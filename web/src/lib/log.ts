@@ -4,6 +4,7 @@
 
 import { blankEpisode, blankTitle } from './actions';
 import { hkdf } from './crypto';
+import { exclusive } from './exclusive';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
@@ -3227,10 +3228,7 @@ function canonical(value: unknown): string {
 }
 
 /** `work` under the lock `name` in every tab of this browser; with no `navigator.locks`, just `work`. */
-export function exclusive<T>(name: string, work: () => Promise<T>): Promise<T> {
-  const locks = globalThis.navigator?.locks;
-  return locks ? locks.request(name, work) : work();
-}
+export { exclusive } from './exclusive';
 
 /**
  * One row per name, the rows that share it merged. Under v3 every episode of a 32-episode block is a write of the

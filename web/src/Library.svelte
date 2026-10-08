@@ -4,7 +4,6 @@
   import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
-  import DownloadsPage from './components/DownloadsPage.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
   import PendingPosterRow from './components/PendingPosterRow.svelte';
   import PosterCard from './components/PosterCard.svelte';
@@ -14,6 +13,7 @@
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
     DetailScreen,
+    DownloadsScreen,
     PeopleScreen,
     PersonScreen,
     PlayerScreen,
@@ -430,6 +430,7 @@
     else if (route.page === 'person') void PersonScreen.load();
     else if (route.page === 'search') void SearchScreen.load();
     else if (route.page === 'people') void PeopleScreen.load();
+    else if (route.page === 'downloads') void DownloadsScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
     else if (route.page === 'watchlist') void WatchlistScreen.load();
   });
@@ -1593,8 +1594,10 @@
         >Link a TV</a
       > to keep them there.
     </p>
+  {:else if !DownloadsScreen.current}
+    <ScreenLoading screen={DownloadsScreen} />
   {:else}
-    <DownloadsPage {active} />
+    <DownloadsScreen.current {active} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !library}

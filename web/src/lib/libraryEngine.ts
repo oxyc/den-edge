@@ -11,7 +11,7 @@ import {
   type ActiveHomeShapeReply,
   type HomeLibraryView,
 } from './homeLibraryView';
-import { applyLog, emptyLibrary, type Shape } from './library';
+import { applyLog, emptyLibrary, type Library, type Shape } from './library';
 import {
   LibraryLog,
   type LibraryLogSnapshot,
@@ -35,16 +35,25 @@ export interface LibraryEngineReply {
   error?: string;
 }
 
+export interface LibraryEngineProjection {
+  rows: ReturnType<LibraryLog['rows']>;
+  library: Library;
+}
+
 export type LibraryEngineHydrationChunk = ActiveHomeHydrationChunk<
   LibraryLogSnapshotHeader,
   LibraryLogSnapshotEntry
->;
+> & {
+  /** The exact projection already folded for compact Home, returned only with the final snapshot chunk. */
+  projection?: LibraryEngineProjection;
+};
 
 type OpenLog = (key: string) => Promise<LibraryLog | null>;
 
 interface ActiveLibrary {
   log: LibraryLog;
   view: HomeLibraryView;
+  projection: LibraryEngineProjection;
   snapshot?: LibraryLogSnapshot;
 }
 
@@ -87,6 +96,7 @@ export class LibraryEngine {
       entries,
       next,
       done,
+      ...(done ? { projection: held.projection } : {}),
     };
     if (done) this.active.delete(request.handle);
     return chunk;
@@ -101,7 +111,7 @@ export class LibraryEngine {
     const library = applyLog(emptyLibrary(), rows);
     const view = selectHomeLibraryView(library, rows);
     const handle = ++this.nextHandle;
-    this.active.set(handle, { log, view });
+    this.active.set(handle, { log, view, projection: { rows, library } });
     const summary = log.currentSummary(now);
     return {
       handle,

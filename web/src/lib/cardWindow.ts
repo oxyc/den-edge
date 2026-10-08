@@ -3,6 +3,15 @@ export interface CardWindow {
   end: number;
 }
 
+/** Fill what is on screen first, then the window's leading and trailing overscan. */
+export function cardMaterializationOrder(window: CardWindow, viewport: CardWindow): number[] {
+  return [
+    ...Array.from({ length: viewport.end - viewport.start }, (_, i) => viewport.start + i),
+    ...Array.from({ length: viewport.start - window.start }, (_, i) => viewport.start - i - 1),
+    ...Array.from({ length: window.end - viewport.end }, (_, i) => viewport.end + i),
+  ];
+}
+
 /** The cards worth mounting around a horizontal track's viewport; every other title keeps a light slot. */
 export function cardWindow(
   count: number,

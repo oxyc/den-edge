@@ -123,7 +123,11 @@ const activeHomePayload = (): ActiveHomePayload => ({
 it('keeps staged Home compact while installing its mutable log and projects only on demand', async () => {
   const log = fakeLog();
   log.refresh.mockResolvedValue(false);
-  const hydrate = vi.fn(async () => log as unknown as LibraryLog);
+  const workerLibrary = emptyLibrary();
+  const hydrate = vi.fn(async () => ({
+    log: log as unknown as LibraryLog,
+    projection: { rows: [] as Row[], library: workerLibrary },
+  }));
   const release = vi.fn(async () => {});
   vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
     payload: activeHomePayload(),
@@ -157,8 +161,49 @@ it('keeps staged Home compact while installing its mutable log and projects only
 
   expect(await session.ensureLog(true)).toBe(log);
   expect(session.activeHome).toBeNull();
-  expect(session.libraryProjection()).not.toBeNull();
-  expect(log.rows).toHaveBeenCalledOnce();
+  expect(session.libraryProjection()?.library).toBe(workerLibrary);
+  expect(
+    log.rows,
+    'revealing the hydrated route must reuse the Worker fold instead of synchronously replaying it',
+  ).not.toHaveBeenCalled();
+  expect(log.rowsInSlices).not.toHaveBeenCalled();
+});
+
+it('publishes a staged route log and its Worker projection atomically', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const workerLibrary = emptyLibrary();
+  let finish!: () => void;
+  const hydrate = vi.fn(
+    () =>
+      new Promise<{ log: LibraryLog; projection: { rows: Row[]; library: Library } }>((resolve) => {
+        finish = () =>
+          resolve({
+            log: log as unknown as LibraryLog,
+            projection: { rows: [], library: workerLibrary },
+          });
+      }),
+  );
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload: activeHomePayload(),
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate,
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+
+  const route = session.ensureLog(true);
+  expect(session.log).toBeUndefined();
+  expect(session.activeHome).not.toBeNull();
+  finish();
+  await expect(route).resolves.toBe(log);
+
+  expect(session.activeHome).toBeNull();
+  expect(session.libraryProjection()?.library).toBe(workerLibrary);
+  expect(log.rows).not.toHaveBeenCalled();
+  expect(log.rowsInSlices).not.toHaveBeenCalled();
 });
 
 it('retries an initially failed open without discarding a recovered log', async () => {

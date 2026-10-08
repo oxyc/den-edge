@@ -1,5 +1,6 @@
 import { fetchSimklClientId } from '../settings/simkl';
-import { exclusive, type LibraryLog } from './log';
+import { exclusive } from './exclusive';
+import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
 import {
   rowName,

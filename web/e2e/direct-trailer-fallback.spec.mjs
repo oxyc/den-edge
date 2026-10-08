@@ -195,6 +195,20 @@ async function play(launch, surface, origin, network, wait = 15_000) {
   const browser = await launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    if (network.home)
+      await page.addInitScript(() => {
+        // These cases model a browser that has already allowed Den to use its home-network listener. Chromium's
+        // Local Network Access gate defaults to `prompt`; an ambient trailer must not raise that prompt itself,
+        // so production correctly leaves LAN out until the grant exists. WebKit has no such permission policy.
+        const permissions = globalThis.Permissions;
+        if (!permissions) return;
+        const query = permissions.prototype.query;
+        permissions.prototype.query = function (descriptor) {
+          if (descriptor?.name === 'local-network-access')
+            return Promise.resolve({ state: 'granted' });
+          return query.call(this, descriptor);
+        };
+      });
     const seen = await mock(page, origin, network);
     const began = Date.now();
     await surface.open(page, origin);

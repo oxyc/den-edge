@@ -1,6 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ActiveHomePayload } from './homeLibraryView';
-import { LIBRARY_ENGINE_CHUNK_MAX, LibraryEngine } from './libraryEngine';
+import {
+  LIBRARY_ENGINE_CHUNK_MAX,
+  LibraryEngine,
+  type LibraryEngineHydrationChunk,
+} from './libraryEngine';
 import type { LibraryLog, LibraryLogSnapshot } from './log';
 
 afterEach(() => {
@@ -82,7 +86,7 @@ it('opens and folds in the owning worker, accepts shapes, and exports at most 25
       handle: payload.handle,
       cursor,
       limit: 1_000,
-    })) as { entries: unknown[]; next: number; done: boolean; header?: unknown };
+    })) as LibraryEngineHydrationChunk;
     chunks.push(chunk);
     cursor = chunk.next;
     if (chunk.done) break;
@@ -100,6 +104,9 @@ it('opens and folds in the owning worker, accepts shapes, and exports at most 25
   ]);
   expect(chunks[0]?.header).toEqual(snapshot.header);
   expect(chunks[1]).not.toHaveProperty('header');
+  expect(chunks[0]).not.toHaveProperty('projection');
+  expect(chunks[1]).not.toHaveProperty('projection');
+  expect(chunks[2]?.projection).toMatchObject({ rows: [], library: { records: [], marks: [] } });
   await expect(
     engine.request({ id: 9, op: 'shapes', handle: payload.handle, shapes: [] }),
   ).rejects.toThrow('expired');
@@ -179,6 +186,16 @@ it('assembles bounded chunks, imports once without reopening, and remaps shape h
                   entries: fakeSnapshot(2).entries,
                   next: 258,
                   done: true,
+                  projection: {
+                    rows: [],
+                    library: {
+                      records: [],
+                      marks: [],
+                      flags: new Map(),
+                      shapes: new Map(),
+                      dismissed: new Map(),
+                    },
+                  },
                 };
       queueMicrotask(() => this.onmessage?.({ data: { id: message.id, value } } as MessageEvent));
     }
@@ -193,7 +210,8 @@ it('assembles bounded chunks, imports once without reopening, and remaps shape h
 
   expect(opened?.payload.handle).not.toBe(41);
   expect(shapes?.handle).toBe(opened?.payload.handle);
-  expect(hydrated).toBe(imported);
+  expect(hydrated?.log).toBe(imported);
+  expect(hydrated?.projection.rows).toEqual([]);
   expect(importSnapshot).toHaveBeenCalledOnce();
   expect(importSnapshot.mock.calls[0]?.[1].entries).toHaveLength(258);
   expect(sent.map(({ op }) => op)).toEqual(['open', 'shapes', 'hydrate', 'hydrate']);

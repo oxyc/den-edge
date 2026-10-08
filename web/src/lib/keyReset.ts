@@ -3,7 +3,8 @@
 // every device still holding the old key — the Apple TV included — is cut off and pairs again.
 
 import { links, readPendingReset, writePendingReset, type PendingReset } from './links.svelte';
-import { exclusive, LibraryLog, successorTag, type MoveRefusal } from './log';
+import { exclusive } from './exclusive';
+import { LibraryLog, successorTag, type MoveRefusal } from './log';
 
 /**
  * Why a reset didn't leave this browser on a new key:

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DIRECT_FIRST_FRAME_MS,
   forgetWarmedTrailers,
@@ -56,6 +56,7 @@ const meta = {
 // asks about the same title and means it each time.
 beforeEach(forgetWarmedTrailers);
 beforeEach(resetActivationPause);
+afterEach(() => vi.unstubAllGlobals());
 
 // Every base in the app today is relative, so the absolute branch below is a guard rather than a path
 // anyone walks. It is tested because "nothing produces this input" is a property of today's callers,
@@ -351,6 +352,69 @@ describe('fetchSources', () => {
     }
   });
 
+  it('shares one pending activation without letting either caller cancel it for the other', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    const media = `/reel/m/s/${blob}?s=${tag}`;
+    let activations = 0;
+    let sourceRequests = 0;
+    let openActivation!: () => void;
+    const activationGate = new Promise<void>((resolve) => {
+      openActivation = resolve;
+    });
+    let allowLan!: () => void;
+    const permissionGate = new Promise<{ state: 'granted' }>((resolve) => {
+      allowLan = () => resolve({ state: 'granted' });
+    });
+    const permission = vi.fn(() => permissionGate);
+    vi.stubGlobal('navigator', { permissions: { query: permission } });
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).includes('/sources/')) {
+        sourceRequests += 1;
+        return new Response(
+          JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+        );
+      }
+      activations += 1;
+      await activationGate;
+      return new Response(
+        JSON.stringify({
+          publicBase: 'https://media.example',
+          lanBase: 'https://lan.media.example:8449',
+          media: `https://media.example${media}`,
+        }),
+      );
+    };
+    const options = { surface: 'audible', player: 'native', fetchImpl, relay: false } as const;
+    const stopped = new AbortController();
+    const first = fetchSources(SOURCES, { ...options, signal: stopped.signal });
+    const second = fetchSources(SOURCES, options);
+
+    await vi.waitFor(() => expect(sourceRequests).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(activations).toBe(1);
+    stopped.abort();
+    await expect(first).resolves.toBeNull();
+
+    openActivation();
+    await vi.waitFor(() => expect(permission).toHaveBeenCalledOnce());
+    // The permission check is part of the shared operation too, so a caller arriving now still joins it.
+    const third = fetchSources(SOURCES, options);
+    await vi.waitFor(() => expect(sourceRequests).toBe(3));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(activations).toBe(1);
+    expect(permission).toHaveBeenCalledOnce();
+
+    allowLan();
+    const expected = [`https://lan.media.example:8449${media}`, `https://media.example${media}`];
+    await expect(second).resolves.toMatchObject({
+      sources: expected.map((url) => ({ url })),
+    });
+    await expect(third).resolves.toMatchObject({
+      sources: expected.map((url) => ({ url })),
+    });
+  });
+
   it('looks up IPv4 only when edge requests it, and falls back unchanged on refusal', async () => {
     const blob = 'A'.repeat(40);
     const tag = 'b'.repeat(24);
@@ -419,6 +483,9 @@ describe('fetchSources', () => {
       sources?.map(({ url, direct }) => (direct ? `${direct} ${url}` : url));
 
     it('at home plays the home-network listener first, then the public one, then the relay where it may', async () => {
+      vi.stubGlobal('navigator', {
+        permissions: { query: async () => ({ state: 'granted' }) },
+      });
       const got = await fetchSources(SOURCES, {
         surface: 'audible',
         player: 'native',
@@ -431,6 +498,55 @@ describe('fetchSources', () => {
         relayed,
         'https://rr3---sn-x.googlevideo.com/file',
       ]);
+    });
+
+    it.each(['prompt', 'denied'] as const)(
+      'leaves out the home-network listener while permission is %s',
+      async (state) => {
+        vi.stubGlobal('navigator', { permissions: { query: async () => ({ state }) } });
+        const got = await fetchSources(SOURCES, {
+          surface: 'audible',
+          player: 'native',
+          fetchImpl: answering(activated('https://lan.media.example:8449')),
+          relay: false,
+        });
+        expect(order(got?.sources)).toEqual([
+          `public https://media.example${media}`,
+          'https://rr3---sn-x.googlevideo.com/file',
+        ]);
+      },
+    );
+
+    it('does not remember a LAN offer that permission kept out of the ladder', async () => {
+      vi.stubGlobal('navigator', { permissions: { query: async () => ({ state: 'prompt' }) } });
+      let activations = 0;
+      const fetchImpl: typeof fetch = async (input) => {
+        if (String(input).includes('/sources/')) {
+          return new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+          );
+        }
+        activations += 1;
+        return activated('https://lan.media.example:8449');
+      };
+      const first = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+      });
+      const publicCopy = first?.sources.find((source) => source.direct === 'public');
+      expect(publicCopy).toBeDefined();
+      abandonDirect(publicCopy!);
+
+      const next = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+      });
+      expect(activations).toBe(1);
+      expect(next).toBeNull();
     });
 
     it('keeps activation available for the next candidate after the public copy times out at home', async () => {

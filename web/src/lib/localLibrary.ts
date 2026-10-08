@@ -3,7 +3,7 @@
 // TV moves the library into the TV's and drops this one.
 
 import { forgetLibrary, libraryVault, type Vault } from './localVault';
-import { LibraryLog } from './log';
+import { loadLibraryLog } from './libraryLogLoader';
 
 const STORAGE_KEY = 'den.localLibrary';
 
@@ -74,6 +74,7 @@ async function mergeLocalLibrary(
   kept: string,
   vault: Vault | null,
 ): Promise<boolean> {
+  const LibraryLog = await loadLibraryLog();
   const [from, into] = await Promise.all([
     LibraryLog.openLocal(lost, vault),
     LibraryLog.openLocal(kept, vault),

@@ -198,7 +198,12 @@ function forgetRefusedToken(base: string, response: Response): void {
   if (response.status === 401) browserTokens.delete(browserBase(base));
 }
 
-export { findRemux, localNetworkRefused, REMUX_PROBE_TIMEOUT_MS } from './remuxRoute';
+export {
+  findRemux,
+  localNetworkRefused,
+  mayUseLocalNetwork,
+  REMUX_PROBE_TIMEOUT_MS,
+} from './remuxRoute';
 export { linkRate, SPEED_PROBE_BYTES };
 /** Time enough to measure a slow link by what arrived, rather than wait out all of it before playing. */
 const SPEED_READ_MS = 4_000;

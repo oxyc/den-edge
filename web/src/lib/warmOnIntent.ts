@@ -11,6 +11,7 @@
 // billboard, and anything added later — without any of them knowing about it.
 
 import type { MediaType } from './library';
+import { warmHls } from './hlsLoader';
 import { parseRoute } from './route';
 
 type Warm = (ref: { type: MediaType; id: number }) => void;
@@ -41,6 +42,9 @@ function pressed(event: Event) {
   const key = `${route.type}:${route.id}`;
   if (key === last) return;
   last = key;
+  // Chrome/Firefox need the split hls.js chunk once the detail trailer has a source. Start it on the
+  // same strong intent as Reel's lookup, not on Home startup or hover, and DetailMedia joins this load.
+  warmHls();
   warmer?.({ type: route.type, id: route.id });
 }
 

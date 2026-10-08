@@ -76,6 +76,52 @@ describe('SessionServices', () => {
     services.stop();
   });
 
+  it('publishes identity before yielded discovery and cancels a run replaced across that yield', async () => {
+    vi.useFakeTimers();
+    try {
+      discoveries = 0;
+      reaches = undefined;
+      let asked = 0;
+      const services = new SessionServices(
+        async () => ({ [`routes-${++asked}`]: [{ url: `/route-${asked}` }] }),
+        () => undefined,
+      );
+      const settings = (tmdbKey: string) => ({
+        tmdbKey,
+        plugins: [`https://${tmdbKey}.test/manifest.json`],
+        remux: null,
+        prefs: {
+          excludedGenres: [],
+          excludedLanguages: [],
+          hideAnime: false,
+          hideWatched: false,
+          services: [],
+          servicesConfigured: false,
+        },
+      });
+
+      services.configureActive(settings('first'));
+      expect(services.tmdbKey).toBe('first');
+      expect(services.plugins).toEqual(['https://first.test/manifest.json']);
+      await Promise.resolve();
+      expect(discoveries).toBe(0);
+      expect(services.routes).toEqual({});
+
+      // Replacing the inputs while the first run is yielded must prevent its routes and probes from publishing.
+      services.configureActive(settings('second'));
+      expect(services.tmdbKey).toBe('second');
+      await Promise.resolve();
+      await vi.runAllTimersAsync();
+
+      expect(asked).toBe(2);
+      expect(discoveries).toBe(1);
+      expect(services.routes).toEqual({ 'routes-2': [{ url: '/route-2' }] });
+      services.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('discovers Scout but holds availability requests until the foreground is ready', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');

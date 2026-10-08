@@ -14,6 +14,7 @@ import { localNetworkRefused } from './remuxRoute';
 import type { Routes } from './routes';
 import type { Addon } from './scout';
 import { ensureSyncPolicy } from './syncLoader';
+import { yieldTask } from './taskYield';
 import { tmdbKeyOf } from './tmdb';
 import type { ActiveHomeSettings } from './homeLibraryView';
 
@@ -136,6 +137,11 @@ export class SessionServices {
       });
     void (async () => {
       const foundRoutes = await this.fetchRoutes();
+      if (!current) return;
+      // A cached routes request can settle in the same microtask checkpoint that publishes compact Home. TMDB and
+      // plugin identity above are needed for its first paint; probing optional providers is not. Give that paint and
+      // input a task boundary before provider discovery fans out, then recheck in case settings changed meanwhile.
+      await yieldTask();
       if (!current) return;
       live = true;
       this.routes = foundRoutes;

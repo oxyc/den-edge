@@ -59,14 +59,31 @@ export async function findRemux(
  * on the public name can be refused before a request leaves. Refusal only: `prompt` means the question has not been
  * put, and a browser that does not know the name has no such policy — neither is something to tell a viewer about.
  */
-export async function localNetworkRefused(): Promise<boolean> {
+async function localNetworkPermission(): Promise<PermissionState | null> {
   const permissions = globalThis.navigator?.permissions;
-  if (!permissions) return false;
+  if (!permissions) return null;
   try {
     const status = await permissions.query({ name: 'local-network-access' as PermissionName });
-    return status.state === 'denied';
+    return status.state;
   } catch {
     // An unknown permission name throws; that browser does not enforce this either.
-    return false;
+    return null;
   }
+}
+
+/** Whether the browser has explicitly refused this page access to the local network. */
+export async function localNetworkRefused(): Promise<boolean> {
+  return (await localNetworkPermission()) === 'denied';
+}
+
+/**
+ * Whether this page may proactively load a local-network media origin.
+ *
+ * A browser implementing Local Network Access must already have a grant: a media load cannot explain or reliably
+ * surface its own permission prompt, so both `prompt` and `denied` are unusable. Browsers without the Permissions API
+ * or this permission name keep their existing behaviour; they do not enforce Chrome's Local Network Access gate.
+ */
+export async function mayUseLocalNetwork(): Promise<boolean> {
+  const permission = await localNetworkPermission();
+  return permission === null || permission === 'granted';
 }
