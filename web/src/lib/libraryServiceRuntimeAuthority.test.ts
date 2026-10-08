@@ -119,10 +119,13 @@ describe('openLibraryServiceAuthority', () => {
       libraryKey: new Uint8Array(32).fill(31),
     });
 
-    const imported = await authority!.task!({
-      kind: 'history.import',
-      items: [{ title: { type: 'movie', id: 77 }, watchedAt: 20_000 }],
-    }, 'import-history');
+    const imported = await authority!.task!(
+      {
+        kind: 'history.import',
+        items: [{ title: { type: 'movie', id: 77 }, watchedAt: 20_000 }],
+      },
+      'import-history',
+    );
     expect(imported.result).toEqual({
       kind: 'history.import',
       written: 1,
