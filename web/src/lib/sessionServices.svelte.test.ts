@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { availability } from './availability.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
@@ -44,6 +44,13 @@ const fakeModel = (overrides: Record<string, unknown> = {}) =>
     rememberPrivateRemux: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   }) as unknown as LibraryModel;
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  reaches = undefined;
+});
 
 describe('SessionServices', () => {
   it('discovers once per normalized input and replaces a run cancelled across its yield', async () => {
@@ -113,5 +120,41 @@ describe('SessionServices', () => {
     await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
     services.stop();
     reaches = undefined;
+  });
+
+  it('cancels an old retention timer when discovery inputs change', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('scheduler', { yield: () => Promise.resolve() });
+    discoveries = 0;
+    const retainServices = vi.fn().mockResolvedValue(undefined);
+    const services = new SessionServices(fakeModel({ retainServices }), async () => ({
+      scout: [{ url: '/scout' }],
+    }));
+
+    services.configure(runtime('first'));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(services.atlas).toBe('/atlas-1');
+    services.configure(runtime('second'));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(retainServices).toHaveBeenCalledOnce();
+    expect(retainServices.mock.calls[0]?.[0]).toMatchObject({
+      scout: { base: '/scout-2' },
+      atlas: '/atlas-2',
+      reel: '/reel-2',
+    });
+    services.stop();
+  });
+
+  it('treats a rejected retained hint as a cache miss', async () => {
+    const services = new SessionServices(
+      fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
+      async () => ({}),
+    );
+    services.configure(runtime('tmdb'));
+    await vi.waitFor(() => expect(services.atlasReady).toBe(true));
+    expect(services.atlas).toBeTruthy();
+    services.stop();
   });
 });

@@ -78,6 +78,8 @@ export class SessionServices {
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
     this.#for = wanted;
+    clearTimeout(this.#keep);
+    this.#keep = undefined;
     this.#stop?.();
     this.tmdbKey = tmdbKey;
     this.providerKeys = { ...providerKeys };
@@ -89,20 +91,25 @@ export class SessionServices {
 
     let live = false;
     if (first && this.model)
-      void this.model.retainedServices().then((saved) => {
-        if (!current || live || !saved) return;
-        this.routes = Object.fromEntries(
-          Object.entries(saved.routes).map(([name, entries]) => [
-            name,
-            entries.map((entry) => ({ ...entry })),
-          ]),
-        );
-        this.scout = saved.scout ? { ...saved.scout } : null;
-        this.atlas = saved.atlas;
-        this.reel = saved.reel;
-        this.remux = saved.remux;
-        if (this.#foregroundReady) availability.connect(this.scout, tmdbKey);
-      });
+      void this.model
+        .retainedServices()
+        .then((saved) => {
+          if (!current || live || !saved) return;
+          this.routes = Object.fromEntries(
+            Object.entries(saved.routes).map(([name, entries]) => [
+              name,
+              entries.map((entry) => ({ ...entry })),
+            ]),
+          );
+          this.scout = saved.scout ? { ...saved.scout } : null;
+          this.atlas = saved.atlas;
+          this.reel = saved.reel;
+          this.remux = saved.remux;
+          if (this.#foregroundReady) availability.connect(this.scout, tmdbKey);
+        })
+        .catch(() => {
+          // Retained discovery is only a first-paint hint; live discovery below remains authoritative.
+        });
 
     void (async () => {
       const foundRoutes = await this.fetchRouteTable();

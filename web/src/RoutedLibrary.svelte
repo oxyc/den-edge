@@ -77,19 +77,6 @@
   let convergence = 0;
   let convergenceWork = Promise.resolve();
 
-  async function replaceWith(key: string, local: boolean): Promise<LibrarySession> {
-    const next = open(key, local);
-    try {
-      await next.model!.ready;
-      libraryIdentity = key;
-      session = next;
-      return next;
-    } catch (error) {
-      next.close();
-      throw error;
-    }
-  }
-
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
   async function joinLibrary(key: string): Promise<boolean> {
     const source = session;
@@ -123,9 +110,19 @@
     outcome: KeyResetOutcome,
   ): Promise<KeyResetOutcome | null> {
     if (outcome === 'moved' || outcome === 'adopted') {
+      const destination = open(pending.to, false);
+      try {
+        await destination.model!.ready;
+      } catch {
+        destination.close();
+        // The reset did move remotely, but the durable marker must survive until this browser proves it can reopen
+        // the destination. Retrying settlement is safe and avoids stranding the link on a key it cannot open.
+        return 'unknown';
+      }
       links.rekey(pending.from, pending.to);
       pendingReset = null;
-      await replaceWith(pending.to, false);
+      libraryIdentity = pending.to;
+      session = destination;
       return null;
     }
     if (outcome === 'held' || outcome === 'unknown') {
