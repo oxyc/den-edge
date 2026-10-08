@@ -353,7 +353,11 @@ export async function prepareTrailers(
   }
 }
 
-function parseTransport(value: unknown, capability: string): TransportAnswer | null {
+function parseTransport(
+  value: unknown,
+  capability: string,
+  expectedRelay: string,
+): TransportAnswer | null {
   if (!value || typeof value !== 'object') return null;
   const answer = value as {
     v?: unknown;
@@ -374,7 +378,7 @@ function parseTransport(value: unknown, capability: string): TransportAnswer | n
     try {
       const relative = attempt.url.startsWith('/') && !attempt.url.startsWith('//');
       if ((attempt.type === 'relay') !== relative) continue;
-      if (attempt.type === 'relay' && attempt.url !== `/reel/${capability}`) continue;
+      if (attempt.type === 'relay' && attempt.url !== expectedRelay) continue;
       const url = new URL(attempt.url, globalThis.location?.href ?? 'https://relative.invalid');
       if (attempt.type !== 'relay' && url.protocol !== 'https:') continue;
       const normalized = relative ? `${url.pathname}${url.search}` : url.href;
@@ -419,7 +423,7 @@ async function transport(
     });
     if (response.status === 403 || response.status === 410) return { kind: 'rejected' as const };
     if (!response.ok) return { kind: 'failed' as const };
-    const answer = parseTransport(await response.json(), capability);
+    const answer = parseTransport(await response.json(), capability, relay.url);
     return answer ? { kind: 'answer' as const, answer } : { kind: 'failed' as const };
   };
   try {

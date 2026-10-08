@@ -273,6 +273,34 @@ describe('PlaybackCursor', () => {
     await expect(cursor.first()).resolves.toBeNull();
   });
 
+  it('keeps a configured-mount relay after a valid direct transport attempt', async () => {
+    const relay = `/custom/reel/${CAPABILITY}`;
+    const cursor = new PlaybackCursor(
+      [
+        {
+          planUrl: '/custom/reel/sources/trailer.json?v=2',
+          plan: plan(carried()),
+        },
+      ],
+      {
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              v: 2,
+              capability: CAPABILITY,
+              attempts: [
+                { type: 'public', url: 'https://public.example/video.mp4' },
+                { type: 'relay', url: relay },
+              ],
+            }),
+          ),
+      },
+    );
+
+    await expect(cursor.first()).resolves.toMatchObject({ attemptType: 'public' });
+    await expect(cursor.next()).resolves.toMatchObject({ attemptType: 'relay', url: relay });
+  });
+
   it('does not publish the relay fallback after its cursor is aborted', async () => {
     const controller = new AbortController();
     const cursor = new PlaybackCursor([candidate(plan(carried()))], {
