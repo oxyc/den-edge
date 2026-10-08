@@ -7,6 +7,14 @@
 
 export const LIBRARY_SERVICE_PROTOCOL = 1 as const;
 
+/** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
+export const LIBRARY_SERVICE_WIRE_LIMITS = {
+  collectionItems: 100_000,
+  presenceTitles: 512,
+  shapeSeasons: 256,
+  seasonEpisodes: 2_048,
+} as const;
+
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
 export type MediaType = 'movie' | 'tv';
 export type Reaction = 'seen' | 'dislike' | 'like' | 'love';
@@ -23,7 +31,7 @@ export interface EpisodeRef extends TitleRef {
   episode: number;
 }
 
-/** A monotonic version within one service instance and one durable library generation. */
+/** A monotonic render-view version within one service instance and durable library generation. */
 export interface LibraryVersion {
   instance: string;
   generation: string | null;
@@ -200,12 +208,18 @@ export interface LibraryServiceHello extends ClientMessage {
   requestId: string;
   clientId: string;
   libraryKey: string;
+  mode: 'online' | 'local';
+  /** One-time migration seed from the page's legacy localStorage clock. */
+  legacyClock?: {
+    device?: string;
+    last?: [milliseconds: number, counter: number, device: string];
+  };
 }
 
 export interface LibraryServiceCommandRequest extends ClientMessage {
   type: 'command';
   requestId: string;
-  /** Stable across a retry after a service crash, so applying a command is idempotent. */
+  /** Stable across retries: durable action journals use it as their ID; every other command has set semantics. */
   operationId: string;
   command: LibraryCommand;
 }
@@ -294,6 +308,7 @@ export interface LibraryServiceQueryResult extends ServerMessage {
 
 export interface LibraryServiceSubscribed extends ServerMessage {
   type: 'subscribed';
+  /** Emitted only after this subscription's initial replacement. */
   requestId: string;
   subscriptionId: string;
   version: LibraryVersion;

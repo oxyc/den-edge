@@ -3,7 +3,7 @@ import {
   decodeLibraryServiceClientMessage,
   decodeLibraryServiceServerMessage,
 } from './libraryServiceProtocolCodec';
-import { LIBRARY_SERVICE_PROTOCOL } from './libraryServiceProtocol';
+import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './libraryServiceProtocol';
 
 const version = { instance: 'worker-1', generation: 'generation-3', revision: 14 };
 
@@ -16,6 +16,11 @@ describe('library service client protocol', () => {
         requestId: 'request-1',
         clientId: 'tab-1',
         libraryKey: 'secret',
+        mode: 'online',
+        legacyClock: {
+          device: '0123456789abcdef',
+          last: [1_800_000_000_000, 2, 'fedcba9876543210'],
+        },
       }),
     ).toMatchObject({ ok: true, value: { type: 'hello' } });
 
@@ -119,6 +124,7 @@ describe('library service client protocol', () => {
         requestId: 'request-1',
         clientId: 'tab-1',
         libraryKey: 'secret',
+        mode: 'online',
       }),
     ).toEqual({
       ok: false,
@@ -159,6 +165,137 @@ describe('library service client protocol', () => {
           watched: true,
         },
       }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-4',
+        operationId: 'operation-3',
+        command: {
+          kind: 'season-watched.set',
+          title: { type: 'tv', id: 42 },
+          season: 2,
+          episodes: [1, 2, 2],
+          watched: true,
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+  });
+
+  it('rejects unknown storage fields and bounded-set violations at the wire boundary', () => {
+    const subscribe = {
+      type: 'subscribe',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'request-strict',
+      subscriptionId: 'visible-posters',
+      selection: { kind: 'presence', titles: [{ type: 'movie', id: 12 }] },
+    };
+
+    expect(decodeLibraryServiceClientMessage({ ...subscribe, row: { kind: 'rec' } })).toMatchObject(
+      {
+        ok: false,
+        error: { code: 'invalid-request' },
+      },
+    );
+    expect(
+      decodeLibraryServiceClientMessage({
+        ...subscribe,
+        selection: {
+          kind: 'presence',
+          titles: [{ type: 'movie', id: 12, row: { kind: 'rec' } }],
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+    expect(
+      decodeLibraryServiceClientMessage({
+        ...subscribe,
+        selection: {
+          kind: 'presence',
+          titles: [
+            { type: 'movie', id: 12 },
+            { type: 'movie', id: 12 },
+          ],
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+    expect(
+      decodeLibraryServiceClientMessage({
+        ...subscribe,
+        selection: {
+          kind: 'presence',
+          titles: Array.from(
+            { length: LIBRARY_SERVICE_WIRE_LIMITS.presenceTitles + 1 },
+            (_, id) => ({ type: 'movie', id: id + 1 }),
+          ),
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'hello',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-hello',
+        clientId: 'tab-1',
+        libraryKey: 'secret',
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-season',
+        operationId: 'operation-season',
+        command: {
+          kind: 'season-watched.set',
+          title: { type: 'tv', id: 42 },
+          season: 2,
+          episodes: Array.from(
+            { length: LIBRARY_SERVICE_WIRE_LIMITS.seasonEpisodes + 1 },
+            (_, index) => index + 1,
+          ),
+          watched: true,
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+  });
+
+  it('rejects duplicate and internally inconsistent title shapes', () => {
+    const observe = (seasons: unknown[], lastAired?: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'observe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-shape',
+        observation: {
+          kind: 'title-shape',
+          title: { type: 'tv', id: 42 },
+          seasons,
+          ...(lastAired === undefined ? {} : { lastAired }),
+        },
+      });
+
+    expect(
+      observe([
+        { season: 1, episodes: 8 },
+        { season: 1, episodes: 9 },
+      ]),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+    expect(observe([{ season: 2, episodes: 6 }], { season: 2, episode: 7 })).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-request' },
+    });
+    expect(observe([{ season: 2, episodes: 6 }], { season: 3, episode: 1 })).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-request' },
+    });
+    expect(
+      observe(
+        Array.from({ length: LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons + 1 }, (_, season) => ({
+          season,
+          episodes: 1,
+        })),
+      ),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
   });
 });
@@ -262,6 +399,16 @@ describe('library service server protocol', () => {
           progress: null,
           episodes: [],
         },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'continue',
+        version,
+        value: { kind: 'continue', items: [], row: { kind: 'rec' } },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
   });
