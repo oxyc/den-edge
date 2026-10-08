@@ -6,68 +6,52 @@
   import Confirm from './Confirm.svelte';
   import Loading from '../components/Loading.svelte';
   import { copyText } from '../lib/clipboard';
-  import type { BrowserClock } from '../lib/clock';
-  import type { Link } from '../lib/links.svelte';
-  import type { LibraryLog } from '../lib/log';
-  import {
-    abandon,
-    begin,
-    confirm,
-    DeriveFailed,
-    deviceCouldNot,
-    makingWaits,
-    prepare,
-    reconcile,
-    recoveryContext,
-    turnOff,
-    type Prepared,
-    type RecoveryContext,
-    type RecoveryStatus,
-  } from '../lib/recovery';
+  import { derive, DeriveFailed, deviceCouldNot, newCode } from '../lib/recovery';
+  import type { RecoveryView } from '../lib/libraryServiceProtocol';
+  import type { Immutable } from '../lib/libraryModel.svelte';
+
+  interface PreparedCode {
+    code: string;
+    locator: string;
+    createdAt: number;
+    lastGroup: string;
+  }
+
+  const toBase64url = (bytes: Uint8Array) =>
+    btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
 
   let {
-    link,
-    log,
-    clock,
-  }: { link: Link; log: LibraryLog | null | undefined; clock: BrowserClock } = $props();
+    view,
+    ready,
+    seal,
+    begin,
+    confirm,
+    abandon,
+    disable,
+  }: {
+    view?: Immutable<RecoveryView>;
+    ready: boolean;
+    seal: (locator: string, wrapKey: string, createdAt: number) => Promise<string>;
+    begin: (locator: string, sealed: string, createdAt: number) => Promise<string>;
+    confirm: (locator: string) => Promise<string>;
+    abandon: (locator: string) => Promise<void>;
+    disable: () => Promise<boolean>;
+  } = $props();
 
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
-  /** undefined while it is read; null when den-edge couldn't be. */
-  let status = $state<RecoveryStatus | null | undefined>(undefined);
-  let notices = $state<string[]>([]);
   let phase = $state<'idle' | 'making' | 'show' | 'confirming' | 'lost'>('idle');
-  let prepared = $state<Prepared | null>(null);
+  let prepared = $state<PreparedCode | null>(null);
   let typed = $state('');
   let message = $state<{ text: string; bad: boolean } | null>(null);
   let copied = $state(false);
   let manual = $state(false);
   let codeEl = $state<HTMLElement>();
-  let baseLive = new Set<string>();
-  let finish: () => void = () => {};
-  let context: RecoveryContext | null = null;
-
-  const ctx = async () => {
-    if (!log) throw new Error('no library');
-    return (context ??= await recoveryContext(link.libraryKey, log, clock));
-  };
-
-  async function check() {
-    if (!log) return;
-    try {
-      status = await reconcile(await ctx());
-      if (status?.notices.length) notices = [...notices, ...status.notices];
-    } catch (error) {
-      console.warn('den: recovery code status could not be read', error);
-      status = null;
-    }
-  }
-
-  // Opening this screen reconciles (§7).
-  $effect(() => {
-    if (log && status === undefined) void check();
-  });
+  let attempt = 0;
 
   const failures = {
     full: 'Den holds too many codes for this library just now. Try again in a minute.',
@@ -77,25 +61,48 @@
   };
 
   async function make() {
+    const current = ++attempt;
     phase = 'making';
     message = null;
     copied = false;
     manual = false;
     try {
-      const c = await ctx();
-      const made = await prepare(c, link.libraryKey);
-      const begun = await begin(c, made);
-      if (!begun.ok) {
-        phase = 'idle';
-        message = { text: failures[begun.error], bad: true };
+      const made = newCode();
+      const derived = await derive(made.data, { op: 'make' });
+      if (current !== attempt) {
+        derived.wrapKey.fill(0);
         return;
       }
-      baseLive = begun.baseLive;
-      finish = begun.done;
-      prepared = made;
+      const createdAt = Date.now();
+      let sealed: string;
+      try {
+        sealed = await seal(derived.locator, toBase64url(derived.wrapKey), createdAt);
+      } finally {
+        derived.wrapKey.fill(0);
+      }
+      const outcome = await begin(derived.locator, sealed, createdAt);
+      if (current !== attempt) {
+        if (outcome === 'begun') await abandon(derived.locator);
+        return;
+      }
+      if (outcome !== 'begun') {
+        phase = 'idle';
+        message = {
+          text: failures[outcome as keyof typeof failures] ?? failures.failed,
+          bad: true,
+        };
+        return;
+      }
+      prepared = {
+        code: made.code,
+        locator: derived.locator,
+        createdAt,
+        lastGroup: made.code.slice(-4),
+      };
       typed = '';
       phase = 'show';
     } catch (error) {
+      if (current !== attempt) return;
       console.warn('den: a recovery code could not be made', error);
       phase = 'idle';
       message = {
@@ -117,15 +124,14 @@
     }
     phase = 'confirming';
     message = null;
-    const result = await confirm(await ctx(), made, baseLive);
-    if (result.ok) {
+    const outcome = await confirm(made.locator);
+    if (outcome === 'confirmed') {
       end();
       message = { text: 'Your recovery code is on.', bad: false };
-      await check();
-    } else if ('lost' in result) {
+    } else if (outcome === 'lost') {
       end();
       phase = 'lost';
-      message = { text: result.lost, bad: true };
+      message = { text: 'That pending recovery code was replaced. Make a new one.', bad: true };
     } else {
       phase = 'show';
       message = {
@@ -137,23 +143,21 @@
 
   /** The code leaves memory: this screen no longer holds it. */
   function end() {
-    finish();
-    finish = () => {};
     prepared = null;
     typed = '';
     phase = 'idle';
   }
 
   async function cancel() {
+    attempt++;
     const made = prepared;
     end();
-    if (made && context) await abandon(context, made.locator);
+    if (made) await abandon(made.locator);
   }
 
   async function off() {
     message = null;
-    if (await turnOff(await ctx())) await check();
-    else message = { text: failures.failed, bad: true };
+    if (!(await disable())) message = { text: failures.failed, bad: true };
   }
 
   /**
@@ -169,15 +173,15 @@
 
   // Leaving with a code shown and not confirmed ends it; a closed tab leaves that to the next reconcile.
   onMount(() => () => {
-    if (prepared && context) void abandon(context, prepared.locator);
-    finish();
+    attempt++;
+    if (prepared) void abandon(prepared.locator);
   });
 
-  const live = $derived(status?.live ?? null);
+  const live = $derived(view?.live ?? null);
 </script>
 
 <h3>Recovery code</h3>
-{#each notices as notice (notice)}<p class="status" role="status">{notice}</p>{/each}
+{#each view?.notices ?? [] as notice (notice)}<p class="status" role="status">{notice}</p>{/each}
 
 {#if phase === 'show' || phase === 'confirming'}
   {@const made = prepared!}
@@ -229,20 +233,17 @@
       onclick={() => {
         phase = 'idle';
         message = null;
-        void check();
       }}>Close</button
     >
   </span>
-{:else if !log}
+{:else if !ready}
   <p class="status">Your library isn’t open yet.</p>
-{:else if makingWaits(log)}
+{:else if view?.availability === 'waits'}
   <p class="status">Available after the library update.</p>
 {:else}
-  {#if status === undefined}
+  {#if view === undefined}
     <p class="status" role="status">Checking your recovery code…</p>
-  {:else if status === null}
-    <p class="status bad" role="alert">Couldn’t reach Den to check your recovery code.</p>
-  {:else if status.broken}
+  {:else if view.broken}
     <p class="status bad" role="alert">Your recovery code no longer works: make a new one.</p>
   {:else if live}
     <p class="status">
@@ -268,7 +269,7 @@
         detail="Your current code stops working."
         confirmLabel="Make a new code"
         tone="primary"
-        disabled={status === undefined}
+        disabled={view === undefined}
         onconfirm={() => void make()}
       />
       <Confirm
@@ -281,7 +282,7 @@
       <button
         type="button"
         class="primary"
-        disabled={status === undefined}
+        disabled={view === undefined}
         onclick={() => void make()}>Make a recovery code</button
       >
     {/if}

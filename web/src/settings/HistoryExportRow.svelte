@@ -3,17 +3,18 @@
      Titles are named from TMDB as the rest of the page names them; the library itself never leaves the browser. -->
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
-  import { buildHistoryExport, historyCsv, letterboxdCsv } from '../lib/historyExport';
+  import { historyCsv, letterboxdCsv, type HistoryExport } from '../lib/historyExport';
   import { titleKey, type Title } from '../lib/library';
-  import type { LibraryLog } from '../lib/log';
-  import { ensureSyncPolicy } from '../lib/syncLoader';
   import { fetchTitle } from '../lib/tmdb';
+  import type { LibraryQueryResult } from '../lib/libraryServiceProtocol';
+
+  type SemanticExport = Extract<LibraryQueryResult, { kind: 'history.export' }>;
 
   let {
-    log,
+    ready,
     tmdbKey,
-    displays,
-  }: { log: LibraryLog | null | undefined; tmdbKey: string; displays: readonly Title[] } = $props();
+    load,
+  }: { ready: boolean; tmdbKey: string; load: () => Promise<SemanticExport> } = $props();
 
   type State =
     { step: 'idle' } | { step: 'naming'; done: number; total: number } | { step: 'failed' };
@@ -22,10 +23,8 @@
   /** Every title's TMDB name and IMDb id: what the page already named, the rest asked for, six at a time. */
   async function names(refs: { type: 'movie' | 'tv'; id: number }[]): Promise<Map<string, Title>> {
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one export; nothing renders from it.
-    const found = new Map(
-      displays.filter((title) => title.imdbId).map((title) => [titleKey(title), title] as const),
-    );
-    const queue = refs.filter((ref) => !found.has(titleKey(ref)));
+    const found = new Map<string, Title>();
+    const queue = [...refs];
     const total = queue.length;
     let done = 0;
     state = { step: 'naming', done, total };
@@ -50,20 +49,32 @@
   }
 
   async function download(as: 'csv' | 'letterboxd' | 'json') {
-    const opened = log;
-    if (!opened) return;
+    if (!ready) return;
     try {
-      await ensureSyncPolicy();
-      const documents = opened
-        .documents()
-        .map(({ document }) => document)
-        .filter((document) => document.kind !== 'delivery');
-      // Only what the export holds is named: not a title removed from the library, nor one holding nothing.
-      const refs = buildHistoryExport(documents, new Map()).titles.map(({ type, tmdbId }) => ({
+      const semantic = await load();
+      const refs = semantic.titles.map(({ type, tmdbId }) => ({
         type,
         id: tmdbId,
       }));
-      const history = buildHistoryExport(documents, await names(refs));
+      const named = await names(refs);
+      const rating = { love: 10, like: 7, dislike: 2 } as const;
+      const history: HistoryExport = {
+        format: 'den-history',
+        version: 1,
+        exportedAt: semantic.exportedAt,
+        titles: semantic.titles.map((title) => {
+          const display = named.get(`${title.type}:${title.tmdbId}`);
+          return {
+            ...title,
+            imdbId: display?.imdbId ?? null,
+            title: display?.title ?? null,
+            year: display?.year ?? null,
+            watchlist: title.status === 'watchlist',
+            rating:
+              title.reaction && title.reaction !== 'seen' ? (rating[title.reaction] ?? null) : null,
+          };
+        }),
+      };
       const day = history.exportedAt.slice(0, 10);
       if (as === 'csv') save(`den-history-${day}.csv`, 'text/csv', historyCsv(history));
       else if (as === 'letterboxd')
@@ -97,19 +108,19 @@
     <button
       type="button"
       class="primary"
-      disabled={!log || state.step === 'naming'}
+      disabled={!ready || state.step === 'naming'}
       onclick={() => void download('csv')}>Download CSV</button
     >
     <button
       type="button"
       class="quiet"
-      disabled={!log || state.step === 'naming'}
+      disabled={!ready || state.step === 'naming'}
       onclick={() => void download('json')}>Download JSON</button
     >
     <button
       type="button"
       class="quiet"
-      disabled={!log || state.step === 'naming'}
+      disabled={!ready || state.step === 'naming'}
       onclick={() => void download('letterboxd')}>Letterboxd (films)</button
     >
   </div>

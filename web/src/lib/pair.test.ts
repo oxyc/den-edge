@@ -251,7 +251,21 @@ describe('hosting a pairing', () => {
     let give: (code: string) => void = () => undefined;
     const code = new Promise<string>((resolve) => (give = resolve));
     const hosted = pair.host({
-      libraryKey,
+      seal: async (handoverKey, host, linkKey) => {
+        const rawLinkKey = fromBase64url(linkKey)!;
+        return {
+          sealed: toBase64url(
+            await pair.sealHandover(fromBase64url(handoverKey)!, {
+              host,
+              hostDeviceId,
+              linkKey: rawLinkKey,
+              libraryKey,
+            }),
+          ),
+          linkKey,
+          inboxKey: (await pair.linkKeys(rawLinkKey)).inbox,
+        };
+      },
       label: 'Safari on Mac',
       deviceId: hostDeviceId,
       linkKey: fromHex(p.link.linkKey),
@@ -358,7 +372,7 @@ describe('joining through den-edge', () => {
     try {
       expect(await pair.join('ABCD-EFGH-JKLM', options(never))).toEqual({ error: 'insecure' });
       const hosting = {
-        libraryKey: new Uint8Array(32),
+        seal: async () => ({ sealed: '', linkKey: '', inboxKey: '' }),
         onCode: () => undefined,
         allow: async () => true,
       };

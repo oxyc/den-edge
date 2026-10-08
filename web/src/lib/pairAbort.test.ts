@@ -22,7 +22,7 @@ it('stops waiting for a joiner once the page that hosts the pairing goes, and en
   const leaving = new AbortController();
   let polls = 0;
   const result = await host({
-    libraryKey: new Uint8Array(32),
+    seal: async () => ({ sealed: '', linkKey: '', inboxKey: '' }),
     label: 'Mac',
     onCode: () => undefined,
     allow: async () => true,

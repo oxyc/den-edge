@@ -5,13 +5,21 @@
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import Switch from './Switch.svelte';
-  import { change, type PrefChanges, type SyncedPrefs } from './values';
+  import {
+    preferenceChange as change,
+    type PreferenceChanges,
+    type SettingsPreferences,
+  } from './preferences';
 
   let {
     prefs,
     disabled,
     save,
-  }: { prefs: SyncedPrefs; disabled: boolean; save: (changes: PrefChanges) => void } = $props();
+  }: {
+    prefs: SettingsPreferences;
+    disabled: boolean;
+    save: (changes: PreferenceChanges) => void;
+  } = $props();
 
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
 </script>

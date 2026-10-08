@@ -1,16 +1,14 @@
-<!-- Settings › Import & export: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
-     each film and episode at the day it was last watched. Read and matched in this browser; written as the library's
-     own rows (`viewingImportJournal`), which the Apple TV's catch-up passes to Simkl in its own time, each at its date. -->
+<!-- Settings › Import & export: provider files are matched here and submitted as semantic history items. -->
 <script lang="ts" module>
   import { SvelteSet } from 'svelte/reactivity';
   import type { Plan } from '../lib/netflixImport';
-  import type { ImportWrites } from '../lib/viewingImportJournal';
+  import type { PlannedHistoryImport } from './historyImport';
 
   type State =
     | { step: 'idle' }
     | { step: 'matching'; done: number; total: number; paused?: boolean }
-    | { step: 'preview'; plan: Plan; writes: ImportWrites[] }
-    | { step: 'writing'; done: number; total: number }
+    | { step: 'preview'; plan: Plan; writes: PlannedHistoryImport[] }
+    | { step: 'writing' }
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
   /** Kept with the module, not the section: matching a long history goes on while the viewer is elsewhere. */
@@ -23,32 +21,36 @@
   import SettingRow from './SettingRow.svelte';
   import PrimeImportRow from './PrimeImportRow.svelte';
   import HistoryExportRow from './HistoryExportRow.svelte';
-  import type { Title } from '../lib/library';
   import SettingsSection from './SettingsSection.svelte';
-  import type { LibraryLog } from '../lib/log';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
-  import { importWrites, writeImportBatches } from '../lib/viewingImportJournal';
   import { viewingImportLookups } from '../lib/viewingImportLookups';
-  import { ensureSyncPolicy } from '../lib/syncLoader';
+  import { historyImportItems } from './historyImport';
+  import type {
+    HistoryImportItem,
+    LibraryQueryResult,
+    TitleRef,
+  } from '../lib/libraryServiceProtocol';
+
+  type HistoryExport = Extract<LibraryQueryResult, { kind: 'history.export' }>;
 
   let {
-    log,
-    device,
+    ready,
     tmdbKey,
-    changed,
-    displays,
+    watched,
+    importHistory,
+    exportHistory,
   }: {
-    log: LibraryLog | null | undefined;
-    device: string;
+    ready: boolean;
     tmdbKey: string;
-    changed: () => void;
-    /** The titles the page has named, which the history export reuses. */
-    displays: readonly Title[];
+    watched: readonly TitleRef[];
+    importHistory: (
+      items: readonly HistoryImportItem[],
+    ) => Promise<{ written: number; total: number; complete: boolean }>;
+    exportHistory: () => Promise<HistoryExport>;
   } = $props();
 
   async function read(file: File) {
-    const opened = log;
-    if (!opened) return;
+    if (!ready) return;
     const viewings = parseCsv(await file.text());
     if (!viewings.length) {
       state = { step: 'failed', message: 'That file has no viewing history in it.' };
@@ -58,10 +60,8 @@
     excluded.clear();
     try {
       // What the library already has as seen is found, and left: its episodes aren't looked up at all.
-      const seen = (ref: { type: string; id: number }) => {
-        const row = opened.title(ref);
-        return !!row && !row.deleted.value && row.status.value === 'watched';
-      };
+      const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
+      const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
       const lookups = viewingImportLookups(tmdbKey, undefined, (ms) => {
         if (state.step === 'matching') state = { ...state, paused: ms > 0 };
       });
@@ -73,11 +73,10 @@
         },
         seen,
       );
-      await ensureSyncPolicy();
       state = {
         step: 'preview',
         plan: result,
-        writes: importWrites(result.marks, result.shows, opened, device, Date.now()),
+        writes: historyImportItems(result.marks, result.shows),
       };
     } catch (error) {
       console.warn('den: Netflix import failed', error);
@@ -85,23 +84,14 @@
     }
   }
 
-  async function write(writes: ImportWrites[]) {
-    const opened = log;
-    if (!opened) return;
-    const total = writes.reduce((count, entry) => count + entry.rows.length, 0);
-    state = { step: 'writing', done: 0, total };
-    const result = await writeImportBatches(writes, opened, (done, all) => {
-      state = { step: 'writing', done, total: all };
-    });
-    changed();
+  async function write(writes: PlannedHistoryImport[]) {
+    state = { step: 'writing' };
+    const result = await importHistory(writes.map((entry) => entry.item));
     state = result.complete
       ? { step: 'done', written: result.written }
       : {
           step: 'failed',
-          message:
-            result.refusal === 'library_full'
-              ? `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
-              : `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
+          message: `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
         };
   }
 
@@ -128,7 +118,7 @@
           <input
             type="file"
             accept=".csv,text/csv"
-            disabled={!log}
+            disabled={!ready}
             onchange={(event) => {
               const file = event.currentTarget.files?.[0];
               event.currentTarget.value = '';
@@ -200,26 +190,17 @@
         <button
           type="button"
           class="primary"
-          disabled={!chosen.some((w) => w.rows.length)}
+          disabled={!chosen.length}
           onclick={() => void write(chosen)}
         >
-          Mark {plural(
-            chosen.filter((w) =>
-              w.rows.some(
-                (row) =>
-                  row.kind === 'ep' || (row.kind === 'rec' && row.status.value === 'watched'),
-              ),
-            ).length,
-            'film or series',
-            'films and series',
-          )} as seen
+          Mark {plural(chosen.length, 'film or series', 'films and series')} as seen
         </button>
         <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}
           >Cancel</button
         >
       </div>
     {:else if state.step === 'writing'}
-      <p class="status" role="status">Saving — {state.done} of {state.total}</p>
+      <p class="status" role="status">Saving…</p>
     {:else if state.step === 'done'}
       <p class="status" role="status">
         Saved {plural(state.written, 'change')}. Your Apple TV sends them to Simkl next time Den is
@@ -229,8 +210,8 @@
       <p class="status bad" role="alert">{state.message}</p>
     {/if}
   </SettingRow>
-  <PrimeImportRow {log} {device} {tmdbKey} {changed} />
-  <HistoryExportRow {log} {tmdbKey} {displays} />
+  <PrimeImportRow {ready} {tmdbKey} {watched} {importHistory} />
+  <HistoryExportRow {ready} {tmdbKey} load={exportHistory} />
 </SettingsSection>
 
 <style>

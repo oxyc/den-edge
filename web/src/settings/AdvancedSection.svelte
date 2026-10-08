@@ -5,41 +5,40 @@
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
-  import { readApiKey } from '../lib/prefs';
-  import type { ConfigValue, SettingsRow } from '../lib/wire';
 
   let {
-    keys,
+    remoteAccessConfigured,
     disabled,
     selfId,
     pendingActions,
     edgeVersion,
     libraryFormat = null,
-    write,
+    setRemoteAccess,
   }: {
-    keys: SettingsRow | undefined;
+    remoteAccessConfigured: boolean;
     disabled: boolean;
     selfId: string;
     /** Changes kept on this device, waiting to reach the library. */
     pendingActions: number;
     edgeVersion: string | null;
-    /** The library's wire format (`LibraryLog.wireMinimum`), when one is open. */
+    /** The library format reported by the service, when one is open. */
     libraryFormat?: number | null;
-    write: (group: string, changes: Record<string, ConfigValue | null>) => Promise<boolean>;
+    setRemoteAccess: (
+      credentials: { clientId: string; clientSecret: string } | null,
+    ) => Promise<boolean>;
   } = $props();
 
   let accessId = $state('');
   let accessSecret = $state('');
-  const hasAccess = $derived(
-    !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
-  );
+  const hasAccess = $derived(remoteAccessConfigured);
 
   /** Both halves together, or both cleared: one without the other opens nothing. */
   async function saveAccess(clear = false) {
     const [id, secret] = clear ? [null, null] : [accessId.trim(), accessSecret.trim()];
     if (!clear && (!id || !secret)) return;
-    const value = (v: string | null) => (v ? { string: v } : null);
-    if (await write('keys', { cfAccessId: value(id), cfAccessSecret: value(secret) })) {
+    if (
+      await setRemoteAccess(clear || !id || !secret ? null : { clientId: id, clientSecret: secret })
+    ) {
       accessId = '';
       accessSecret = '';
     }
