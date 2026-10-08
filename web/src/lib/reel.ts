@@ -105,25 +105,33 @@ export interface TitleIds {
 }
 
 /** Where reel is asked about this title: the id it prefers, and the other one as a companion. */
-function metaURL(
+function discoveryURL(
   base: string,
+  route: 'meta' | 'prepare',
   type: MediaType,
   ids: TitleIds,
   prewarm: 'full' | 'direct',
   height?: number,
+  sourceAsk?: SourceAsk,
 ): string | null {
   // Never encoded: reel matches `tmdb:` on the raw path, so a percent-encoded colon would not be seen.
   const id =
     ids.tmdb !== undefined ? `tmdb:${ids.tmdb}` : ids.imdb ? encodeURIComponent(ids.imdb) : null;
   if (!id) return null;
   const params = new URLSearchParams();
-  if (prewarm === 'direct') params.set('prewarm', 'direct');
+  if (route === 'meta' && prewarm === 'direct') params.set('prewarm', 'direct');
+  if (route === 'prepare' && sourceAsk) {
+    params.set('surface', sourceAsk.surface);
+    params.set('player', sourceAsk.player);
+    params.set('intent', sourceAsk.intent ?? 'play');
+    if (sourceAsk.playable) params.set('playable', JSON.stringify(sourceAsk.playable));
+  }
   // reel keeps a separate resolve per height step, so the warm-up has to name the same one the page
   // will go on to ask for — otherwise the request that matters pays a cold resolve anyway.
   if (height) params.set('height', String(height));
   if (ids.tmdb !== undefined && ids.imdb) params.set('imdb', ids.imdb);
   const query = params.toString();
-  return `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${id}.json${query ? `?${query}` : ''}`;
+  return `${base}/${route}/${type === 'tv' ? 'series' : 'movie'}/${id}.json${query ? `?${query}` : ''}`;
 }
 
 /**
@@ -144,6 +152,8 @@ function metaURL(
  */
 const warmed = new Map<string, { found: TrailerCandidate[]; at: number }>();
 const WARM_TTL_MS = 5 * 60_000;
+/** Reel bases that answered as a version predating `/prepare`; forgotten with the other short-lived lookup state. */
+const prepareUnsupported = new Set<string>();
 
 /**
  * What the remembered URLs are only true for.
@@ -167,6 +177,7 @@ function warmKey(
 /** Forget it. Tests ask the same title twice and mean it both times. */
 export function forgetWarmedTrailers(): void {
   warmed.clear();
+  prepareUnsupported.clear();
 }
 
 /** One trailer reel offered for a title. */
@@ -178,6 +189,23 @@ export interface TrailerCandidate {
    * a reel older than 0.29.0, which is the signal to derive it from `play` the way we always did.
    */
   sources: string | null;
+  /**
+   * The primary ladder returned by Reel's combined `/prepare` request. Absent after the legacy
+   * `/meta` path; null when `/prepare` completed but could not prepare this primary candidate.
+   */
+  prepared?: Sources | null;
+}
+
+/** The source question `/prepare` can answer beside trailer discovery. */
+export interface SourceAsk {
+  surface: Surface;
+  player: Player;
+  intent?: 'warm';
+  playable?: unknown;
+  /** The browser's public IPv4 lookup, injected by tests and called only after edge asks for it. */
+  lookupIpv4?: () => Promise<string | undefined>;
+  /** Whether a carried source may play through this origin's relay (`relaysMedia`); tests name it. */
+  relay?: boolean;
 }
 
 /**
@@ -239,6 +267,7 @@ export async function trailerCandidates(
     signal,
     prewarm = 'full',
     height,
+    sourceAsk,
   }: {
     fetchImpl?: typeof fetch;
     secure?: boolean;
@@ -254,6 +283,12 @@ export async function trailerCandidates(
      * to `/play`, which would then be cold exactly when it is needed.
      */
     prewarm?: 'full' | 'direct';
+    /**
+     * Collapse discovery and the primary source ladder into Reel's `/prepare` request. A Reel
+     * version without that additive endpoint falls back to `/meta` and the caller's ordinary
+     * `fetchSources` path.
+     */
+    sourceAsk?: SourceAsk;
   } = {},
 ): Promise<TrailerCandidate[]> {
   const origin = mediaBase(base, routes.reel ?? [], secure);
@@ -263,30 +298,97 @@ export async function trailerCandidates(
   const key = warmKey(origin, base, type, ids, height);
   const already = key ? warmed.get(key) : undefined;
   if (already && Date.now() - already.at < WARM_TTL_MS) return already.found;
-  const asked = metaURL(base, type, ids, prewarm, height);
-  if (!asked) return [];
-  try {
-    const res = await fetchImpl(asked, { signal });
-    if (!res.ok) return [];
-    const body = await res.json();
-    if (!Array.isArray(body?.meta?.links)) return [];
-    const found: TrailerCandidate[] = [];
-    for (const candidate of body.meta.links) {
-      const play = onOrigin(candidate?.trailers, origin, /\/play\/[^/]+$/);
-      if (!play) continue;
-      if (found.some((had) => had.play === play)) continue;
-      // reel names this from 0.29.0. Older answers carry none, and a surface then derives what it
-      // plays from the play URL, exactly as every version before /sources did.
-      found.push({ play, sources: onOrigin(candidate?.sources, origin, /\/sources\/[^/]+$/) });
+  const legacy = discoveryURL(base, 'meta', type, ids, prewarm, height);
+  if (!legacy) return [];
+  if (sourceAsk && !prepareUnsupported.has(base)) {
+    const preparedURL = discoveryURL(base, 'prepare', type, ids, prewarm, height, sourceAsk);
+    if (preparedURL) {
+      let response: Response;
+      try {
+        response = await fetchImpl(preparedURL, { signal });
+      } catch {
+        // A failed combined request must not immediately repeat its discovery/provider work through
+        // the legacy chain. A later interaction may try again.
+        return [];
+      }
+      if (response.ok) {
+        let body: {
+          meta?: { links?: unknown };
+          primary?: { sourcesBase?: unknown } | null;
+          prepared?: unknown;
+        } | null = null;
+        try {
+          body = await response.json();
+        } catch {
+          // Some old proxy mounts answer unknown routes with an HTML shell and status 200.
+          prepareUnsupported.add(base);
+        }
+        if (Array.isArray(body?.meta?.links) && Object.hasOwn(body, 'primary')) {
+          const found = candidatesFrom(body, origin);
+          const first = found[0];
+          const sourcesBase = onOrigin(body?.primary?.sourcesBase, origin, /\/sources\/[^/]+$/);
+          if (first && sourcesBase && first.sources === sourcesBase) {
+            const prepared = body.prepared as { playReady?: unknown } | null | undefined;
+            first.prepared =
+              prepared?.playReady === true
+                ? await sourcesFrom(body, sourcesBase, {
+                    ...sourceAsk,
+                    fetchImpl,
+                    signal,
+                  })
+                : null;
+          }
+          rememberCandidates(key, found);
+          return found;
+        }
+        // A successful response without the combined schema identifies a pre-prepare mount.
+        prepareUnsupported.add(base);
+      } else if (response.status === 404 || response.status === 405) {
+        // Mixed rollout: remember an older Reel for this page lifetime instead of paying one known
+        // 404 before every title's legacy request.
+        prepareUnsupported.add(base);
+      } else {
+        // Genuine prepare/provider failure: do not duplicate the same upstream work through `/meta`.
+        return [];
+      }
+      if (signal?.aborted) return [];
     }
-    // Only a real answer is remembered. An empty list is usually reel saying "not yet" — a resolve
-    // still running, an upstream that faulted — and pinning that for five minutes would leave the
-    // page with no trailer long after one existed.
-    if (key && found.length) warmed.set(key, { found, at: Date.now() });
+  }
+  try {
+    const response = await fetchImpl(legacy, { signal });
+    if (!response.ok) return [];
+    const body = await response.json();
+    const found = candidatesFrom(body, origin);
+    rememberCandidates(key, found);
     return found;
   } catch {
     return [];
   }
+}
+
+/** The usable candidates in either `/meta` or `/prepare`'s shared metadata envelope. */
+function candidatesFrom(body: unknown, origin: string): TrailerCandidate[] {
+  const links = (body as { meta?: { links?: unknown } })?.meta?.links;
+  if (!Array.isArray(links)) return [];
+  const found: TrailerCandidate[] = [];
+  for (const candidate of links) {
+    const link = candidate as { trailers?: unknown; sources?: unknown };
+    const play = onOrigin(link?.trailers, origin, /\/play\/[^/]+$/);
+    if (!play || found.some((had) => had.play === play)) continue;
+    // reel names this from 0.29.0. Older answers carry none, and a surface then derives what it
+    // plays from the play URL, exactly as every version before /sources did.
+    found.push({ play, sources: onOrigin(link?.sources, origin, /\/sources\/[^/]+$/) });
+  }
+  return found;
+}
+
+/** Cache discovery only: a provisional warm ladder must never answer a later play request. */
+function rememberCandidates(key: string | null, found: TrailerCandidate[]): void {
+  if (!key || !found.length) return;
+  warmed.set(key, {
+    found: found.map(({ play, sources }) => ({ play, sources })),
+    at: Date.now(),
+  });
 }
 
 /**
@@ -850,14 +952,47 @@ export async function fetchSources(
     const res = await fetchImpl(asked, { signal });
     if (!res.ok) return null;
     const body = await res.json();
-    if (!Array.isArray(body?.sources)) return null;
+    return sourcesFrom(body, sources, {
+      surface,
+      player,
+      intent,
+      playable,
+      fetchImpl,
+      signal,
+      lookupIpv4,
+      relay,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Parse and activate a source ladder, whether it arrived from `/sources` or combined `/prepare`. */
+async function sourcesFrom(
+  body: unknown,
+  sources: string,
+  {
+    player,
+    fetchImpl,
+    signal,
+    lookupIpv4 = () => ipv4Hint(),
+    relay = relaysMedia(),
+  }: SourceAsk & {
+    fetchImpl: typeof fetch;
+    signal?: AbortSignal;
+  },
+): Promise<Sources | null> {
+  try {
+    const answer = body as { sources?: unknown; crop?: unknown; expires?: unknown };
+    if (!Array.isArray(answer?.sources)) return null;
+    const url = new URL(sources, globalThis.location?.href ?? 'http://relative.invalid');
     // Where this page can reach reel: the mount it just asked on, minus the `/sources/<id>.json`.
     const mount = `${/^[a-z][a-z0-9+.-]*:/i.test(sources) ? url.origin : ''}${url.pathname.replace(
       /\/sources\/[^/]+$/,
       '',
     )}`;
     const list: Source[] = [];
-    for (const entry of body.sources) {
+    for (const entry of answer.sources) {
       // `kind` and `url` are the two that cannot be guessed; anything without both is unusable.
       if (typeof entry?.url !== 'string') continue;
       if (entry.kind !== 'mp4' && entry.kind !== 'hls') continue;
@@ -885,7 +1020,11 @@ export async function fetchSources(
       player,
     );
     if (!activated.length) return null;
-    return { sources: activated, crop: crop(body.crop), expires: body.expires };
+    return {
+      sources: activated,
+      crop: crop(answer.crop),
+      expires: typeof answer.expires === 'number' ? answer.expires : undefined,
+    };
   } catch {
     return null;
   }

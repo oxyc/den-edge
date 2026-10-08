@@ -36,6 +36,7 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"/>',
     }),
   );
+  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.route('**/reel/fixture/meta/**', (r) =>
     r.fulfill({
       json: {

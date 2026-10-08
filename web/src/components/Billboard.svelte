@@ -559,18 +559,48 @@
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
         signal: controller.signal,
+        sourceAsk: {
+          surface: 'silent',
+          player: PLAYS_HLS ? 'native' : 'hls.js',
+        },
       })
         .then(async (found) => {
           const first = found[0];
           if (ambientRequest !== request || !first) return;
-          const url = first.play;
-          if (first.sources) {
-            const offered = await fetchSources(first.sources, {
-              surface: 'silent',
-              player: PLAYS_HLS ? 'native' : 'hls.js',
-              signal: controller.signal,
-            });
-            if (ambientRequest !== request) return;
+          let chosen = first;
+          let offered = first.sources
+            ? Object.hasOwn(first, 'prepared')
+              ? first.prepared
+              : await fetchSources(first.sources, {
+                  surface: 'silent',
+                  player: PLAYS_HLS ? 'native' : 'hls.js',
+                  signal: controller.signal,
+                })
+            : null;
+          if (ambientRequest !== request) return;
+          if (Object.hasOwn(first, 'prepared') && !offered) {
+            // `/prepare` deliberately keeps every discovery alternate when its primary fails. Walk
+            // those rather than immediately repeating the failed primary through a derived route.
+            for (const alternate of found.slice(1)) {
+              if (!alternate.sources) continue;
+              const answer = await fetchSources(alternate.sources, {
+                surface: 'silent',
+                player: PLAYS_HLS ? 'native' : 'hls.js',
+                signal: controller.signal,
+              });
+              if (ambientRequest !== request) return;
+              if (!answer) continue;
+              chosen = alternate;
+              offered = answer;
+              break;
+            }
+            if (!offered) {
+              ambientFailed = true;
+              return;
+            }
+          }
+          const url = chosen.play;
+          if (chosen.sources) {
             // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
             // is only worth taking where the element parses one itself; offered to anything else it
             // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
@@ -662,9 +692,21 @@
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
         signal: request.controller.signal,
+        sourceAsk: {
+          surface: 'silent',
+          player: PLAYS_HLS ? 'native' : 'hls.js',
+          intent: 'warm',
+        },
       }).then((found) => {
         const first = found[0];
-        if (nextWarm !== request || !first?.sources) return;
+        if (
+          nextWarm !== request ||
+          !first?.sources ||
+          // A combined request already performed this warm. Only an old Reel's legacy answer needs
+          // the separate source ask below.
+          Object.hasOwn(first, 'prepared')
+        )
+          return;
         // Asking IS the warming. `/sources` waits for the resolve its first entry plays from, and
         // builds that entry's index where it needs one, so there is no separate prewarm to keep in
         // step with what this slide will go on to ask for — which is precisely what went wrong when a

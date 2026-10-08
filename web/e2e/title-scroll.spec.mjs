@@ -49,6 +49,7 @@ async function setup(page) {
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({ contentType: 'image/svg+xml', body: art }),
   );
+  await page.route('**/reel/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.route('**/reel/meta/**', (r) =>
     r.fulfill({
       json: {

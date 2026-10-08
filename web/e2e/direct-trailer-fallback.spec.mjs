@@ -89,6 +89,7 @@ async function mock(page, origin, { home, reach, csp = POLICY, firstFails = fals
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
+  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.route('**/reel/fixture/meta/**', (r) =>
     r.fulfill({
       json: {

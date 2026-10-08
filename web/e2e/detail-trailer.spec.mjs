@@ -22,6 +22,7 @@ async function mock(page, trailer, bytes = videoBytes) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
+  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.route('**/reel/fixture/meta/**', trailer);
   await page.route('**/play/trailer.webm', (r) => {
     const range = /bytes=(\d+)-(\d*)/.exec(r.request().headers().range ?? '');

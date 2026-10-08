@@ -37,7 +37,7 @@ const serveVideo = (route) => {
   });
 };
 
-async function mock(page, sources) {
+async function mock(page, sources, prepared) {
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -48,6 +48,11 @@ async function mock(page, sources) {
   );
   // Both halves of a link: the play URL every older path was built from, and the sources URL that
   // replaces building anything.
+  await page.route('**/reel/fixture/prepare/**', (r) =>
+    prepared && r.request().url().includes('tmdb:42')
+      ? r.fulfill({ json: prepared })
+      : r.fulfill({ status: 404, json: {} }),
+  );
   await page.route('**/reel/fixture/meta/**', (r) => {
     const current = r.request().url().includes('tmdb:42');
     const next = r.request().url().includes('tmdb:43');
@@ -267,6 +272,65 @@ test('billboard walks reel’s order when the first will not play', async () => 
     });
     // An unmeasured trailer draws as it always did, with no transform at all.
     await expect(video).not.toHaveAttribute('style', /scale/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('billboard tries a prepare alternate without repeating an unavailable primary', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await mock(
+      page,
+      { sources: [] },
+      {
+        meta: {
+          links: [
+            {
+              trailers: 'http://internal/play/trailer.webm',
+              sources: 'http://internal/sources/trailer.json',
+            },
+            {
+              trailers: 'http://internal/play/alternate.webm',
+              sources: 'http://internal/sources/alternate.json',
+            },
+          ],
+        },
+        primary: { id: 'trailer', sourcesBase: 'http://internal/sources/trailer.json' },
+        prepared: null,
+        sources: [],
+      },
+    );
+    let primarySources = 0;
+    await page.route('**/sources/trailer.json**', (route) => {
+      primarySources++;
+      return route.fulfill({ json: { sources: [] } });
+    });
+    await page.route('**/sources/alternate.json**', (route) =>
+      route.fulfill({
+        json: {
+          sources: [
+            {
+              kind: 'mp4',
+              url: 'http://internal/m/s/alternate.webm',
+              audio: false,
+              height: 720,
+              width: 1280,
+            },
+          ],
+        },
+      }),
+    );
+    await page.route('**/m/s/alternate.webm', serveVideo);
+
+    await start(page);
+    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/alternate.webm', {
+      timeout: 15000,
+    });
+    expect(primarySources).toBe(0);
   } finally {
     await browser.close();
   }

@@ -45,6 +45,7 @@ const DIRECT = 'https://media.invalid';
  */
 async function mockReelInstall(page, base, counts) {
   const key = base.split('/').pop();
+  await page.route(`**${base}/prepare/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`**${base}/meta/**`, (route) => {
     counts.meta[key] = (counts.meta[key] ?? 0) + 1;
     return route.fulfill({

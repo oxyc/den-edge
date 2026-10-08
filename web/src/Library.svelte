@@ -953,22 +953,26 @@
     if (!reel) return;
     void trailerCandidates(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
       prewarm: 'direct',
-    }).then((found) => {
-      const first = found[0];
-      if (!first?.sources) return;
-      // Asking IS the warming, and what it warms is the question this press is heading towards. A
-      // detail page is an audible surface — it starts muted and a press unmutes it in place — so this
-      // is the same ask the hero makes when it mounts, answered from the same cache by the time it
-      // does. Warming one thing and playing another is exactly what put a multi-second index build in
-      // front of a viewer once already: a surface warmed one height step and then asked for a
-      // different one, and paid the whole build with the picture still empty.
-      void fetchSources(first.sources, {
+      // Combined discovery + source preparation saves the dependent `/meta` -> `/sources` RTT. A
+      // pre-prepare Reel falls back inside `trailerCandidates`; the detail page then asks the named
+      // `/sources` URL exactly as it did before.
+      sourceAsk: {
         surface: 'audible',
         player: nativeHls() ? 'native' : 'hls.js',
         // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
         // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
         // and it does so for every title glanced at across rows, search results and filmographies. The
         // resolve still starts, which is the expensive half and the half that actually helps.
+        intent: 'warm',
+      },
+    }).then((found) => {
+      const first = found[0];
+      if (!first?.sources || Object.hasOwn(first, 'prepared')) return;
+      // A Reel version predating `/prepare`: preserve its two-request warm path during a mixed
+      // rollout. Once the server upgrades, the combined response above makes this branch disappear.
+      void fetchSources(first.sources, {
+        surface: 'audible',
+        player: nativeHls() ? 'native' : 'hls.js',
         intent: 'warm',
       });
     });
