@@ -6,6 +6,7 @@ import {
   type LibraryServiceAuthority,
 } from './libraryServiceCore';
 import type { LibraryLog } from './log';
+import { exclusive } from './exclusive';
 
 const JOURNAL = 'library-service-operations.v1';
 const LIMIT = 1_024;
@@ -29,12 +30,12 @@ type Entry =
  * library-derived local key, so neither operation payloads nor administrative results are stored in plaintext.
  */
 export class DurableOperationAuthority implements LibraryServiceAuthority {
-  #loaded?: Promise<Entry[]>;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly authority: LibraryServiceAuthority,
     private readonly log: LibraryLog,
+    private readonly runExclusive: typeof exclusive = exclusive,
   ) {}
 
   get generation() {
@@ -50,15 +51,19 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
 
   command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult> {
     return this.#serialized(() =>
-      this.#perform('command', operationId, command, () =>
-        this.authority.command(command, operationId),
+      this.runExclusive(`den.library.operations.${this.log.libraryId}`, () =>
+        this.#perform('command', operationId, command, () =>
+          this.authority.command(command, operationId),
+        ),
       ),
     );
   }
 
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     return this.#serialized(() =>
-      this.#perform('task', operationId, task, () => this.authority.task(task, operationId)),
+      this.runExclusive(`den.library.operations.${this.log.libraryId}`, () =>
+        this.#perform('task', operationId, task, () => this.authority.task(task, operationId)),
+      ),
     );
   }
 
@@ -114,24 +119,19 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
   }
 
   async #entries(): Promise<Entry[]> {
-    if (!this.#loaded)
-      this.#loaded = this.log
-        .kept<unknown>(JOURNAL)
-        .then((stored) =>
-          Array.isArray(stored)
-            ? stored.filter(
-                (entry): entry is Entry =>
-                  !!entry &&
-                  typeof entry === 'object' &&
-                  !Array.isArray(entry) &&
-                  ((entry as { kind?: unknown }).kind === 'command' ||
-                    (entry as { kind?: unknown }).kind === 'task') &&
-                  typeof (entry as { operationId?: unknown }).operationId === 'string' &&
-                  typeof (entry as { request?: unknown }).request === 'string' &&
-                  !!(entry as { result?: unknown }).result,
-              )
-            : [],
-        );
-    return this.#loaded;
+    const stored = await this.log.kept<unknown>(JOURNAL);
+    return Array.isArray(stored)
+      ? stored.filter(
+          (entry): entry is Entry =>
+            !!entry &&
+            typeof entry === 'object' &&
+            !Array.isArray(entry) &&
+            ((entry as { kind?: unknown }).kind === 'command' ||
+              (entry as { kind?: unknown }).kind === 'task') &&
+            typeof (entry as { operationId?: unknown }).operationId === 'string' &&
+            typeof (entry as { request?: unknown }).request === 'string' &&
+            !!(entry as { result?: unknown }).result,
+        )
+      : [];
   }
 }

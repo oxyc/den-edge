@@ -7,6 +7,7 @@ function storedLog() {
   const kept = new Map<string, unknown>();
   return {
     log: {
+      libraryId: 'library-1',
       kept: async <T>(name: string) => structuredClone(kept.get(name)) as T | undefined,
       keep: async (name: string, value: unknown) => void kept.set(name, structuredClone(value)),
     } as unknown as LibraryLog,
@@ -33,6 +34,31 @@ function base() {
 }
 
 describe('DurableOperationAuthority', () => {
+  it('does not lose operation receipts written by concurrent service instances', async () => {
+    const stored = storedLog();
+    let held = Promise.resolve();
+    const lock = <T>(_name: string, work: () => Promise<T>) => {
+      const result = held.then(work);
+      held = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    };
+    const first = new DurableOperationAuthority(base(), stored.log, lock);
+    const second = new DurableOperationAuthority(base(), stored.log, lock);
+
+    await Promise.all([
+      first.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'one'),
+      second.command({ kind: 'watchlist.add', title: { type: 'movie', id: 2 } }, 'two'),
+    ]);
+
+    expect([...stored.kept.values()][0]).toEqual([
+      expect.objectContaining({ operationId: 'one' }),
+      expect.objectContaining({ operationId: 'two' }),
+    ]);
+  });
+
   it('returns the original command result after authority replacement without executing again', async () => {
     const stored = storedLog();
     const first = base();
