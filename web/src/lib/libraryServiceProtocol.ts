@@ -19,6 +19,7 @@ export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
 export type MediaType = 'movie' | 'tv';
 export type Reaction = 'seen' | 'dislike' | 'like' | 'love';
 export type Standing = 'watchlist' | 'in-progress' | 'watched';
+export type RatingSource = 'imdb' | 'tmdb' | 'rottenTomatoes' | 'metacritic';
 
 export interface TitleRef {
   type: MediaType;
@@ -76,8 +77,22 @@ export interface LibraryPreferencesPatch {
   hideAnime?: boolean;
   hideWatched?: boolean;
   minReleaseYear?: number | null;
-  services?: ServiceRef[];
+  audioLanguage?: string | null;
+  subtitleLanguage?: string | null;
+  shownSubtitleLanguages?: string[];
+  subtitlesPerLanguage?: number;
+  autoSkipSegments?: boolean;
+  autoplayTrailers?: boolean;
+  /** `default` restores every built-in source; `values: []` deliberately disables all sources. */
+  ratingSources?: LibraryListPreferencePatch<RatingSource>;
+  shownWarnings?: string[];
+  watchRegion?: string | null;
+  /** `default` restores guest service picks; `values: []` deliberately selects no services. */
+  services?: LibraryListPreferencePatch<ServiceRef>;
+  maturityCeiling?: 'pg13' | 'r' | null;
 }
+
+export type LibraryListPreferencePatch<T> = { kind: 'default' } | { kind: 'values'; values: T[] };
 
 export interface ServiceRef {
   id: number;
@@ -162,15 +177,28 @@ export interface PresenceView {
 
 export interface SettingsView {
   kind: 'settings';
-  preferences: {
-    excludedGenres: number[];
-    excludedLanguages: string[];
-    hideAnime: boolean;
-    hideWatched: boolean;
-    minReleaseYear?: number;
-    services: ServiceRef[];
-    servicesConfigured: boolean;
-  };
+  preferences: LibraryPreferences;
+}
+
+/** Every preference synchronized in the library, projected with the same defaults as the settings screen. */
+export interface LibraryPreferences {
+  excludedGenres: number[];
+  excludedLanguages: string[];
+  hideAnime: boolean;
+  hideWatched: boolean;
+  minReleaseYear?: number;
+  audioLanguage?: string;
+  subtitleLanguage?: string;
+  shownSubtitleLanguages: string[];
+  subtitlesPerLanguage: number;
+  autoSkipSegments: boolean;
+  autoplayTrailers: boolean;
+  ratingSources: RatingSource[];
+  shownWarnings: string[];
+  watchRegion?: string;
+  services: ServiceRef[];
+  servicesConfigured: boolean;
+  maturityCeiling?: 'pg13' | 'r';
 }
 
 export interface DownloadViewItem {

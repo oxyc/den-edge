@@ -83,6 +83,48 @@ describe('library service client protocol', () => {
     expect(JSON.stringify(decoded)).not.toContain('row');
   });
 
+  it('accepts the complete semantic preferences patch', () => {
+    const decoded = decodeLibraryServiceClientMessage({
+      type: 'command',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'request-preferences',
+      operationId: 'operation-preferences',
+      command: {
+        kind: 'preferences.patch',
+        patch: {
+          excludedGenres: [27, 878],
+          excludedLanguages: ['fi', 'sv'],
+          hideAnime: true,
+          hideWatched: true,
+          minReleaseYear: null,
+          audioLanguage: 'fi',
+          subtitleLanguage: null,
+          shownSubtitleLanguages: ['en', 'sv'],
+          subtitlesPerLanguage: 0,
+          autoSkipSegments: true,
+          autoplayTrailers: false,
+          ratingSources: { kind: 'values', values: [] },
+          shownWarnings: ['Abuse', 'Spoiler'],
+          watchRegion: 'FI',
+          services: { kind: 'values', values: [] },
+          maturityCeiling: 'pg13',
+        },
+      },
+    });
+
+    expect(decoded).toMatchObject({
+      ok: true,
+      value: {
+        command: {
+          patch: {
+            ratingSources: { kind: 'values', values: [] },
+            services: { kind: 'values', values: [] },
+          },
+        },
+      },
+    });
+  });
+
   it('accepts title-shape and lifecycle observations without route semantics', () => {
     expect(
       decodeLibraryServiceClientMessage({
@@ -259,6 +301,31 @@ describe('library service client protocol', () => {
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+  });
+
+  it('rejects ambiguous or malformed preference patches', () => {
+    const decodePatch = (patch: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-preferences',
+        operationId: 'operation-preferences',
+        command: { kind: 'preferences.patch', patch },
+      });
+
+    expect(decodePatch({})).toMatchObject({ ok: false });
+    expect(decodePatch({ excludedLanguages: ['fi', 'fi'] })).toMatchObject({ ok: false });
+    expect(decodePatch({ audioLanguage: 'FIN' })).toMatchObject({ ok: false });
+    expect(decodePatch({ ratingSources: [] })).toMatchObject({ ok: false });
+    expect(
+      decodePatch({ ratingSources: { kind: 'values', values: ['imdb', 'unknown'] } }),
+    ).toMatchObject({ ok: false });
+    expect(decodePatch({ services: { kind: 'default', values: [] } })).toMatchObject({ ok: false });
+    expect(
+      decodePatch({ services: { kind: 'values', values: [{ id: 8, country: 'fi' }] } }),
+    ).toMatchObject({ ok: false });
+    expect(decodePatch({ watchRegion: '' })).toMatchObject({ ok: false });
+    expect(decodePatch({ rawSetting: { string: 'secret' } })).toMatchObject({ ok: false });
   });
 
   it('rejects duplicate and internally inconsistent title shapes', () => {
@@ -452,6 +519,48 @@ describe('library service server protocol', () => {
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+  });
+
+  it('accepts complete preference views and rejects storage-shaped or inconsistent ones', () => {
+    const preferences = {
+      excludedGenres: [27],
+      excludedLanguages: ['ja'],
+      hideAnime: true,
+      hideWatched: false,
+      minReleaseYear: 2000,
+      audioLanguage: 'fi',
+      subtitleLanguage: 'en',
+      shownSubtitleLanguages: ['en', 'sv'],
+      subtitlesPerLanguage: 3,
+      autoSkipSegments: true,
+      autoplayTrailers: false,
+      ratingSources: ['imdb', 'tmdb'],
+      shownWarnings: ['Spoiler'],
+      watchRegion: 'FI',
+      services: [{ id: 8, country: 'FI' }],
+      servicesConfigured: true,
+      maturityCeiling: 'r',
+    };
+    const update = (value: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'settings',
+        version,
+        value: { kind: 'settings', preferences: value },
+      });
+
+    expect(update(preferences)).toMatchObject({ ok: true });
+    expect(update({ ...preferences, row: { kind: 'set', name: 'prefs' } })).toMatchObject({
+      ok: false,
+    });
+    expect(update({ ...preferences, ratingSources: ['imdb', 'imdb'] })).toMatchObject({
+      ok: false,
+    });
+    expect(
+      update({ ...preferences, servicesConfigured: false, services: [{ id: 8, country: 'FI' }] }),
+    ).toMatchObject({ ok: false });
+    expect(update({ ...preferences, subtitlesPerLanguage: -1 })).toMatchObject({ ok: false });
   });
 
   it('carries delivery, resolved playback intent, and session status without storage details', () => {

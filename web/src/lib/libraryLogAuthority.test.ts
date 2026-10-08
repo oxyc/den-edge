@@ -333,9 +333,152 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('owns every synced preference with semantic default and explicit-empty patches', async () => {
+    const { log, authority } = await localAuthority();
+
+    await expect(authority.select({ kind: 'settings' })).resolves.toEqual({
+      kind: 'settings',
+      preferences: {
+        excludedGenres: [],
+        excludedLanguages: [],
+        hideAnime: false,
+        hideWatched: false,
+        minReleaseYear: undefined,
+        audioLanguage: undefined,
+        subtitleLanguage: undefined,
+        shownSubtitleLanguages: [],
+        subtitlesPerLanguage: 3,
+        autoSkipSegments: false,
+        autoplayTrailers: true,
+        ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+        shownWarnings: [],
+        watchRegion: undefined,
+        services: [],
+        servicesConfigured: false,
+        maturityCeiling: undefined,
+      },
+    });
+
+    await expect(
+      authority.command(
+        {
+          kind: 'preferences.patch',
+          patch: {
+            excludedGenres: [878, 27],
+            excludedLanguages: ['sv', 'fi'],
+            hideAnime: true,
+            hideWatched: true,
+            minReleaseYear: 2000,
+            audioLanguage: 'fi',
+            subtitleLanguage: 'sv',
+            shownSubtitleLanguages: ['sv', 'en'],
+            subtitlesPerLanguage: 0,
+            autoSkipSegments: true,
+            autoplayTrailers: false,
+            ratingSources: { kind: 'values', values: [] },
+            shownWarnings: ['Spoiler', 'Abuse'],
+            watchRegion: 'FI',
+            services: {
+              kind: 'values',
+              values: [
+                { id: 119, country: 'FI' },
+                { id: 8, country: 'FI' },
+              ],
+            },
+            maturityCeiling: 'r',
+          },
+        },
+        'preferences-all',
+      ),
+    ).resolves.toEqual({
+      outcome: 'applied',
+      delivery: 'local',
+      affected: [{ kind: 'settings' }],
+    });
+
+    const row = log.settings('prefs')!;
+    expect(row.values['den.excludedGenreIDs']?.value).toEqual({ ints: [27, 878] });
+    expect(row.values['den.myServicePicks']?.value).toEqual({ strings: ['8@FI', '119@FI'] });
+    expect(new Set(Object.values(row.values).map(({ at }) => JSON.stringify(at))).size).toBe(1);
+    expect(
+      log
+        .rows()
+        .filter((held) => held.kind === 'set')
+        .map((held) => held.name),
+    ).toEqual(['prefs']);
+    await expect(authority.select({ kind: 'settings' })).resolves.toMatchObject({
+      preferences: {
+        excludedGenres: [27, 878],
+        excludedLanguages: ['fi', 'sv'],
+        hideAnime: true,
+        hideWatched: true,
+        minReleaseYear: 2000,
+        audioLanguage: 'fi',
+        subtitleLanguage: 'sv',
+        shownSubtitleLanguages: ['en', 'sv'],
+        subtitlesPerLanguage: 0,
+        autoSkipSegments: true,
+        autoplayTrailers: false,
+        ratingSources: [],
+        shownWarnings: ['Abuse', 'Spoiler'],
+        watchRegion: 'FI',
+        services: [
+          { id: 8, country: 'FI' },
+          { id: 119, country: 'FI' },
+        ],
+        servicesConfigured: true,
+        maturityCeiling: 'r',
+      },
+    });
+
+    await expect(
+      authority.command(
+        {
+          kind: 'preferences.patch',
+          patch: {
+            audioLanguage: null,
+            minReleaseYear: null,
+            ratingSources: { kind: 'default' },
+            services: { kind: 'default' },
+            watchRegion: null,
+            maturityCeiling: null,
+          },
+        },
+        'preferences-defaults',
+      ),
+    ).resolves.toMatchObject({ affected: [{ kind: 'settings' }] });
+    await expect(authority.select({ kind: 'settings' })).resolves.toMatchObject({
+      preferences: {
+        audioLanguage: undefined,
+        minReleaseYear: undefined,
+        ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+        watchRegion: undefined,
+        services: [],
+        servicesConfigured: false,
+        maturityCeiling: undefined,
+      },
+    });
+    await expect(
+      authority.command(
+        {
+          kind: 'preferences.patch',
+          patch: {
+            ratingSources: { kind: 'default' },
+            services: { kind: 'default' },
+          },
+        },
+        'preferences-noop',
+      ),
+    ).resolves.toEqual({
+      outcome: 'unchanged',
+      delivery: 'local',
+      affected: [],
+    });
+  });
+
   it('reports protocol surfaces it does not implement', async () => {
     const { authority } = await localAuthority();
-    await expect(authority.select({ kind: 'settings' })).rejects.toMatchObject({
+    await expect(authority.select({ kind: 'downloads' })).rejects.toMatchObject({
       failure: { code: 'invalid-request', retryable: false },
     });
   });

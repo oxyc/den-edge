@@ -35,6 +35,7 @@ import type {
   LibraryObservation,
   LibraryQuery,
   LibraryQueryResult,
+  RatingSource,
   LibrarySelection,
   LibrarySelectionValue,
   LibraryServiceErrorCode,
@@ -50,7 +51,15 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog } from './log';
 import { recordTrackerEvent } from './trackerEvents';
-import { compareStamps, type EpisodeRow, type Row, type SettingsRow, type TitleRow } from './wire';
+import { change as preferenceChange, readSyncedPrefs, type PrefChanges } from '../settings/values';
+import {
+  compareStamps,
+  type ConfigValue,
+  type EpisodeRow,
+  type Row,
+  type SettingsRow,
+  type TitleRow,
+} from './wire';
 
 type Delivery = 'synced' | 'queued' | 'local';
 
@@ -73,6 +82,15 @@ export interface LibraryLogAuthorityOptions {
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
+
+const sameConfig = (a: ConfigValue | null, b: ConfigValue | null): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
+const isRatingSource = (value: string): value is RatingSource =>
+  value === 'imdb' || value === 'tmdb' || value === 'rottenTomatoes' || value === 'metacritic';
+
+const uniqueSorted = <T>(values: Iterable<T>, compare?: (a: T, b: T) => number): T[] =>
+  [...new Set(values)].sort(compare);
 
 const serviceStanding = (standing: ProjectedStanding): Standing =>
   standing === 'inProgress' ? 'in-progress' : standing;
@@ -140,6 +158,7 @@ export class LibraryLogAuthority {
       case 'presence':
         return this.#presence(selection.titles);
       case 'settings':
+        return this.#settings();
       case 'downloads':
         throw authorityError(
           'invalid-request',
@@ -190,10 +209,7 @@ export class LibraryLogAuthority {
       case 'progress.record':
         return this.#progress(command);
       case 'preferences.patch':
-        throw authorityError(
-          'invalid-request',
-          'preferences.patch is not implemented by the log authority',
-        );
+        return this.#patchPreferences(command.patch);
     }
   }
 
@@ -340,6 +356,59 @@ export class LibraryLogAuthority {
         ...(episode ? { episode } : {}),
         episodes,
       })),
+    };
+  }
+
+  #settings(): Extract<LibrarySelectionValue, { kind: 'settings' }> {
+    const stored = readSyncedPrefs(this.#log.settings('prefs'));
+    const validLanguage = (value: string | undefined): value is string =>
+      value !== undefined && /^[a-z]{2}$/.test(value);
+    const services = [
+      ...new Map(
+        stored.services
+          .filter(
+            ({ id, country }) => Number.isSafeInteger(id) && id > 0 && /^[A-Z]{2}$/.test(country),
+          )
+          .map((service) => [`${service.id}@${service.country}`, service] as const),
+      ).values(),
+    ]
+      .sort((a, b) => a.country.localeCompare(b.country) || a.id - b.id)
+      .slice(0, 256);
+    return {
+      kind: 'settings',
+      preferences: {
+        ...stored,
+        excludedGenres: uniqueSorted(
+          stored.excludedGenres.filter((id) => Number.isSafeInteger(id) && id > 0),
+          (a, b) => a - b,
+        ).slice(0, 256),
+        excludedLanguages: uniqueSorted(stored.excludedLanguages.filter(validLanguage)).slice(
+          0,
+          256,
+        ),
+        minReleaseYear:
+          stored.minReleaseYear !== undefined &&
+          stored.minReleaseYear >= 1800 &&
+          stored.minReleaseYear <= 3000
+            ? stored.minReleaseYear
+            : undefined,
+        audioLanguage: validLanguage(stored.audioLanguage) ? stored.audioLanguage : undefined,
+        subtitleLanguage: validLanguage(stored.subtitleLanguage)
+          ? stored.subtitleLanguage
+          : undefined,
+        shownSubtitleLanguages: uniqueSorted(
+          stored.shownSubtitleLanguages.filter(validLanguage),
+        ).slice(0, 256),
+        subtitlesPerLanguage:
+          Number.isSafeInteger(stored.subtitlesPerLanguage) && stored.subtitlesPerLanguage >= 0
+            ? stored.subtitlesPerLanguage
+            : 3,
+        ratingSources: [...new Set(stored.ratingSources.filter(isRatingSource))],
+        shownWarnings: uniqueSorted(
+          stored.shownWarnings.filter((warning) => warning.length > 0 && warning.length <= 4_096),
+        ).slice(0, 256),
+        services,
+      },
     };
   }
 
@@ -524,6 +593,73 @@ export class LibraryLogAuthority {
     );
   }
 
+  async #patchPreferences(
+    patch: Extract<LibraryCommand, { kind: 'preferences.patch' }>['patch'],
+  ): Promise<LibraryAuthorityCommandResult> {
+    const changes: PrefChanges = {};
+    if (patch.excludedGenres !== undefined)
+      Object.assign(changes, preferenceChange.excludedGenres(patch.excludedGenres));
+    if (patch.excludedLanguages !== undefined)
+      Object.assign(changes, preferenceChange.excludedLanguages(patch.excludedLanguages));
+    if (patch.hideAnime !== undefined)
+      Object.assign(changes, preferenceChange.hideAnime(patch.hideAnime));
+    if (patch.hideWatched !== undefined)
+      Object.assign(changes, preferenceChange.hideWatched(patch.hideWatched));
+    if (patch.minReleaseYear !== undefined)
+      Object.assign(changes, preferenceChange.minReleaseYear(patch.minReleaseYear ?? undefined));
+    if (patch.audioLanguage !== undefined)
+      Object.assign(changes, preferenceChange.audioLanguage(patch.audioLanguage ?? undefined));
+    if (patch.subtitleLanguage !== undefined)
+      Object.assign(
+        changes,
+        preferenceChange.subtitleLanguage(patch.subtitleLanguage ?? undefined),
+      );
+    if (patch.shownSubtitleLanguages !== undefined)
+      Object.assign(changes, preferenceChange.shownSubtitleLanguages(patch.shownSubtitleLanguages));
+    if (patch.subtitlesPerLanguage !== undefined)
+      Object.assign(changes, preferenceChange.subtitlesPerLanguage(patch.subtitlesPerLanguage));
+    if (patch.autoSkipSegments !== undefined)
+      Object.assign(changes, preferenceChange.autoSkipSegments(patch.autoSkipSegments));
+    if (patch.autoplayTrailers !== undefined)
+      Object.assign(changes, preferenceChange.autoplayTrailers(patch.autoplayTrailers));
+    if (patch.ratingSources !== undefined)
+      Object.assign(
+        changes,
+        patch.ratingSources.kind === 'default'
+          ? { 'den.enabledRatingSources': null }
+          : preferenceChange.ratingSources(patch.ratingSources.values),
+      );
+    if (patch.shownWarnings !== undefined)
+      Object.assign(changes, preferenceChange.shownWarnings(patch.shownWarnings));
+    if (patch.watchRegion !== undefined)
+      Object.assign(changes, preferenceChange.watchRegion(patch.watchRegion ?? undefined));
+    if (patch.services !== undefined)
+      Object.assign(
+        changes,
+        patch.services.kind === 'default'
+          ? { 'den.myServicePicks': null }
+          : preferenceChange.services(patch.services.values),
+      );
+    if (patch.maturityCeiling !== undefined)
+      Object.assign(changes, preferenceChange.maturityCeiling(patch.maturityCeiling ?? undefined));
+
+    const base = this.#log.settings('prefs') ?? {
+      kind: 'set' as const,
+      schema: 2,
+      name: 'prefs',
+      values: {},
+    };
+    const changed = Object.entries(changes).filter(
+      ([name, value]) => !sameConfig(base.values[name]?.value ?? null, value),
+    );
+    if (!changed.length) return this.#unchanged();
+    await this.#clock.see(this.#log.newestStamp());
+    const at = await this.#clock.issue();
+    const values = { ...base.values };
+    for (const [name, value] of changed) values[name] = { value, at };
+    return this.#writeRow({ ...base, values }, [{ kind: 'settings' }]);
+  }
+
   #preparePlayback(title: TitleRef, requested?: EpisodeRef): LibraryQueryResult {
     if (requested) {
       if (!sameTitle(title, requested))
@@ -632,7 +768,7 @@ export class LibraryLogAuthority {
   }
 
   async #writeRow(
-    row: TitleRow | EpisodeRow,
+    row: TitleRow | EpisodeRow | SettingsRow,
     affected: LibraryAffectedSelection[],
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;

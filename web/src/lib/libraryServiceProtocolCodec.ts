@@ -16,6 +16,7 @@ import {
   type LibraryServiceFailure,
   type LibraryServiceServerMessage,
   type LibraryVersion,
+  type RatingSource,
   type ServiceRef,
   type TitleRef,
 } from './libraryServiceProtocol';
@@ -84,6 +85,14 @@ const reaction = (value: unknown) =>
   value === 'seen' || value === 'dislike' || value === 'like' || value === 'love';
 const standing = (value: unknown) =>
   value === 'watchlist' || value === 'in-progress' || value === 'watched';
+const languageCode = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-z]{2}$/.test(value);
+const countryCode = (value: unknown): value is string =>
+  typeof value === 'string' && /^[A-Z]{2}$/.test(value);
+const ratingSource = (value: unknown): value is RatingSource =>
+  value === 'imdb' || value === 'tmdb' || value === 'rottenTomatoes' || value === 'metacritic';
+const unique = <T>(values: readonly T[], key: (value: T) => string = String): boolean =>
+  new Set(values.map(key)).size === values.length;
 
 function serviceRef(value: unknown): value is ServiceRef {
   return (
@@ -91,8 +100,7 @@ function serviceRef(value: unknown): value is ServiceRef {
     exact(value, ['id', 'country']) &&
     integer(value.id) &&
     value.id > 0 &&
-    typeof value.country === 'string' &&
-    /^[A-Z]{2}$/.test(value.country)
+    countryCode(value.country)
   );
 }
 
@@ -121,28 +129,82 @@ function legacyClock(value: unknown): value is {
 }
 
 function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
-  return (
-    record(value) &&
-    exact(value, [
+  if (
+    !record(value) ||
+    !Object.values(value).some((candidate) => candidate !== undefined) ||
+    !exact(value, [
       'excludedGenres',
       'excludedLanguages',
       'hideAnime',
       'hideWatched',
       'minReleaseYear',
+      'audioLanguage',
+      'subtitleLanguage',
+      'shownSubtitleLanguages',
+      'subtitlesPerLanguage',
+      'autoSkipSegments',
+      'autoplayTrailers',
+      'ratingSources',
+      'shownWarnings',
+      'watchRegion',
       'services',
-    ]) &&
-    optional(value.excludedGenres, (candidate): candidate is number[] =>
-      list(candidate, integer),
-    ) &&
-    optional(value.excludedLanguages, (candidate): candidate is string[] =>
-      list(candidate, text),
-    ) &&
+      'maturityCeiling',
+    ])
+  )
+    return false;
+
+  const genres = value.excludedGenres;
+  const excludedLanguages = value.excludedLanguages;
+  const shownSubtitleLanguages = value.shownSubtitleLanguages;
+  const shownWarnings = value.shownWarnings;
+  const sources = value.ratingSources;
+  const services = value.services;
+  return (
+    (genres === undefined ||
+      (list(genres, (candidate): candidate is number => integer(candidate) && candidate > 0, 256) &&
+        unique(genres))) &&
+    (excludedLanguages === undefined ||
+      (list(excludedLanguages, languageCode, 256) && unique(excludedLanguages))) &&
     optional(value.hideAnime, bool) &&
     optional(value.hideWatched, bool) &&
     (value.minReleaseYear === undefined ||
       value.minReleaseYear === null ||
-      (integer(value.minReleaseYear) && value.minReleaseYear >= 1800)) &&
-    optional(value.services, (candidate): candidate is ServiceRef[] => list(candidate, serviceRef))
+      (integer(value.minReleaseYear) &&
+        value.minReleaseYear >= 1800 &&
+        value.minReleaseYear <= 3000)) &&
+    optional(value.audioLanguage, (candidate): candidate is string | null =>
+      nullable(candidate, languageCode),
+    ) &&
+    optional(value.subtitleLanguage, (candidate): candidate is string | null =>
+      nullable(candidate, languageCode),
+    ) &&
+    (shownSubtitleLanguages === undefined ||
+      (list(shownSubtitleLanguages, languageCode, 256) && unique(shownSubtitleLanguages))) &&
+    (value.subtitlesPerLanguage === undefined || integer(value.subtitlesPerLanguage)) &&
+    optional(value.autoSkipSegments, bool) &&
+    optional(value.autoplayTrailers, bool) &&
+    (sources === undefined ||
+      (record(sources) &&
+        ((exact(sources, ['kind']) && sources.kind === 'default') ||
+          (exact(sources, ['kind', 'values']) &&
+            sources.kind === 'values' &&
+            list(sources.values, ratingSource, 4) &&
+            unique(sources.values))))) &&
+    (shownWarnings === undefined || (list(shownWarnings, text, 256) && unique(shownWarnings))) &&
+    optional(value.watchRegion, (candidate): candidate is string | null =>
+      nullable(candidate, countryCode),
+    ) &&
+    (services === undefined ||
+      (record(services) &&
+        ((exact(services, ['kind']) && services.kind === 'default') ||
+          (exact(services, ['kind', 'values']) &&
+            services.kind === 'values' &&
+            list(services.values, serviceRef, 256) &&
+            unique(services.values, (service) => `${service.id}@${service.country}`))))) &&
+    (value.maturityCeiling === undefined ||
+      value.maturityCeiling === null ||
+      value.maturityCeiling === 'pg13' ||
+      value.maturityCeiling === 'r')
   );
 }
 
@@ -388,6 +450,69 @@ function download(value: unknown): value is DownloadViewItem {
   );
 }
 
+function preferencesView(value: unknown): boolean {
+  if (
+    !record(value) ||
+    !exact(value, [
+      'excludedGenres',
+      'excludedLanguages',
+      'hideAnime',
+      'hideWatched',
+      'minReleaseYear',
+      'audioLanguage',
+      'subtitleLanguage',
+      'shownSubtitleLanguages',
+      'subtitlesPerLanguage',
+      'autoSkipSegments',
+      'autoplayTrailers',
+      'ratingSources',
+      'shownWarnings',
+      'watchRegion',
+      'services',
+      'servicesConfigured',
+      'maturityCeiling',
+    ])
+  )
+    return false;
+  const genres = value.excludedGenres;
+  const excludedLanguages = value.excludedLanguages;
+  const shownSubtitleLanguages = value.shownSubtitleLanguages;
+  const sources = value.ratingSources;
+  const shownWarnings = value.shownWarnings;
+  const services = value.services;
+  return (
+    list(genres, (candidate): candidate is number => integer(candidate) && candidate > 0, 256) &&
+    unique(genres) &&
+    list(excludedLanguages, languageCode, 256) &&
+    unique(excludedLanguages) &&
+    bool(value.hideAnime) &&
+    bool(value.hideWatched) &&
+    (value.minReleaseYear === undefined ||
+      (integer(value.minReleaseYear) &&
+        value.minReleaseYear >= 1800 &&
+        value.minReleaseYear <= 3000)) &&
+    optional(value.audioLanguage, languageCode) &&
+    optional(value.subtitleLanguage, languageCode) &&
+    list(shownSubtitleLanguages, languageCode, 256) &&
+    unique(shownSubtitleLanguages) &&
+    integer(value.subtitlesPerLanguage) &&
+    bool(value.autoSkipSegments) &&
+    bool(value.autoplayTrailers) &&
+    list(sources, ratingSource, 4) &&
+    unique(sources) &&
+    list(shownWarnings, text, 256) &&
+    unique(shownWarnings) &&
+    optional(value.watchRegion, countryCode) &&
+    list(services, serviceRef, 256) &&
+    unique(services, (service) => `${service.id}@${service.country}`) &&
+    bool(value.servicesConfigured) &&
+    (value.servicesConfigured || services.length === 0) &&
+    (value.maturityCeiling === undefined ||
+      value.maturityCeiling === 'pg13' ||
+      value.maturityCeiling === 'r')
+  );
+}
+
 function episodeProgress(value: unknown): value is {
   season: number;
   episode: number;
@@ -507,26 +632,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
           value.items.length
       );
     case 'settings':
-      return (
-        exact(value, ['kind', 'preferences']) &&
-        record(value.preferences) &&
-        exact(value.preferences, [
-          'excludedGenres',
-          'excludedLanguages',
-          'hideAnime',
-          'hideWatched',
-          'minReleaseYear',
-          'services',
-          'servicesConfigured',
-        ]) &&
-        list(value.preferences.excludedGenres, integer) &&
-        list(value.preferences.excludedLanguages, text) &&
-        bool(value.preferences.hideAnime) &&
-        bool(value.preferences.hideWatched) &&
-        optional(value.preferences.minReleaseYear, integer) &&
-        list(value.preferences.services, serviceRef) &&
-        bool(value.preferences.servicesConfigured)
-      );
+      return exact(value, ['kind', 'preferences']) && preferencesView(value.preferences);
     case 'downloads':
       return exact(value, ['kind', 'items']) && list(value.items, download);
     default:
