@@ -121,6 +121,48 @@ test('billboard plays what reel offers, cropped where reel measured it', async (
   }
 });
 
+test('an inactive retained billboard unloads its media resource before it can retry', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.fixtureMediaLoads = 0;
+    const load = HTMLMediaElement.prototype.load;
+    HTMLMediaElement.prototype.load = function () {
+      window.fixtureMediaLoads += 1;
+      return load.call(this);
+    };
+  });
+  await mock(page, {
+    sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
+  });
+  await page.route('**/m/s/chosen.webm', serveVideo);
+  await start(page);
+  const video = page.locator('video.ambient');
+  await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15_000 });
+  const loadsBefore = await page.evaluate(() => window.fixtureMediaLoads);
+
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
+  );
+  await expect
+    .poll(() =>
+      video.evaluate((element) => ({
+        attribute: element.getAttribute('src'),
+        paused: element.paused,
+      })),
+    )
+    .toEqual({ attribute: null, paused: true });
+  await expect(video).not.toHaveClass(/\bplaying\b/);
+  expect(await page.evaluate(() => window.fixtureMediaLoads)).toBeGreaterThan(loadsBefore);
+
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+  );
+  await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm');
+  await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15_000 });
+  await expect.poll(() => video.evaluate((element) => !element.paused)).toBe(true);
+});
+
 test('equal title republishes do not restart the same ambient trailer request', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

@@ -722,6 +722,23 @@
 
   // Scrolled out of view, or left in a tab nobody is looking at: stop. Back in view: carry on from where it
   // stopped, which is what the still picture underneath has been standing in for.
+  function releaseAmbient(video: HTMLVideoElement) {
+    video.pause();
+    playing = false;
+    video.removeAttribute('src');
+    // Removing `src` does not abort a media element's current resource. `load()` makes that removal effective,
+    // which matters for a blocked direct origin: Chromium otherwise keeps retrying it behind the retained page.
+    video.load();
+  }
+
+  // A retained route keeps this component mounted. Let go of the media resource when its element is removed too,
+  // rather than relying on DOM removal to cancel a browser-owned retry.
+  $effect(() => {
+    const video = ambientPlayer;
+    if (!video) return;
+    return () => releaseAmbient(video);
+  });
+
   $effect(() => {
     const video = ambientPlayer;
     if (!video || !ambient) return;
@@ -733,6 +750,7 @@
       // Pausing stops the picture. It does not stop a rendition AVFoundation has already started, which
       // is why a slide left behind on Home could still be heard from the page opened on top of it.
       hush(video);
+      if (!active) releaseAmbient(video);
     }
   });
 
@@ -1030,7 +1048,7 @@
         bind:this={ambientPlayer}
         class="ambient"
         class:playing
-        src={ambient ?? undefined}
+        src={active ? ambient : undefined}
         style={cropStyle(ambientCrop) ?? undefined}
         autoplay
         muted

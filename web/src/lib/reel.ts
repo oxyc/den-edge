@@ -206,6 +206,8 @@ export interface SourceAsk {
   lookupIpv4?: () => Promise<string | undefined>;
   /** Whether a carried source may play through this origin's relay (`relaysMedia`); tests name it. */
   relay?: boolean;
+  /** Test seam for the browser-owned local-media proof. */
+  probeLocalMedia?: (media: string) => Promise<boolean>;
 }
 
 /**
@@ -578,6 +580,26 @@ let lanPausedUntil = 0;
  */
 let lanOfferedUntil = 0;
 
+/**
+ * How long a direct route gets to produce useful media before the next one is tried.
+ *
+ * An activation answering 200 says the gate opened, not that this browser can reach the origin: at home the router
+ * may not loop its public address back in, and iOS's native player can wait without raising an error. The detached
+ * LAN proof shares this measured budget; Reel's reordered progressive file reached playback in about 1.07s on the
+ * slower Safari path, while two seconds still bounds an LNA refusal before the public route is offered.
+ */
+export const DIRECT_FIRST_FRAME_MS = 2_000;
+
+// `Permissions.query()` is only a preflight hint. Chrome may report the site permission as granted while the
+// concrete destination is still refused (for example by the browser/OS network gate after DNS resolution). An
+// isolated media load of the exact signed URL is the only end-to-end proof available before handing that URL to the
+// visible <video>, whose internal retries are neither observable nor cancellable one by one.
+const LAN_PROBE_TIMEOUT_MS = DIRECT_FIRST_FRAME_MS;
+const LAN_PROBE_TTL_MS = ACTIVATION_PAUSE_MS;
+let provedLan: { origin: string; at: number } | null = null;
+const refusedLan = new Map<string, number>();
+const provingLan = new Map<string, Promise<boolean>>();
+
 function pauseActivation(response: Response, now = Date.now()): void {
   if (response.status === 503) activationPausedUntil = now + ACTIVATION_PAUSE_MS;
   else if (response.status === 429) {
@@ -594,16 +616,111 @@ export function resetActivationPause(): void {
   lanPausedUntil = 0;
   lanOfferedUntil = 0;
   completedActivation = null;
+  provedLan = null;
+  refusedLan.clear();
+  provingLan.clear();
+}
+
+/** Let an aborted consumer leave a shared LAN proof without aborting the proof for every other consumer. */
+function waitForLanProof(
+  pending: Promise<boolean>,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  if (!signal) return pending;
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (answer: boolean) => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener('abort', stopped);
+      resolve(answer);
+    };
+    const stopped = () => finish(false);
+    signal.addEventListener('abort', stopped, { once: true });
+    void pending.then(finish, () => finish(false));
+  });
 }
 
 /**
- * How long a direct copy gets to produce its first frame before the next entry is played.
+ * Prove that a bare media element can receive data from this exact local URL.
  *
- * An activation answering 200 says the gate opened, not that this browser can reach the origin: at home the
- * router does not loop its own public address back in, and iOS's native player then waits on the connection
- * with no error to fall back on (oxyc/den#197).
+ * This deliberately is not `fetch`: the shell's tight `connect-src` does not publish each household's private LAN
+ * hostname, while `media-src https:` already permits the real player. The element is never attached or played, is
+ * always muted, and is fully unloaded after its metadata proves real response bytes or the bounded refusal/timeout.
  */
-export const DIRECT_FIRST_FRAME_MS = 2_000;
+function probeLocalMedia(media: string): Promise<boolean> {
+  if (typeof document === 'undefined') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    let finished = false;
+    const finish = (usable: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', loaded);
+      video.removeEventListener('error', failed);
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      resolve(usable);
+    };
+    const loaded = () => finish(true);
+    const failed = () => finish(false);
+    const timer = setTimeout(failed, LAN_PROBE_TIMEOUT_MS);
+    video.addEventListener('loadedmetadata', loaded, { once: true });
+    video.addEventListener('error', failed, { once: true });
+    try {
+      video.src = media;
+      video.load();
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/** Prove and briefly remember the concrete local media route before mounting it. */
+async function proveLanMedia(
+  media: string,
+  probe: (media: string) => Promise<boolean>,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  let origin: string;
+  try {
+    origin = new URL(media).origin;
+  } catch {
+    return false;
+  }
+  const refusedAt = refusedLan.get(media);
+  if (refusedAt !== undefined && Date.now() - refusedAt < LAN_PROBE_TTL_MS) return false;
+  if (refusedAt !== undefined) refusedLan.delete(media);
+  const remembered = provedLan;
+  if (remembered?.origin === origin && Date.now() - remembered.at < LAN_PROBE_TTL_MS) return true;
+
+  let pending = provingLan.get(media);
+  if (!pending) {
+    pending = probe(media)
+      .catch(() => false)
+      .then((usable) => {
+        if (usable) provedLan = { origin, at: Date.now() };
+        else {
+          refusedLan.set(media, Date.now());
+          // Signed routes expire and a long browse session can see many of them. Keep only the newest refusals.
+          while (refusedLan.size > 32) refusedLan.delete(refusedLan.keys().next().value!);
+        }
+        return usable;
+      });
+    provingLan.set(media, pending);
+    const clear = () => {
+      if (provingLan.get(media) === pending) provingLan.delete(media);
+    };
+    void pending.then(clear, clear);
+  }
+  return waitForLanProof(pending, signal);
+}
 
 /** `HTMLMediaElement.HAVE_CURRENT_DATA`: a frame is decoded. Spelled out so this runs where the DOM does not. */
 const HAVE_CURRENT_DATA = 2;
@@ -861,6 +978,7 @@ async function directSources(
   lookup: () => Promise<string | undefined>,
   relay: boolean,
   player: Player,
+  probe: (media: string) => Promise<boolean>,
 ): Promise<Source[]> {
   // A page already speaking to Reel directly (LAN/tailnet) should keep doing so. Activation is an
   // edge-owned control route and exists only beside the same-origin `/reel` relay mount.
@@ -869,7 +987,18 @@ async function directSources(
   const first = sources.map((source) => carriedPath(source.url)).find((path) => path !== null);
   if (!first) return sources;
   const direct = await activateDirect(first, edgeMount, mount, fetchImpl, signal, lookup);
-  const lan = direct?.lan && Date.now() >= lanPausedUntil ? direct.lan : null;
+  let lan = direct?.lan && Date.now() >= lanPausedUntil ? direct.lan : null;
+  // Keep the listener lease usable for another signed candidate even when this exact route fails its probe. A
+  // media error cannot tell an LNA refusal from a candidate-specific 502/decode failure; pausing activation here
+  // made one bad file suppress a healthy next candidate on the same at-home listener.
+  const offeredLanBase = !!lan;
+  const lanPath = sources
+    .filter((source) => source.kind === 'mp4' || player === 'native')
+    .map((source) => carriedPath(source.url))
+    .find((path) => path !== null);
+  if (lan && lanPath && !(await proveLanMedia(new URL(lanPath, lan).href, probe, signal)))
+    lan = null;
+  if (signal?.aborted) return [];
   const result: Source[] = [];
   let includedLan = false;
   for (const source of sources) {
@@ -886,9 +1015,10 @@ async function directSources(
       result.push({ ...source, url: new URL(path, direct.public).href, direct: 'public' });
     if (relay) result.push(source);
   }
-  // This flag exists only to distinguish a public-listener timeout at home. It must describe the ladder returned
-  // above, not merely a `lanBase` in the activation JSON that permission or player choice kept out of that ladder.
-  lanOfferedUntil = includedLan ? Date.now() + ACTIVATION_PAUSE_MS : 0;
+  // Distinguish a public-listener timeout at home from a dead listener away. A LAN base that passed the permission
+  // gate is enough even if this exact route failed its proof: keeping the activation alive is what lets the next
+  // candidate prove and use the same at-home listener.
+  lanOfferedUntil = includedLan || offeredLanBase ? Date.now() + ACTIVATION_PAUSE_MS : 0;
   return result;
 }
 
@@ -912,6 +1042,7 @@ export async function fetchSources(
     signal,
     lookupIpv4 = () => ipv4Hint(),
     relay = relaysMedia(),
+    probeLocalMedia: probe = probeLocalMedia,
   }: {
     surface: Surface;
     player: Player;
@@ -932,6 +1063,8 @@ export async function fetchSources(
     lookupIpv4?: () => Promise<string | undefined>;
     /** Whether a carried source may play through this origin's relay (`relaysMedia`); tests name it. */
     relay?: boolean;
+    /** Browser-owned media proof, injectable only so the route policy can be tested without a real network. */
+    probeLocalMedia?: (media: string) => Promise<boolean>;
   },
 ): Promise<Sources | null> {
   try {
@@ -961,6 +1094,7 @@ export async function fetchSources(
       signal,
       lookupIpv4,
       relay,
+      probeLocalMedia: probe,
     });
   } catch {
     return null;
@@ -977,6 +1111,7 @@ async function sourcesFrom(
     signal,
     lookupIpv4 = () => ipv4Hint(),
     relay = relaysMedia(),
+    probeLocalMedia: probe = probeLocalMedia,
   }: SourceAsk & {
     fetchImpl: typeof fetch;
     signal?: AbortSignal;
@@ -1018,6 +1153,7 @@ async function sourcesFrom(
       lookupIpv4,
       relay,
       player,
+      probe,
     );
     if (!activated.length) return null;
     return {
