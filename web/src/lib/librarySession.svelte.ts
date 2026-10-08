@@ -23,7 +23,7 @@ import type { Row } from './wire';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
-import type { ActiveHomePayload } from './homeLibraryView';
+import { continueLibraryWithShapes, type ActiveHomePayload } from './homeLibraryView';
 import {
   openLibraryEngine,
   projectLibraryEngineShapes,
@@ -55,7 +55,19 @@ export class LibrarySession {
   /** Compact first-paint state while the ordinary mutable log remains retained in the library Worker. */
   activeHome = $state.raw<ActiveHomePayload | null>(null);
   /** Exact compact Home policy can bridge Home -> detail until the first real library change. */
-  private retainedHome = $state.raw<{ revision: number; payload: ActiveHomePayload }>();
+  private retainedHome = $state.raw<{
+    revision: number;
+    payload: ActiveHomePayload;
+    /** The Worker's reduced policy graph, available once its snapshot has hydrated. */
+    continueLibrary?: Library;
+  }>();
+  /** Compact policy graph arriving with the exact Worker projection, before compact Home retires. */
+  private hydratedHomeContinue?: {
+    handle: number;
+    library: Library;
+    /** Ready before publishing `log`, so an overlapping detail request cannot observe a bridge gap. */
+    payload: ActiveHomePayload;
+  };
   /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
   live = false;
   log = $state<LibraryLog | null | undefined>(undefined);
@@ -154,6 +166,7 @@ export class LibrarySession {
   adoptActiveHome(payload: ActiveHomePayload, engine?: StagedLibraryEngine): void {
     this.stagedEngine = engine;
     this.retainedHome = undefined;
+    this.hydratedHomeContinue = undefined;
     this.finishActiveHomeContinueSettlement();
     this.activeHomeContinueSettledHandle = payload.view.requiredShapeRefs.length
       ? undefined
@@ -165,9 +178,22 @@ export class LibrarySession {
   clearActiveHome(handle?: number): void {
     if (handle === undefined || this.activeHome?.handle === handle) {
       const active = this.activeHome;
-      if (active && this.activeHomeContinueSettledHandle === active.handle)
-        this.retainedHome = { revision: this.revision, payload: active };
+      const compact =
+        active && this.hydratedHomeContinue?.handle === active.handle
+          ? this.hydratedHomeContinue
+          : undefined;
+      // A settled Worker answer is exact. When navigation won the race with TV-layout naming, the hydrated
+      // projection also carries the Worker's reduced policy graph: project that against every shape currently
+      // known, then update it on later shape batches. It is the same answer as the full library without replaying
+      // thousands of unrelated rows while the detail hero paints.
+      if (active && (this.activeHomeContinueSettledHandle === active.handle || compact))
+        this.retainedHome = {
+          revision: this.revision,
+          payload: compact ? compact.payload : active,
+          ...(compact ? { continueLibrary: compact.library } : {}),
+        };
       this.activeHome = null;
+      this.hydratedHomeContinue = undefined;
       this.activeHomeContinueSettledHandle = undefined;
       this.finishActiveHomeContinueSettlement();
       this.activeHomeShapeRun++;
@@ -240,6 +266,13 @@ export class LibrarySession {
           log: opened,
           ...stagedProjection,
         };
+        const active = this.activeHome;
+        if (active && stagedProjection.continueLibrary)
+          this.hydratedHomeContinue = {
+            handle: active.handle,
+            library: stagedProjection.continueLibrary,
+            payload: this.homeWithCurrentShapes(active, stagedProjection.continueLibrary),
+          };
         this.attachDownloads(opened);
         this.log = opened;
         this.revision++;
@@ -495,7 +528,10 @@ export class LibrarySession {
         this.shapes = next;
         this.shapeBatches.push(changed);
         this.shapeRevision = this.shapeBatches.length;
-        void this.projectActiveHomeContinue();
+        if (this.activeHome) {
+          this.projectHydratedHomeContinue();
+          void this.projectActiveHomeContinue();
+        } else this.projectRetainedHomeContinue(changed);
       }
     }
   }
@@ -579,8 +615,56 @@ export class LibrarySession {
   private detailBridgeHome(): ActiveHomePayload | undefined {
     const active = this.activeHome;
     if (active && this.activeHomeContinueSettledHandle === active.handle) return active;
+    const hydrated = this.hydratedHomeContinue;
+    if (active && hydrated?.handle === active.handle) return hydrated.payload;
     const retained = this.retainedHome;
     return retained?.revision === this.revision ? retained.payload : undefined;
+  }
+
+  /** Keep the post-hydration bridge current synchronously; its Worker request may finish after Svelte flushes. */
+  private projectHydratedHomeContinue(): void {
+    const active = this.activeHome;
+    const hydrated = this.hydratedHomeContinue;
+    if (!active || hydrated?.handle !== active.handle) return;
+    const payload = this.homeWithCurrentShapes(active, hydrated.library);
+    this.hydratedHomeContinue = {
+      ...hydrated,
+      payload,
+    };
+    // The hydrated Worker has stopped, so its async shape request cannot publish this answer. `activeHome` is the
+    // reactive compact owner on Home and during the detail overlap; updating it keeps both surfaces and PlayOnTv
+    // current without exposing the full projection.
+    this.activeHome = payload;
+  }
+
+  /** Re-project only the compact policy graph when a detail visit outlived Home's Worker handle. */
+  private projectRetainedHomeContinue(changed: readonly string[]): void {
+    const retained = this.retainedHome;
+    if (
+      !retained?.continueLibrary ||
+      retained.revision !== this.revision ||
+      !changed.some((key) => retained.payload.view.requiredShapeRefs.includes(key))
+    )
+      return;
+    this.retainedHome = {
+      ...retained,
+      payload: this.homeWithCurrentShapes(retained.payload, retained.continueLibrary),
+    };
+  }
+
+  private homeWithCurrentShapes(
+    payload: ActiveHomePayload,
+    continueLibrary: Library,
+  ): ActiveHomePayload {
+    const wanted = new Set(payload.view.requiredShapeRefs);
+    const shapes = [...this.shapes].filter(([key]) => wanted.has(key));
+    return {
+      ...payload,
+      view: {
+        ...payload.view,
+        continue: continueLibraryWithShapes(continueLibrary, shapes),
+      },
+    };
   }
 
   private namedActiveHomeContinue(active: ActiveHomePayload): ContinueEntry[] {

@@ -38,6 +38,8 @@ export interface LibraryEngineReply {
 export interface LibraryEngineProjection {
   rows: ReturnType<LibraryLog['rows']>;
   library: Library;
+  /** Small exact policy input retained so late TV layouts never force a full page-thread Continue pass. */
+  continueLibrary?: Library;
 }
 
 export type LibraryEngineHydrationChunk = ActiveHomeHydrationChunk<
@@ -111,7 +113,11 @@ export class LibraryEngine {
     const library = applyLog(emptyLibrary(), rows);
     const view = selectHomeLibraryView(library, rows);
     const handle = ++this.nextHandle;
-    this.active.set(handle, { log, view, projection: { rows, library } });
+    this.active.set(handle, {
+      log,
+      view,
+      projection: { rows, library, continueLibrary: view.continueLibrary },
+    });
     const summary = log.currentSummary(now);
     return {
       handle,

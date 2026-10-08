@@ -8,6 +8,7 @@ import {
 } from './library';
 import { LibraryLog } from './log';
 import { BACKGROUND_PROVIDER_FALLBACK_MS, LibrarySession } from './librarySession.svelte';
+import { downloads } from './downloadQueue.svelte';
 import { deliverSimkl } from './simklDelivery';
 import { ensureSyncPolicy } from './syncLoader';
 import type { Row } from './wire';
@@ -284,6 +285,86 @@ it('does not retain compact Continue before required TV shapes settle', async ()
   await session.ensureLog(true);
 
   expect(session.detailBridgeContinueWatching()).toBeNull();
+});
+
+it('keeps reduced Continue policy reactive when detail hydration wins the TV-shape race', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const payload = activeHomePayload();
+  payload.view.requiredShapeRefs = ['tv:7'];
+  const continueLibrary: Library = {
+    records: [],
+    marks: [
+      {
+        type: 'tv',
+        id: 7,
+        season: 1,
+        episode: 2,
+        fraction: 0.4,
+        updatedAt: 10,
+        title: 'Seven',
+        voteAverage: 7,
+      },
+    ],
+    flags: new Map(),
+    shapes: new Map(),
+    dismissed: new Map(),
+  };
+  payload.view.continue = [
+    {
+      ref: { type: 'tv', id: 7 },
+      display: 'mark',
+      episode: { season: 1, episode: 2 },
+      fraction: 0.4,
+      title: { type: 'tv', id: 7, title: 'Seven', rating: 7 },
+    },
+  ];
+  let finishHydration!: () => void;
+  const hydration = new Promise<{
+    log: LibraryLog;
+    projection: { rows: Row[]; library: Library; continueLibrary: Library };
+  }>((resolve) => {
+    finishHydration = () =>
+      resolve({
+        log: log as unknown as LibraryLog,
+        projection: { rows: [] as Row[], library: emptyLibrary(), continueLibrary },
+      });
+  });
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload,
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate: vi.fn(() => hydration),
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+  const background = session.ensureLog();
+  const detail = session.ensureLog(true);
+  const shape = { counts: new Map([[1, 8]]) };
+  const shaped = continueWatching({
+    ...continueLibrary,
+    shapes: new Map([['tv:7', shape]]),
+  });
+  let bridgeWhilePublishing: ReturnType<LibrarySession['detailBridgeContinueWatching']> = null;
+  let activeWhilePublishing: ReturnType<LibrarySession['activeHomeContinueWatching']> = [];
+  vi.spyOn(downloads, 'touch').mockImplementation(() => {
+    // The second touch follows the reactive log/revision publication, before `ensureLog(true)`'s chained clear.
+    if (session.log) {
+      bridgeWhilePublishing = session.detailBridgeContinueWatching();
+      // A shape can settle in the same pre-clear window. The stopped Worker cannot publish its answer, so the
+      // locally hydrated compact owner must update the reactive Home/detail payload itself.
+      session.publishLibraryMetadata([], [['tv:7', shape]]);
+      activeWhilePublishing = session.activeHomeContinueWatching();
+    }
+  });
+  finishHydration();
+  await background;
+  await detail;
+
+  expect(bridgeWhilePublishing).toEqual(continueWatching(continueLibrary));
+  expect(activeWhilePublishing).toEqual(shaped);
+  expect(session.detailBridgeContinueWatching()).toEqual(shaped);
 });
 
 it('retains the newest required-shape answer when it supersedes the settlement request', async () => {

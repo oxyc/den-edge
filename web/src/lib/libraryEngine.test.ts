@@ -106,7 +106,11 @@ it('opens and folds in the owning worker, accepts shapes, and exports at most 25
   expect(chunks[1]).not.toHaveProperty('header');
   expect(chunks[0]).not.toHaveProperty('projection');
   expect(chunks[1]).not.toHaveProperty('projection');
-  expect(chunks[2]?.projection).toMatchObject({ rows: [], library: { records: [], marks: [] } });
+  expect(chunks[2]?.projection).toMatchObject({
+    rows: [],
+    library: { records: [], marks: [] },
+    continueLibrary: { records: [], marks: [] },
+  });
   await expect(
     engine.request({ id: 9, op: 'shapes', handle: payload.handle, shapes: [] }),
   ).rejects.toThrow('expired');
