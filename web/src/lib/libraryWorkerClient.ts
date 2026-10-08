@@ -1,6 +1,9 @@
 import type { Library } from './library';
+import type { HomeLibraryViewProof } from './homeLibraryView';
 import type { Row, Stamp } from './wire';
 import { yieldTask } from './taskYield';
+
+const HOME_VIEW_PROOF = import.meta.env.DEV && import.meta.env.VITE_HOME_VIEW_PROOF === '1';
 
 interface ProjectedRows {
   rows: Row[];
@@ -12,6 +15,8 @@ interface ProjectedRows {
 
 interface ProjectedLibrary extends ProjectedRows {
   library: Library;
+  /** Development-only proof; production Workers omit it and callers ignore it. */
+  homeView?: HomeLibraryViewProof;
 }
 
 interface OpenedProjection extends ProjectedLibrary {
@@ -21,6 +26,7 @@ interface OpenedProjection extends ProjectedLibrary {
 
 /** A projection reply carries its first fold so the next startup step does not clone the same rows back again. */
 const projectedLibraries = new WeakMap<Row[], Library>();
+const projectedHomeViews = new WeakMap<Row[], HomeLibraryViewProof>();
 
 interface WorkerReply {
   id: number;
@@ -191,6 +197,7 @@ export async function projectRowsInWorker(
     const opened = openedProjection(source);
     if (opened) {
       projectedLibraries.set(opened.rows, opened.library);
+      if (HOME_VIEW_PROOF && opened.homeView) projectedHomeViews.set(opened.rows, opened.homeView);
       return opened;
     }
     const retained = retainedProjection(source);
@@ -208,10 +215,17 @@ export async function projectRowsInWorker(
     if (!request) return undefined;
     const projected = await request;
     projectedLibraries.set(projected.rows, projected.library);
+    if (HOME_VIEW_PROOF && projected.homeView)
+      projectedHomeViews.set(projected.rows, projected.homeView);
     return projected;
   } catch {
     return undefined;
   }
+}
+
+/** The Worker's development proof for this exact structured-cloned row array, when it supplied one. */
+export function devHomeLibraryView(rows: Row[]): HomeLibraryViewProof | undefined {
+  return HOME_VIEW_PROOF ? projectedHomeViews.get(rows) : undefined;
 }
 
 /** Fold already-projected rows through den-core off-thread. Undefined asks for the existing sliced fallback. */

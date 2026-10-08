@@ -2,6 +2,7 @@
 // Worker so its den-core instance is reused; projection and fold share one reply instead of cloning rows twice.
 
 import { applyLog, emptyLibrary } from './library';
+import { proveHomeLibraryView } from './homeLibraryView';
 import { projectDocument } from './libraryV4';
 import {
   compareStamps,
@@ -41,6 +42,7 @@ type Request =
     };
 
 const utf8 = new TextEncoder();
+const HOME_VIEW_PROOF = import.meta.env.DEV && import.meta.env.VITE_HOME_VIEW_PROOF === '1';
 // A cached snapshot and its first projection normally cross in one clone graph, so unchanged row objects are copied
 // once. If that projection fails, keep the Worker-side parse just long enough for the retry to refer to the immutable
 // rows by tiny integer indexes instead of cloning the whole history back. The cap also bounds abandoned opens.
@@ -118,6 +120,7 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         | (Awaited<ReturnType<typeof project>> & {
             source: Row[];
             library: ReturnType<typeof emptyLibrary>;
+            homeView?: ReturnType<typeof proveHomeLibraryView>;
           })
         | undefined;
       if (request.projectAt !== undefined) {
@@ -125,10 +128,14 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         if (source)
           try {
             const projection = await project(source, request.projectAt);
+            const library = applyLog(emptyLibrary(), projection.rows);
             projected = {
               source,
               ...projection,
-              library: applyLog(emptyLibrary(), projection.rows),
+              library,
+              ...(HOME_VIEW_PROOF
+                ? { homeView: proveHomeLibraryView(library, projection.rows) }
+                : {}),
             };
           } catch {
             // Opening the authoritative snapshot still succeeds. The page retries projection through the ordinary
@@ -148,7 +155,12 @@ self.onmessage = async (event: MessageEvent<Request>) => {
           : request.source;
       if (!source) throw new Error('library projection has no rows');
       const projected = await project(source, request.now);
-      value = { ...projected, library: applyLog(emptyLibrary(), projected.rows) };
+      const library = applyLog(emptyLibrary(), projected.rows);
+      value = {
+        ...projected,
+        library,
+        ...(HOME_VIEW_PROOF ? { homeView: proveHomeLibraryView(library, projected.rows) } : {}),
+      };
     } else {
       await initialize();
       value = applyLog(request.library, request.rows);

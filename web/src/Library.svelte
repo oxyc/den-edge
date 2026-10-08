@@ -42,6 +42,8 @@
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
+  import { digestHomeLibraryView, homeLibraryViewFromCurrent } from './lib/homeLibraryView';
+  import { devHomeLibraryView } from './lib/libraryWorkerClient';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
     episodeAfter,
@@ -1004,6 +1006,40 @@
       watchlisted: namedSeeds(selected.watchlisted),
       owned: new Set(titleRows.map((r) => titleKey(r.title))),
     };
+  });
+  // Opt-in development proof: the Worker selects the compact fixed Home inputs while it already owns the fold;
+  // compare them with the values this component still derives today. Production omits and never reads the proof.
+  // Enable with VITE_HOME_VIEW_PROOF=1; ordinary development should not pay for the extra clone and comparison.
+  $effect(() => {
+    if (
+      !import.meta.env.DEV ||
+      import.meta.env.VITE_HOME_VIEW_PROOF !== '1' ||
+      !projection ||
+      !applied
+    )
+      return;
+    const worker = devHomeLibraryView(projection.rows);
+    if (!worker) return;
+    const current = homeLibraryViewFromCurrent({
+      ...personalTitleRows,
+      watched,
+      watchlist: applied.records
+        .filter((record) => !record.deleted && record.status === 'watchlist')
+        .sort((a, b) => b.addedAt - a.addedAt)
+        .map((record) => titleKey(record.title)),
+      standings: standings(applied),
+      weighted,
+    });
+    const digest = digestHomeLibraryView(current);
+    if (
+      digest.hash !== worker.digest.hash ||
+      digest.bytes !== worker.digest.bytes ||
+      JSON.stringify(current) !== JSON.stringify(worker.view)
+    )
+      console.warn('den: Worker Home view differs from the page projection', {
+        worker,
+        current: { view: current, digest },
+      });
   });
   /**
    * atlas's service charts, as its manifest lists them: what the pooled rows can be built from at all.
