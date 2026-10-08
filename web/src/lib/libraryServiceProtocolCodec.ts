@@ -484,6 +484,8 @@ function observation(value: unknown): value is LibraryObservation {
         bool(value.online) &&
         bool(value.playbackActive)
       );
+    case 'foreground-ready':
+      return exact(value, ['kind']);
     default:
       return false;
   }

@@ -16,21 +16,16 @@ import {
   updateProgress,
 } from './actions';
 import type { ClockStore } from './clockStore';
+import type { DownloadCoordinator, DownloadStatus } from './downloadCoordinator';
 import { episodeProgress } from './detailPresentation';
 import {
   contentKey,
   deviceName,
   downloadName,
-  emptyRow,
   readDownload,
   readDownloads,
-  releaseValue,
-  removedRow,
-  titleValue,
-  withValues,
   type Download,
   type DownloadRelease,
-  type DownloadTitle,
 } from './downloadRows';
 import { watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
@@ -69,7 +64,6 @@ import {
 import { LibraryLog } from './log';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { recordTrackerEvent } from './trackerEvents';
-import { syncPolicy } from './syncCore';
 import {
   change as preferenceChange,
   forgetDevice,
@@ -111,6 +105,8 @@ interface StoredShape {
 export interface LibraryLogAuthorityOptions {
   /** `local` is a library opened with `LibraryLog.openLocal`; every other log is `online`. */
   mode: 'online' | 'local';
+  /** Worker-owned live download state. */
+  downloads: DownloadCoordinator;
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
@@ -157,24 +153,6 @@ const effectiveStanding = (
   return row.status.value === 'inProgress' ? 'in-progress' : row.status.value;
 };
 
-interface DurableDownloadStatus {
-  state:
-    | 'starting'
-    | 'fetching'
-    | 'not_started'
-    | 'refused'
-    | 'paused'
-    | 'unreachable'
-    | 'ready'
-    | 'no_working_release'
-    | 'release_gone'
-    | null;
-  service?: string;
-  until?: number;
-  clock: { lastProgress: number; progressAt: number };
-  stalled: boolean;
-}
-
 const publicRelease = (
   release: DownloadRelease | NonNullable<DownloadRelease['hedge']>,
   fallbackLabel?: string,
@@ -186,7 +164,7 @@ const publicRelease = (
 });
 
 const downloadPhase = (
-  state: NonNullable<DurableDownloadStatus['state']>,
+  state: NonNullable<DownloadStatus['state']>,
 ): 'queued' | 'downloading' | 'trouble' | 'ready' => {
   if (state === 'ready') return 'ready';
   if (state === 'fetching') return 'downloading';
@@ -213,12 +191,14 @@ export class LibraryLogAuthority {
   readonly #log: LibraryLog;
   readonly #clock: ClockStore;
   readonly #options: LibraryLogAuthorityOptions;
+  readonly #downloadsCoordinator: DownloadCoordinator;
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
     this.#log = log;
     this.#clock = clock;
     this.#options = options;
+    this.#downloadsCoordinator = options.downloads;
   }
 
   get generation(): string | null {
@@ -339,7 +319,8 @@ export class LibraryLogAuthority {
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult> {
-    if (observation.kind === 'lifecycle') return { outcome: 'unchanged', affected: [] };
+    if (observation.kind === 'lifecycle' || observation.kind === 'foreground-ready')
+      return { outcome: 'unchanged', affected: [] };
     const counts = new Map<number, number>();
     for (const { season, episodes } of observation.seasons) {
       if (season < 0 || episodes < 0)
@@ -600,11 +581,7 @@ export class LibraryLogAuthority {
     return {
       kind: 'downloads',
       items: readDownloads(this.#log.rows()).map((download) => {
-        const durable = syncPolicy<DurableDownloadStatus>({
-          op: 'download_status',
-          row: download.row,
-          now: Date.now(),
-        });
+        const durable = this.#downloadsCoordinator.status(download);
         const state = durable.state ?? 'starting';
         const fraction = Math.max(
           0,
@@ -1104,65 +1081,52 @@ export class LibraryLogAuthority {
     command: Extract<LibraryCommand, { kind: 'download.enqueue' }>,
   ): Promise<LibraryAuthorityCommandResult> {
     const target = command.title.target;
-    const name = downloadName(
-      contentKey(
-        target.type,
-        target.id,
-        target.type === 'tv' ? target.season : undefined,
-        target.type === 'tv' ? target.episode : undefined,
-      ),
+    const pending = this.#log.pendingActions;
+    const saved = await this.#downloadsCoordinator.enqueue(
+      {
+        mediaType: target.type,
+        mediaId: target.id,
+        ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
+        title: command.title.name,
+        ...(command.title.imdbId ? { imdbId: command.title.imdbId } : {}),
+        ...(command.title.posterPath ? { posterPath: command.title.posterPath } : {}),
+        ...(command.title.stillPath ? { stillPath: command.title.stillPath } : {}),
+        ...(command.title.originalLanguage
+          ? { originalLanguage: command.title.originalLanguage }
+          : {}),
+      },
+      {
+        filename: command.release.label,
+        url: command.release.url,
+        label: command.release.label,
+        identity: command.release.identity,
+        ...(command.release.sizeBytes !== undefined ? { size: command.release.sizeBytes } : {}),
+        ...(command.release.cached !== undefined ? { cached: command.release.cached } : {}),
+        badges: [],
+        languages: [],
+        probed: false,
+        attributes: {},
+      },
+      command.candidates,
     );
-    const existing = this.#log.settings(name);
-    const current = existing ? readDownload(existing) : null;
-    await this.#clock.see(this.#log.newestStamp());
-    const now = Date.now();
-    if (
-      existing &&
-      current &&
-      current.release.identity === command.release.identity &&
-      !current.exhausted
-    ) {
-      const at = await this.#clock.issue(now);
-      return this.#writeRow(withValues(existing, { queuedAt: { value: { int: now }, at } }), [
-        { kind: 'downloads' },
-      ]);
-    }
-
-    const values: Record<string, Stamped<ConfigValue | null>> = {};
-    const base = existing ?? emptyRow(name);
-    if (existing) values.removed = { value: { bool: true }, at: await this.#clock.issue(now) };
-    const at = await this.#clock.issue(now);
-    const release: DownloadRelease = command.release;
-    const title: DownloadTitle = {
-      mediaType: target.type,
-      mediaId: target.id,
-      ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
-      title: command.title.name,
-      ...(command.title.imdbId ? { imdbId: command.title.imdbId } : {}),
-      ...(command.title.posterPath ? { posterPath: command.title.posterPath } : {}),
-      ...(command.title.stillPath ? { stillPath: command.title.stillPath } : {}),
-      ...(command.title.originalLanguage
-        ? { originalLanguage: command.title.originalLanguage }
-        : {}),
-      ...(readSyncedPrefs(this.#log.settings('prefs')).audioLanguage
-        ? { preferredLanguage: readSyncedPrefs(this.#log.settings('prefs')).audioLanguage }
-        : {}),
+    if (!saved) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'downloads' }]),
     };
-    values.release = { value: releaseValue(release), at };
-    values.title = { value: titleValue(title), at };
-    values.queuedAt = { value: { int: now }, at };
-    if (command.candidates !== undefined)
-      values.candidates = { value: { int: command.candidates }, at };
-    return this.#writeRow(withValues(base, values), [{ kind: 'downloads' }]);
   }
 
   async #removeDownload(target: DownloadTarget): Promise<LibraryAuthorityCommandResult> {
     const download = this.#download(target);
     if (!download) return this.#unchanged();
-    await this.#clock.see(this.#log.newestStamp());
-    return this.#writeRow(removedRow(download.row, await this.#clock.issue()), [
-      { kind: 'downloads' },
-    ]);
+    const pending = this.#log.pendingActions;
+    if (!(await this.#downloadsCoordinator.remove(download, true))) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'downloads' }]),
+    };
   }
 
   async #tryDownloadRelease(
@@ -1178,26 +1142,25 @@ export class LibraryLogAuthority {
       return this.#unchanged();
     if (download.release.hedge)
       throw authorityError('conflict', 'download is already trying an alternate release', true);
-    await this.#clock.see(this.#log.newestStamp());
-    const now = Date.now();
-    const at = await this.#clock.issue(now);
-    return this.#writeRow(
-      withValues(download.row, {
-        release: {
-          value: releaseValue({
-            ...download.release,
-            hedge: {
-              ...release,
-              queuedAt: now,
-              lastProgress: 0,
-              progressAt: now,
-            },
-          }),
-          at,
-        },
-      }),
-      [{ kind: 'downloads' }],
-    );
+    const pending = this.#log.pendingActions;
+    const saved = await this.#downloadsCoordinator.tryRelease(download, {
+      filename: release.label,
+      url: release.url,
+      label: release.label,
+      identity: release.identity,
+      ...(release.sizeBytes !== undefined ? { size: release.sizeBytes } : {}),
+      ...(release.cached !== undefined ? { cached: release.cached } : {}),
+      badges: [],
+      languages: [],
+      probed: false,
+      attributes: {},
+    });
+    if (!saved) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'downloads' }]),
+    };
   }
 
   #download(target: DownloadTarget): Download | null {

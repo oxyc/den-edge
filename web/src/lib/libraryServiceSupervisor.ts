@@ -490,6 +490,7 @@ function failureFrom(error: unknown): LibraryServiceFailure {
 
 function observationKey(observation: LibraryObservation): string {
   if (observation.kind === 'lifecycle') return 'lifecycle';
+  if (observation.kind === 'foreground-ready') return 'foreground-ready';
   return `title-shape:${observation.title.type}:${observation.title.id}`;
 }
 

@@ -217,6 +217,15 @@ describe('library service client protocol', () => {
         },
       }),
     ).toMatchObject({ ok: true, value: { observation: { kind: 'lifecycle' } } });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'observe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-6',
+        observation: { kind: 'foreground-ready' },
+      }),
+    ).toMatchObject({ ok: true, value: { observation: { kind: 'foreground-ready' } } });
   });
 
   it('rejects mismatched protocols and malformed domain values with typed failures', () => {

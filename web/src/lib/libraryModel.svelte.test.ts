@@ -402,6 +402,7 @@ it('forwards semantic commands, playback queries, and observations without UI po
     lastAired: { season: 2, episode: 6 },
   });
   await model.observeLifecycle({ visible: true, online: true, playbackActive: false });
+  await model.observeForegroundReady();
   expect(service.observations).toEqual([
     {
       kind: 'title-shape',
@@ -410,6 +411,7 @@ it('forwards semantic commands, playback queries, and observations without UI po
       lastAired: { season: 2, episode: 6 },
     },
     { kind: 'lifecycle', visible: true, online: true, playbackActive: false },
+    { kind: 'foreground-ready' },
   ]);
   model.close();
 });

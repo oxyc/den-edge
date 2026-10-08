@@ -422,6 +422,11 @@ export class LibraryModel {
     return this.service.observe({ kind: 'lifecycle', ...lifecycle });
   }
 
+  observeForegroundReady(): Promise<LibraryVersion> {
+    this.#assertOpen();
+    return this.service.observe({ kind: 'foreground-ready' });
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;

@@ -68,6 +68,29 @@ afterEach(() => {
 });
 
 describe('ScheduledLibraryServiceAuthority', () => {
+  it('keeps optional background work behind foreground readiness and online visibility', async () => {
+    vi.useFakeTimers();
+    const base = authority();
+    const work = maintenance();
+    const background = { run: vi.fn(async () => true) };
+    const scheduled = new ScheduledLibraryServiceAuthority(base.port, work.port, { background });
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(background.run).not.toHaveBeenCalled();
+
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(background.run).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual({ kind: 'changed', affected: [{ kind: 'downloads' }] });
+
+    await scheduled.observe(lifecycle({ online: false }));
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 2);
+    expect(background.run).toHaveBeenCalledTimes(1);
+  });
+
   it('polls visible online libraries at the foreground and playback cadences', async () => {
     vi.useFakeTimers();
     const base = authority();

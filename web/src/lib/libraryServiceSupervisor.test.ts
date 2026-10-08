@@ -186,6 +186,7 @@ it('replays only the latest service observations before requesting replacement v
     online: true,
     playbackActive: false,
   });
+  await supervisor.observe({ kind: 'foreground-ready' });
 
   first.fail(unavailable('worker crashed'));
 
@@ -194,6 +195,7 @@ it('replays only the latest service observations before requesting replacement v
     'open',
     'observe:title-shape',
     'observe:lifecycle',
+    'observe:foreground-ready',
     'subscribe:continue',
   ]);
   expect(second.observations).toEqual([
@@ -208,6 +210,7 @@ it('replays only the latest service observations before requesting replacement v
       online: true,
       playbackActive: false,
     },
+    { kind: 'foreground-ready' },
   ]);
   supervisor.close();
 });

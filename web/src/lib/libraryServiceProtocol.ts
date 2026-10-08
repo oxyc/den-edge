@@ -376,7 +376,9 @@ export type LibraryObservation =
       visible: boolean;
       online: boolean;
       playbackActive: boolean;
-    };
+    }
+  /** One-way session milestone: optional provider/download work may now use the network. */
+  | { kind: 'foreground-ready' };
 
 interface ClientMessage {
   protocol: LibraryServiceProtocol;

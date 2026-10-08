@@ -26,6 +26,11 @@ export interface LibraryAuthoritySchedulerOptions {
   now?: () => number;
   setTimer?: (task: () => void, delay: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  /** Optional domains that must stay behind the first foreground paint. */
+  background?: {
+    run(current: () => boolean): Promise<boolean>;
+    listen?(listener: () => void): () => void;
+  };
 }
 
 const sameStatus = (left: LibraryAuthorityStatus | undefined, right: LibraryAuthorityStatus) =>
@@ -40,7 +45,9 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   readonly #now: () => number;
   readonly #setTimer: NonNullable<LibraryAuthoritySchedulerOptions['setTimer']>;
   readonly #clearTimer: NonNullable<LibraryAuthoritySchedulerOptions['clearTimer']>;
+  readonly #background?: LibraryAuthoritySchedulerOptions['background'];
   readonly #stopAuthority?: () => void;
+  readonly #stopBackground?: () => void;
   #lifecycle: Extract<LibraryObservation, { kind: 'lifecycle' }> = {
     kind: 'lifecycle',
     visible: false,
@@ -50,6 +57,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   #timer?: ReturnType<typeof setTimeout>;
   #running?: Promise<void>;
   #lastStatus?: LibraryAuthorityStatus;
+  #foregroundReady = false;
   #halted = false;
   #closed = false;
 
@@ -61,7 +69,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#now = options.now ?? Date.now;
     this.#setTimer = options.setTimer ?? ((task, delay) => setTimeout(task, delay));
     this.#clearTimer = options.clearTimer ?? clearTimeout;
+    this.#background = options.background;
     this.#stopAuthority = authority.listen?.((event) => this.#emit(event));
+    this.#stopBackground = options.background?.listen?.(() =>
+      this.#emit({ kind: 'changed', affected: [{ kind: 'downloads' }] }),
+    );
   }
 
   get generation(): string | null {
@@ -75,7 +87,15 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
 
   async observe(observation: LibraryObservation) {
     const result = await this.authority.observe(observation);
-    if (observation.kind !== 'lifecycle' || this.#closed) return result;
+    if (this.#closed) return result;
+    if (observation.kind === 'foreground-ready') {
+      if (!this.#foregroundReady) {
+        this.#foregroundReady = true;
+        if (this.#eligible()) this.#schedule(0);
+      }
+      return result;
+    }
+    if (observation.kind !== 'lifecycle') return result;
     const wasEligible = this.#eligible();
     const previousInterval = this.#interval();
     this.#lifecycle = structuredClone(observation);
@@ -97,6 +117,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#closed = true;
     this.#cancelTimer();
     this.#stopAuthority?.();
+    this.#stopBackground?.();
     this.#listeners.clear();
     await this.#running;
     await this.authority.close?.();
@@ -143,6 +164,22 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
           this.#lastStatus = result.status;
           this.#emit({ kind: 'status', status: result.status });
         }
+        if (this.#background && this.#foregroundReady && this.#lifecycle.online)
+          try {
+            if (
+              (await this.#background.run(
+                () =>
+                  !this.#closed &&
+                  this.#eligible() &&
+                  this.#lifecycle.online &&
+                  this.#foregroundReady,
+              )) &&
+              !this.#closed
+            )
+              this.#emit({ kind: 'changed', affected: [{ kind: 'downloads' }] });
+          } catch (error) {
+            if (!this.#closed) console.warn('den: download maintenance failed', error);
+          }
       } catch (error) {
         if (this.#closed) return;
         console.warn('den: library service maintenance failed', error);

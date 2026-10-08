@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { blankTitle } from './actions';
-import { openClockStore } from './clockStore';
+import { openClockStore, type ClockStore } from './clockStore';
+import { DownloadCoordinator } from './downloadCoordinator';
 import { LibraryLogAuthority } from './libraryLogAuthority';
 import { LibraryServiceAuthorityError } from './libraryServiceCore';
 import type { Vault } from './localVault';
@@ -34,7 +35,17 @@ async function localAuthority() {
     key: 'authority-test-clock',
     createDevice: () => '0123456789abcdef',
   });
-  return { log, authority: new LibraryLogAuthority(log, clock, { mode: 'local' }) };
+  return { log, authority: authority(log, clock, 'local') };
+}
+
+function authority(log: LibraryLog, clock: ClockStore, mode: 'online' | 'local') {
+  const downloads = new DownloadCoordinator(log, clock, {
+    prepare: async () => ({ state: 'preparing', progress: 0 }),
+    cancel: async () => true,
+    resolve: async () => ({ sources: null }),
+    ticket: (url) => (url.startsWith('/scout/') ? url : null),
+  });
+  return new LibraryLogAuthority(log, clock, { mode, downloads });
 }
 
 describe('LibraryLogAuthority', () => {
@@ -235,7 +246,7 @@ describe('LibraryLogAuthority', () => {
         return blankTitle(movie, 1);
       },
     } as unknown as LibraryLog;
-    const queued = new LibraryLogAuthority(queuedLog, clock, { mode: 'online' });
+    const queued = authority(queuedLog, clock, 'online');
     await expect(
       queued.command({ kind: 'watchlist.add', title: movie }, 'queued'),
     ).resolves.toMatchObject({ outcome: 'applied', delivery: 'queued' });
@@ -248,7 +259,7 @@ describe('LibraryLogAuthority', () => {
       },
       writeAction: async () => null,
     } as unknown as LibraryLog;
-    const refused = new LibraryLogAuthority(refusedLog, clock, { mode: 'online' });
+    const refused = authority(refusedLog, clock, 'online');
     await expect(
       refused.command({ kind: 'watchlist.add', title: movie }, 'refused'),
     ).rejects.toEqual(
@@ -610,21 +621,19 @@ describe('LibraryLogAuthority', () => {
 
   it('returns only the relay-scoped member capability from an online log', async () => {
     const capability = { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) };
-    const authority = new LibraryLogAuthority(
-      {
-        currentGeneration: 'generation-1',
-        relayMembership: async () => capability,
-      } as unknown as LibraryLog,
-      {
-        device: '0123456789abcdef',
-        issue: async () => [1, 0, '0123456789abcdef'],
-        see: async () => undefined,
-        current: async () => [1, 0, '0123456789abcdef'],
-      },
-      { mode: 'online' },
-    );
+    const onlineLog = {
+      currentGeneration: 'generation-1',
+      relayMembership: async () => capability,
+    } as unknown as LibraryLog;
+    const onlineClock = {
+      device: '0123456789abcdef',
+      issue: async () => [1, 0, '0123456789abcdef'],
+      see: async () => undefined,
+      current: async () => [1, 0, '0123456789abcdef'],
+    } as ClockStore;
+    const onlineAuthority = authority(onlineLog, onlineClock, 'online');
 
-    const result = await authority.query({ kind: 'relay.membership' });
+    const result = await onlineAuthority.query({ kind: 'relay.membership' });
     expect(result).toEqual({ kind: 'relay.membership', capability });
     expect(JSON.stringify(result)).not.toContain('libraryKey');
   });
@@ -676,7 +685,7 @@ describe('LibraryLogAuthority', () => {
             sizeBytes: 7_000,
             cached: true,
           },
-          status: { phase: 'queued', stalled: false },
+          status: { phase: 'downloading', stalled: false },
           tried: 1,
           candidates: 2,
           announced: false,
