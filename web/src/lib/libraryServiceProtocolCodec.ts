@@ -1080,7 +1080,13 @@ function connectionsView(value: unknown): value is ConnectionsView {
     value.kind !== 'connections' ||
     !record(value.apiKeys) ||
     !exact(value.apiKeys, ['tmdb', 'omdb', 'content-warnings']) ||
-    !Object.values(value.apiKeys).every((candidate) => boundedText(candidate, 16_384)) ||
+    !Object.values(value.apiKeys).every(
+      (candidate) =>
+        record(candidate) &&
+        exact(candidate, ['configured', 'masked']) &&
+        candidate.configured === true &&
+        boundedText(candidate.masked, 32),
+    ) ||
     !bool(value.parentalPinConfigured) ||
     !bool(value.remoteAccessConfigured)
   )

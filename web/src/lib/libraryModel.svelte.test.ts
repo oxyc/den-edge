@@ -207,7 +207,7 @@ const historyValue = (): LibrarySelectionValue => ({
 
 const connectionsValue = (): LibrarySelectionValue => ({
   kind: 'connections',
-  apiKeys: { tmdb: 'key' },
+  apiKeys: { tmdb: { configured: true, masked: '•••' } },
   parentalPinConfigured: true,
   remoteAccessConfigured: false,
   plugins: [],

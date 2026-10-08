@@ -40,6 +40,7 @@ export interface EpisodeRef extends TitleRef {
 
 export interface RuntimeDiscoveryView {
   kind: 'runtime';
+  /** Explicit temporary capability for page-owned TMDB metadata fetches; remove with that subsystem's cutover. */
   tmdbKey: string;
   pluginManifestUrls: string[];
   privateRemuxUrl: string | null;
@@ -353,7 +354,7 @@ export interface LibraryPluginView {
 /** Settings-facing connection state with storage names, stamps, and ConfigValue deliberately erased. */
 export interface ConnectionsView {
   kind: 'connections';
-  apiKeys: Partial<Record<LibraryApiKeyService, string>>;
+  apiKeys: Partial<Record<LibraryApiKeyService, { configured: true; masked: string }>>;
   parentalPinConfigured: boolean;
   remoteAccessConfigured: boolean;
   plugins: LibraryPluginView[];

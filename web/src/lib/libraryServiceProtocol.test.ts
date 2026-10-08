@@ -803,7 +803,7 @@ describe('library service server protocol', () => {
   it('accepts normalized connection views and bounded relay capabilities', () => {
     const connection = {
       kind: 'connections',
-      apiKeys: { tmdb: 'tmdb-secret' },
+      apiKeys: { tmdb: { configured: true, masked: '••••cret' } },
       parentalPinConfigured: true,
       remoteAccessConfigured: false,
       plugins: [

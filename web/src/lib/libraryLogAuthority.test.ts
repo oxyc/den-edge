@@ -385,6 +385,8 @@ describe('LibraryLogAuthority', () => {
     const clock = {
       device: '0123456789abcdef',
       issue: async () => [2_000, 0, '0123456789abcdef'] as [number, number, string],
+      historical: async (times: readonly number[]) =>
+        times.map((at, index) => [at, index + 1, '0123456789abcdef'] as [number, number, string]),
       see: async () => undefined,
       current: async () => [2_000, 0, '0123456789abcdef'] as [number, number, string],
     };
@@ -710,9 +712,13 @@ describe('LibraryLogAuthority', () => {
       });
     }
 
-    await expect(authority.select({ kind: 'connections' })).resolves.toEqual({
+    const connections = await authority.select({ kind: 'connections' });
+    expect(connections).toEqual({
       kind: 'connections',
-      apiKeys: { tmdb: 'tmdb-secret', 'content-warnings': 'warnings-secret' },
+      apiKeys: {
+        tmdb: { configured: true, masked: '••••cret' },
+        'content-warnings': { configured: true, masked: '••••cret' },
+      },
       parentalPinConfigured: true,
       remoteAccessConfigured: true,
       plugins: [
@@ -739,6 +745,8 @@ describe('LibraryLogAuthority', () => {
         selfDeviceId: '0123456789abcdef',
       },
     });
+    expect(JSON.stringify(connections)).not.toContain('tmdb-secret');
+    expect(JSON.stringify(connections)).not.toContain('warnings-secret');
     const serialized = JSON.stringify(await authority.select({ kind: 'connections' }));
     expect(serialized).not.toContain('server-secret');
     expect(serialized).not.toContain('access-secret');
@@ -793,6 +801,8 @@ describe('LibraryLogAuthority', () => {
     const onlineClock = {
       device: '0123456789abcdef',
       issue: async () => [1, 0, '0123456789abcdef'],
+      historical: async (times) =>
+        times.map((at, index) => [at, index + 1, '0123456789abcdef']),
       see: async () => undefined,
       current: async () => [1, 0, '0123456789abcdef'],
     } as ClockStore;

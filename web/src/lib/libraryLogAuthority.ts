@@ -715,7 +715,11 @@ export class LibraryLogAuthority {
     ).reduce<Extract<LibrarySelectionValue, { kind: 'connections' }>['apiKeys']>(
       (found, [service, stored]) => {
         const value = readApiKey(keys, stored);
-        if (value && value.length <= 16_384) found[service] = value;
+        if (value && value.length <= 16_384)
+          found[service] = {
+            configured: true,
+            masked: value.length <= 4 ? '•'.repeat(value.length) : `••••${value.slice(-4)}`,
+          };
         return found;
       },
       {},
