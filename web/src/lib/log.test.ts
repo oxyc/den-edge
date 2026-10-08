@@ -1615,6 +1615,47 @@ describe('LibraryLog', () => {
     expect(log.rows()).not.toBe(projected);
   });
 
+  it('adopts an exact live-snapshot projection and invalidates it with the entries', async () => {
+    const server = await edge([row(1)]);
+    const opened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const rows = opened.rows();
+    const summary = opened.currentSummary(2000);
+    const imported = (await LibraryLog.importSnapshot(
+      LIBRARY_KEY,
+      { ...opened.exportSnapshot(), projected: { rows, ...summary } },
+      server.fetchImpl,
+      undefined,
+      null,
+    ))!;
+
+    expect(imported.rows()).toBe(rows);
+    expect(imported.currentSummary(2001)).toEqual(summary);
+
+    await server.append(row(2, { status: { value: 'watchlist', at: at(5000) } }));
+    expect(await imported.refresh()).toBe(true);
+    expect(imported.rows()).not.toBe(rows);
+    expect(imported.newestStamp()).toEqual(at(5000));
+  });
+
+  it('reconsiders an adopted newest-stamp projection at its deadline', async () => {
+    const server = await edge([row(1)]);
+    const opened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const cached = at(10, 'cached');
+    const imported = (await LibraryLog.importSnapshot(
+      LIBRARY_KEY,
+      {
+        ...opened.exportSnapshot(),
+        projected: { rows: opened.rows(), stamp: cached, at: 100, reconsiderAt: 200 },
+      },
+      server.fetchImpl,
+      undefined,
+      null,
+    ))!;
+
+    expect(imported.currentSummary(199).stamp).toEqual(cached);
+    expect(imported.currentSummary(200).stamp).toEqual(at(1000));
+  });
+
   it('keeps the newest cache correct across concurrent conflict merges', async () => {
     const server = await edge([row(1)]);
     const [phone, laptop] = await Promise.all([
