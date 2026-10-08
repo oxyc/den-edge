@@ -7,6 +7,7 @@ import { libraryVault, type Vault } from './localVault';
 import { LibraryLog } from './log';
 import {
   libraryLogMaintenance,
+  librarySimklDelivery,
   ScheduledLibraryServiceAuthority,
 } from './libraryServiceScheduledAuthority';
 
@@ -37,5 +38,6 @@ export async function openLibraryServiceAuthority(
     authority,
     libraryLogMaintenance(log, clock, request.mode),
     { background: downloads },
+    librarySimklDelivery(log, clock),
   );
 }

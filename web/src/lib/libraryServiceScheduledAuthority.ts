@@ -7,6 +7,7 @@ import type {
   LibraryServiceAuthority,
 } from './libraryServiceCore';
 import type { LibraryLog } from './log';
+import { deliverSimklWithClock } from './simklDelivery';
 
 export const ACTIVE_PLAYBACK_REFRESH_MS = 5_000;
 export const VISIBLE_REFRESH_MS = 30_000;
@@ -20,6 +21,11 @@ export interface LibraryMaintenanceResult {
 export interface LibraryMaintenance {
   readonly mode: 'online' | 'local';
   run(): Promise<LibraryMaintenanceResult>;
+}
+
+/** Optional provider work run by the same authority scheduler after foreground content is released. */
+export interface LibraryProviderDelivery {
+  run(): Promise<boolean>;
 }
 
 export interface LibraryAuthoritySchedulerOptions {
@@ -56,8 +62,10 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   };
   #timer?: ReturnType<typeof setTimeout>;
   #running?: Promise<void>;
-  #lastStatus?: LibraryAuthorityStatus;
+  #deliveryRunning?: Promise<void>;
+  #deliveryPending = false;
   #foregroundReady = false;
+  #lastStatus?: LibraryAuthorityStatus;
   #halted = false;
   #closed = false;
 
@@ -65,6 +73,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     private readonly authority: LibraryServiceAuthority,
     private readonly maintenance: LibraryMaintenance,
     options: LibraryAuthoritySchedulerOptions = {},
+    private readonly delivery?: LibraryProviderDelivery,
   ) {
     this.#now = options.now ?? Date.now;
     this.#setTimer = options.setTimer ?? ((task, delay) => setTimeout(task, delay));
@@ -81,8 +90,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   }
 
   select: LibraryServiceAuthority['select'] = (selection) => this.authority.select(selection);
-  command: LibraryServiceAuthority['command'] = (command, operationId) =>
-    this.authority.command(command, operationId);
+  command: LibraryServiceAuthority['command'] = async (command, operationId) => {
+    const result = await this.authority.command(command, operationId);
+    if (result.outcome === 'applied') this.#requestDelivery();
+    return result;
+  };
   query: LibraryServiceAuthority['query'] = (query) => this.authority.query(query);
 
   async observe(observation: LibraryObservation) {
@@ -93,6 +105,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
         this.#foregroundReady = true;
         if (this.#eligible()) this.#schedule(0);
       }
+      this.#requestDelivery();
       return result;
     }
     if (observation.kind !== 'lifecycle') return result;
@@ -103,6 +116,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (!eligible) this.#cancelTimer();
     else if (!wasEligible) this.#schedule(0);
     else if (this.#interval() !== previousInterval) this.#schedule(this.#interval());
+    if (!wasEligible && eligible) this.#requestDelivery();
     return result;
   }
 
@@ -120,6 +134,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#stopBackground?.();
     this.#listeners.clear();
     await this.#running;
+    await this.#deliveryRunning;
     await this.authority.close?.();
   }
 
@@ -160,6 +175,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
         const result = await this.maintenance.run();
         if (this.#closed) return;
         if (result.changed) this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
+        if (result.changed) this.#requestDelivery();
         if (!sameStatus(this.#lastStatus, result.status)) {
           this.#lastStatus = result.status;
           this.#emit({ kind: 'status', status: result.status });
@@ -201,6 +217,36 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     return running;
   }
 
+  #requestDelivery(): void {
+    if (
+      this.#closed ||
+      !this.delivery ||
+      !this.#foregroundReady ||
+      !this.#eligible() ||
+      this.maintenance.mode !== 'online'
+    )
+      return;
+    if (this.#deliveryRunning) {
+      this.#deliveryPending = true;
+      return;
+    }
+    const running = (async () => {
+      try {
+        if (await this.delivery!.run())
+          this.#emit({ kind: 'changed', affected: [{ kind: 'simkl' }, { kind: 'connections' }] });
+      } catch (error) {
+        if (!this.#closed) console.warn('den: SIMKL delivery failed', error);
+      }
+    })();
+    this.#deliveryRunning = running;
+    void running.finally(() => {
+      if (this.#deliveryRunning === running) this.#deliveryRunning = undefined;
+      const again = this.#deliveryPending;
+      this.#deliveryPending = false;
+      if (again) this.#requestDelivery();
+    });
+  }
+
   #emit(event: LibraryAuthorityEvent): void {
     if (this.#closed) return;
     if (event.kind === 'status' && event.status.kind === 'moved') {
@@ -234,6 +280,14 @@ export function libraryLogMaintenance(
       return { changed, status: logStatus(log) };
     },
   };
+}
+
+export function librarySimklDelivery(
+  log: LibraryLog,
+  clock: ClockStore,
+  fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+): LibraryProviderDelivery {
+  return { run: () => deliverSimklWithClock(log, clock, fetchImpl) };
 }
 
 function logStatus(log: LibraryLog): LibraryAuthorityStatus {

@@ -238,4 +238,51 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(base.observe).toHaveBeenCalledWith(observation);
     await scheduled.close();
   });
+
+  it('defers and coalesces provider delivery until foreground content is released', async () => {
+    vi.useFakeTimers();
+    let finish!: (changed: boolean) => void;
+    const delivery = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const base = authority();
+    vi.mocked(base.port.command).mockResolvedValue({
+      outcome: 'applied',
+      delivery: 'queued',
+      affected: [],
+    });
+    const scheduled = new ScheduledLibraryServiceAuthority(
+      base.port,
+      maintenance().port,
+      {},
+      { run: delivery },
+    );
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(delivery).not.toHaveBeenCalled();
+
+    await scheduled.observe({ kind: 'foreground-ready' });
+    expect(delivery).toHaveBeenCalledOnce();
+    await scheduled.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'add');
+    await scheduled.command({ kind: 'watchlist.add', title: { type: 'movie', id: 2 } }, 'add-2');
+    expect(delivery).toHaveBeenCalledOnce();
+
+    finish(true);
+    await vi.waitFor(() => expect(delivery).toHaveBeenCalledTimes(2));
+    expect(events).toContainEqual({
+      kind: 'changed',
+      affected: [{ kind: 'simkl' }, { kind: 'connections' }],
+    });
+    finish(false);
+    await scheduled.observe(lifecycle({ visible: false }));
+    await scheduled.command({ kind: 'watchlist.add', title: { type: 'movie', id: 3 } }, 'add-3');
+    expect(delivery).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+  });
 });
