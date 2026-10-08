@@ -248,6 +248,8 @@ fn is_control(route: &str) -> bool {
             | "/grant/addons"
             | "/grant/usage"
             | "/grant/:gid"
+            | "/reel/transport"
+            | "/reel/activate"
             | "/lib/:id/grants"
             | "/lib/:id/grants/:gid"
             | "/lib/:id"
@@ -484,9 +486,12 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if crate::oauth::is_path(&path) {
         return crate::oauth::handle(state, req, rid).await;
     }
-    // Edge owns activation rather than forwarding it to Reel. A valid, short-lived signed `/m/s`
-    // capability is checked by Reel over the LAN before the root-owned helper leases this exact
-    // visitor address. Metadata and the fallback relay remain on this origin.
+    // Edge owns transport selection rather than forwarding it to Reel. A valid, short-lived signed `/m/s`
+    // capability is checked by Reel over the LAN before the root-owned helper leases this exact visitor address.
+    // Metadata and the fallback relay remain on this origin.
+    if path == crate::relay::REEL_TRANSPORT {
+        return crate::relay::transport_reel(state, req, rid).await;
+    }
     if path == crate::relay::REEL_ACTIVATE {
         return crate::relay::activate_reel(state, req, rid).await;
     }
@@ -716,6 +721,7 @@ fn reel_route(rest: &str) -> &'static str {
         let mut beyond = tail.split('/');
         let (next, then) = (beyond.next().unwrap_or(""), beyond.next().unwrap_or(""));
         match segment {
+            "transport" if tail.is_empty() => return "/reel/transport",
             "activate" if tail.is_empty() => return "/reel/activate",
             "m" if next == "n" => return "/reel/m/n",
             "m" if next == "s" && then == "seg" => return "/reel/m/s/seg",
@@ -823,7 +829,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
-        "/grant/redeem" | "/reel/activate" | "/grant/usage" => Some(POST),
+        "/grant/redeem" | "/reel/transport" | "/reel/activate" | "/grant/usage" => Some(POST),
         "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" => Some(GET_PUT),
@@ -855,6 +861,7 @@ fn body_cap(route: &str) -> usize {
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
         // A dozen durations and a few short labels: a few hundred bytes, generously.
+        "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
         _ => MAX_BODY_BYTES,
     }
@@ -1053,6 +1060,8 @@ pub mod tests {
     /// segment is optional, so the ones that carry it are spelled both ways here.
     #[test]
     fn a_relayed_reel_request_names_the_route_it_asked_for() {
+        assert_eq!(route_label("/reel/transport"), "/reel/transport");
+        assert_eq!(route_label("/reel/activate"), "/reel/activate");
         assert_eq!(route_label("/reel/sources/dQw4w9WgXcQ.json"), "/reel/sources");
         assert_eq!(route_label("/reel/cfg/sources/dQw4w9WgXcQ.json"), "/reel/sources");
         assert_eq!(route_label("/reel/m/n/AbC123"), "/reel/m/n");
@@ -1076,6 +1085,14 @@ pub mod tests {
         assert_eq!(route_label("/scout/cfg/manifest.json"), "/scout");
         assert_eq!(route_label("/atlas/recommend"), "/atlas");
         assert_eq!(route_label("/nope"), "other");
+    }
+
+    #[test]
+    fn reel_transport_is_a_bounded_post_control_route() {
+        assert_eq!(route_label("/reel/transport"), "/reel/transport");
+        assert_eq!(allowed_methods("/reel/transport"), Some(&[Method::POST][..]));
+        assert_eq!(body_cap("/reel/transport"), crate::relay::REEL_TRANSPORT_BYTES);
+        assert!(is_control("/reel/transport"));
     }
 
     #[test]
