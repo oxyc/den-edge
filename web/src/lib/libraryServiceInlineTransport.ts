@@ -12,22 +12,19 @@ export type LibraryServiceMessageListener = (message: LibraryServiceServerMessag
  */
 export class InlineLibraryServiceTransport {
   readonly #listeners = new Set<LibraryServiceMessageListener>();
+  readonly #stopCore: () => void;
   #closed = false;
 
-  constructor(private readonly core: LibraryServiceCore) {}
+  constructor(private readonly core: LibraryServiceCore) {
+    this.#stopCore = core.listen((messages) => this.#deliver(messages));
+  }
 
   send(message: LibraryServiceClientMessage): void {
-    if (this.#closed) return;
+    if (this.#closed) throw new Error('library service transport is closed');
     const request = structuredClone(message);
     queueMicrotask(() => {
       if (this.#closed) return;
-      void this.core.dispatch(request).then((messages) => {
-        if (this.#closed) return;
-        for (const reply of messages) {
-          const delivered = structuredClone(reply);
-          for (const listener of this.#listeners) listener(delivered);
-        }
-      });
+      void this.core.dispatch(request).then((messages) => this.#deliver(messages));
     });
   }
 
@@ -40,7 +37,22 @@ export class InlineLibraryServiceTransport {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#stopCore();
     this.#listeners.clear();
     void this.core.close();
+  }
+
+  #deliver(messages: LibraryServiceServerMessage[]): void {
+    const batch = structuredClone(messages);
+    queueMicrotask(() => {
+      if (this.#closed) return;
+      for (const reply of batch)
+        for (const listener of this.#listeners)
+          try {
+            listener(structuredClone(reply));
+          } catch (error) {
+            console.error('den: a library transport listener failed', error);
+          }
+    });
   }
 }

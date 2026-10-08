@@ -9,6 +9,7 @@ import {
   type LibraryServiceClientMessage,
   type LibraryServiceCommandResult,
   type LibraryServiceFailure,
+  type LibraryServiceHello,
   type LibraryServiceServerMessage,
   type LibrarySessionStatus,
   type LibraryVersion,
@@ -21,7 +22,13 @@ export interface LibraryServiceTransport {
   close(): void;
 }
 
+export type LibraryServiceOpenOptions = Pick<
+  LibraryServiceHello,
+  'libraryKey' | 'mode' | 'legacyClock'
+>;
+
 type Pending = {
+  request: LibraryServiceClientMessage;
   resolve: (message: LibraryServiceServerMessage) => void;
   reject: (error: LibraryServiceError) => void;
 };
@@ -57,14 +64,14 @@ export class LibraryServiceClient {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
 
-  async open(libraryKey: string): Promise<LibraryVersion> {
+  async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     const requestId = this.#requestId();
     const reply = await this.#request({
       type: 'hello',
       protocol: LIBRARY_SERVICE_PROTOCOL,
       requestId,
       clientId: this.clientId,
-      libraryKey,
+      ...options,
     });
     if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
     this.#instance = reply.version.instance;
@@ -174,7 +181,7 @@ export class LibraryServiceClient {
   #request(message: LibraryServiceClientMessage): Promise<LibraryServiceServerMessage> {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
-      this.#pending.set(message.requestId, { resolve, reject });
+      this.#pending.set(message.requestId, { request: message, resolve, reject });
       try {
         this.transport.send(message);
       } catch (error) {
@@ -209,11 +216,20 @@ export class LibraryServiceClient {
         return;
       }
       subscription.version = message.version;
-      subscription.listener(message.value, message.version);
+      try {
+        subscription.listener(message.value, message.version);
+      } catch (error) {
+        console.error('den: a library subscription listener failed', error);
+      }
       return;
     }
     if (message.type === 'status') {
-      for (const listener of this.#statusListeners) listener(message.status);
+      for (const listener of this.#statusListeners)
+        try {
+          listener(message.status);
+        } catch (error) {
+          console.error('den: a library status listener failed', error);
+        }
       return;
     }
     if (message.type === 'error' && message.requestId) {
@@ -230,6 +246,17 @@ export class LibraryServiceClient {
     if (!('requestId' in message)) return;
     const pending = this.#pending.get(message.requestId);
     if (!pending) return;
+    if (!replyMatches(pending.request, message, this.#instance)) {
+      this.#pending.delete(message.requestId);
+      const failure: LibraryServiceFailure = {
+        code: 'invalid-request',
+        message: 'library service reply did not match its request',
+        retryable: false,
+      };
+      pending.reject(new LibraryServiceError(failure));
+      this.#failAll(failure);
+      return;
+    }
     this.#pending.delete(message.requestId);
     pending.resolve(message);
   }
@@ -238,7 +265,12 @@ export class LibraryServiceClient {
     const error = new LibraryServiceError(failure);
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
-    for (const listener of this.#statusListeners) listener({ kind: 'failed', error: failure });
+    for (const listener of this.#statusListeners)
+      try {
+        listener({ kind: 'failed', error: failure });
+      } catch (listenerError) {
+        console.error('den: a library status listener failed', listenerError);
+      }
   }
 
   #requestId(): string {
@@ -274,10 +306,39 @@ function selectionMatches(selection: LibrarySelection, value: LibrarySelectionVa
   if (selection.kind === 'continue') return value.kind === 'continue';
   if (selection.kind === 'settings') return value.kind === 'settings';
   if (selection.kind === 'downloads') return value.kind === 'downloads';
-  if (selection.kind === 'presence') return value.kind === 'presence';
+  if (selection.kind === 'presence')
+    return (
+      value.kind === 'presence' &&
+      value.items.every((item) =>
+        selection.titles.some(
+          (title) => title.type === item.title.type && title.id === item.title.id,
+        ),
+      )
+    );
   return (
     value.kind === 'title' &&
     value.title.type === selection.title.type &&
     value.title.id === selection.title.id
   );
+}
+
+function replyMatches(
+  request: LibraryServiceClientMessage,
+  reply: LibraryServiceServerMessage,
+  instance: string | undefined,
+): boolean {
+  if ('version' in reply && instance && reply.version.instance !== instance) return false;
+  if (request.type === 'hello') return reply.type === 'ready';
+  if (request.type === 'command')
+    return reply.type === 'command-result' && reply.operationId === request.operationId;
+  if (request.type === 'query') {
+    if (reply.type !== 'query-result' || reply.result.kind !== request.query.kind) return false;
+    const target = reply.result.target;
+    return target.type === request.query.title.type && target.id === request.query.title.id;
+  }
+  if (request.type === 'subscribe')
+    return reply.type === 'subscribed' && reply.subscriptionId === request.subscriptionId;
+  if (request.type === 'unsubscribe')
+    return reply.type === 'unsubscribed' && reply.subscriptionId === request.subscriptionId;
+  return reply.type === 'observed';
 }

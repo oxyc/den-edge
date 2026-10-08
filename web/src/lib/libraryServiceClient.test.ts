@@ -44,7 +44,7 @@ const version = (revision: number, instance = 'worker-1') => ({
 async function opened() {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');
-  const opening = client.open('library-key');
+  const opening = client.open({ libraryKey: 'library-key', mode: 'online' });
   const hello = transport.sent[0]!;
   transport.emit({
     type: 'ready',
@@ -155,7 +155,7 @@ it('observes revised subscriptions before resolving a command result', async () 
 it('rejects pending work when closed', async () => {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');
-  const opening = client.open('library-key');
+  const opening = client.open({ libraryKey: 'library-key', mode: 'online' });
 
   client.close();
 

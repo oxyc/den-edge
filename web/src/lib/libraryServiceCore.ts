@@ -10,7 +10,10 @@ import {
   type LibraryServiceError,
   type LibraryServiceErrorCode,
   type LibraryServiceFailure,
+  type LibraryServiceHello,
   type LibraryServiceServerMessage,
+  type LibrarySessionStatus,
+  type TitleRef,
   type LibraryVersion,
 } from './libraryServiceProtocol';
 import { decodeLibraryServiceClientMessage } from './libraryServiceProtocolCodec';
@@ -18,22 +21,48 @@ import { decodeLibraryServiceClientMessage } from './libraryServiceProtocolCodec
 type Change = 'applied' | 'unchanged';
 type CommandDelivery = 'synced' | 'queued' | 'local';
 
-interface AuthorityCommandResult {
+export type LibrarySelectionScope =
+  | { kind: 'overview' }
+  | { kind: 'continue' }
+  | { kind: 'settings' }
+  | { kind: 'downloads' }
+  | { kind: 'title'; title: TitleRef }
+  | { kind: 'presence'; title: TitleRef };
+
+export interface LibraryAuthorityCommandResult {
   outcome: Change;
   delivery: CommandDelivery;
+  affected: LibrarySelectionScope[];
+}
+
+export interface LibraryAuthorityObservationResult {
+  outcome: Change;
+  affected: LibrarySelectionScope[];
 }
 
 /** The raw log stays behind this boundary. Tests and the eventual Worker host inject one exact authority. */
-interface LibraryAuthority {
+export interface LibraryServiceAuthority {
   readonly generation: string | null;
   select(selection: LibrarySelection): Promise<LibrarySelectionValue>;
-  command(command: LibraryCommand, operationId: string): Promise<AuthorityCommandResult>;
+  command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult>;
   query(query: LibraryQuery): Promise<LibraryQueryResult>;
-  observe(observation: LibraryObservation): Promise<Change>;
+  observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult>;
+  listen?(listener: (event: LibraryAuthorityEvent) => void): () => void;
   close?(): void | Promise<void>;
 }
 
-type OpenAuthority = (libraryKey: string) => Promise<LibraryAuthority | null>;
+export type LibraryAuthorityEvent =
+  | { kind: 'changed'; affected: LibrarySelectionScope[] }
+  | { kind: 'status'; status: LibraryAuthorityStatus };
+
+export type LibraryAuthorityStatus =
+  | { kind: 'ready' }
+  | { kind: 'reconnecting' }
+  | { kind: 'read-only'; reason: string }
+  | { kind: 'moved'; successor?: string }
+  | { kind: 'failed'; error: LibraryServiceFailure };
+
+type OpenAuthority = (request: LibraryServiceHello) => Promise<LibraryServiceAuthority | null>;
 
 interface Subscription {
   selection: LibrarySelection;
@@ -55,6 +84,19 @@ const failure = (
   message: string,
   retryable = false,
 ): LibraryServiceFailure => ({ code, message, retryable });
+
+/** A domain/storage refusal that the protocol must preserve instead of flattening into `internal`. */
+export class LibraryServiceAuthorityError extends Error {
+  constructor(readonly failure: LibraryServiceFailure) {
+    super(failure.message);
+    this.name = 'LibraryServiceAuthorityError';
+  }
+}
+
+const authorityFailure = (error: unknown, fallback: string): LibraryServiceFailure =>
+  error instanceof LibraryServiceAuthorityError
+    ? error.failure
+    : failure('internal', error instanceof Error ? error.message : fallback, true);
 
 const requestIdOf = (input: unknown): string | undefined => {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined;
@@ -87,8 +129,10 @@ export class LibraryServiceCore {
   readonly #subscriptions = new Map<string, Subscription>();
   /** In-instance replay protection; durable action idempotency remains the authority's responsibility. */
   readonly #operations = new Map<string, CompletedOperation>();
-  #authority?: LibraryAuthority;
-  #client?: { id: string; libraryKey: string };
+  readonly #listeners = new Set<(messages: LibraryServiceServerMessage[]) => void>();
+  #authority?: LibraryServiceAuthority;
+  #stopAuthority?: () => void;
+  #client?: { id: string; libraryKey: string; mode: LibraryServiceHello['mode'] };
   #revision = 0;
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
@@ -121,6 +165,13 @@ export class LibraryServiceCore {
     return result;
   }
 
+  /** Out-of-band changes use the same ordered actor and version stream as requests. */
+  listen(listener: (messages: LibraryServiceServerMessage[]) => void): () => void {
+    if (this.#closed) return () => {};
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
   /** Cancel queued work, then release the one authority after the actor has drained. */
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -128,6 +179,9 @@ export class LibraryServiceCore {
     await this.#requests;
     this.#subscriptions.clear();
     this.#operations.clear();
+    this.#listeners.clear();
+    this.#stopAuthority?.();
+    this.#stopAuthority = undefined;
     const authority = this.#authority;
     this.#authority = undefined;
     await authority?.close?.();
@@ -148,7 +202,7 @@ export class LibraryServiceCore {
     try {
       switch (request.type) {
         case 'subscribe':
-          return this.#subscribe(request);
+          return await this.#subscribe(request);
         case 'unsubscribe':
           this.#subscriptions.delete(request.subscriptionId);
           return [
@@ -160,7 +214,7 @@ export class LibraryServiceCore {
             },
           ];
         case 'command':
-          return this.#command(request);
+          return await this.#command(request);
         case 'query':
           return [
             {
@@ -172,16 +226,12 @@ export class LibraryServiceCore {
             },
           ];
         case 'observe':
-          return this.#observe(request);
+          return await this.#observe(request);
       }
     } catch (error) {
       return [
         errorReply(
-          failure(
-            'internal',
-            error instanceof Error ? error.message : 'library service request failed',
-            true,
-          ),
+          authorityFailure(error, 'library service request failed'),
           request.requestId,
           request.type === 'subscribe' || request.type === 'unsubscribe'
             ? request.subscriptionId
@@ -195,7 +245,11 @@ export class LibraryServiceCore {
     request: Extract<LibraryServiceClientMessage, { type: 'hello' }>,
   ): Promise<LibraryServiceServerMessage[]> {
     if (this.#client) {
-      if (this.#client.id !== request.clientId || this.#client.libraryKey !== request.libraryKey)
+      if (
+        this.#client.id !== request.clientId ||
+        this.#client.libraryKey !== request.libraryKey ||
+        this.#client.mode !== request.mode
+      )
         return [
           errorReply(
             failure('conflict', 'library service already belongs to another client'),
@@ -213,13 +267,14 @@ export class LibraryServiceCore {
     }
 
     try {
-      const authority = await this.openAuthority(request.libraryKey);
+      const authority = await this.openAuthority(request);
       if (!authority)
         return [
           errorReply(failure('not-found', 'library could not be opened', true), request.requestId),
         ];
       this.#authority = authority;
-      this.#client = { id: request.clientId, libraryKey: request.libraryKey };
+      this.#client = { id: request.clientId, libraryKey: request.libraryKey, mode: request.mode };
+      this.#stopAuthority = authority.listen?.((event) => this.#enqueueAuthorityEvent(event));
       return [
         {
           type: 'ready',
@@ -231,11 +286,13 @@ export class LibraryServiceCore {
     } catch (error) {
       return [
         errorReply(
-          failure(
-            'unavailable',
-            error instanceof Error ? error.message : 'library could not be opened',
-            true,
-          ),
+          error instanceof LibraryServiceAuthorityError
+            ? error.failure
+            : failure(
+                'unavailable',
+                error instanceof Error ? error.message : 'library could not be opened',
+                true,
+              ),
           request.requestId,
         ),
       ];
@@ -296,7 +353,7 @@ export class LibraryServiceCore {
       ];
     }
 
-    const { outcome, delivery } = await this.#authority!.command(
+    const { outcome, delivery, affected } = await this.#authority!.command(
       request.command,
       request.operationId,
     );
@@ -308,8 +365,16 @@ export class LibraryServiceCore {
       delivery,
       version,
     });
+    let updates: LibraryServiceServerMessage[] = [];
+    if (outcome === 'applied')
+      try {
+        updates = await this.#updates(affected);
+      } catch {
+        // The command is already durable. Leave every subscription digest unchanged so the next authority
+        // publication retries the complete replacement set; never invite the caller to repeat the command.
+      }
     return [
-      ...(outcome === 'applied' ? await this.#updates() : []),
+      ...updates,
       {
         type: 'command-result',
         protocol: LIBRARY_SERVICE_PROTOCOL,
@@ -325,11 +390,18 @@ export class LibraryServiceCore {
   async #observe(
     request: Extract<LibraryServiceClientMessage, { type: 'observe' }>,
   ): Promise<LibraryServiceServerMessage[]> {
-    const outcome = await this.#authority!.observe(request.observation);
+    const { outcome, affected } = await this.#authority!.observe(request.observation);
     if (outcome === 'applied') this.#revision++;
     const version = this.#version();
+    let updates: LibraryServiceServerMessage[] = [];
+    if (outcome === 'applied')
+      try {
+        updates = await this.#updates(affected);
+      } catch {
+        // As above, the observation is installed even when a render-facing selector temporarily fails.
+      }
     return [
-      ...(outcome === 'applied' ? await this.#updates() : []),
+      ...updates,
       {
         type: 'observed',
         protocol: LIBRARY_SERVICE_PROTOCOL,
@@ -339,24 +411,76 @@ export class LibraryServiceCore {
     ];
   }
 
-  async #updates(): Promise<LibraryServiceServerMessage[]> {
+  async #updates(
+    affected: readonly LibrarySelectionScope[],
+  ): Promise<LibraryServiceServerMessage[]> {
     const version = this.#version();
-    const updates: LibraryServiceServerMessage[] = [];
+    const staged: Array<{
+      subscriptionId: string;
+      subscription: Subscription;
+      value: LibrarySelectionValue;
+      digest: string;
+    }> = [];
     for (const [subscriptionId, subscription] of this.#subscriptions) {
+      if (!affected.some((scope) => scopeMatches(scope, subscription.selection))) continue;
       const value = await this.#authority!.select(subscription.selection);
       const nextDigest = digest(value);
       if (nextDigest === subscription.digest) continue;
-      subscription.value = value;
-      subscription.digest = nextDigest;
-      updates.push({
-        type: 'update',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        subscriptionId,
-        version,
-        value,
-      });
+      staged.push({ subscriptionId, subscription, value, digest: nextDigest });
     }
-    return updates;
+    for (const update of staged) {
+      update.subscription.value = update.value;
+      update.subscription.digest = update.digest;
+    }
+    return staged.map(({ subscriptionId, value }) => ({
+      type: 'update',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      subscriptionId,
+      version,
+      value,
+    }));
+  }
+
+  #enqueueAuthorityEvent(event: LibraryAuthorityEvent): void {
+    this.#requests = this.#requests
+      .then(async () => {
+        if (this.#closed || !this.#authority) return;
+        let messages: LibraryServiceServerMessage[];
+        if (event.kind === 'status')
+          messages = [
+            {
+              type: 'status',
+              protocol: LIBRARY_SERVICE_PROTOCOL,
+              status: this.#status(event.status),
+            },
+          ];
+        else {
+          this.#revision++;
+          try {
+            messages = await this.#updates(event.affected);
+          } catch {
+            return;
+          }
+        }
+        if (!messages.length) return;
+        for (const listener of this.#listeners)
+          try {
+            listener(messages);
+          } catch (error) {
+            console.error('den: a library service listener failed', error);
+          }
+      })
+      .catch(() => undefined);
+  }
+
+  #status(status: LibraryAuthorityStatus): LibrarySessionStatus {
+    if (status.kind === 'ready') return { kind: 'ready', version: this.#version() };
+    if (status.kind === 'reconnecting') return { kind: 'reconnecting', version: this.#version() };
+    if (status.kind === 'read-only')
+      return { kind: 'read-only', version: this.#version(), reason: status.reason };
+    if (status.kind === 'moved')
+      return { kind: 'moved', ...(status.successor ? { successor: status.successor } : {}) };
+    return status;
   }
 
   #rememberOperation(operationId: string, completed: CompletedOperation): void {
@@ -372,4 +496,23 @@ export class LibraryServiceCore {
       revision: this.#revision,
     };
   }
+}
+
+function sameTitle(a: TitleRef, b: TitleRef): boolean {
+  return a.type === b.type && a.id === b.id;
+}
+
+function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {
+  if (
+    scope.kind === 'overview' ||
+    scope.kind === 'continue' ||
+    scope.kind === 'settings' ||
+    scope.kind === 'downloads'
+  )
+    return selection.kind === scope.kind;
+  if (scope.kind === 'title')
+    return selection.kind === 'title' && sameTitle(scope.title, selection.title);
+  return (
+    selection.kind === 'presence' && selection.titles.some((title) => sameTitle(scope.title, title))
+  );
 }

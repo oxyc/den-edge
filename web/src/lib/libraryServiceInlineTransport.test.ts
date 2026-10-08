@@ -8,6 +8,7 @@ import {
   type LibrarySelectionValue,
   type LibraryServiceServerMessage,
 } from './libraryServiceProtocol';
+import { LibraryServiceClient } from './libraryServiceClient';
 import { LibraryServiceCore } from './libraryServiceCore';
 import { InlineLibraryServiceTransport } from './libraryServiceInlineTransport';
 
@@ -35,15 +36,19 @@ it('delivers cloned messages asynchronously and preserves request order', async 
       async command(command: LibraryCommand, operationId: string) {
         commands.push(operationId);
         if (command.kind !== 'watchlist.add' || listed)
-          return { outcome: 'unchanged' as const, delivery: 'synced' as const };
+          return { outcome: 'unchanged' as const, delivery: 'synced' as const, affected: [] };
         listed = true;
-        return { outcome: 'applied' as const, delivery: 'synced' as const };
+        return {
+          outcome: 'applied' as const,
+          delivery: 'synced' as const,
+          affected: [{ kind: 'title' as const, title }],
+        };
       },
       async query(_query: LibraryQuery): Promise<never> {
         throw new Error('unsupported query');
       },
       async observe(_observation: LibraryObservation) {
-        return 'unchanged' as const;
+        return { outcome: 'unchanged' as const, affected: [] };
       },
     }),
     'inline-1',
@@ -56,6 +61,7 @@ it('delivers cloned messages asynchronously and preserves request order', async 
     requestId: 'hello',
     clientId: 'tab',
     libraryKey: 'secret',
+    mode: 'online',
   });
   const command = {
     type: 'command' as const,
@@ -91,10 +97,64 @@ it('does not deliver a request after the transport closes', async () => {
     requestId: 'hello',
     clientId: 'tab',
     libraryKey: 'secret',
+    mode: 'online',
   });
   transport.close();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(opened).toBe(0);
   expect(received).toEqual([]);
+});
+
+it('composes with the client and isolates a throwing subscription listener', async () => {
+  let listed = false;
+  const core = new LibraryServiceCore(
+    async () => ({
+      generation: null,
+      async select(): Promise<LibrarySelectionValue> {
+        return {
+          kind: 'title',
+          title,
+          listed,
+          watched: false,
+          reaction: null,
+          standing: listed ? 'watchlist' : null,
+          progress: null,
+          episodes: [],
+        };
+      },
+      async command() {
+        listed = true;
+        return {
+          outcome: 'applied' as const,
+          delivery: 'synced' as const,
+          affected: [{ kind: 'title' as const, title }],
+        };
+      },
+      async query(): Promise<never> {
+        throw new Error('unsupported query');
+      },
+      async observe() {
+        return { outcome: 'unchanged' as const, affected: [] };
+      },
+    }),
+    'inline-client-1',
+  );
+  const client = new LibraryServiceClient(new InlineLibraryServiceTransport(core), 'client-1');
+  const reported = console.error;
+  console.error = () => {};
+  try {
+    await client.open({ libraryKey: 'secret', mode: 'online' });
+    const stop = await client.subscribe({ kind: 'title', title }, () => {
+      throw new Error('render failed');
+    });
+
+    await expect(
+      client.command({ kind: 'watchlist.add', title }, 'operation-1'),
+    ).resolves.toMatchObject({ outcome: 'applied', version: { revision: 1 } });
+    stop();
+  } finally {
+    console.error = reported;
+    client.close();
+  }
 });

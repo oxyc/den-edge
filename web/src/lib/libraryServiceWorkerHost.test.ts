@@ -33,6 +33,7 @@ const hello = (requestId: string): LibraryServiceClientMessage => ({
   requestId,
   clientId: 'tab-1',
   libraryKey: 'library-1',
+  mode: 'online' as const,
 });
 
 const ready = (requestId: string): LibraryServiceServerMessage => ({

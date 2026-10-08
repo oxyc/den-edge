@@ -23,7 +23,7 @@ export class WorkerLibraryServiceTransport {
   }
 
   send(message: LibraryServiceClientMessage): void {
-    if (this.#closed) return;
+    if (this.#closed) throw new Error('library service worker is unavailable');
     const decoded = decodeLibraryServiceClientMessage(message);
     if (!decoded.ok) throw new TypeError(decoded.error.message);
     try {
