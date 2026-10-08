@@ -1,0 +1,283 @@
+import {
+  LIBRARY_SERVICE_PROTOCOL,
+  type LibraryCommand,
+  type LibraryObservation,
+  type LibraryQuery,
+  type LibraryQueryResult,
+  type LibrarySelection,
+  type LibrarySelectionValue,
+  type LibraryServiceClientMessage,
+  type LibraryServiceCommandResult,
+  type LibraryServiceFailure,
+  type LibraryServiceServerMessage,
+  type LibrarySessionStatus,
+  type LibraryVersion,
+} from './libraryServiceProtocol';
+import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
+
+export interface LibraryServiceTransport {
+  send(message: LibraryServiceClientMessage): void;
+  listen(listener: (message: unknown) => void): () => void;
+  close(): void;
+}
+
+type Pending = {
+  resolve: (message: LibraryServiceServerMessage) => void;
+  reject: (error: LibraryServiceError) => void;
+};
+
+type Subscription = {
+  selection: LibrarySelection;
+  listener: (value: LibrarySelectionValue, version: LibraryVersion) => void;
+  version?: LibraryVersion;
+};
+
+export class LibraryServiceError extends Error {
+  constructor(readonly failure: LibraryServiceFailure) {
+    super(failure.message);
+    this.name = 'LibraryServiceError';
+  }
+}
+
+/** Transport-neutral client for immutable library views and semantic commands. */
+export class LibraryServiceClient {
+  readonly #pending = new Map<string, Pending>();
+  readonly #subscriptions = new Map<string, Subscription>();
+  readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
+  readonly #stopListening: () => void;
+  #nextRequest = 0;
+  #nextSubscription = 0;
+  #instance?: string;
+  #closed = false;
+
+  constructor(
+    private readonly transport: LibraryServiceTransport,
+    private readonly clientId: string = crypto.randomUUID(),
+  ) {
+    this.#stopListening = transport.listen((message) => this.#receive(message));
+  }
+
+  async open(libraryKey: string): Promise<LibraryVersion> {
+    const requestId = this.#requestId();
+    const reply = await this.#request({
+      type: 'hello',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      clientId: this.clientId,
+      libraryKey,
+    });
+    if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
+    this.#instance = reply.version.instance;
+    return reply.version;
+  }
+
+  async command(
+    command: LibraryCommand,
+    operationId: string = crypto.randomUUID(),
+  ): Promise<LibraryServiceCommandResult> {
+    const requestId = this.#requestId();
+    const reply = await this.#request({
+      type: 'command',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      operationId,
+      command,
+    });
+    if (reply.type !== 'command-result') throw this.#unexpected(reply, 'command-result');
+    return reply;
+  }
+
+  async query(
+    query: LibraryQuery,
+  ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
+    const requestId = this.#requestId();
+    const reply = await this.#request({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      query,
+    });
+    if (reply.type !== 'query-result') throw this.#unexpected(reply, 'query-result');
+    return { result: reply.result, version: reply.version };
+  }
+
+  async observe(observation: LibraryObservation): Promise<LibraryVersion> {
+    const requestId = this.#requestId();
+    const reply = await this.#request({
+      type: 'observe',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      observation,
+    });
+    if (reply.type !== 'observed') throw this.#unexpected(reply, 'observed');
+    return reply.version;
+  }
+
+  async subscribe(
+    selection: LibrarySelection,
+    listener: (value: LibrarySelectionValue, version: LibraryVersion) => void,
+  ): Promise<() => void> {
+    this.#assertOpen();
+    const subscriptionId = `subscription-${++this.#nextSubscription}`;
+    this.#subscriptions.set(subscriptionId, { selection, listener });
+    const requestId = this.#requestId();
+    try {
+      const reply = await this.#request({
+        type: 'subscribe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        subscriptionId,
+        selection,
+      });
+      if (reply.type !== 'subscribed') throw this.#unexpected(reply, 'subscribed');
+    } catch (error) {
+      this.#subscriptions.delete(subscriptionId);
+      throw error;
+    }
+    let subscribed = true;
+    return () => {
+      if (!subscribed || this.#closed) return;
+      subscribed = false;
+      this.#subscriptions.delete(subscriptionId);
+      const unsubscribeId = this.#requestId();
+      void this.#request({
+        type: 'unsubscribe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: unsubscribeId,
+        subscriptionId,
+      }).catch(() => undefined);
+    };
+  }
+
+  onStatus(listener: (status: LibrarySessionStatus) => void): () => void {
+    if (this.#closed) return () => {};
+    this.#statusListeners.add(listener);
+    return () => this.#statusListeners.delete(listener);
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#stopListening();
+    this.transport.close();
+    const error = new LibraryServiceError({
+      code: 'cancelled',
+      message: 'library service client is closed',
+      retryable: false,
+    });
+    for (const pending of this.#pending.values()) pending.reject(error);
+    this.#pending.clear();
+    this.#subscriptions.clear();
+    this.#statusListeners.clear();
+  }
+
+  #request(message: LibraryServiceClientMessage): Promise<LibraryServiceServerMessage> {
+    this.#assertOpen();
+    return new Promise((resolve, reject) => {
+      this.#pending.set(message.requestId, { resolve, reject });
+      try {
+        this.transport.send(message);
+      } catch (error) {
+        this.#pending.delete(message.requestId);
+        reject(error);
+      }
+    });
+  }
+
+  #receive(input: unknown): void {
+    if (this.#closed) return;
+    const decoded = decodeLibraryServiceServerMessage(input);
+    if (!decoded.ok) {
+      this.#failAll(decoded.error);
+      return;
+    }
+    const message = decoded.value;
+    if (message.type === 'update') {
+      const subscription = this.#subscriptions.get(message.subscriptionId);
+      if (
+        !subscription ||
+        message.version.instance !== this.#instance ||
+        !newer(message.version, subscription.version)
+      )
+        return;
+      if (!selectionMatches(subscription.selection, message.value)) {
+        this.#failAll({
+          code: 'invalid-request',
+          message: 'library service returned the wrong selection value',
+          retryable: false,
+        });
+        return;
+      }
+      subscription.version = message.version;
+      subscription.listener(message.value, message.version);
+      return;
+    }
+    if (message.type === 'status') {
+      for (const listener of this.#statusListeners) listener(message.status);
+      return;
+    }
+    if (message.type === 'error' && message.requestId) {
+      const pending = this.#pending.get(message.requestId);
+      if (!pending) return;
+      this.#pending.delete(message.requestId);
+      pending.reject(new LibraryServiceError(message.error));
+      return;
+    }
+    if (message.type === 'error') {
+      this.#failAll(message.error);
+      return;
+    }
+    if (!('requestId' in message)) return;
+    const pending = this.#pending.get(message.requestId);
+    if (!pending) return;
+    this.#pending.delete(message.requestId);
+    pending.resolve(message);
+  }
+
+  #failAll(failure: LibraryServiceFailure): void {
+    const error = new LibraryServiceError(failure);
+    for (const pending of this.#pending.values()) pending.reject(error);
+    this.#pending.clear();
+    for (const listener of this.#statusListeners) listener({ kind: 'failed', error: failure });
+  }
+
+  #requestId(): string {
+    return `${this.clientId}:${++this.#nextRequest}`;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed)
+      throw new LibraryServiceError({
+        code: 'cancelled',
+        message: 'library service client is closed',
+        retryable: false,
+      });
+  }
+
+  #unexpected(message: LibraryServiceServerMessage, expected: string): LibraryServiceError {
+    return new LibraryServiceError({
+      code: 'internal',
+      message: `library service returned ${message.type}; expected ${expected}`,
+      retryable: false,
+    });
+  }
+}
+
+function newer(candidate: LibraryVersion, current: LibraryVersion | undefined): boolean {
+  if (!current) return true;
+  if (candidate.instance !== current.instance) return false;
+  return candidate.revision > current.revision;
+}
+
+function selectionMatches(selection: LibrarySelection, value: LibrarySelectionValue): boolean {
+  if (selection.kind === 'overview') return value.kind === 'overview';
+  if (selection.kind === 'continue') return value.kind === 'continue';
+  if (selection.kind === 'settings') return value.kind === 'settings';
+  if (selection.kind === 'downloads') return value.kind === 'downloads';
+  if (selection.kind === 'presence') return value.kind === 'presence';
+  return (
+    value.kind === 'title' &&
+    value.title.type === selection.title.type &&
+    value.title.id === selection.title.id
+  );
+}
