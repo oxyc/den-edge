@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "den-edge"
-version = "0.264.12"
+version = "0.264.13"
 dependencies = [
  "axum",
  "ed25519-dalek",
