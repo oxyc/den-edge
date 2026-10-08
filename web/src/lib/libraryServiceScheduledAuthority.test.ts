@@ -1,0 +1,218 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { LibraryObservation } from './libraryServiceProtocol';
+import type { LibraryAuthorityEvent, LibraryServiceAuthority } from './libraryServiceCore';
+import {
+  ACTIVE_PLAYBACK_REFRESH_MS,
+  ScheduledLibraryServiceAuthority,
+  VISIBLE_REFRESH_MS,
+  type LibraryMaintenance,
+  type LibraryMaintenanceResult,
+} from './libraryServiceScheduledAuthority';
+
+const lifecycle = (
+  values: Partial<Extract<LibraryObservation, { kind: 'lifecycle' }>> = {},
+): Extract<LibraryObservation, { kind: 'lifecycle' }> => ({
+  kind: 'lifecycle',
+  visible: true,
+  online: true,
+  playbackActive: false,
+  ...values,
+});
+
+function authority() {
+  const observe = vi.fn<LibraryServiceAuthority['observe']>(async () => ({
+    outcome: 'unchanged',
+    affected: [],
+  }));
+  const close = vi.fn<() => void>();
+  const port: LibraryServiceAuthority = {
+    generation: 'g1',
+    select: vi.fn<LibraryServiceAuthority['select']>(async () => ({
+      kind: 'history',
+      items: [],
+    })),
+    command: vi.fn<LibraryServiceAuthority['command']>(async () => ({
+      outcome: 'unchanged',
+      delivery: 'synced',
+      affected: [],
+    })),
+    query: vi.fn<LibraryServiceAuthority['query']>(async () => ({
+      kind: 'playback.prepare',
+      action: 'start',
+      target: { type: 'movie', id: 1 },
+      resume: null,
+    })),
+    observe,
+    close,
+  };
+  return { port, observe, close };
+}
+
+function maintenance(mode: 'online' | 'local' = 'online') {
+  const results: LibraryMaintenanceResult[] = [];
+  const run = vi.fn<LibraryMaintenance['run']>(
+    async () =>
+      results.shift() ??
+      ({ changed: false, status: { kind: 'ready' } } satisfies LibraryMaintenanceResult),
+  );
+  return {
+    port: { mode, run } satisfies LibraryMaintenance,
+    run,
+    results,
+  };
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe('ScheduledLibraryServiceAuthority', () => {
+  it('polls visible online libraries at the foreground and playback cadences', async () => {
+    vi.useFakeTimers();
+    const base = authority();
+    const work = maintenance();
+    work.results.push({ changed: true, status: { kind: 'ready' } });
+    const scheduled = new ScheduledLibraryServiceAuthority(base.port, work.port);
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(work.run).not.toHaveBeenCalled();
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([
+      { kind: 'changed', affected: [{ kind: 'all' }] },
+      { kind: 'status', status: { kind: 'ready' } },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS - 1);
+    expect(work.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(work.run).toHaveBeenCalledTimes(2);
+
+    await scheduled.observe(lifecycle({ playbackActive: true }));
+    await vi.advanceTimersByTimeAsync(ACTIVE_PLAYBACK_REFRESH_MS - 1);
+    expect(work.run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(work.run).toHaveBeenCalledTimes(3);
+
+    await scheduled.close();
+  });
+
+  it('pauses while hidden or offline and catches up immediately on return', async () => {
+    vi.useFakeTimers();
+    const work = maintenance();
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+
+    await scheduled.observe(lifecycle({ visible: false }));
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(work.run).not.toHaveBeenCalled();
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(1);
+
+    await scheduled.observe(lifecycle({ online: false }));
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 2);
+    expect(work.run).toHaveBeenCalledTimes(1);
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+  });
+
+  it('runs local maintenance once when foregrounded without polling', async () => {
+    vi.useFakeTimers();
+    const work = maintenance('local');
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+
+    await scheduled.observe(lifecycle({ online: false }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 10);
+    expect(work.run).toHaveBeenCalledTimes(1);
+
+    await scheduled.observe(lifecycle({ visible: false, online: false }));
+    await scheduled.observe(lifecycle({ online: false }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+  });
+
+  it('reports a retrying pass once and returns to ready on the next pass', async () => {
+    vi.useFakeTimers();
+    const work = maintenance();
+    work.run.mockRejectedValueOnce(new Error('network down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([{ kind: 'status', status: { kind: 'reconnecting' } }]);
+    expect(warn).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(events.at(-1)).toEqual({ kind: 'status', status: { kind: 'ready' } });
+    await scheduled.close();
+  });
+
+  it('stops permanently when the library has moved', async () => {
+    vi.useFakeTimers();
+    const work = maintenance();
+    work.results.push({ changed: false, status: { kind: 'moved', successor: 'next' } });
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 2);
+
+    expect(work.run).toHaveBeenCalledOnce();
+    await scheduled.close();
+  });
+
+  it('cancels future work and suppresses an in-flight result before closing the log', async () => {
+    vi.useFakeTimers();
+    let finish!: (result: LibraryMaintenanceResult) => void;
+    const run = vi.fn(
+      () =>
+        new Promise<LibraryMaintenanceResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const base = authority();
+    const scheduled = new ScheduledLibraryServiceAuthority(base.port, { mode: 'online', run });
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledOnce();
+    const closing = scheduled.close();
+    expect(base.close).not.toHaveBeenCalled();
+    finish({ changed: true, status: { kind: 'ready' } });
+    await closing;
+
+    expect(events).toEqual([]);
+    expect(base.close).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 2);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('forwards the lifecycle observation through the ordinary authority contract', async () => {
+    vi.useFakeTimers();
+    const base = authority();
+    const scheduled = new ScheduledLibraryServiceAuthority(base.port, maintenance().port);
+    const observation = lifecycle();
+
+    await scheduled.observe(observation);
+
+    expect(base.observe).toHaveBeenCalledWith(observation);
+    await scheduled.close();
+  });
+});

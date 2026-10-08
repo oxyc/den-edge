@@ -4,6 +4,10 @@ import type { LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
 import { libraryVault, type Vault } from './localVault';
 import { LibraryLog } from './log';
+import {
+  libraryLogMaintenance,
+  ScheduledLibraryServiceAuthority,
+} from './libraryServiceScheduledAuthority';
 
 /**
  * Open the single production authority for one service instance. Both transports call this exact boundary: the
@@ -22,5 +26,10 @@ export async function openLibraryServiceAuthority(
     request.mode === 'local'
       ? await LibraryLog.openLocal(request.libraryKey, vault)
       : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
-  return log ? new LibraryLogAuthority(log, clock, { mode: request.mode }) : null;
+  if (!log) return null;
+  const authority = new LibraryLogAuthority(log, clock, { mode: request.mode });
+  return new ScheduledLibraryServiceAuthority(
+    authority,
+    libraryLogMaintenance(log, clock, request.mode),
+  );
 }

@@ -10,6 +10,13 @@ import { readDevices } from '../settings/values';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
 import type { Stamp } from './wire';
 
+/** The upgrade boundary needs an identity and ordered stamps, not page-local storage specifically. */
+export interface LibraryUpgradeClock {
+  readonly device: string;
+  issue(now?: number): Stamp | Promise<Stamp>;
+  see(stamp: Stamp): void | Promise<void>;
+}
+
 /** How long after a switch that didn't happen before it is tried again, so a library that can't switch isn't asked
  * to on every 30-second refresh. */
 const RETRY_MS = 10 * 60_000;
@@ -24,13 +31,13 @@ export async function upgradeLibrary(
   log: LibraryLog,
   local: boolean,
   now = Date.now(),
+  clock: LibraryUpgradeClock = browserClock(),
 ): Promise<boolean> {
   if (log.wireMinimum >= 3 || log.moved || log.upgradeRequired) return false;
   const last = tried.get(log);
   if (last !== undefined && now - last < RETRY_MS) return false;
   tried.set(log, now);
-  const clock = browserClock();
-  clock.see(log.newestStamp());
+  await clock.see(log.newestStamp());
   if (!local) {
     const state = librarySwitchState(readDevices(log.settings('devices')), clock.device, now);
     if (!state.performable || !state.webOnly) return false;
@@ -52,7 +59,7 @@ export async function upgradeLibrary(
   }
   const switched = await log.switchWebOnly({
     performer: clock.device,
-    stamp: clock.issue(),
+    stamp: await clock.issue(now),
     simkl,
   });
   if (switched) console.info('den: the library switched to Library v3');
@@ -77,6 +84,7 @@ export async function switchLibraryToV4(
   log: LibraryLog,
   now = Date.now(),
   fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+  performer?: string,
 ): Promise<boolean> {
   if (!log.needsV4) return false;
   const last = triedV4.get(log);
@@ -86,8 +94,7 @@ export async function switchLibraryToV4(
     console.info('den: Library v4 waits for den-edge to take it');
     return false;
   }
-  const clock = browserClock();
-  return log.switchToV4(clock.device);
+  return log.switchToV4(performer ?? browserClock().device);
 }
 
 async function edgeTakesV4(fetchImpl: typeof fetch): Promise<boolean> {

@@ -22,6 +22,7 @@ type Change = 'applied' | 'unchanged';
 type CommandDelivery = 'synced' | 'queued' | 'local';
 
 export type LibrarySelectionScope =
+  | { kind: 'all' }
   | { kind: 'overview' }
   | { kind: 'continue' }
   | { kind: 'history' }
@@ -506,6 +507,7 @@ function sameTitle(a: TitleRef, b: TitleRef): boolean {
 }
 
 function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {
+  if (scope.kind === 'all') return true;
   if (
     scope.kind === 'overview' ||
     scope.kind === 'continue' ||
