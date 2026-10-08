@@ -30,6 +30,13 @@ class FakeClient implements LibraryServiceClientPort {
   readonly events: string[] = [];
   readonly observations: LibraryObservation[] = [];
   readonly commands: Array<{
+    operationId?: string;
+    resolve: (result: LibraryServiceCommandResult) => void;
+    reject: (error: LibraryServiceError) => void;
+  }> = [];
+  readonly tasks: Array<{
+    operationId?: string;
+    resolve: (result: { result: LibraryTaskResult; version: LibraryVersion }) => void;
     reject: (error: LibraryServiceError) => void;
   }> = [];
   openFailure?: LibraryServiceFailure;
@@ -46,16 +53,19 @@ class FakeClient implements LibraryServiceClientPort {
     return this.version(0);
   }
 
-  command(_command: LibraryCommand, _operationId?: string): Promise<LibraryServiceCommandResult> {
-    return new Promise((_resolve, reject) => this.commands.push({ reject }));
+  command(_command: LibraryCommand, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return new Promise((resolve, reject) => this.commands.push({ operationId, resolve, reject }));
   }
 
   query(_query: LibraryQuery): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     return Promise.reject(new Error('unused'));
   }
 
-  task(_task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    return Promise.reject(new Error('unused'));
+  task(
+    _task: LibraryTask,
+    operationId?: string,
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    return new Promise((resolve, reject) => this.tasks.push({ operationId, resolve, reject }));
   }
 
   observe(observation: LibraryObservation): Promise<LibraryVersion> {
@@ -86,6 +96,7 @@ class FakeClient implements LibraryServiceClientPort {
   fail(failure: LibraryServiceFailure): void {
     const error = new LibraryServiceError(failure);
     for (const command of this.commands.splice(0)) command.reject(error);
+    for (const task of this.tasks.splice(0)) task.reject(error);
     for (const listener of this.statusListeners) listener({ kind: 'failed', error: failure });
   }
 
@@ -98,6 +109,26 @@ const unavailable = (message: string): LibraryServiceFailure => ({
   code: 'unavailable',
   message,
   retryable: true,
+});
+
+it('replays an in-flight task with its original operation ID after a lost reply', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const queue = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => queue.shift()!);
+  await supervisor.open(openOptions);
+  const task = supervisor.task({ kind: 'recovery.disable' }, 'disable-1');
+
+  first.fail(unavailable('reply lost'));
+  await vi.waitFor(() => expect(second.tasks).toHaveLength(1));
+  expect(second.tasks[0]?.operationId).toBe('disable-1');
+  second.tasks[0]!.resolve({
+    result: { kind: 'recovery.disable', outcome: 'disabled' },
+    version: second.version(1),
+  });
+  await expect(task).resolves.toMatchObject({ result: { outcome: 'disabled' } });
+  supervisor.close();
 });
 
 const openOptions: LibraryServiceOpenOptions = {
@@ -117,7 +148,7 @@ const continueValue = (instance: string): LibrarySelectionValue => ({
   needsShapes: [],
 });
 
-it('rejects in-flight commands, preserves stale views, and installs a fresh replacement', async () => {
+it('replays an in-flight command with the same operation ID and preserves stale views', async () => {
   const first = new FakeClient();
   const second = new FakeClient();
   second.instance = 'worker-2';
@@ -141,10 +172,19 @@ it('rejects in-flight commands, preserves stale views, and installs a fresh repl
   );
 
   first.fail(unavailable('worker crashed'));
-  await expect(command).rejects.toMatchObject({
-    failure: { code: 'unavailable', message: 'worker crashed' },
-  });
   await vi.waitFor(() => expect(created).toHaveLength(2));
+  await vi.waitFor(() => expect(second.commands).toHaveLength(1));
+  expect(second.commands[0]?.operationId).toBe('operation-1');
+  second.commands[0]!.resolve({
+    type: 'command-result',
+    protocol: 2,
+    requestId: 'replacement',
+    operationId: 'operation-1',
+    outcome: 'applied',
+    delivery: 'queued',
+    version: second.version(2),
+  });
+  await expect(command).resolves.toMatchObject({ operationId: 'operation-1' });
   await vi.waitFor(() =>
     expect(snapshots.at(-1)).toMatchObject({
       connection: 'ready',
@@ -164,7 +204,7 @@ it('rejects in-flight commands, preserves stale views, and installs a fresh repl
   expect(first.close).toHaveBeenCalledOnce();
   expect(second.opened).toEqual([openOptions]);
   expect(second.subscriptions[0]?.selection).toEqual({ kind: 'continue' });
-  expect(second.commands).toHaveLength(0);
+  expect(second.commands).toHaveLength(1);
   supervisor.close();
 });
 

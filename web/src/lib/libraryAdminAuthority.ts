@@ -12,12 +12,14 @@ import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
 import { LibraryLog, projectV3Documents, successorTag } from './log';
 import type { Vault } from './localVault';
 import { linkKeys, sealHandover } from './pair';
+import { completeDurableTaskOperation } from './libraryOperationAuthority';
 import {
   abandon,
   begin,
   confirm,
   makingWaits,
   reconcile,
+  resumeMaking,
   seal,
   turnOff,
   type Prepared,
@@ -30,10 +32,14 @@ const RESET_ROUNDS = 3;
 const IMPORT_BATCH = 250;
 const STALE_IMPORT_MS = 182 * 86_400_000;
 const RECOVERY_MAKES = 'library-service-recovery-makes.v1';
+const LOCAL_MERGES = 'library-service-local-merges.v1';
+const HISTORY_IMPORTS = 'library-service-history-imports.v1';
 
 interface DurableRecoveryMake {
   prepared: Prepared;
   baseLive: string[];
+  operationId?: string;
+  outcome?: 'confirmed' | 'lost' | 'failed';
 }
 
 const affectedLibrary = [
@@ -64,7 +70,13 @@ export interface LibraryAdminAuthorityOptions {
 export class LibraryAdminAuthority {
   readonly #recoveryMakes = new Map<
     string,
-    { prepared: Prepared; baseLive: Set<string>; done: () => void }
+    {
+      prepared: Prepared;
+      baseLive: Set<string>;
+      done: () => void;
+      operationId?: string;
+      outcome?: 'confirmed' | 'lost' | 'failed';
+    }
   >();
   readonly #recoveryStorage = new MemoryStorage();
 
@@ -168,6 +180,7 @@ export class LibraryAdminAuthority {
   }
 
   async recoveryView() {
+    await this.#restoreRecoveryMakes();
     const status = await reconcile(this.#recoveryContext());
     return {
       kind: 'recovery' as const,
@@ -187,26 +200,26 @@ export class LibraryAdminAuthority {
     };
   }
 
-  async task(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+  async task(task: LibraryTask, operationId?: string): Promise<LibraryAuthorityTaskResult> {
     switch (task.kind) {
       case 'recovery.begin':
-        return this.#beginRecovery(task);
+        return this.#beginRecovery(task, operationId);
       case 'recovery.confirm':
-        return this.#confirmRecovery(task.locator);
+        return this.#confirmRecovery(task.locator, operationId);
       case 'recovery.abandon':
         return this.#abandonRecovery(task.locator);
       case 'recovery.disable':
         return this.#disableRecovery();
       case 'history.import':
-        return this.#importHistory(task.items);
+        return this.#importHistory(task.items, operationId);
       case 'local-library.merge':
-        return this.#mergeLocal(task.sourceLibraryKey);
+        return this.#mergeLocal(task.sourceLibraryKey, operationId);
       case 'key-reset.move':
-        return this.#moveKey(task.destinationLibraryKey);
+        return this.#moveKey(task, operationId);
       case 'key-reset.settle':
-        return this.#settleKey(task.destinationLibraryKey);
+        return this.#settleKey(task, operationId);
       case 'key-reset.adopt':
-        return this.#adoptKey(task.destinationLibraryKey);
+        return this.#adoptKey(task, operationId);
     }
   }
 
@@ -227,8 +240,14 @@ export class LibraryAdminAuthority {
 
   async #beginRecovery(
     task: Extract<LibraryTask, { kind: 'recovery.begin' }>,
+    operationId?: string,
   ): Promise<LibraryAuthorityTaskResult> {
     const previous = await this.#recoveryMake(task.locator);
+    if (previous && previous.operationId === operationId && !previous.outcome)
+      return {
+        result: { kind: 'recovery.begin', outcome: 'begun' },
+        affected: [{ kind: 'recovery' }],
+      };
     previous?.done();
     this.#recoveryMakes.delete(task.locator);
     await this.#keepRecoveryMakes();
@@ -249,6 +268,7 @@ export class LibraryAdminAuthority {
       prepared,
       baseLive: begun.baseLive,
       done: begun.done,
+      ...(operationId ? { operationId } : {}),
     });
     try {
       await this.#keepRecoveryMakes();
@@ -267,23 +287,34 @@ export class LibraryAdminAuthority {
     };
   }
 
-  async #confirmRecovery(locator: string): Promise<LibraryAuthorityTaskResult> {
+  async #confirmRecovery(
+    locator: string,
+    operationId?: string,
+  ): Promise<LibraryAuthorityTaskResult> {
     const making = await this.#recoveryMake(locator);
     if (!making)
       return {
         result: { kind: 'recovery.confirm', outcome: 'lost' },
         affected: [{ kind: 'recovery' }],
       };
+    if (making.operationId === operationId && making.outcome)
+      return {
+        result: { kind: 'recovery.confirm', outcome: making.outcome },
+        affected: [{ kind: 'recovery' }],
+      };
     const result = await confirm(this.#recoveryContext(), making.prepared, making.baseLive);
+    const outcome = result.ok ? 'confirmed' : 'lost' in result ? 'lost' : 'failed';
     if (result.ok || 'lost' in result) {
       making.done();
-      this.#recoveryMakes.delete(locator);
+      making.done = () => {};
+      making.operationId = operationId;
+      making.outcome = outcome;
       await this.#keepRecoveryMakes();
     }
     return {
       result: {
         kind: 'recovery.confirm',
-        outcome: result.ok ? 'confirmed' : 'lost' in result ? 'lost' : 'failed',
+        outcome,
       },
       affected: [{ kind: 'recovery' }],
     };
@@ -304,8 +335,13 @@ export class LibraryAdminAuthority {
   async #recoveryMake(locator: string) {
     const active = this.#recoveryMakes.get(locator);
     if (active) return active;
+    await this.#restoreRecoveryMakes();
+    return this.#recoveryMakes.get(locator);
+  }
+
+  async #restoreRecoveryMakes(): Promise<void> {
     const kept = await this.log.kept<unknown>(RECOVERY_MAKES);
-    if (!Array.isArray(kept)) return undefined;
+    if (!Array.isArray(kept)) return;
     for (const value of kept) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
       const candidate = value as Partial<DurableRecoveryMake>;
@@ -319,22 +355,36 @@ export class LibraryAdminAuthority {
         !candidate.baseLive.every((entry) => typeof entry === 'string')
       )
         continue;
+      if (this.#recoveryMakes.has(prepared.locator)) continue;
       this.#recoveryMakes.set(prepared.locator, {
         prepared,
         baseLive: new Set(candidate.baseLive),
-        done: () => {},
+        done: candidate.outcome
+          ? () => {}
+          : resumeMaking(this.#recoveryContext(), prepared.locator),
+        ...(typeof candidate.operationId === 'string'
+          ? { operationId: candidate.operationId }
+          : {}),
+        ...(candidate.outcome === 'confirmed' ||
+        candidate.outcome === 'lost' ||
+        candidate.outcome === 'failed'
+          ? { outcome: candidate.outcome }
+          : {}),
       });
     }
-    return this.#recoveryMakes.get(locator);
   }
 
   async #keepRecoveryMakes(): Promise<void> {
     await this.log.keep(
       RECOVERY_MAKES,
-      [...this.#recoveryMakes.values()].map(({ prepared, baseLive }): DurableRecoveryMake => ({
-        prepared,
-        baseLive: [...baseLive],
-      })),
+      [...this.#recoveryMakes.values()].map(
+        ({ prepared, baseLive, operationId, outcome }): DurableRecoveryMake => ({
+          prepared,
+          baseLive: [...baseLive],
+          ...(operationId ? { operationId } : {}),
+          ...(outcome ? { outcome } : {}),
+        }),
+      ),
     );
   }
 
@@ -349,6 +399,7 @@ export class LibraryAdminAuthority {
 
   async #importHistory(
     items: Extract<LibraryTask, { kind: 'history.import' }>['items'],
+    operationId?: string,
   ): Promise<LibraryAuthorityTaskResult> {
     const pending: Array<{ at: number; build: (stamp: Stamp) => Row }> = [];
     await this.clock.see(this.log.newestStamp());
@@ -384,6 +435,27 @@ export class LibraryAdminAuthority {
           build: (stamp) => dismissFromContinueWatching(title, stamp),
         });
     }
+    let total = pending.length;
+    if (operationId) {
+      const stored = await this.log.kept<unknown>(HISTORY_IMPORTS);
+      const imports = Array.isArray(stored)
+        ? stored.filter(
+            (entry): entry is { operationId: string; total: number } =>
+              !!entry &&
+              typeof entry === 'object' &&
+              !Array.isArray(entry) &&
+              typeof (entry as { operationId?: unknown }).operationId === 'string' &&
+              Number.isSafeInteger((entry as { total?: unknown }).total) &&
+              ((entry as { total: number }).total ?? -1) >= 0,
+          )
+        : [];
+      const existing = imports.find((entry) => entry.operationId === operationId);
+      if (existing) total = existing.total;
+      else {
+        imports.push({ operationId, total });
+        await this.log.keep(HISTORY_IMPORTS, imports.slice(-64));
+      }
+    }
     const stamps = await this.clock.historical(pending.map(({ at }) => at));
     const rows = pending.map(({ build }, index) => build(stamps[index]!));
     let written = 0;
@@ -391,32 +463,73 @@ export class LibraryAdminAuthority {
       const batch = rows.slice(start, start + IMPORT_BATCH);
       if (!(await this.log.writeRows(batch)))
         return {
-          result: { kind: 'history.import', written, total: rows.length, complete: false },
+          result: {
+            kind: 'history.import',
+            written: Math.max(0, total - rows.length) + written,
+            total,
+            complete: false,
+          },
           affected: affectedLibrary,
         };
       written += batch.length;
     }
     return {
-      result: { kind: 'history.import', written, total: rows.length, complete: true },
+      result: { kind: 'history.import', written: total, total, complete: true },
       affected: affectedLibrary,
     };
   }
 
-  async #mergeLocal(sourceLibraryKey: string): Promise<LibraryAuthorityTaskResult> {
+  async #mergeLocal(
+    sourceLibraryKey: string,
+    operationId?: string,
+  ): Promise<LibraryAuthorityTaskResult> {
     if (sourceLibraryKey === this.options.libraryKey)
       return {
         result: { kind: 'local-library.merge', outcome: 'unavailable' },
         affected: [],
       };
+    const merges = operationId ? await this.log.kept<unknown>(LOCAL_MERGES) : undefined;
+    const staged = Array.isArray(merges)
+      ? merges.filter(
+          (entry): entry is { operationId: string; sourceLibraryKey: string } =>
+            !!entry &&
+            typeof entry === 'object' &&
+            !Array.isArray(entry) &&
+            typeof (entry as { operationId?: unknown }).operationId === 'string' &&
+            typeof (entry as { sourceLibraryKey?: unknown }).sourceLibraryKey === 'string',
+        )
+      : [];
+    const wasWritten = operationId
+      ? staged.some(
+          (entry) =>
+            entry.operationId === operationId && entry.sourceLibraryKey === sourceLibraryKey,
+        )
+      : false;
     const source = await LibraryLog.openExistingLocal(sourceLibraryKey, this.options.vault);
     if (!source)
       return {
-        result: { kind: 'local-library.merge', outcome: 'absent' },
+        result: {
+          kind: 'local-library.merge',
+          outcome: wasWritten ? 'merged' : 'absent',
+        },
         affected: [],
       };
     try {
-      const rows = source.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
-      if (!(await this.log.writeRows(rows)) || !(await source.forget()))
+      if (!wasWritten) {
+        const rows = source
+          .rows()
+          .filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
+        if (!(await this.log.writeRows(rows)))
+          return {
+            result: { kind: 'local-library.merge', outcome: 'unavailable' },
+            affected: affectedLibrary,
+          };
+        if (operationId) {
+          staged.push({ operationId, sourceLibraryKey });
+          await this.log.keep(LOCAL_MERGES, staged.slice(-64));
+        }
+      }
+      if (!(await source.forget()))
         return {
           result: { kind: 'local-library.merge', outcome: 'unavailable' },
           affected: affectedLibrary,
@@ -430,7 +543,11 @@ export class LibraryAdminAuthority {
     }
   }
 
-  async #moveKey(destinationKey: string): Promise<LibraryAuthorityTaskResult> {
+  async #moveKey(
+    task: Extract<LibraryTask, { kind: 'key-reset.move' }>,
+    operationId?: string,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const destinationKey = task.destinationLibraryKey;
     if (this.options.mode !== 'online') return this.#resetResult('key-reset.move', 'unavailable');
     const next = await this.#destination(destinationKey);
     for (let round = 0; round < RESET_ROUNDS; round++) {
@@ -446,7 +563,7 @@ export class LibraryAdminAuthority {
       switch (await this.log.endMoved(moving, next)) {
         case 'deleted':
           await this.log.rekeyKept(next);
-          return this.#resetResult('key-reset.move', 'moved');
+          return this.#completedReset(next, task, operationId, 'moved');
         case 'changed':
           continue;
         case 'failed':
@@ -462,14 +579,18 @@ export class LibraryAdminAuthority {
     return this.#abandonReset(next, 'key-reset.move', 'unavailable');
   }
 
-  async #settleKey(destinationKey: string): Promise<LibraryAuthorityTaskResult> {
+  async #settleKey(
+    task: Extract<LibraryTask, { kind: 'key-reset.settle' }>,
+    operationId?: string,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const destinationKey = task.destinationLibraryKey;
     const next = await this.#destination(destinationKey);
     const standing = await this.log.standing();
     if (standing === null) return this.#resetResult('key-reset.settle', 'unknown');
     if ('moved' in standing) {
       if (standing.successor === (await successorTag(next.libraryId))) {
         await this.log.rekeyKept(next);
-        return this.#resetResult('key-reset.settle', 'adopted');
+        return this.#completedReset(next, task, operationId, 'adopted');
       }
       if (standing.successor === undefined) return this.#resetResult('key-reset.settle', 'held');
       return this.#abandonReset(next, 'key-reset.settle', 'foreign');
@@ -480,14 +601,29 @@ export class LibraryAdminAuthority {
     return this.#abandonReset(next, 'key-reset.settle', 'undone');
   }
 
-  async #adoptKey(destinationKey: string): Promise<LibraryAuthorityTaskResult> {
+  async #adoptKey(
+    task: Extract<LibraryTask, { kind: 'key-reset.adopt' }>,
+    operationId?: string,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const destinationKey = task.destinationLibraryKey;
     const next = await this.#destination(destinationKey);
     const standing = await this.log.standing();
     if (!standing || !('moved' in standing))
       return this.#resetResult('key-reset.adopt', standing ? 'unavailable' : 'unknown');
     if (standing.successor !== undefined) return this.#resetResult('key-reset.adopt', 'foreign');
     await this.log.rekeyKept(next);
-    return this.#resetResult('key-reset.adopt', 'adopted');
+    return this.#completedReset(next, task, operationId, 'adopted');
+  }
+
+  async #completedReset(
+    destination: LibraryLog,
+    task: Extract<LibraryTask, { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt' }>,
+    operationId: string | undefined,
+    outcome: Extract<KeyResetOutcome, 'moved' | 'adopted'>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const result = this.#resetResult(task.kind, outcome);
+    if (operationId) await completeDurableTaskOperation(destination, operationId, task, result);
+    return result;
   }
 
   #destination(key: string): Promise<LibraryLog> {

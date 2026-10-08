@@ -8,26 +8,152 @@ import {
 import type { LibraryLog } from './log';
 import { exclusive } from './exclusive';
 
-const JOURNAL = 'library-service-operations.v1';
-const LIMIT = 1_024;
+export const LIBRARY_OPERATION_JOURNAL = 'library-service-operations.v2';
+const LEGACY_JOURNAL = 'library-service-operations.v1';
+const ENTRY_LIMIT = 1_024;
+const BYTE_LIMIT = 256 * 1_024;
+const RESULT_BYTE_LIMIT = 32 * 1_024;
+const utf8 = new TextEncoder();
 
-type Entry =
-  | {
-      kind: 'command';
-      operationId: string;
-      request: string;
-      result: LibraryAuthorityCommandResult;
-    }
-  | {
-      kind: 'task';
-      operationId: string;
-      request: string;
-      result: LibraryAuthorityTaskResult;
+type OperationKind = 'command' | 'task';
+type OperationResult = LibraryAuthorityCommandResult | LibraryAuthorityTaskResult;
+
+type Entry = {
+  kind: OperationKind;
+  operationId: string;
+  requestDigest: string;
+  state: 'intent' | 'complete';
+  result?: OperationResult;
+};
+
+const conflict = () =>
+  new LibraryServiceAuthorityError({
+    code: 'conflict',
+    message: 'operationId was already used for another operation',
+    retryable: false,
+  });
+
+const storageFailure = (message: string) =>
+  new LibraryServiceAuthorityError({ code: 'storage', message, retryable: true });
+
+async function digest(request: LibraryCommand | LibraryTask): Promise<string> {
+  const bytes = await crypto.subtle.digest('SHA-256', utf8.encode(JSON.stringify(request)));
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function decodedEntries(value: unknown): Entry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate): Entry[] => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+    const entry = candidate as Partial<Entry>;
+    if (
+      (entry.kind !== 'command' && entry.kind !== 'task') ||
+      typeof entry.operationId !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(entry.requestDigest ?? '') ||
+      (entry.state !== 'intent' && entry.state !== 'complete') ||
+      (entry.state === 'complete' && !entry.result)
+    )
+      return [];
+    return [
+      {
+        kind: entry.kind,
+        operationId: entry.operationId,
+        requestDigest: entry.requestDigest!,
+        state: entry.state,
+        ...(entry.state === 'complete' ? { result: structuredClone(entry.result!) } : {}),
+      },
+    ];
+  });
+}
+
+async function entries(log: LibraryLog): Promise<Entry[]> {
+  const current = await log.kept<unknown>(LIBRARY_OPERATION_JOURNAL);
+  if (current !== undefined) return decodedEntries(current);
+  const legacy = await log.kept<unknown>(LEGACY_JOURNAL);
+  if (!Array.isArray(legacy)) return [];
+  const migrated: Entry[] = [];
+  for (const candidate of legacy) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const entry = candidate as {
+      kind?: unknown;
+      operationId?: unknown;
+      request?: unknown;
+      result?: unknown;
     };
+    if (
+      (entry.kind !== 'command' && entry.kind !== 'task') ||
+      typeof entry.operationId !== 'string' ||
+      typeof entry.request !== 'string' ||
+      !entry.result
+    )
+      continue;
+    try {
+      migrated.push({
+        kind: entry.kind,
+        operationId: entry.operationId,
+        requestDigest: await digest(JSON.parse(entry.request) as LibraryCommand | LibraryTask),
+        state: 'complete',
+        result: structuredClone(entry.result as OperationResult),
+      });
+    } catch {
+      // An unreadable legacy receipt is ignored; authenticated storage still prevents attacker-supplied entries.
+    }
+  }
+  return migrated;
+}
+
+function bounded(current: Entry[], protectedOperationId: string): Entry[] {
+  const kept = current.slice(-ENTRY_LIMIT);
+  while (utf8.encode(JSON.stringify(kept)).byteLength > BYTE_LIMIT && kept.length > 1) {
+    const removable = kept.findIndex((entry) => entry.operationId !== protectedOperationId);
+    if (removable < 0) break;
+    kept.splice(removable, 1);
+  }
+  if (utf8.encode(JSON.stringify(kept)).byteLength > BYTE_LIMIT)
+    throw storageFailure('operation result exceeds the durable journal limit');
+  return kept;
+}
+
+async function keep(
+  log: LibraryLog,
+  current: Entry[],
+  protectedOperationId: string,
+): Promise<void> {
+  await log.keep(LIBRARY_OPERATION_JOURNAL, bounded(current, protectedOperationId));
+}
+
+/** Copy a completed reset task into the destination library before the source authority returns. */
+export async function completeDurableTaskOperation(
+  log: LibraryLog,
+  operationId: string,
+  task: LibraryTask,
+  result: LibraryAuthorityTaskResult,
+  runExclusive: typeof exclusive = exclusive,
+): Promise<void> {
+  const requestDigest = await digest(task);
+  if (utf8.encode(JSON.stringify(result)).byteLength > RESULT_BYTE_LIMIT)
+    throw storageFailure('operation result exceeds the durable result limit');
+  await runExclusive(`den.library.operations.${log.libraryId}`, async () => {
+    const current = await entries(log);
+    const found = current.find((entry) => entry.operationId === operationId);
+    if (found && (found.kind !== 'task' || found.requestDigest !== requestDigest)) throw conflict();
+    const complete: Entry = {
+      kind: 'task',
+      operationId,
+      requestDigest,
+      state: 'complete',
+      result: structuredClone(result),
+    };
+    if (found) current[current.indexOf(found)] = complete;
+    else current.push(complete);
+    await keep(log, current, operationId);
+  });
+}
 
 /**
- * Durable replay protection around the semantic authority. The journal is sealed by LibraryLog.keep under the
- * library-derived local key, so neither operation payloads nor administrative results are stored in plaintext.
+ * Durable replay protection around the semantic authority. A bounded encrypted intent lands before any effect. A
+ * retry may safely resume an incomplete intent because domain writes have set/idempotent semantics; completion then
+ * stores the original semantic result for exact lost-reply replay.
  */
 export class DurableOperationAuthority implements LibraryServiceAuthority {
   #tail: Promise<void> = Promise.resolve();
@@ -81,7 +207,7 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
     return result;
   }
 
-  async #perform<K extends Entry['kind']>(
+  async #perform<K extends OperationKind>(
     kind: K,
     operationId: string,
     request: LibraryCommand | LibraryTask,
@@ -89,19 +215,18 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
       K extends 'command' ? LibraryAuthorityCommandResult : LibraryAuthorityTaskResult
     >,
   ): Promise<K extends 'command' ? LibraryAuthorityCommandResult : LibraryAuthorityTaskResult> {
-    const requestText = JSON.stringify(request);
-    const entries = await this.#entries();
-    const found = entries.find((entry) => entry.operationId === operationId);
+    const requestDigest = await digest(request);
+    const current = await entries(this.log);
+    const found = current.find((entry) => entry.operationId === operationId);
     if (found) {
-      if (found.kind !== kind || found.request !== requestText)
-        throw new LibraryServiceAuthorityError({
-          code: 'conflict',
-          message: 'operationId was already used for another operation',
-          retryable: false,
-        });
-      return structuredClone(found.result) as K extends 'command'
-        ? LibraryAuthorityCommandResult
-        : LibraryAuthorityTaskResult;
+      if (found.kind !== kind || found.requestDigest !== requestDigest) throw conflict();
+      if (found.state === 'complete')
+        return structuredClone(found.result) as K extends 'command'
+          ? LibraryAuthorityCommandResult
+          : LibraryAuthorityTaskResult;
+    } else {
+      current.push({ kind, operationId, requestDigest, state: 'intent' });
+      await keep(this.log, current, operationId);
     }
 
     const result = await work();
@@ -112,26 +237,23 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
       !taskResult.result.complete
     )
       return result;
-    entries.push({ kind, operationId, request: requestText, result } as Entry);
-    if (entries.length > LIMIT) entries.splice(0, entries.length - LIMIT);
-    await this.log.keep(JOURNAL, entries);
-    return result;
-  }
+    if (utf8.encode(JSON.stringify(result)).byteLength > RESULT_BYTE_LIMIT)
+      throw storageFailure('operation result exceeds the durable result limit');
 
-  async #entries(): Promise<Entry[]> {
-    const stored = await this.log.kept<unknown>(JOURNAL);
-    return Array.isArray(stored)
-      ? stored.filter(
-          (entry): entry is Entry =>
-            !!entry &&
-            typeof entry === 'object' &&
-            !Array.isArray(entry) &&
-            ((entry as { kind?: unknown }).kind === 'command' ||
-              (entry as { kind?: unknown }).kind === 'task') &&
-            typeof (entry as { operationId?: unknown }).operationId === 'string' &&
-            typeof (entry as { request?: unknown }).request === 'string' &&
-            !!(entry as { result?: unknown }).result,
-        )
-      : [];
+    const latest = await entries(this.log);
+    const intent = latest.find((entry) => entry.operationId === operationId);
+    if (intent && (intent.kind !== kind || intent.requestDigest !== requestDigest))
+      throw conflict();
+    const complete: Entry = {
+      kind,
+      operationId,
+      requestDigest,
+      state: 'complete',
+      result: structuredClone(result),
+    };
+    if (intent) latest[latest.indexOf(intent)] = complete;
+    else latest.push(complete);
+    await keep(this.log, latest, operationId);
+    return result;
   }
 }

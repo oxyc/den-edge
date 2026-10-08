@@ -146,7 +146,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     command: LibraryCommand,
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
-    return await this.#readyClient().command(command, operationId);
+    return this.#semantic((client) => client.command(command, operationId));
   }
 
   async query(
@@ -159,7 +159,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     task: LibraryTask,
     operationId: string = crypto.randomUUID(),
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    return await this.#readyClient().task(task, operationId);
+    return this.#semantic((client) => client.task(task, operationId));
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {
@@ -456,6 +456,30 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       message: 'library service is not ready',
       retryable: true,
     });
+  }
+
+  /** Replay only after this exact client was replaced; the durable operation ID makes a lost reply safe. */
+  async #semantic<T>(send: (client: LibraryServiceClientPort) => Promise<T>): Promise<T> {
+    for (;;) {
+      const active = this.#active;
+      const client = this.#readyClient();
+      try {
+        return await send(client);
+      } catch (error) {
+        // A transport may reject its pending request immediately before its failure status reaches us.
+        await Promise.resolve();
+        const failure = failureFrom(error);
+        if (
+          !failure.retryable ||
+          this.#phase === 'closed' ||
+          (active === this.#active && this.#phase === 'ready')
+        )
+          throw error;
+        const reconnecting = this.#connecting;
+        if (!reconnecting) throw error;
+        await reconnecting;
+      }
+    }
   }
 
   #assertNotClosed(): void {

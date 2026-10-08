@@ -5,13 +5,21 @@ import type { LibraryLog } from './log';
 
 function storedLog() {
   const kept = new Map<string, unknown>();
+  let failKeep = false;
   return {
     log: {
       libraryId: 'library-1',
       kept: async <T>(name: string) => structuredClone(kept.get(name)) as T | undefined,
-      keep: async (name: string, value: unknown) => void kept.set(name, structuredClone(value)),
+      keep: async (name: string, value: unknown) => {
+        if (failKeep) {
+          failKeep = false;
+          throw new Error('disk full');
+        }
+        kept.set(name, structuredClone(value));
+      },
     } as unknown as LibraryLog,
     kept,
+    failNextKeep: () => (failKeep = true),
   };
 }
 
@@ -80,6 +88,59 @@ describe('DurableOperationAuthority', () => {
       affected: [{ kind: 'downloads' }],
     });
     expect(replacement.command).not.toHaveBeenCalled();
+  });
+
+  it('persists an intent before effects and resumes the same operation after a receipt write failure', async () => {
+    const stored = storedLog();
+    const first = base();
+    const command = { kind: 'watchlist.add' as const, title: { type: 'movie' as const, id: 7 } };
+    const wrapped = new DurableOperationAuthority(first, stored.log);
+    // The first keep is the intent. Fail the completion keep from inside the effect.
+    vi.mocked(first.command).mockImplementationOnce(async () => {
+      stored.failNextKeep();
+      return { outcome: 'applied', delivery: 'queued', affected: [{ kind: 'overview' }] };
+    });
+    await expect(wrapped.command(command, 'crash-boundary')).rejects.toThrow('disk full');
+    expect(first.command).toHaveBeenCalledOnce();
+
+    const replacement = base();
+    await expect(
+      new DurableOperationAuthority(replacement, stored.log).command(command, 'crash-boundary'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+    expect(replacement.command).toHaveBeenCalledOnce();
+  });
+
+  it('stores only a fixed request digest for a maximum-shape import payload', async () => {
+    const stored = storedLog();
+    const items = Array.from({ length: 100_000 }, (_, id) => ({
+      title: { type: 'movie' as const, id: id + 1 },
+      watchedAt: id + 1,
+    }));
+    await new DurableOperationAuthority(base(), stored.log).task(
+      { kind: 'history.import', items },
+      'large-import',
+    );
+    const encoded = JSON.stringify([...stored.kept.values()][0]);
+    expect(encoded.length).toBeLessThan(2_000);
+    expect(encoded).not.toContain('watchedAt');
+    expect(encoded).toContain('requestDigest');
+  });
+
+  it('refuses an authority result that would exceed the bounded encrypted journal', async () => {
+    const stored = storedLog();
+    const authority = base();
+    vi.mocked(authority.command).mockResolvedValueOnce({
+      outcome: 'applied',
+      delivery: 'queued',
+      affected: Array.from({ length: 10_000 }, () => ({ kind: 'downloads' as const })),
+    });
+    await expect(
+      new DurableOperationAuthority(authority, stored.log).command(
+        { kind: 'watchlist.add', title: { type: 'movie', id: 1 } },
+        'oversized-result',
+      ),
+    ).rejects.toMatchObject({ failure: { code: 'storage', retryable: true } });
+    expect(JSON.stringify([...stored.kept.values()][0]).length).toBeLessThan(1_000);
   });
 
   it('deduplicates tasks across replacement and rejects operation identity reuse', async () => {

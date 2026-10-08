@@ -551,11 +551,14 @@ export class LibraryModel {
     return this.service.task(task, operationId);
   }
 
-  importHistory(items: readonly HistoryImportItem[]) {
-    return this.task({
-      kind: 'history.import',
-      items: structuredClone(items) as HistoryImportItem[],
-    });
+  importHistory(items: readonly HistoryImportItem[], operationId?: string) {
+    return this.task(
+      {
+        kind: 'history.import',
+        items: structuredClone(items) as HistoryImportItem[],
+      },
+      operationId,
+    );
   }
 
   exportHistory() {
@@ -573,36 +576,36 @@ export class LibraryModel {
     return this.service.query({ kind: 'recovery.seal', locator, wrapKey, createdAt });
   }
 
-  beginRecovery(locator: string, sealed: string, createdAt: number) {
-    return this.task({ kind: 'recovery.begin', locator, sealed, createdAt });
+  beginRecovery(locator: string, sealed: string, createdAt: number, operationId?: string) {
+    return this.task({ kind: 'recovery.begin', locator, sealed, createdAt }, operationId);
   }
 
-  confirmRecovery(locator: string) {
-    return this.task({ kind: 'recovery.confirm', locator });
+  confirmRecovery(locator: string, operationId?: string) {
+    return this.task({ kind: 'recovery.confirm', locator }, operationId);
   }
 
-  abandonRecovery(locator: string) {
-    return this.task({ kind: 'recovery.abandon', locator });
+  abandonRecovery(locator: string, operationId?: string) {
+    return this.task({ kind: 'recovery.abandon', locator }, operationId);
   }
 
-  disableRecovery() {
-    return this.task({ kind: 'recovery.disable' });
+  disableRecovery(operationId?: string) {
+    return this.task({ kind: 'recovery.disable' }, operationId);
   }
 
-  moveLibraryKey(destinationLibraryKey: string) {
-    return this.task({ kind: 'key-reset.move', destinationLibraryKey });
+  moveLibraryKey(destinationLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'key-reset.move', destinationLibraryKey }, operationId);
   }
 
-  settleLibraryKey(destinationLibraryKey: string) {
-    return this.task({ kind: 'key-reset.settle', destinationLibraryKey });
+  settleLibraryKey(destinationLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'key-reset.settle', destinationLibraryKey }, operationId);
   }
 
-  adoptLibraryKey(destinationLibraryKey: string) {
-    return this.task({ kind: 'key-reset.adopt', destinationLibraryKey });
+  adoptLibraryKey(destinationLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'key-reset.adopt', destinationLibraryKey }, operationId);
   }
 
-  mergeLocalLibrary(sourceLibraryKey: string) {
-    return this.task({ kind: 'local-library.merge', sourceLibraryKey });
+  mergeLocalLibrary(sourceLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'local-library.merge', sourceLibraryKey }, operationId);
   }
 
   sealPairingHandover(handoverKey: string, host: string, linkKey?: string) {

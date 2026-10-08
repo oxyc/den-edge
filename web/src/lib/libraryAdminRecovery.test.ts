@@ -7,6 +7,8 @@ const recovery = vi.hoisted(() => ({
   begin: vi.fn(),
   confirm: vi.fn(),
   done: vi.fn(),
+  resumeMaking: vi.fn(() => vi.fn()),
+  reconcile: vi.fn(async () => null),
 }));
 
 vi.mock('./recovery', () => ({
@@ -14,7 +16,8 @@ vi.mock('./recovery', () => ({
   begin: recovery.begin,
   confirm: recovery.confirm,
   makingWaits: vi.fn(() => false),
-  reconcile: vi.fn(async () => null),
+  reconcile: recovery.reconcile,
+  resumeMaking: recovery.resumeMaking,
   seal: vi.fn(),
   turnOff: vi.fn(async () => true),
 }));
@@ -63,18 +66,26 @@ it('restores a begun recovery transaction after authority replacement', async ()
   };
   const first = new LibraryAdminAuthority(log, clock, options);
   await expect(
-    first.task({
-      kind: 'recovery.begin',
-      locator: 'a'.repeat(32),
-      sealed: 'sealed',
-      createdAt: 10,
-    }),
+    first.task(
+      {
+        kind: 'recovery.begin',
+        locator: 'a'.repeat(32),
+        sealed: 'sealed',
+        createdAt: 10,
+      },
+      'begin-1',
+    ),
   ).resolves.toMatchObject({ result: { outcome: 'begun' } });
   first.close();
 
   const replacement = new LibraryAdminAuthority(log, clock, options);
+  await replacement.recoveryView();
+  expect(recovery.resumeMaking).toHaveBeenCalledWith(expect.anything(), 'a'.repeat(32));
+  expect(recovery.resumeMaking.mock.invocationCallOrder[0]).toBeLessThan(
+    recovery.reconcile.mock.invocationCallOrder[0]!,
+  );
   await expect(
-    replacement.task({ kind: 'recovery.confirm', locator: 'a'.repeat(32) }),
+    replacement.task({ kind: 'recovery.confirm', locator: 'a'.repeat(32) }, 'confirm-1'),
   ).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
   expect(recovery.begin).toHaveBeenCalledOnce();
   expect(recovery.confirm).toHaveBeenCalledWith(
@@ -82,4 +93,11 @@ it('restores a begun recovery transaction after authority replacement', async ()
     expect.objectContaining({ locator: 'a'.repeat(32), sealed: 'sealed', createdAt: 10 }),
     new Set(['previous-live']),
   );
+
+  replacement.close();
+  const afterLostReply = new LibraryAdminAuthority(log, clock, options);
+  await expect(
+    afterLostReply.task({ kind: 'recovery.confirm', locator: 'a'.repeat(32) }, 'confirm-1'),
+  ).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
+  expect(recovery.confirm).toHaveBeenCalledOnce();
 });

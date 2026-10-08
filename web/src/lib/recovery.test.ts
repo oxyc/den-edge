@@ -308,6 +308,8 @@ describe('making a code (§6)', () => {
       expect(atPost).toBe('pending');
       if (!begun.ok) return;
       expect(await confirm(web, prepared, begun.baseLive)).toEqual({ ok: true });
+      // A lost reply may make the service retry after the live compare-and-set already committed.
+      expect(await confirm(web, prepared, begun.baseLive)).toEqual({ ok: true });
       begun.done();
       expect(readRecovery(edge.row).get(prepared.locator)?.state).toBe('live');
       expect(edge.entries.has(prepared.locator)).toBe(true);
