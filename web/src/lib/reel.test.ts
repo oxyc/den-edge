@@ -26,6 +26,8 @@ const ROUTES: Routes = {
   ],
 };
 
+const allowLan = async () => true;
+
 /** reel, answering through den-edge's relay: it names its play URLs by the LAN address it was asked at. */
 const answering = (body: unknown, status = 200, at = '/reel/cfg'): typeof fetch =>
   (async (input) => {
@@ -519,9 +521,9 @@ describe('fetchSources', () => {
     const activationGate = new Promise<void>((resolve) => {
       openActivation = resolve;
     });
-    let allowLan!: () => void;
+    let grantLanPermission!: () => void;
     const permissionGate = new Promise<{ state: 'granted' }>((resolve) => {
-      allowLan = () => resolve({ state: 'granted' });
+      grantLanPermission = () => resolve({ state: 'granted' });
     });
     const permission = vi.fn(() => permissionGate);
     vi.stubGlobal('navigator', { permissions: { query: permission } });
@@ -542,7 +544,13 @@ describe('fetchSources', () => {
         }),
       );
     };
-    const options = { surface: 'audible', player: 'native', fetchImpl, relay: false } as const;
+    const options = {
+      surface: 'audible',
+      player: 'native',
+      fetchImpl,
+      relay: false,
+      probeLocalMedia: allowLan,
+    } as const;
     const stopped = new AbortController();
     const first = fetchSources(SOURCES, { ...options, signal: stopped.signal });
     const second = fetchSources(SOURCES, options);
@@ -565,7 +573,7 @@ describe('fetchSources', () => {
       'each consumer applies its own current browser permission',
     ).toHaveBeenCalledTimes(2);
 
-    allowLan();
+    grantLanPermission();
     const expected = [`https://lan.media.example:8449${media}`, `https://media.example${media}`];
     await expect(second).resolves.toMatchObject({
       sources: expected.map((url) => ({ url })),
@@ -586,6 +594,7 @@ describe('fetchSources', () => {
         player: 'native',
         fetchImpl,
         relay: false,
+        probeLocalMedia: allowLan,
       });
     const responder =
       (activations: { count: number }, failFirst = false): typeof fetch =>
@@ -800,6 +809,7 @@ describe('fetchSources', () => {
         player: 'native',
         fetchImpl: answering(activated('https://lan.media.example:8449')),
         relay: true,
+        probeLocalMedia: allowLan,
       });
       expect(order(got?.sources)).toEqual([
         `lan https://lan.media.example:8449${media}`,
@@ -807,6 +817,137 @@ describe('fetchSources', () => {
         relayed,
         'https://rr3---sn-x.googlevideo.com/file',
       ]);
+    });
+
+    it('admits LAN only after a media proof of the exact signed route', async () => {
+      vi.stubGlobal('navigator', {
+        permissions: { query: async () => ({ state: 'granted' }) },
+      });
+      let probes = 0;
+      const fetchImpl = answering(activated('https://lan.media.example:8449'));
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+        probeLocalMedia: async (url) => {
+          probes += 1;
+          expect(url).toBe(`https://lan.media.example:8449${media}`);
+          return true;
+        },
+      });
+      expect(probes).toBe(1);
+      expect(order(got?.sources)).toEqual([
+        `lan https://lan.media.example:8449${media}`,
+        `public https://media.example${media}`,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('fails closed and remembers when the concrete LAN media request is refused', async () => {
+      vi.stubGlobal('navigator', {
+        permissions: { query: async () => ({ state: 'granted' }) },
+      });
+      const alternate = 'C'.repeat(40);
+      const probes = new Map<string, number>();
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const source = String(input).match(/\/sources\/([^/.]+)\.json/)?.[1];
+        if (source)
+          return new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${source}?s=${tag}` }] }),
+          );
+        const asked = JSON.parse(String(init?.body)).media as string;
+        return new Response(
+          JSON.stringify({
+            publicBase: 'https://media.example',
+            lanBase: 'https://lan.media.example:8449',
+            media: `https://media.example${asked}`,
+          }),
+        );
+      };
+      const options = {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+        probeLocalMedia: async (url: string) => {
+          probes.set(url, (probes.get(url) ?? 0) + 1);
+          return url.includes(alternate);
+        },
+      } as const;
+      const ask = (source: string) =>
+        fetchSources(`/reel/cfg/sources/${source}.json?s=${tag}`, options);
+      expect((await ask(blob))?.sources.map((source) => source.direct)).toEqual(['public']);
+      expect((await ask(alternate))?.sources.map((source) => source.direct)).toEqual([
+        'lan',
+        'public',
+      ]);
+      expect((await ask(blob))?.sources.map((source) => source.direct)).toEqual(['public']);
+      expect(probes.get(`https://lan.media.example:8449${media}`)).toBe(1);
+      expect(probes.get(`https://lan.media.example:8449/reel/m/s/${alternate}?s=${tag}`)).toBe(1);
+    });
+
+    it('coalesces LAN proof and lets one aborted consumer leave without poisoning the other', async () => {
+      vi.stubGlobal('navigator', {
+        permissions: { query: async () => ({ state: 'granted' }) },
+      });
+      let probes = 0;
+      let pass!: () => void;
+      const gate = new Promise<void>((resolve) => (pass = resolve));
+      const fetchImpl = answering(activated('https://lan.media.example:8449'));
+      const options = {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+        probeLocalMedia: async () => {
+          probes += 1;
+          await gate;
+          return true;
+        },
+      } as const;
+      const stopped = new AbortController();
+      const first = fetchSources(SOURCES, { ...options, signal: stopped.signal });
+      const second = fetchSources(SOURCES, options);
+      await vi.waitFor(() => expect(probes).toBe(1));
+      stopped.abort();
+      await expect(first).resolves.toBeNull();
+      pass();
+      expect((await second)?.sources.map((source) => source.direct)).toEqual([
+        'lan',
+        'public',
+        undefined,
+      ]);
+      expect(probes).toBe(1);
+    });
+
+    it('re-proves a LAN origin after the proof cache expires', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.stubGlobal('navigator', {
+          permissions: { query: async () => ({ state: 'granted' }) },
+        });
+        let probes = 0;
+        const fetchImpl = answering(activated('https://lan.media.example:8449'));
+        const options = {
+          surface: 'audible',
+          player: 'native',
+          fetchImpl,
+          relay: false,
+          probeLocalMedia: async () => {
+            probes += 1;
+            return true;
+          },
+        } as const;
+        await fetchSources(SOURCES, options);
+        await fetchSources(SOURCES, options);
+        expect(probes).toBe(1);
+        await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+        await fetchSources(SOURCES, options);
+        expect(probes).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it.each(['prompt', 'denied'] as const)(
@@ -874,6 +1015,7 @@ describe('fetchSources', () => {
         player: 'native',
         fetchImpl,
         relay: false,
+        probeLocalMedia: allowLan,
       });
       const publicCopy = first?.sources.find((source) => source.direct === 'public');
       expect(publicCopy).toBeDefined();
@@ -884,6 +1026,7 @@ describe('fetchSources', () => {
         player: 'native',
         fetchImpl,
         relay: false,
+        probeLocalMedia: allowLan,
       });
       expect(activations).toBe(1);
       expect(next?.sources[0]).toMatchObject({
@@ -985,6 +1128,7 @@ describe('fetchSources', () => {
         player: 'native',
         fetchImpl: playlist,
         relay: false,
+        probeLocalMedia: allowLan,
       });
       expect(order(element?.sources)).toEqual([
         `lan https://lan.media.example:8449${media}`,
