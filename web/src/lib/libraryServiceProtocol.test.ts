@@ -129,6 +129,16 @@ describe('library service client protocol', () => {
         version,
       }),
     ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-task',
+        operationId: 'operation-task',
+        result: { kind: 'local-library.merge', outcome: 'absent' },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
   });
 
   it('accepts the complete semantic preferences patch', () => {

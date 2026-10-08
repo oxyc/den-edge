@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
@@ -14,7 +14,15 @@
     type Link,
     type PendingReset,
   } from './lib/links.svelte';
-  import { dropLocalLibrary, followLocalLibraryKey, localLibraryKey } from './lib/localLibrary';
+  import {
+    dropLocalLibrary,
+    followLocalLibraryKey,
+    keptLocalLibraryKey,
+    localLibraryKey,
+    pendingLocalLibraryMerges,
+    rememberLocalLibraryMerge,
+    settleLocalLibraryMerge,
+  } from './lib/localLibrary';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
@@ -74,25 +82,50 @@
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
   let pendingReset = $state.raw<PendingReset | null>(untrack(() => readPendingReset()));
+  let resetInFlight = $state(false);
   let convergence = 0;
   let convergenceWork = Promise.resolve();
+  let convergenceRetry: ReturnType<typeof setTimeout> | undefined;
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+    clearTimeout(convergenceRetry);
+  });
 
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
   async function joinLibrary(key: string): Promise<boolean> {
-    const source = session;
-    if (!source.local || !source.model || !libraryIdentity) return false;
+    let sourceKey = libraryIdentity;
+    if (!session.local || !session.model || !sourceKey) return false;
     const destination = open(key, false);
     try {
       await destination.model!.ready;
-      const { result } = await destination.model!.mergeLocalLibrary(libraryIdentity);
-      if (result.kind !== 'local-library.merge' || result.outcome !== 'merged') {
-        destination.close();
-        return false;
+      // A first-tab winner can change again while a TV join is copying it. Follow that pointer until the exact source
+      // just copied can be removed; every earlier source is already safe in the destination.
+      for (let round = 0; round < 8; round++) {
+        const { result } = await destination.model!.mergeLocalLibrary(sourceKey);
+        if (
+          result.kind !== 'local-library.merge' ||
+          (result.outcome !== 'merged' && result.outcome !== 'absent') ||
+          !alive
+        ) {
+          destination.close();
+          return false;
+        }
+        settleLocalLibraryMerge(sourceKey);
+        if (await dropLocalLibrary(sourceKey)) {
+          // Cancel a queued convergence open before publishing the linked destination.
+          convergence++;
+          clearTimeout(convergenceRetry);
+          libraryIdentity = key;
+          session = destination;
+          return true;
+        }
+        const winner = keptLocalLibraryKey();
+        if (!winner || winner === sourceKey) break;
+        sourceKey = winner;
       }
-      await dropLocalLibrary();
-      libraryIdentity = key;
-      session = destination;
-      return true;
+      destination.close();
+      return false;
     } catch {
       destination.close();
       return false;
@@ -105,7 +138,20 @@
     return true;
   }
 
-  async function finishReset(
+  let resetCompletion: Promise<KeyResetOutcome | null> | undefined;
+  function finishReset(
+    pending: PendingReset,
+    outcome: KeyResetOutcome,
+  ): Promise<KeyResetOutcome | null> {
+    if (resetCompletion) return resetCompletion;
+    const completing = finishResetOnce(pending, outcome).finally(() => {
+      if (resetCompletion === completing) resetCompletion = undefined;
+    });
+    resetCompletion = completing;
+    return completing;
+  }
+
+  async function finishResetOnce(
     pending: PendingReset,
     outcome: KeyResetOutcome,
   ): Promise<KeyResetOutcome | null> {
@@ -117,6 +163,15 @@
         destination.close();
         // The reset did move remotely, but the durable marker must survive until this browser proves it can reopen
         // the destination. Retrying settlement is safe and avoids stranding the link on a key it cannot open.
+        return 'unknown';
+      }
+      if (
+        !alive ||
+        pendingReset?.from !== pending.from ||
+        pendingReset.to !== pending.to ||
+        libraryIdentity !== pending.from
+      ) {
+        destination.close();
         return 'unknown';
       }
       links.rekey(pending.from, pending.to);
@@ -135,9 +190,11 @@
   }
 
   async function resetLibraryKey(): Promise<KeyResetOutcome | null> {
+    if (resetInFlight) return 'unavailable';
     const model = session.model;
     const from = libraryIdentity;
     if (!model || !from || session.local) return 'unavailable';
+    resetInFlight = true;
     try {
       const existing = pendingReset;
       if (existing) {
@@ -161,6 +218,8 @@
         : 'unavailable';
     } catch {
       return 'unknown';
+    } finally {
+      resetInFlight = false;
     }
   }
 
@@ -207,7 +266,8 @@
   $effect(() => {
     const pending = pendingReset;
     const model = session.model;
-    if (!pending || !model || pending.from !== libraryIdentity || pending.held) return;
+    if (!pending || !model || pending.from !== libraryIdentity || pending.held || resetInFlight)
+      return;
     let current = true;
     void model.ready
       .then(() => model.settleLibraryKey(pending.to))
@@ -253,29 +313,68 @@
   });
 
   // Concurrent first tabs can create different local keys. Open the winner, merge the losing library through the
-  // winner's authority, then publish the new session in one assignment. A newer storage event cancels stale work.
+  // winner's authority, then publish the new session in one assignment. Losing keys are recorded before any await:
+  // after a crash or transient merge refusal, the next winner session retries them instead of silently orphaning rows.
   $effect(() => {
     if (!ownKey || link) return;
-    return followLocalLibraryKey(ownKey, (nextKey, previousKey) => {
+    let current = true;
+    const retry = () => {
+      clearTimeout(convergenceRetry);
+      convergenceRetry = setTimeout(() => {
+        if (!current || !alive) return;
+        const winner = localLibraryKey();
+        if (!winner) return;
+        if (session.local && libraryIdentity === winner) void drain(session, winner);
+        else converge(winner);
+      }, 2_000);
+    };
+    const drain = async (owner: LibrarySession, winner: string) => {
+      const model = owner.model;
+      if (!model) return;
+      let complete = true;
+      for (const sourceKey of pendingLocalLibraryMerges(winner)) {
+        try {
+          const { result } = await model.mergeLocalLibrary(sourceKey);
+          if (
+            result.kind === 'local-library.merge' &&
+            (result.outcome === 'merged' || result.outcome === 'absent')
+          )
+            settleLocalLibraryMerge(sourceKey);
+          else complete = false;
+        } catch {
+          complete = false;
+        }
+      }
+      if (!complete && current && alive && session === owner) retry();
+    };
+    const converge = (nextKey: string) => {
       const run = ++convergence;
       convergenceWork = convergenceWork.then(async () => {
         const next = open(nextKey, true);
         try {
           await next.model!.ready;
-          const { result } = await next.model!.mergeLocalLibrary(previousKey);
-          if (
-            result.kind !== 'local-library.merge' ||
-            result.outcome !== 'merged' ||
-            run !== convergence
-          )
-            return next.close();
+          if (!current || !alive || run !== convergence) return next.close();
           libraryIdentity = nextKey;
           session = next;
+          await drain(next, nextKey);
         } catch {
           next.close();
+          if (current && alive && run === convergence) retry();
         }
       });
+    };
+    const stop = followLocalLibraryKey(ownKey, (nextKey, previousKey) => {
+      rememberLocalLibraryMerge(previousKey);
+      converge(nextKey);
     });
+    const initial = untrack(() => session);
+    const initialKey = untrack(() => libraryIdentity);
+    if (initialKey) void initial.model?.ready.then(() => drain(initial, initialKey), retry);
+    return () => {
+      current = false;
+      stop();
+      clearTimeout(convergenceRetry);
+    };
   });
 </script>
 

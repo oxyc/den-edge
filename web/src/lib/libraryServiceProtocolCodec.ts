@@ -1588,7 +1588,9 @@ function taskResult(value: unknown): value is LibraryTaskResult {
     case 'local-library.merge':
       return (
         exact(value, ['kind', 'outcome']) &&
-        (value.outcome === 'merged' || value.outcome === 'unavailable')
+        (value.outcome === 'merged' ||
+          value.outcome === 'absent' ||
+          value.outcome === 'unavailable')
       );
     case 'key-reset.move':
     case 'key-reset.settle':

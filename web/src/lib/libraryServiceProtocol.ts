@@ -527,7 +527,7 @@ export type LibraryTaskResult =
   | { kind: 'recovery.abandon'; outcome: 'abandoned' }
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
-  | { kind: 'local-library.merge'; outcome: 'merged' | 'unavailable' }
+  | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome };
 
 export type LibraryQuery =

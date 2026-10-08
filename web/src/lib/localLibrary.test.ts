@@ -1,5 +1,11 @@
 import { expect, it, vi } from 'vitest';
-import { followLocalLibraryKey } from './localLibrary';
+import {
+  dropLocalLibrary,
+  followLocalLibraryKey,
+  pendingLocalLibraryMerges,
+  rememberLocalLibraryMerge,
+  settleLocalLibraryMerge,
+} from './localLibrary';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import type { Stamp, TitleRow } from './wire';
@@ -36,6 +42,41 @@ function memoryVault() {
   };
   return { data, vault };
 }
+
+function memoryStorage(entries: Record<string, string> = {}): Storage {
+  const data = new Map(Object.entries(entries));
+  return {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (name) => data.get(name) ?? null,
+    key: (index) => [...data.keys()][index] ?? null,
+    removeItem: (name) => void data.delete(name),
+    setItem: (name, value) => void data.set(name, value),
+  };
+}
+
+it('never drops a newer local winner when an older merge finishes', async () => {
+  const [merged, winner] = [key(1), key(2)];
+  const storage = memoryStorage({ 'den.localLibrary': winner });
+  await expect(dropLocalLibrary(merged, storage)).resolves.toBe(false);
+  expect(storage.getItem('den.localLibrary')).toBe(winner);
+});
+
+it('keeps losing keys durable until each merge is settled', () => {
+  const [one, two, winner] = [key(1), key(2), key(3)];
+  const storage = memoryStorage();
+  expect(rememberLocalLibraryMerge(one, storage)).toBe(true);
+  expect(rememberLocalLibraryMerge(two, storage)).toBe(true);
+  expect(rememberLocalLibraryMerge(one, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([one, two]);
+  expect(settleLocalLibraryMerge(one, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([two]);
+  // A stale marker naming the winner must never ask the authority to merge a library into itself.
+  expect(rememberLocalLibraryMerge(winner, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([two]);
+});
 
 /**
  * Two tabs opened together on a first visit each made a key for this browser's own library, and the one written last

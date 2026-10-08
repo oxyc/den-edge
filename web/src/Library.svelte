@@ -230,7 +230,16 @@
   });
   $effect(() => {
     if (!model || continueView) return;
-    void model.retainedHomeContinue().then((present) => (retainedContinue = present === true));
+    let current = true;
+    void model.retainedHomeContinue().then(
+      (present) => {
+        if (current) retainedContinue = present === true;
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
   });
 
   // The Watchlist screen is the only owner of the potentially large history naming tail.
@@ -983,17 +992,20 @@
       ? { kind: 'personal', facet: type, fresh }
       : { kind: 'shared', facet: type, fresh };
     let current = true;
-    void model.retainedBillboard(scope).then((saved) => {
-      if (!current || !saved || featured.length) return;
-      if (saved.kind === 'personal') {
-        const titles = displayableKept({
-          at: saved.at,
-          titles: structuredClone(saved.titles) as RecommendedTitle[],
-        })?.titles;
-        if (titles) featured = titles;
-      } else if (saved.titles.length)
-        featured = structuredClone(saved.titles) as RecommendedTitle[];
-    });
+    void model.retainedBillboard(scope).then(
+      (saved) => {
+        if (!current || !saved || featured.length) return;
+        if (saved.kind === 'personal') {
+          const titles = displayableKept({
+            at: saved.at,
+            titles: structuredClone(saved.titles) as RecommendedTitle[],
+          })?.titles;
+          if (titles) featured = titles;
+        } else if (saved.titles.length)
+          featured = structuredClone(saved.titles) as RecommendedTitle[];
+      },
+      () => {},
+    );
     return () => {
       current = false;
     };

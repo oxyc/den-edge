@@ -411,7 +411,7 @@ export class LibraryAdminAuthority {
     const source = await LibraryLog.openExistingLocal(sourceLibraryKey, this.options.vault);
     if (!source)
       return {
-        result: { kind: 'local-library.merge', outcome: 'unavailable' },
+        result: { kind: 'local-library.merge', outcome: 'absent' },
         affected: [],
       };
     try {

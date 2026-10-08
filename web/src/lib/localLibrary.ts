@@ -5,13 +5,25 @@
 import { forgetLibrary } from './localVault';
 
 const STORAGE_KEY = 'den.localLibrary';
+const PENDING_MERGES_KEY = 'den.localLibraryMerges';
+
+/** Read the current local owner without creating one. */
+export function keptLocalLibraryKey(
+  storage: Storage | undefined = globalThis.localStorage,
+): string | null {
+  try {
+    return storage?.getItem(STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** This browser's own library key, made the first time it's asked for; null where nothing can be kept here. */
 export function localLibraryKey(
   storage: Storage | undefined = globalThis.localStorage,
 ): string | null {
   try {
-    const kept = storage?.getItem(STORAGE_KEY);
+    const kept = keptLocalLibraryKey(storage);
     if (kept) return kept;
     const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
     storage?.setItem(STORAGE_KEY, key);
@@ -22,18 +34,74 @@ export function localLibraryKey(
   }
 }
 
-/** Drop this browser's own library: its key, and what was kept under it. */
+/**
+ * Drop exactly the browser-local library that was merged. A concurrent tab may have published a newer winner while
+ * the merge was in flight; that winner must never be removed or forgotten here.
+ */
 export async function dropLocalLibrary(
+  expectedKey: string,
   storage: Storage | undefined = globalThis.localStorage,
-): Promise<void> {
-  let key: string | null = null;
+): Promise<boolean> {
   try {
-    key = storage?.getItem(STORAGE_KEY) ?? null;
+    if (storage?.getItem(STORAGE_KEY) !== expectedKey) return false;
     storage?.removeItem(STORAGE_KEY);
   } catch {
-    // Nothing more to drop than was kept.
+    return false;
   }
-  if (key) await forgetLibrary(key);
+  // The semantic merge already forgot this source. This is a best-effort cleanup for an absent/empty source.
+  await forgetLibrary(expectedKey).catch(() => {});
+  return true;
+}
+
+function pendingMerges(storage: Storage | undefined): string[] {
+  try {
+    const value = JSON.parse(storage?.getItem(PENDING_MERGES_KEY) ?? '[]') as unknown;
+    return Array.isArray(value)
+      ? value.filter(
+          (key, index): key is string => typeof key === 'string' && value.indexOf(key) === index,
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingMerges(keys: readonly string[], storage: Storage | undefined): boolean {
+  try {
+    if (keys.length) storage?.setItem(PENDING_MERGES_KEY, JSON.stringify(keys));
+    else storage?.removeItem(PENDING_MERGES_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Persist a losing first-tab key before yielding, so a crash cannot strand its rows forever. */
+export function rememberLocalLibraryMerge(
+  sourceKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  const keys = pendingMerges(storage);
+  return keys.includes(sourceKey) || writePendingMerges([...keys, sourceKey], storage);
+}
+
+/** Losing keys still owed to the current winner. The winner itself is never offered as its own source. */
+export function pendingLocalLibraryMerges(
+  winnerKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): string[] {
+  return pendingMerges(storage).filter((key) => key !== winnerKey);
+}
+
+/** Clear one source only after the authority says it was merged or was already absent. */
+export function settleLocalLibraryMerge(
+  sourceKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  return writePendingMerges(
+    pendingMerges(storage).filter((key) => key !== sourceKey),
+    storage,
+  );
 }
 
 /**

@@ -131,7 +131,7 @@ it('rejects a source key that has no browser-local library', async () => {
   await expect(
     authority.task({ kind: 'local-library.merge', sourceLibraryKey: DESTINATION }),
   ).resolves.toEqual({
-    result: { kind: 'local-library.merge', outcome: 'unavailable' },
+    result: { kind: 'local-library.merge', outcome: 'absent' },
     affected: [],
   });
   expect(existing).toHaveBeenCalledWith(DESTINATION, vault);
