@@ -392,29 +392,48 @@ function parseTransport(value: unknown, capability: string): TransportAnswer | n
 
 async function transport(
   capability: string,
+  planUrl: string,
   fetchImpl: typeof fetch,
   signal: AbortSignal,
   lookupIpv4: () => Promise<string | undefined>,
 ): Promise<TransportAttempt[]> {
+  const relay = (() => {
+    if (!planUrl.startsWith('/') || planUrl.startsWith('//')) return null;
+    const path = planUrl.split('?', 1)[0] ?? '';
+    const marker = path.lastIndexOf('/sources/');
+    if (marker <= 0) return null;
+    const mount = path.slice(0, marker);
+    return CAPABILITY.test(capability)
+      ? ({ type: 'relay', url: `${mount}/${capability}` } satisfies TransportAttempt)
+      : null;
+  })();
+  const fallback = () => (signal.aborted || !relay ? [] : [relay]);
   const ask = async (extra: { ipv4Hint?: string; noHint?: boolean } = {}) => {
-    const response = await fetchImpl('/reel/transport', {
+    if (!relay) return { kind: 'failed' as const };
+    const mount = relay.url.slice(0, relay.url.length - capability.length - 1);
+    const response = await fetchImpl(`${mount}/transport`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ capability, ...extra }),
       signal,
     });
-    if (!response.ok) return null;
-    return parseTransport(await response.json(), capability);
+    if (response.status === 403 || response.status === 410) return { kind: 'rejected' as const };
+    if (!response.ok) return { kind: 'failed' as const };
+    const answer = parseTransport(await response.json(), capability);
+    return answer ? { kind: 'answer' as const, answer } : { kind: 'failed' as const };
   };
   try {
-    let answer = await ask();
-    if (!answer?.ipv4HintWanted || signal.aborted) return answer?.attempts ?? [];
+    let result = await ask();
+    if (result.kind === 'rejected' || signal.aborted) return [];
+    if (result.kind === 'failed') return fallback();
+    if (!result.answer.ipv4HintWanted) return result.answer.attempts;
     const hint = await lookupIpv4();
     if (signal.aborted) return [];
-    answer = await ask(hint ? { ipv4Hint: hint } : { noHint: true });
-    return answer?.attempts ?? [];
+    result = await ask(hint ? { ipv4Hint: hint } : { noHint: true });
+    if (result.kind === 'rejected' || signal.aborted) return [];
+    return result.kind === 'answer' ? result.answer.attempts : fallback();
   } catch {
-    return [];
+    return fallback();
   }
 }
 
@@ -523,6 +542,7 @@ export class PlaybackCursor {
           ? [{ type: 'external', url: source.delivery.url }]
           : await transport(
               source.delivery.capability,
+              candidate.planUrl,
               this.#fetch,
               this.#controller.signal,
               this.#lookupIpv4,

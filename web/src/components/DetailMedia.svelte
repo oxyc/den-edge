@@ -598,12 +598,12 @@
     // WebKit's first painted frame while the audio/video clock is already advancing.
     if (video.videoHeight > video.videoWidth) nextTrailer();
   }
-  let advancing = false;
+  let advancing: PlaybackCursor | null = null;
   async function nextTrailer() {
-    if (!playback || !active || advancing) return;
+    if (!playback || !active) return;
     const owner = cursor;
-    if (!owner) return;
-    advancing = true;
+    if (!owner || advancing === owner) return;
+    advancing = owner;
     playing = false;
     const next = await owner.next();
     if (cursor === owner) {
@@ -611,7 +611,7 @@
       forced = false;
       failed = !next;
     }
-    advancing = false;
+    if (advancing === owner) advancing = null;
   }
   function firstFrame() {
     const player = video;

@@ -243,6 +243,48 @@ describe('PlaybackCursor', () => {
     expect(asked).toHaveLength(1);
   });
 
+  it.each([
+    ['malformed', () => new Response('{}')],
+    ['non-OK', () => new Response('{}', { status: 503 })],
+    ['thrown', () => Promise.reject(new Error('transport unavailable'))],
+  ])('keeps the exact configured relay fallback when transport is %s', async (_name, answer) => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => answer());
+    const cursor = new PlaybackCursor(
+      [
+        {
+          planUrl: '/custom/reel/sources/trailer.json?v=2',
+          plan: plan(carried()),
+        },
+      ],
+      { fetchImpl },
+    );
+
+    await expect(cursor.first()).resolves.toMatchObject({
+      attemptType: 'relay',
+      url: `/custom/reel/${CAPABILITY}`,
+    });
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/custom/reel/transport');
+  });
+
+  it.each([403, 410])('does not bypass an explicit %s capability rejection', async (status) => {
+    const cursor = new PlaybackCursor([candidate(plan(carried()))], {
+      fetchImpl: async () => new Response('{}', { status }),
+    });
+    await expect(cursor.first()).resolves.toBeNull();
+  });
+
+  it('does not publish the relay fallback after its cursor is aborted', async () => {
+    const controller = new AbortController();
+    const cursor = new PlaybackCursor([candidate(plan(carried()))], {
+      signal: controller.signal,
+      fetchImpl: async () => {
+        controller.abort();
+        throw new DOMException('stopped', 'AbortError');
+      },
+    });
+    await expect(cursor.first()).resolves.toBeNull();
+  });
+
   it('advances failed plans and candidates deterministically without mutating shared discovery', async () => {
     const lazy: TrailerCandidate = {
       planUrl: '/reel/sources/missing.json?v=2',
