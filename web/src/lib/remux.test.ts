@@ -466,7 +466,7 @@ describe('localNetworkRefused', () => {
     });
     expect(await localNetworkRefused()).toBe(true);
     expect(await mayUseLocalNetwork()).toBe(false);
-    expect(asked).toEqual([{ name: 'local-network-access' }, { name: 'local-network-access' }]);
+    expect(asked).toEqual([{ name: 'local-network' }, { name: 'local-network' }]);
     restore();
 
     restore = withPermissions({ query: async () => ({ state: 'prompt' }) });

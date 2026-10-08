@@ -58,15 +58,20 @@ export async function findRemux(
  * Chrome's Local Network Access (enforcing since 142) classifies a tailnet address (100.64.0.0/10) as local, so a page
  * on the public name can be refused before a request leaves. Refusal only: `prompt` means the question has not been
  * put, and a browser that does not know the name has no such policy — neither is something to tell a viewer about.
+ *
+ * Ask for the granular permission that guards this exact address space. Since Chrome 145 the old
+ * `local-network-access` name combines local and loopback permissions; it can say `granted` merely because localhost
+ * is allowed while a LAN media request is still refused. Browsers that do not know the granular name do not expose a
+ * trustworthy preflight signal here, so they keep the existing attempt-and-fallback behaviour.
  */
 async function localNetworkPermission(): Promise<PermissionState | null> {
   const permissions = globalThis.navigator?.permissions;
   if (!permissions) return null;
   try {
-    const status = await permissions.query({ name: 'local-network-access' as PermissionName });
+    const status = await permissions.query({ name: 'local-network' as PermissionName });
     return status.state;
   } catch {
-    // An unknown permission name throws; that browser does not enforce this either.
+    // No granular status to trust. Preserve the attempt-and-fallback behaviour used by browsers without LNA.
     return null;
   }
 }
@@ -81,7 +86,7 @@ export async function localNetworkRefused(): Promise<boolean> {
  *
  * A browser implementing Local Network Access must already have a grant: a media load cannot explain or reliably
  * surface its own permission prompt, so both `prompt` and `denied` are unusable. Browsers without the Permissions API
- * or this permission name keep their existing behaviour; they do not enforce Chrome's Local Network Access gate.
+ * or this granular permission name keep their existing attempt-and-fallback behaviour.
  */
 export async function mayUseLocalNetwork(): Promise<boolean> {
   const permission = await localNetworkPermission();
