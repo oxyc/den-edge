@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { openClockStore } from './clockStore';
+import { openClockStore, type Exclusive } from './clockStore';
 import type { Vault } from './localVault';
 import { compareStamps } from './wire';
 
@@ -23,6 +23,18 @@ function memoryVault() {
     },
   };
   return { values, vault, writes };
+}
+
+function lock(): Exclusive {
+  let held = Promise.resolve();
+  return (_name, work) => {
+    const result = held.then(work);
+    held = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
 }
 
 describe('openClockStore', () => {
@@ -55,6 +67,28 @@ describe('openClockStore', () => {
     await seen;
     expect(await third).toEqual([8_000, 3, '0123456789abcdef']);
     expect(await clock.current()).toEqual([8_000, 3, '0123456789abcdef']);
+  });
+
+  it('coordinates two tabs through one durable clock', async () => {
+    const memory = memoryVault();
+    const exclusive = lock();
+    const [one, two] = await Promise.all([
+      openClockStore(memory.vault, {
+        createDevice: () => '1111111111111111',
+        exclusive,
+      }),
+      openClockStore(memory.vault, {
+        createDevice: () => '2222222222222222',
+        exclusive,
+      }),
+    ]);
+    expect(two.device).toBe(one.device);
+
+    const [first, second] = await Promise.all([one.issue(5_000), two.issue(5_000)]);
+    expect(first).toEqual([5_000, 0, one.device]);
+    expect(second).toEqual([5_000, 1, one.device]);
+    expect(await one.current()).toEqual(second);
+    expect(await two.current()).toEqual(second);
   });
 
   it('does not expose a state that failed to become durable, and keeps the queue usable', async () => {

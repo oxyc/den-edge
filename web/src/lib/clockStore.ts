@@ -2,6 +2,7 @@
 // library, rather than in a page global, and every operation is committed before its result becomes observable.
 
 import { hex } from './crypto';
+import { exclusive as browserExclusive } from './exclusive';
 import type { Vault } from './localVault';
 import { Clock, compareStamps, type Stamp } from './wire';
 
@@ -37,7 +38,11 @@ export interface ClockStoreOptions {
   legacy?: LegacyClockBootstrap;
   /** Injectable to make device creation deterministic in tests. */
   createDevice?: () => string;
+  /** Injectable Web Locks adapter. The default gracefully runs unlocked where Web Locks are unavailable. */
+  exclusive?: Exclusive;
 }
+
+export type Exclusive = <T>(name: string, work: () => Promise<T>) => Promise<T>;
 
 const validDevice = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{16}$/.test(value);
@@ -80,8 +85,11 @@ export async function openClockStore(
   options: ClockStoreOptions = {},
 ): Promise<ClockStore> {
   const key = options.key ?? CLOCK_STORE_KEY;
-  let state = decode(await vault.get(key));
-  if (!state) {
+  const lockName = `den.clock.${key}`;
+  const exclusively = options.exclusive ?? browserExclusive;
+  let state = await exclusively(lockName, async () => {
+    const durable = decode(await vault.get(key));
+    if (durable) return durable;
     const device = validDevice(options.legacy?.device)
       ? options.legacy.device
       : (options.createDevice ?? randomDevice)();
@@ -90,12 +98,11 @@ export async function openClockStore(
     const last = validStamp(options.legacy?.last)
       ? copyStamp(options.legacy.last)
       : ([0, 0, ''] as Stamp);
-    state = { version: 1, device, last };
-    await vault.put(key, encode(state));
-  }
+    const seeded: StoredClock = { version: 1, device, last };
+    await vault.put(key, encode(seeded));
+    return seeded;
+  });
 
-  const device = state.device;
-  let last = state.last;
   let tail: Promise<void> = Promise.resolve();
   const serialized = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = tail.then(operation);
@@ -105,29 +112,48 @@ export async function openClockStore(
     );
     return result;
   };
+  const refresh = async () => {
+    const durable = decode(await vault.get(key));
+    if (durable) state = durable;
+    else await vault.put(key, encode(state));
+  };
   const commit = async (next: Stamp) => {
     const owned = copyStamp(next);
-    await vault.put(key, encode({ version: 1, device, last: owned }));
-    last = owned;
+    const updated: StoredClock = { version: 1, device: state.device, last: owned };
+    await vault.put(key, encode(updated));
+    state = updated;
   };
 
   return {
-    device,
+    get device() {
+      return state.device;
+    },
     issue(now = Date.now()) {
-      return serialized(async () => {
-        const stamp = new Clock(device, last).issue(now);
-        await commit(stamp);
-        return copyStamp(stamp);
-      });
+      return serialized(() =>
+        exclusively(lockName, async () => {
+          await refresh();
+          const stamp = new Clock(state.device, state.last).issue(now);
+          await commit(stamp);
+          return copyStamp(stamp);
+        }),
+      );
     },
     see(stamp) {
-      return serialized(async () => {
-        if (!validStamp(stamp)) throw new Error('invalid clock stamp');
-        if (compareStamps(stamp, last) > 0) await commit(stamp);
-      });
+      return serialized(() =>
+        exclusively(lockName, async () => {
+          await refresh();
+          if (!validStamp(stamp)) throw new Error('invalid clock stamp');
+          if (compareStamps(stamp, state.last) > 0) await commit(stamp);
+        }),
+      );
     },
     current() {
-      return serialized(async () => copyStamp(last));
+      return serialized(() =>
+        exclusively(lockName, async () => {
+          await refresh();
+          return copyStamp(state.last);
+        }),
+      );
     },
   };
 }
