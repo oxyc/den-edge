@@ -231,6 +231,7 @@ export class LibraryAdminAuthority {
     const previous = await this.#recoveryMake(task.locator);
     previous?.done();
     this.#recoveryMakes.delete(task.locator);
+    await this.#keepRecoveryMakes();
     const prepared: Prepared = {
       code: '',
       lastGroup: '',
