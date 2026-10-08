@@ -1329,7 +1329,8 @@ export class LibraryLog {
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
-    const saved = (await log.kept<Snapshot>(SNAPSHOT_V4)) ?? (await log.kept<Snapshot>(SNAPSHOT));
+    const saved =
+      (await log.kept<Snapshot>(SNAPSHOT_V4, true)) ?? (await log.kept<Snapshot>(SNAPSHOT, true));
     if (saved) {
       await policy;
       log.memberRegistered = saved.memberRegistered ?? false;
@@ -1462,7 +1463,7 @@ export class LibraryLog {
       if (version !== this.entriesVersion) return this.rowsInSlices(options);
       this.newestCache = {
         version,
-        at: now,
+        at: projected.at,
         stamp: projected.stamp,
         reconsiderAt: projected.reconsiderAt,
       };
@@ -1660,7 +1661,7 @@ export class LibraryLog {
   }
 
   /** What `keep` kept under `name`; undefined when nothing was, or it doesn't open under this library's key. */
-  async kept<T>(name: string): Promise<T | undefined> {
+  async kept<T>(name: string, projectRows = false): Promise<T | undefined> {
     if (!this.local) return undefined;
     try {
       const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
@@ -1670,6 +1671,7 @@ export class LibraryLog {
         name,
         bytes,
         name === SNAPSHOT || name === SNAPSHOT_V4,
+        projectRows ? Date.now() : undefined,
       );
       if (opened !== undefined) return opened;
       const plain = await crypto.subtle.decrypt(

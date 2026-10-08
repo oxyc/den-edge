@@ -29,7 +29,7 @@ it('reuses the fold returned with projected rows instead of posting the whole hi
         this.onmessage?.({
           data: {
             id: message.id,
-            value: { rows, library, stamp: [0, 0, ''], reconsiderAt: Infinity },
+            value: { rows, library, stamp: [0, 0, ''], reconsiderAt: Infinity, at: 0 },
           },
         } as MessageEvent),
       );
@@ -50,7 +50,7 @@ it('reuses the fold returned with projected rows instead of posting the whole hi
   expect(sent.map(({ op }) => op)).toEqual(['project']);
 });
 
-it('projects rows retained from a kept snapshot without cloning them back to the worker', async () => {
+it('opens and projects a kept snapshot in one reply without cloning its rows twice', async () => {
   const first = { kind: 'set', schema: 3, name: 'one', value: {} } as unknown as Row;
   const second = { kind: 'set', schema: 3, name: 'two', value: {} } as unknown as Row;
   const library: Library = {
@@ -78,10 +78,24 @@ it('projects rows retained from a kept snapshot without cloning them back to the
                   ['one', 1, first],
                 ],
               },
-              retainedId: 17,
+              projected: {
+                source: [second, first],
+                rows: [second, first],
+                library,
+                stamp: [0, 0, ''],
+                reconsiderAt: Infinity,
+                at: 123,
+              },
             }
-          : { rows: [first, second], library, stamp: [0, 0, ''], reconsiderAt: Infinity };
-      queueMicrotask(() => this.onmessage?.({ data: { id: message.id, value } } as MessageEvent));
+          : {
+              rows: [first, second],
+              library,
+              stamp: [0, 0, ''],
+              reconsiderAt: Infinity,
+              at: 123,
+            };
+      const reply = structuredClone({ id: message.id, value });
+      queueMicrotask(() => this.onmessage?.({ data: reply } as MessageEvent));
     }
 
     terminate(): void {}
@@ -95,16 +109,90 @@ it('projects rows retained from a kept snapshot without cloning them back to the
     'log.v4',
     new Uint8Array(),
     true,
+    123,
   );
-  const projected = await projectRowsInWorker([opened!.entries[1]![2], opened!.entries[0]![2]], 0);
+  const projected = await projectRowsInWorker(
+    [opened!.entries[0]![2], opened!.entries[1]![2]],
+    123,
+  );
   const folded = await applyRowsInWorker(
     { records: [], marks: [], flags: new Map(), shapes: new Map(), dismissed: new Map() },
     projected!.rows,
   );
 
-  expect(folded).toBe(library);
+  expect(folded).toStrictEqual(library);
+  expect(projected!.rows[0]).toBe(opened!.entries[0]![2]);
+  expect(projected!.rows[1]).toBe(opened!.entries[1]![2]);
+  expect(sent.map(({ op }) => op)).toEqual(['open']);
+  expect(sent[0]?.projectAt).toBe(123);
+});
+
+it('does not reuse the opened projection after the authoritative row order changes', async () => {
+  const first = { kind: 'set', schema: 3, name: 'one', value: {} } as unknown as Row;
+  const second = { kind: 'set', schema: 3, name: 'two', value: {} } as unknown as Row;
+  const library: Library = {
+    records: [],
+    marks: [],
+    flags: new Map(),
+    shapes: new Map(),
+    dismissed: new Map(),
+  };
+  const sent: Array<Record<string, unknown>> = [];
+
+  class FakeWorker {
+    onmessage?: (event: MessageEvent) => void;
+    onerror?: (event: ErrorEvent) => void;
+    onmessageerror?: () => void;
+
+    postMessage(message: Record<string, unknown>): void {
+      sent.push(message);
+      const source = message.op === 'open' ? [first, second] : (message.source as Row[]);
+      const value =
+        message.op === 'open'
+          ? {
+              opened: {
+                entries: [
+                  ['one', 1, first],
+                  ['two', 2, second],
+                ],
+              },
+              projected: {
+                source,
+                rows: source,
+                library,
+                stamp: [0, 0, ''],
+                reconsiderAt: Infinity,
+                at: 123,
+              },
+            }
+          : {
+              rows: source,
+              library,
+              stamp: [0, 0, ''],
+              reconsiderAt: Infinity,
+              at: 124,
+            };
+      const reply = structuredClone({ id: message.id, value });
+      queueMicrotask(() => this.onmessage?.({ data: reply } as MessageEvent));
+    }
+
+    terminate(): void {}
+  }
+
+  vi.stubGlobal('Worker', FakeWorker);
+  const { openKeptInWorker, projectRowsInWorker } = await import('./libraryWorkerClient');
+  const opened = await openKeptInWorker<{ entries: [string, number, Row][] }>(
+    {} as CryptoKey,
+    'log.v4',
+    new Uint8Array(),
+    true,
+    123,
+  );
+  const reordered = [opened!.entries[1]![2], opened!.entries[0]![2]];
+  const projected = await projectRowsInWorker(reordered, 124);
+
   expect(sent.map(({ op }) => op)).toEqual(['open', 'project']);
-  expect(sent[1]).not.toHaveProperty('source');
-  expect(sent[1]?.retainedId).toBe(17);
-  expect([...new Uint32Array(sent[1]?.indexes as ArrayBuffer)]).toEqual([1, 0]);
+  expect(sent[1]?.source).toEqual(reordered);
+  expect(projected?.rows).toStrictEqual(reordered);
+  expect(projected?.at).toBe(124);
 });

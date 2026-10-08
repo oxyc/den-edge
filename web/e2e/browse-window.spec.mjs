@@ -135,3 +135,46 @@ test('windowing materially reduces a large row DOM', async ({ browser }, testInf
   expect(windowed.rowNodes).toBeLessThan(control.rowNodes * 0.4);
   expect(windowed.nodes).toBeLessThan(control.nodes * 0.6);
 });
+
+test('a row entering the viewport materializes card trees in small frame batches', async ({
+  browser,
+}, testInfo) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  await page.goto(`${E2E_ORIGIN}/test/browse-window.html?below`);
+  const row = page.getByRole('region', { name: 'Windowed row' });
+  await expect(row.locator('[data-card-index]')).toHaveCount(200);
+  await expect(row.locator('.card')).toHaveCount(0);
+
+  const counts = await page.evaluate(async () => {
+    const row = document.querySelector('[aria-label="Windowed row"]');
+    const count = () => row?.querySelectorAll('.card').length ?? 0;
+    const samples = [count()];
+    scrollTo({ top: document.body.scrollHeight });
+    for (let index = 0; index < 20; index += 1) {
+      await new Promise(requestAnimationFrame);
+      samples.push(count());
+    }
+    return samples;
+  });
+  const additions = counts.slice(1).map((count, index) => count - counts[index]);
+  await testInfo.attach('browse-row-materialization.json', {
+    body: JSON.stringify({ counts, additions }, null, 2),
+    contentType: 'application/json',
+  });
+  expect(Math.max(...additions)).toBeLessThanOrEqual(2);
+  expect(counts.at(-1)).toBeGreaterThan(4);
+
+  // A keyboard target is interactive immediately even if its ordinary frame has not been reached yet.
+  await row
+    .locator('[data-card-index="18"] .proxy')
+    .evaluate((node) => node.focus({ preventScroll: true }));
+  await expect(row.locator('[data-card-index="18"] .card')).toBeFocused();
+  await page.close();
+});

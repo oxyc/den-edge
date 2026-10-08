@@ -6,10 +6,17 @@ interface ProjectedRows {
   rows: Row[];
   stamp: Stamp;
   reconsiderAt: number;
+  /** The instant at which future document stamps were judged believable. */
+  at: number;
 }
 
 interface ProjectedLibrary extends ProjectedRows {
   library: Library;
+}
+
+interface OpenedProjection extends ProjectedLibrary {
+  /** The raw rows used for this projection. They share identity with `opened.entries` in the same clone graph. */
+  source: Row[];
 }
 
 /** A projection reply carries its first fold so the next startup step does not clone the same rows back again. */
@@ -24,6 +31,7 @@ interface WorkerReply {
 interface OpenedValue<T> {
   opened: T;
   retainedId?: number;
+  projected?: OpenedProjection;
 }
 
 interface RetainedRow {
@@ -39,9 +47,11 @@ type Waiting = {
 let worker: Worker | undefined;
 let nextId = 0;
 const waiting = new Map<number, Waiting>();
-// Structured cloning gives the page different objects than the Worker retained. Their identity still tells us
-// whether LibraryLog is projecting the exact opened rows or whether journal work replaced any of them.
+// Structured cloning preserves shared identity inside one reply graph. It tells us whether LibraryLog is projecting
+// exactly the opened rows (and may reuse that reply's projection) or journal work replaced any of them. The retained
+// map is the fallback for Workers that opened successfully but could not complete the combined projection.
 const retainedRows = new WeakMap<object, RetainedRow>();
+const openedProjections = new WeakMap<object, { projection: OpenedProjection; index: number }>();
 
 function failed(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -97,22 +107,30 @@ function ask<T>(
   });
 }
 
-/** Open one encrypted vault value away from the page thread. The non-extractable key is only cloned, never exported. */
+/**
+ * Open one encrypted vault value away from the page thread. The non-extractable key is only cloned, never exported.
+ * A `projectAt` snapshot returns its first row projection in the same reply graph when possible.
+ */
 export async function openKeptInWorker<T>(
   key: CryptoKey,
   name: string,
   bytes: Uint8Array,
   retainRows = false,
+  projectAt?: number,
 ): Promise<T | undefined> {
   // IndexedDB returns an owned clone, but Vault's test and alternate implementations need not. Transfer a copy so
   // moving the buffer into the Worker cannot detach the value they retain.
   const copy = bytes.slice();
-  const request = ask<OpenedValue<T>>({ op: 'open', key, name, bytes: copy.buffer, retainRows }, [
-    copy.buffer,
-  ]);
+  const request = ask<OpenedValue<T>>(
+    { op: 'open', key, name, bytes: copy.buffer, retainRows, projectAt },
+    [copy.buffer],
+  );
   if (!request) return undefined;
   try {
-    const { opened, retainedId } = await request;
+    const { opened, retainedId, projected } = await request;
+    projected?.source.forEach((row, index) =>
+      openedProjections.set(row, { projection: projected, index }),
+    );
     if (retainedId !== undefined && opened && typeof opened === 'object') {
       const entries = (opened as { entries?: unknown }).entries;
       if (Array.isArray(entries))
@@ -125,6 +143,20 @@ export async function openKeptInWorker<T>(
   } catch {
     return undefined;
   }
+}
+
+function openedProjection(source: Row[]): OpenedProjection | undefined {
+  const first = source[0];
+  if (!first) return undefined;
+  const held = openedProjections.get(first);
+  if (
+    !held ||
+    held.index !== 0 ||
+    held.projection.source.length !== source.length ||
+    held.projection.source.some((row, index) => row !== source[index])
+  )
+    return undefined;
+  return held.projection;
 }
 
 function retainedProjection(
@@ -156,6 +188,11 @@ export async function projectRowsInWorker(
   now: number,
 ): Promise<ProjectedRows | undefined> {
   try {
+    const opened = openedProjection(source);
+    if (opened) {
+      projectedLibraries.set(opened.rows, opened.library);
+      return opened;
+    }
     const retained = retainedProjection(source);
     const message =
       'retainedId' in retained

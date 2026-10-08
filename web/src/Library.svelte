@@ -297,10 +297,23 @@
     if (active && route.page === 'watchlist' && naming) void naming.drain();
   });
 
-  /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */
-  const applied = $derived.by(() => {
+  /** The log's rows and fold, only when the log changes: names arrive more often and are laid over it below. */
+  const projection = $derived.by(() => {
     void version;
-    return session.libraryProjection()?.library ?? null;
+    return session.libraryProjection();
+  });
+  const applied = $derived(projection?.library ?? null);
+  /** One pass shared by recommendation weighting, personal seeds and owned-title filtering. */
+  const personalTitleRows = $derived.by(() => {
+    const titleRows: TitleRow[] = [];
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Published only once as part of this derived snapshot.
+    const reactions = new Map<string, TitleRow['reaction']['value']>();
+    for (const row of projection?.rows ?? []) {
+      if (row.kind !== 'rec' || row.deleted.value) continue;
+      titleRows.push(row);
+      reactions.set(titleKey(row.title), row.reaction.value);
+    }
+    return { titleRows, reactions, selected: personalSeedRows(titleRows) };
   });
   const library = $derived(applied && session.displayedLibrary(applied));
   /**
@@ -956,13 +969,8 @@
    * so it counts for more than either, and a dislike counts against. Ids and weights need no names.
    */
   const weighted = $derived.by(() => {
-    void version;
     // Reactions live on the log's rows; the records carry only status. A title is read by both.
-    const reactions = new Map(
-      (log?.rows() ?? [])
-        .filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value)
-        .map((r) => [titleKey(r.title), r.reaction.value]),
-    );
+    const reactions = personalTitleRows.reactions;
     const weightOf = (status: string, reaction: string | null | undefined) => {
       // Turning something down is the whole verdict; that they sat through it doesn't soften it.
       if (reaction === 'dislike') return -1.5;
@@ -987,15 +995,8 @@
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
-  const selectedSeeds = $derived.by(() => {
-    void version;
-    const titleRows = (log?.rows() ?? []).filter(
-      (r): r is TitleRow => r.kind === 'rec' && !r.deleted.value,
-    );
-    return { selected: personalSeedRows(titleRows), titleRows };
-  });
   const seeds = $derived.by(() => {
-    const { selected, titleRows } = selectedSeeds;
+    const { selected, titleRows } = personalTitleRows;
     const namedSeeds = (refs: TitleRow[]) =>
       refs.flatMap((r) => session.displayTitle(r.title) ?? []);
     return {
