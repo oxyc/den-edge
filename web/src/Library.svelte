@@ -32,7 +32,7 @@
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { isHidden } from './lib/prefs';
-  import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
+  import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
@@ -662,7 +662,7 @@
    * visible. Atlas gives rows an IMDb id of their own, so nothing has to be looked up first: the tap
    * is enough to start it, and it runs while the page is still being built.
    *
-   * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerCandidates`
+   * Fire and forget. It is a warm-up; reel caches the answer either way, and `prepareTrailers`
    * reports a failure as an empty list rather than throwing.
    */
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
@@ -676,30 +676,14 @@
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
-    void trailerCandidates(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
-      prewarm: 'direct',
-      // Combined discovery + source preparation saves the dependent `/meta` -> `/sources` RTT. A
-      // pre-prepare Reel falls back inside `trailerCandidates`; the detail page then asks the named
-      // `/sources` URL exactly as it did before.
-      sourceAsk: {
-        surface: 'audible',
-        player: nativeHls() ? 'native' : 'hls.js',
-        // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
-        // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
-        // and it does so for every title glanced at across rows, search results and filmographies. The
-        // resolve still starts, which is the expensive half and the half that actually helps.
-        intent: 'warm',
-      },
-    }).then((found) => {
-      const first = found[0];
-      if (!first?.sources || Object.hasOwn(first, 'prepared')) return;
-      // A Reel version predating `/prepare`: preserve its two-request warm path during a mixed
-      // rollout. Once the server upgrades, the combined response above makes this branch disappear.
-      void fetchSources(first.sources, {
-        surface: 'audible',
-        player: nativeHls() ? 'native' : 'hls.js',
-        intent: 'warm',
-      });
+    void prepareTrailers(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
+      surface: 'audible',
+      player: nativeHls() ? 'native' : 'hls.js',
+      // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
+      // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
+      // and it does so for every title glanced at across rows, search results and filmographies. The
+      // resolve still starts, which is the expensive half and the half that actually helps.
+      intent: 'warm',
     });
   }
 
