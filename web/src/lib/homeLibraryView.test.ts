@@ -1,12 +1,7 @@
 import { expect, it } from 'vitest';
-import { standings, titleKey, type Library } from './library';
-import {
-  digestHomeLibraryView,
-  homeLibraryViewFromCurrent,
-  selectHomeLibraryView,
-} from './homeLibraryView';
-import { personalSeedRows } from './libraryNaming';
-import type { Row, TitleRow } from './wire';
+import type { Library } from './library';
+import { digestHomeLibraryView, selectHomeLibraryView } from './homeLibraryView';
+import type { TitleRow } from './wire';
 
 const titleRow = (
   id: number,
@@ -56,61 +51,15 @@ function foldFor(rows: TitleRow[]): Library {
   };
 }
 
-it('matches the fixed inputs Home currently derives on the page thread', () => {
-  const rows: Row[] = [
+it('selects the fixed Home view from rows once', () => {
+  const rows: TitleRow[] = [
     titleRow(1, 'watched', 'love', 10),
     titleRow(2, 'watchlist', null, 20),
     titleRow(3, 'inProgress', 'dislike', 30),
     titleRow(4, 'watched', null, 40, true),
   ];
-  const library = foldFor(rows as TitleRow[]);
-  const titleRows = rows.filter((row): row is TitleRow => row.kind === 'rec' && !row.deleted.value);
-  const reactions = new Map(titleRows.map((row) => [titleKey(row.title), row.reaction.value]));
-  const selected = personalSeedRows(titleRows);
-  const watched = new Set(
-    library.records
-      .filter((record) => !record.deleted && record.status === 'watched')
-      .map((record) => titleKey(record.title)),
-  );
-  const weighted = library.records.flatMap((record) => {
-    if (record.deleted) return [];
-    const reaction = reactions.get(titleKey(record.title));
-    const weight =
-      reaction === 'dislike'
-        ? -1.5
-        : (record.status === 'watched' || record.status === 'inProgress'
-            ? 1
-            : record.status === 'watchlist'
-              ? 0.6
-              : 0) + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
-    return weight === 0
-      ? []
-      : [
-          {
-            ref: { type: record.title.type, id: record.title.id },
-            weight,
-            at: Math.max(record.progressAt, record.addedAt),
-          },
-        ];
-  });
-
+  const library = foldFor(rows);
   const worker = selectHomeLibraryView(library, rows);
-  const current = homeLibraryViewFromCurrent({
-    library,
-    rows,
-    titleRows,
-    reactions,
-    selected,
-    watched,
-    watchlist: library.records
-      .filter((record) => !record.deleted && record.status === 'watchlist')
-      .sort((a, b) => b.addedAt - a.addedAt)
-      .map((record) => titleKey(record.title)),
-    standings: standings(library),
-    weighted,
-  });
-
-  expect(worker).toEqual(current);
   expect(worker).toMatchObject({
     owned: ['movie:1', 'tv:2', 'movie:3'],
     watched: ['movie:1'],
@@ -128,7 +77,7 @@ it('matches the fixed inputs Home currently derives on the page thread', () => {
     ],
     seeds: { watched: ['movie:1'], watchlisted: ['tv:2'] },
   });
-  expect(digestHomeLibraryView(worker)).toEqual(digestHomeLibraryView(current));
+  expect(digestHomeLibraryView(worker)).toMatchObject({ hash: expect.any(String) });
   expect(worker).not.toHaveProperty('continue');
 });
 

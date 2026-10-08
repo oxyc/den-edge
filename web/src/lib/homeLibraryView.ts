@@ -37,22 +37,6 @@ export interface HomeLibraryViewProof {
   digest: { hash: string; bytes: number };
 }
 
-export interface CurrentHomeLibraryInputs {
-  library: Library;
-  rows: Row[];
-  titleRows: TitleRow[];
-  reactions: ReadonlyMap<string, TitleRow['reaction']['value']>;
-  selected: { watched: TitleRow[]; watchlisted: TitleRow[] };
-  watched: ReadonlySet<string>;
-  watchlist: string[];
-  standings: ReadonlyMap<string, Standing>;
-  weighted: Array<{
-    ref: { type: 'movie' | 'tv'; id: number };
-    weight: number;
-    at: number;
-  }>;
-}
-
 function activeTitleRows(rows: Row[]): TitleRow[] {
   return rows.filter((row): row is TitleRow => row.kind === 'rec' && !row.deleted.value);
 }
@@ -216,26 +200,6 @@ export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibrar
     requiredShapeRefs: shelfRefs.filter((key) => key.startsWith('tv:') && shaped.has(key)),
     continueLibrary: compactContinueLibrary(library),
     downloads: readDownloads(rows),
-  };
-}
-
-/** Normalize the values Home currently derives on the page thread for comparison with the Worker proof. */
-export function homeLibraryViewFromCurrent(inputs: CurrentHomeLibraryInputs): HomeLibraryView {
-  const selected = selectHomeLibraryView(inputs.library, inputs.rows);
-  return {
-    owned: [...new Set(inputs.titleRows.map((row) => titleKey(row.title)))],
-    watched: [...inputs.watched],
-    watchlist: inputs.watchlist,
-    standings: [...inputs.standings],
-    weighted: inputs.weighted.map(({ ref, weight, at }) => [titleKey(ref), weight, at]),
-    seeds: {
-      watched: inputs.selected.watched.map((row) => titleKey(row.title)),
-      watchlisted: inputs.selected.watchlisted.map((row) => titleKey(row.title)),
-    },
-    shelfRefs: selected.shelfRefs,
-    requiredShapeRefs: selected.requiredShapeRefs,
-    continueLibrary: selected.continueLibrary,
-    downloads: selected.downloads,
   };
 }
 

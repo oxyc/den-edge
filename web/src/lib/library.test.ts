@@ -502,8 +502,8 @@ describe("the TV's rows", () => {
    * symptom, where the same state drew the finished episode at 100% (oxyc/den#32).
    *
    * No viewer meets either state. Home's row and the Watchlist page both wait for `shelvesReady`, set only
-   * after the naming pass has fetched a shape for every marked series — `shelfTitleRefs` passes the marks
-   * wholesale, and a `tv` ref with no shape is deliberately not skipped.
+   * after the naming pass has fetched every `needsShapes` ref supplied by the Continue view, and a `tv` ref with no
+   * shape is deliberately not skipped.
    *
    * Both halves are pinned because that safety is load order rather than logic, and load order is not
    * something a test can watch. A surface drawing this row before the shapes arrive would lose finished-mark

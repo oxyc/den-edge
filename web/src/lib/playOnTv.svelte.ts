@@ -2,9 +2,9 @@
 // 120 s/45 s ladder of outcomes; the owner asked for something simpler instead: one toast, updated in place —
 // "Sent to <TV>…", a hint if the TV hasn't opened Den after a bit, and "Playing on <TV>" once it clearly has.
 //
-// "Clearly has" is the library pull the page already does (`LibrarySession.start`, `LIVE_PULL_MS` while
-// `session.live`): a fresh position on the sent title, written after the send, that this browser did not write
-// itself. The record log drops which device wrote a position once it is merged (`library.ts`'s `applyLog`), so
+// "Clearly has" is a fresh position delivered by the library service on the sent title, written after the send, that
+// this browser did not write itself. The record log drops which device wrote a position once it is merged
+// (`library.ts`'s `applyLog`), so
 // this does not try to match the TV's exact device id the way the fuller spec did — it reads "fresh and after we
 // sent it" as "the TV", which is the whole of what a Play press is waiting to see.
 
