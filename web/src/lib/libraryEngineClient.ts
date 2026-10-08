@@ -161,7 +161,16 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
           if (!header) throw new Error('library engine hydration omitted its header');
           if (!projection) throw new Error('library engine hydration omitted its projection');
           const LibraryLog = await logClass;
-          const log = await LibraryLog.importSnapshot(key, { header, entries });
+          const log = await LibraryLog.importSnapshot(key, {
+            header,
+            entries,
+            projected: {
+              rows: projection.rows,
+              stamp: payload.stamp,
+              reconsiderAt: payload.reconsiderAt,
+              at: payload.at,
+            },
+          });
           return log ? { log, projection } : null;
         } catch {
           return null;

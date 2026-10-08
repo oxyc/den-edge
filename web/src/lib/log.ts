@@ -238,10 +238,21 @@ export interface LibraryLogSnapshotHeader {
   unreported: boolean;
 }
 
+/** Exact row and newest-stamp projection prepared by the owner that exported a live snapshot. */
+export interface LibraryLogSnapshotProjection {
+  rows: Row[];
+  stamp: Stamp;
+  reconsiderAt: number;
+  /** The instant at which future document stamps were judged believable. */
+  at: number;
+}
+
 /** Exact, clone-safe state of an online `LibraryLog`. */
 export interface LibraryLogSnapshot {
   header: LibraryLogSnapshotHeader;
   entries: LibraryLogSnapshotEntry[];
+  /** Present only on a live Worker handoff; ordinary persisted/exported snapshots do not duplicate projections. */
+  projected?: LibraryLogSnapshotProjection;
 }
 
 /** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
@@ -1799,6 +1810,16 @@ export class LibraryLog {
     if (!valid) {
       log.runtimeChannel?.close();
       return null;
+    }
+    if (snapshot.projected) {
+      const version = log.entriesVersion;
+      log.rowsCache = { version, rows: snapshot.projected.rows };
+      log.newestCache = {
+        version,
+        at: snapshot.projected.at,
+        stamp: snapshot.projected.stamp,
+        reconsiderAt: snapshot.projected.reconsiderAt,
+      };
     }
     if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
     return log;
