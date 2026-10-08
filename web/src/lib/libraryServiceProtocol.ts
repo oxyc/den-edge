@@ -26,7 +26,7 @@ export interface EpisodeRef extends TitleRef {
 /** A monotonic version within one service instance and one durable library generation. */
 export interface LibraryVersion {
   instance: string;
-  generation: number;
+  generation: string | null;
   revision: number;
 }
 
@@ -105,6 +105,14 @@ export interface TitleView {
   reaction: Reaction | null;
   standing: Standing | null;
   progress: { fraction: number; seconds?: number; updatedAt?: number } | null;
+  episodes: Array<{
+    season: number;
+    episode: number;
+    watched: boolean;
+    fraction: number;
+    seconds?: number;
+    updatedAt?: number;
+  }>;
 }
 
 export interface PresenceView {
@@ -158,6 +166,20 @@ export type LibraryQueryResult = {
   continue: ContinueItem | null;
 };
 
+export type LibraryObservation =
+  | {
+      kind: 'title-shape';
+      title: TitleRef & { type: 'tv' };
+      seasons: Array<{ season: number; episodes: number }>;
+      lastAired?: { season: number; episode: number };
+    }
+  | {
+      kind: 'lifecycle';
+      visible: boolean;
+      online: boolean;
+      playbackActive: boolean;
+    };
+
 interface ClientMessage {
   protocol: LibraryServiceProtocol;
 }
@@ -196,12 +218,19 @@ export interface LibraryServiceUnsubscribeRequest extends ClientMessage {
   subscriptionId: string;
 }
 
+export interface LibraryServiceObserveRequest extends ClientMessage {
+  type: 'observe';
+  requestId: string;
+  observation: LibraryObservation;
+}
+
 export type LibraryServiceClientMessage =
   | LibraryServiceHello
   | LibraryServiceCommandRequest
   | LibraryServiceQueryRequest
   | LibraryServiceSubscribeRequest
-  | LibraryServiceUnsubscribeRequest;
+  | LibraryServiceUnsubscribeRequest
+  | LibraryServiceObserveRequest;
 
 export type LibraryServiceErrorCode =
   | 'protocol-mismatch'
@@ -260,6 +289,12 @@ export interface LibraryServiceUnsubscribed extends ServerMessage {
   subscriptionId: string;
 }
 
+export interface LibraryServiceObserved extends ServerMessage {
+  type: 'observed';
+  requestId: string;
+  version: LibraryVersion;
+}
+
 /** Replacements are intentional: one immutable assignment is one UI invalidation. */
 export interface LibraryServiceUpdate extends ServerMessage {
   type: 'update';
@@ -281,5 +316,6 @@ export type LibraryServiceServerMessage =
   | LibraryServiceQueryResult
   | LibraryServiceSubscribed
   | LibraryServiceUnsubscribed
+  | LibraryServiceObserved
   | LibraryServiceUpdate
   | LibraryServiceError;

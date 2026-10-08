@@ -3,6 +3,7 @@ import {
   type ContinueItem,
   type DownloadViewItem,
   type LibraryCommand,
+  type LibraryObservation,
   type LibraryPreferencesPatch,
   type LibraryQuery,
   type LibraryQueryResult,
@@ -169,9 +170,40 @@ function query(value: unknown): value is LibraryQuery {
   );
 }
 
+function observation(value: unknown): value is LibraryObservation {
+  if (!record(value) || !text(value.kind)) return false;
+  switch (value.kind) {
+    case 'title-shape':
+      return (
+        titleRef(value.title) &&
+        value.title.type === 'tv' &&
+        list(
+          value.seasons,
+          (candidate): candidate is { season: number; episodes: number } =>
+            record(candidate) && integer(candidate.season) && integer(candidate.episodes),
+        ) &&
+        optional(
+          value.lastAired,
+          (candidate): candidate is { season: number; episode: number } =>
+            record(candidate) &&
+            integer(candidate.season) &&
+            integer(candidate.episode) &&
+            candidate.episode > 0,
+        )
+      );
+    case 'lifecycle':
+      return bool(value.visible) && bool(value.online) && bool(value.playbackActive);
+    default:
+      return false;
+  }
+}
+
 function version(value: unknown): value is LibraryVersion {
   return (
-    record(value) && text(value.instance) && integer(value.generation) && integer(value.revision)
+    record(value) &&
+    text(value.instance) &&
+    nullable(value.generation, text) &&
+    integer(value.revision)
   );
 }
 
@@ -227,6 +259,24 @@ function download(value: unknown): value is DownloadViewItem {
   );
 }
 
+function episodeProgress(value: unknown): value is {
+  season: number;
+  episode: number;
+  watched: boolean;
+  fraction: number;
+  seconds?: number;
+  updatedAt?: number;
+} {
+  return (
+    record(value) &&
+    integer(value.season) &&
+    integer(value.episode) &&
+    value.episode > 0 &&
+    bool(value.watched) &&
+    progress(value)
+  );
+}
+
 function selectionValue(value: unknown): value is LibrarySelectionValue {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
@@ -263,7 +313,8 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         bool(value.watched) &&
         nullable(value.reaction, reaction) &&
         nullable(value.standing, standing) &&
-        nullable(value.progress, progress)
+        nullable(value.progress, progress) &&
+        list(value.episodes, episodeProgress)
       );
     case 'presence':
       return list(
@@ -364,6 +415,9 @@ export function decodeLibraryServiceClientMessage(
     case 'unsubscribe':
       if (!text(input.subscriptionId)) return invalid('subscriptionId is required');
       break;
+    case 'observe':
+      if (!observation(input.observation)) return invalid('observation is invalid');
+      break;
     default:
       return invalid(`unknown request type ${input.type}`);
   }
@@ -402,6 +456,10 @@ export function decodeLibraryServiceServerMessage(
     case 'unsubscribed':
       if (!text(input.requestId) || !text(input.subscriptionId))
         return invalid('unsubscribed reply is invalid');
+      break;
+    case 'observed':
+      if (!text(input.requestId) || !version(input.version))
+        return invalid('observed reply is invalid');
       break;
     case 'update':
       if (!text(input.subscriptionId) || !version(input.version) || !selectionValue(input.value))

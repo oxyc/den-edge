@@ -5,7 +5,7 @@ import {
 } from './libraryServiceProtocolCodec';
 import { LIBRARY_SERVICE_PROTOCOL } from './libraryServiceProtocol';
 
-const version = { instance: 'worker-1', generation: 3, revision: 14 };
+const version = { instance: 'worker-1', generation: 'generation-3', revision: 14 };
 
 describe('library service client protocol', () => {
   it('accepts a handshake and semantic, idempotent commands', () => {
@@ -54,6 +54,39 @@ describe('library service client protocol', () => {
 
     expect(decoded).toMatchObject({ ok: true, value: { selection: { kind: 'presence' } } });
     expect(JSON.stringify(decoded)).not.toContain('row');
+  });
+
+  it('accepts title-shape and lifecycle observations without route semantics', () => {
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'observe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-4',
+        observation: {
+          kind: 'title-shape',
+          title: { type: 'tv', id: 42 },
+          seasons: [
+            { season: 1, episodes: 8 },
+            { season: 2, episodes: 6 },
+          ],
+          lastAired: { season: 2, episode: 3 },
+        },
+      }),
+    ).toMatchObject({ ok: true, value: { type: 'observe' } });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'observe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-5',
+        observation: {
+          kind: 'lifecycle',
+          visible: true,
+          online: true,
+          playbackActive: false,
+        },
+      }),
+    ).toMatchObject({ ok: true, value: { observation: { kind: 'lifecycle' } } });
   });
 
   it('rejects mismatched protocols and malformed domain values with typed failures', () => {
@@ -106,6 +139,15 @@ describe('library service server protocol', () => {
 
     expect(
       decodeLibraryServiceServerMessage({
+        type: 'observed',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-4',
+        version: { instance: 'worker-1', generation: null, revision: 0 },
+      }),
+    ).toMatchObject({ ok: true, value: { type: 'observed', version: { generation: null } } });
+
+    expect(
+      decodeLibraryServiceServerMessage({
         type: 'update',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         subscriptionId: 'continue',
@@ -127,6 +169,34 @@ describe('library service server protocol', () => {
       ok: true,
       value: { type: 'update', version: { revision: 15 }, value: { kind: 'continue' } },
     });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'title-42',
+        version: { ...version, revision: 16 },
+        value: {
+          kind: 'title',
+          title: { type: 'tv', id: 42 },
+          listed: false,
+          watched: false,
+          reaction: null,
+          standing: 'in-progress',
+          progress: null,
+          episodes: [
+            {
+              season: 2,
+              episode: 3,
+              watched: false,
+              fraction: 0.4,
+              seconds: 812,
+              updatedAt: 1_800_000_000_000,
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({ ok: true, value: { value: { kind: 'title', episodes: [{ episode: 3 }] } } });
   });
 
   it('validates typed service errors and rejects malformed replacements', () => {
@@ -153,6 +223,7 @@ describe('library service server protocol', () => {
           reaction: null,
           standing: null,
           progress: null,
+          episodes: [],
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
