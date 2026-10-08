@@ -3,6 +3,7 @@
      doing, and Cancel (in flight: dropped at the debrid too) or Remove (only the card). -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import DownloadStatus from './DownloadStatus.svelte';
   import DownloadAlternatives from './DownloadAlternatives.svelte';
   import DownloadPosterCard from './DownloadPosterCard.svelte';
@@ -50,6 +51,37 @@
   });
 
   const list = $derived((lease?.snapshot.value?.items ?? []) as DownloadViewItem[]);
+  let recoveredArtwork = $state(new Map<string, string | null>());
+  const artworkPending = new SvelteSet<string>();
+  $effect(() => {
+    const service = model;
+    const missing = list.filter(
+      (download) =>
+        download.title.type === 'tv' &&
+        !download.stillPath &&
+        !recoveredArtwork.has(download.content) &&
+        !artworkPending.has(download.content),
+    );
+    if (!service || !missing.length) return;
+    for (const download of missing) artworkPending.add(download.content);
+    void Promise.all(
+      missing.map(async (download) => {
+        const target = descriptorOf(download).target;
+        try {
+          const { result } = await service.downloadArtwork(target);
+          return [
+            download.content,
+            result.kind === 'download.artwork' ? result.stillPath : null,
+          ] as const;
+        } catch {
+          return [download.content, null] as const;
+        }
+      }),
+    ).then((found) => {
+      for (const [content] of found) artworkPending.delete(content);
+      recoveredArtwork = new Map([...recoveredArtwork, ...found]);
+    });
+  });
   const rows = $derived(list.map((download) => ({ download, title: titleOf(download) })));
   const groups = $derived(
     [
@@ -70,14 +102,18 @@
   /** Asked once as the page shows, then by the library's own refresh: it opens on fresh figures. */
   $effect(() => {
     if (!active) return;
-    if (model) void model.refreshDownloads();
+    if (model) void model.refreshDownloads().catch(() => undefined);
   });
   let busy = $state<string | null>(null);
+  let message = $state('');
 
   async function drop(download: DownloadViewItem) {
     busy = download.content;
+    message = '';
     try {
       await model?.removeDownload(descriptorOf(download).target);
+    } catch {
+      message = 'Couldn’t remove that download. Try again.';
     } finally {
       busy = null;
     }
@@ -86,6 +122,7 @@
 
 <h1>Downloads</h1>
 <p class="note">Your debrid fetches these — you can close Den, they keep going.</p>
+{#if message}<p class="note" role="status">{message}</p>{/if}
 
 {#if !list.length}
   <p class="note">No downloads yet. Download a title from its Sources to see it here.</p>
@@ -94,13 +131,14 @@
     <section>
       <h2>{group.title}</h2>
       <ul class="grid">
-        {#each group.items as row (row.download.name)}
+        {#each group.items as row (row.download.content)}
           {@const { download, title } = row}
           {@const state = download.status.state}
           <li data-download={download.content}>
             <DownloadPosterCard
               {download}
               {title}
+              stillPath={recoveredArtwork.get(download.content) ?? undefined}
               badge={download.status.fraction
                 ? `${Math.floor(download.status.fraction * 100)}%`
                 : undefined}

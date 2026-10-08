@@ -656,8 +656,14 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'download.refresh')
     return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);
-  if (value.kind === 'download.releases')
-    return exact(value, ['kind', 'title']) && downloadTitle(value.title);
+  if (value.kind === 'download.sources')
+    return (
+      exact(value, ['kind', 'title', 'refresh']) &&
+      downloadTitle(value.title) &&
+      optional(value.refresh, bool)
+    );
+  if (value.kind === 'download.artwork')
+    return exact(value, ['kind', 'target']) && downloadTarget(value.target);
   if (value.kind === 'retained.services.get' || value.kind === 'retained.home-continue.get')
     return exact(value, ['kind']);
   if (value.kind === 'retained.billboard.get')
@@ -1445,19 +1451,59 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     );
   if (value.kind === 'download.refresh')
     return exact(value, ['kind', 'refreshed']) && bool(value.refreshed);
-  if (value.kind === 'download.releases') {
-    const release = (candidate: unknown): boolean =>
+  if (value.kind === 'download.sources') {
+    const source = (candidate: unknown): boolean =>
       record(candidate) &&
-      exact(candidate, ['identity', 'label', 'sizeBytes', 'cached']) &&
+      exact(candidate, [
+        'identity',
+        'label',
+        'filename',
+        'sizeBytes',
+        'cached',
+        'seeders',
+        'packSizeBytes',
+        'badges',
+        'languages',
+        'probed',
+      ]) &&
       boundedText(candidate.identity, 4_096) &&
       boundedText(candidate.label, 4_096) &&
+      boundedText(candidate.filename, 4_096) &&
       optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
-      optional(candidate.cached, bool);
+      optional(candidate.cached, bool) &&
+      optional(candidate.seeders, (item): item is number => integer(item) && item >= 0) &&
+      optional(candidate.packSizeBytes, (item): item is number => integer(item) && item > 0) &&
+      list(candidate.badges, (item): item is string => boundedText(item, 256), 32) &&
+      list(candidate.languages, (item): item is string => boundedText(item, 64), 64) &&
+      bool(candidate.probed);
+    const answer = (candidate: unknown): candidate is Record<string, unknown> =>
+      record(candidate) &&
+      exact(candidate, ['kind', 'missing', 'outageBuiltAt']) &&
+      (candidate.kind === 'live' ||
+        candidate.kind === 'partial' ||
+        candidate.kind === 'empty' ||
+        candidate.kind === 'unknown' ||
+        candidate.kind === 'stale') &&
+      integer(candidate.missing) &&
+      candidate.missing >= 0 &&
+      optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
     return (
-      exact(value, ['kind', 'releases']) &&
-      (value.releases === null || (Array.isArray(value.releases) && value.releases.every(release)))
+      exact(value, ['kind', 'sources', 'answer', 'failure']) &&
+      (value.sources === null || (Array.isArray(value.sources) && value.sources.every(source))) &&
+      optional(value.answer, answer) &&
+      optional(
+        value.failure,
+        (item): item is string =>
+          item === 'not-configured' || item === 'unmatched' || item === 'unreachable',
+      ) &&
+      (value.failure === undefined || value.sources === null)
     );
   }
+  if (value.kind === 'download.artwork')
+    return (
+      exact(value, ['kind', 'stillPath']) &&
+      (value.stillPath === null || boundedText(value.stillPath, 2_048))
+    );
   if (value.kind === 'retained.services')
     return exact(value, ['kind', 'value']) && nullable(value.value, isRetainedServices);
   if (value.kind === 'retained.home-continue')

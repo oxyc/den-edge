@@ -16,7 +16,11 @@ import {
   updateProgress,
 } from './actions';
 import type { ClockStore } from './clockStore';
-import type { DownloadCoordinator, DownloadStatus } from './downloadCoordinator';
+import {
+  downloadIsInFlight,
+  type DownloadCoordinator,
+  type DownloadStatus,
+} from './downloadCoordinator';
 import { episodeProgress } from './detailPresentation';
 import {
   contentKey,
@@ -42,7 +46,7 @@ import {
 import type {
   EpisodeRef,
   DownloadReleaseDescriptor,
-  DownloadReleaseOption,
+  DownloadSourceOption,
   DownloadTitleDescriptor,
   DownloadTarget,
   LibraryCommand,
@@ -155,6 +159,7 @@ export interface LibraryLogAuthorityOptions {
   fetchImpl?: typeof fetch;
   destination?: (key: string) => Promise<LibraryLog>;
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
+  downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
@@ -227,8 +232,10 @@ const internalDownloadTitle = (title: DownloadTitleDescriptor) => {
 
 const downloadPhase = (
   state: NonNullable<DownloadStatus['state']>,
+  fetchState?: 'queued' | 'fetching' | 'downloading' | 'stalled' | 'failed',
 ): 'queued' | 'downloading' | 'trouble' | 'ready' => {
   if (state === 'ready') return 'ready';
+  if (fetchState === 'stalled' || fetchState === 'failed') return 'trouble';
   if (state === 'fetching') return 'downloading';
   if (
     state === 'refused' ||
@@ -424,20 +431,43 @@ export class LibraryLogAuthority {
           kind: 'download.refresh',
           refreshed: (await this.#options.refreshDownloads?.(query.target)) ?? false,
         };
-      case 'download.releases': {
+      case 'download.sources': {
         const title = internalDownloadTitle(query.title);
-        const sources = await this.#downloadsCoordinator.releasesForTitle(title);
+        const snapshot = await this.#downloadsCoordinator.sourcesForTitle(title, query.refresh);
         return {
-          kind: 'download.releases',
-          releases:
-            sources?.map((source): DownloadReleaseOption => ({
+          kind: 'download.sources',
+          sources:
+            snapshot.sources?.map((source): DownloadSourceOption => ({
               identity: source.identity,
-              label: source.label,
+              label: source.label.slice(0, 4_096),
+              filename: source.filename.slice(0, 4_096),
               ...(source.size !== undefined ? { sizeBytes: source.size } : {}),
               ...(source.cached !== undefined ? { cached: source.cached } : {}),
+              ...(source.seeders !== undefined ? { seeders: source.seeders } : {}),
+              ...(source.packSize !== undefined ? { packSizeBytes: source.packSize } : {}),
+              badges: source.badges.slice(0, 32).map((badge) => badge.slice(0, 256)),
+              languages: source.languages.slice(0, 64).map((language) => language.slice(0, 64)),
+              probed: source.probed,
             })) ?? null,
+          ...(snapshot.answer
+            ? {
+                answer: {
+                  kind: snapshot.answer.kind,
+                  missing: snapshot.answer.missing,
+                  ...(snapshot.answer.outage
+                    ? { outageBuiltAt: snapshot.answer.outage.builtAt }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(snapshot.failure ? { failure: snapshot.failure } : {}),
         };
       }
+      case 'download.artwork':
+        return {
+          kind: 'download.artwork',
+          stillPath: (await this.#options.downloadArtwork?.(query.target)) ?? null,
+        };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
         return {
@@ -793,15 +823,26 @@ export class LibraryLogAuthority {
               LibrarySelectionValue,
               { kind: 'downloads' }
             >['items'][number]['status']['state'],
-            phase: downloadPhase(state),
+            phase: downloadPhase(state, live?.fetch?.state),
             ...(fraction > 0 ? { fraction } : {}),
             ...(durable.clock.progressAt > 0 ? { progressAt: durable.clock.progressAt } : {}),
-            ...(live?.etaSeconds !== undefined ? { etaSeconds: live.etaSeconds } : {}),
-            ...(live?.bytesPerSecond !== undefined ? { bytesPerSecond: live.bytesPerSecond } : {}),
+            ...(live?.etaSeconds !== undefined &&
+            Number.isFinite(live.etaSeconds) &&
+            live.etaSeconds >= 0 &&
+            live.etaSeconds <= 7 * 24 * 60 * 60
+              ? { etaSeconds: live.etaSeconds }
+              : {}),
+            ...(live?.bytesPerSecond !== undefined &&
+            Number.isFinite(live.bytesPerSecond) &&
+            live.bytesPerSecond >= 0
+              ? { bytesPerSecond: live.bytesPerSecond }
+              : {}),
             ...(live?.fetch ? { fetch: { ...live.fetch } } : {}),
-            ...(durable.service ? { service: durable.service } : {}),
+            ...(live?.fetch?.service || durable.service
+              ? { service: live?.fetch?.service ?? durable.service }
+              : {}),
             ...(durable.until !== undefined ? { until: durable.until } : {}),
-            stalled: durable.stalled,
+            stalled: durable.stalled || live?.fetch?.state === 'stalled',
           },
           tried: new Set([...download.tried, download.release.identity]).size,
           ...(download.candidates !== undefined ? { candidates: download.candidates } : {}),
@@ -1488,7 +1529,7 @@ export class LibraryLogAuthority {
     if (!download) return this.#unchanged();
     const pending = this.#log.pendingActions;
     const state = this.#downloadsCoordinator.status(download).state;
-    const cancel = state === 'starting' || state === 'fetching' || state === 'not_started';
+    const cancel = downloadIsInFlight(state);
     if (!(await this.#downloadsCoordinator.remove(download, cancel))) this.#writeFailed();
     return {
       outcome: 'applied',

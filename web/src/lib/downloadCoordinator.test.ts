@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClockStore } from './clockStore';
-import { DownloadCoordinator, downloadPollDelay } from './downloadCoordinator';
+import { DownloadCoordinator, downloadIsInFlight, downloadPollDelay } from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import { clockValue, downloadName, readDownload, releaseValue, titleValue } from './downloadRows';
 import { source, testLog } from './downloadTestLog';
@@ -97,6 +97,12 @@ describe('DownloadCoordinator', () => {
     expect(downloadPollDelay(20)).toBe(60_000);
   });
 
+  it('treats paused and not-yet-started work as cancellable upstream', () => {
+    expect(downloadIsInFlight('paused')).toBe(true);
+    expect(downloadIsInFlight('not_started')).toBe(true);
+    expect(downloadIsInFlight('ready')).toBe(false);
+  });
+
   it('does not write until its durable asynchronous stamp has committed', async () => {
     const shared = testLog();
     let release!: () => void;
@@ -147,6 +153,70 @@ describe('DownloadCoordinator', () => {
     await Promise.resolve();
     expect(queue.answers.get(NAME)).toMatchObject({ state: 'preparing', progress: 0.2 });
     expect(changes).toBe(2);
+  });
+
+  it('keeps one worker-owned source snapshot for display and selection', async () => {
+    const shared = testLog();
+    let resolves = 0;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => {
+          resolves++;
+          return { sources: [first, second] };
+        },
+      },
+      { now: () => T0 },
+    );
+
+    const shown = await queue.sourcesForTitle(title);
+    expect(shown.sources?.map(({ identity }) => identity)).toEqual([
+      first.identity,
+      second.identity,
+    ]);
+    await expect(queue.enqueueIdentity(title, first.identity, 2)).resolves.toBe(true);
+    expect(resolves).toBe(1);
+
+    await queue.sourcesForTitle(title, true);
+    expect(resolves).toBe(2);
+  });
+
+  it('does not reactivate an already queued release', async () => {
+    const shared = testLog();
+    const asked: string[] = [];
+    const queue = new DownloadCoordinator(shared.log, clock(), effects(asked), { now: () => T0 });
+    await queue.enqueue(title, first, 2);
+    await Promise.resolve();
+    await queue.enqueue(title, first, 2);
+    await Promise.resolve();
+    expect(shared.writes).toHaveLength(1);
+    expect(asked).toEqual([`prefetch ${first.url}`]);
+  });
+
+  it('cancels a paused upstream fetch when removing it', async () => {
+    const shared = testLog();
+    const cancelled: string[] = [];
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        prepare: async () => ({ state: 'paused', until: T0 + MINUTE }),
+        cancel: async (url) => {
+          cancelled.push(url);
+          return true;
+        },
+      },
+      { now: () => T0 },
+    );
+    await queue.enqueue(title, first, 1);
+    await Promise.resolve();
+    const download = queue.get(NAME)!;
+    expect(queue.status(download).state).toBe('paused');
+    await queue.remove(download, true);
+    expect(cancelled).toEqual([first.url]);
   });
 
   it('uses durable stamps for the lease and every fallback write', async () => {

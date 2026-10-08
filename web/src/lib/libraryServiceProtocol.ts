@@ -150,8 +150,21 @@ export interface DownloadReleaseDescriptor {
   cached?: boolean;
 }
 
-/** A release choice safe to render. Playback tickets remain inside the service. */
-export type DownloadReleaseOption = DownloadReleaseDescriptor;
+/** A ranked source safe to render. Playback tickets and provider attributes remain inside the service. */
+export interface DownloadSourceOption extends DownloadReleaseDescriptor {
+  filename: string;
+  seeders?: number;
+  packSizeBytes?: number;
+  badges: string[];
+  languages: string[];
+  probed: boolean;
+}
+
+export interface DownloadSourceAnswer {
+  kind: 'live' | 'partial' | 'empty' | 'unknown' | 'stale';
+  missing: number;
+  outageBuiltAt?: number;
+}
 
 export type LibraryCommand =
   | { kind: 'watchlist.add'; title: TitleRef }
@@ -540,7 +553,8 @@ export type LibraryQuery =
   | { kind: 'history.export' }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
-  | { kind: 'download.releases'; title: DownloadTitleDescriptor }
+  | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
+  | { kind: 'download.artwork'; target: DownloadTarget }
   | { kind: 'retained.services.get' }
   | { kind: 'retained.home-continue.get' }
   | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope };
@@ -579,7 +593,13 @@ export type LibraryQueryResult =
       capability: { libraryId: string; memberToken: string } | null;
     }
   | { kind: 'download.refresh'; refreshed: boolean }
-  | { kind: 'download.releases'; releases: DownloadReleaseOption[] | null }
+  | {
+      kind: 'download.sources';
+      sources: DownloadSourceOption[] | null;
+      answer?: DownloadSourceAnswer;
+      failure?: 'not-configured' | 'unmatched' | 'unreachable';
+    }
+  | { kind: 'download.artwork'; stillPath: string | null }
   | { kind: 'retained.services'; value: RetainedServices | null }
   | { kind: 'retained.home-continue'; present: boolean | null }
   | {

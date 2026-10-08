@@ -24,4 +24,26 @@ describe('download view presentation', () => {
   it('uses the semantic trouble phase', () => {
     expect(viewTrouble(item({ state: 'unreachable', phase: 'trouble' }))).toBe(true);
   });
+
+  it('names live dead and stalled states instead of presenting them as downloading', () => {
+    expect(viewHeadline(item({ fetch: { state: 'failed' }, phase: 'trouble' }))).toBe(
+      'Download failed',
+    );
+    expect(
+      viewHeadline(item({ fetch: { state: 'stalled' }, phase: 'trouble', stalled: true })),
+    ).toBe('Download stalled');
+  });
+
+  it('shows normalized service, pause, and attempts while rejecting implausible ETAs', () => {
+    const download = item({
+      state: 'paused',
+      phase: 'queued',
+      service: 'Real-Debrid',
+      until: 180_001,
+      etaSeconds: 9_999_999,
+    });
+    download.tried = 3;
+    download.candidates = 5;
+    expect(viewFacts(download, 1)).toEqual(['Real-Debrid', 'Retries in 3 min', 'Tried 3 of 5']);
+  });
 });

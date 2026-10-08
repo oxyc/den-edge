@@ -10,6 +10,7 @@
     progress,
     badge,
     downloadBadge,
+    stillPath: recoveredStill,
     href,
     menu = true,
     active: _active = true,
@@ -21,6 +22,7 @@
     progress?: number;
     badge?: string;
     downloadBadge?: { state: 'queued' | 'downloading' | 'trouble' | 'ready'; label: string };
+    stillPath?: string;
     href?: string;
     menu?: boolean;
     active?: boolean;
@@ -34,7 +36,9 @@
   );
   const season = $derived(viewDownload?.season ?? rowDownload?.title.season);
   const episode = $derived(viewDownload?.episode ?? rowDownload?.title.episode);
-  const stillPath = $derived(viewDownload?.stillPath ?? rowDownload?.title.stillPath);
+  const stillPath = $derived(
+    viewDownload?.stillPath ?? rowDownload?.title.stillPath ?? recoveredStill,
+  );
   const coordinate = $derived(season === undefined ? undefined : `S${season} E${episode}`);
 </script>
 

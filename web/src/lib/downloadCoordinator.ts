@@ -28,6 +28,8 @@ import type { ConfigValue, SettingsRow, Stamped } from './wire';
 
 export const DOWNLOAD_POLL_MS = 5_000;
 export const DOWNLOAD_POLL_MAX_MS = 60_000;
+export const DOWNLOAD_SOURCE_SNAPSHOT_MS = 30_000;
+const DOWNLOAD_SOURCE_SNAPSHOTS = 64;
 
 export const downloadPollDelay = (quiet: number): number =>
   Math.min(DOWNLOAD_POLL_MS * 2 ** Math.max(0, quiet), DOWNLOAD_POLL_MAX_MS);
@@ -55,9 +57,17 @@ export interface DownloadStatus {
   announce: boolean;
 }
 
-export type DownloadResolve = (
-  title: DownloadTitle,
-) => Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }>;
+export type DownloadResolve = (title: DownloadTitle) => Promise<{
+  sources: TitleSource[] | null;
+  answer?: SourceAnswer;
+  failure?: 'not-configured' | 'unmatched' | 'unreachable';
+}>;
+
+export interface DownloadSourceSnapshot {
+  sources: TitleSource[] | null;
+  answer?: SourceAnswer;
+  failure?: 'not-configured' | 'unmatched' | 'unreachable';
+}
 
 export interface DownloadCoordinatorEffects {
   prepare(url: string, queue: boolean, prefetch: boolean): Promise<Preparation>;
@@ -94,6 +104,11 @@ export class DownloadCoordinator {
   readonly #noHedgeUntil = new Map<string, { key: string; until: number }>();
   readonly #pending = new Map<string, Promise<Preparation>>();
   readonly #enqueuePending = new Map<string, Promise<boolean>>();
+  readonly #sourceCache = new Map<
+    string,
+    { expiresAt: number; snapshot: DownloadSourceSnapshot }
+  >();
+  readonly #sourcePending = new Map<string, Promise<DownloadSourceSnapshot>>();
   readonly #hedgePending = new Map<
     string,
     { identity: string; url: string; run: Promise<Preparation> }
@@ -193,7 +208,7 @@ export class DownloadCoordinator {
     identity: string,
     candidates?: number,
   ): Promise<boolean> {
-    const { sources } = await this.effects.resolve(title);
+    const { sources } = await this.sourcesForTitle(title);
     const source = sources?.find((candidate) => candidate.identity === identity);
     return source ? this.enqueue(title, source, candidates) : false;
   }
@@ -207,47 +222,41 @@ export class DownloadCoordinator {
     const now = this.now();
     const existing = this.log.settings(name);
     const current = existing ? readDownload(existing) : null;
+    if (current && current.release.identity === source.identity && !current.exhausted) return true;
     const base: SettingsRow = existing ?? { kind: 'set', schema: 2, name, values: {} };
-    let row: SettingsRow;
-    if (current && current.release.identity === source.identity && !current.exhausted) {
-      row = withValues(base, {
-        queuedAt: { value: { int: now }, at: await this.stamp(now) },
-      });
-    } else {
-      const values: Record<string, Stamped<ConfigValue | null>> = {};
-      if (existing) values.removed = { value: { bool: true }, at: await this.stamp(now) };
-      const at = await this.stamp(now);
-      const preferredLanguage = readSyncedPrefs(this.log.settings('prefs')).audioLanguage;
-      const release: DownloadRelease = {
-        identity: source.identity,
-        label: source.label,
-        url: source.url,
-        sizeBytes: source.size,
-        cached: source.cached,
-      };
-      values.release = { value: releaseValue(release), at };
-      values.title = {
-        value: titleValue({
-          ...title,
-          preferredLanguage: title.preferredLanguage ?? preferredLanguage,
-        }),
+    const values: Record<string, Stamped<ConfigValue | null>> = {};
+    if (existing) values.removed = { value: { bool: true }, at: await this.stamp(now) };
+    const at = await this.stamp(now);
+    const preferredLanguage = readSyncedPrefs(this.log.settings('prefs')).audioLanguage;
+    const release: DownloadRelease = {
+      identity: source.identity,
+      label: source.label,
+      url: source.url,
+      sizeBytes: source.size,
+      cached: source.cached,
+    };
+    values.release = { value: releaseValue(release), at };
+    values.title = {
+      value: titleValue({
+        ...title,
+        preferredLanguage: title.preferredLanguage ?? preferredLanguage,
+      }),
+      at,
+    };
+    values.queuedAt = { value: { int: now }, at };
+    if (sources !== undefined)
+      values.candidates = {
+        value: {
+          int:
+            typeof sources === 'number'
+              ? sources
+              : sources.filter(
+                  (candidate) => !(candidate.cached === false && candidate.seeders === 0),
+                ).length,
+        },
         at,
       };
-      values.queuedAt = { value: { int: now }, at };
-      if (sources !== undefined)
-        values.candidates = {
-          value: {
-            int:
-              typeof sources === 'number'
-                ? sources
-                : sources.filter(
-                    (candidate) => !(candidate.cached === false && candidate.seeders === 0),
-                  ).length,
-          },
-          at,
-        };
-      row = withValues(base, values);
-    }
+    const row = withValues(base, values);
     if (!(await this.log.write(row))) return false;
     this.urls.set(name, source.url);
     this.clocks.delete(name);
@@ -329,16 +338,49 @@ export class DownloadCoordinator {
   }
 
   async releases(download: Download): Promise<TitleSource[] | null> {
-    return this.releasesForTitle(download.title);
+    return (await this.sourcesForTitle(download.title)).sources;
   }
 
   async releasesForTitle(title: DownloadTitle): Promise<TitleSource[] | null> {
-    const { sources } = await this.effects.resolve(title);
-    if (!sources?.length) return sources;
-    const preferred = this.pick(sources, title.originalLanguage);
-    return preferred
-      ? [preferred, ...sources.filter((source) => source.identity !== preferred.identity)]
-      : sources;
+    return (await this.sourcesForTitle(title)).sources;
+  }
+
+  /**
+   * One short-lived worker-owned snapshot backs display and the action selected from it. Tickets never leave this
+   * object, and a click does not repeat the provider request that produced the visible list.
+   */
+  async sourcesForTitle(title: DownloadTitle, refresh = false): Promise<DownloadSourceSnapshot> {
+    const key = contentKeyOf(title);
+    const now = this.now();
+    const cached = this.#sourceCache.get(key);
+    if (!refresh && cached && cached.expiresAt > now) return cached.snapshot;
+    const pending = this.#sourcePending.get(key);
+    if (pending) return pending;
+    const run = this.effects.resolve(title).then(({ sources, answer, failure }) => {
+      const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
+      const ordered = preferred
+        ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
+        : sources;
+      const snapshot: DownloadSourceSnapshot = {
+        sources: ordered ?? null,
+        ...(answer ? { answer } : {}),
+        ...(failure ? { failure } : {}),
+      };
+      this.#sourceCache.delete(key);
+      this.#sourceCache.set(key, {
+        expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
+        snapshot,
+      });
+      while (this.#sourceCache.size > DOWNLOAD_SOURCE_SNAPSHOTS)
+        this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
+      return snapshot;
+    });
+    this.#sourcePending.set(key, run);
+    try {
+      return await run;
+    } finally {
+      if (this.#sourcePending.get(key) === run) this.#sourcePending.delete(key);
+    }
   }
 
   async tryReleaseIdentity(download: Download, identity: string): Promise<boolean> {
@@ -544,4 +586,4 @@ export class DownloadCoordinator {
 }
 
 export const downloadIsInFlight = (state: DownloadStatus['state']) =>
-  state === 'starting' || state === 'fetching' || state === 'paused';
+  state === 'starting' || state === 'fetching' || state === 'not_started' || state === 'paused';

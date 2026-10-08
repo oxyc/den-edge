@@ -4,6 +4,8 @@ import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import type { LibraryLog } from './log';
 import type { DownloadTarget } from './libraryServiceProtocol';
 import { contentKeyOf, downloadName } from './downloadRows';
+import { downloadStill, type SeasonLoader } from './downloadArtwork';
+import { fetchSeason } from './detail';
 import { readPlugins } from './prefs';
 import { relayFetch } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
@@ -32,6 +34,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   #providers?: Promise<{ scout: Addon | null; routes: Routes; input: string }>;
   #resolved?: { scout: Addon | null; routes: Routes; input: string };
   #providerInput?: string;
+  readonly #seasonLoader: SeasonLoader;
   readonly #listeners = new Set<() => void>();
   #changeQueued = false;
 
@@ -40,7 +43,9 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     clock: ClockStore,
     changed: () => void,
     readonly fetchImpl: typeof fetch = relayFetch,
+    seasonLoader: SeasonLoader = fetchSeason,
   ) {
+    this.#seasonLoader = seasonLoader;
     const providers = () => this.#getProviders();
     this.coordinator = new DownloadCoordinator(
       log,
@@ -56,15 +61,16 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         },
         resolve: async (title) => {
           const { scout, routes } = await providers();
-          if (!scout) return { sources: null };
+          if (!scout) return { sources: null, failure: 'not-configured' };
           const imdb =
             title.imdbId ??
             (await fetchImdbId(
               { type: title.mediaType, id: title.mediaId },
               tmdbKeyOf(this.log.settings('keys')),
             ));
-          if (!imdb) return { sources: null };
-          return fetchSourceList(
+          if (imdb === null) return { sources: null, failure: 'unmatched' };
+          if (imdb === undefined) return { sources: null, failure: 'unreachable' };
+          const found = await fetchSourceList(
             scout,
             imdb,
             routes,
@@ -73,6 +79,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             undefined,
             this.fetchImpl,
           );
+          return found.sources === null ? { ...found, failure: 'unreachable' } : found;
         },
       },
       {
@@ -143,6 +150,26 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
       ...(name ? { names: new Set([name]) } : {}),
     });
     return wrote || before !== this.#digest();
+  }
+
+  async artwork(target: DownloadTarget): Promise<string | null> {
+    if (target.type !== 'tv') return null;
+    try {
+      return (
+        (await downloadStill(
+          {
+            mediaType: 'tv',
+            mediaId: target.id,
+            season: target.season,
+            episode: target.episode,
+            title: '',
+          },
+          this.#seasonLoader,
+        )) ?? null
+      );
+    } catch {
+      return null;
+    }
   }
 
   #digest(): string {

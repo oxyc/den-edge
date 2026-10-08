@@ -870,6 +870,46 @@ describe('library service server protocol', () => {
     ).toMatchObject({ ok: false });
   });
 
+  it('keeps download sources semantic and rejects provider tickets at the wire boundary', () => {
+    const result = (source: Record<string, unknown>) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources',
+        version,
+        result: {
+          kind: 'download.sources',
+          sources: [
+            {
+              identity: 'release-one',
+              label: 'Release One',
+              filename: 'release-one.mkv',
+              badges: ['4K'],
+              languages: ['en'],
+              probed: true,
+              ...source,
+            },
+          ],
+          answer: { kind: 'partial', missing: 1 },
+        },
+      });
+    expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    expect(result({ url: '/scout/p/private-ticket' })).toMatchObject({ ok: false });
+    expect(result({ attributes: { provider: 'private' } })).toMatchObject({ ok: false });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-artwork',
+        query: {
+          kind: 'download.artwork',
+          target: { type: 'tv', id: 7, season: 2, episode: 3 },
+        },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('carries delivery, resolved playback intent, and session status without storage details', () => {
     expect(
       decodeLibraryServiceServerMessage({

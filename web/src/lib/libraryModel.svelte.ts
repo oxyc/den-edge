@@ -533,9 +533,14 @@ export class LibraryModel {
     return this.service.query({ kind: 'download.refresh', ...(target ? { target } : {}) });
   }
 
-  downloadReleases(title: DownloadTitleDescriptor) {
+  downloadSources(title: DownloadTitleDescriptor, refresh = false) {
     this.#assertOpen();
-    return this.service.query({ kind: 'download.releases', title });
+    return this.service.query({ kind: 'download.sources', title, ...(refresh ? { refresh } : {}) });
+  }
+
+  downloadArtwork(target: DownloadTarget) {
+    this.#assertOpen();
+    return this.service.query({ kind: 'download.artwork', target });
   }
 
   task(

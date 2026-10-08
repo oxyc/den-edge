@@ -23,6 +23,27 @@
     model: LibraryModel;
   } = $props();
   let job = $state<SeasonJob>();
+  let observer: AbortController | undefined;
+  $effect(() => {
+    void `${title.id}:${imdb}:${season}`;
+    return () => observer?.abort();
+  });
+  function start() {
+    observer?.abort();
+    observer = new AbortController();
+    job = undefined;
+    void downloadSeason(
+      model,
+      imdb,
+      season,
+      episodes,
+      title,
+      (next) => (job = next),
+      observer.signal,
+    ).catch(() => {
+      if (!observer?.signal.aborted && job) job = { ...job, running: false };
+    });
+  }
   const label = $derived(`Download season ${season}`);
   /**
    * While running, the visible progress IS the name — "Preparing season 2: 3 of 12" — so an `aria-label`
@@ -40,8 +61,7 @@
     disabled={disabled || job?.running}
     aria-label={compact && !job?.running ? label : undefined}
     title={job?.running ? undefined : label}
-    onclick={() =>
-      void downloadSeason(model, imdb, season, episodes, title, (next) => (job = next))}
+    onclick={start}
   >
     <DetailIcon name="download" />{#if job?.running}{running}{:else if !compact}Download season {season}{/if}
   </button>

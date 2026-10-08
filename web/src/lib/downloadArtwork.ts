@@ -2,7 +2,11 @@ import { fetchSeason, type Episode } from './detail';
 import type { DownloadTitle } from './downloadRows';
 import { TMDB_PROXY_KEY } from './tmdbCache';
 
-type SeasonLoader = (seriesId: number, season: number, key: string) => Promise<Episode[] | null>;
+export type SeasonLoader = (
+  seriesId: number,
+  season: number,
+  key: string,
+) => Promise<Episode[] | null>;
 
 /** A failed legacy-artwork recovery may be retried after a quiet period, but a card remount cannot bypass it. */
 export const DOWNLOAD_STILL_RETRY_MS = 30_000;

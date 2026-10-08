@@ -115,7 +115,7 @@
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
-    /** Where den-remux answers (`findRemux`), so the Sources list can say which releases won't play here. */
+    /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
     away?: boolean;
@@ -729,10 +729,7 @@
           model={model ?? undefined}
           bind:this={sourcesPanel}
           imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
-          {scout}
-          {routes}
           {active}
-          {remux}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}
           title={d.title}

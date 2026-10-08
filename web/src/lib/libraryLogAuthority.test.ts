@@ -869,9 +869,18 @@ describe('LibraryLogAuthority', () => {
     });
     const projected = await authority.select({ kind: 'downloads' });
     expect(JSON.stringify(projected)).not.toContain('secret-one');
-    const alternatives = await authority.query({ kind: 'download.releases', title });
-    expect(alternatives.kind).toBe('download.releases');
+    const alternatives = await authority.query({ kind: 'download.sources', title });
+    expect(alternatives.kind).toBe('download.sources');
+    if (alternatives.kind !== 'download.sources') throw new Error('wrong query result');
+    expect(alternatives.sources?.[0]).toMatchObject({
+      identity: 'release-one',
+      filename: 'Release One',
+      badges: [],
+      languages: [],
+      probed: false,
+    });
     expect(JSON.stringify(alternatives)).not.toContain('/scout/');
+    expect(JSON.stringify(alternatives)).not.toContain('attributes');
 
     await expect(
       authority.command(

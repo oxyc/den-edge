@@ -37,6 +37,7 @@ export async function openLibraryServiceAuthority(
     libraryKey: request.libraryKey,
     vault,
     refreshDownloads: (target) => downloads.refresh(target),
+    downloadArtwork: (target) => downloads.artwork(target),
   });
   return new ScheduledLibraryServiceAuthority(
     new DurableOperationAuthority(logAuthority, log),

@@ -100,8 +100,10 @@ class FakeService {
       };
     if (query.kind === 'download.refresh')
       return { result: { kind: 'download.refresh', refreshed: true }, version: version(6) };
-    if (query.kind === 'download.releases')
-      return { result: { kind: 'download.releases', releases: [] }, version: version(6) };
+    if (query.kind === 'download.sources')
+      return { result: { kind: 'download.sources', sources: [] }, version: version(6) };
+    if (query.kind === 'download.artwork')
+      return { result: { kind: 'download.artwork', stillPath: null }, version: version(6) };
     if (query.kind === 'retained.services.get')
       return {
         result: { kind: 'retained.services', value: retainedServicesValue() },

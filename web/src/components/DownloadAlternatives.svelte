@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { LibraryModel } from '../lib/libraryModel.svelte';
   import type {
-    DownloadReleaseOption,
+    DownloadSourceOption,
     DownloadTitleDescriptor,
     DownloadViewItem,
   } from '../lib/libraryServiceProtocol';
@@ -12,9 +12,10 @@
     model,
   }: { download: DownloadViewItem; title: DownloadTitleDescriptor; model: LibraryModel } = $props();
   let open = $state(false);
-  let sources = $state<DownloadReleaseOption[] | null | undefined>();
+  let sources = $state<DownloadSourceOption[] | null | undefined>();
   let busy = $state(false);
   let message = $state('');
+  let request = 0;
   const choices = $derived(
     (sources ?? []).filter(
       (source) =>
@@ -24,11 +25,17 @@
   );
 
   async function show() {
+    const current = ++request;
     open = true;
     message = '';
     sources = undefined;
-    const response = await model.downloadReleases(title);
-    sources = response.result.kind === 'download.releases' ? response.result.releases : null;
+    try {
+      const response = await model.downloadSources(title, true);
+      if (current === request)
+        sources = response.result.kind === 'download.sources' ? response.result.sources : null;
+    } catch {
+      if (current === request) sources = null;
+    }
   }
 
   async function choose(event: Event) {
@@ -36,10 +43,16 @@
     const source = choices.find((candidate) => candidate.identity === identity);
     if (!source) return;
     busy = true;
-    await model.tryDownloadRelease(title.target, source.identity);
-    busy = false;
-    open = false;
-    message = `Also trying ${source.label}`;
+    message = '';
+    try {
+      await model.tryDownloadRelease(title.target, source.identity);
+      open = false;
+      message = `Also trying ${source.label}`;
+    } catch {
+      message = 'Couldn’t try that release. Try again.';
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
