@@ -1,5 +1,10 @@
-import type { Library } from './library';
-import type { HomeLibraryViewProof } from './homeLibraryView';
+import type { Library, Shape } from './library';
+import type {
+  ActiveHomePayload,
+  ActiveHomeHydrationChunk,
+  ActiveHomeShapeReply,
+  HomeLibraryViewProof,
+} from './homeLibraryView';
 import type { Row, Stamp } from './wire';
 import { yieldTask } from './taskYield';
 
@@ -111,6 +116,77 @@ function ask<T>(
       reject(failed(error));
     }
   });
+}
+
+/**
+ * Open a cached library to the first-paint Home contract only. The decrypted snapshot and full fold stay in the
+ * Worker under `handle` until the caller either hydrates the ordinary log or releases it.
+ */
+export async function openActiveHomeInWorker(
+  key: CryptoKey,
+  name: string,
+  bytes: Uint8Array,
+  now = Date.now(),
+): Promise<ActiveHomePayload | undefined> {
+  const copy = bytes.slice();
+  const request = ask<ActiveHomePayload>(
+    { op: 'open-active-home', key, name, bytes: copy.buffer, now },
+    [copy.buffer],
+  );
+  if (!request) return undefined;
+  try {
+    return await request;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Exact Continue candidates after Home's policy-critical TV layouts arrive. */
+export async function projectActiveHomeShapes(
+  handle: number,
+  shapes: ReadonlyArray<readonly [string, Shape]>,
+): Promise<ActiveHomeShapeReply | undefined> {
+  try {
+    const request = ask<ActiveHomeShapeReply>({
+      op: 'active-home-shapes',
+      handle,
+      shapes: shapes.map(([key, shape]) => [key, shape]),
+    });
+    return request ? await request : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Materialize one bounded snapshot tranche when a route or action needs the ordinary mutable log. */
+export async function hydrateActiveHomeInWorker<
+  THeader = Record<string, unknown>,
+  TEntry = unknown,
+>(
+  handle: number,
+  cursor = 0,
+  limit = 256,
+): Promise<ActiveHomeHydrationChunk<THeader, TEntry> | undefined> {
+  try {
+    const request = ask<ActiveHomeHydrationChunk<THeader, TEntry>>({
+      op: 'hydrate-active-home',
+      handle,
+      cursor,
+      limit,
+    });
+    return request ? await request : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Abandon a compact open whose session was replaced before hydration. */
+export async function releaseActiveHomeInWorker(handle: number): Promise<void> {
+  try {
+    await ask<boolean>({ op: 'release-active-home', handle });
+  } catch {
+    // A stopped/expired Worker already released it.
+  }
 }
 
 /**

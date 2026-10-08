@@ -1021,6 +1021,8 @@
     const worker = devHomeLibraryView(projection.rows);
     if (!worker) return;
     const current = homeLibraryViewFromCurrent({
+      library: applied,
+      rows: projection.rows,
       ...personalTitleRows,
       watched,
       watchlist: applied.records

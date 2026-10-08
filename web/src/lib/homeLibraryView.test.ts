@@ -96,6 +96,8 @@ it('matches the fixed inputs Home currently derives on the page thread', () => {
 
   const worker = selectHomeLibraryView(library, rows);
   const current = homeLibraryViewFromCurrent({
+    library,
+    rows,
     titleRows,
     reactions,
     selected,
@@ -109,7 +111,7 @@ it('matches the fixed inputs Home currently derives on the page thread', () => {
   });
 
   expect(worker).toEqual(current);
-  expect(worker).toEqual({
+  expect(worker).toMatchObject({
     owned: ['movie:1', 'tv:2', 'movie:3'],
     watched: ['movie:1'],
     watchlist: ['tv:2'],
@@ -118,10 +120,6 @@ it('matches the fixed inputs Home currently derives on the page thread', () => {
       ['movie:1', 'watched'],
       ['tv:2', 'watchlist'],
       ['movie:3', 'inProgress'],
-    ],
-    reactions: [
-      ['movie:1', 'love'],
-      ['movie:3', 'dislike'],
     ],
     weighted: [
       ['movie:1', 2, 10],

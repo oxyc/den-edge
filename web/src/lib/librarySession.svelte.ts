@@ -25,6 +25,8 @@ import type { Row } from './wire';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
+import type { ActiveHomePayload } from './homeLibraryView';
+import { projectActiveHomeShapes } from './libraryWorkerClient';
 
 /** Directly opened routes may never paint Home's billboard; background providers still start eventually. */
 export const BACKGROUND_PROVIDER_FALLBACK_MS = 10_000;
@@ -40,6 +42,8 @@ export class LibrarySession {
   shapeRevision = $state(0);
   revision = $state(0);
   settingsRevision = $state(0);
+  /** Compact first-paint state while the ordinary mutable log remains retained in the library Worker. */
+  activeHome = $state.raw<ActiveHomePayload | null>(null);
   /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
   live = false;
   log = $state<LibraryLog | null | undefined>(undefined);
@@ -93,6 +97,7 @@ export class LibrarySession {
   private indexedDisplays = this.displays;
   private readonly displayBatches: string[][] = [];
   private readonly shapeBatches: string[][] = [];
+  private activeHomeShapeRun = 0;
   private readonly device = this.clock.device;
   /** SIMKL delivery is independent of the visible library. Hold its large snapshot behind foreground readiness. */
   private providersReady = false;
@@ -125,6 +130,16 @@ export class LibrarySession {
     const early = this.early;
     this.early = undefined;
     return early ?? fetchRoutes();
+  }
+
+  /** Install the Worker's compact first reply. The log/facade owner decides when its retained handle hydrates. */
+  adoptActiveHome(payload: ActiveHomePayload): void {
+    this.activeHome = payload;
+  }
+
+  /** The retained snapshot has become the ordinary log; its compact first reply no longer owns page state. */
+  clearActiveHome(handle?: number): void {
+    if (handle === undefined || this.activeHome?.handle === handle) this.activeHome = null;
   }
 
   /** One refresh owner for every route, including Settings. Failed opens are retryable. */
@@ -327,8 +342,29 @@ export class LibrarySession {
         this.shapes = next;
         this.shapeBatches.push(changed);
         this.shapeRevision = this.shapeBatches.length;
+        void this.projectActiveHomeContinue();
       }
     }
+  }
+
+  /** Exact Continue policy after the compact Home preflight names TV layouts. */
+  private async projectActiveHomeContinue(): Promise<void> {
+    const active = this.activeHome;
+    if (!active) return;
+    const wanted = new Set(active.view.requiredShapeRefs);
+    const shapes = [...this.shapes].filter(([key]) => wanted.has(key));
+    const run = ++this.activeHomeShapeRun;
+    const projected = await projectActiveHomeShapes(active.handle, shapes);
+    if (
+      !projected ||
+      run !== this.activeHomeShapeRun ||
+      this.activeHome?.handle !== projected.handle
+    )
+      return;
+    this.activeHome = {
+      ...this.activeHome,
+      view: { ...this.activeHome.view, continue: projected.continue },
+    };
   }
 
   /** Remember metadata learned outside the background naming queue (for example, a pressed billboard card). */
