@@ -167,6 +167,14 @@
   const log = $derived(session.log);
   /** Compact worker-owned state is usable only on Home; every other route asks the session to hydrate. */
   const stagedHome = $derived(route.page === 'library' ? session.activeHome : null);
+  const stagedHomeHandle = $derived(stagedHome?.handle ?? null);
+  /** Hydration installs `log` before compact Home retires; that ownership overlap must not restart naming. */
+  const libraryNamingSource = $derived(
+    stagedHomeHandle === null ? log : `staged:${stagedHomeHandle}`,
+  );
+  const libraryNamingSettingsRevision = $derived(
+    stagedHomeHandle === null ? session.settingsRevision : 0,
+  );
   /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
   const version = $derived(session.revision);
   let busy = $state(false);
@@ -212,12 +220,13 @@
       : undefined;
   };
   $effect(() => {
-    void session.settingsRevision;
-    const opened = log;
-    const staged = stagedHome;
+    void libraryNamingSettingsRevision;
+    const source = libraryNamingSource;
+    const opened = untrack(() => log);
+    const staged = untrack(() => stagedHome);
     // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
     // the discovery: atlas gives them rows and reel gives them trailers, both on this origin.
-    if (opened === undefined && !staged) return;
+    if (source === undefined) return;
     // The shared grants are read here so a grant that arrives or ends asks again (`guestGrants.list` is state).
     void guestGrants.pluginUrls();
     let disposed = false;
@@ -234,8 +243,8 @@
         shelvesReady = false;
         shelfPlan = null;
         shelfPlanReady = false;
-        const projection = opened ? session.libraryProjection() : null;
-        if (opened && !projection) return;
+        const projection = opened && !staged ? session.libraryProjection() : null;
+        if (opened && !staged && !projection) return;
         const raw = projection?.library;
         const naming = staged
           ? nameActiveHomeShelfTitles(session, staged, key)
@@ -1301,16 +1310,17 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const opened = log;
+    const staged = stagedHome;
     const type = facet;
-    if (!opened || !tmdbKey) return;
+    if ((!opened && !staged) || !tmdbKey) return;
     if (memberPost) {
-      void opened.kept<KeptBillboard>(keptPersonal(type)).then((saved) => {
+      void session.kept<KeptBillboard>(keptPersonal(type)).then((saved) => {
         const titles = displayableKept(saved)?.titles ?? null;
         if (titles && !featured.length) featured = titles;
       });
       return;
     }
-    void opened.kept<RecommendedTitle[]>(keptBillboard(type)).then((saved) => {
+    void session.kept<RecommendedTitle[]>(keptBillboard(type)).then((saved) => {
       if (saved?.length && !featured.length) featured = saved;
     });
   });
@@ -1380,13 +1390,12 @@
             }),
           )
         : null;
-    const kept =
-      ranked && opened
-        ? opened.kept<KeptBillboard>(keptPersonal(type)).then(
-            (saved) => displayableKept(saved)?.titles ?? null,
-            () => null,
-          )
-        : Promise.resolve(null);
+    const kept = ranked
+      ? session.kept<KeptBillboard>(keptPersonal(type)).then(
+          (saved) => displayableKept(saved)?.titles ?? null,
+          () => null,
+        )
+      : Promise.resolve(null);
     void kept
       .then(async (personal) => {
         if (run !== billboardRun) return;
@@ -1399,14 +1408,14 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
         featured = swapAfter(featured, slideShown, picked);
-        if (opened) {
+        if (opened || stagedHome) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
             libraryIdentity,
             type,
             fresh,
             picked,
-            (kept) => opened.keep(keptPersonal(type), kept),
+            (kept) => session.keep(keptPersonal(type), kept),
             keptAt,
           ).catch(warnKeep);
         }
@@ -1430,7 +1439,7 @@
     const first = await nameSlides(shared.slice(0, 1), new Map(), lookup, 1);
     if (run !== billboardRun) return;
     // A member's kept billboard stays up while the rest is named. A guest's generic fallback gives way at once.
-    if (first.length && (!log || !featured.length)) featured = first;
+    if (first.length && (!libraryOpen || !featured.length)) featured = first;
     const known = new Map(first.map((title) => [titleKey(title), title] as const));
     const picked = await nameSlides(shared.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
     if (run !== billboardRun) return;
@@ -1441,7 +1450,7 @@
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
     // forever, with its stale explanation attached.
     featured = picked;
-    void log?.keep(keptBillboard(type), picked).catch(warnKeep);
+    if (log || stagedHome) void session.keep(keptBillboard(type), picked).catch(warnKeep);
   }
 
   /**

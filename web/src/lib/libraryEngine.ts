@@ -23,6 +23,8 @@ export const LIBRARY_ENGINE_CHUNK_MAX = 256;
 
 export type LibraryEngineRequest =
   | { id: number; op: 'open'; key: string; now: number }
+  | { id: number; op: 'kept'; handle: number; name: string }
+  | { id: number; op: 'keep'; handle: number; name: string; value: unknown }
   | { id: number; op: 'shapes'; handle: number; shapes: Array<[string, Shape]> }
   | { id: number; op: 'hydrate'; handle: number; cursor: number; limit?: number }
   | { id: number; op: 'release'; handle: number };
@@ -56,6 +58,11 @@ export class LibraryEngine {
     if (request.op === 'open') return this.open(request.key, request.now);
     const held = this.active.get(request.handle);
     if (!held) throw new Error('staged library has expired');
+    if (request.op === 'kept') return held.log.kept(request.name);
+    if (request.op === 'keep') {
+      await held.log.keep(request.name, request.value);
+      return true;
+    }
     if (request.op === 'shapes')
       return {
         handle: request.handle,

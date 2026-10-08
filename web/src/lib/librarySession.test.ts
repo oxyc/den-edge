@@ -127,6 +127,8 @@ it('keeps staged Home compact while installing its mutable log and projects only
   const release = vi.fn(async () => {});
   vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
     payload: activeHomePayload(),
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
     hydrate,
     release,
   });

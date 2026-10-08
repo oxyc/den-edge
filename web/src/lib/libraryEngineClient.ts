@@ -64,6 +64,8 @@ interface ActiveConnection {
 
 export interface OpenedLibraryEngine {
   payload: ActiveHomePayload;
+  kept<T>(name: string): Promise<T | undefined>;
+  keep<T>(name: string, value: T): Promise<void>;
   hydrate(): Promise<LibraryLog | null>;
   release(): Promise<void>;
 }
@@ -152,7 +154,12 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
           connection.stop();
         }
       })());
-    return { payload, hydrate, release };
+    const kept = <T>(name: string) =>
+      connection.request<T | undefined>({ op: 'kept', handle: opened.handle, name });
+    const keep = async <T>(name: string, value: T) => {
+      await connection.request<boolean>({ op: 'keep', handle: opened.handle, name, value });
+    };
+    return { payload, kept, keep, hydrate, release };
   } catch {
     connection.stop();
     return undefined;

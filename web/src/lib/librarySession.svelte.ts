@@ -30,6 +30,8 @@ import { openLibraryEngine, projectLibraryEngineShapes } from './libraryEngineCl
 
 interface StagedLibraryEngine {
   payload: ActiveHomePayload;
+  kept<T>(name: string): Promise<T | undefined>;
+  keep<T>(name: string, value: T): Promise<void>;
   hydrate(): Promise<LibraryLog | null>;
   release(): Promise<void>;
 }
@@ -152,6 +154,24 @@ export class LibrarySession {
       this.activeHome = null;
       this.activeHomeShapeRun++;
     }
+  }
+
+  /** Read a retained first-paint value without materializing the worker-owned library snapshot. */
+  kept<T>(name: string): Promise<T | undefined> {
+    if (this.log) return this.log.kept<T>(name);
+    if (this.hydrating) return this.hydrating.then((log) => log?.kept<T>(name));
+    return this.stagedEngine?.kept<T>(name) ?? Promise.resolve(undefined);
+  }
+
+  /** Persist through whichever side currently owns the staged library. */
+  async keep<T>(name: string, value: T): Promise<void> {
+    if (this.log) return this.log.keep(name, value);
+    if (this.hydrating) {
+      const log = await this.hydrating;
+      if (log) await log.keep(name, value);
+      return;
+    }
+    await this.stagedEngine?.keep(name, value);
   }
 
   /** Materialize the ordinary mutable log once a route or action needs more than compact Home state. */
@@ -465,8 +485,8 @@ export class LibrarySession {
   activeHomeContinueWatching(): ContinueEntry[] {
     const active = this.activeHome;
     if (!active) return [];
-    return active.view.continue.flatMap(({ ref, display: _display, ...entry }) => {
-      const title = this.displayTitle(ref);
+    return active.view.continue.flatMap(({ ref, display: _display, title: retained, ...entry }) => {
+      const title = this.displayTitle(ref) ?? retained;
       return title?.title ? [{ ...entry, title }] : [];
     });
   }
