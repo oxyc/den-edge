@@ -271,7 +271,13 @@ export class LibrarySession {
           this.hydratedHomeContinue = {
             handle: active.handle,
             library: stagedProjection.continueLibrary,
-            payload: this.homeWithCurrentShapes(active, stagedProjection.continueLibrary),
+            // Home settles its Worker answer before ordinary foreground hydration. Reuse that exact payload instead
+            // of replaying the compact policy graph on this thread; only a route that won the settlement race needs
+            // the local fallback.
+            payload:
+              this.activeHomeContinueSettledHandle === active.handle
+                ? active
+                : this.homeWithCurrentShapes(active, stagedProjection.continueLibrary),
           };
         this.attachDownloads(opened);
         this.log = opened;
