@@ -25,6 +25,10 @@ import type {
   PresenceView,
   Reaction,
   RecoveryView,
+  RetainedBillboard,
+  RetainedBillboardScope,
+  RetainedServices,
+  RuntimeDiscoveryView,
   SettingsView,
   SimklView,
   TitleRef,
@@ -102,6 +106,7 @@ export class LibraryModel {
   #overview = $state.raw<LibraryModelSnapshot<LibraryOverviewView>>(connectingSnapshot());
   #continue = $state.raw<LibraryModelSnapshot<ContinueView>>(connectingSnapshot());
   #settings = $state.raw<LibraryModelSnapshot<SettingsView>>(connectingSnapshot());
+  #runtime = $state.raw<LibraryModelSnapshot<RuntimeDiscoveryView>>(connectingSnapshot());
   #connection = $state<LibraryModelConnection>('connecting');
   #status = $state.raw<LibraryModelStatus>(Object.freeze({ kind: 'connecting' }));
   #openFailure = $state.raw<Immutable<LibraryServiceFailure> | undefined>();
@@ -119,7 +124,7 @@ export class LibraryModel {
   #installingRelayMembership?: Promise<void>;
   #relayMembershipAllowed = true;
 
-  /** Settles only after the service and all three Home-critical root replacements are ready. */
+  /** Settles only after the service and all four Home-critical root replacements are ready. */
   readonly ready: Promise<LibraryVersion>;
 
   constructor(
@@ -135,6 +140,9 @@ export class LibraryModel {
       }),
       service.subscribeSnapshot({ kind: 'settings' }, (snapshot) => {
         this.#settings = modelSnapshot<SettingsView>(snapshot);
+      }),
+      service.subscribeSnapshot({ kind: 'runtime' }, (snapshot) => {
+        this.#runtime = modelSnapshot<RuntimeDiscoveryView>(snapshot);
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
@@ -219,6 +227,10 @@ export class LibraryModel {
 
   get settings(): LibraryModelSnapshot<SettingsView> {
     return this.#settings;
+  }
+
+  get runtime(): LibraryModelSnapshot<RuntimeDiscoveryView> {
+    return this.#runtime;
   }
 
   get connection(): LibraryModelConnection {
@@ -430,6 +442,55 @@ export class LibraryModel {
     return this.#command({ kind: 'simkl.removals.approve', approvalId }, operationId);
   }
 
+  rememberPrivateRemux(url: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'discovery.remux.remember', url }, operationId);
+  }
+
+  retainServices(
+    value: RetainedServices,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'retained.services.set', value }, operationId);
+  }
+
+  retainHomeContinue(present: boolean, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'retained.home-continue.set', present }, operationId);
+  }
+
+  retainBillboard(
+    scope: RetainedBillboardScope,
+    value: RetainedBillboard,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'retained.billboard.set', scope, value }, operationId);
+  }
+
+  async retainedServices(): Promise<Immutable<RetainedServices> | null> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'retained.services.get' });
+    if (result.kind !== 'retained.services') throw wrongQueryResult('retained services');
+    return result.value as Immutable<RetainedServices> | null;
+  }
+
+  async retainedHomeContinue(): Promise<boolean | null> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'retained.home-continue.get' });
+    if (result.kind !== 'retained.home-continue') throw wrongQueryResult('retained Home hint');
+    return result.present;
+  }
+
+  async retainedBillboard(
+    scope: RetainedBillboardScope,
+  ): Promise<Immutable<RetainedBillboard> | null> {
+    this.#assertOpen();
+    const { result } = await this.service.query({
+      kind: 'retained.billboard.get',
+      scope: structuredClone(scope),
+    });
+    if (result.kind !== 'retained.billboard') throw wrongQueryResult('retained billboard');
+    return result.value as Immutable<RetainedBillboard> | null;
+  }
+
   enqueueDownload(
     title: DownloadTitleDescriptor,
     release: DownloadReleaseDescriptor,
@@ -597,6 +658,7 @@ export class LibraryModel {
     this.#recovery?.close();
     this.#recovery = undefined;
     this.#settings = closedSnapshot(this.#settings);
+    this.#runtime = closedSnapshot(this.#runtime);
     this.#forgetRelayMembership?.();
     this.#forgetRelayMembership = undefined;
     this.#connection = 'closed';
@@ -758,6 +820,14 @@ function failureFrom(error: unknown): Immutable<LibraryServiceFailure> {
           retryable: true,
         };
   return Object.freeze(failure);
+}
+
+function wrongQueryResult(wanted: string): LibraryServiceError {
+  return new LibraryServiceError({
+    code: 'internal',
+    message: `library service returned the wrong ${wanted} result`,
+    retryable: true,
+  });
 }
 
 function titleKey(title: TitleRef): string {

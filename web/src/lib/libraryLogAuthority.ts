@@ -50,6 +50,7 @@ import type {
   LibraryQuery,
   LibraryQueryResult,
   LibraryTask,
+  RetainedBillboard,
   RatingSource,
   LibrarySelection,
   LibrarySelectionValue,
@@ -69,6 +70,7 @@ import { LibraryLog } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
 import type { Vault } from './localVault';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
+import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
 import {
   approveSimklRemovalsWithClock,
@@ -76,6 +78,8 @@ import {
   type HeldRemovals,
 } from './simklDelivery';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
+import { tmdbKeyOf } from './tmdb';
+import { isRetainedBillboard, isRetainedServices } from './libraryServiceProtocolCodec';
 import {
   change as preferenceChange,
   forgetDevice,
@@ -100,6 +104,33 @@ import {
 } from './wire';
 
 type Delivery = 'synced' | 'queued' | 'local';
+
+const RETAINED_SERVICES = 'services.v1';
+const RETAINED_HOME_SHELVES = 'home.shelves.v1';
+const retainedBillboardName = (
+  scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
+) =>
+  scope.kind === 'personal'
+    ? `billboard.personal.v1.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`
+    : `billboard.v4.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`;
+const retainedBillboardValue = (
+  scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
+  stored: unknown,
+): RetainedBillboard | null => {
+  const candidate =
+    scope.kind === 'shared'
+      ? { kind: 'shared' as const, titles: stored }
+      : stored && typeof stored === 'object' && !Array.isArray(stored)
+        ? {
+            kind: 'personal' as const,
+            at: (stored as { at?: unknown }).at,
+            titles: (stored as { titles?: unknown }).titles,
+          }
+        : null;
+  return isRetainedBillboard(candidate) && candidate.kind === scope.kind ? candidate : null;
+};
+const storedBillboardValue = (value: RetainedBillboard): unknown =>
+  value.kind === 'shared' ? value.titles : { at: value.at, titles: value.titles };
 
 export type LibraryAffectedSelection = LibrarySelectionScope;
 
@@ -273,6 +304,8 @@ export class LibraryLogAuthority {
         return this.#simkl();
       case 'recovery':
         return this.#administration().recoveryView();
+      case 'runtime':
+        return this.#runtime();
       case 'downloads':
         return this.#downloads();
     }
@@ -345,6 +378,17 @@ export class LibraryLogAuthority {
         return this.#disconnectSimkl();
       case 'simkl.removals.approve':
         return this.#approveSimklRemovals(command.approvalId);
+      case 'discovery.remux.remember':
+        return this.#rememberRemux(command.url);
+      case 'retained.services.set':
+        return this.#keepRetained(RETAINED_SERVICES, command.value);
+      case 'retained.home-continue.set':
+        return this.#keepRetained(RETAINED_HOME_SHELVES, { continue: command.present });
+      case 'retained.billboard.set':
+        return this.#keepRetained(
+          retainedBillboardName(command.scope),
+          storedBillboardValue(command.value),
+        );
       case 'download.enqueue':
         return this.#enqueueDownload(command);
       case 'download.remove':
@@ -392,6 +436,34 @@ export class LibraryLogAuthority {
               ...(source.size !== undefined ? { sizeBytes: source.size } : {}),
               ...(source.cached !== undefined ? { cached: source.cached } : {}),
             })) ?? null,
+        };
+      }
+      case 'retained.services.get': {
+        const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
+        return {
+          kind: 'retained.services',
+          value: isRetainedServices(value) ? value : null,
+        };
+      }
+      case 'retained.home-continue.get': {
+        const value = await this.#log.kept<unknown>(RETAINED_HOME_SHELVES);
+        return {
+          kind: 'retained.home-continue',
+          present:
+            value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            typeof (value as { continue?: unknown }).continue === 'boolean'
+              ? (value as { continue: boolean }).continue
+              : null,
+        };
+      }
+      case 'retained.billboard.get': {
+        const value = await this.#log.kept<unknown>(retainedBillboardName(query.scope));
+        return {
+          kind: 'retained.billboard',
+          scope: query.scope,
+          value: retainedBillboardValue(query.scope, value),
         };
       }
       default:
@@ -733,6 +805,18 @@ export class LibraryLogAuthority {
     };
   }
 
+  #runtime(): Extract<LibrarySelectionValue, { kind: 'runtime' }> {
+    const remux = readPrivateAddresses(this.#log.settings(ADDRESSES)).remux;
+    return {
+      kind: 'runtime',
+      tmdbKey: tmdbKeyOf(this.#log.settings('keys')),
+      pluginManifestUrls: readPlugins(this.#log.settings('plugins'))
+        .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
+        .slice(0, 10_000),
+      privateRemuxUrl: remux ?? null,
+    };
+  }
+
   #simkl(): Extract<LibrarySelectionValue, { kind: 'simkl' }> {
     const account = this.#simklAccount();
     if (!account) {
@@ -1040,7 +1124,7 @@ export class LibraryLogAuthority {
     return this.#patchSettings(
       'keys',
       { [this.#keyName(service)]: value === null ? null : { string: value } },
-      [{ kind: 'connections' }],
+      [{ kind: 'connections' }, ...(service === 'tmdb' ? ([{ kind: 'runtime' }] as const) : [])],
     );
   }
 
@@ -1085,7 +1169,35 @@ export class LibraryLogAuthority {
       throw authorityError('invalid-request', 'plugin manifest URL is not allowed');
     return this.#patchSettings('plugins', { [manifestUrl]: installed ? { bool: true } : null }, [
       { kind: 'connections' },
+      { kind: 'runtime' },
     ]);
+  }
+
+  async #rememberRemux(url: string): Promise<LibraryAuthorityCommandResult> {
+    if (!storable(url))
+      throw authorityError(
+        'invalid-request',
+        'private remux URL is not a storable tailnet address',
+      );
+    const change = healed(readPrivateAddresses(this.#log.settings(ADDRESSES)), 'remux', url);
+    return change
+      ? this.#patchSettings(ADDRESSES, change, [{ kind: 'runtime' }])
+      : this.#unchanged();
+  }
+
+  async #keepRetained(name: string, value: unknown): Promise<LibraryAuthorityCommandResult> {
+    const current = await this.#log.kept<unknown>(name);
+    if (JSON.stringify(current) === JSON.stringify(value)) return this.#unchanged();
+    try {
+      await this.#log.keep(name, value);
+    } catch (error) {
+      throw authorityError(
+        'storage',
+        error instanceof Error ? error.message : 'retained library value could not be saved',
+        true,
+      );
+    }
+    return { outcome: 'applied', delivery: 'local', affected: [] };
   }
 
   async #setPluginTrust(

@@ -58,6 +58,7 @@ class FakeService {
     this.publish({ kind: 'overview' }, overviewValue(), 1);
     this.publish({ kind: 'continue' }, continueValue(), 2);
     this.publish({ kind: 'settings' }, settingsValue(), 4);
+    this.publish({ kind: 'runtime' }, runtimeValue(), 4);
     this.status({ kind: 'ready', version: version(4) });
     return version(4);
   }
@@ -101,6 +102,28 @@ class FakeService {
       return { result: { kind: 'download.refresh', refreshed: true }, version: version(6) };
     if (query.kind === 'download.releases')
       return { result: { kind: 'download.releases', releases: [] }, version: version(6) };
+    if (query.kind === 'retained.services.get')
+      return {
+        result: { kind: 'retained.services', value: retainedServicesValue() },
+        version: version(6),
+      };
+    if (query.kind === 'retained.home-continue.get')
+      return {
+        result: { kind: 'retained.home-continue', present: true },
+        version: version(6),
+      };
+    if (query.kind === 'retained.billboard.get')
+      return {
+        result: {
+          kind: 'retained.billboard',
+          scope: query.scope,
+          value:
+            query.scope.kind === 'personal'
+              ? { kind: 'personal', at: 1_000, titles: [] }
+              : { kind: 'shared', titles: [] },
+        },
+        version: version(6),
+      };
     if (query.kind !== 'playback.prepare') throw new Error('unsupported query in fake service');
     return {
       result: {
@@ -224,6 +247,21 @@ const settingsValue = (): LibrarySelectionValue => ({
   },
 });
 
+const runtimeValue = (): LibrarySelectionValue => ({
+  kind: 'runtime',
+  tmdbKey: 'tmdb-key',
+  pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
+  privateRemuxUrl: 'https://remux.tailnet.ts.net',
+});
+
+const retainedServicesValue = () => ({
+  routes: { remux: [{ url: 'https://remux.example' }] },
+  scout: { install: 'https://plugins.example/scout', base: '/scout' },
+  atlas: '/atlas',
+  reel: '/reel',
+  remux: 'https://remux.example',
+});
+
 it('opens only Home-critical roots and keeps history and downloads lazy', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
@@ -232,6 +270,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     { kind: 'overview' },
     { kind: 'continue' },
     { kind: 'settings' },
+    { kind: 'runtime' },
   ]);
   await expect(model.ready).resolves.toEqual(version(4));
   expect(service.queries[0]).toEqual({ kind: 'relay.membership' });
@@ -246,6 +285,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   });
   expect(model.continueWatching.value?.items[0]).toMatchObject({ fraction: 0.4 });
   expect(model.settings.value?.preferences.autoplayTrailers).toBe(true);
+  expect(model.runtime.value).toMatchObject({ tmdbKey: 'tmdb-key' });
   expect(Object.isFrozen(model.overview)).toBe(true);
 
   const history = model.history();
@@ -294,6 +334,55 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(model.continueWatching).not.toBe(before);
   model.close();
   expect(hasLibraryCredential()).toBe(false);
+});
+
+it('exposes named discovery and retained-Home operations without a generic cache surface', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const scope = { kind: 'personal', facet: 'movie', fresh: false } as const;
+  const billboard = { kind: 'personal' as const, at: 1_000, titles: [] };
+
+  await model.rememberPrivateRemux('https://remux.tailnet.ts.net', 'remember-remux');
+  await model.retainServices(retainedServicesValue(), 'retain-services');
+  await model.retainHomeContinue(true, 'retain-continue');
+  await model.retainBillboard(scope, billboard, 'retain-billboard');
+
+  expect(service.commands.slice(-4)).toEqual([
+    {
+      command: {
+        kind: 'discovery.remux.remember',
+        url: 'https://remux.tailnet.ts.net',
+      },
+      operationId: 'remember-remux',
+    },
+    {
+      command: { kind: 'retained.services.set', value: retainedServicesValue() },
+      operationId: 'retain-services',
+    },
+    {
+      command: { kind: 'retained.home-continue.set', present: true },
+      operationId: 'retain-continue',
+    },
+    {
+      command: { kind: 'retained.billboard.set', scope, value: billboard },
+      operationId: 'retain-billboard',
+    },
+  ]);
+  await expect(model.retainedServices()).resolves.toEqual(retainedServicesValue());
+  await expect(model.retainedHomeContinue()).resolves.toBe(true);
+  await expect(model.retainedBillboard(scope)).resolves.toEqual({
+    kind: 'personal',
+    at: 1_000,
+    titles: [],
+  });
+  expect(service.queries.slice(-3)).toEqual([
+    { kind: 'retained.services.get' },
+    { kind: 'retained.home-continue.get' },
+    { kind: 'retained.billboard.get', scope },
+  ]);
+
+  model.close();
 });
 
 it('shares exact keyed title and ordered-presence subscriptions until their last lease releases', async () => {

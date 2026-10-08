@@ -23,6 +23,10 @@ import {
   type LibraryTaskResult,
   type LibraryVersion,
   type RatingSource,
+  type RetainedBillboard,
+  type RetainedBillboardScope,
+  type RetainedBillboardTitle,
+  type RetainedServices,
   type ServiceRef,
   type SimklView,
   type TitleRef,
@@ -46,6 +50,7 @@ const finite = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 const integer = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
+const positiveInteger = (value: unknown): value is number => integer(value) && value > 0;
 const bool = (value: unknown): value is boolean => typeof value === 'boolean';
 const optional = <T>(
   value: unknown,
@@ -109,6 +114,173 @@ const webUrl = (value: unknown): value is string => {
     return false;
   }
 };
+const serviceBase = (value: unknown): value is string =>
+  boundedText(value, 4_096) && (value.startsWith('/') || webUrl(value));
+
+function retainedBillboardScope(value: unknown): value is RetainedBillboardScope {
+  return (
+    record(value) &&
+    exact(value, ['kind', 'facet', 'fresh']) &&
+    (value.kind === 'shared' || value.kind === 'personal') &&
+    (value.facet === null || value.facet === 'movie' || value.facet === 'tv') &&
+    bool(value.fresh)
+  );
+}
+
+const smallText = (value: unknown): value is string => boundedText(value, 1_024);
+const positiveIntegerList = (value: unknown, max = 256): value is number[] =>
+  list(value, positiveInteger, max) && unique(value);
+
+function retainedBillboardTitle(value: unknown): value is RetainedBillboardTitle {
+  if (
+    !record(value) ||
+    !exact(value, [
+      'type',
+      'id',
+      'title',
+      'posterPath',
+      'posterUrl',
+      'backdropPath',
+      'year',
+      'releaseDate',
+      'rating',
+      'ratingSource',
+      'votes',
+      'popularity',
+      'countries',
+      'people',
+      'collectionId',
+      'genreIds',
+      'primaryGenreName',
+      'likely',
+      'originalLanguage',
+      'adult',
+      'imdbId',
+      'arrivesAt',
+      'services',
+      'why',
+    ]) ||
+    !titleRef({ type: value.type, id: value.id }) ||
+    !smallText(value.title) ||
+    !optional(value.posterPath, smallText) ||
+    !optional(value.posterUrl, webUrl) ||
+    !optional(value.backdropPath, smallText) ||
+    !optional(value.year, integer) ||
+    !optional(
+      value.releaseDate,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(candidate),
+    ) ||
+    !optional(value.rating, finite) ||
+    !optional(
+      value.ratingSource,
+      (candidate): candidate is 'tmdb' | 'justwatch-imdb' =>
+        candidate === 'tmdb' || candidate === 'justwatch-imdb',
+    ) ||
+    !optional(value.votes, integer) ||
+    !optional(value.popularity, finite) ||
+    !optional(
+      value.countries,
+      (candidate): candidate is string[] => list(candidate, countryCode, 32) && unique(candidate),
+    ) ||
+    !optional(value.people, (candidate): candidate is number[] => positiveIntegerList(candidate)) ||
+    !optional(value.collectionId, positiveInteger) ||
+    !optional(value.genreIds, (candidate): candidate is number[] =>
+      positiveIntegerList(candidate),
+    ) ||
+    !optional(value.primaryGenreName, smallText) ||
+    !optional(value.likely, bool) ||
+    !optional(value.originalLanguage, languageCode) ||
+    !optional(value.adult, bool) ||
+    !optional(
+      value.imdbId,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && /^tt\d+$/.test(candidate),
+    ) ||
+    !optional(value.arrivesAt, integer) ||
+    !optional(
+      value.services,
+      (candidate): candidate is string[] => list(candidate, smallText, 64) && unique(candidate),
+    )
+  )
+    return false;
+  if (value.why === undefined) return true;
+  if (
+    !record(value.why) ||
+    !exact(value.why, [
+      'score',
+      'fit',
+      'similar',
+      'profile',
+      'people',
+      'confidence',
+      'fresh',
+      'arrived',
+      'quality',
+      'buzz',
+      'reason',
+    ])
+  )
+    return false;
+  return (
+    optional(value.why.score, finite) &&
+    optional(value.why.fit, finite) &&
+    optional(value.why.similar, (candidate): candidate is number | null =>
+      nullable(candidate, finite),
+    ) &&
+    optional(value.why.profile, finite) &&
+    optional(value.why.people, finite) &&
+    optional(value.why.confidence, finite) &&
+    optional(value.why.fresh, finite) &&
+    optional(value.why.arrived, finite) &&
+    optional(value.why.quality, finite) &&
+    optional(value.why.buzz, finite) &&
+    optional(value.why.reason, smallText)
+  );
+}
+
+export function isRetainedBillboard(value: unknown): value is RetainedBillboard {
+  return (
+    record(value) &&
+    ((value.kind === 'shared' && exact(value, ['kind', 'titles'])) ||
+      (value.kind === 'personal' && exact(value, ['kind', 'at', 'titles']) && integer(value.at))) &&
+    list(value.titles, retainedBillboardTitle, LIBRARY_SERVICE_WIRE_LIMITS.retainedTitles)
+  );
+}
+
+export function isRetainedServices(value: unknown): value is RetainedServices {
+  if (
+    !record(value) ||
+    !exact(value, ['routes', 'scout', 'atlas', 'reel', 'remux']) ||
+    !record(value.routes) ||
+    Object.keys(value.routes).length > LIBRARY_SERVICE_WIRE_LIMITS.routeServices
+  )
+    return false;
+  const addon = (candidate: unknown): candidate is { install: string; base: string } =>
+    record(candidate) &&
+    exact(candidate, ['install', 'base']) &&
+    webUrl(candidate.install) &&
+    serviceBase(candidate.base);
+  return (
+    Object.entries(value.routes).every(
+      ([name, entries]) =>
+        /^[a-z][a-z0-9-]*$/.test(name) &&
+        list(
+          entries,
+          (entry): entry is { url: string; access?: boolean } =>
+            record(entry) &&
+            exact(entry, ['url', 'access']) &&
+            webUrl(entry.url) &&
+            optional(entry.access, bool),
+          LIBRARY_SERVICE_WIRE_LIMITS.routeEntries,
+        ),
+    ) &&
+    nullable(value.scout, addon) &&
+    nullable(value.atlas, serviceBase) &&
+    nullable(value.reel, serviceBase) &&
+    nullable(value.remux, serviceBase)
+  );
+}
 
 function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
   return (
@@ -395,6 +567,19 @@ function command(value: unknown): value is LibraryCommand {
       return exact(value, ['kind']);
     case 'simkl.removals.approve':
       return exact(value, ['kind', 'approvalId']) && boundedText(value.approvalId, 256);
+    case 'discovery.remux.remember':
+      return exact(value, ['kind', 'url']) && webUrl(value.url);
+    case 'retained.services.set':
+      return exact(value, ['kind', 'value']) && isRetainedServices(value.value);
+    case 'retained.home-continue.set':
+      return exact(value, ['kind', 'present']) && bool(value.present);
+    case 'retained.billboard.set':
+      return (
+        exact(value, ['kind', 'scope', 'value']) &&
+        retainedBillboardScope(value.scope) &&
+        isRetainedBillboard(value.value) &&
+        value.scope.kind === value.value.kind
+      );
     case 'download.enqueue':
       return (
         exact(value, ['kind', 'title', 'release', 'candidates']) &&
@@ -428,6 +613,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'connections':
     case 'simkl':
     case 'recovery':
+    case 'runtime':
     case 'downloads':
       return exact(value, ['kind']);
     case 'title':
@@ -472,6 +658,10 @@ function query(value: unknown): value is LibraryQuery {
     return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);
   if (value.kind === 'download.releases')
     return exact(value, ['kind', 'title']) && downloadTitle(value.title);
+  if (value.kind === 'retained.services.get' || value.kind === 'retained.home-continue.get')
+    return exact(value, ['kind']);
+  if (value.kind === 'retained.billboard.get')
+    return exact(value, ['kind', 'scope']) && retainedBillboardScope(value.scope);
   return (
     value.kind === 'playback.prepare' &&
     exact(value, ['kind', 'title', 'episode']) &&
@@ -1108,6 +1298,14 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         bool(value.broken) &&
         list(value.notices, (notice): notice is string => boundedText(notice, 4_096), 32)
       );
+    case 'runtime':
+      return (
+        exact(value, ['kind', 'tmdbKey', 'pluginManifestUrls', 'privateRemuxUrl']) &&
+        boundedText(value.tmdbKey, 16_384) &&
+        list(value.pluginManifestUrls, webUrl, 10_000) &&
+        unique(value.pluginManifestUrls) &&
+        nullable(value.privateRemuxUrl, webUrl)
+      );
     case 'downloads':
       return exact(value, ['kind', 'items']) && list(value.items, download);
     default:
@@ -1227,6 +1425,17 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       (value.releases === null || (Array.isArray(value.releases) && value.releases.every(release)))
     );
   }
+  if (value.kind === 'retained.services')
+    return exact(value, ['kind', 'value']) && nullable(value.value, isRetainedServices);
+  if (value.kind === 'retained.home-continue')
+    return exact(value, ['kind', 'present']) && nullable(value.present, bool);
+  if (value.kind === 'retained.billboard')
+    return (
+      exact(value, ['kind', 'scope', 'value']) &&
+      retainedBillboardScope(value.scope) &&
+      nullable(value.value, isRetainedBillboard) &&
+      (value.value === null || value.scope.kind === value.value.kind)
+    );
   return (
     exact(value, ['kind', 'action', 'target', 'resume']) &&
     value.kind === 'playback.prepare' &&

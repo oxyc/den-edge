@@ -14,6 +14,9 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   presenceTitles: 512,
   shapeSeasons: 256,
   seasonEpisodes: 2_048,
+  retainedTitles: 64,
+  routeServices: 64,
+  routeEntries: 32,
 } as const;
 
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
@@ -34,6 +37,81 @@ export interface EpisodeRef extends TitleRef {
   season: number;
   episode: number;
 }
+
+export interface RuntimeDiscoveryView {
+  kind: 'runtime';
+  tmdbKey: string;
+  pluginManifestUrls: string[];
+  privateRemuxUrl: string | null;
+}
+
+export interface RetainedRouteEntry {
+  url: string;
+  access?: boolean;
+}
+
+export type RetainedRoutes = Record<string, RetainedRouteEntry[]>;
+
+export interface RetainedAddon {
+  install: string;
+  base: string;
+}
+
+export interface RetainedServices {
+  routes: RetainedRoutes;
+  scout: RetainedAddon | null;
+  atlas: string | null;
+  reel: string | null;
+  remux: string | null;
+}
+
+export interface RetainedRecommendationWhy {
+  score?: number;
+  fit?: number;
+  similar?: number | null;
+  profile?: number;
+  people?: number;
+  confidence?: number;
+  fresh?: number;
+  arrived?: number;
+  quality?: number;
+  buzz?: number;
+  reason?: string;
+}
+
+/** The bounded display title Home already retains for a future billboard first paint. */
+export interface RetainedBillboardTitle extends TitleRef {
+  title: string;
+  posterPath?: string;
+  posterUrl?: string;
+  backdropPath?: string;
+  year?: number;
+  releaseDate?: string;
+  rating?: number;
+  ratingSource?: 'tmdb' | 'justwatch-imdb';
+  votes?: number;
+  popularity?: number;
+  countries?: string[];
+  people?: number[];
+  collectionId?: number;
+  genreIds?: number[];
+  primaryGenreName?: string;
+  likely?: boolean;
+  originalLanguage?: string;
+  adult?: boolean;
+  imdbId?: string;
+  arrivesAt?: number;
+  services?: string[];
+  why?: RetainedRecommendationWhy;
+}
+
+export type RetainedBillboardScope =
+  | { kind: 'shared'; facet: MediaType | null; fresh: boolean }
+  | { kind: 'personal'; facet: MediaType | null; fresh: boolean };
+
+export type RetainedBillboard =
+  | { kind: 'shared'; titles: RetainedBillboardTitle[] }
+  | { kind: 'personal'; at: number; titles: RetainedBillboardTitle[] };
 
 /** A monotonic render-view version within one service instance and durable library generation. */
 export interface LibraryVersion {
@@ -120,6 +198,14 @@ export type LibraryCommand =
   | { kind: 'simkl.connect'; token: string }
   | { kind: 'simkl.disconnect' }
   | { kind: 'simkl.removals.approve'; approvalId: string }
+  | { kind: 'discovery.remux.remember'; url: string }
+  | { kind: 'retained.services.set'; value: RetainedServices }
+  | { kind: 'retained.home-continue.set'; present: boolean }
+  | {
+      kind: 'retained.billboard.set';
+      scope: RetainedBillboardScope;
+      value: RetainedBillboard;
+    }
   | {
       kind: 'download.enqueue';
       title: DownloadTitleDescriptor;
@@ -173,6 +259,7 @@ export type LibrarySelection =
   | { kind: 'connections' }
   | { kind: 'simkl' }
   | { kind: 'recovery' }
+  | { kind: 'runtime' }
   | { kind: 'downloads' };
 
 export interface LibraryOverviewView {
@@ -384,6 +471,7 @@ export type LibrarySelectionValue =
   | ConnectionsView
   | SimklView
   | RecoveryView
+  | RuntimeDiscoveryView
   | DownloadsView;
 
 export interface HistoryImportItem {
@@ -448,7 +536,10 @@ export type LibraryQuery =
   | { kind: 'history.export' }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
-  | { kind: 'download.releases'; title: DownloadTitleDescriptor };
+  | { kind: 'download.releases'; title: DownloadTitleDescriptor }
+  | { kind: 'retained.services.get' }
+  | { kind: 'retained.home-continue.get' }
+  | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope };
 
 export type LibraryQueryResult =
   | {
@@ -484,7 +575,14 @@ export type LibraryQueryResult =
       capability: { libraryId: string; memberToken: string } | null;
     }
   | { kind: 'download.refresh'; refreshed: boolean }
-  | { kind: 'download.releases'; releases: DownloadReleaseOption[] | null };
+  | { kind: 'download.releases'; releases: DownloadReleaseOption[] | null }
+  | { kind: 'retained.services'; value: RetainedServices | null }
+  | { kind: 'retained.home-continue'; present: boolean | null }
+  | {
+      kind: 'retained.billboard';
+      scope: RetainedBillboardScope;
+      value: RetainedBillboard | null;
+    };
 
 export type LibraryObservation =
   | {

@@ -79,6 +79,94 @@ function authority(
 }
 
 describe('LibraryLogAuthority', () => {
+  it('owns minimal runtime discovery and the named retained Home values', async () => {
+    const { log, authority } = await localAuthority();
+    await expect(authority.select({ kind: 'runtime' })).resolves.toMatchObject({
+      kind: 'runtime',
+      pluginManifestUrls: [],
+      privateRemuxUrl: null,
+    });
+
+    await expect(
+      authority.command({ kind: 'api-key.set', service: 'tmdb', value: 'tmdb-secret' }, 'tmdb'),
+    ).resolves.toMatchObject({
+      affected: [{ kind: 'connections' }, { kind: 'runtime' }],
+    });
+    await authority.command(
+      { kind: 'plugin.install', manifestUrl: 'https://plugins.example/scout/manifest.json' },
+      'plugin',
+    );
+    await authority.command(
+      { kind: 'discovery.remux.remember', url: 'https://remux.tailnet.ts.net/' },
+      'remux',
+    );
+    const runtime = await authority.select({ kind: 'runtime' });
+    expect(runtime).toEqual({
+      kind: 'runtime',
+      tmdbKey: 'tmdb-secret',
+      pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
+      privateRemuxUrl: 'https://remux.tailnet.ts.net',
+    });
+    expect(JSON.stringify(runtime)).not.toContain('omdb');
+
+    await log.keep('services.v1', { arbitrary: 'old-or-corrupt' });
+    await expect(authority.query({ kind: 'retained.services.get' })).resolves.toEqual({
+      kind: 'retained.services',
+      value: null,
+    });
+    const services = {
+      routes: { remux: [{ url: 'https://remux.example' }] },
+      scout: { install: 'https://plugins.example/scout', base: '/scout' },
+      atlas: '/atlas',
+      reel: '/reel',
+      remux: 'https://remux.example',
+    };
+    await expect(
+      authority.command({ kind: 'retained.services.set', value: services }, 'services'),
+    ).resolves.toEqual({ outcome: 'applied', delivery: 'local', affected: [] });
+    await expect(authority.query({ kind: 'retained.services.get' })).resolves.toEqual({
+      kind: 'retained.services',
+      value: services,
+    });
+
+    await authority.command({ kind: 'retained.home-continue.set', present: true }, 'continue-hint');
+    await expect(authority.query({ kind: 'retained.home-continue.get' })).resolves.toEqual({
+      kind: 'retained.home-continue',
+      present: true,
+    });
+
+    const scope = { kind: 'personal' as const, facet: null, fresh: false };
+    const billboard = {
+      kind: 'personal' as const,
+      at: 1_800_000_000_000,
+      titles: [{ type: 'movie' as const, id: 7, title: 'Seven', why: { reason: 'similar' } }],
+    };
+    await authority.command(
+      { kind: 'retained.billboard.set', scope, value: billboard },
+      'billboard',
+    );
+    await expect(log.kept('billboard.personal.v1.all')).resolves.toEqual({
+      at: billboard.at,
+      titles: billboard.titles,
+    });
+    await expect(authority.query({ kind: 'retained.billboard.get', scope })).resolves.toEqual({
+      kind: 'retained.billboard',
+      scope,
+      value: billboard,
+    });
+
+    const sharedScope = { kind: 'shared' as const, facet: 'movie' as const, fresh: true };
+    const sharedTitles = [{ type: 'movie' as const, id: 8, title: 'Eight' }];
+    await log.keep('billboard.v4.fresh.movie', sharedTitles);
+    await expect(
+      authority.query({ kind: 'retained.billboard.get', scope: sharedScope }),
+    ).resolves.toEqual({
+      kind: 'retained.billboard',
+      scope: sharedScope,
+      value: { kind: 'shared', titles: sharedTitles },
+    });
+  });
+
   it('owns SIMKL credentials and exposes only normalized connection state', async () => {
     const vault = memoryVault();
     const log = (await LibraryLog.openLocal(KEY, vault))!;
@@ -608,12 +696,19 @@ describe('LibraryLogAuthority', () => {
         'server',
       ],
       [{ kind: 'device.heartbeat', name: 'MacBook' }, 'heartbeat'],
-    ] as const)
+    ] as const) {
+      const affectsRuntime =
+        (command.kind === 'api-key.set' && command.service === 'tmdb') ||
+        command.kind === 'plugin.install';
       await expect(authority.command(command, operation)).resolves.toMatchObject({
         outcome: 'applied',
         delivery: 'local',
-        affected: [{ kind: 'connections' }],
+        affected: [
+          { kind: 'connections' },
+          ...(affectsRuntime ? ([{ kind: 'runtime' }] as const) : []),
+        ],
       });
+    }
 
     await expect(authority.select({ kind: 'connections' })).resolves.toEqual({
       kind: 'connections',

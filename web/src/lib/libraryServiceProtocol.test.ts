@@ -308,6 +308,79 @@ describe('library service client protocol', () => {
     ).toMatchObject({ ok: true });
   });
 
+  it('accepts only named runtime discovery and retained-Home operations', () => {
+    const command = (value: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'runtime-command',
+        operationId: 'runtime-operation',
+        command: value,
+      });
+    const services = {
+      routes: { remux: [{ url: 'https://remux.example', access: true }] },
+      scout: { install: 'https://plugins.example/scout', base: '/scout' },
+      atlas: '/atlas',
+      reel: '/reel',
+      remux: 'https://remux.example',
+    };
+    expect(command({ kind: 'retained.services.set', value: services })).toMatchObject({ ok: true });
+    expect(command({ kind: 'retained.home-continue.set', present: true })).toMatchObject({
+      ok: true,
+    });
+    expect(
+      command({
+        kind: 'retained.billboard.set',
+        scope: { kind: 'personal', facet: 'movie', fresh: false },
+        value: {
+          kind: 'personal',
+          at: 1_800_000_000_000,
+          titles: [{ type: 'movie', id: 7, title: 'Seven', why: { reason: 'similar' } }],
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(command({ kind: 'cache.set', name: 'anything', value: { secret: true } })).toMatchObject(
+      { ok: false },
+    );
+    expect(
+      command({
+        kind: 'retained.billboard.set',
+        scope: { kind: 'shared', facet: null, fresh: false },
+        value: { kind: 'personal', at: 1, titles: [] },
+      }),
+    ).toMatchObject({ ok: false });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'runtime',
+        version,
+        value: {
+          kind: 'runtime',
+          tmdbKey: 'key',
+          pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
+          privateRemuxUrl: 'https://remux.tailnet.ts.net',
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'runtime',
+        version,
+        value: {
+          kind: 'runtime',
+          tmdbKey: 'key',
+          pluginManifestUrls: [],
+          privateRemuxUrl: null,
+          otherApiKeys: { omdb: 'must-not-cross' },
+        },
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
   it('rejects mismatched protocols and malformed domain values with typed failures', () => {
     expect(
       decodeLibraryServiceClientMessage({
