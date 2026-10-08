@@ -20,7 +20,7 @@ import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
 import { reuse } from './reuse';
-import { tmdbFetch } from './tmdbCache';
+import { tmdbFetch, tmdbMissing } from './tmdbCache';
 import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 import { fetchServices, matches, type Service } from '../settings/services';
 
@@ -184,6 +184,7 @@ export async function fillPosters(
   const wanted = titles.filter((title) => !title.posterPath).slice(0, head);
   if (!wanted.length) return titles;
   const found = new Map<string, string>();
+  const missing = new Set<string>();
   const key_ = (title: Title) => `${title.type}:${title.id}`;
   for (let at = 0; at < wanted.length; at += atOnce) {
     await Promise.all(
@@ -191,7 +192,10 @@ export async function fillPosters(
         try {
           const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
           const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-          if (!res.ok) return;
+          if (!res.ok) {
+            if (await tmdbMissing(res)) missing.add(key_(title));
+            return;
+          }
           const body = (await res.json()) as { poster_path?: unknown };
           if (typeof body.poster_path === 'string') found.set(key_(title), body.poster_path);
         } catch {
@@ -200,9 +204,11 @@ export async function fillPosters(
       }),
     );
   }
-  return titles.map((title) =>
-    found.has(key_(title)) ? { ...title, posterPath: found.get(key_(title)) } : title,
-  );
+  return titles.flatMap((title) => {
+    const id = key_(title);
+    if (missing.has(id)) return [];
+    return [found.has(id) ? { ...title, posterPath: found.get(id) } : title];
+  });
 }
 
 /**
@@ -615,6 +621,7 @@ export async function withBackdrops(
   const candidates = titles.slice(0, head);
   const looked: (Title | null)[] = [...candidates];
   const missing = candidates.flatMap((title, at) => (title.backdropPath ? [] : [{ title, at }]));
+  const absent = new Set<number>();
   let stopped = false;
   await runBounded(
     missing,
@@ -627,7 +634,13 @@ export async function withBackdrops(
         // dequeue more speculative art lookups during the provider's requested rest.
         if (res.status === 429 || (res.status === 503 && res.headers.has('retry-after')))
           stopped = true;
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (await tmdbMissing(res)) {
+            absent.add(at);
+            looked[at] = null;
+          }
+          return;
+        }
         const body = (await res.json()) as { backdrop_path?: unknown };
         looked[at] =
           typeof body.backdrop_path === 'string'
@@ -641,7 +654,7 @@ export async function withBackdrops(
   );
   const pictured = looked.filter((title): title is Title => title !== null);
   // Nothing with a picture at all: the words are still a better hero than an empty one.
-  return pictured.length ? pictured : candidates;
+  return pictured.length ? pictured : candidates.filter((_, at) => !absent.has(at));
 }
 
 export interface ServicePageOptions {

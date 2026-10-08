@@ -582,6 +582,15 @@ describe('withBackdrops', () => {
     expect(await withBackdrops(titles, 'k', { fetchImpl })).toEqual(titles);
   });
 
+  it('drops only a relay-confirmed missing title from the hero', async () => {
+    const fetchImpl: typeof fetch = async (url) =>
+      String(url).includes('/2?')
+        ? new Response('{"error":"not_found"}', { status: 404 })
+        : new Response('{"error":"tmdb_proxy_off"}', { status: 404 });
+    const titles = [title(1), title(2)];
+    expect((await withBackdrops(titles, 'k', { fetchImpl })).map((item) => item.id)).toEqual([1]);
+  });
+
   it('bounds the hero’s missing-backdrop lookups', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -650,28 +659,29 @@ describe('fillPosters', () => {
     expect(at(filled, 3).posterPath, 'the tail keeps its placeholder').toBeUndefined();
   });
 
-  it('asks even for a title a chart gave art, and keeps what it had when TMDB cannot name it', async () => {
+  it('keeps transient failures but drops a relay-confirmed missing chart title', async () => {
     let calls = 0;
-    const fetchImpl: typeof fetch = async () => {
+    const fetchImpl: typeof fetch = async (url) => {
       calls++;
-      return new Response('{}', { status: 404 });
+      return String(url).includes('/2?')
+        ? new Response('{"error":"tmdb_proxy_off"}', { status: 404 })
+        : new Response('{"error":"not_found"}', { status: 404 });
     };
     // TMDB's own path is art and is left alone.
     const named = [title(1, { posterPath: '/a.jpg' })];
     expect(await fillPosters(named, 'k', { fetchImpl })).toEqual(named);
     expect(calls).toBe(0);
 
-    // A chart's own art is metahub's, which the page can only draw if its CSP allows the host metahub
-    // redirects to — so it is asked for anyway, and TMDB's path wins wherever there is one.
+    // A configuration refusal is not evidence that the chart entry disappeared.
     const chartArt = [title(2, { posterUrl: 'https://art/b.jpg' })];
     expect(
       await fillPosters(chartArt, 'k', { fetchImpl }),
-      'and keeps it when TMDB has none',
+      'and keeps it while TMDB cannot be asked',
     ).toEqual(chartArt);
     expect(calls).toBe(1);
 
     const unnamed = [title(3)];
-    expect(await fillPosters(unnamed, 'k', { fetchImpl })).toEqual(unnamed);
+    expect(await fillPosters(unnamed, 'k', { fetchImpl })).toEqual([]);
     expect(calls).toBe(2);
   });
 });

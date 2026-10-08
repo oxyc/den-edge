@@ -37,6 +37,9 @@ function proxied(url: URL): string {
   return `${origin}/tmdb${asked.pathname}${asked.search}`;
 }
 const DAY = 86_400_000;
+/** A missing TMDB record can appear later, so remember it for hours rather than as settled title metadata. */
+const ABSENT_FOR = DAY / 4;
+const ABSENT_BODY = '{"error":"not_found"}';
 /** TMDB's terms cap how long its content may be cached. */
 export const RETENTION = 180 * DAY;
 /**
@@ -80,6 +83,8 @@ export interface Entry {
   fetchedAt: number;
   /** Checked as it was kept (`keepable`), so it is not parsed again on every read. */
   checked?: true;
+  /** A relay-confirmed missing TMDB record, not a provider/configuration failure. */
+  status?: 404;
 }
 
 export interface Store {
@@ -208,6 +213,32 @@ function keepable(body: string): object | undefined {
   }
 }
 
+/** Only den-edge's exact missing-record answer is safe to remember as absent. */
+function absentBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return (
+      !!parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed).length === 1 &&
+      (parsed as { error?: unknown }).error === 'not_found'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Whether this is den-edge saying the TMDB record itself is missing, rather than an outage or disabled proxy. */
+export async function tmdbMissing(res: Response): Promise<boolean> {
+  if (res.status !== 404) return false;
+  try {
+    return absentBody(await res.clone().text());
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Answers already parsed on their way through here (`keepable`), so their reader does not parse them again: a
  * title's details are tens of kilobytes, parsed on the main thread while its page waits for them. Every caller of a
@@ -267,6 +298,13 @@ function answer(body: string, parsed?: object): Response {
   reusableAnswers.set(res, { body, parsed });
   if (parsed) parsedAnswers.set(res, parsed);
   return res;
+}
+
+function absent(): Response {
+  return new Response(ABSENT_BODY, {
+    status: 404,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 /** `fetch`, keeping TMDB's GET answers in `store`; everything else goes straight to the network. */
@@ -381,10 +419,14 @@ export function cachingFetch(
     };
     const remembered = recall(key);
     const stored = remembered?.entry ?? (await store.get(key).catch(() => undefined));
+    if (stored?.status === 404 && now() - stored.fetchedAt < ABSENT_FOR) return absent();
     // Anything unusable is treated as absent, which also heals what an earlier version kept. So is anything
     // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
     const kept =
-      stored && (stored.checked || keepable(stored.body)) && now() - stored.fetchedAt < RETENTION
+      stored &&
+      stored.status !== 404 &&
+      (stored.checked || keepable(stored.body)) &&
+      now() - stored.fetchedAt < RETENTION
         ? stored
         : undefined;
     // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
@@ -413,6 +455,14 @@ export function cachingFetch(
       const res = await network(asked, init);
       if (!res.ok) {
         if (throttled(res)) announceThrottle(res);
+        if (await tmdbMissing(res)) {
+          // Publish to the bounded handoff before IndexedDB settles, as successful answers do. The same six-hour
+          // lifetime as den-edge avoids repeated origin RTTs and failed-resource console entries without hiding a
+          // disabled proxy, rate limit, outage, or arbitrary 404.
+          void keep(key, { body: ABSENT_BODY, fetchedAt: now(), status: 404 }).catch(
+            () => undefined,
+          );
+        }
         // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
         if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body, keptParsed);
         return res;
