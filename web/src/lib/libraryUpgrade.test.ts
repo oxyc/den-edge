@@ -1,8 +1,8 @@
 import { expect, it, vi } from 'vitest';
-import { upgradeLibrary } from './libraryUpgrade';
+import { upgradeLibrary, type LibraryUpgradeClock } from './libraryUpgrade';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
-import type { TitleRow } from './wire';
+import type { Stamp, TitleRow } from './wire';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 
@@ -60,4 +60,31 @@ it('tries a switch that did not happen again only after a while, not on every re
   expect(switchWebOnly).toHaveBeenCalledTimes(1);
   await upgradeLibrary(log, true, 1_000 + 10 * 60_000);
   expect(switchWebOnly).toHaveBeenCalledTimes(2);
+});
+
+it('uses the service-owned clock when an upgrade writes its replacement', async () => {
+  const stamp = [2_000, 3, 'bbbbbbbbbbbbbbbb'] as const;
+  const switchWebOnly = vi.fn(async () => true);
+  const log = {
+    wireMinimum: 2,
+    moved: false,
+    upgradeRequired: null,
+    newestStamp: () => [1_000, 0, 'aaaaaaaaaaaaaaaa'],
+    settings: () => undefined,
+    switchWebOnly,
+  } as unknown as LibraryLog;
+  const clock: LibraryUpgradeClock = {
+    device: 'bbbbbbbbbbbbbbbb',
+    see: vi.fn(async () => {}),
+    issue: vi.fn(async (): Promise<Stamp> => [...stamp]),
+  };
+
+  await expect(upgradeLibrary(log, true, 2_000, clock)).resolves.toBe(true);
+  expect(clock.see).toHaveBeenCalledWith([1_000, 0, 'aaaaaaaaaaaaaaaa']);
+  expect(clock.issue).toHaveBeenCalledWith(2_000);
+  expect(switchWebOnly).toHaveBeenCalledWith({
+    performer: clock.device,
+    stamp: [...stamp],
+    simkl: undefined,
+  });
 });

@@ -1,5 +1,11 @@
 import { expect, it, vi } from 'vitest';
-import { followLocalLibrary } from './localLibrary';
+import {
+  dropLocalLibrary,
+  followLocalLibraryKey,
+  pendingLocalLibraryMerges,
+  rememberLocalLibraryMerge,
+  settleLocalLibraryMerge,
+} from './localLibrary';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import type { Stamp, TitleRow } from './wire';
@@ -37,41 +43,60 @@ function memoryVault() {
   return { data, vault };
 }
 
+function memoryStorage(entries: Record<string, string> = {}): Storage {
+  const data = new Map(Object.entries(entries));
+  return {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (name) => data.get(name) ?? null,
+    key: (index) => [...data.keys()][index] ?? null,
+    removeItem: (name) => void data.delete(name),
+    setItem: (name, value) => void data.set(name, value),
+  };
+}
+
+it('never drops a newer local winner when an older merge finishes', async () => {
+  const [merged, winner] = [key(1), key(2)];
+  const storage = memoryStorage({ 'den.localLibrary': winner });
+  await expect(dropLocalLibrary(merged, storage)).resolves.toBe(false);
+  expect(storage.getItem('den.localLibrary')).toBe(winner);
+});
+
+it('keeps losing keys durable until each merge is settled', () => {
+  const [one, two, winner] = [key(1), key(2), key(3)];
+  const storage = memoryStorage();
+  expect(rememberLocalLibraryMerge(one, storage)).toBe(true);
+  expect(rememberLocalLibraryMerge(two, storage)).toBe(true);
+  expect(rememberLocalLibraryMerge(one, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([one, two]);
+  expect(settleLocalLibraryMerge(one, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([two]);
+  // A stale marker naming the winner must never ask the authority to merge a library into itself.
+  expect(rememberLocalLibraryMerge(winner, storage)).toBe(true);
+  expect(pendingLocalLibraryMerges(winner, storage)).toEqual([two]);
+});
+
 /**
  * Two tabs opened together on a first visit each made a key for this browser's own library, and the one written last
  * is kept. The other tab went on writing to a library no later visit opens.
  */
-it("moves this tab's rows into the library another tab's key keeps, and goes on with that key", async () => {
-  const { vault } = memoryVault();
+it('reports the winning key and the previous key exactly once', () => {
   const [lost, kept] = [key(1), key(2)];
-  const ours = (await LibraryLog.openLocal(lost, vault))!;
-  await ours.write(row(1));
-  const theirs = (await LibraryLog.openLocal(kept, vault))!;
-  await theirs.write(row(2));
-  await vi.waitFor(async () =>
-    expect((await LibraryLog.openLocal(kept, vault))!.rows()).toHaveLength(1),
-  );
-
   const tab = new EventTarget();
-  const rekeyed: string[] = [];
-  const stop = followLocalLibrary(lost, (next) => rekeyed.push(next), tab, vault);
+  const changed = vi.fn();
+  const stop = followLocalLibraryKey(lost, changed, tab);
   const storage = (k: string, newValue: string | null) =>
     tab.dispatchEvent(Object.assign(new Event('storage'), { key: k, newValue }));
   storage('den.links', kept);
   storage('den.localLibrary', null);
   storage('den.localLibrary', kept);
-  await vi.waitFor(() => expect(rekeyed).toEqual([kept]));
-
-  const merged = (await LibraryLog.openLocal(kept, vault))!;
-  expect(merged.title({ type: 'movie', id: 1 }), "this tab's row").toBeDefined();
-  expect(merged.title({ type: 'movie', id: 2 })).toBeDefined();
-  expect((await LibraryLog.openLocal(lost, vault))!.rows(), 'the lost library is dropped').toEqual(
-    [],
-  );
+  expect(changed).toHaveBeenCalledOnce();
+  expect(changed).toHaveBeenCalledWith(kept, lost);
   stop();
   storage('den.localLibrary', key(3));
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  expect(rekeyed).toEqual([kept]);
+  expect(changed).toHaveBeenCalledOnce();
 });
 
 /**

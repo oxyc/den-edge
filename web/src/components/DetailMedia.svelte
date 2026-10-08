@@ -1,20 +1,16 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
   import { loadHls } from '../lib/hlsLoader';
   import {
     cropStyle,
-    fetchSources,
-    hlsURL,
-    isPlaylist,
     nativeHls,
-    nextRung,
-    relaysMedia,
-    trailerCandidates,
-    watchDirect,
+    PlaybackCursor,
+    prepareTrailers,
+    watchPlaybackAttempt,
   } from '../lib/reel';
-  import type { Crop, Source, Sources, TrailerCandidate } from '../lib/reel';
+  import type { PlaybackStep } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -67,67 +63,28 @@
     void artwork;
     canMountTrailer = !artwork;
   });
-  let candidates = $state<TrailerCandidate[]>([]);
-  let candidate = $state(0);
-  const url = $derived(candidates[candidate]?.play ?? null);
-  /** YouTube's own URL for this candidate, when one exists that this browser can play. */
-  let upgraded = $state<string | null>(null);
+  let cursor: PlaybackCursor | null = null;
+  let playback = $state<PlaybackStep | null>(null);
   /**
    * Whether reel is being asked what to play and has not answered yet.
    *
-   * Nothing is mounted while this is true, so the poster holds for the ~12 ms an audible `/sources`
-   * takes. It replaced mounting a derived master first, which looked free and was not: reel's log showed
-   * the element fetching TWO masters per hero open, both waiting on the same cold resolve — 2413 ms
-   * spent on the one that was then discarded, beside 2289 ms on the one that was kept.
+   * Nothing is mounted while this is true, so the poster holds through the combined prepare and the
+   * current source's lazy transport decision. No likely-wrong media request races it.
    */
   let asking = $state(false);
-  /**
-   * Whether this page may play a trailer's bytes through its own `/reel` relay: not on the public web name, which
-   * is served through Cloudflare (`relaysMedia`). There reel's own file and its proxied master are never mounted,
-   * and a trailer neither direct listener can serve is not shown.
-   */
-  const relay = relaysMedia();
-  const source = $derived(!canMountTrailer || asking ? null : (upgraded ?? (relay ? url : null)));
-  /**
-   * What reel offered for this candidate, best first, and which of them is mounted.
-   *
-   * For an audible surface reel answers at once and resolves behind it, so this costs the hero a round
-   * trip of about 12 ms rather than the 1.2-2.4 s a resolve takes — which is why the hero can ask at all.
-   */
-  let rungs = $state<Source[]>([]);
-  let rung = $state(0);
-  const mounted = $derived(canMountTrailer ? (rungs[rung] ?? null) : null);
-  /** Where the picture sits inside the frame; null until reel has measured this trailer. */
-  let heroCrop = $state<Crop | null>(null);
+  const source = $derived(!canMountTrailer || asking ? null : playback?.url);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
-  /**
-   * The master this page names itself when reel named nothing. A native one's segments come from Google; the one
-   * hls.js plays carries every segment through the relay, so it is not named where the relay may not carry video.
-   */
-  const derivedMaster = (play: string) => (playsHls || relay ? hlsURL(play, playsHls) : null);
   /**
    * The source this page has to drive itself.
    *
    * A `<video>` given a master playlist it cannot parse simply errors, so where the browser has no
    * native HLS the element is handed nothing and hls.js feeds it instead.
    *
-   * The test is on the PATH, and has to be: reel signs its play links, so an HLS URL ends
-   * `…m3u8?s=<tag>`, and asking whether the whole URL ended in `.m3u8` was false for every one of
-   * them. hls.js was never started, the element was handed a playlist to parse by itself, and each
-   * browser errored its way back to reel's `/play` download — the very path this exists to avoid.
+   * The plan's explicit `kind` decides this. A Reel transport URL is deliberately opaque, so its path
+   * says nothing about the bytes it serves.
    */
-  const managed = $derived(
-    mounted
-      ? // reel says what a URL is, because a minted `/m/<blob>` has no extension to read. Getting this
-        // from the path is what the note below is about, and an opaque URL removes the path entirely.
-        mounted.kind === 'hls' && !playsHls
-        ? mounted.url
-        : null
-      : source && !playsHls && isPlaylist(source)
-        ? source
-        : null,
-  );
+  const managed = $derived(playback?.kind === 'hls' && !playsHls ? source : null);
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -370,15 +327,15 @@
     };
   });
 
-  /** Which trailer `candidates` were found for. Kept while the page is away, so coming back resumes it. */
+  /** Which media identity the cursor belongs to. Kept while the retained page is away. */
   let foundFor = '';
   /**
-   * The title/media-type `candidates` were last resolved for, once resolved — unlike `foundFor`, never
+   * The title/media-type candidates were last resolved for, once resolved — unlike `foundFor`, never
    * including the reel address. `SessionServices.configure()` publishes a restored `services.v1` reel
    * first and can replace it from live `/routes` discovery a moment later on a cold route (a hard
    * refresh); a detail trailer must keep one media identity for the page's lifetime, so that later
    * address alone must not look like a different trailer and tear down a source already producing
-   * playback. Late discovery still reaches the next `trailerCandidates` call through `reel` itself —
+   * playback. Late discovery still reaches the next prepare through `reel` itself —
    * this only holds the CURRENT one steady.
    */
   let lockedFor = '';
@@ -403,155 +360,65 @@
     }
     foundFor = '';
     lockedFor = '';
-    candidates = [];
-    candidate = 0;
+    cursor?.close();
+    cursor = null;
+    playback = null;
+    asking = false;
     playing = ended = failed = false;
-    if (!wanted || !active || !base) return;
+    if (!wanted || !base) return;
     const controller = new AbortController();
-    // Resolve only. YouTube's adaptive stream carries sound and plays in every browser now — its
-    // master directly where HLS is native, reel's proxy of it everywhere else — so a download and
-    // remux would only warm a fallback that is not normally reached.
-    void trailerCandidates(base, mediaType, ids, table, {
-      signal: controller.signal,
-      prewarm: 'direct',
-      sourceAsk: {
+    let owned: PlaybackCursor | null = null;
+    let published = false;
+    asking = true;
+    void prepareTrailers(
+      base,
+      mediaType,
+      ids,
+      table,
+      {
         surface: 'audible',
         player: playsHls ? 'native' : 'hls.js',
       },
-    }).then((found) => {
+      { signal: controller.signal },
+    ).then(async (found) => {
       if (controller.signal.aborted) return;
-      candidates = found;
+      const nextCursor = new PlaybackCursor(found, {
+        signal: controller.signal,
+      });
+      owned = nextCursor;
+      cursor = nextCursor;
+      const first = await nextCursor.first();
+      if (controller.signal.aborted || cursor !== nextCursor) return;
+      playback = first;
+      asking = false;
+      failed = !first;
       foundFor = key;
       lockedFor = identity;
+      published = true;
     });
-    return () => controller.abort();
-  });
-
-  // YouTube's adaptive master through reel, which skips the download, the re-mux and the bytes back
-  // out through the house — the whole of the wait before a cold trailer shows anything.
-  //
-  // The source follows from the play URL alone, so it is known on the first render. Asking `/direct`
-  // first, only to learn whether a master exists, put a round trip and a yt-dlp resolve in front of
-  // every trailer with the element held empty for both; the one case it ruled out — a trailer with
-  // no master — is a 404 the error path already reads as "fall back to reel's own file".
-  /**
-   * What the effect below last acted on, so an unchanged trailer is not started over.
-   *
-   * It depends on `candidates`, and the effect that fills `candidates` assigns a NEW array every time
-   * it runs — including the runs that follow `active` or `saving` changing, where the trailer has not
-   * changed at all. Everything below then ran a second time: another `/sources` for the same title
-   * (measured from a phone, the second a 0 ms cache hit), and a reset of `sound` under a viewer who
-   * had already turned the sound on. Compared by value, so an equal array asks for nothing.
-   */
-  let asked: {
-    play: string;
-    sources: string;
-    prepared: Sources | null | undefined;
-    combined: boolean;
-  } = { play: '', sources: '', prepared: undefined, combined: false };
-
-  $effect(() => {
-    const play = url;
-    const discovered = candidates[candidate];
-    const offered = discovered?.sources;
-    const combined = !!discovered && Object.hasOwn(discovered, 'prepared');
-    const prepared = discovered?.prepared;
-    // Both read before the check, so both stay tracked whichever way it goes.
-    if (
-      play &&
-      asked.play === play &&
-      asked.sources === (offered ?? '') &&
-      asked.prepared === prepared &&
-      asked.combined === combined
-    )
-      return;
-    asked = { play: play ?? '', sources: offered ?? '', prepared, combined };
-    // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
-    // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
-    // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
-    // refused full-screen never fires `fullscreenchange` and iOS never fires it at all.
+    // Sound and native controls belong to this title, not to the retained component.
     sound = false;
     touched = false;
     forced = false;
-    rungs = [];
-    rung = 0;
-    heroCrop = null;
-    if (!play) {
-      upgraded = null;
-      asking = false;
-      return;
-    }
-    if (combined) {
-      const top = prepared?.sources[0];
-      asking = false;
-      if (!top) {
-        // `/prepare` completed but its primary ladder was unavailable. Do not immediately repeat
-        // that provider work through a derived route or `/sources`; try an alternate Reel retained
-        // in the same discovery answer, if there is one.
-        upgraded = null;
-        nextTrailer();
-        return;
-      }
-      rungs = prepared.sources;
-      rung = 0;
-      heroCrop = prepared.crop ?? null;
-      upgraded = top.url;
-      return;
-    }
-    if (!offered) {
-      // A reel older than 0.29.0 names no `/sources`, so the master is derived exactly as every version
-      // before it did. This is the only remaining reason to derive one at all.
-      upgraded = derivedMaster(play);
-      asking = false;
-      // Nothing this page may mount for this candidate: the next one, or no trailer.
-      if (!upgraded && !relay) nextTrailer();
-      return;
-    }
-    // Ask, and mount nothing until the answer comes. Deriving one to mount in the meantime cost a whole
-    // second master fetch per open for about 12 ms of apparent gain, and on a cold resolve the two
-    // queued behind the same resolve — so the wait was paid twice and half of it discarded.
-    upgraded = null;
-    asking = true;
-    let live = true;
-    void fetchSources(offered, {
-      surface: 'audible',
-      player: playsHls ? 'native' : 'hls.js',
-    }).then((answer) => {
-      // `sources` is reel's ordering, which for an audible surface puts the master first — the same
-      // thing the line above derived, named by reel rather than by us. Adopting it is what makes the
-      // fallback list, the crop and the minted accounting reel's to change without a release here.
-      const top = answer?.sources[0];
-      // `live` is the whole guard. The cleanup below clears it whenever this effect re-runs, which is
-      // exactly when the candidate changed — so re-reading `candidates` here to check would add
-      // nothing, and would read state belonging to an effect that no longer exists. Svelte warns
-      // about that (`derived_inert`) precisely because such a read can see a stale value.
-      if (!live) return;
-      asking = false;
-      if (!top) {
-        // reel could not say what to play, so fall back to the master this page can name itself — the
-        // same thing an answer without a sources URL gets.
-        upgraded = derivedMaster(play);
-        if (!upgraded && !relay) nextTrailer();
-        return;
-      }
-      rungs = answer.sources;
-      rung = 0;
-      heroCrop = answer.crop ?? null;
-      upgraded = top.url;
-    });
     return () => {
-      live = false;
+      // A live cursor belongs to the media identity, not to the service-route object that happened
+      // to discover it. The next identity closes it explicitly; a route refresh leaves playback intact.
+      if (!published) {
+        controller.abort();
+        owned?.close();
+        if (cursor === owned) cursor = null;
+      }
     };
   });
+
+  onDestroy(() => cursor?.close());
 
   /** How often one fragment may be fetched before the engine is taken for looping (see `FRAG_LOADING` below). */
   const MOST_FRAGMENT_LOADS = 4;
 
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
-  // `src`, and is torn down with the source it was given — switching candidates must never leave two
-  // engines feeding one element. A master that will not play steps on exactly as the element's own
-  // `error` does (`nextTrailer`): reel's next offer, the next candidate, then reel's own file. Clearing
-  // `upgraded` alone did nothing once reel had named the sources, because `managed` follows the rung.
+  // `src`, and is torn down with the typed source it was given. A fatal error advances the same cursor
+  // the bare element uses, so the two player paths cannot disagree about fallback order.
   $effect(() => {
     const player = video;
     const master = managed;
@@ -631,12 +498,12 @@
     };
   });
 
-  // A direct copy has DIRECT_FIRST_FRAME_MS to show a frame, or its relay copy plays instead. The element's
-  // own `error` cannot be waited for: iOS's native player sits on an unreachable origin without raising one.
+  // The visible element is the reachability test. No detached media element pre-activates a fallback.
   $effect(() => {
     const player = video;
-    if (!player || !allowed || upgraded !== mounted?.url) return;
-    return watchDirect(player, mounted, nextTrailer);
+    const mounted = playback;
+    if (!player || !allowed || source !== mounted?.url) return;
+    return watchPlaybackAttempt(player, mounted, () => void nextTrailer());
   });
 
   // Reads `source`, not `url`, and that is the whole point: swapping `src` to the direct stream
@@ -731,39 +598,20 @@
     // WebKit's first painted frame while the audio/video clock is already advancing.
     if (video.videoHeight > video.videoWidth) nextTrailer();
   }
-  function nextTrailer() {
-    if (!url || !active) return;
+  let advancing: PlaybackCursor | null = null;
+  async function nextTrailer() {
+    if (!playback || !active) return;
+    const owner = cursor;
+    if (!owner || advancing === owner) return;
+    advancing = owner;
     playing = false;
-    // An explicit media error belongs to this source, not necessarily to its listener. In particular, Reel can
-    // answer `progressive_unavailable` for one trailer while the next candidate on the same LAN listener is ready.
-    // Listener reachability is handled by `watchDirect`'s no-frame deadline; do not blacklist the whole origin here.
-    // reel offered these in order and guarantees them distinct, so a step always changes the source.
-    // A step that did not would fire no load and no error, and the hero would stop here silently.
-    const at = nextRung(rungs, rung);
-    const next = rungs[at];
-    if (next) {
-      rung = at;
-      upgraded = next.url;
-      return;
+    const next = await owner.next();
+    if (cursor === owner) {
+      playback = next;
+      forced = false;
+      failed = !next;
     }
-    // The next candidate's master before this one's file. A master refused because YouTube has removed
-    // the video is refused for reel's copy too — and asking costs a whole yt-dlp round trip to be told
-    // the same thing: two seconds for the master, nearly two more for the file, before a trailer that
-    // does exist is even started. So walk the candidates first.
-    if (candidate + 1 < candidates.length) {
-      candidate += 1;
-      return;
-    }
-    // Every master refused. reel's own file is what is left, and it is worth one ask: a video with no
-    // HLS master at all still plays from it. Once, not once per candidate, and only where the relay may
-    // carry it: on the public web name the trailer is given up instead.
-    if (upgraded && relay) {
-      upgraded = null;
-      rungs = [];
-      rung = 0;
-      return;
-    }
-    failed = true;
+    if (advancing === owner) advancing = null;
   }
   function firstFrame() {
     const player = video;
@@ -801,7 +649,10 @@
         // A one-off animation rather than a standing `transition`, which kept the picture on a layer of its
         // own for good and shifted the antialiasing of what is drawn beside it.
         if (!reduced && placeholder)
-          image.animate([{ opacity: 0 }, {}], { duration: 150, easing: 'ease-out' });
+          image.animate([{ opacity: 0 }, {}], {
+            duration: 150,
+            easing: 'ease-out',
+          });
       }}
       onerror={() => (canMountTrailer = true)}
     />
@@ -815,7 +666,7 @@
   <video
     bind:this={video}
     src={active && !managed ? (source ?? undefined) : undefined}
-    style={cropStyle(heroCrop) ?? undefined}
+    style={cropStyle(playback?.crop) ?? undefined}
     class:playing
     class:present={!!source && !failed && !ended}
     poster={backdrop ?? poster}
@@ -849,7 +700,7 @@
     <canvas
       class="frame"
       use:paint={held}
-      style={cropStyle(heroCrop) ?? undefined}
+      style={cropStyle(playback?.crop) ?? undefined}
       aria-hidden="true"
     ></canvas>
   {/if}

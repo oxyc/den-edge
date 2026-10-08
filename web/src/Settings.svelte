@@ -1,7 +1,4 @@
-<!-- Settings, as on the TV — every section and every setting, one page: the TV's pushed screens open in place, and
-     the choices use the browser's own controls. What's set here is the library's (`set:prefs`, `set:keys`,
-     `set:plugins`, `set:servers`, `set:trust`, `set:devices`), sealed, so the TV and this browser share it and den-edge
-     can't read it. -->
+<!-- Settings, as on the TV. Typed views and semantic commands keep storage inside the library service. -->
 <script lang="ts">
   import AboutSection from './settings/AboutSection.svelte';
   import AssistantsSection from './settings/AssistantsSection.svelte';
@@ -14,48 +11,54 @@
   import RecoveryCode from './settings/RecoveryCode.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
-  import {
-    readDevices,
-    readServers,
-    readSyncedPrefs,
-    readTrust,
-    selfEntry,
-    forgetDevice,
-    type PrefChanges,
-  } from './settings/values';
-  import { browserClock } from './lib/clock';
+  import type { PreferenceChanges } from './settings/preferences';
   import { thisDevice } from './lib/device.svelte';
-  import { onMount } from 'svelte';
-  import { links, readPendingReset, type Link } from './lib/links.svelte';
-  import {
-    adoptHeldReset,
-    resetLibraryKey,
-    settlePendingReset,
-    type KeyResetRefusal,
-  } from './lib/keyReset';
-  import { dropLocalLibrary } from './lib/localLibrary';
-  import type { LibrarySession } from './lib/librarySession.svelte';
+  import { onDestroy } from 'svelte';
+  import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
-  import { readApiKey, readPlugins } from './lib/prefs';
   import { relayFetch } from './lib/relayFetch';
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { approveSimklRemovals, heldSimklRemovals, type HeldRemovals } from './lib/simklDelivery';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { ensureSyncPolicy } from './lib/syncLoader';
-  import { fetchTitle, tmdbKeyOf } from './lib/tmdb';
-  import { fetchSimklClientId, simklAccountID } from './settings/simkl';
-  import type { ConfigValue, SettingsRow, Stamp } from './lib/wire';
+  import { fetchTitle } from './lib/tmdb';
+  import type { LibraryModel } from './lib/libraryModel.svelte';
+  import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
-  let { link, session }: { link: Link | null; session: LibrarySession } = $props();
+  let {
+    link,
+    model,
+    local = false,
+    onjoin,
+    onresetkey,
+    heldReset = false,
+    onadoptheld,
+  }: {
+    link: Link | null;
+    model: LibraryModel;
+    local?: boolean;
+    onjoin?: (libraryKey: string) => Promise<boolean>;
+    onresetkey?: () => Promise<KeyResetOutcome | null>;
+    heldReset?: boolean;
+    onadoptheld?: () => Promise<void>;
+  } = $props();
 
-  /** undefined while it opens; null when this browser can't reach the library. */
-  const log = $derived(session.log);
-  /** Bumped after a write: the log isn't reactive. */
-  const version = $derived(session.revision);
-  const clock = browserClock();
+  const connectionsLease = untrack(() => model.connections());
+  const simklLease = untrack(() => model.simkl());
+  const recoveryLease = untrack(() => model.recovery());
+  onDestroy(() => {
+    connectionsLease?.release();
+    simklLease?.release();
+    recoveryLease?.release();
+  });
+  const settings = $derived(model.settings.value);
+  const connections = $derived(connectionsLease?.snapshot.value);
+  const simkl = $derived(simklLease?.snapshot.value);
+  const recoveryView = $derived(
+    recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
+  );
+  const ready = $derived(!!settings && !!connections);
   let failure = $state<string | null>(null);
   let saving = $state(false);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
@@ -69,67 +72,39 @@
     })
     .catch(() => undefined);
 
-  $effect(() => {
-    const opened = log;
-    if (opened) clock.see(opened.newestStamp());
-  });
+  const prefs = $derived(settings ? structuredClone(settings.preferences) : undefined);
+  const plugins = $derived(connections ? structuredClone(connections.plugins) : []);
+  const pluginUrls = $derived(plugins.map((plugin) => plugin.manifestUrl));
+  const disabled = $derived(!ready || saving);
+  const tmdbKey = $derived(model.runtime.value?.tmdbKey ?? '');
+  const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
 
-  const group = (name: string) => {
-    void version;
-    return log?.settings(name);
-  };
-  const prefs = $derived(readSyncedPrefs(group('prefs')));
-  const keys = $derived(group('keys'));
-  const trackers = $derived(group('trackers'));
-  // Kept by content: a re-read list is a new array each time the library refreshes, and what reads it (the addon
-  // credits below, Sharing's escrow) asks the network again for a new one.
-  const pluginsKey = $derived(JSON.stringify(readPlugins(group('plugins'))));
-  const plugins = $derived(JSON.parse(pluginsKey) as string[]);
-  const servers = $derived(readServers(group('servers')));
-  const trust = $derived(readTrust(group('trust')));
-  const devicesRow = $derived(group('devices'));
-  const devices = $derived(readDevices(devicesRow));
-  const disabled = $derived(!log || saving);
-  const libraryFormat = $derived.by(() => {
-    void version;
-    return log ? log.wireMinimum : null;
-  });
-
-  /**
-   * Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. False when
-   * the device's entry wasn't removed.
-   */
-  async function removeLibraryDevice(id: string): Promise<boolean> {
-    if (!log) return false;
-    console.info('den: removing device from the library list', { device: id });
-    if (!(await write('devices', forgetDevice(id)))) {
-      console.warn('den: device removal was not saved', { device: id });
+  async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
+    if (!quiet) {
+      saving = true;
+      failure = null;
+    }
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      console.warn('den: settings command failed', error);
+      if (!quiet) failure = 'Couldn’t save that. Check your connection and try again.';
       return false;
+    } finally {
+      if (!quiet) saving = false;
     }
-    const suffix = `:${id}`;
-    for (const row of log.rows()) {
-      if (row.kind !== 'set' || !row.name.startsWith('handoff:') || !row.name.endsWith(suffix))
-        continue;
-      const cleared = Object.fromEntries(Object.keys(row.values).map((name) => [name, null]));
-      if (Object.keys(cleared).length && !(await write(row.name, cleared))) {
-        console.warn('den: device removal saved, but its handoff cleanup was not saved', {
-          device: id,
-          handoff: row.name,
-        });
-        return true;
-      }
-    }
-    const removed = !readDevices(log.settings('devices')).some((device) => device.id === id);
-    console.info('den: device removal completed', { device: id, removed });
-    return true;
   }
+
+  const savePrefs = (changes: PreferenceChanges) => void run(() => model.patchPreferences(changes));
+  const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
   // its rows and the billboard show that data regardless.
   let addonCredits = $state<Credit[][]>([[...ATLAS_FALLBACK]]);
   $effect(() => {
-    const installed = plugins;
+    const installed = pluginUrls;
     const table = routes;
     let gone = false;
     const creditsOf = async (addon: Addon | null): Promise<Credit[] | null> => {
@@ -152,99 +127,11 @@
     };
   });
 
-  /**
-   * Set settings in one group, or clear one with null — stamped now, together, merged over what another device last
-   * wrote. `quiet` keeps a failure to itself, for a write the viewer didn't ask for.
-   */
-  async function write(
-    name: string,
-    changes: Record<string, ConfigValue | null>,
-    quiet = false,
-    atOverride?: Stamp,
-  ): Promise<boolean> {
-    if (!log) return false;
-    if (!quiet) {
-      saving = true;
-      failure = null;
-    }
-    try {
-      await ensureSyncPolicy();
-      const base: SettingsRow = log.settings(name) ?? { kind: 'set', schema: 2, name, values: {} };
-      const at = atOverride ?? clock.issue();
-      const values = { ...base.values };
-      for (const [setting, value] of Object.entries(changes)) values[setting] = { value, at };
-      const saved = await log.write({ ...base, values });
-      if (log.moved) {
-        if (link) links.forgetMoved(link);
-        return false;
-      }
-      if (!saved) {
-        if (!quiet) failure = 'Couldn’t save that. Check that this device is on your network.';
-        return false;
-      }
-      session.changed(true);
-      return true;
-    } catch {
-      if (!quiet) failure = 'Couldn’t prepare or save that change. Please try again.';
-      return false;
-    } finally {
-      if (!quiet) saving = false;
-    }
-  }
-
-  const savePrefs = (changes: PrefChanges) => void write('prefs', changes);
-
-  const simklConnection = $derived(
-    Object.entries(trackers?.values ?? {}).find(
-      ([name, stamped]) =>
-        name.startsWith('simkl:') && stamped.value !== null && !name.endsWith('.token'),
-    ),
-  );
-
   async function saveSimkl(token: string | null): Promise<boolean> {
-    if (!log || log.wireMinimum < 3)
-      return write('keys', { simkl: token ? { string: token } : null });
-    const current = simklConnection;
-    if (!token) {
-      if (!current) return true;
-      return write('trackers', { [current[0]]: null });
-    }
-    const clientId = await fetchSimklClientId();
-    const account = clientId && (await simklAccountID(clientId, token));
-    if (!account) return false;
-    const at = clock.issue();
-    const connection = JSON.stringify({ access_token: token, connectedAt: at });
-    const connected = await write(
-      'trackers',
-      { [`simkl:${account}`]: { string: connection } },
-      false,
-      at,
-    );
-    if (!connected) return false;
-    // A delivery row is created only after the connection landed.
-    if (!log.settings(`deliver:simkl:${account}`)) {
-      const since = JSON.stringify(at);
-      if (
-        !(await write(`deliver:simkl:${account}`, {
-          since: { string: since },
-          lease: { strings: ['', '1'] },
-        }))
-      )
-        return false;
-    }
-    return true;
+    return run(() => (token ? model.connectSimkl(token) : model.disconnectSimkl()));
   }
 
-  /** The SIMKL watchlist removals the removals latch holds, until someone approves them here or on a TV. */
-  const heldRemovals = $derived.by((): HeldRemovals => {
-    void version;
-    try {
-      return log ? heldSimklRemovals(log) : { titles: [], approval: null };
-    } catch (error) {
-      console.warn('den: the held SIMKL removals could not be read', error);
-      return { titles: [], approval: null };
-    }
-  });
+  const heldRemovals = $derived(simkl?.heldRemovals ?? []);
 
   /**
    * Their names, from TMDB through den-edge's proxy as the library names any title it holds no display for: a
@@ -252,8 +139,8 @@
    */
   const heldNames = new SvelteMap<string, string>();
   $effect(() => {
-    const key = tmdbKeyOf(keys);
-    const held = heldRemovals.titles;
+    const key = tmdbKey;
+    const held = heldRemovals;
     // The names untracked: one arriving must not re-run this and drop the lookups still on their way.
     const wanted = untrack(() => held.filter((ref) => !heldNames.has(`${ref.type}:${ref.id}`)));
     if (!key || !wanted.length) return;
@@ -269,7 +156,7 @@
     };
   });
   const namedRemovals = $derived(
-    heldRemovals.titles.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
+    heldRemovals.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
   );
 
   /**
@@ -277,72 +164,50 @@
    * row, which counts for every device. False when the row changed meanwhile; the list is read and shown again.
    */
   async function approveRemovals(): Promise<boolean> {
-    if (!log) return false;
-    const approved = await approveSimklRemovals(log, clock.device, heldRemovals);
-    session.changed(true);
-    return approved;
+    const approvalId = simkl?.approvalId;
+    return !!approvalId && run(() => model.approveSimklRemovals(approvalId));
   }
 
-  /**
-   * Linking a TV from a browser using its own library: every row goes into the TV's library, merged with what the TV
-   * has, and only then is this browser's own library dropped.
-   */
-  async function moveOwnLibrary(libraryKey: string): Promise<boolean> {
-    const own = session.log;
-    if (!own || !(await own.moveTo(libraryKey))) return false;
-    await own.forget();
-    await dropLocalLibrary();
-    return true;
+  const hasRecoveryCode = $derived(!!recoveryView?.live);
+  const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
+
+  async function sealHandover(handoverKey: string, host: string, linkKey: string) {
+    const { result } = await model.sealPairingHandover(handoverKey, host, linkKey);
+    if (result.kind !== 'pairing.handover') throw new Error('wrong pairing response');
+    return result;
   }
 
-  /**
-   * Cut every other device off: the library moves to a new key, with its documents, delivery receipts and settings,
-   * and the old one is deleted (library v4 §12). This browser then opens it under the new key; every other device
-   * pairs again. Null when it moved, else why it didn't.
-   */
-  async function resetKey(): Promise<KeyResetRefusal | null> {
-    if (!log || !link) return 'unavailable';
-    const reset = await resetLibraryKey(log, clock.device, link.libraryKey);
-    readHeld();
-    return 'refused' in reset ? reset.refused : null;
+  async function sealRecovery(locator: string, wrapKey: string, createdAt: number) {
+    const { result } = await model.sealRecovery(locator, wrapKey, createdAt);
+    if (result.kind !== 'recovery.seal') throw new Error('wrong recovery response');
+    return result.sealed;
   }
 
-  /** A reset held because den-edge couldn't say whose it was (`PendingReset.held`): Settings offers to use its key. */
-  let heldReset = $state(readPendingReset()?.held === true);
-  const readHeld = () => (heldReset = readPendingReset()?.held === true);
-  async function adoptHeld() {
-    await adoptHeldReset();
-    readHeld();
+  async function recoveryOutcome(
+    action: () => ReturnType<LibraryModel['beginRecovery']>,
+  ): Promise<string> {
+    const { result } = await action();
+    return 'outcome' in result ? result.outcome : 'failed';
   }
 
-  // A reset this browser didn't see through is settled when Settings opens, and again every 30 seconds while it stays
-  // pending (wire/library-v4 §12, den#192 spec §6): finished, the app reopens on the new key; undone, nothing changed.
-  onMount(() => {
-    const settle = () => {
-      if (readPendingReset()) void settlePendingReset().then(readHeld);
-    };
-    settle();
-    const timer = window.setInterval(settle, 30_000);
-    return () => window.clearInterval(timer);
-  });
+  async function importHistory(items: Parameters<LibraryModel['importHistory']>[0]) {
+    const { result } = await model.importHistory(items);
+    if (result.kind !== 'history.import') throw new Error('wrong history import response');
+    return result;
+  }
 
-  // A recovery code wraps the library key, so a reset ends it (recovery-code §9; its Settings, oxyc/den#176, offers a
-  // new one once the library reopens). The confirmation says so first.
-  const hasRecoveryCode = $derived(
-    Object.values(group('recovery')?.values ?? {}).some((setting) => setting.value !== null),
-  );
+  async function exportHistory() {
+    const { result } = await model.exportHistory();
+    if (result.kind !== 'history.export') throw new Error('wrong history export response');
+    return result;
+  }
 
   // This browser lists itself among the devices with the library, as each device does when it opens it: again when its
   // name changes, and otherwise at most once a day.
   $effect(() => {
-    if (!log) return;
-    const entry = selfEntry(
-      devicesRow,
-      { id: clock.device, name: thisDevice.name, kind: 'browser' },
-      Date.now(),
-    );
-    if (!entry) return;
-    const timer = setTimeout(() => void write('devices', entry, true), 1000);
+    if (!ready) return;
+    const name = thisDevice.name;
+    const timer = setTimeout(() => void run(() => model.heartbeatDevice(name), true), 1000);
     return () => clearTimeout(timer);
   });
 </script>
@@ -355,69 +220,83 @@
       <ExpandAll label="Settings" />
     </div>
     <SettingsNav variant="bar" />
-    {#if log === undefined}
+    {#if !settings || !connections}
       <p class="banner" role="status">Loading your settings…</p>
-    {:else if log === null}
-      <p class="banner" role="alert">
-        Your library can’t be reached right now, so your settings are read-only. Check that this
-        device is on your network.
-      </p>
     {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
 
     <ConnectionsSection
       {link}
-      onjoin={session.local ? moveOwnLibrary : undefined}
-      onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? resetKey : undefined}
+      onjoin={local ? onjoin : undefined}
+      onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? onresetkey : undefined}
       {hasRecoveryCode}
       {heldReset}
-      onadoptheld={adoptHeld}
-      {keys}
-      simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
+      {onadoptheld}
+      apiKeys={connections?.apiKeys ?? {}}
+      rawApiKeys={model.runtime.value?.providerKeys ?? {}}
+      simklConnected={!!simkl?.connected}
       {saveSimkl}
       heldRemovals={namedRemovals}
       {approveRemovals}
       {plugins}
       {routes}
-      {servers}
-      {trust}
-      {devices}
-      selfId={clock.device}
+      servers={connections ? structuredClone(connections.servers) : []}
+      devices={connections ? structuredClone(connections.devices) : []}
+      {selfId}
       {disabled}
-      {write}
+      setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
+      installPlugin={(url) => run(() => model.installPlugin(url))}
+      removePlugin={(url) => run(() => model.removePlugin(url))}
+      setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
+      removeServer={(server) => run(() => model.patchServer(server, null))}
+      {sealHandover}
       removeDevice={removeLibraryDevice}
-      recovery={link && !session.local ? recovery : undefined}
+      recovery={link && !local ? recovery : undefined}
     />
     {#snippet recovery()}
-      {#if link}<RecoveryCode {link} {log} {clock} />{/if}
+      <RecoveryCode
+        view={recoveryView}
+        {ready}
+        seal={sealRecovery}
+        begin={(locator, sealed, createdAt) =>
+          recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
+        confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
+        abandon={async (locator) => {
+          await model.abandonRecovery(locator);
+        }}
+        disable={async () => run(() => model.disableRecovery())}
+      />
     {/snippet}
-    <SharingSection {link} {plugins} {routes} ready={!!log} />
+    <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
     <AssistantsSection />
-    <PlaybackSection {prefs} {disabled} save={savePrefs} />
-    <ImportSection
-      {log}
-      device={clock.device}
-      tmdbKey={tmdbKeyOf(keys)}
-      changed={() => session.changed()}
-      displays={session.displays}
-    />
-    <ContentSection
-      {prefs}
-      tmdbKey={tmdbKeyOf(keys)}
-      pin={readApiKey(keys, 'parentalPIN')}
-      {disabled}
-      save={savePrefs}
-      savePin={(pin) => write('keys', { parentalPIN: pin ? { string: pin } : null })}
-    />
-    <AdvancedSection
-      {keys}
-      {disabled}
-      selfId={clock.device}
-      pendingActions={log?.pendingActions ?? 0}
-      {edgeVersion}
-      {libraryFormat}
-      {write}
-    />
+    {#if prefs}
+      <PlaybackSection {prefs} {disabled} save={savePrefs} />
+      <ImportSection
+        {ready}
+        {tmdbKey}
+        watched={model.overview.value?.watched ?? []}
+        {importHistory}
+        {exportHistory}
+      />
+      <ContentSection
+        {prefs}
+        {tmdbKey}
+        pinConfigured={connections?.parentalPinConfigured ?? false}
+        {disabled}
+        save={savePrefs}
+        savePin={(pin) => run(() => model.setParentalPin(pin))}
+        verifyPin={(pin) => model.verifyParentalPin(pin)}
+      />
+      <AdvancedSection
+        remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
+        {disabled}
+        {selfId}
+        pendingActions={connections?.diagnostics.pendingChanges ?? 0}
+        {edgeVersion}
+        {libraryFormat}
+        setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
+      />
+    {/if}
     <AboutSection credits={mergeCredits(addonCredits)} />
   </div>
 </div>

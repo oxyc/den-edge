@@ -9,6 +9,11 @@ export interface Vault {
   /** Every key/value pair whose key starts with `prefix`, in IndexedDB key order. */
   entries(prefix: string): Promise<Array<[key: string, value: Uint8Array]>>;
   put(key: string, value: Uint8Array): Promise<void>;
+  /** Atomically replace one value from its current value. `updater` runs synchronously inside a write transaction. */
+  update?(
+    key: string,
+    updater: (current: Uint8Array | undefined) => Uint8Array,
+  ): Promise<Uint8Array>;
   /** Drop exactly `key`; unlike `remove`, longer keys with this prefix remain. */
   delete(key: string): Promise<void>;
   /** Drop every value whose key starts with `prefix`. */
@@ -122,6 +127,19 @@ export function indexedVault(factory: IDBFactory): Vault {
     },
     put: async (key, value) => {
       await run('readwrite', (kept) => kept.put(value, key));
+    },
+    update: async (key, updater) => {
+      const updated = await run('readwrite', (kept) => {
+        const read = kept.get(key) as IDBRequest<Uint8Array | undefined>;
+        let next: Uint8Array;
+        read.onsuccess = () => {
+          next = updater(read.result);
+          // Returning the object read is an explicit no-op; it need not dirty the object store.
+          if (next !== read.result) kept.put(next, key);
+        };
+        return () => next!;
+      });
+      return updated!;
     },
     delete: async (key) => {
       await run('readwrite', (kept) => kept.delete(key));

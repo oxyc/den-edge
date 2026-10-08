@@ -4,7 +4,7 @@ import App from './App.svelte';
 import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosticsReport';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
-import { links, readPendingReset } from './lib/links.svelte';
+import { links } from './lib/links.svelte';
 import { freshOn, startBillboard } from './lib/recommend';
 import { recoverChunkFailure, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
@@ -53,15 +53,6 @@ if (invited) {
   if (!links.current) links.browse();
   history.replaceState(history.state, '', location.pathname + location.search);
 }
-
-// A key reset this browser started and didn't see through is finished or undone (den#192): until then the old
-// library's `410` doesn't drop the link (`Links.forgetMoved`).
-if (readPendingReset())
-  void import('./lib/keyReset')
-    .then(({ settlePendingReset }) => settlePendingReset())
-    .catch((error: unknown) =>
-      console.warn('den: a pending key reset could not be settled', error),
-    );
 
 // The document head has already started an exact kept personalized lead, when one exists. Everyone else's billboard
 // is still asked here before the app has found atlas or opened the library.

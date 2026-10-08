@@ -34,31 +34,31 @@
     type ServiceDirectoryLoad,
   } from './services';
   import {
-    change,
     effectiveServicePicks,
-    hashPin,
-    pinMatches,
+    preferenceChange as change,
     toggled,
-    type PrefChanges,
-    type SyncedPrefs,
-  } from './values';
+    type PreferenceChanges,
+    type SettingsPreferences,
+  } from './preferences';
 
   let {
     prefs,
     tmdbKey,
-    pin,
+    pinConfigured,
     disabled,
     save,
     savePin,
+    verifyPin,
   }: {
-    prefs: SyncedPrefs;
+    prefs: SettingsPreferences;
     /** What TMDB's country and service directories are asked with: the library's key, or den-edge's. */
     tmdbKey: string;
     /** The parental PIN, when one is set. */
-    pin?: string;
+    pinConfigured: boolean;
     disabled: boolean;
-    save: (changes: PrefChanges) => void;
+    save: (changes: PreferenceChanges) => void;
     savePin: (pin: string | null) => Promise<boolean>;
+    verifyPin: (pin: string) => Promise<boolean>;
   } = $props();
 
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
@@ -249,19 +249,19 @@
   let pinEntry = $state('');
   let pinWrong = $state(false);
   let newPin = $state('');
-  const canChangeLimit = $derived(!pin || unlocked);
+  const canChangeLimit = $derived(!pinConfigured || unlocked);
   const limitLabel = $derived(
     prefs.maturityCeiling === 'pg13' ? 'PG-13' : prefs.maturityCeiling === 'r' ? 'R' : 'None',
   );
   async function unlock() {
-    pinWrong = !(pin && (await pinMatches(pin, pinEntry)));
+    pinWrong = !(pinConfigured && (await verifyPin(pinEntry)));
     if (!pinWrong) unlocked = true;
     pinEntry = '';
   }
   async function setPin() {
     if (!/^\d{4}$/.test(newPin)) return;
-    // Hashed before it's written: the library carries the PIN's digest, never the PIN.
-    if (await savePin(await hashPin(newPin))) {
+    // The service hashes it before it reaches the encrypted library.
+    if (await savePin(newPin)) {
       newPin = '';
       unlocked = true;
     }
@@ -529,7 +529,7 @@
     <CheckGrid
       legend="Sources"
       options={RATING_SOURCES.map((s) => ({ value: s.id, label: s.name }))}
-      checked={(id) => prefs.ratingSources.includes(id)}
+      checked={(id) => (prefs.ratingSources as readonly string[]).includes(id)}
       {disabled}
       onchange={(id, on) => save(change.ratingSources(toggled(prefs.ratingSources, id, on)))}
     />
@@ -552,7 +552,7 @@
       disabled={disabled || !canChangeLimit}
       onchange={(v) => save(change.maturityCeiling(v === 'pg13' || v === 'r' ? v : undefined))}
     />
-    {#if pin && !unlocked}
+    {#if pinConfigured && !unlocked}
       <form
         class="form"
         onsubmit={(event) => {
@@ -576,7 +576,7 @@
       {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
       <p class="foot">A PIN protects the maturity ceiling. Enter it to change the ceiling.</p>
     {:else}
-      <h3>{pin ? 'Change PIN' : 'PIN'}</h3>
+      <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
       <form
         class="form"
         onsubmit={(event) => {
@@ -591,14 +591,14 @@
           inputmode="numeric"
           autocomplete="new-password"
           maxlength="4"
-          placeholder={pin ? 'New 4-digit PIN' : 'Set a 4-digit PIN'}
-          aria-label={pin ? 'New parental PIN' : 'Set a parental PIN'}
+          placeholder={pinConfigured ? 'New 4-digit PIN' : 'Set a 4-digit PIN'}
+          aria-label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
           bind:value={newPin}
         />
         <button class="primary" disabled={disabled || !/^\d{4}$/.test(newPin)}
-          >{pin ? 'Change PIN' : 'Set PIN'}</button
+          >{pinConfigured ? 'Change PIN' : 'Set PIN'}</button
         >
-        {#if pin}
+        {#if pinConfigured}
           <Confirm
             label="Remove PIN"
             question="Remove the parental PIN?"

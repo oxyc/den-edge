@@ -450,8 +450,12 @@ export type HostResult =
   { joiner: string; inboxKey: string; linkKey: Bytes } | { error: HostError };
 
 export interface HostOptions {
-  /** The library to hand over: this browser's, raw. */
-  libraryKey: Bytes;
+  /** Seal the authenticated handover inside the library authority; page code never receives its library key. */
+  seal: (
+    handoverKey: string,
+    host: string,
+    linkKey: string,
+  ) => Promise<{ sealed: string; linkKey: string; inboxKey: string }>;
   /** What the joined device will call this one; this browser by default. */
   label?: string;
   /** This browser's stable library stamp device id, encrypted in the handover. */
@@ -516,17 +520,17 @@ export async function host(options: HostOptions): Promise<HostResult> {
   const c = await read('c');
   if (!c || !(await hostConfirm(responded.state, c))) return fail();
   if (!(await options.allow(responded.state.joiner))) return fail();
-  const handover = {
-    host: label,
-    hostDeviceId: options.deviceId,
-    linkKey: options.linkKey ?? crypto.getRandomValues(new Uint8Array(32)),
-    libraryKey: options.libraryKey,
-  };
-  const sealed = await sealHandover(responded.state.handoverKey, handover);
-  if (!(await put('d', sealed))) return fail();
+  const requestedLinkKey = options.linkKey ?? crypto.getRandomValues(new Uint8Array(32));
+  const handover = await options
+    .seal(toBase64url(responded.state.handoverKey), label, toBase64url(requestedLinkKey))
+    .catch(() => null);
+  if (!handover) return fail();
+  const sealed = fromBase64url(handover.sealed);
+  const linkKey = fromBase64url(handover.linkKey);
+  if (!sealed || linkKey?.length !== 32 || !(await put('d', sealed))) return fail();
   return {
     joiner: responded.state.joiner,
-    inboxKey: (await linkKeys(handover.linkKey)).inbox,
-    linkKey: handover.linkKey,
+    inboxKey: handover.inboxKey,
+    linkKey,
   };
 }

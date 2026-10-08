@@ -6,6 +6,7 @@ import {
   relayFetch,
   rememberGrant,
   useLibraryCredential,
+  useLibraryRelayMembership,
 } from './relayFetch';
 
 const KEYS = { id: 'abc123', member: 'def456' };
@@ -47,6 +48,26 @@ test('claims membership on the relayed addon and household API paths', async () 
     await relayFetch(path);
     expect(sent(spy)[HEADER]).toBe('abc123:def456');
   }
+});
+
+test('takes the bounded membership capability returned by LibraryService', async () => {
+  const spy = stub();
+  const dispose = useLibraryRelayMembership({ libraryId: 'abc123', memberToken: 'def456' });
+  await relayFetch('/atlas/recommend');
+  expect(sent(spy)[HEADER]).toBe('abc123:def456');
+  dispose();
+  await relayFetch('/atlas/recommend');
+  expect(sent(spy)[HEADER]).toBeUndefined();
+});
+
+test('an old model cannot clear the membership installed by its replacement', async () => {
+  const spy = stub();
+  const disposeOld = useLibraryRelayMembership({ libraryId: 'old', memberToken: 'member' });
+  const disposeCurrent = useLibraryRelayMembership({ libraryId: 'current', memberToken: 'member' });
+  disposeOld();
+  await relayFetch('/atlas/recommend');
+  expect(sent(spy)[HEADER]).toBe('current:member');
+  disposeCurrent();
 });
 
 test('claims nothing anywhere else, on this origin or another', async () => {

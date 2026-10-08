@@ -1,26 +1,41 @@
 <script lang="ts">
-  import type { DownloadQueue } from '../lib/downloadQueue.svelte';
-  import type { Download } from '../lib/downloadRows';
-  import type { TitleSource } from '../lib/titleSources';
+  import type { LibraryModel } from '../lib/libraryModel.svelte';
+  import type {
+    DownloadSourceOption,
+    DownloadTitleDescriptor,
+    DownloadViewItem,
+  } from '../lib/libraryServiceProtocol';
 
-  let { download, queue }: { download: Download; queue: DownloadQueue } = $props();
+  let {
+    download,
+    title,
+    model,
+  }: { download: DownloadViewItem; title: DownloadTitleDescriptor; model: LibraryModel } = $props();
   let open = $state(false);
-  let sources = $state<TitleSource[] | null | undefined>();
+  let sources = $state<DownloadSourceOption[] | null | undefined>();
   let busy = $state(false);
   let message = $state('');
+  let request = 0;
   const choices = $derived(
     (sources ?? []).filter(
       (source) =>
         source.identity !== download.release.identity &&
-        source.identity !== download.release.hedge?.identity,
+        source.identity !== download.alternate?.identity,
     ),
   );
 
   async function show() {
+    const current = ++request;
     open = true;
     message = '';
     sources = undefined;
-    sources = await queue.alternatives(download);
+    try {
+      const response = await model.downloadSources(title, true);
+      if (current === request)
+        sources = response.result.kind === 'download.sources' ? response.result.sources : null;
+    } catch {
+      if (current === request) sources = null;
+    }
   }
 
   async function choose(event: Event) {
@@ -28,16 +43,20 @@
     const source = choices.find((candidate) => candidate.identity === identity);
     if (!source) return;
     busy = true;
-    const answer = await queue.tryAnother(download, source);
-    busy = false;
-    if (answer.state === 'preparing' || answer.state === 'ready' || answer.state === 'paused') {
+    message = '';
+    try {
+      await model.tryDownloadRelease(title.target, source.identity);
       open = false;
-      message = answer.state === 'ready' ? 'That release is ready.' : `Also trying ${source.label}`;
-    } else message = answer.message ?? 'Couldn’t start that release.';
+      message = `Also trying ${source.label}`;
+    } catch {
+      message = 'Couldn’t try that release. Try again.';
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
-{#if download.release.hedge}
+{#if download.alternate}
   <p class="hint">Two releases are already being tried.</p>
 {:else if !open}
   <button type="button" class="try" onclick={() => void show()}>Try another</button>

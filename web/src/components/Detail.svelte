@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import DetailMedia from './DetailMedia.svelte';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import type { Routes } from '../lib/routes';
@@ -31,7 +31,6 @@
   import EpisodeCard from './EpisodeCard.svelte';
   import SeasonDownload from './SeasonDownload.svelte';
   import { downloadEpisode } from '../lib/seasonDownloads.svelte';
-  import { downloads, inFlight } from '../lib/downloadQueue.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import DetailReactions from './DetailReactions.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
@@ -52,6 +51,8 @@
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
   import { yieldTask } from '../lib/taskYield';
+  import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
+  import type { DownloadsView } from '../lib/libraryServiceProtocol';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -87,6 +88,7 @@
     shown = () => true,
     seed,
     still,
+    model,
   }: {
     ref: { type: MediaType; id: number };
     active?: boolean;
@@ -113,7 +115,7 @@
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
-    /** Where den-remux answers (`findRemux`), so the Sources list can say which releases won't play here. */
+    /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
     away?: boolean;
@@ -144,6 +146,7 @@
      * under the backdrop that has yet to arrive.
      */
     still?: string;
+    model?: LibraryModel | null;
   } = $props();
 
   /** The backdrop the hero will end up using, where the page that linked here knew it. */
@@ -210,6 +213,10 @@
    * the release list and downloads are not offered: a guest plays through den-remux alone.
    */
   const guestScout = $derived(!!scout && !!sharedInstallOf(scout.install));
+  const downloadLease: LibraryModelLease<DownloadsView> | undefined = untrack(() =>
+    model?.downloads(),
+  );
+  onDestroy(() => downloadLease?.release());
   // Away from home a play asks den-remux for a session that fits the link. Timing it while this page is read lets the
   // first play's request carry it, rather than start a session only to measure and start another. Given up on when
   // the page stops being the active one — which pressing Play does.
@@ -546,8 +553,8 @@
   async function queueEpisode(episode: Episode) {
     const d = untrack(() => detail),
       picked = untrack(() => displayedSeason);
-    if (!d || !scout || guestScout || !d.imdbId || picked === null) return;
-    const result = await downloadEpisode(scout, d.imdbId, picked, episode, routes, d.title);
+    if (!d || !model || guestScout || !d.imdbId || picked === null) return;
+    const result = await downloadEpisode(model, d.imdbId, picked, episode, d.title);
     if (result === 'ready') notify?.('This episode is already ready to play.');
     else if (result === 'unavailable')
       notify?.('No downloadable release was found for that episode.');
@@ -719,12 +726,10 @@
     {#if !guestScout}
       <div class="title-sources" hidden={restricted}>
         <TitleSources
+          model={model ?? undefined}
           bind:this={sourcesPanel}
           imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
-          {scout}
-          {routes}
           {active}
-          {remux}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}
           title={d.title}
@@ -768,14 +773,13 @@
           />
           <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
              foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
-          {#if scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+          {#if model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
             <SeasonDownload
-              {scout}
+              {model}
               title={d.title}
               imdb={d.imdbId}
               season={displayedSeason}
               episodes={seasonEpisodes}
-              {routes}
               disabled={seasonLoading}
               compact
             />
@@ -820,11 +824,18 @@
                 {@const episodeDownload =
                   displayedSeason === null
                     ? undefined
-                    : downloads.of(d.title.type, d.title.id, displayedSeason, e.number)}
+                    : downloadLease?.snapshot.value?.items.find(
+                        (item) =>
+                          item.title.type === d.title.type &&
+                          item.title.id === d.title.id &&
+                          item.season === displayedSeason &&
+                          item.episode === e.number,
+                      )}
                 {@const episodeDownloadState = episodeDownload
-                  ? episodeDownload.announced || downloads.status(episodeDownload).state === 'ready'
+                  ? episodeDownload.status.phase === 'ready'
                     ? 'ready'
-                    : inFlight(downloads.status(episodeDownload).state)
+                    : episodeDownload.status.phase === 'queued' ||
+                        episodeDownload.status.phase === 'downloading'
                       ? 'downloading'
                       : undefined
                   : undefined}
@@ -848,7 +859,7 @@
                           void sourcesPanel?.show();
                         }
                       }}
-                  ondownload={scout && !guestScout && d.imdbId
+                  ondownload={model && scout && !guestScout && d.imdbId
                     ? () => void queueEpisode(e)
                     : undefined}
                   downloadState={episodeDownloadState}

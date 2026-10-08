@@ -2,13 +2,18 @@
   import { SvelteSet } from 'svelte/reactivity';
   import type { PrimeImportSource } from '../lib/primeImport';
   import type { PrimeImportPlan } from '../lib/primeImportPlan';
-  import type { ImportWrites } from '../lib/viewingImportJournal';
+  import type { PlannedHistoryImport } from './historyImport';
 
   type State =
     | { step: 'idle' }
     | { step: 'matching'; done: number; total: number; paused?: boolean }
-    | { step: 'preview'; source: PrimeImportSource; plan: PrimeImportPlan; writes: ImportWrites[] }
-    | { step: 'writing'; done: number; total: number }
+    | {
+        step: 'preview';
+        source: PrimeImportSource;
+        plan: PrimeImportPlan;
+        writes: PlannedHistoryImport[];
+      }
+    | { step: 'writing' }
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
 
@@ -17,26 +22,30 @@
 </script>
 
 <script lang="ts">
-  import type { LibraryLog } from '../lib/log';
-  import { importWrites, writeImportBatches } from '../lib/viewingImportJournal';
   import { parsePrimeFiles } from '../lib/primeImport';
   import { planPrimeImport } from '../lib/primeImportPlan';
-  import { ensureSyncPolicy } from '../lib/syncLoader';
   import { viewingImportLookups } from '../lib/viewingImportLookups';
   import { viewingPreviewLines } from '../lib/viewingImport';
   import SettingRow from './SettingRow.svelte';
+  import { historyImportItems } from './historyImport';
+  import type { HistoryImportItem, TitleRef } from '../lib/libraryServiceProtocol';
 
   let {
-    log,
-    device,
+    ready,
     tmdbKey,
-    changed,
-  }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
-    $props();
+    watched,
+    importHistory,
+  }: {
+    ready: boolean;
+    tmdbKey: string;
+    watched: readonly TitleRef[];
+    importHistory: (
+      items: readonly HistoryImportItem[],
+    ) => Promise<{ written: number; total: number; complete: boolean }>;
+  } = $props();
 
   async function read(files: readonly File[]) {
-    const opened = log;
-    if (!opened) return;
+    if (!ready) return;
     excluded.clear();
     try {
       const source = parsePrimeFiles(
@@ -45,10 +54,8 @@
         ),
       );
       state = { step: 'matching', done: 0, total: source.viewings.length };
-      const seen = (ref: { type: string; id: number }) => {
-        const row = opened.title(ref);
-        return !!row && !row.deleted.value && row.status.value === 'watched';
-      };
+      const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
+      const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
       const lookups = viewingImportLookups(tmdbKey, undefined, (ms) => {
         if (state.step === 'matching') state = { ...state, paused: ms > 0 };
       });
@@ -60,12 +67,11 @@
         },
         seen,
       );
-      await ensureSyncPolicy();
       state = {
         step: 'preview',
         source,
         plan,
-        writes: importWrites(plan.marks, plan.shows, opened, device, Date.now()),
+        writes: historyImportItems(plan.marks, plan.shows),
       };
     } catch (error) {
       console.warn('den: Prime Video import failed', error);
@@ -77,23 +83,14 @@
     }
   }
 
-  async function write(writes: ImportWrites[]) {
-    const opened = log;
-    if (!opened) return;
-    const total = writes.reduce((count, entry) => count + entry.rows.length, 0);
-    state = { step: 'writing', done: 0, total };
-    const result = await writeImportBatches(writes, opened, (done, all) => {
-      state = { step: 'writing', done, total: all };
-    });
-    changed();
+  async function write(writes: PlannedHistoryImport[]) {
+    state = { step: 'writing' };
+    const result = await importHistory(writes.map((entry) => entry.item));
     state = result.complete
       ? { step: 'done', written: result.written }
       : {
           step: 'failed',
-          message:
-            result.refusal === 'library_full'
-              ? `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
-              : `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. Importing both files again picks up where this stopped.`,
+          message: `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. Importing both files again picks up where this stopped.`,
         };
   }
 
@@ -120,7 +117,7 @@
           type="file"
           accept=".csv,text/csv"
           multiple
-          disabled={!log}
+          disabled={!ready}
           onchange={(event) => {
             const files = [...(event.currentTarget.files ?? [])];
             event.currentTarget.value = '';
@@ -187,7 +184,7 @@
       <button
         type="button"
         class="primary"
-        disabled={!chosen.some((entry) => entry.rows.length)}
+        disabled={!chosen.length}
         onclick={() => void write(chosen)}
       >
         Import viewing history
@@ -195,7 +192,7 @@
       <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}>Cancel</button>
     </div>
   {:else if state.step === 'writing'}
-    <p class="status" role="status">Saving — {state.done} of {state.total}</p>
+    <p class="status" role="status">Saving…</p>
   {:else if state.step === 'done'}
     <p class="status" role="status">
       Saved {plural(state.written, 'change')}. Your Apple TV sends them to Simkl next time Den is

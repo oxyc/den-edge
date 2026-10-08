@@ -2,18 +2,23 @@
      Downloads shelf as a page. Each card is the title's poster with how far it has got; under it, what the debrid is
      doing, and Cancel (in flight: dropped at the debrid too) or Remove (only the card). -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import DownloadStatus from './DownloadStatus.svelte';
   import DownloadAlternatives from './DownloadAlternatives.svelte';
   import DownloadPosterCard from './DownloadPosterCard.svelte';
-  import { refreshDownloads } from '../lib/downloadDriver';
-  import { downloads as shared, inFlight, type DownloadQueue } from '../lib/downloadQueue.svelte';
-  import type { Download } from '../lib/downloadRows';
-  import { headline, phase } from '../lib/downloadStatus';
+  import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
+  import type { DownloadTitleDescriptor, DownloadViewItem } from '../lib/libraryServiceProtocol';
+  import { viewHeadline } from '../lib/downloadStatus';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
 
-  let { queue = shared, active = true }: { queue?: DownloadQueue; active?: boolean } = $props();
+  let { model, active = true }: { model?: LibraryModel; active?: boolean } = $props();
+  let lease = $state<LibraryModelLease<import('../lib/libraryServiceProtocol').DownloadsView>>();
+  onMount(() => {
+    lease = model?.downloads();
+    return () => lease?.release();
+  });
 
   /** The clock the status lines read, ticked while the page is showing so "No progress for 14 min" keeps time. */
   let now = $state(Date.now());
@@ -23,35 +28,73 @@
     return () => clearInterval(timer);
   });
 
-  const titleOf = (download: Download): Title => ({
-    type: download.title.mediaType,
-    id: download.title.mediaId,
-    title: download.title.title || download.release.label,
-    posterPath: download.title.posterPath,
+  const titleOf = (download: DownloadViewItem): Title => ({
+    type: download.title.type,
+    id: download.title.id,
+    title: download.name,
+    posterPath: download.posterPath,
+  });
+  const descriptorOf = (download: DownloadViewItem): DownloadTitleDescriptor => ({
+    target:
+      download.title.type === 'movie'
+        ? { ...download.title, type: 'movie' }
+        : {
+            ...download.title,
+            type: 'tv',
+            season: download.season!,
+            episode: download.episode!,
+          },
+    name: download.name,
+    ...(download.imdbId ? { imdbId: download.imdbId } : {}),
+    ...(download.posterPath ? { posterPath: download.posterPath } : {}),
+    ...(download.stillPath ? { stillPath: download.stillPath } : {}),
   });
 
-  const list = $derived(queue.list());
-  /** One reactive snapshot per row: sectioning and drawing reuse the same status/title/answer work. */
-  const rows = $derived(
-    list.map((download) => ({
-      download,
-      title: titleOf(download),
-      status: queue.status(download, now),
-      answer: queue.answers.get(download.name),
-    })),
-  );
+  const list = $derived((lease?.snapshot.value?.items ?? []) as DownloadViewItem[]);
+  let recoveredArtwork = $state(new Map<string, string | null>());
+  const artworkPending = new SvelteSet<string>();
+  $effect(() => {
+    const service = model;
+    const missing = list.filter(
+      (download) =>
+        download.title.type === 'tv' &&
+        !download.stillPath &&
+        !recoveredArtwork.has(download.content) &&
+        !artworkPending.has(download.content),
+    );
+    if (!service || !missing.length) return;
+    for (const download of missing) artworkPending.add(download.content);
+    void Promise.all(
+      missing.map(async (download) => {
+        const target = descriptorOf(download).target;
+        try {
+          const { result } = await service.downloadArtwork(target);
+          return [
+            download.content,
+            result.kind === 'download.artwork' ? result.stillPath : null,
+          ] as const;
+        } catch {
+          return [download.content, null] as const;
+        }
+      }),
+    ).then((found) => {
+      for (const [content] of found) artworkPending.delete(content);
+      recoveredArtwork = new Map([...recoveredArtwork, ...found]);
+    });
+  });
+  const rows = $derived(list.map((download) => ({ download, title: titleOf(download) })));
   const groups = $derived(
     [
       {
         title: 'In progress',
         items: rows.filter(
-          ({ download, status }) => !download.announced && status.state !== 'ready',
+          ({ download }) => !download.announced && download.status.state !== 'ready',
         ),
       },
       {
         title: 'Recently downloaded',
         items: rows.filter(
-          ({ download, status }) => download.announced || status.state === 'ready',
+          ({ download }) => download.announced || download.status.state === 'ready',
         ),
       },
     ].filter((group) => group.items.length),
@@ -59,20 +102,18 @@
   /** Asked once as the page shows, then by the library's own refresh: it opens on fresh figures. */
   $effect(() => {
     if (!active) return;
-    let live = true;
-    untrack(() => {
-      void refreshDownloads(queue, { force: true, shouldContinue: () => live && active });
-    });
-    return () => {
-      live = false;
-    };
+    if (model) void model.refreshDownloads().catch(() => undefined);
   });
   let busy = $state<string | null>(null);
+  let message = $state('');
 
-  async function drop(download: Download) {
-    busy = download.name;
+  async function drop(download: DownloadViewItem) {
+    busy = download.content;
+    message = '';
     try {
-      await queue.remove(download, inFlight(queue.status(download).state));
+      await model?.removeDownload(descriptorOf(download).target);
+    } catch {
+      message = 'Couldn’t remove that download. Try again.';
     } finally {
       busy = null;
     }
@@ -81,6 +122,7 @@
 
 <h1>Downloads</h1>
 <p class="note">Your debrid fetches these — you can close Den, they keep going.</p>
+{#if message}<p class="note" role="status">{message}</p>{/if}
 
 {#if !list.length}
   <p class="note">No downloads yet. Download a title from its Sources to see it here.</p>
@@ -89,34 +131,39 @@
     <section>
       <h2>{group.title}</h2>
       <ul class="grid">
-        {#each group.items as row (row.download.name)}
-          {@const { download, title, status, answer } = row}
-          {@const state = status.state}
+        {#each group.items as row (row.download.content)}
+          {@const { download, title } = row}
+          {@const state = download.status.state}
           <li data-download={download.content}>
             <DownloadPosterCard
               {download}
               {title}
-              badge={answer?.state === 'preparing' && answer.progress
-                ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
+              stillPath={recoveredArtwork.get(download.content) ?? undefined}
+              badge={download.status.fraction
+                ? `${Math.floor(download.status.fraction * 100)}%`
                 : undefined}
-              progress={state === 'ready'
-                ? 1
-                : answer?.state === 'preparing'
-                  ? answer.progress
-                  : undefined}
-              downloadBadge={{ state: phase(status, answer), label: headline(status, answer) }}
+              progress={state === 'ready' ? 1 : download.status.fraction}
+              downloadBadge={{ state: download.status.phase, label: viewHeadline(download) }}
               href={titleHref(title)}
               menu={false}
               {active}
             />
-            <DownloadStatus {download} {queue} {now} {status} {answer} />
-            {#if state !== 'ready'}<DownloadAlternatives {download} {queue} />{/if}
+            <DownloadStatus {download} {now} />
+            {#if state !== 'ready'}
+              {#if model}<DownloadAlternatives
+                  {download}
+                  title={descriptorOf(download)}
+                  {model}
+                />{/if}
+            {/if}
             <button
               type="button"
               class="control"
-              disabled={busy === download.name}
+              disabled={busy === download.content}
               onclick={() => void drop(download)}
-              >{inFlight(state) ? 'Cancel download' : 'Remove'}</button
+              >{download.status.phase === 'queued' || download.status.phase === 'downloading'
+                ? 'Cancel download'
+                : 'Remove'}</button
             >
           </li>
         {/each}

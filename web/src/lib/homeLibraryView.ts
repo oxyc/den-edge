@@ -3,21 +3,8 @@
 
 import { WATCHED } from './actions';
 import { readDownloads, type Download } from './downloadRows';
-import {
-  ContinueProjector,
-  nameContinueCandidates,
-  standings,
-  titleKey,
-  type ContinueCandidate,
-  type ContinueEntry,
-  type Library,
-  type Shape,
-  type Standing,
-} from './library';
-import { readPrivateAddresses } from './privateAddresses';
-import { readPlugins, readPrefs, type ServicePick } from './prefs';
-import { tmdbKeyOf } from './tmdb';
-import type { Row, SettingsRow, Stamp, TitleRow } from './wire';
+import { standings, titleKey, type Library, type Standing } from './library';
+import type { Row, TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -45,92 +32,9 @@ export interface HomeLibraryView {
   downloads: Download[];
 }
 
-export interface ActiveHomeSettings {
-  tmdbKey: string;
-  plugins: string[];
-  remux: string | null;
-  prefs: {
-    excludedGenres: number[];
-    excludedLanguages: string[];
-    hideAnime: boolean;
-    hideWatched: boolean;
-    minReleaseYear?: number;
-    services: ServicePick[];
-    servicesConfigured: boolean;
-  };
-}
-
-/** The only first reply for the fast path. The decrypted snapshot and policy fold stay behind `handle`. */
-export interface ActiveHomePayload {
-  handle: number;
-  view: Omit<HomeLibraryView, 'continueLibrary'> & { continue: ActiveHomeContinueCandidate[] };
-  settings: ActiveHomeSettings;
-  stamp: Stamp;
-  reconsiderAt: number;
-  at: number;
-}
-
-/** A compact policy answer plus any display already carried by the library's playback rows. */
-export interface ActiveHomeContinueCandidate extends ContinueCandidate {
-  title?: ContinueEntry['title'];
-}
-
-export interface ActiveHomeShapeReply {
-  handle: number;
-  continue: ActiveHomeContinueCandidate[];
-}
-
-export interface ActiveHomeHydrationChunk<THeader = Record<string, unknown>, TEntry = unknown> {
-  handle: number;
-  /** Snapshot fields other than `entries`, present on the first chunk only. */
-  header?: THeader;
-  entries: TEntry[];
-  next: number;
-  done: boolean;
-}
-
 export interface HomeLibraryViewProof {
   view: HomeLibraryView;
   digest: { hash: string; bytes: number };
-}
-
-export interface CurrentHomeLibraryInputs {
-  library: Library;
-  rows: Row[];
-  titleRows: TitleRow[];
-  reactions: ReadonlyMap<string, TitleRow['reaction']['value']>;
-  selected: { watched: TitleRow[]; watchlisted: TitleRow[] };
-  watched: ReadonlySet<string>;
-  watchlist: string[];
-  standings: ReadonlyMap<string, Standing>;
-  weighted: Array<{
-    ref: { type: 'movie' | 'tv'; id: number };
-    weight: number;
-    at: number;
-  }>;
-}
-
-function settingsRows(rows: Row[]): Map<string, SettingsRow> {
-  return new Map(rows.flatMap((row) => (row.kind === 'set' ? [[row.name, row] as const] : [])));
-}
-
-export function selectActiveHomeSettings(rows: Row[]): ActiveHomeSettings {
-  const settings = settingsRows(rows);
-  const prefs = readPrefs(settings.get('prefs'));
-  return {
-    tmdbKey: tmdbKeyOf(settings.get('keys')),
-    plugins: readPlugins(settings.get('plugins')),
-    remux: readPrivateAddresses(settings.get('addresses')).remux ?? null,
-    prefs: {
-      excludedGenres: [...prefs.excludedGenres],
-      excludedLanguages: [...prefs.excludedLanguages],
-      hideAnime: prefs.hideAnime,
-      hideWatched: prefs.hideWatched,
-      ...(prefs.minReleaseYear !== undefined ? { minReleaseYear: prefs.minReleaseYear } : {}),
-      services: prefs.services,
-      servicesConfigured: prefs.servicesConfigured,
-    },
-  };
 }
 
 function activeTitleRows(rows: Row[]): TitleRow[] {
@@ -297,69 +201,6 @@ export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibrar
     continueLibrary: compactContinueLibrary(library),
     downloads: readDownloads(rows),
   };
-}
-
-/** Normalize the values Home currently derives on the page thread for comparison with the Worker proof. */
-export function homeLibraryViewFromCurrent(inputs: CurrentHomeLibraryInputs): HomeLibraryView {
-  const selected = selectHomeLibraryView(inputs.library, inputs.rows);
-  return {
-    owned: [...new Set(inputs.titleRows.map((row) => titleKey(row.title)))],
-    watched: [...inputs.watched],
-    watchlist: inputs.watchlist,
-    standings: [...inputs.standings],
-    weighted: inputs.weighted.map(({ ref, weight, at }) => [titleKey(ref), weight, at]),
-    seeds: {
-      watched: inputs.selected.watched.map((row) => titleKey(row.title)),
-      watchlisted: inputs.selected.watchlisted.map((row) => titleKey(row.title)),
-    },
-    shelfRefs: selected.shelfRefs,
-    requiredShapeRefs: selected.requiredShapeRefs,
-    continueLibrary: selected.continueLibrary,
-    downloads: selected.downloads,
-  };
-}
-
-/** Convert the internal compact policy input into the clone-safe first-paint contract. */
-export function activeHomeView(view: HomeLibraryView): ActiveHomePayload['view'] {
-  const { continueLibrary, ...fixed } = view;
-  const candidates = new ContinueProjector().project(continueLibrary);
-  return {
-    ...fixed,
-    continue: withExistingContinueTitles(candidates, continueLibrary),
-  };
-}
-
-function withExistingContinueTitles(
-  candidates: ContinueCandidate[],
-  library: Library,
-): ActiveHomeContinueCandidate[] {
-  const named = new Map(
-    nameContinueCandidates(candidates, library).map((entry) => [
-      titleKey(entry.title),
-      entry.title,
-    ]),
-  );
-  return candidates.map((candidate) => ({
-    ...candidate,
-    ...(named.get(titleKey(candidate.ref)) ? { title: named.get(titleKey(candidate.ref)) } : {}),
-  }));
-}
-
-/** Re-run only Continue policy after the page names the required TV layouts. */
-export function continueWithShapes(
-  view: HomeLibraryView,
-  shapes: ReadonlyArray<readonly [string, Shape]>,
-): ActiveHomeContinueCandidate[] {
-  return continueLibraryWithShapes(view.continueLibrary, shapes);
-}
-
-/** Re-run compact Continue policy after the Worker-owned snapshot has hydrated onto the page. */
-export function continueLibraryWithShapes(
-  continueLibrary: Library,
-  shapes: ReadonlyArray<readonly [string, Shape]>,
-): ActiveHomeContinueCandidate[] {
-  const library = { ...continueLibrary, shapes: new Map(shapes) };
-  return withExistingContinueTitles(new ContinueProjector().project(library), library);
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */

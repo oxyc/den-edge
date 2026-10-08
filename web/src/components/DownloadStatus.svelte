@@ -2,48 +2,36 @@
      doing and how fast, then the figures behind it, then which release, and who queued it when that wasn't this
      browser. Text, not controls: it is a status. -->
 <script lang="ts">
-  import { downloads as shared, type DownloadQueue } from '../lib/downloadQueue.svelte';
-  import type { DownloadState } from '../lib/downloadQueue.svelte';
-  import { deviceName, type Download } from '../lib/downloadRows';
-  import { facts, headline, isTrouble, queuedFrom, releaseLine } from '../lib/downloadStatus';
-  import type { Preparation } from '../lib/titleSources';
+  import type { DownloadViewItem } from '../lib/libraryServiceProtocol';
+  import { viewFacts, viewHeadline, viewTrouble } from '../lib/downloadStatus';
 
   let {
     download,
-    queue = shared,
     now = Date.now(),
     release = true,
-    status: suppliedStatus,
-    answer: suppliedAnswer,
   }: {
-    download: Download;
-    queue?: DownloadQueue;
+    download: DownloadViewItem;
     now?: number;
     /** Name the release too: off where the release is already on screen (a title's source list). */
     release?: boolean;
-    /** A parent already drawing the card can share these computations. */
-    status?: DownloadState;
-    answer?: Preparation;
   } = $props();
 
-  const status = $derived(suppliedStatus ?? queue.status(download, now));
-  const answer = $derived(suppliedAnswer ?? queue.answers.get(download.name));
-  const lines = $derived(facts(download, status, answer, now));
+  const lines = $derived(viewFacts(download, now));
   const from = $derived(
-    queuedFrom(download, queue.device, (device) =>
-      deviceName(queue.library?.settings('devices'), device),
-    ),
+    download.queuedBy.isSelf
+      ? undefined
+      : `Queued from ${download.queuedBy.name ?? 'another device'}`,
   );
 </script>
 
 <div class="download-status">
-  <p class="headline" class:trouble={isTrouble(status, answer)} role="status">
-    {headline(status, answer)}
+  <p class="headline" class:trouble={viewTrouble(download)} role="status">
+    {viewHeadline(download)}
   </p>
   {#if lines.length}<p>{lines.join(' · ')}</p>{/if}
-  {#if release && releaseLine(download)}<p class="release">{releaseLine(download)}</p>{/if}
-  {#if download.release.hedge}
-    <p class="alternate">Also trying {download.release.hedge.label ?? 'another release'}</p>
+  {#if release}<p class="release">{download.release.label}</p>{/if}
+  {#if download.alternate}
+    <p class="alternate">Also trying {download.alternate.label}</p>
   {/if}
   {#if from}<p class="from">{from}</p>{/if}
 </div>

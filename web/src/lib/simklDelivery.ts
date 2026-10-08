@@ -1,4 +1,5 @@
 import { fetchSimklClientId } from '../settings/simkl';
+import type { ClockStore } from './clockStore';
 import { exclusive } from './exclusive';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
@@ -334,108 +335,91 @@ interface V4Pass {
   account: string;
   epoch: number;
   device: string;
-  /** The next settle order in this epoch (`orderCounter`). */
-  order: () => number;
+  /** Durably reserve one contiguous settle-order block before any receipt in the pass uses it. */
+  orders: (count: number) => Promise<number[]>;
+  reserveRemoval: () => Promise<void>;
   fetchImpl: typeof fetch;
+  current: () => boolean;
 }
 
-/** This page's own order counters, per library: what it used where storage is blocked. */
-const ordersHere = new WeakMap<LibraryLog, Map<string, number>>();
+interface DeliverySafetyState {
+  orders: Record<string, number>;
+  removalsSent: number[];
+}
 
-function ordersOf(log: LibraryLog): Map<string, number> {
-  let orders = ordersHere.get(log);
-  if (!orders) ordersHere.set(log, (orders = new Map()));
-  return orders;
+interface DeliverySafety {
+  greatestEpoch: number;
+  orders(epoch: number, count: number): Promise<number[]>;
+  reserveRemoval(): Promise<void>;
+  removalsSent(): number[];
+}
+
+const safetyName = (account: string) => `simkl-delivery-safety.v1.${account}`;
+
+function safetyState(value: unknown): DeliverySafetyState {
+  const stored = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const rawOrders = (stored as { orders?: unknown }).orders;
+  const orders: Record<string, number> = {};
+  if (rawOrders && typeof rawOrders === 'object' && !Array.isArray(rawOrders))
+    for (const [epoch, order] of Object.entries(rawOrders))
+      if (
+        /^\d+$/.test(epoch) &&
+        Number.isSafeInteger(Number(epoch)) &&
+        Number(epoch) >= 0 &&
+        Number.isSafeInteger(order) &&
+        (order as number) >= 0
+      )
+        orders[epoch] = order as number;
+  const rawRemovals = (stored as { removalsSent?: unknown }).removalsSent;
+  const removalsSent = Array.isArray(rawRemovals)
+    ? rawRemovals.filter((at): at is number => Number.isSafeInteger(at) && at >= 0)
+    : [];
+  return { orders, removalsSent };
 }
 
 /**
- * Settle orders that never repeat within an epoch (v3 §6): the last one this device used is kept in this browser,
- * which every tab of it shares, and a pass takes its orders under one lock per account (`deliverSimkl`). Starting
- * at 0 on every pass reused `[E, 1, device]` across passes and tabs, and a merge of two equal orders falls back to
- * byte order, which could bring back an older receipt.
+ * Safety bookkeeping shared by every authority for this encrypted library. `deliverSimklWithClock` opens it under
+ * the account Web Lock. Every mutation is kept before it is returned to a receipt or an external removal request.
  */
-function orderCounter(log: LibraryLog, account: string, epoch: number): () => number {
-  const key = `den.simklOrder.${account}.${epoch}`;
-  const ordersHere = ordersOf(log);
-  let last = ordersHere.get(key) ?? 0;
-  try {
-    last = Math.max(last, Number(globalThis.localStorage?.getItem(key)) || 0);
-  } catch {
-    // Storage blocked: this page's own count still never repeats.
-  }
-  return () => {
-    last++;
-    ordersHere.set(key, last);
-    try {
-      globalThis.localStorage?.setItem(key, String(last));
-    } catch {
-      // As above.
-    }
-    return last;
+async function deliverySafety(log: LibraryLog, account: string): Promise<DeliverySafety> {
+  const name = safetyName(account);
+  const state = safetyState(await log.kept<unknown>(name));
+  const persist = async () => {
+    await log.keep(name, state);
+    const kept = safetyState(await log.kept<unknown>(name));
+    if (JSON.stringify(kept) !== JSON.stringify(state))
+      throw new Error('the SIMKL delivery safety reservation could not be kept');
   };
-}
-
-/**
- * The greatest epoch this browser has settled under for an account: every epoch it used keeps an order counter
- * (`orderCounter`), so a take never reuses one, even after a restore rolls the row and the receipts back (v3 §6).
- */
-function heldEpoch(log: LibraryLog, account: string): number {
-  const prefix = `den.simklOrder.${account}.`;
-  let greatest = 0;
-  const consider = (key: string | null) => {
-    if (key?.startsWith(prefix))
-      greatest = Math.max(greatest, Number(key.slice(prefix.length)) || 0);
+  const recent = () => {
+    const now = Date.now();
+    state.removalsSent = state.removalsSent.filter((at) => now - at < HOLD);
+    return state.removalsSent.map((at) => Math.min(at, now));
   };
-  for (const key of ordersOf(log).keys()) consider(key);
-  try {
-    const storage = globalThis.localStorage;
-    for (let i = 0; i < (storage?.length ?? 0); i++) consider(storage!.key(i));
-  } catch {
-    // Storage blocked: this page's own epochs still count.
-  }
-  return greatest;
-}
-
-/** When this page sent list removals, per library and account, on both clocks. */
-const removalsSentHere = new WeakMap<LibraryLog, Map<string, { at: number; mono: number }[]>>();
-
-/**
- * The list removals sent for an account in the last 120 s, as den-core takes them (`removals_sent`, v4 §9). Kept in
- * this browser's storage, which every tab and every reload shares, so a second tab or a reload sees the same window.
- * This page's own sends also carry `performance.now`, so a `Date` step forward doesn't drop them from the count, and
- * a send after `now` (`Date` stepped back) still counts, passed as `now`: den-core counts none later than `now`.
- */
-function recentRemovals(log: LibraryLog, account: string, sentNow = false): number[] {
-  const now = Date.now();
-  const mono = monoNow();
-  const byWall = (at: number) => now - at < 120_000;
-  let here = removalsSentHere.get(log);
-  if (!here) removalsSentHere.set(log, (here = new Map()));
-  const mine = (here.get(account) ?? []).filter((s) => byWall(s.at) || mono - s.mono < 120_000);
-  if (sentNow) mine.push({ at: now, mono });
-  here.set(account, mine);
-  let stored: number[] | null = null;
-  try {
-    const storage = globalThis.localStorage;
-    if (storage) {
-      const key = `den.simklRemovalsSent.${account}`;
-      const kept: unknown = JSON.parse(storage.getItem(key) ?? '[]');
-      stored = (Array.isArray(kept) ? kept : []).filter(
-        (at): at is number => typeof at === 'number' && byWall(at),
-      );
-      if (sentNow) stored.push(now);
-      storage.setItem(key, JSON.stringify(stored));
-    }
-  } catch (error) {
-    console.warn(`den: the SIMKL removals sent can't be kept in this browser: ${error}`);
-    stored = null;
-  }
-  // Storage holds every tab's sends that `Date` counts; this page adds its own that only `performance.now` still does.
-  const recent =
-    stored === null
-      ? mine.map((s) => s.at)
-      : [...stored, ...mine.filter((s) => !byWall(s.at)).map((s) => s.at)];
-  return recent.map((at) => Math.min(at, now));
+  return {
+    greatestEpoch: Object.keys(state.orders).reduce(
+      (greatest, epoch) => Math.max(greatest, Number(epoch)),
+      0,
+    ),
+    async orders(epoch, count) {
+      if (!Number.isSafeInteger(count) || count < 0)
+        throw new Error('the SIMKL settle-order reservation is invalid');
+      const key = String(epoch);
+      const first = (state.orders[key] ?? 0) + 1;
+      const last = first + count - 1;
+      if (!Number.isSafeInteger(first) || (count > 0 && !Number.isSafeInteger(last)))
+        throw new Error('the SIMKL settle order is exhausted');
+      if (count === 0) return [];
+      state.orders[key] = last;
+      await persist();
+      return Array.from({ length: count }, (_, index) => first + index);
+    },
+    async reserveRemoval() {
+      recent();
+      state.removalsSent.push(Date.now());
+      await persist();
+    },
+    removalsSent: recent,
+  };
 }
 
 /**
@@ -466,7 +450,7 @@ function latchText(latch: Record<string, unknown>): string {
 }
 
 /** The account's `set:deliver` facts `pending_targets_v4` reads (v4 §9). */
-function deliverFacts(log: LibraryLog, row: SettingsRow, account: string, since: Stamp) {
+function deliverFacts(row: SettingsRow, account: string, since: Stamp, removalsSent: number[]) {
   const unverified = row.values.unverified?.value;
   return {
     provider: 'simkl',
@@ -474,7 +458,7 @@ function deliverFacts(log: LibraryLog, row: SettingsRow, account: string, since:
     since,
     removals: latchSetting(row) ?? null,
     unverified: unverified && 'ints' in unverified ? unverified.ints : [],
-    removals_sent: recentRemovals(log, account),
+    removals_sent: removalsSent,
   };
 }
 
@@ -495,7 +479,7 @@ function deliveryTitle(name: string): { media: 'movie' | 'tv'; id: number; seaso
  * dropped, and its targets are decided again next pass.
  */
 async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
-  const { account, epoch, device, snapshot, pending, stored, order } = pass;
+  const { account, epoch, device, snapshot, pending, stored, orders } = pass;
   const entry = (name: string, key: string) =>
     (stored.get(name)?.document.entries as Record<string, unknown> | undefined)?.[key] ?? null;
   const settle = (outcome: Record<string, unknown>, target: V4Target, at: number) =>
@@ -526,11 +510,17 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
       },
     };
   };
+  const pendingCommands = pending.commands.slice(0, 100);
+  const reserved = await orders(pending.settle.length + pendingCommands.length);
+  let reservedIndex = 0;
   for (const target of pending.settle)
-    add(target, settle({ action: 'acknowledge' }, target, order()));
+    add(target, settle({ action: 'acknowledge' }, target, reserved[reservedIndex++]!));
 
   // Fit before sending: each document as it would be with every settle this pass writes to it.
-  const commands = pending.commands.slice(0, 100).map((command) => ({ command, at: order() }));
+  const commands = pendingCommands.map((command) => ({
+    command,
+    at: reserved[reservedIndex++]!,
+  }));
   const full = new Set<string>();
   for (const name of new Set(commands.map(({ command }) => command.document))) {
     const fit = syncPolicy<{ held: { key: string }[] }>({
@@ -550,6 +540,7 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
   }
 
   for (const { command, at } of commands) {
+    if (!pass.current()) break;
     if (full.has(`${command.document}#${command.key}`)) {
       console.warn(`den: ${command.document} is full; ${command.key} is held, not sent`);
       continue;
@@ -571,17 +562,18 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
       console.warn('den: the SIMKL lease lapsed during a delivery pass; stopping it');
       break;
     }
+    if (outcome.action === 'send' && command.kind === 'list' && command.added === false)
+      await pass.reserveRemoval();
     if (
       outcome.action === 'send' &&
       !(await send(command, target, pass.clientId, pass.token, pass.fetchImpl))
     )
       continue;
-    if (outcome.action === 'send' && command.kind === 'list' && command.added === false)
-      recentRemovals(log, account, true);
     add(command, settle(outcome, command, at));
   }
 
   for (const [name, settles] of writes) {
+    if (!pass.current()) break;
     const written = syncPolicy<{ document: DocumentRow }>({
       op: 'delivery_write',
       ...shape(name),
@@ -604,6 +596,19 @@ export async function deliverSimkl(
   fetchImpl: typeof fetch = fetch,
   elapsed = pageElapsed(),
 ): Promise<boolean> {
+  const clock = legacyClock(log, device);
+  return deliverSimklWithClock(log, clock, fetchImpl, elapsed);
+}
+
+/** Service-owned delivery. Every durable stamp comes from the worker-safe, cross-tab clock store. */
+export async function deliverSimklWithClock(
+  log: LibraryLog,
+  clock: ClockStore,
+  fetchImpl: typeof fetch = fetch,
+  elapsed = pageElapsed(),
+  current: () => boolean = () => true,
+): Promise<boolean> {
+  if (!current()) return false;
   const tracker = log.settings('trackers');
   const connection = Object.entries(tracker?.values ?? {}).find(
     ([name, value]) =>
@@ -626,7 +631,7 @@ export async function deliverSimkl(
   }
   // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
   return exclusive(`den.simkl.${account}`, () =>
-    deliverAccount(log, device, fetchImpl, elapsed, account, token),
+    deliverAccount(log, clock, fetchImpl, elapsed, account, token, current),
   );
 }
 
@@ -639,13 +644,12 @@ async function writeAccountState(
   log: LibraryLog,
   name: string,
   pending: V4Pending,
-  device: string,
+  clock: ClockStore,
 ) {
   const row = log.settings(name);
   if (!row) return;
   const values = { ...row.values };
-  const at = (): Stamp =>
-    syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
   let changed = false;
   const removals = latchSetting(row);
   const latch =
@@ -654,7 +658,10 @@ async function writeAccountState(
   const stored = Array.isArray(latch.held) ? (latch.held as Stamp) : null;
   if (closing && (!stored || stampOrder(stored, closing) < 0)) {
     // Beside the stored approval, never over it: removals approved before this batch are still decided.
-    values.removals = { value: { string: latchText({ ...latch, held: closing }) }, at: at() };
+    values.removals = {
+      value: { string: latchText({ ...latch, held: closing }) },
+      at: await clock.issue(),
+    };
     changed = true;
   }
   if (pending.unverified) {
@@ -662,7 +669,7 @@ async function writeAccountState(
     const current = listed && 'ints' in listed ? listed.ints : [];
     const epochs = [...pending.unverified].sort((a, b) => a - b);
     if (JSON.stringify(epochs) !== JSON.stringify(current)) {
-      values.unverified = { value: { ints: epochs }, at: at() };
+      values.unverified = { value: { ints: epochs }, at: await clock.issue() };
       changed = true;
     }
   }
@@ -696,7 +703,9 @@ export function heldSimklRemovals(log: LibraryLog): HeldRemovals {
   const pending = syncPolicy<V4Pending>({
     op: 'pending_targets_v4',
     documents: log.documents().map(({ document }) => document),
-    deliver: deliverFacts(log, row, account, since),
+    // This synchronous presentation projection fails closed: only the delivery pass reads the async kept
+    // reservation record, so the UI may continue to show a held removal until that pass updates the durable latch.
+    deliver: deliverFacts(row, account, since, []),
     now: Date.now(),
   });
   return {
@@ -720,13 +729,22 @@ export async function approveSimklRemovals(
   device: string,
   shown: HeldRemovals,
 ): Promise<boolean> {
+  return approveSimklRemovalsWithClock(log, legacyClock(log, device), shown);
+}
+
+export async function approveSimklRemovalsWithClock(
+  log: LibraryLog,
+  clock: ClockStore,
+  shown: HeldRemovals,
+): Promise<boolean> {
   const account = simklAccountOf(log);
   const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
   if (!row || !shown.approval) return false;
   const removals = latchSetting(row);
   const latch =
     removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
-  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
+  const at = await clock.issue();
   const values = {
     ...row.values,
     removals: { value: { string: latchText({ ...latch, approved: shown.approval }) }, at },
@@ -742,12 +760,15 @@ function jsonSetting(row: SettingsRow, name: string): unknown {
 
 async function deliverAccount(
   log: LibraryLog,
-  device: string,
+  clock: ClockStore,
   fetchImpl: typeof fetch,
   elapsed: number,
   account: string,
   token: string,
+  current: () => boolean,
 ): Promise<boolean> {
+  if (!current()) return false;
+  const device = clock.device;
   const name = `deliver:simkl:${account}`;
   const deliver = log.settings(name);
   const base: SettingsRow = deliver ?? { kind: 'set', schema: 2, name, values: {} };
@@ -775,8 +796,10 @@ async function deliverAccount(
     });
     if (decision.action !== 'take') return false;
   }
-  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
+  const at = await clock.issue();
   const since = (jsonSetting(base, 'since') as Stamp | undefined) ?? at;
+  const safety = await deliverySafety(log, account);
   // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
   const held = log.wireMinimum >= 4 ? log.documents() : [];
   const pendingV4 =
@@ -786,7 +809,7 @@ async function deliverAccount(
           documents: held.map(({ document }) => document),
           // The removals latch and its approval, the epochs whose receipts are unverified, and this page's recent
           // removal sends (v4 §9).
-          deliver: deliverFacts(log, base, account, since),
+          deliver: deliverFacts(base, account, since, safety.removalsSent()),
           now: Date.now(),
         })
       : null;
@@ -796,10 +819,7 @@ async function deliverAccount(
   const epoch =
     locallyHeld && kept
       ? kept.epoch
-      : lease[0] === device && !fresh
-        ? Number(lease[1] ?? 0)
-        : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0, heldEpoch(log, account)) +
-          1;
+      : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0, safety.greatestEpoch) + 1;
   if (!locallyHeld || !kept || Math.max(Date.now() - kept.at, monoNow() - kept.mono) >= HOLD / 2) {
     // Compare-and-set on the lease as read: another device that took or renewed it since wins, and this pass stops.
     // The hold counts from when the request was sent.
@@ -808,23 +828,27 @@ async function deliverAccount(
       values: { ...base.values, lease: { value: { strings: [device, String(epoch)] }, at } },
     };
     const sent = { at: Date.now(), mono: monoNow() };
+    if (!current()) return false;
     if (!(await log.writeAt(leased, log.seqOf(rowName(leased))))) return false;
     heldLeases.set(log, { account, epoch, ...sent });
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
-  if (pendingV4) await writeAccountState(log, name, pendingV4, device);
-  const order = orderCounter(log, account, epoch);
+  if (!current()) return false;
+  if (pendingV4) await writeAccountState(log, name, pendingV4, clock);
+  if (!current()) return false;
+  const orders = (count: number) => safety.orders(epoch, count);
 
   const clientId = await fetchSimklClientId(fetchImpl);
-  if (!clientId) return false;
+  if (!clientId || !current()) return false;
   const snapshotResponse = await simkl(
     '/sync/all-items?extended=full&include_all_episodes=yes&episode_watched_at=yes',
     clientId,
     token,
     fetchImpl,
   );
-  if (!snapshotResponse.ok) return false;
+  if (!snapshotResponse.ok || !current()) return false;
   const snapshot = collectSnapshot(await snapshotResponse.json());
+  if (!current()) return false;
   if (pendingV4) {
     const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
     await deliverV4(log, {
@@ -836,8 +860,10 @@ async function deliverAccount(
       account,
       epoch,
       device,
-      order,
+      orders,
+      reserveRemoval: () => safety.reserveRemoval(),
       fetchImpl,
+      current,
     });
     return true;
   }
@@ -850,7 +876,10 @@ async function deliverAccount(
     since,
     now: Date.now(),
   });
-  for (const command of pending.slice(0, 100)) {
+  const commands = pending.slice(0, 100);
+  const reserved = await orders(commands.length);
+  for (const [index, command] of commands.entries()) {
+    if (!current()) break;
     const target = command.built_from as Target;
     const id = identity(target.media, target.id, target.season, target.episode_number);
     const title = identity(target.media, target.id);
@@ -863,11 +892,12 @@ async function deliverAccount(
     if (outcome.action === 'send' && !holding(log, account)) break;
     if (outcome.action === 'send' && !(await send(command, target, clientId, token, fetchImpl)))
       continue;
+    if (!current()) break;
     const settled = syncPolicy<unknown>({
       op: 'settle',
       outcome,
       built_from: target,
-      order: [epoch, order(), device],
+      order: [epoch, reserved[index]!, device],
     });
     if (settled === null) continue;
     const name = syncPolicy<string>({
@@ -876,10 +906,10 @@ async function deliverAccount(
       account,
       target: target.receipt_target,
     });
-    const current = log
+    const currentReceipt = log
       .rows()
       .find((row): row is ReceiptRow => row.kind === 'snt' && rowName(row) === name);
-    const receipt: ReceiptRow = current ?? {
+    const receipt: ReceiptRow = currentReceipt ?? {
       kind: 'snt',
       schema: 3,
       provider: 'simkl',
@@ -894,4 +924,28 @@ async function deliverAccount(
     );
   }
   return true;
+}
+
+/** Compatibility for the page-owned session while the final atomic UI cutover is still in progress. */
+function legacyClock(log: LibraryLog, device: string): ClockStore {
+  let last = log.newestStamp();
+  return {
+    device,
+    async issue(now = Date.now()) {
+      last = syncPolicy<Stamp>({ op: 'issue', last, now, device });
+      return last;
+    },
+    async historical(times) {
+      return times.map((at) => {
+        last = syncPolicy<Stamp>({ op: 'issue', last: [at, last[1], device], now: at, device });
+        return last;
+      });
+    },
+    async see(stamp) {
+      if (stampOrder(last, stamp) < 0) last = stamp;
+    },
+    async current() {
+      return last;
+    },
+  };
 }

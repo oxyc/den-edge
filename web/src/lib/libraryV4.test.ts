@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addToWatchlist,
   blankEpisode,
@@ -8,8 +8,7 @@ import {
   react,
   updateEpisodeProgress,
 } from './actions';
-import { libraryAlert } from './librarySession.svelte';
-import { switchLibraryToV4 } from './libraryUpgrade';
+import { libraryAlert, switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
@@ -589,6 +588,11 @@ describe('the switch to Library v4', () => {
 });
 
 describe('SIMKL delivery on Library v4', () => {
+  let deliveryVault: Vault;
+  beforeEach(() => {
+    deliveryVault = memoryVault().vault;
+  });
+
   const trackers: SettingsRow = {
     kind: 'set',
     schema: 2,
@@ -650,7 +654,7 @@ describe('SIMKL delivery on Library v4', () => {
 
   it('never repeats a settle order within an epoch, pass after pass', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     await server.append(filmDocument(551));
     await log.refresh();
@@ -675,7 +679,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['bbbbbbbbbbbbbbbb', '2']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '8'] });
   });
@@ -686,7 +690,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['', '1']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     // The TV renews its lease after this browser read the row, with an older stamp than this browser would issue.
     await server.append(deliver(['cccccccccccccccc', '3'], 600));
     expect(await watched(log, connection)).toBe(false);
@@ -703,7 +707,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['', '1']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     expect(sent.count).toBe(1);
     const receipts = (await server.opened()).find((row) => row.kind === 'delivery') as DocumentRow;
@@ -736,7 +740,7 @@ describe('SIMKL delivery on Library v4', () => {
     expect(visit.pendingActions).toBe(1);
 
     // The TV switches it to v4: minimum 4, a new generation.
-    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, deliveryVault))!;
     // Its dry run lists the rating commands v4 no longer sends for titles nobody rated.
     const quiet = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(await switchLibraryToV4(tv, Date.now(), server.fetchImpl)).toBe(true);
@@ -786,7 +790,7 @@ describe('SIMKL delivery on Library v4', () => {
 
   it('a lease refused by a generation change reads the new log, and a later pass takes it', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await deliverSimkl(log, DEVICE, connection, 0)).toBe(false);
     // The library is restored between this browser's read and its lease write: a new generation.
     await server.append(filmDocument(551));
@@ -798,7 +802,7 @@ describe('SIMKL delivery on Library v4', () => {
 
   it('after a generation change, watches the new store before taking even its own lease, at a new epoch', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '2'] });
     // A restore: a new generation whose lease row still names this browser.
@@ -817,7 +821,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['cccccccccccccccc', '3']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     // A page open for ten minutes is no reason to take a lease the TV renewed a moment ago.
     expect(await watched(log, connection)).toBe(true);
     expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '4'] });
@@ -838,7 +842,7 @@ describe('SIMKL delivery on Library v4', () => {
 
   it('a page that kept no generation watches before taking even an empty lease', async () => {
     const { connection, sent } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await deliverSimkl(log, DEVICE, connection, 900_000)).toBe(false);
     expect(await deliverSimkl(log, DEVICE, connection, 1_499_999)).toBe(false);
     expect(sent.count).toBe(0);
@@ -868,7 +872,7 @@ describe('SIMKL delivery on Library v4', () => {
         row.values.removals = { value: { string: JSON.stringify(removals) }, at: at(4000) };
       // SIMKL's account no longer lists them, so each removal, once decided, settles as delivered.
       const { server, connection } = await simkl([...removed, ...receipts, trackers, row]);
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
       expect(await watched(log, connection)).toBe(true);
       const opened = await server.opened();
       const latch = opened.find(
@@ -930,7 +934,7 @@ describe('SIMKL delivery on Library v4', () => {
         return new Response('{}', { status: 503 });
       return connection(input, init);
     };
-    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, deliveryVault))!;
     expect(await watched(log, listing)).toBe(true);
     const latch = (await server.opened()).find(
       (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
@@ -940,7 +944,9 @@ describe('SIMKL delivery on Library v4', () => {
     failing = false;
     await log.refresh();
     expect(await deliverSimkl(log, DEVICE, listing, 600_000)).toBe(true);
-    expect(sent.count).toBe(21);
+    // A failed external request was already reserved. For 120 seconds the safety latch counts those attempts too,
+    // rather than risking a retry storm that bypasses the removal limit.
+    expect(sent.count).toBe(0);
     expect(heldSimklRemovals(log).titles.map(({ id }) => id)).toEqual(
       laterBatch.map((doc) => doc.title.id),
     );
@@ -975,7 +981,7 @@ describe('SIMKL delivery on Library v4', () => {
             }),
           )
         : connection(input, init);
-    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, deliveryVault))!;
     expect(await watched(log, listing)).toBe(true);
     expect(sent.count).toBe(1);
   });
@@ -997,7 +1003,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['', '1']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     expect(sent.count).toBe(2);
     const row = (await server.opened()).find(
@@ -1022,7 +1028,7 @@ describe('SIMKL delivery on Library v4', () => {
           vi.advanceTimersByTime(121_000);
         return res;
       };
-      const log = (await LibraryLog.open(LIBRARY_KEY, slow, undefined, null))!;
+      const log = (await LibraryLog.open(LIBRARY_KEY, slow, undefined, deliveryVault))!;
       expect(await watched(log, slow)).toBe(true);
       expect(sent.count).toBe(1);
     } finally {
@@ -1049,7 +1055,7 @@ describe('SIMKL delivery on Library v4', () => {
         }
         return res;
       };
-      const log = (await LibraryLog.open(LIBRARY_KEY, stepping, undefined, null))!;
+      const log = (await LibraryLog.open(LIBRARY_KEY, stepping, undefined, deliveryVault))!;
       expect(await watched(log, stepping)).toBe(true);
       expect(sent.count).toBe(1);
     } finally {
@@ -1059,7 +1065,7 @@ describe('SIMKL delivery on Library v4', () => {
 
   it('watches on the lesser of its clocks: a wall clock that jumps ahead is no ten minutes', async () => {
     const { connection, sent } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       // The page's own clocks, as `deliverSimkl` reads them when given no `elapsed`.
@@ -1090,7 +1096,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       deliver(['', '1']),
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     const shown = heldSimklRemovals(log);
     expect(shown.titles).toHaveLength(21);
     expect(shown.approval).toEqual(at(3000));
@@ -1145,7 +1151,7 @@ describe('SIMKL delivery on Library v4', () => {
       trackers,
       row,
     ]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     const shown = heldSimklRemovals(log);
     expect(shown.titles).toHaveLength(24);
     expect(shown.approval).toEqual(at(3024));
@@ -1180,14 +1186,15 @@ describe('SIMKL delivery on Library v4', () => {
               }),
             )
           : connection(input, init);
-      const tab = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+      const tab = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, deliveryVault))!;
       expect(await watched(tab, listing)).toBe(true);
       expect(sent.count).toBe(21);
 
       // An offline device's removal stamped before the approval arrives; another tab reads it.
       for (const document of removedFilms(621, 1, () => 3000)) await server.append(document);
-      const other = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
-      expect(heldSimklRemovals(other).titles).toEqual([{ type: 'movie', id: 621 }]);
+      const other = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, deliveryVault))!;
+      expect(await deliverSimkl(other, DEVICE, listing, 600_000)).toBe(true);
+      expect(sent.count).toBe(21);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1207,7 +1214,7 @@ describe('SIMKL delivery on Library v4', () => {
       values: { ...deliver(['', '1']).values, unverified: { value: { ints: [3] }, at: at(4000) } },
     };
     const { connection, sent } = await simkl([filmDocument(550), receipts, trackers, unverified]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, deliveryVault))!;
     expect(await watched(log, connection)).toBe(true);
     expect(sent.count).toBe(1);
   });

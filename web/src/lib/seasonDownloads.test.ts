@@ -1,88 +1,122 @@
-import { expect, it } from 'vitest';
-import {
-  downloadEpisode,
-  downloadSeason,
-  seasonJobs,
-  seasonJobKey,
-} from './seasonDownloads.svelte';
-import { DownloadQueue } from './downloadQueue.svelte';
-import { readDownloads } from './downloadRows';
-import { source, testClock, testLog } from './downloadTestLog';
+import { describe, expect, it, vi } from 'vitest';
+import { downloadEpisode, downloadSeason } from './seasonDownloads.svelte';
+import type { LibraryModel } from './libraryModel.svelte';
+import type { DownloadViewItem } from './libraryServiceProtocol';
 
-it('queues aired season episodes once across repeated clicks, skips ready files, future episodes and dead swarms', async () => {
-  seasonJobs.clear();
-  const addon = { install: 'http://scout/config', base: '/scout/config' };
-  const looked: number[] = [],
-    queued: string[] = [];
-  const release = (n: number, cached: boolean, seeders = 10) =>
-    source(`E${n}`, { cached, seeders, resolution: '1080p' }, String(n));
-  const resolve = async (_a: unknown, _i: string, _r: unknown, _s?: number, e?: number) => {
-    looked.push(e!);
-    await Promise.resolve();
-    return { sources: [release(e!, e === 1, e === 3 ? 0 : 10)] };
+const episodes = [
+  { number: 1, name: 'One', airDate: '2020-01-01' },
+  { number: 2, name: 'Two', airDate: '2020-01-02' },
+];
+const title = { type: 'tv' as const, id: 7, title: 'Series' };
+const source = {
+  identity: 'one',
+  label: 'One',
+  filename: 'one.mkv',
+  cached: false,
+  badges: [],
+  languages: [],
+  probed: false,
+};
+
+function model(resolve = vi.fn(async () => [source])) {
+  const items: DownloadViewItem[] = [];
+  const release = vi.fn();
+  const library = {
+    downloads: vi.fn(() => ({ snapshot: { value: { kind: 'downloads', items } }, release })),
+    downloadSources: vi.fn(async () => ({
+      result: { kind: 'download.sources', sources: await resolve() },
+      version: {},
+    })),
+    enqueueDownload: vi.fn(async (requested) => {
+      items.push({
+        content: `tv:7:${requested.target.season}:${requested.target.episode}`,
+        title: { type: 'tv', id: 7 },
+        name: 'Series',
+        season: requested.target.season,
+        episode: requested.target.episode,
+        queuedAt: 1,
+        queuedBy: { device: 'self', isSelf: true },
+        release: { identity: 'one', label: 'One' },
+        status: { state: 'starting', phase: 'queued', stalled: false },
+        tried: 1,
+        announced: false,
+      });
+    }),
   };
-  const shared = testLog();
-  const queue = new DownloadQueue(async (url) => {
-    queued.push(url);
-    return { state: 'preparing' };
+  return { library: library as unknown as LibraryModel, release, resolve };
+}
+
+describe('semantic season downloads', () => {
+  it('queues the service-ranked identity without receiving a ticket', async () => {
+    const { library } = model();
+    await expect(downloadEpisode(library, 'tt1', 1, episodes[1]!, title)).resolves.toBe('queued');
+    expect(library.enqueueDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { type: 'tv', id: 7, season: 1, episode: 2 } }),
+      source,
+      1,
+    );
+    expect(
+      JSON.stringify((library.enqueueDownload as ReturnType<typeof vi.fn>).mock.calls),
+    ).not.toContain('/scout/');
   });
-  queue.attach(shared.log, testClock('bbbbbbbbbbbbbbbb'));
-  const episodes = [1, 2, 3, 4].map((number) => ({
-    number,
-    name: `E${number}`,
-    stillPath: `/still-${number}.jpg`,
-    airDate: number === 4 ? '2099-01-01' : '2020-01-01',
-  }));
-  const series = { type: 'tv' as const, id: 77, title: 'Series' };
-  await Promise.all([
-    downloadSeason(addon, 'tt1', 1, episodes, {}, series, resolve, queue),
-    downloadSeason(addon, 'tt1', 1, episodes, {}, series, resolve, queue),
-  ]);
-  expect(looked).toEqual([1, 2, 3]);
-  expect(queued).toEqual(['/scout/p/2']);
-  expect(seasonJobs.get(seasonJobKey(addon, 'tt1', 1))).toMatchObject({
-    total: 3,
-    ready: 1,
-    queued: 1,
-    unavailable: 1,
-    running: false,
+
+  it('coalesces concurrent runs and makes a repeated completed run idempotent', async () => {
+    const { library, resolve } = model();
+    const first: Array<{ checked: number; running: boolean }> = [];
+    const second: Array<{ checked: number; running: boolean }> = [];
+    await Promise.all([
+      downloadSeason(library, 'tt1', 1, episodes, title, (job) => first.push(job)),
+      downloadSeason(library, 'tt1', 1, episodes, title, (job) => second.push(job)),
+    ]);
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(library.enqueueDownload).toHaveBeenCalledTimes(2);
+    expect(first.at(-1)).toMatchObject({ checked: 2, queued: 2, running: false });
+    expect(second.at(-1)).toMatchObject({ checked: 2, queued: 2, running: false });
+
+    await downloadSeason(library, 'tt1', 1, episodes, title, () => {});
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(library.enqueueDownload).toHaveBeenCalledTimes(2);
   });
-  // One row per episode started, for every device to show.
-  const saved = readDownloads(shared.log.rows());
-  expect(saved.map((d) => d.content)).toEqual(['tv:77:1:2']);
-  expect(saved[0]?.title.stillPath).toBe('/still-2.jpg');
 
-  // A second press leaves the episode in flight alone: asking again would be a fresh add at the debrid.
-  await downloadSeason(addon, 'tt1', 1, episodes, {}, series, resolve, queue);
-  expect(queued).toEqual(['/scout/p/2']);
-});
-
-it('queues one episode from its menu with its still and does not re-add an active download', async () => {
-  const addon = { install: 'http://scout/config', base: '/scout/config' };
-  const picked = source('Episode.1080p.mkv', { cached: false, seeders: 12 }, 'episode');
-  let resolves = 0;
-  const resolve = async () => {
-    resolves++;
-    return { sources: [picked] };
-  };
-  const shared = testLog();
-  const queued: string[] = [];
-  const queue = new DownloadQueue(async (url) => {
-    queued.push(url);
-    return { state: 'preparing', progress: 0.1 };
+  it('settles errors, releases its lease, and keeps checking the season', async () => {
+    let call = 0;
+    const { library, release } = model(
+      vi.fn(async () => {
+        if (call++ === 0) throw new Error('provider down');
+        return [source];
+      }),
+    );
+    const updates: Array<{ uncertain: number; queued: number; running: boolean }> = [];
+    await expect(
+      downloadSeason(library, 'tt1', 1, episodes, title, (job) => updates.push(job)),
+    ).resolves.toBeUndefined();
+    expect(updates.at(-1)).toMatchObject({ uncertain: 1, queued: 1, running: false });
+    expect(release).toHaveBeenCalledOnce();
   });
-  queue.attach(shared.log, testClock('bbbbbbbbbbbbbbbb'));
-  const episode = { number: 4, name: 'Four', stillPath: '/four.jpg' };
-  const series = { type: 'tv' as const, id: 77, title: 'Series', posterPath: '/series.jpg' };
 
-  await expect(downloadEpisode(addon, 'tt1', 2, episode, {}, series, resolve, queue)).resolves.toBe(
-    'queued',
-  );
-  await expect(downloadEpisode(addon, 'tt1', 2, episode, {}, series, resolve, queue)).resolves.toBe(
-    'queued',
-  );
-
-  expect(resolves).toBe(1);
-  expect(queued).toEqual(['/scout/p/episode']);
-  expect(queue.list()[0]?.title).toMatchObject({ season: 2, episode: 4, stillPath: '/four.jpg' });
+  it('stops publishing to an observer that has been cancelled', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    const { library } = model(
+      vi.fn(async () => {
+        await gate;
+        return [source];
+      }),
+    );
+    const controller = new AbortController();
+    const updates: number[] = [];
+    const running = downloadSeason(
+      library,
+      'tt1',
+      1,
+      [episodes[0]!],
+      title,
+      (job) => updates.push(job.checked),
+      controller.signal,
+    );
+    controller.abort();
+    finish();
+    await running;
+    expect(updates).toEqual([0]);
+  });
 });

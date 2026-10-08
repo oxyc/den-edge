@@ -128,6 +128,31 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('listens for runtime changes in a Worker global without window', async () => {
+    const opened: string[] = [];
+    class WorkerChannel {
+      onmessage: ((event: MessageEvent<{ key?: string; value?: string }>) => void) | null = null;
+      constructor(name: string) {
+        opened.push(name);
+      }
+      postMessage() {}
+      close() {}
+    }
+    vi.stubGlobal('window', undefined);
+    vi.stubGlobal('BroadcastChannel', WorkerChannel);
+    try {
+      const server = await edge();
+      const { vault } = memoryVault();
+
+      await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault);
+
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatch(/^den-library-runtime:/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('imports legacy runtime state once, with an existing vault value winning', async () => {
     const { data: legacy, storage } = memoryStorage();
     const { data, vault } = memoryVault();
@@ -421,7 +446,12 @@ describe('LibraryLog', () => {
         headers,
       });
     };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage, null))!;
+    const log = (await LibraryLog.open(
+      LIBRARY_KEY,
+      connection,
+      memoryStorage().storage,
+      memoryVault().vault,
+    ))!;
     // A final v2 write lands after this browser's read but before the rewrite fence. The switch must refresh through
     // the offered base and include it rather than converting its stale in-memory snapshot.
     const latest = row(550, { status: { value: 'watched', at: at(2400, device) } });
@@ -1546,62 +1576,6 @@ describe('LibraryLog', () => {
     expect(log.newestStamp()).toEqual(at(11_000, 'import'));
   });
 
-  it('exports and imports the exact current and acknowledged states without network or journal replay', async () => {
-    const { data, vault } = memoryVault();
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    data.set(
-      `${keys.id}:runtime:pending:held`,
-      new TextEncoder().encode(JSON.stringify({ k: 'held', v: 'sealed' })),
-    );
-    const acknowledged = row(1);
-    const current = row(1, { reaction: { value: 'love', at: at(2_000, 'web') } });
-    const snapshot = {
-      header: {
-        version: 1 as const,
-        generation: 'generation',
-        head: 9,
-        memberRegistered: false,
-        wireMin: 4,
-        upgradeRequired: null,
-        unreadable: [],
-        newerFraming: [],
-        newerDocuments: [],
-        switchFailure: null,
-        predatesV3: false,
-        compactionRefused: null,
-        moved: false,
-        refused: false,
-        refusedAt: 0,
-        refusal: null,
-        rejected: [],
-        fromCache: true,
-        generationChanges: 0,
-        unreported: false,
-      },
-      entries: [
-        {
-          name: 'rec:movie:1',
-          current: [0, current] as [number, Row],
-          acknowledged: [9, acknowledged] as [number, Row],
-        },
-      ],
-    };
-    const fetchImpl = vi.fn<typeof fetch>();
-
-    const imported = await LibraryLog.importSnapshot(
-      LIBRARY_KEY,
-      snapshot,
-      fetchImpl,
-      undefined,
-      vault,
-    );
-
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(imported?.pendingActions).toBe(1);
-    expect(imported?.title({ type: 'movie', id: 1 })?.reaction.value).toBe('love');
-    expect(imported?.exportSnapshot()).toEqual(snapshot);
-  });
-
   it('shares one projected row snapshot until an entry changes', async () => {
     const server = await edge([row(1)]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
@@ -1613,47 +1587,6 @@ describe('LibraryLog', () => {
     await server.append(row(2));
     expect(await log.refresh()).toBe(true);
     expect(log.rows()).not.toBe(projected);
-  });
-
-  it('adopts an exact live-snapshot projection and invalidates it with the entries', async () => {
-    const server = await edge([row(1)]);
-    const opened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    const rows = opened.rows();
-    const summary = opened.currentSummary(2000);
-    const imported = (await LibraryLog.importSnapshot(
-      LIBRARY_KEY,
-      { ...opened.exportSnapshot(), projected: { rows, ...summary } },
-      server.fetchImpl,
-      undefined,
-      null,
-    ))!;
-
-    expect(imported.rows()).toBe(rows);
-    expect(imported.currentSummary(2001)).toEqual(summary);
-
-    await server.append(row(2, { status: { value: 'watchlist', at: at(5000) } }));
-    expect(await imported.refresh()).toBe(true);
-    expect(imported.rows()).not.toBe(rows);
-    expect(imported.newestStamp()).toEqual(at(5000));
-  });
-
-  it('reconsiders an adopted newest-stamp projection at its deadline', async () => {
-    const server = await edge([row(1)]);
-    const opened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    const cached = at(10, 'cached');
-    const imported = (await LibraryLog.importSnapshot(
-      LIBRARY_KEY,
-      {
-        ...opened.exportSnapshot(),
-        projected: { rows: opened.rows(), stamp: cached, at: 100, reconsiderAt: 200 },
-      },
-      server.fetchImpl,
-      undefined,
-      null,
-    ))!;
-
-    expect(imported.currentSummary(199).stamp).toEqual(cached);
-    expect(imported.currentSummary(200).stamp).toEqual(at(1000));
   });
 
   it('keeps the newest cache correct across concurrent conflict merges', async () => {
@@ -1712,6 +1645,17 @@ describe('LibraryLog', () => {
 
 describe('a library kept only in this browser', () => {
   const LOCAL_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
+
+  it('opens as an existing local library only after this vault created it', async () => {
+    const { vault } = memoryVault();
+    await expect(LibraryLog.openExistingLocal(LOCAL_KEY, vault)).resolves.toBeNull();
+    const created = await LibraryLog.openLocal(LOCAL_KEY, vault);
+    expect(created).not.toBeNull();
+    const reopened = await LibraryLog.openExistingLocal(LOCAL_KEY, vault);
+    expect(reopened).not.toBeNull();
+    await created!.forget();
+    await expect(LibraryLog.openExistingLocal(LOCAL_KEY, vault)).resolves.toBeNull();
+  });
 
   it('prepares the newest maximum while projecting, so reads do not rescan the log', async () => {
     const { vault } = memoryVault();

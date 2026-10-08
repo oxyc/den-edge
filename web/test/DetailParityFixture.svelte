@@ -1,14 +1,40 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Router from '../src/Router.svelte';
   import Detail from '../src/components/Detail.svelte';
   import Person from '../src/components/Person.svelte';
   import type { EpisodeRow, TitleRow } from '../src/lib/wire';
   import type { Title } from '../src/lib/library';
   import '../src/app.css';
-  import { downloads } from '../src/lib/downloadQueue.svelte';
-  import { testClock, testLog } from '../src/lib/downloadTestLog';
-  // A download is a row in the library (den-spec library-v4 §17): this page's is one held in memory.
-  downloads.attach(testLog().log, testClock('aaaaaaaaaaaaaaaa'));
+  import { testLog } from '../src/lib/downloadTestLog';
+  import { fetchSourceList } from '../src/lib/titleSources';
+  import { fixtureLibraryService } from './libraryService';
+
+  const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
+  const routes = { scout: [{ url: 'http://scout.internal' }] };
+  // A download is a service command over a library held in memory; the component never sees its rows.
+  const library = fixtureLibraryService({
+    log: testLog().log,
+    // The parity spec changes Scout's answer between opening Sources and using the episode's direct Download action.
+    refreshDownloadSources: true,
+    effects: {
+      resolve: async (title) =>
+        title.imdbId
+          ? fetchSourceList(
+              scout,
+              title.imdbId,
+              routes,
+              title.season,
+              title.episode,
+              undefined,
+              fetch,
+            )
+          : { sources: null },
+    },
+  });
+  // Production's library service schedules download maintenance; this in-process fixture drives the same query.
+  const downloadPoll = setInterval(() => void library.model.refreshDownloads(), 300);
+  onDestroy(() => clearInterval(downloadPoll));
   const noop = () => {};
   const at = [100, 0, 'test'] as const;
   const stamped = <T,>(value: T) => ({ value, at });
@@ -56,8 +82,6 @@
       progress: { value: value ? 1 : 0, at: [200, 0, 'test'], viewing: 1 },
     });
   }
-  const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
-  const routes = { scout: [{ url: 'http://scout.internal' }] };
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
@@ -85,6 +109,7 @@
           onplay={play}
           onplayhere={play}
           onepisode={seen}
+          model={library.model}
         />
       {/if}
     {/snippet}

@@ -16,14 +16,11 @@
   } from '../src/lib/actions';
   import { parseRoute, type Route } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
-  import { fetchRoutes } from '../src/lib/routes';
-  import { SessionServices } from '../src/lib/sessionServices.svelte';
-  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import { trackerEvent } from '../src/lib/trackerEvents';
   import { browserClock } from '../src/lib/clock';
-  import { downloads } from '../src/lib/downloadQueue.svelte';
   import { startRow } from '../src/lib/downloadRows';
   import type { LibraryLog } from '../src/lib/log';
+  import { fixtureLibraryService } from './libraryService';
   import {
     rowName,
     type EpisodeRow,
@@ -132,6 +129,9 @@
     row.kind !== 'set' && row.title.type === ref.type && row.title.id === ref.id;
 
   const log = {
+    readOnly: false,
+    wireMinimum: 4,
+    currentGeneration: undefined,
     settings: (group: string) =>
       group === 'keys'
         ? { values: { tmdb: { value: { string: 'fixture-key' }, at: [1, 0, 'test'] } } }
@@ -146,6 +146,7 @@
       return { continue: true };
     },
     keep: async () => {},
+    relayMembership: async () => null,
     /** Nothing is ever waiting to be sent: a write here is done the moment it is made. */
     pendingActions: 0,
     title: (ref: { type: string; id: number }) =>
@@ -157,7 +158,6 @@
       ),
     write: async (row: Row) => {
       put(row);
-      session.changed();
       return row;
     },
     /**
@@ -170,7 +170,6 @@
         const event = trackerEvent(journal);
         put(event ? event.after : journal);
       }
-      session.changed();
       return true;
     },
     /** One action, as `act` writes it (Remove, Mark watched on a movie): its journal's row, as `writeActions` keeps them. */
@@ -179,46 +178,24 @@
       const event = trackerEvent(journal);
       const row = event ? event.after : journal;
       put(row);
-      session.changed();
       return row;
     },
-  };
+    close() {},
+  } as unknown as LibraryLog;
 
-  if (withDownload) downloads.attach(log as unknown as LibraryLog, fixtureClock);
-
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  const TOAST_MS = 6000;
-  const session = $state({
-    ...fixtureLibrarySessionMethods,
-    // Bumped as the real session does, so a write is drawn rather than silently kept.
-    changed(settings = false) {
-      this.revision++;
-      if (settings) this.settingsRevision++;
-    },
-    revision: 0,
-    settingsRevision: 0,
-    displays: unnamedMany
-      ? []
-      : Array.from({ length: many }, (_, index) => ({
-          type: 'movie' as const,
-          id: 3000 + index,
-          title: `Measured movie ${index + 1}`,
-        })),
-    shapes: new Map(),
-    log,
-    opened: Promise.resolve(log),
-    routes: fetchRoutes,
-    services: new SessionServices(fetchRoutes, () => session.changed(true)),
-    toast: null as string | null,
-    alert: null as string | null,
-    live: false,
-    // As `LibrarySession.notify` behaves (`librarySession.svelte.ts`): "Play on TV" (den-edge#235) needs this.
-    notify(message: string, { holdMs = TOAST_MS }: { holdMs?: number } = {}) {
-      this.toast = message;
-      clearTimeout(toastTimer);
-      if (Number.isFinite(holdMs)) toastTimer = setTimeout(() => (this.toast = null), holdMs);
-    },
-  }) as unknown as LibrarySession;
+  let publish = () => {};
+  const library = fixtureLibraryService({ log });
+  publish = () => library.publish();
+  const session: LibrarySession = library.session;
+  if (!unnamedMany)
+    session.publishLibraryMetadata(
+      Array.from({ length: many }, (_, index) => ({
+        type: 'movie' as const,
+        id: 3000 + index,
+        title: `Measured movie ${index + 1}`,
+      })),
+      [],
+    );
   const link = {
     inboxKey: 'fixture',
     name: 'Living Room TV',
@@ -237,7 +214,7 @@
     ) => {
       const before = log.title(ref) ?? blankTitle(ref, at);
       put(updateProgress(before, 0.2, seconds, [at, 0, 'other-device']));
-      session.changed();
+      publish();
     };
     (window as unknown as { denTestLivePosition: typeof denTestLivePosition }).denTestLivePosition =
       denTestLivePosition;

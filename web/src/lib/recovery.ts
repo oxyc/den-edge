@@ -59,7 +59,7 @@ export interface RecoveryContext {
   member: string;
   /** This browser's stamp device id. */
   device: string;
-  issue: () => Stamp;
+  issue: () => Stamp | Promise<Stamp>;
   fetchImpl?: typeof fetch;
   now?: () => number;
   storage?: Storage;
@@ -404,13 +404,13 @@ async function update(
   return false;
 }
 
-function write(
+async function write(
   ctx: RecoveryContext,
   row: SettingsRow | undefined,
   base: number,
   changes: Record<string, RecoveryEntry | null>,
 ): Promise<boolean> {
-  const at = ctx.issue();
+  const at = await ctx.issue();
   const values = { ...(row?.values ?? {}) };
   for (const [locator, entry] of Object.entries(changes))
     values[locator] = { value: entry ? { string: JSON.stringify(entry) } : null, at };
@@ -468,6 +468,15 @@ function markMaking(ctx: RecoveryContext, locator: string): () => void {
     delete making[locator];
     writeMaking(making, ctx.storage);
   };
+}
+
+/**
+ * Resume the heartbeat for a make whose sealed preparation was restored from encrypted service storage. The caller
+ * must only use this for a preparation it durably owns; unlike `begin`, this does not write or post the pending entry
+ * again.
+ */
+export function resumeMaking(ctx: RecoveryContext, locator: string): () => void {
+  return markMaking(ctx, locator);
 }
 
 const now = (ctx: RecoveryContext) => (ctx.now ?? Date.now)();
@@ -593,6 +602,13 @@ export async function confirm(
     const mine = entries.get(prepared.locator);
     const live = ownLive(ctx, entries);
     const newer = live.find(([locator]) => !baseLive.has(locator));
+    // A worker may have committed the compare-and-set and died before its encrypted operation receipt. The same
+    // locator being the sole newly-live entry is the completed operation, not a setup that should be abandoned.
+    if (
+      mine?.state === 'live' &&
+      !live.some(([locator]) => locator !== prepared.locator && !baseLive.has(locator))
+    )
+      return { ok: true };
     if (!mine || mine.state !== 'pending' || newer) {
       await abandon(ctx, prepared.locator, false);
       return {

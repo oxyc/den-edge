@@ -5,12 +5,11 @@
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
+  import { viewHeadline } from './lib/downloadStatus';
   import PendingPosterRow from './components/PendingPosterRow.svelte';
   import PosterCard from './components/PosterCard.svelte';
-  import { downloads, inFlight } from './lib/downloadQueue.svelte';
-  import { headline } from './lib/downloadStatus';
   import WindowedPosterRow from './components/WindowedPosterRow.svelte';
-  import { seenEpisodes, watchedHistory } from './lib/history';
+  import type { SeenEpisode, WatchedEntry } from './lib/history';
   import {
     DetailScreen,
     DownloadsScreen,
@@ -22,60 +21,18 @@
     ServiceScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
-  import {
-    addToWatchlist,
-    blankEpisode,
-    blankTitle,
-    dismissFromContinueWatching,
-    markEpisode,
-    markWatched,
-    react,
-    removeFromLibrary,
-    restoreToContinueWatching,
-    unwatch,
-    unwatchSeries,
-    updateEpisodeProgress,
-    updateProgress,
-    WATCHED,
-  } from './lib/actions';
   import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
-  import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
-  import { digestHomeLibraryView, homeLibraryViewFromCurrent } from './lib/homeLibraryView';
-  import { devHomeLibraryView } from './lib/libraryWorkerClient';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
-  import {
-    episodeAfter,
-    isAired,
-    standings,
-    hasUntitledTitle,
-    titleKey,
-    untitled,
-    watchlist,
-    watchlistSlides,
-    type ContinueEntry,
-    type Title,
-  } from './lib/library';
-  import { links, type Link } from './lib/links.svelte';
+  import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
+  import type { Link } from './lib/links.svelte';
   import { clock as timecode, livePosition } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
-  import {
-    nameActiveHomeShelfTitles,
-    nameLibraryHistoryTitles,
-    nameLibraryShelfTitles,
-    promoteLibraryTitle,
-    personalSeedRows,
-    type BackgroundNaming,
-    type ShelfNaming,
-    type ShelfPlan,
-  } from './lib/libraryNaming';
-  import { recordTrackerEvent } from './lib/trackerEvents';
-  import { ensureSyncPolicy } from './lib/syncLoader';
-  import { isHidden, readApiKey, readPrefs, readDetailPrefs } from './lib/prefs';
-  import { readSyncedPrefs } from './settings/values';
-  import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
+  import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
+  import { isHidden } from './lib/prefs';
+  import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
@@ -93,7 +50,6 @@
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setToastContext } from './lib/toast';
-  import { guestGrants } from './lib/grants.svelte';
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
@@ -109,11 +65,17 @@
     recommendForEveryone,
     replacePersonalBillboard,
     swapAfter,
-    type KeptBillboard,
     type RecommendedTitle,
   } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
-  import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
+  import type { LibraryModelLease } from './lib/libraryModel.svelte';
+  import type {
+    HistoryView,
+    RetainedBillboardScope,
+    TitleRef,
+    TitleView,
+  } from './lib/libraryServiceProtocol';
+  import { overviewTitleRow, titleViewRows } from './lib/libraryViewPresentation';
 
   let {
     link,
@@ -148,35 +110,16 @@
   const EVERYONE_NAMED = 20;
   /** Let the hero's loaded image reach a paint before background provider synchronization starts. */
   const PROVIDERS_AFTER_HERO_MS = 1_000;
-  /** Last exact Continue presence, sealed by `LibraryLog.keep`; it reserves layout only, never membership. */
-  const KEPT_HOME_SHELVES = 'home.shelves.v1';
   const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
-  /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
-  let shelvesReady = $state(false);
-  let shelfPlan = $state.raw<ShelfPlan | null>(null);
-  /** The exact shelf membership is known. Until then a lower row must not paint ahead of Continue Watching. */
-  let shelfPlanReady = $state(false);
-  /** Continue's geometry is either reserved or proven absent, so every lower Home row has a stable place. */
-  const shelfOrderReady = $derived(shelfPlanReady || shelfPlan?.continue === true);
-  let shelfNaming = $state.raw<ShelfNaming | null>(null);
-  let historyNaming = $state.raw<BackgroundNaming | null>(null);
-  const clock = browserClock();
-  /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
-  const log = $derived(session.log);
-  /** Compact worker-owned state is usable only on Home; every other route asks the session to hydrate. */
-  const stagedHome = $derived(route.page === 'library' ? session.activeHome : null);
-  const stagedHomeHandle = $derived(stagedHome?.handle ?? null);
-  /** Hydration installs `log` before compact Home retires; that ownership overlap must not restart naming. */
-  const libraryNamingSource = $derived(
-    stagedHomeHandle === null ? log : `staged:${stagedHomeHandle}`,
-  );
-  const libraryNamingSettingsRevision = $derived(
-    stagedHomeHandle === null ? session.settingsRevision : 0,
-  );
-  /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
-  const version = $derived(session.revision);
+  const model = untrack(() => session.model);
+  const SHELF_TRANCHE = 8;
+  let shelvesReady = $state(model === null);
+  let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
+  let retainedContinue = $state(false);
+  let continueNames = $state(SHELF_TRANCHE);
+  let watchlistNames = $state(SHELF_TRANCHE);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -197,6 +140,58 @@
   const remuxAway = $derived(discovered.remuxAway);
   const remuxBlocked = $derived(discovered.remuxBlocked);
 
+  const overview = $derived(model?.overview.value);
+  const continueView = $derived(model?.continueWatching.value);
+  const settings = $derived(model?.settings.value);
+  const libraryOpen = $derived(model === null || overview !== undefined);
+  const serviceFailed = $derived(
+    !!model && model.connection === 'failed' && model.overview.value === undefined,
+  );
+
+  let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
+  let titleLease = $state.raw<LibraryModelLease<TitleView>>();
+  let connectionsLease = $state.raw<ReturnType<NonNullable<typeof model>['connections']>>();
+  let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
+
+  const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
+  $effect(() => {
+    const opening = page;
+    if (!model || !opening) return;
+    const lease = model.title(opening);
+    titleLease = lease;
+    return () => {
+      lease.release();
+      if (titleLease === lease) titleLease = undefined;
+    };
+  });
+  $effect(() => {
+    if (!model || route.page !== 'watchlist') return;
+    const lease = model.history();
+    historyLease = lease;
+    return () => {
+      lease.release();
+      if (historyLease === lease) historyLease = undefined;
+    };
+  });
+  $effect(() => {
+    if (!model || route.page !== 'title') return;
+    const lease = model.connections();
+    connectionsLease = lease;
+    return () => {
+      lease.release();
+      if (connectionsLease === lease) connectionsLease = undefined;
+    };
+  });
+  $effect(() => {
+    if (!model || (route.page !== 'library' && route.page !== 'downloads')) return;
+    const lease = model.downloads();
+    downloadsLease = lease;
+    return () => {
+      lease.release();
+      if (downloadsLease === lease) downloadsLease = undefined;
+    };
+  });
+
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
@@ -207,194 +202,91 @@
   const playOnTv = untrack(() => new PlayOnTvTracker(session));
   $effect(() => () => playOnTv.stop());
 
+  // Name only first-paint shelves eagerly. History and the full watchlist stay behind their lazy screen lease.
   $effect(() => {
-    const opened = log;
-    if (opened) clock.see(opened.newestStamp());
-  });
-
-  const refOfKey = (key: string): Pick<Title, 'type' | 'id'> | undefined => {
-    const match = /^(movie|tv):(\d+)$/.exec(key);
-    const id = Number(match?.[2]);
-    return match && Number.isSafeInteger(id) && id > 0
-      ? { type: match[1] as Title['type'], id }
-      : undefined;
-  };
-  let libraryNamingDeferredForTitle = false;
-  let libraryNamingResume = $state(0);
-  // The large naming effect stays attached to its library across ordinary navigation. Only a title transition that
-  // deliberately skipped its staged -> hydrated rerun needs to restart it when Home becomes visible again.
-  $effect(() => {
-    if (route.page !== 'title' && libraryNamingDeferredForTitle) {
-      libraryNamingDeferredForTitle = false;
-      libraryNamingResume++;
+    const view = overview;
+    const continued = continueView;
+    const key = tmdbKey;
+    if (!model || !view || !continued || !key) {
+      shelvesReady = model === null;
+      shelfPlan = null;
+      return;
     }
-  });
-  $effect(() => {
-    void libraryNamingResume;
-    void libraryNamingSettingsRevision;
-    const source = libraryNamingSource;
-    const opened = untrack(() => log);
-    const staged = untrack(() => stagedHome);
-    // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
-    // the discovery: atlas gives them rows and reel gives them trailers, both on this origin.
-    if (source === undefined) return;
-    // The shared grants are read here so a grant that arrives or ends asks again (`guestGrants.list` is state).
-    void guestGrants.pluginUrls();
     let disposed = false;
-    let background: BackgroundNaming | null = null;
-    // Only the shared settings revision and opened log trigger reconfiguration.
-    // Service state is an output, not a dependency of this effect.
-    untrack(() => {
-      if (staged) discovered.configureActive(staged.settings);
-      else discovered.configure(opened ?? null);
-      // A title page reads its own rows directly. Rebuilding every Home shelf while its hero mounts used to run
-      // the whole Continue policy for an invisible retained route; returning Home starts a fresh naming run.
-      if (route.page === 'title' && (session.detailBridgeContinueWatching?.() ?? null) !== null) {
-        libraryNamingDeferredForTitle = true;
-        return;
-      }
-      // Naming the library is still only the paired case: it reads the log itself.
-      const key = discovered.tmdbKey;
-      if (key && (opened || staged)) {
-        // An initial run may be replaced before it becomes ready. Never let its plan paint for the replacement.
-        shelvesReady = false;
-        shelfPlan = null;
-        shelfPlanReady = false;
-        const projection = opened && !staged ? session.libraryProjection() : null;
-        if (opened && !staged && !projection) return;
-        const raw = projection?.library;
-        const naming = staged
-          ? nameActiveHomeShelfTitles(session, staged, key)
-          : nameLibraryShelfTitles(session, raw!, projection!.rows, key);
-        shelfNaming = naming;
-        shelfPlan = naming.initialPlan;
-        // A prior exact positive may reserve the portrait row while this visit validates TV layouts. It cannot
-        // release lower shelves or supply cards, and the current exact plan always replaces it.
-        if (opened && !naming.initialPlan.continue)
-          void opened.kept<{ continue?: unknown }>(KEPT_HOME_SHELVES).then((saved) => {
-            if (!disposed && !shelfPlanReady && saved?.continue === true)
-              shelfPlan = { ...(shelfPlan ?? naming.initialPlan), continue: true };
-          });
-        let exactPlan: ShelfPlan | undefined;
-        void naming.planned.then((plan) => {
-          if (!disposed) {
-            exactPlan = plan;
-            shelfPlan = plan;
-            shelfPlanReady = true;
-          }
-        });
-        void naming.ready
-          .then(() => {
-            if (disposed) return;
-            shelvesReady = true;
-            if (exactPlan && opened)
-              void opened.keep(KEPT_HOME_SHELVES, { continue: exactPlan.continue }).catch(warnKeep);
-            if (!opened || !raw) return;
-            const reserved = new Set(naming.refs.map(titleKey));
-            // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
-            // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
-            background = nameLibraryHistoryTitles(
-              session,
-              () => untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
-              key,
-              {
-                owns: (ref) => !reserved.has(titleKey(ref)) && hasUntitledTitle(raw, ref),
-              },
-            );
-            historyNaming = background;
-            if (!active || route.page !== 'watchlist') background.pause();
-          })
-          .catch((error) => {
-            if (disposed) return;
-            console.warn('den: Library shelves could not be named', error);
-            shelvesReady = true;
-          });
-      } else {
-        shelfPlan = null;
-        shelfPlanReady = true;
-        shelvesReady = true;
-      }
+    const initial = untrack(() => shelfPlan === null);
+    if (initial) shelvesReady = false;
+    shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
+    const refs = [
+      ...continued.needsShapes,
+      ...continued.items.slice(0, continueNames).map(({ title }) => title),
+      ...view.watchlist.slice(0, watchlistNames),
+      ...view.seeds.watched,
+      ...view.seeds.watchlisted,
+    ];
+    void nameLibraryTitles(session, refs as TitleRef[], key).finally(() => {
+      if (disposed) return;
+      shelvesReady = true;
+      void model.retainHomeContinue(continued.items.length > 0).catch(warnKeep);
     });
     return () => {
       disposed = true;
-      shelfNaming?.cancel();
-      shelfNaming = null;
-      background?.cancel();
-      if (historyNaming === background) historyNaming = null;
+    };
+  });
+  $effect(() => {
+    if (!model) return;
+    let current = true;
+    void model.retainedHomeContinue().then(
+      (present) => {
+        if (current) retainedContinue = present === true;
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
     };
   });
 
-  // A retained route names watched history only on the screen that draws it. Document visibility is watched by the
-  // queue itself, because it can change without any Svelte state changing.
+  const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
+  const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
+
+  // The Watchlist screen is the only owner of the potentially large history naming tail.
   $effect(() => {
-    const background = historyNaming;
-    if (!background) return;
-    if (active && route.page === 'watchlist') background.resume();
-    else background.pause();
+    const history = historyLease?.snapshot.value;
+    const view = overview;
+    if (!active || route.page !== 'watchlist' || !view || !history || !tmdbKey) return;
+    void nameLibraryTitles(
+      session,
+      [...view.watchlist, ...history.items.map(({ title }) => title)] as TitleRef[],
+      tmdbKey,
+    );
   });
 
-  // Compact state is deliberately a Home-only surface. A directly opened route asks for the ordinary log at once.
-  $effect(() => {
-    if (active && route.page !== 'library' && session.activeHome) void session.ensureLog(true);
-  });
-
-  // The full-library screen owns every saved/continued title. Fill its progressive Home tail in small idle
-  // tranches; a retained Home keeps that tail dormant until a row is actually explored.
-  $effect(() => {
-    const naming = shelfNaming;
-    if (active && route.page === 'watchlist' && naming) void naming.drain();
-  });
-
-  /** The log's rows and fold, only when the log changes: names arrive more often and are laid over it below. */
-  const projection = $derived.by(() => {
-    void version;
-    return session.libraryProjection();
-  });
-  const applied = $derived(projection?.library ?? null);
-  /**
-   * Home's Worker answer remains exact across route hydration. Use it on a title page until a real row revision,
-   * avoiding an otherwise invisible whole-library display/Continue pass during the detail hero's first paint.
-   */
-  const retainedDetailContinue = $derived(
-    route.page === 'title' ? (session.detailBridgeContinueWatching?.() ?? null) : null,
-  );
-  const retainedDetailStandings = $derived(
-    route.page === 'title' ? (session.detailBridgeStandings?.() ?? null) : null,
-  );
-  /** One pass shared by recommendation weighting, personal seeds and owned-title filtering. */
-  const personalTitleRows = $derived.by(() => {
-    const titleRows: TitleRow[] = [];
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Published only once as part of this derived snapshot.
-    const reactions = new Map<string, TitleRow['reaction']['value']>();
-    for (const row of projection?.rows ?? []) {
-      if (row.kind !== 'rec' || row.deleted.value) continue;
-      titleRows.push(row);
-      reactions.set(titleKey(row.title), row.reaction.value);
-    }
-    return { titleRows, reactions, selected: personalSeedRows(titleRows) };
-  });
-  const library = $derived(applied && session.displayedLibrary(applied));
-  /**
-   * TMDB names arrive in small batches. They change the cards, but not den-core's answer about which episode
-   * continues a series. Keep those policy decisions across display-only flushes and invalidate each series only
-   * when its marks, shape, dismissal or watched state changes.
-   */
   const continueEntries = $derived(
-    stagedHome
-      ? session.activeHomeContinueWatching()
-      : retainedDetailContinue !== null
-        ? retainedDetailContinue
-        : applied && library
-          ? session.continueWatching(applied, library)
-          : [],
+    (continueView?.items ?? []).flatMap((entry): ContinueEntry[] => {
+      const title = session.displayTitle(entry.title);
+      return title
+        ? [
+            {
+              title,
+              fraction: entry.fraction,
+              ...(entry.episode ? { episode: entry.episode } : {}),
+              ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
+              ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
+            },
+          ]
+        : [];
+    }),
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() =>
     libraryStandings.set(
-      stagedHome
-        ? new Map(stagedHome.view.standings)
-        : (retainedDetailStandings ?? (applied ? standings(applied) : new Map())),
+      new Map(
+        (overview?.standings ?? []).map(({ title, standing }) => [
+          titleKey(title),
+          standing === 'in-progress' ? 'inProgress' : standing,
+        ]),
+      ),
     ),
   );
   $effect(() => () => libraryStandings.set(new Map()));
@@ -415,43 +307,21 @@
   });
   // Fed to the "Play on TV" tracker on every pull, so it can notice a fresh position without a poll of its own.
   $effect(() => playOnTv.observe(continueEntries));
-  // A fresh position arriving from a pull is live again without waiting for a tick to notice.
-  $effect(() => {
-    void applied;
-    now = Date.now();
-  });
-  /** Home's Downloading row: only while something is in flight, as the TV's shelf (den-spec library-v4 §17). */
   const downloading = $derived(
-    stagedHome
-      ? stagedHome.view.downloads.filter((d) => inFlight(downloads.status(d).state))
-      : log
-        ? downloads.list().filter((d) => inFlight(downloads.status(d).state))
-        : [],
-  );
-  const stagedWatchlist = $derived(
-    stagedHome
-      ? stagedHome.view.watchlist.flatMap((key) => {
-          const ref = refOfKey(key);
-          return ref ? (session.displayTitle(ref) ?? []) : [];
-        })
-      : [],
+    (downloadsLease?.snapshot.value?.items ?? []).filter(
+      ({ status }) => status.state === 'starting' || status.state === 'fetching',
+    ),
   );
   const liveClock = (entry: ContinueEntry) => {
     const at = livePosition(entry, now);
     return at === undefined ? undefined : timecode(at);
   };
 
-  /** The title whose page is open, if one is. */
-  const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
-
   // A route the viewer chose is foreground work. This removes it from the idle tail, or joins the exact pending
   // request when an idle slot got there first.
   $effect(() => {
     const opening = page;
     const key = tmdbKey;
-    // Re-run when the post-shelf tail is created, including a directly opened route with no pointer intent.
-    void historyNaming;
-    void shelfNaming;
     if (active && opening && key) void promoteLibraryTitle(session, opening, key);
   });
 
@@ -468,22 +338,14 @@
   $effect(() => {
     if (playing) void PlayerScreen.load();
   });
-  const pageRow = $derived.by(() => {
-    void version;
-    return page ? log?.title(page) : undefined;
+  const pageRows = $derived.by(() => {
+    const opening = page;
+    if (!opening) return { row: undefined, episodes: new Map() };
+    const title = session.displayTitle(opening) ?? { ...opening, title: '' };
+    return titleViewRows(title, titleLease?.snapshot.value);
   });
-  const pageEpisodes = $derived.by(() => {
-    void version;
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- This derived value publishes a completed snapshot; intermediate inserts must not be reactive.
-    const rows = new Map<string, EpisodeRow>();
-    if (!page || !log) return rows;
-    for (const row of log.rows()) {
-      if (row.kind === 'ep' && row.title.type === page.type && row.title.id === page.id) {
-        rows.set(`${row.season}:${row.episode}`, row);
-      }
-    }
-    return rows;
-  });
+  const pageRow = $derived(pageRows.row);
+  const pageEpisodes = $derived(pageRows.episodes);
 
   // Transient messages and playback belong to the active page.
   $effect(() => {
@@ -496,27 +358,20 @@
     session.rememberTitle(title);
   }
 
-  const actionLog = () => (log ? Promise.resolve(log) : session.ensureLog());
-
-  /** Write one row and re-derive what shows it. */
-  async function save(row: Row, journal = false) {
-    const opened = await actionLog();
-    if (!opened) return;
+  async function runCommand(
+    work: (() => Promise<{ delivery: 'synced' | 'queued' | 'local' }>) | undefined,
+    title?: Title,
+  ): Promise<boolean | undefined> {
+    if (!work) return;
+    if (title) remember(title);
     busy = true;
     failure = null;
     try {
-      const saved =
-        journal && row.kind === 'set' ? await opened.writeAction(row) : await opened.write(row);
-      if (opened.moved) {
-        if (link) links.forgetMoved(link);
-        return;
-      }
-      if (!saved) failure = SAVE_FAILED;
-      else if (opened.pendingActions > 0)
+      const result = await work();
+      if (result.delivery === 'queued')
         notice =
           'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-      session.changed();
-      return saved !== null;
+      return true;
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -526,10 +381,7 @@
   }
 
   /** A title's row as last read, for the billboard's Watchlist and Seen. */
-  const rowOf = (title: Title) => {
-    void version;
-    return log?.title(title);
-  };
+  const rowOf = (title: Title) => overviewTitleRow(title, overview);
 
   /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
   async function fromSlide(write: Promise<boolean | undefined>) {
@@ -538,23 +390,13 @@
     return saved;
   }
 
-  /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
-  async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
-    const opened = await actionLog();
-    if (!opened) return;
-    try {
-      await ensureSyncPolicy();
-      remember(title);
-      const before = opened.title(title) ?? blankTitle(title, Date.now());
-      clock.see(opened.newestStamp());
-      const at = clock.issue();
-      const event = recordTrackerEvent(before, change(before, at), at);
-      return event ? await save(event, true) : true;
-    } catch {
-      failure = SAVE_FAILED;
-      return false;
-    }
-  }
+  const toggleWatchlist = (title: Title, on: boolean) =>
+    runCommand(
+      model ? () => (on ? model.addToWatchlist(title) : model.removeFromLibrary(title)) : undefined,
+      title,
+    );
+  const setReaction = (title: Title, reaction: 'seen' | 'dislike' | 'like' | 'love' | null) =>
+    runCommand(model ? () => model.setReaction(title, reaction) : undefined, title);
 
   /**
    * Off Continue Watching. Not an action the trackers hear about — nothing about what was watched changed, and the
@@ -562,42 +404,12 @@
    * sync policy doesn't capture for this change and `act` would then drop.
    */
   async function dismiss(title: Title) {
-    const opened = await actionLog();
-    if (!opened) return;
-    try {
-      // Stamping runs through the sync policy, as for every other action: without it loaded the dismissal throws.
-      await ensureSyncPolicy();
-      remember(title);
-      const before = opened.title(title) ?? blankTitle(title, Date.now());
-      clock.see(opened.newestStamp());
-      if (!(await save(dismissFromContinueWatching(before, clock.issue())))) {
-        // Unlike the actions around it, a row write isn't kept on this device to sync later.
-        failure =
-          'Couldn’t remove that from Continue Watching. It needs a connection to your library.';
-        return false;
-      }
-      return true;
-    } catch (error) {
-      console.warn('den: removing from Continue Watching failed', error);
-      failure = SAVE_FAILED;
-      return false;
-    }
+    return runCommand(model ? () => model.setContinueDismissed(title, true) : undefined, title);
   }
 
   /** Undoes `dismiss` — the poster menu's "Remove from Continue Watching" offers this in its toast. */
   async function restore(title: Title) {
-    const opened = await actionLog();
-    if (!opened) return;
-    try {
-      await ensureSyncPolicy();
-      remember(title);
-      const before = opened.title(title) ?? blankTitle(title, Date.now());
-      clock.see(opened.newestStamp());
-      return await save(restoreToContinueWatching(before, clock.issue()));
-    } catch (error) {
-      console.warn('den: restoring to Continue Watching failed', error);
-      return false;
-    }
+    return runCommand(model ? () => model.setContinueDismissed(title, false) : undefined, title);
   }
 
   /**
@@ -607,75 +419,36 @@
    * puts the same word where the press happened, as the poster ⋯ menu's own writes already do.
    */
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
-    const opened = await actionLog();
-    if (!opened) return false;
-    try {
-      await ensureSyncPolicy();
-      remember(title);
-      const row = opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-      clock.see(opened.newestStamp());
-      const at = clock.issue();
-      const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
-      const ok = event ? await save(event, true) : true;
-      if (!ok) session.notify(SAVE_FAILED);
-      return ok;
-    } catch {
-      failure = SAVE_FAILED;
-      session.notify(SAVE_FAILED);
-      return false;
-    }
+    const ok = await runCommand(
+      model
+        ? () => model.setEpisodeWatched({ type: 'tv', id: title.id, season, episode }, seen)
+        : undefined,
+      title,
+    );
+    if (!ok) session.notify(SAVE_FAILED);
+    return ok;
   }
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
-    const opened = await actionLog();
-    if (!opened) return;
+    if (!model) return;
     try {
-      await ensureSyncPolicy();
       if (title.type === 'tv') {
+        const tv = { type: 'tv' as const, id: title.id };
         const shape =
           session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
         if (!shape) {
           failure = 'Couldn’t load the episodes. Nothing was marked Seen.';
           return false;
         }
-        const journals: SettingsRow[] = [];
-        clock.see(opened.newestStamp());
-        for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
-          if (season <= 0) continue;
-          for (let episode = 1; episode <= count; episode++) {
-            if (!isAired({ season, episode }, shape.lastAired)) continue;
-            const before =
-              opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-            const at = clock.issue();
-            const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
-            if (event) journals.push(event);
-          }
-        }
-        const before = opened.title(title) ?? blankTitle(title, Date.now());
-        const at = clock.issue();
-        const event = recordTrackerEvent(
-          before,
-          (seen ? markWatched : unwatchSeries)(before, at),
-          at,
-        );
-        if (event) journals.push(event);
-        busy = true;
-        failure = null;
-        try {
-          if (!(await opened.writeActions(journals))) failure = SAVE_FAILED;
-          else if (opened.pendingActions > 0)
-            notice =
-              'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-          session.changed();
-        } catch {
-          failure = SAVE_FAILED;
-        } finally {
-          busy = false;
-        }
-        return failure === null;
+        session.publishLibraryMetadata([], [[titleKey(title), shape]]);
+        await model.observeTitleShape({
+          title: tv,
+          seasons: [...shape.counts].map(([season, episodes]) => ({ season, episodes })),
+          ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
+        });
       }
-      return await act(title, seen ? markWatched : unwatch);
+      return await runCommand(() => model.setWatched(title, seen), title);
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -695,35 +468,11 @@
    */
   async function markSeasonSeen(title: Title, season: number, episodes: number[], seen: boolean) {
     if (!episodes.length) return;
-    const opened = await actionLog();
-    if (!opened) return;
-    busy = true;
-    failure = null;
-    try {
-      await ensureSyncPolicy();
-      remember(title);
-      const journals: SettingsRow[] = [];
-      clock.see(opened.newestStamp());
-      for (const episode of episodes) {
-        const before =
-          opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-        // A stamp each: one shared across the rows would lose the order they merge in.
-        const at = clock.issue();
-        // An episode already in this state journals nothing, and drops out of the write by itself.
-        const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
-        if (event) journals.push(event);
-      }
-      if (!journals.length) return;
-      if (!(await opened.writeActions(journals))) failure = SAVE_FAILED;
-      else if (opened.pendingActions > 0)
-        notice =
-          'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-      session.changed();
-    } catch {
-      failure = SAVE_FAILED;
-    } finally {
-      busy = false;
-    }
+    const tv = title.type === 'tv' ? { type: 'tv' as const, id: title.id } : null;
+    return runCommand(
+      model && tv ? () => model.setSeasonWatched(tv, season, episodes, seen) : undefined,
+      title,
+    );
   }
 
   /**
@@ -812,7 +561,7 @@
   }
   setTitleActionsContext({
     get libraryOpen() {
-      return !!log || !!stagedHome;
+      return model !== null;
     },
     get busy() {
       return busy;
@@ -823,13 +572,13 @@
         ? continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode
         : undefined,
     toggleWatchlist: (title, on) => {
-      void act(title, on ? addToWatchlist : removeFromLibrary).then((ok) =>
+      void toggleWatchlist(title, on).then((ok) =>
         menuToast(
           ok,
           on
             ? `Added “${title.title}” to your watchlist`
             : `Removed “${title.title}” from your watchlist`,
-          on ? undefined : { label: 'Undo', run: () => void act(title, addToWatchlist) },
+          on ? undefined : { label: 'Undo', run: () => void toggleWatchlist(title, true) },
         ),
       );
     },
@@ -850,7 +599,7 @@
             : reaction === 'dislike'
               ? 'Not for me'
               : 'No rating';
-      void act(title, (row, at) => react(row, reaction, at)).then((ok) =>
+      void setReaction(title, reaction).then((ok) =>
         menuToast(ok, `Set “${title.title}” to ${label}`),
       );
     },
@@ -887,46 +636,38 @@
     })();
   });
 
-  function progressOf(target: Target) {
-    const { title, season, episode } = target;
-    return season !== undefined && episode !== undefined
-      ? log?.episode(title, season, episode)?.progress
-      : log?.title(title)?.resume;
-  }
-
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
   function resumePoint(target: Target): { fraction: number; seconds?: number } {
-    const progress = progressOf(target);
-    return progress && progress.value < WATCHED
-      ? { fraction: progress.value, seconds: progress.seconds }
+    const continued = continueEntries.find(
+      ({ title, episode }) =>
+        titleKey(title) === titleKey(target.title) &&
+        (target.episode === undefined || episode?.episode === target.episode),
+    );
+    return continued
+      ? {
+          fraction: continued.fraction,
+          ...(continued.seconds === undefined ? {} : { seconds: continued.seconds }),
+        }
       : { fraction: 0 };
   }
 
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
-    const opened = await actionLog();
-    if (!opened) return;
-    try {
-      await ensureSyncPolicy();
-      const { title, season, episode } = target;
-      remember(title);
-      if (season !== undefined && episode !== undefined) {
-        const row = opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-        await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
-      } else {
-        await save(
-          updateProgress(
-            opened.title(title) ?? blankTitle(title, Date.now()),
-            fraction,
-            seconds,
-            clock.issue(),
-          ),
-        );
-      }
-    } catch {
-      failure = SAVE_FAILED;
-      return false;
-    }
+    if (!model) return;
+    const { title, season, episode } = target;
+    return runCommand(
+      () =>
+        model.recordProgress({
+          title,
+          ...(season !== undefined && episode !== undefined
+            ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
+            : {}),
+          fraction,
+          seconds,
+          observedAt: Date.now(),
+        }),
+      title,
+    );
   }
 
   /**
@@ -937,7 +678,7 @@
    * visible. Atlas gives rows an IMDb id of their own, so nothing has to be looked up first: the tap
    * is enough to start it, and it runs while the page is still being built.
    *
-   * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerCandidates`
+   * Fire and forget. It is a warm-up; reel caches the answer either way, and `prepareTrailers`
    * reports a failure as an empty list rather than throwing.
    */
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
@@ -951,30 +692,14 @@
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
-    void trailerCandidates(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
-      prewarm: 'direct',
-      // Combined discovery + source preparation saves the dependent `/meta` -> `/sources` RTT. A
-      // pre-prepare Reel falls back inside `trailerCandidates`; the detail page then asks the named
-      // `/sources` URL exactly as it did before.
-      sourceAsk: {
-        surface: 'audible',
-        player: nativeHls() ? 'native' : 'hls.js',
-        // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
-        // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
-        // and it does so for every title glanced at across rows, search results and filmographies. The
-        // resolve still starts, which is the expensive half and the half that actually helps.
-        intent: 'warm',
-      },
-    }).then((found) => {
-      const first = found[0];
-      if (!first?.sources || Object.hasOwn(first, 'prepared')) return;
-      // A Reel version predating `/prepare`: preserve its two-request warm path during a mixed
-      // rollout. Once the server upgrades, the combined response above makes this branch disappear.
-      void fetchSources(first.sources, {
-        surface: 'audible',
-        player: nativeHls() ? 'native' : 'hls.js',
-        intent: 'warm',
-      });
+    void prepareTrailers(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
+      surface: 'audible',
+      player: nativeHls() ? 'native' : 'hls.js',
+      // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
+      // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
+      // and it does so for every title glanced at across rows, search results and filmographies. The
+      // resolve still starts, which is the expensive half and the half that actually helps.
+      intent: 'warm',
     });
   }
 
@@ -998,47 +723,50 @@
   /** The pressed card's own poster, already loaded, which the hero paints at once while TMDB is asked. */
   const pageStill = $derived(page ? pressedCard(page)?.still : undefined);
 
-  /** The TV's hide rules, from the log's `set:prefs`: re-read when settings change, not on every refresh. */
+  /** Render-ready preferences are projected once by the authority, with TV-compatible defaults. */
   const prefs = $derived.by(() => {
-    void session.settingsRevision;
-    if (stagedHome) {
-      const compact = stagedHome.settings.prefs;
-      return {
-        ...compact,
-        excludedGenres: new Set(compact.excludedGenres),
-        excludedLanguages: new Set(compact.excludedLanguages),
-      };
-    }
-    return readPrefs(log?.settings('prefs'));
+    const value = settings?.preferences;
+    return {
+      excludedGenres: new Set(value?.excludedGenres ?? []),
+      excludedLanguages: new Set(value?.excludedLanguages ?? []),
+      hideAnime: value?.hideAnime ?? false,
+      hideWatched: value?.hideWatched ?? false,
+      minReleaseYear: value?.minReleaseYear,
+      services: [...(value?.services ?? [])],
+      servicesConfigured: value?.servicesConfigured ?? false,
+    };
   });
   const detailPrefs = $derived.by(() => {
-    void session.settingsRevision;
-    return readDetailPrefs(log?.settings('prefs'));
+    const value = settings?.preferences;
+    let fallback = 'US';
+    try {
+      fallback = new Intl.Locale(navigator.language).region ?? fallback;
+    } catch {
+      // Malformed browser locale.
+    }
+    return {
+      region: value?.watchRegion ?? fallback,
+      ceiling: value?.maturityCeiling,
+      ratingSources: value?.ratingSources ?? ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+      warningCategories: value?.shownWarnings ?? [],
+      autoplay: value?.autoplayTrailers ?? true,
+    };
   });
   /** Settings › Playback's languages, which the player here asks den-remux for. */
   const playbackPrefs = $derived.by(() => {
-    void session.settingsRevision;
-    return readSyncedPrefs(log?.settings('prefs'));
+    const value = settings?.preferences;
+    return {
+      audioLanguage: value?.audioLanguage,
+      subtitleLanguage: value?.subtitleLanguage,
+      shownSubtitleLanguages: value?.shownSubtitleLanguages ?? [],
+      autoSkipSegments: value?.autoSkipSegments ?? false,
+    };
   });
-  const warningKey = $derived.by(() => {
-    void session.settingsRevision;
-    return readApiKey(log?.settings('keys'), 'doesthedogdie') ?? '';
-  });
-  const omdbKey = $derived.by(() => {
-    void session.settingsRevision;
-    return readApiKey(log?.settings('keys'), 'omdb') ?? '';
-  });
+  const warningKey = $derived(discovered.providerKeys['content-warnings'] ?? '');
+  const omdbKey = $derived(discovered.providerKeys.omdb ?? '');
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
-  const watched = $derived(
-    new Set(
-      stagedHome
-        ? stagedHome.view.watched
-        : (applied?.records
-            .filter((r) => !r.deleted && r.status === 'watched')
-            .map((r) => titleKey(r.title)) ?? []),
-    ),
-  );
+  const watched = $derived(new Set((overview?.watched ?? []).map(titleKey)));
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
@@ -1078,94 +806,23 @@
    * so it counts for more than either, and a dislike counts against. Ids and weights need no names.
    */
   const weighted = $derived.by(() => {
-    if (stagedHome)
-      return stagedHome.view.weighted.map(([key, weight, at]) => {
-        const ref = refOfKey(key)!;
-        return { ref, weight, at };
-      });
-    // Reactions live on the log's rows; the records carry only status. A title is read by both.
-    const reactions = personalTitleRows.reactions;
-    const weightOf = (status: string, reaction: string | null | undefined) => {
-      // Turning something down is the whole verdict; that they sat through it doesn't soften it.
-      if (reaction === 'dislike') return -1.5;
-      const seen =
-        status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
-      return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
-    };
-    return (applied?.records ?? []).flatMap((r) => {
-      if (r.deleted) return [];
-      const weight = weightOf(r.status, reactions.get(titleKey(r.title)));
-      return weight === 0
-        ? []
-        : [
-            {
-              ref: { type: r.title.type, id: r.title.id },
-              weight,
-              at: Math.max(r.progressAt, r.addedAt),
-            },
-          ];
-    });
+    return (overview?.weighted ?? []).map(({ title, weight, updatedAt }) => ({
+      ref: title,
+      weight,
+      at: updatedAt,
+    }));
   });
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
   const seeds = $derived.by(() => {
-    if (stagedHome) {
-      const named = (keys: string[]) =>
-        keys.flatMap((key) => {
-          const ref = refOfKey(key);
-          return ref ? (session.displayTitle(ref) ?? []) : [];
-        });
-      return {
-        watched: named(stagedHome.view.seeds.watched),
-        watchlisted: named(stagedHome.view.seeds.watchlisted),
-        owned: new Set(stagedHome.view.owned),
-      };
-    }
-    const { selected, titleRows } = personalTitleRows;
-    const namedSeeds = (refs: TitleRow[]) =>
-      refs.flatMap((r) => session.displayTitle(r.title) ?? []);
+    const namedSeeds = (refs: readonly TitleRef[]) =>
+      refs.flatMap((ref) => session.displayTitle(ref) ?? []);
     return {
-      watched: namedSeeds(selected.watched),
-      watchlisted: namedSeeds(selected.watchlisted),
-      owned: new Set(titleRows.map((r) => titleKey(r.title))),
+      watched: namedSeeds(overview?.seeds.watched ?? []),
+      watchlisted: namedSeeds(overview?.seeds.watchlisted ?? []),
+      owned: new Set((overview?.owned ?? []).map(titleKey)),
     };
-  });
-  // Opt-in development proof: the Worker selects the compact fixed Home inputs while it already owns the fold;
-  // compare them with the values this component still derives today. Production omits and never reads the proof.
-  // Enable with VITE_HOME_VIEW_PROOF=1; ordinary development should not pay for the extra clone and comparison.
-  $effect(() => {
-    if (
-      !import.meta.env.DEV ||
-      import.meta.env.VITE_HOME_VIEW_PROOF !== '1' ||
-      !projection ||
-      !applied
-    )
-      return;
-    const worker = devHomeLibraryView(projection.rows);
-    if (!worker) return;
-    const current = homeLibraryViewFromCurrent({
-      library: applied,
-      rows: projection.rows,
-      ...personalTitleRows,
-      watched,
-      watchlist: applied.records
-        .filter((record) => !record.deleted && record.status === 'watchlist')
-        .sort((a, b) => b.addedAt - a.addedAt)
-        .map((record) => titleKey(record.title)),
-      standings: standings(applied),
-      weighted,
-    });
-    const digest = digestHomeLibraryView(current);
-    if (
-      digest.hash !== worker.digest.hash ||
-      digest.bytes !== worker.digest.bytes ||
-      JSON.stringify(current) !== JSON.stringify(worker.view)
-    )
-      console.warn('den: Worker Home view differs from the page projection', {
-        worker,
-        current: { view: current, digest },
-      });
   });
   /**
    * atlas's service charts, as its manifest lists them: what the pooled rows can be built from at all.
@@ -1323,15 +980,6 @@
   });
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
-  /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
-  // v4 invalidates the additive blend that let an unmatched shared lead stay ahead of credible personal matches.
-  // Earlier namespaces cover the unbounded multi-seed and removed POST rankers.
-  // Only-new-titles billboards (`fresh`) are kept under names of their own, so neither opens the other's page.
-  const keptBillboard = (type: 'movie' | 'tv' | null) =>
-    `billboard.v4.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
-  /** Where atlas's ranking for this library (`POST /recommend`) is kept, with when it was ranked (`KeptBillboard`). */
-  const keptPersonal = (type: 'movie' | 'tv' | null) =>
-    `billboard.personal.v1.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
   /**
    * Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`), and whether
    * the billboard is only new titles (`freshOn`).
@@ -1345,20 +993,29 @@
   // opens it for up to seven days. After its first day it is stale-while-revalidate: it still paints immediately,
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
-    const opened = log;
-    const staged = stagedHome;
     const type = facet;
-    if ((!opened && !staged) || !tmdbKey) return;
-    if (memberPost) {
-      void session.kept<KeptBillboard>(keptPersonal(type)).then((saved) => {
-        const titles = displayableKept(saved)?.titles ?? null;
-        if (titles && !featured.length) featured = titles;
-      });
-      return;
-    }
-    void session.kept<RecommendedTitle[]>(keptBillboard(type)).then((saved) => {
-      if (saved?.length && !featured.length) featured = saved;
-    });
+    if (!model || !tmdbKey) return;
+    const scope: RetainedBillboardScope = memberPost
+      ? { kind: 'personal', facet: type, fresh }
+      : { kind: 'shared', facet: type, fresh };
+    let current = true;
+    void model.retainedBillboard(scope).then(
+      (saved) => {
+        if (!current || !saved || featured.length) return;
+        if (saved.kind === 'personal') {
+          const titles = displayableKept({
+            at: saved.at,
+            titles: structuredClone(saved.titles) as RecommendedTitle[],
+          })?.titles;
+          if (titles) featured = titles;
+        } else if (saved.titles.length)
+          featured = structuredClone(saved.titles) as RecommendedTitle[];
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
   });
   // Common next screens load only after both the shelves and the hero have won their critical resources.
   $effect(() => {
@@ -1385,16 +1042,13 @@
     const here = atlas;
     if (!tmdbKey) return;
     // The shared pool needs no profile read: ask as soon as discovery and TMDB naming are available. `null` is a
-    // guest with no log; a paired/local library is ready when `applied` is not null.
+    // A guest can use the shared pool immediately; a library waits for its compact overview.
     if (!here) {
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    if (log === null || libraryOpen) untrack(() => buildRecommended(here));
+    if (model === null || libraryOpen) untrack(() => buildRecommended(here));
   });
-
-  /** Whether the log's rows have been read: once, rather than every time they change. */
-  const libraryOpen = $derived(applied !== null || stagedHome !== null);
 
   /**
    * Everyone starts with atlas's one cacheable ranking for this surface and UTC day, less what the library holds.
@@ -1410,10 +1064,9 @@
     const type = facet;
     const key = tmdbKey;
     const run = ++billboardRun;
-    const opened = log;
     const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
     const ranked =
-      (opened || stagedHome) && memberPost
+      model && overview && memberPost
         ? recommend(
             here,
             recommendBody({
@@ -1427,8 +1080,14 @@
           )
         : null;
     const kept = ranked
-      ? session.kept<KeptBillboard>(keptPersonal(type)).then(
-          (saved) => displayableKept(saved)?.titles ?? null,
+      ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+          (saved) =>
+            saved?.kind === 'personal'
+              ? (displayableKept({
+                  at: saved.at,
+                  titles: structuredClone(saved.titles) as RecommendedTitle[],
+                })?.titles ?? null)
+              : null,
           () => null,
         )
       : Promise.resolve(null);
@@ -1444,14 +1103,18 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
         featured = swapAfter(featured, slideShown, picked);
-        if (opened || stagedHome) {
+        if (model) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
             libraryIdentity,
             type,
             fresh,
             picked,
-            (kept) => session.keep(keptPersonal(type), kept),
+            (kept) =>
+              model.retainBillboard(
+                { kind: 'personal', facet: type, fresh },
+                { kind: 'personal', at: kept.at, titles: kept.titles },
+              ),
             keptAt,
           ).catch(warnKeep);
         }
@@ -1486,7 +1149,10 @@
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
     // forever, with its stale explanation attached.
     featured = picked;
-    if (log || stagedHome) void session.keep(keptBillboard(type), picked).catch(warnKeep);
+    if (model)
+      void model
+        .retainBillboard({ kind: 'shared', facet: type, fresh }, { kind: 'shared', titles: picked })
+        .catch(warnKeep);
   }
 
   /**
@@ -1509,16 +1175,36 @@
       });
   }
 
-  /** Everything watched, for the Watchlist page: read from the log's rows, named as the library is. */
+  /** Lazy history is named only while the Watchlist screen owns its lease. */
   const history = $derived.by(() => {
-    void version;
-    if (route.page !== 'watchlist' || !log) return [];
-    return watchedHistory(log.rows(), session.displayTitles());
+    if (route.page !== 'watchlist') return [];
+    return (historyLease?.snapshot.value?.items ?? []).flatMap((entry): WatchedEntry[] => {
+      const title = session.displayTitle(entry.title);
+      return title
+        ? [
+            {
+              title,
+              at: entry.watchedAt,
+              ...(entry.episode ? { episode: entry.episode } : {}),
+              episodes: entry.episodes,
+            },
+          ]
+        : [];
+    });
   });
   const seenOfSeries = $derived.by(() => {
-    void version;
-    return route.page === 'watchlist' && log ? seenEpisodes(log.rows()) : new Map();
+    if (route.page !== 'watchlist') return new Map<string, SeenEpisode[]>();
+    return new Map(
+      (historyLease?.snapshot.value?.items ?? []).flatMap((entry) =>
+        entry.title.type === 'tv'
+          ? [[titleKey(entry.title), structuredClone(entry.seen ?? [])] as const]
+          : [],
+      ),
+    );
   });
+  const savedTitles = $derived(
+    (overview?.watchlist ?? []).flatMap((ref) => session.displayTitle(ref) ?? []),
+  );
 
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
@@ -1526,9 +1212,9 @@
   }
 </script>
 
-{#if link && log === undefined && !stagedHome}
+{#if link && model && !overview && !serviceFailed}
   <Loading label="Loading your library" page />
-{:else if link && (log === null || (route.page !== 'title' && !library && !stagedHome))}
+{:else if link && serviceFailed}
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its
     library key, unlink in
@@ -1559,9 +1245,9 @@
     {tmdbKey}
     {omdbKey}
     {warningKey}
-    warningCategories={detailPrefs.warningCategories}
+    warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
-    ratingSources={detailPrefs.ratingSources}
+    ratingSources={[...detailPrefs.ratingSources]}
     autoplay={detailPrefs.autoplay}
     {scout}
     row={pageRow}
@@ -1571,10 +1257,11 @@
     {busy}
     {failure}
     {notice}
-    onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
+    {model}
+    onwatchlist={toggleWatchlist}
     onseen={setSeen}
     onseason={markSeasonSeen}
-    onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
+    onreact={setReaction}
     onplay={play}
     onplayhere={playHere}
     {remux}
@@ -1623,7 +1310,7 @@
 {:else if route.page === 'people'}
   <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
 {:else if route.page === 'downloads'}
-  {#if !library}
+  {#if !model}
     <p class="note">
       Downloads live in your library, which this browser can’t keep. <a href="/settings"
         >Link a TV</a
@@ -1632,10 +1319,10 @@
   {:else if !DownloadsScreen.current}
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
-    <DownloadsScreen.current {active} />
+    <DownloadsScreen.current {model} {active} />
   {/if}
 {:else if route.page === 'watchlist'}
-  {#if !library}
+  {#if !model}
     <p class="note">
       Your watchlist lives in your library, which this browser can’t keep. <a href="/settings"
         >Link a TV</a
@@ -1646,7 +1333,7 @@
   {:else if !WatchlistScreen.current}
     <ScreenLoading screen={WatchlistScreen} />
   {:else}
-    {@const slides = watchlistSlides(library, seenOfSeries)}
+    {@const slides = savedTitles.slice(0, 20)}
     {#if tmdbKey && slides.length}
       <Billboard
         active={active && !playing}
@@ -1655,15 +1342,15 @@
         {reel}
         {routes}
         onplay={playHere && ((title) => playHere(title))}
-        rowOf={log ? rowOf : undefined}
-        onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+        {rowOf}
+        onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
         onseen={(title, on) => fromSlide(setSeen(title, on))}
         watchlistPage
       />
     {/if}
     <WatchlistScreen.current
       resume={continueEntries}
-      saved={watchlist(library)}
+      saved={savedTitles}
       {history}
       year={watchedYear}
       onyear={(year) => navigate(watchlistHref(year))}
@@ -1671,15 +1358,13 @@
       seen={seenOfSeries}
       {failure}
       ondismiss={(title) => void dismiss(title)}
-      onremove={(title) => void act(title, removeFromLibrary)}
+      onremove={(title) => void toggleWatchlist(title, false)}
       onseen={(title, seen) => void setSeen(title, seen)}
     />
   {/if}
 {:else}
   {@const resume = continueEntries.filter((e) => !facet || e.title.type === facet)}
-  {@const saved = (stagedHome ? stagedWatchlist : library ? watchlist(library) : []).filter(
-    (t) => !facet || t.type === facet,
-  )}
+  {@const saved = savedTitles.filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
     <Billboard
@@ -1693,12 +1378,12 @@
       onretained={(title, detail) =>
         void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
       onplay={playHere && ((title) => playHere(title))}
-      rowOf={log ? rowOf : undefined}
-      onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+      rowOf={model ? rowOf : undefined}
+      onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
       onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
-  {#if !shelvesReady && (!shelfOrderReady || facet)}
+  {#if !shelvesReady && (!(retainedContinue || shelfPlan?.continue) || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
     {#if shelvesReady && resume.length}
@@ -1708,7 +1393,7 @@
         itemKey={(entry) => `${entry.title.type}:${entry.title.id}`}
         itemHref={(entry) => titleHref(entry.title)}
         itemLabel={(entry) => entry.title.title}
-        onintent={() => void shelfNaming?.admit('continue')}
+        onintent={admitContinueNames}
       >
         {#snippet children(entry)}
           <PosterCard
@@ -1721,7 +1406,7 @@
           />
         {/snippet}
       </WindowedPosterRow>
-    {:else if !shelvesReady && !facet && shelfPlan?.continue}
+    {:else if !shelvesReady && !facet && (shelfPlan?.continue || retainedContinue)}
       <PendingPosterRow heading="Continue Watching" />
     {/if}
     {#if !facet && downloading.length && shelvesReady}
@@ -1729,32 +1414,31 @@
         heading="Downloading"
         aside={{ label: 'All downloads', href: '/downloads' }}
         items={downloading}
-        itemKey={(download) => download.name}
+        itemKey={(download) => download.content}
         itemHref={(download) =>
           titleHref({
-            type: download.title.mediaType,
-            id: download.title.mediaId,
-            title: download.title.title || download.release.label,
+            type: download.title.type,
+            id: download.title.id,
+            title: download.name,
           })}
-        itemLabel={(download) => download.title.title || download.release.label}
+        itemLabel={(download) => download.name}
         landscape
       >
         {#snippet children(download)}
-          {@const answer = downloads.answers.get(download.name)}
           {@const title = {
-            type: download.title.mediaType,
-            id: download.title.mediaId,
-            title: download.title.title || download.release.label,
-            posterPath: download.title.posterPath,
+            type: download.title.type,
+            id: download.title.id,
+            title: download.name,
+            posterPath: download.posterPath,
           }}
           <DownloadPosterCard
             {download}
             {title}
-            badge={answer?.state === 'preparing' && answer.progress
-              ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
+            badge={download.status.fraction !== undefined
+              ? `${Math.floor(Math.min(download.status.fraction, 1) * 100)}%`
               : undefined}
-            caption={headline(downloads.status(download), answer)}
-            progress={answer?.state === 'preparing' ? answer.progress : undefined}
+            caption={viewHeadline(download)}
+            progress={download.status.fraction}
             href={titleHref(title)}
           />
         {/snippet}
@@ -1767,7 +1451,7 @@
         itemKey={(title) => `${title.type}:${title.id}`}
         itemHref={titleHref}
         itemLabel={(title) => title.title}
-        onintent={() => void shelfNaming?.admit('watchlist')}
+        onintent={admitWatchlistNames}
       >
         {#snippet children(title)}
           <PosterCard

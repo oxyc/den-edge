@@ -130,17 +130,28 @@ pub(crate) const MEMBER_HINTS: usize = 4;
 const MEMBER_HINT_TTL_MS: u64 = 60 * 60 * 1000;
 const REEL_HINT_BUCKETS: usize = 1024;
 
-/// Edge-owned activation for Reel's signed direct-media capabilities. It deliberately lives below
+/// Edge-owned transport selection for Reel's signed direct-media capabilities. It deliberately lives below
 /// the existing Reel mount so the browser needs no new origin or credential for the control call.
+pub const REEL_TRANSPORT: &str = "/reel/transport";
+/// The old endpoint remains a thin response adapter while already-loaded pages age out.
 pub const REEL_ACTIVATE: &str = "/reel/activate";
-const REEL_ACTIVATE_BYTES: usize = 4 * 1024;
-const REEL_ACTIVATE_PER_WINDOW: u32 = 120;
+pub(crate) const REEL_TRANSPORT_BYTES: usize = 4 * 1024;
+const REEL_TRANSPORT_PER_WINDOW: u32 = 120;
 const REEL_VALIDATE_TIMEOUT: Duration = Duration::from_secs(2);
 const REEL_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ReelActivation {
+struct ReelTransportRequest {
+    capability: String,
+    ipv4_hint: Option<String>,
+    #[serde(default)]
+    no_hint: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct LegacyReelActivation {
     media: String,
     ipv4_hint: Option<String>,
     #[serde(default)]
@@ -1626,81 +1637,222 @@ fn allow_reel_hint(state: &AppState, bucket: &str, addr: std::net::IpAddr) -> bo
     crate::grants::remember_source(list, addr, now, MEMBER_HINTS, MEMBER_HINT_TTL_MS)
 }
 
-/// Validate one signed Reel-carried media path and lease the direct listener for exactly this
-/// browser's public IPv4 address. The capability is the authority: Reel verifies it without doing
-/// a resolve, index build, or media fetch. Failure is deliberately harmless—the browser retains the
-/// same bounded `/reel/m/s` relay URL as its next source.
-pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
-    let Some(base) = state.public_media_base.as_deref() else {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
+struct ReelTransport {
+    capability: String,
+    form: Option<String>,
+    expires: Option<u64>,
+    attempts: Vec<(&'static str, String)>,
+    hinted: bool,
+    ipv4_hint_wanted: bool,
+}
+
+enum ReelValidation {
+    Valid { form: String, expires: u64 },
+    Rejected(StatusCode),
+    Unavailable,
+}
+
+enum ReelTransportError {
+    Capability(StatusCode),
+    InvalidIpv4Hint,
+}
+
+/// Choose transports for one signed capability. Reel remains the authority for signature and expiry, but an
+/// unavailable validator, listener or direct quota can only remove the direct optimization: the same-origin relay
+/// remains a complete playback path and is always the final attempt.
+pub async fn transport_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
+    let observed = crate::handler::client_addr(state, &req);
+    let request = match read_reel_json::<ReelTransportRequest>(req).await {
+        Ok(request) => request,
+        Err(response) => return *response,
     };
-    let Some(socket) = state.public_media_socket.as_deref() else {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
+    let Some((blob, query)) = reel_capability(&request.capability) else {
+        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
     };
-    let Some(observed) = crate::handler::client_addr(state, &req) else {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
-    };
-    let bucket = crate::handler::rate_limit_key(observed);
-    if let Some(wait) =
-        crate::link::throttled_per_minute(state, &format!("reel-activate:{bucket}"), REEL_ACTIVATE_PER_WINDOW)
-    {
-        return limited(wait);
+    let (blob, query) = (blob.to_owned(), query.to_owned());
+    match build_reel_transport(state, request, observed, &blob, &query, rid).await {
+        Ok(transport) => transport_json(&transport),
+        Err(ReelTransportError::Capability(status)) => capability_rejected(status),
+        Err(ReelTransportError::InvalidIpv4Hint) => {
+            direct_json(StatusCode::BAD_REQUEST, &error("invalid_ipv4_hint"))
+        }
     }
+}
+
+/// Compatibility for pages loaded before the v2 cutover. Parsing and transport selection are shared with v2;
+/// only the request and response envelopes retain the old names.
+pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
+    let observed = crate::handler::client_addr(state, &req);
+    let legacy = match read_reel_json::<LegacyReelActivation>(req).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let Some(capability) = legacy.media.strip_prefix("/reel/").map(str::to_owned) else {
+        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+    };
+    let request = ReelTransportRequest { capability, ipv4_hint: legacy.ipv4_hint, no_hint: legacy.no_hint };
+    let Some((blob, query)) = reel_capability(&request.capability) else {
+        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+    };
+    let (blob, query) = (blob.to_owned(), query.to_owned());
+    let transport = match build_reel_transport(state, request, observed, &blob, &query, rid).await {
+        Ok(transport) => transport,
+        Err(ReelTransportError::Capability(status)) => return capability_rejected(status),
+        Err(ReelTransportError::InvalidIpv4Hint) => {
+            return direct_json(StatusCode::BAD_REQUEST, &error("invalid_ipv4_hint"))
+        }
+    };
+    if transport.ipv4_hint_wanted {
+        return direct_json(StatusCode::PRECONDITION_REQUIRED, &error("ipv4_hint_wanted"));
+    }
+    let Some((_, public)) = transport.attempts.iter().find(|(kind, _)| *kind == "public") else {
+        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
+    };
+    let Some(public_base) = state.public_media_base.as_deref() else {
+        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
+    };
+    let mut answer = serde_json::json!({
+        "publicBase": public_base,
+        "media": public,
+        "hinted": transport.hinted,
+        "form": transport.form,
+        "expires": transport.expires,
+    });
+    if transport.attempts.iter().any(|(kind, _)| *kind == "lan") {
+        if let Some(lan_base) = &state.lan_media_base {
+            answer["lanBase"] = serde_json::Value::String(lan_base.clone());
+        }
+    }
+    direct_json(StatusCode::OK, &answer)
+}
+
+async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T, Box<Response>> {
     if req
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_none_or(|value| value.split(';').next().map(str::trim) != Some("application/json"))
     {
-        return direct_json(StatusCode::UNSUPPORTED_MEDIA_TYPE, &error("content_type_required"));
+        return Err(Box::new(direct_json(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &error("content_type_required"),
+        )));
     }
-    let body = match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), REEL_ACTIVATE_BYTES))
-        .await
+    let body = match tokio::time::timeout(
+        TIMEOUT,
+        axum::body::to_bytes(req.into_body(), REEL_TRANSPORT_BYTES),
+    )
+    .await
     {
         Ok(Ok(body)) => body,
-        Ok(Err(_)) => return direct_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large")),
-        Err(_) => return direct_json(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")),
+        Ok(Err(_)) => {
+            return Err(Box::new(direct_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))))
+        }
+        Err(_) => return Err(Box::new(direct_json(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")))),
     };
-    let Ok(activation) = serde_json::from_slice::<ReelActivation>(&body) else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
-    };
-    let Some((blob, query)) = reel_capability(&activation.media) else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
-    };
+    serde_json::from_slice(&body)
+        .map_err(|_| Box::new(direct_json(StatusCode::BAD_REQUEST, &error("bad_request"))))
+}
 
+async fn build_reel_transport(
+    state: &Arc<AppState>,
+    request: ReelTransportRequest,
+    observed: Option<std::net::IpAddr>,
+    blob: &str,
+    query: &str,
+    rid: &str,
+) -> Result<ReelTransport, ReelTransportError> {
+    let ipv4_hint = match request.ipv4_hint.as_deref() {
+        Some(raw) => match hint_address(&serde_json::Value::String(raw.to_owned())) {
+            Ok(address) => Some(address),
+            Err(reason) => {
+                state.metrics.record_public_media_hint_rejected(reason);
+                return Err(ReelTransportError::InvalidIpv4Hint);
+            }
+        },
+        None => None,
+    };
+    let relay = format!("/reel/{}", request.capability);
+    let mut transport = ReelTransport {
+        capability: request.capability,
+        form: None,
+        expires: None,
+        attempts: vec![("relay", relay)],
+        hinted: false,
+        ipv4_hint_wanted: false,
+    };
+    let (form, expires) = match validate_reel(state, blob, query, rid).await {
+        ReelValidation::Valid { form, expires } => (form, expires),
+        ReelValidation::Rejected(status) => return Err(ReelTransportError::Capability(status)),
+        ReelValidation::Unavailable => return Ok(transport),
+    };
+    transport.form = Some(form);
+    transport.expires = Some(expires);
+
+    let (Some(base), Some(socket), Some(observed)) =
+        (state.public_media_base.as_deref(), state.public_media_socket.as_deref(), observed)
+    else {
+        return Ok(transport);
+    };
+    let bucket = crate::handler::rate_limit_key(observed);
     let (source, hinted) = match observed {
         std::net::IpAddr::V4(v4) => match hint_address(&serde_json::Value::String(v4.to_string())) {
             Ok(v4) => (std::net::IpAddr::V4(v4), false),
-            Err(_) => {
-                return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"))
-            }
+            Err(_) => return Ok(transport),
         },
-        std::net::IpAddr::V6(_) => match activation.ipv4_hint.as_deref() {
-            None if !activation.no_hint => {
+        std::net::IpAddr::V6(_) => match ipv4_hint {
+            None if !request.no_hint => {
                 state.metrics.record_public_media_hint_wanted("reel");
-                return direct_json(StatusCode::PRECONDITION_REQUIRED, &error("ipv4_hint_wanted"));
+                transport.ipv4_hint_wanted = true;
+                return Ok(transport);
             }
-            None => return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_ipv6")),
-            Some(raw) => match hint_address(&serde_json::Value::String(raw.to_owned())) {
-                // Parsing is harmless before validation, but quota mutation is authority-bearing: a forged,
-                // expired or revoked capability must not poison this /64 or the global hint table.
-                Ok(v4) => (std::net::IpAddr::V4(v4), true),
-                Err(reason) => {
-                    state.metrics.record_public_media_hint_rejected(reason);
-                    return direct_json(StatusCode::BAD_REQUEST, &error("invalid_ipv4_hint"));
-                }
-            },
+            None => return Ok(transport),
+            Some(v4) => (std::net::IpAddr::V4(v4), true),
         },
     };
+    if crate::link::throttled_per_minute(
+        state,
+        &format!("reel-transport:{bucket}"),
+        REEL_TRANSPORT_PER_WINDOW,
+    )
+    .is_some()
+    {
+        return Ok(transport);
+    }
+    if hinted && !allow_reel_hint(state, &bucket, source) {
+        state.metrics.record_public_media_hint_rejected("limit");
+        return Ok(transport);
+    }
+    if !lease_reel_listener(socket, source).await {
+        return Ok(transport);
+    }
+    if hinted {
+        state.metrics.record_public_media_hinted("reel");
+    }
+    transport.hinted = hinted;
+    let media_path = format!("/reel/{}", transport.capability);
+    let public = format!("{base}{media_path}");
+    let mut direct = Vec::with_capacity(2);
+    if let Some(lan) = &state.lan_media_base {
+        if state.home_address.is_behind_home_router(base, source).await {
+            push_reel_attempt(&mut direct, ("lan", format!("{lan}{media_path}")));
+        }
+    }
+    push_reel_attempt(&mut direct, ("public", public));
+    for attempt in transport.attempts.drain(..) {
+        push_reel_attempt(&mut direct, attempt);
+    }
+    transport.attempts = direct;
+    Ok(transport)
+}
 
-    // The relay semaphore bounds validator sockets together with every other addon call. Admission
-    // is fail-fast here: activation is an optimization and the same response already has a relay URL.
+async fn validate_reel(state: &Arc<AppState>, blob: &str, query: &str, rid: &str) -> ReelValidation {
     let Ok(_slot) = Arc::clone(&state.relay_slots).try_acquire_owned() else {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("relay_busy"));
+        return ReelValidation::Unavailable;
     };
     let validate_path = format!("/reel/_internal/validate/m/s/{blob}?{query}");
     let Some(validate_target) = target(&state.relays, &validate_path) else {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_unavailable"));
+        return ReelValidation::Unavailable;
     };
     let Ok(validate) = axum::http::Request::builder()
         .method(Method::GET)
@@ -1708,68 +1860,77 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()))
     else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+        return ReelValidation::Unavailable;
     };
-    let validated = tokio::time::timeout(REEL_VALIDATE_TIMEOUT, state.relay_client.request(validate)).await;
-    let answer = match validated {
+    let answer = match tokio::time::timeout(REEL_VALIDATE_TIMEOUT, state.relay_client.request(validate)).await
+    {
         Ok(Ok(answer)) if answer.status() == StatusCode::NO_CONTENT => answer,
-        Ok(Ok(_)) => return direct_json(StatusCode::FORBIDDEN, &error("invalid_media_capability")),
-        _ => return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("addon_unreachable")),
+        Ok(Ok(answer)) if matches!(answer.status(), StatusCode::FORBIDDEN | StatusCode::GONE) => {
+            return ReelValidation::Rejected(answer.status())
+        }
+        _ => return ReelValidation::Unavailable,
     };
     let form = answer
         .headers()
         .get("x-den-media-form")
         .and_then(|v| v.to_str().ok())
-        .filter(|v| matches!(*v, "progressive" | "hls-proxy"))
+        .filter(|v| matches!(*v, "progressive" | "hls-proxy" | "download"))
         .map(str::to_owned);
     let expires = answer
         .headers()
         .get("x-den-media-expires")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    let (Some(form), Some(expires)) = (form, expires) else {
-        return direct_json(StatusCode::BAD_GATEWAY, &error("addon_answer_unreadable"));
-    };
-    drop(answer);
-    drop(_slot);
+    match (form, expires) {
+        (Some(form), Some(expires)) => ReelValidation::Valid { form, expires },
+        _ => ReelValidation::Unavailable,
+    }
+}
 
-    if hinted && !allow_reel_hint(state, &bucket, source) {
-        state.metrics.record_public_media_hint_rejected("limit");
-        return direct_json(StatusCode::TOO_MANY_REQUESTS, &error("hint_limit"));
+fn push_reel_attempt(attempts: &mut Vec<(&'static str, String)>, attempt: (&'static str, String)) {
+    if !attempts.iter().any(|(_, url)| url == &attempt.1) {
+        attempts.push(attempt);
     }
-    if !lease_reel_listener(socket, source).await {
-        return direct_json(StatusCode::SERVICE_UNAVAILABLE, &error("public_listener_unavailable"));
-    }
-    if hinted {
-        state.metrics.record_public_media_hinted("reel");
-    }
-    let media = format!("{base}{}", activation.media);
+}
+
+fn transport_json(transport: &ReelTransport) -> Response {
+    let attempts: Vec<_> = transport
+        .attempts
+        .iter()
+        .map(|(kind, url)| serde_json::json!({ "type": kind, "url": url }))
+        .collect();
     let mut answer = serde_json::json!({
-        "publicBase": base,
-        "media": media,
-        "hinted": hinted,
-        "form": form,
-        "expires": expires,
+        "v": 2,
+        "capability": transport.capability,
+        "attempts": attempts,
     });
-    // As a remux session does: the home-network origin, only to a browser behind the home's own router. The router
-    // does not loop the public address back in, so from home that origin is the only direct way to the media; the
-    // page tries it first and the public one after it (oxyc/den#197).
-    if let Some(lan) = &state.lan_media_base {
-        if state.home_address.is_behind_home_router(base, source).await {
-            answer["lanBase"] = serde_json::Value::String(lan.clone());
-        }
+    if let Some(form) = &transport.form {
+        answer["form"] = serde_json::Value::String(form.clone());
+    }
+    if let Some(expires) = transport.expires {
+        answer["expires"] = serde_json::Value::from(expires);
+    }
+    if transport.ipv4_hint_wanted {
+        answer["ipv4HintWanted"] = serde_json::Value::Bool(true);
     }
     direct_json(StatusCode::OK, &answer)
 }
 
-/// The only path shape Caddy publishes. Keep the exact original query for Reel's validator and the
-/// eventual media URL, but accept no parameter besides its fixed 24-hex MAC.
-fn reel_capability(media: &str) -> Option<(&str, &str)> {
-    let (path, query) = media.split_once('?')?;
+fn capability_rejected(status: StatusCode) -> Response {
+    let message =
+        if status == StatusCode::GONE { "expired_media_capability" } else { "invalid_media_capability" };
+    direct_json(status, &error(message))
+}
+
+/// Keep the exact original query for Reel's validator and every eventual media URL, but accept no parameter besides
+/// its fixed 24-hex MAC. Capabilities are relative to the Reel mount so neither side has to infer or rewrite an
+/// origin.
+fn reel_capability(capability: &str) -> Option<(&str, &str)> {
+    let (path, query) = capability.split_once('?')?;
     if query.contains('?') || query.contains('#') || path.contains('#') {
         return None;
     }
-    let blob = path.strip_prefix("/reel/m/s/")?;
+    let blob = path.strip_prefix("m/s/")?;
     if !(40..=2048).contains(&blob.len())
         || !blob.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     {
@@ -2240,31 +2401,113 @@ mod tests {
     }
 
     #[test]
-    fn only_one_strict_reel_capability_shape_can_activate() {
+    fn only_one_strict_mount_relative_reel_capability_shape_can_select_transport() {
         let blob = "A".repeat(40);
         let tag = "b".repeat(24);
         let query = format!("s={tag}");
-        let good = format!("/reel/m/s/{blob}?s={tag}");
+        let good = format!("m/s/{blob}?s={tag}");
         assert_eq!(super::reel_capability(&good), Some((blob.as_str(), query.as_str())));
         for bad in [
             format!("https://media.example/reel/m/s/{blob}?s={tag}"),
+            format!("/reel/m/s/{blob}?s={tag}"),
             format!("/reel/m/n/{blob}?s={tag}"),
-            format!("/reel/m/s/{blob}?s={tag}&x=1"),
-            format!("/reel/m/s/{blob}?s=short"),
-            format!("/reel/m/s/has%2Fslash?s={tag}"),
+            format!("m/s/{blob}?s={tag}&x=1"),
+            format!("m/s/{blob}?s=short"),
+            format!("m/s/has%2Fslash?s={tag}"),
         ] {
             assert!(super::reel_capability(&bad).is_none(), "accepted {bad}");
         }
     }
 
+    #[test]
+    fn transport_attempts_keep_first_order_and_deduplicate_urls() {
+        let mut attempts = Vec::new();
+        super::push_reel_attempt(&mut attempts, ("lan", "https://media.example/reel/x".into()));
+        super::push_reel_attempt(&mut attempts, ("public", "https://media.example/reel/x".into()));
+        super::push_reel_attempt(&mut attempts, ("relay", "/reel/x".into()));
+        assert_eq!(
+            attempts,
+            vec![("lan", "https://media.example/reel/x".into()), ("relay", "/reel/x".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_request_is_strict_and_a_missing_validator_degrades_to_the_exact_relay() {
+        let h = Harness::new();
+        let capability = format!("m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
+        let answer = h
+            .send(
+                "POST",
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability }).to_string()),
+                &[("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let body = crate::handler::tests::body_json(answer).await;
+        assert_eq!(body["capability"], capability);
+        assert_eq!(body["attempts"], json!([{ "type": "relay", "url": format!("/reel/{capability}") }]));
+        assert!(body.get("form").is_none());
+        assert!(body.get("expires").is_none());
+
+        let extra = h
+            .send(
+                "POST",
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability, "media": "not-allowed" }).to_string()),
+                &[("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(extra.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            h.send("GET", super::REEL_TRANSPORT, None, &[]).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[tokio::test]
+    async fn reels_explicit_signature_and_expiry_rejections_return_no_attempts() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
+            if req.uri().path().contains(&"B".repeat(40)) {
+                StatusCode::GONE
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays =
+            crate::parse_relays(&format!("/reel=http://{upstream_addr}"));
+        for (blob, status, message) in [
+            ("A".repeat(40), StatusCode::FORBIDDEN, "invalid_media_capability"),
+            ("B".repeat(40), StatusCode::GONE, "expired_media_capability"),
+        ] {
+            let answer = h
+                .send(
+                    "POST",
+                    super::REEL_TRANSPORT,
+                    Some(json!({ "capability": format!("m/s/{blob}?s={}", "b".repeat(24)) }).to_string()),
+                    &[("content-type", "application/json")],
+                )
+                .await;
+            assert_eq!(answer.status(), status);
+            let body = crate::handler::tests::body_json(answer).await;
+            assert_eq!(body["error"], message);
+            assert!(body.get("attempts").is_none());
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_valid_reel_capability_leases_only_the_observed_public_address() {
+    async fn a_valid_reel_capability_returns_public_then_relay_and_leases_only_the_observed_address() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let blob = "A".repeat(40);
         let tag = "b".repeat(24);
-        let media = format!("/reel/m/s/{blob}?s={tag}");
+        let capability = format!("m/s/{blob}?s={tag}");
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let expected = format!("/_internal/validate/m/s/{blob}?s={tag}");
@@ -2306,43 +2549,78 @@ mod tests {
         let answer = h
             .send(
                 "POST",
-                super::REEL_ACTIVATE,
-                Some(json!({ "media": media }).to_string()),
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability }).to_string()),
                 &[("x-forwarded-for", "8.8.8.8"), ("content-type", "application/json")],
             )
             .await;
         assert_eq!(answer.status(), StatusCode::OK);
         assert_eq!(answer.headers()["cache-control"], "no-store");
         let body = crate::handler::tests::body_json(answer).await;
-        assert_eq!(body["media"], format!("https://media.example{media}"));
+        assert_eq!(body["v"], 2);
+        assert_eq!(body["capability"], capability);
         assert_eq!(body["form"], "progressive");
         assert_eq!(body["expires"], 4_000_000_000u64);
-        assert_eq!(body["hinted"], false);
+        assert_eq!(
+            body["attempts"],
+            json!([
+                { "type": "public", "url": format!("https://media.example/reel/{capability}") },
+                { "type": "relay", "url": format!("/reel/{capability}") },
+            ])
+        );
         let lease: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
         assert_eq!(lease, json!({ "lease": "reel", "source": "8.8.8.8" }));
     }
 
     #[tokio::test]
-    async fn an_ipv6_reel_activation_asks_for_a_hint_before_validation() {
+    async fn a_valid_ipv6_transport_keeps_relay_while_asking_for_a_hint() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            axum::http::Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header("x-den-media-form", "hls-proxy")
+                .header("x-den-media-expires", "4000000000")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
         let mut h = Harness::new();
         let state = Arc::get_mut(&mut h.state).unwrap();
-        state.relays = crate::parse_relays("/reel=http://127.0.0.1:9");
+        state.relays = crate::parse_relays(&format!("/reel=http://{upstream_addr}"));
         state.public_media_base = Some("https://media.example".into());
         state.public_media_socket = Some(h.dir.join("unused.sock"));
         state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let capability = format!("m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
         let body = json!({
-            "media": format!("/reel/m/s/{}?s={}", "A".repeat(40), "b".repeat(24))
+            "capability": capability
         });
         let answer = h
             .send(
                 "POST",
-                super::REEL_ACTIVATE,
+                super::REEL_TRANSPORT,
                 Some(body.to_string()),
                 &[("x-forwarded-for", "2001:4860:4860::8888"), ("content-type", "application/json")],
             )
             .await;
-        assert_eq!(answer.status(), StatusCode::PRECONDITION_REQUIRED);
-        assert_eq!(crate::handler::tests::body_json(answer).await["error"], "ipv4_hint_wanted");
+        assert_eq!(answer.status(), StatusCode::OK);
+        let body = crate::handler::tests::body_json(answer).await;
+        assert_eq!(body["ipv4HintWanted"], true);
+        assert_eq!(body["attempts"], json!([{ "type": "relay", "url": format!("/reel/{capability}") }]));
+
+        let answer = h
+            .send(
+                "POST",
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability }).to_string()),
+                &[("x-forwarded-for", "8.8.8.8"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let body = crate::handler::tests::body_json(answer).await;
+        assert_eq!(body["form"], "hls-proxy");
+        assert_eq!(body["expires"], 4_000_000_000u64);
+        assert_eq!(body["attempts"], json!([{ "type": "relay", "url": format!("/reel/{capability}") }]));
     }
 
     /// As a remux session does: the home-network origin goes only to a browser behind the home's router — seen as the
@@ -2408,6 +2686,25 @@ mod tests {
                 assert!(body.get("lanBase").is_none(), "{visitor}: {body}");
             }
         }
+        let capability = media.strip_prefix("/reel/").unwrap();
+        let answer = h
+            .send(
+                "POST",
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability }).to_string()),
+                &[("x-forwarded-for", "8.8.4.4"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let body = crate::handler::tests::body_json(answer).await;
+        assert_eq!(
+            body["attempts"],
+            json!([
+                { "type": "lan", "url": format!("https://lan.media.example:8449/reel/{capability}") },
+                { "type": "public", "url": format!("https://8.8.4.4/reel/{capability}") },
+                { "type": "relay", "url": format!("/reel/{capability}") },
+            ])
+        );
     }
 
     #[tokio::test]

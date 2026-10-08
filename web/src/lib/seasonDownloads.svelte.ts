@@ -1,13 +1,10 @@
-import { SvelteMap } from 'svelte/reactivity';
 import type { Episode } from './detail';
 import { futureDate } from './detailPresentation';
-import { downloads, inFlight } from './downloadQueue.svelte';
-import { ensureSyncPolicy } from './syncLoader';
-import { fetchSourceList } from './titleSources';
-import type { Addon } from './scout';
-import type { Routes } from './routes';
+import type { LibraryModel } from './libraryModel.svelte';
+import type { DownloadTitleDescriptor } from './libraryServiceProtocol';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
-interface SeasonJob {
+export interface SeasonJob {
   total: number;
   checked: number;
   queued: number;
@@ -16,11 +13,7 @@ interface SeasonJob {
   uncertain: number;
   running: boolean;
 }
-export const seasonJobs = new SvelteMap<string, SeasonJob>();
-export const seasonJobKey = (addon: Addon, imdb: string, season: number) =>
-  `${addon.install}:${imdb}:${season}`;
 
-/** The series a season pass downloads episodes of, as each episode's download is written down. */
 export interface SeasonTitle {
   type: 'movie' | 'tv';
   id: number;
@@ -31,128 +24,155 @@ export interface SeasonTitle {
 
 export type EpisodeDownloadResult = 'queued' | 'ready' | 'unavailable' | 'uncertain';
 
-/** Queue one episode with the same ranked pick as its Sources panel and a season download. */
-export async function downloadEpisode(
-  addon: Addon,
+interface SharedSeasonRun {
+  latest: SeasonJob;
+  listeners: Set<(job: SeasonJob) => void>;
+  promise: Promise<void>;
+}
+
+const seasonRuns = new WeakMap<LibraryModel, SvelteMap<string, SharedSeasonRun>>();
+
+const descriptor = (
   imdb: string,
   season: number,
   episode: Episode,
-  routes: Routes,
   title: SeasonTitle,
-  resolve = fetchSourceList,
-  queue = downloads,
+): DownloadTitleDescriptor => ({
+  target: { type: 'tv', id: title.id, season, episode: episode.number },
+  name: title.title,
+  imdbId: imdb,
+  ...(title.posterPath ? { posterPath: title.posterPath } : {}),
+  ...(episode.stillPath ? { stillPath: episode.stillPath } : {}),
+  ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+});
+
+async function downloadEpisodeWithModel(
+  model: LibraryModel,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  title: SeasonTitle,
+  existing?: ReturnType<LibraryModel['downloads']>,
 ): Promise<EpisodeDownloadResult> {
-  await ensureSyncPolicy();
-  const current = queue.of(title.type, title.id, season, episode.number);
-  if (current) {
-    const state = queue.status(current).state;
-    if (state === 'ready') return 'ready';
-    if (inFlight(state)) return 'queued';
-  }
-  const { sources } = await resolve(addon, imdb, routes, season, episode.number);
-  if (sources === null) return 'uncertain';
-  const source = queue.pick(sources, title.originalLanguage);
-  if (!source || (source.cached === false && source.seeders === 0)) return 'unavailable';
-  if (source.cached === true) return 'ready';
-  const result = await queue.start({
-    title: {
-      mediaType: title.type,
-      mediaId: title.id,
-      imdbId: imdb,
-      season,
-      episode: episode.number,
-      title: title.title,
-      posterPath: title.posterPath,
-      stillPath: episode.stillPath,
-      originalLanguage: title.originalLanguage,
-    },
-    source,
-    sources,
-  });
-  if (result.state === 'ready') return 'ready';
-  if (result.state === 'preparing' || result.state === 'paused') return 'queued';
-  if (result.state === 'unknown' || result.state === 'not-queued') return 'uncertain';
-  return 'unavailable';
+  const requested = descriptor(imdb, season, episode, title);
+  const queued = existing?.snapshot.value?.items.find(
+    (item) =>
+      item.title.type === 'tv' &&
+      item.title.id === title.id &&
+      item.season === season &&
+      item.episode === episode.number,
+  );
+  if (queued) return queued.status.state === 'ready' ? 'ready' : 'queued';
+  const { result } = await model.downloadSources(requested);
+  if (result.kind !== 'download.sources' || result.sources === null) return 'uncertain';
+  const release = result.sources[0];
+  if (!release) return 'unavailable';
+  if (release.cached) return 'ready';
+  await model.enqueueDownload(requested, release, result.sources.length);
+  return 'queued';
 }
 
-/**
- * The queue owns this pass, not the page. Leaving a detail must not stop halfway through a season. One library row
- * per episode, each started with the TV's own pick (`rank_releases`), so a season queued here is the one the TV
- * would have queued, and shows on its shelf.
- */
+export async function downloadEpisode(
+  model: LibraryModel,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  title: SeasonTitle,
+): Promise<EpisodeDownloadResult> {
+  const lease = model.downloads();
+  try {
+    return await downloadEpisodeWithModel(model, imdb, season, episode, title, lease);
+  } finally {
+    lease.release();
+  }
+}
+
+const seasonKey = (
+  imdb: string,
+  season: number,
+  episodes: readonly Episode[],
+  title: SeasonTitle,
+) => `${title.id}:${imdb}:${season}:${episodes.map(({ number }) => number).join(',')}`;
+
+/** A small presentation coordinator; durable episode work remains owned by LibraryService. */
 export async function downloadSeason(
-  addon: Addon,
+  model: LibraryModel,
   imdb: string,
   season: number,
   episodes: Episode[],
-  routes: Routes,
   title: SeasonTitle,
-  resolve = fetchSourceList,
-  queue = downloads,
+  changed: (job: SeasonJob) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  // Each episode's release is den-core's pick.
-  await ensureSyncPolicy();
-  const key = seasonJobKey(addon, imdb, season);
-  if (seasonJobs.get(key)?.running) return;
-  const aired = episodes.filter((e) => !futureDate(e.airDate));
-  let job: SeasonJob = {
-    total: aired.length,
-    checked: 0,
-    queued: 0,
-    ready: 0,
-    unavailable: 0,
-    uncertain: 0,
-    running: true,
-  };
-  seasonJobs.set(key, job);
-  try {
-    for (const episode of aired) {
-      const current = queue.of(title.type, title.id, season, episode.number);
-      // Already fetching: asking again is a fresh add at the debrid, not a status check.
-      if (current && inFlight(queue.status(current).state)) {
-        job = { ...job, queued: job.queued + 1, checked: job.checked + 1 };
-        seasonJobs.set(key, job);
-        continue;
-      }
-      const { sources } = await resolve(addon, imdb, routes, season, episode.number);
-      if (sources === null) job = { ...job, uncertain: job.uncertain + 1 };
-      else {
-        const source = queue.pick(sources, title.originalLanguage);
-        if (!source || (source.cached === false && source.seeders === 0))
-          job = { ...job, unavailable: job.unavailable + 1 };
-        else if (source.cached === true) job = { ...job, ready: job.ready + 1 };
-        else {
-          const result = await queue.start({
-            title: {
-              mediaType: title.type,
-              mediaId: title.id,
-              imdbId: imdb,
-              season,
-              episode: episode.number,
-              title: title.title,
-              posterPath: title.posterPath,
-              stillPath: episode.stillPath,
-              originalLanguage: title.originalLanguage,
-            },
-            source,
-            sources,
-          });
-          if (result.state === 'ready') job = { ...job, ready: job.ready + 1 };
-          else if (result.state === 'preparing' || result.state === 'paused')
-            job = { ...job, queued: job.queued + 1 };
-          else if (result.state === 'unknown' || result.state === 'not-queued')
-            job = { ...job, uncertain: job.uncertain + 1 };
-          else job = { ...job, unavailable: job.unavailable + 1 };
-        }
-      }
-      job = { ...job, checked: job.checked + 1 };
-      seasonJobs.set(key, job);
-    }
-  } finally {
-    seasonJobs.set(key, { ...job, running: false });
+  const aired = episodes.filter((episode) => !futureDate(episode.airDate));
+  const key = seasonKey(imdb, season, aired, title);
+  let runs = seasonRuns.get(model);
+  if (!runs) {
+    runs = new SvelteMap();
+    seasonRuns.set(model, runs);
   }
-  for (const [old, value] of seasonJobs) {
-    if (seasonJobs.size <= 20) break;
-    if (!value.running) seasonJobs.delete(old);
+  let run = runs.get(key);
+  if (!run) {
+    const shared: SharedSeasonRun = {
+      latest: {
+        total: aired.length,
+        checked: 0,
+        queued: 0,
+        ready: 0,
+        unavailable: 0,
+        uncertain: 0,
+        running: true,
+      },
+      listeners: new SvelteSet(),
+      promise: Promise.resolve(),
+    };
+    const publish = (next: SeasonJob) => {
+      shared.latest = next;
+      for (const listener of shared.listeners) listener(next);
+    };
+    runs.set(key, shared);
+    run = shared;
+    shared.promise = (async () => {
+      let lease: ReturnType<LibraryModel['downloads']> | undefined;
+      try {
+        lease = model.downloads();
+        for (const episode of aired) {
+          let result: EpisodeDownloadResult = 'uncertain';
+          try {
+            result = await downloadEpisodeWithModel(model, imdb, season, episode, title, lease);
+          } catch {
+            // One provider or enqueue failure must not strand the season or suppress the remaining episodes.
+          }
+          publish({
+            ...shared.latest,
+            checked: shared.latest.checked + 1,
+            [result]: shared.latest[result] + 1,
+          });
+        }
+      } catch {
+        const left = shared.latest.total - shared.latest.checked;
+        publish({
+          ...shared.latest,
+          checked: shared.latest.total,
+          uncertain: shared.latest.uncertain + left,
+        });
+      } finally {
+        lease?.release();
+        publish({ ...shared.latest, running: false });
+        if (runs?.get(key) === shared) runs.delete(key);
+      }
+    })();
+  }
+  if (!signal?.aborted) {
+    run.listeners.add(changed);
+    changed(run.latest);
+  }
+  const cancel = () => run?.listeners.delete(changed);
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    await run.promise;
+  } finally {
+    cancel();
+    signal?.removeEventListener('abort', cancel);
   }
 }

@@ -21,17 +21,13 @@
   import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
-    abandonDirect,
     cropStyle,
-    fetchSources,
     nativeHls,
-    nextRung,
-    progressiveURL,
-    relaysMedia,
-    trailerCandidates,
-    watchDirect,
+    PlaybackCursor,
+    prepareTrailers,
+    watchPlaybackAttempt,
   } from '../lib/reel';
-  import type { Crop, Source } from '../lib/reel';
+  import type { PlaybackStep } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
   import {
@@ -396,49 +392,19 @@
   let ambientPlayer = $state<HTMLVideoElement>();
   /** A trailer den-reel cannot serve — YouTube refuses some of them to a server — is not asked for again. */
   let ambientFailed = $state(false);
-  /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
-  let proxied = $state<string | null>(null);
-  /**
-   * What reel offered for this slide, best first, and which of them is mounted.
-   *
-   * reel chooses from its own measurements rather than this page guessing from a path, and it guarantees
-   * the entries are distinct — which matters more than it sounds: a fallback step that lands on the URL
-   * already playing fires no load and no error, and the slide simply stops with nothing to say why.
-   */
-  let rungs = $state<Source[]>([]);
-  let rung = $state(0);
-  /** Where the picture sits inside the frame; null until reel has measured this trailer. */
-  let ambientCrop = $state<Crop | null>(null);
+  /** The one shared candidate/source/transport cursor's currently mounted attempt. */
+  let ambientStep = $state<PlaybackStep | null>(null);
   /** Whether a bare element plays a playlist here, which decides what reel is worth offering. */
   const PLAYS_HLS = nativeHls();
-  /**
-   * Whether this page may play a trailer's bytes through its own `/reel` relay. Not on the public web name, which
-   * is served through Cloudflare (`relaysMedia`): there reel's own copy is never mounted, and a slide neither direct
-   * listener can serve keeps its still picture.
-   */
-  const RELAY = relaysMedia();
-  /** This source will not play: reel's next offer, then its own copy, then the still picture. */
-  function ambientFailedOver() {
+  /** This visible attempt will not play: advance the same ordered cursor. */
+  async function ambientFailedOver() {
     playing = false;
-    // A direct copy that will not play means its listener is out of reach from here: the next copy is tried.
-    const mounted = rungs[rung];
-    if (mounted?.direct && ambient === mounted.url) abandonDirect(mounted);
-    const at = nextRung(rungs, rung);
-    const next = rungs[at];
-    if (next) {
-      rung = at;
-      ambient = next.url;
-      return;
-    }
-    // YouTube's own URL can expire or be withdrawn under us; reel's copy is what to try before
-    // giving up on the slide altogether.
-    if (proxied && ambient !== proxied) {
-      ambient = proxied;
-      return;
-    }
-    // The still picture is the fallback, and asking again on every return only fills reel's log.
-    ambient = null;
-    ambientFailed = true;
+    const request = ambientRequest;
+    const next = await request?.cursor?.next();
+    if (!request || ambientRequest !== request) return;
+    ambientStep = next ?? null;
+    ambient = next?.url ?? null;
+    if (!next) ambientFailed = true;
   }
   /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
   const saving = () =>
@@ -471,6 +437,7 @@
   interface AmbientRequest {
     key: string;
     controller: AbortController;
+    cursor?: PlaybackCursor;
     timer?: ReturnType<typeof setTimeout>;
   }
   // Plain rather than state: this only suppresses duplicate work and must not itself retrigger the lookup effect.
@@ -478,6 +445,7 @@
   function cancelAmbientRequest() {
     if (!ambientRequest) return;
     clearTimeout(ambientRequest.timer);
+    ambientRequest.cursor?.close();
     ambientRequest.controller.abort(new DOMException('ambient trailer changed', 'AbortError'));
     ambientRequest = undefined;
   }
@@ -505,14 +473,9 @@
     void currentKey;
     cancelAmbientRequest();
     ambient = null;
-    proxied = null;
+    ambientStep = null;
     playing = false;
     ambientFailed = false;
-    // What reel offered belonged to the slide that is leaving; left standing, the next one would fall
-    // back through its predecessor's rungs and draw with its crop.
-    rungs = [];
-    rung = 0;
-    ambientCrop = null;
   });
 
   $effect(() => {
@@ -532,12 +495,13 @@
       saving() ||
       ambientFailed
     ) {
-      cancelAmbientRequest();
+      // A found cursor belongs to this slide and survives an off-screen pause. Its visible media is
+      // released below; only a lookup that has not produced anything yet is cancelled here.
+      if (!untrack(() => ambient)) cancelAmbientRequest();
       return;
     }
     // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
     if (untrack(() => ambient)) {
-      cancelAmbientRequest();
       return;
     }
     // A naming batch can replace `title` and `routes` with equal objects every 100 ms. The title, reel base and
@@ -553,117 +517,39 @@
     };
     ambientRequest = request;
     request.timer = setTimeout(() => {
-      // Resolve only. Asking reel for the URLs costs a lookup; asking it for the file costs a download,
-      // an ffmpeg re-mux, a slot on the cache volume and the trailer crossing the house twice.
-      void trailerCandidates(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
-        prewarm: 'direct',
-        height: SLIDE_HEIGHT,
-        signal: controller.signal,
-        sourceAsk: {
+      void prepareTrailers(
+        base,
+        title.type,
+        { tmdb: title.id, imdb: imdbId },
+        table ?? {},
+        {
           surface: 'silent',
           player: PLAYS_HLS ? 'native' : 'hls.js',
         },
-      })
-        .then(async (found) => {
-          const first = found[0];
-          if (ambientRequest !== request || !first) return;
-          let chosen = first;
-          let offered = first.sources
-            ? Object.hasOwn(first, 'prepared')
-              ? first.prepared
-              : await fetchSources(first.sources, {
-                  surface: 'silent',
-                  player: PLAYS_HLS ? 'native' : 'hls.js',
-                  signal: controller.signal,
-                })
-            : null;
-          if (ambientRequest !== request) return;
-          if (Object.hasOwn(first, 'prepared') && !offered) {
-            // `/prepare` deliberately keeps every discovery alternate when its primary fails. Walk
-            // those rather than immediately repeating the failed primary through a derived route.
-            for (const alternate of found.slice(1)) {
-              if (!alternate.sources) continue;
-              const answer = await fetchSources(alternate.sources, {
-                surface: 'silent',
-                player: PLAYS_HLS ? 'native' : 'hls.js',
-                signal: controller.signal,
-              });
-              if (ambientRequest !== request) return;
-              if (!answer) continue;
-              chosen = alternate;
-              offered = answer;
-              break;
-            }
-            if (!offered) {
-              ambientFailed = true;
-              return;
-            }
-          }
-          const url = chosen.play;
-          if (chosen.sources) {
-            // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
-            // is only worth taking where the element parses one itself; offered to anything else it
-            // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
-            // A portrait trailer — a Short posted 9:16 — fills this slide with two black columns, and the
-            // letterbox crop cannot help: there is no picture at the sides for it to find. reel names the
-            // dimensions where it measured them, so an entry carrying none is taken as landscape, which is
-            // what an `hls` entry looks like whether it is one or not.
-            const playable =
-              offered?.sources.filter(
-                (one) =>
-                  (one.kind === 'mp4' || PLAYS_HLS) &&
-                  !(one.width && one.height && one.width < one.height),
-              ) ?? [];
-            const top = playable[0];
-            if (top) {
-              proxied = RELAY ? url : null;
-              rungs = playable;
-              rung = 0;
-              ambientCrop = offered?.crop ?? null;
-              ambient = top.url;
-              return;
-            }
-          }
-          // Nothing either direct listener can serve, on a page that may not carry video through the relay: the
-          // still picture stays.
-          if (!RELAY) {
-            ambientFailed = true;
-            return;
-          }
-          // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
-          proxied = url;
-          // One file with its index in front, played by the element itself. No playlist, no player.
-          //
-          // This slide is muted and fifteen seconds long, so everything HLS is good at is wasted on it
-          // and everything it costs is paid in full: a master playlist, a variant playlist, an
-          // initialisation segment and a first media segment are four sequential round trips before a
-          // frame, and then ABR opens on whichever rung it guesses — four seconds of 144p, measured.
-          //
-          // Nor is Google's own file the answer. It is fragmented — an empty sample table, a `sidx`,
-          // twenty-eight `moof`/`mdat` pairs — so a player that starts at the beginning must visit every
-          // fragment first to learn what is in them. Safari does exactly that: twenty-six range requests
-          // opened and abandoned, 2.4s to metadata and 4.9s before it would play, where Chrome managed
-          // 811ms. reel reads that index once and serves a normal MP4 with a real `moov` at the front,
-          // which measured 1070ms in the same Safari on the same trailer.
-          //
-          // The element's own request is what makes reel build that index, and reel shares one build
-          // between everything asking for the same stream — so there is nothing to pre-warm here. It
-          // takes about 600ms on the box, spent while the still picture is still the thing on screen.
-          ambient = progressiveURL(url, SLIDE_HEIGHT) ?? url;
-        })
-        .finally(() => {
-          if (ambientRequest === request) ambientRequest = undefined;
+        { height: SLIDE_HEIGHT, signal: controller.signal },
+      ).then(async (found) => {
+        if (ambientRequest !== request) return;
+        request.cursor = new PlaybackCursor(found, {
+          signal: controller.signal,
+          // This surface has no hls.js engine. A portrait Short is not a useful full-bleed hero.
+          accepts: (source) =>
+            (source.kind === 'mp4' || PLAYS_HLS) &&
+            !(source.width && source.height && source.width < source.height),
         });
+        const first = await request.cursor.first();
+        if (ambientRequest !== request) return;
+        ambientStep = first;
+        ambient = first?.url ?? null;
+        if (!first) ambientFailed = true;
+      });
     }, SETTLE_MS);
   });
 
   /**
    * Resolve the slide AFTER this one, while this one is playing.
    *
-   * reel answers `/meta?prewarm=direct` at once and resolves in a spawned task, so asking for a trailer
-   * and then immediately playing it does not warm anything — the play request joins the resolve already
-   * running and waits the rest of it out. Measured: a first view paid about 3.6s of resolve against an
-   * index build of 0.6s, while a stream already resolved played in 324ms.
+   * A warm v2 prepare starts Reel's expensive resolve without redeeming any transport capability.
+   * The play request then reuses the prepared answer instead of putting that resolve on the viewer's path.
    *
    * A slide stands for fifteen seconds, which is a great deal of time to be resolving something in. So
    * the wait moves off the viewer's path: by the time this neighbour is the one on screen, reel has its
@@ -688,35 +574,18 @@
     request.cancelIdle = whenIdle(() => {
       if (nextWarm !== request) return;
       const ids = { tmdb: next.id, imdb: known.get(keyOf(next))?.imdbId };
-      void trailerCandidates(base, next.type, ids, table ?? {}, {
-        prewarm: 'direct',
-        height: SLIDE_HEIGHT,
-        signal: request.controller.signal,
-        sourceAsk: {
+      void prepareTrailers(
+        base,
+        next.type,
+        ids,
+        table ?? {},
+        {
           surface: 'silent',
           player: PLAYS_HLS ? 'native' : 'hls.js',
           intent: 'warm',
         },
-      }).then((found) => {
-        const first = found[0];
-        if (
-          nextWarm !== request ||
-          !first?.sources ||
-          // A combined request already performed this warm. Only an old Reel's legacy answer needs
-          // the separate source ask below.
-          Object.hasOwn(first, 'prepared')
-        )
-          return;
-        // Asking IS the warming. `/sources` waits for the resolve its first entry plays from, and
-        // builds that entry's index where it needs one, so there is no separate prewarm to keep in
-        // step with what this slide will go on to ask for — which is precisely what went wrong when a
-        // surface warmed one height step and then played another, and paid the build in full.
-        void fetchSources(first.sources, {
-          surface: 'silent',
-          player: PLAYS_HLS ? 'native' : 'hls.js',
-          signal: request.controller.signal,
-        });
-      });
+        { height: SLIDE_HEIGHT, signal: request.controller.signal },
+      );
     }, WARM_IDLE_TIMEOUT_MS);
   });
 
@@ -754,14 +623,14 @@
     }
   });
 
-  // A direct copy has DIRECT_FIRST_FRAME_MS to show a frame, or its relay copy plays instead: iOS's native player
-  // waits on an unreachable origin without raising the `error` the ladder steps on.
+  // The visible element is the reachability test. A direct attempt that produces no frame advances;
+  // there is no detached probe and no speculative transport activation.
   $effect(() => {
     const video = ambientPlayer;
-    const mounted = rungs[rung];
+    const mounted = ambientStep;
     if (!video || !mounted || ambient !== mounted.url || !active || !onScreen || !foreground)
       return;
-    return watchDirect(video, mounted, ambientFailedOver);
+    return watchPlaybackAttempt(video, mounted, () => void ambientFailedOver());
   });
 
   // --- The rail ---
@@ -1007,7 +876,12 @@
         ? 0
         : Math.min(Math.max(index - (DOT_WINDOW >> 1), 0), count - DOT_WINDOW);
     const end = Math.min(start + DOT_WINDOW, count);
-    return { start, end, count, at: Array.from({ length: end - start }, (_, i) => start + i) };
+    return {
+      start,
+      end,
+      count,
+      at: Array.from({ length: end - start }, (_, i) => start + i),
+    };
   });
 </script>
 
@@ -1049,7 +923,7 @@
         class="ambient"
         class:playing
         src={active ? ambient : undefined}
-        style={cropStyle(ambientCrop) ?? undefined}
+        style={cropStyle(ambientStep?.crop) ?? undefined}
         autoplay
         muted
         loop
@@ -1057,7 +931,7 @@
         preload="auto"
         tabindex="-1"
         onplaying={() => (playing = true)}
-        onerror={ambientFailedOver}
+        onerror={() => void ambientFailedOver()}
         onloadstart={(event) => hush(event.currentTarget)}
         onloadedmetadata={(event) => hush(event.currentTarget)}
       ></video>

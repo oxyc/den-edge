@@ -2,17 +2,28 @@
 // this browser like a link's, so the watchlist, what was watched and Settings are all still there next visit. Linking a
 // TV moves the library into the TV's and drops this one.
 
-import { forgetLibrary, libraryVault, type Vault } from './localVault';
-import { loadLibraryLog } from './libraryLogLoader';
+import { forgetLibrary } from './localVault';
 
 const STORAGE_KEY = 'den.localLibrary';
+const PENDING_MERGES_KEY = 'den.localLibraryMerges';
+
+/** Read the current local owner without creating one. */
+export function keptLocalLibraryKey(
+  storage: Storage | undefined = globalThis.localStorage,
+): string | null {
+  try {
+    return storage?.getItem(STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** This browser's own library key, made the first time it's asked for; null where nothing can be kept here. */
 export function localLibraryKey(
   storage: Storage | undefined = globalThis.localStorage,
 ): string | null {
   try {
-    const kept = storage?.getItem(STORAGE_KEY);
+    const kept = keptLocalLibraryKey(storage);
     if (kept) return kept;
     const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
     storage?.setItem(STORAGE_KEY, key);
@@ -23,18 +34,74 @@ export function localLibraryKey(
   }
 }
 
-/** Drop this browser's own library: its key, and what was kept under it. */
+/**
+ * Drop exactly the browser-local library that was merged. A concurrent tab may have published a newer winner while
+ * the merge was in flight; that winner must never be removed or forgotten here.
+ */
 export async function dropLocalLibrary(
+  expectedKey: string,
   storage: Storage | undefined = globalThis.localStorage,
-): Promise<void> {
-  let key: string | null = null;
+): Promise<boolean> {
   try {
-    key = storage?.getItem(STORAGE_KEY) ?? null;
+    if (storage?.getItem(STORAGE_KEY) !== expectedKey) return false;
     storage?.removeItem(STORAGE_KEY);
   } catch {
-    // Nothing more to drop than was kept.
+    return false;
   }
-  if (key) await forgetLibrary(key);
+  // The semantic merge already forgot this source. This is a best-effort cleanup for an absent/empty source.
+  await forgetLibrary(expectedKey).catch(() => {});
+  return true;
+}
+
+function pendingMerges(storage: Storage | undefined): string[] {
+  try {
+    const value = JSON.parse(storage?.getItem(PENDING_MERGES_KEY) ?? '[]') as unknown;
+    return Array.isArray(value)
+      ? value.filter(
+          (key, index): key is string => typeof key === 'string' && value.indexOf(key) === index,
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingMerges(keys: readonly string[], storage: Storage | undefined): boolean {
+  try {
+    if (keys.length) storage?.setItem(PENDING_MERGES_KEY, JSON.stringify(keys));
+    else storage?.removeItem(PENDING_MERGES_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Persist a losing first-tab key before yielding, so a crash cannot strand its rows forever. */
+export function rememberLocalLibraryMerge(
+  sourceKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  const keys = pendingMerges(storage);
+  return keys.includes(sourceKey) || writePendingMerges([...keys, sourceKey], storage);
+}
+
+/** Losing keys still owed to the current winner. The winner itself is never offered as its own source. */
+export function pendingLocalLibraryMerges(
+  winnerKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): string[] {
+  return pendingMerges(storage).filter((key) => key !== winnerKey);
+}
+
+/** Clear one source only after the authority says it was merged or was already absent. */
+export function settleLocalLibraryMerge(
+  sourceKey: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  return writePendingMerges(
+    pendingMerges(storage).filter((key) => key !== sourceKey),
+    storage,
+  );
 }
 
 /**
@@ -44,43 +111,23 @@ export async function dropLocalLibrary(
  * dropped, and `rekey` is told the key to go on with. `rekey` is told even when the rows couldn't be moved: staying on
  * the lost key would lose everything after too. The function returned stops following.
  */
-export function followLocalLibrary(
+/**
+ * Observe only the winning local key. The LibraryModel owner performs the guarded semantic merge before replacing
+ * its session; this key watcher deliberately has no storage or row authority of its own.
+ */
+export function followLocalLibraryKey(
   own: string,
-  rekey: (key: string) => void,
+  changed: (next: string, previous: string) => void,
   target: EventTarget = window,
-  vault: Vault | null = libraryVault,
 ): () => void {
   let current = own;
-  let moving = Promise.resolve();
   const listener = (event: Event) => {
     const { key, newValue } = event as StorageEvent;
     if (key !== STORAGE_KEY || !newValue || newValue === current) return;
-    const lost = current;
+    const previous = current;
     current = newValue;
-    moving = moving
-      .then(() => mergeLocalLibrary(lost, newValue, vault))
-      .catch(() => false)
-      .then(() => {
-        if (current === newValue) rekey(newValue);
-      });
+    changed(newValue, previous);
   };
   target.addEventListener('storage', listener);
   return () => target.removeEventListener('storage', listener);
-}
-
-/** Every row of the library `lost` opens written into `kept`'s, and `lost` dropped. False when either can't be opened. */
-async function mergeLocalLibrary(
-  lost: string,
-  kept: string,
-  vault: Vault | null,
-): Promise<boolean> {
-  const LibraryLog = await loadLibraryLog();
-  const [from, into] = await Promise.all([
-    LibraryLog.openLocal(lost, vault),
-    LibraryLog.openLocal(kept, vault),
-  ]);
-  // A browser's own library never holds `set:recovery`, but a code stays with the library it opens (recovery-code §9).
-  const rows = from?.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
-  if (!from || !into || !rows || !(await into.writeRows(rows))) return false;
-  return from.forget();
 }

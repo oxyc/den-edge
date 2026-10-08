@@ -17,27 +17,32 @@
     type LinkedDeviceRow,
   } from './linkedDevices';
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
-  import { parsePublicKey, type DeviceEntry } from './values';
+  import { parsePublicKey } from './preferences';
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
-  import type { KeyResetRefusal } from '../lib/keyReset';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
-  import { acceptsAddonURL, readApiKey } from '../lib/prefs';
+  import { acceptsAddonURL } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
   import { routePath } from '../lib/route';
   import { denAddonOf } from '../lib/scout';
   import { clearTmdbCache } from '../lib/tmdbCache';
-  import type { ConfigValue, SettingsRow } from '../lib/wire';
-
-  type Changes = Record<string, ConfigValue | null>;
+  import type {
+    ConnectionsView,
+    KeyResetOutcome,
+    LibraryApiKeyService,
+    LibraryDeviceView,
+    LibraryPluginView,
+  } from '../lib/libraryServiceProtocol';
+  import type { Immutable } from '../lib/libraryModel.svelte';
 
   let {
     link,
-    keys,
+    apiKeys,
+    rawApiKeys,
     simklConnected,
     saveSimkl,
     heldRemovals = [],
@@ -45,11 +50,15 @@
     plugins,
     routes,
     servers,
-    trust,
     devices,
     selfId,
     disabled,
-    write,
+    setApiKey,
+    installPlugin,
+    removePlugin,
+    setPluginTrust,
+    removeServer,
+    sealHandover,
     removeDevice,
     onjoin,
     onresetkey,
@@ -60,21 +69,34 @@
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
-    keys: SettingsRow | undefined;
+    apiKeys: ConnectionsView['apiKeys'];
+    rawApiKeys: Partial<Record<LibraryApiKeyService, string>>;
     simklConnected: boolean;
     saveSimkl: (token: string | null) => Promise<boolean>;
     /** SIMKL watchlist removals held back until someone approves them (more than 20 at once). */
     heldRemovals?: { type: 'movie' | 'tv'; id: number; name?: string }[];
     approveRemovals?: () => Promise<boolean>;
-    plugins: string[];
+    plugins: readonly Immutable<LibraryPluginView>[];
     routes: Routes;
-    servers: { kind: 'jellyfin' | 'plex'; url: string; user?: string }[];
-    trust: ReadonlyMap<string, string>;
-    devices: DeviceEntry[];
+    servers: readonly {
+      readonly kind: 'jellyfin' | 'plex';
+      readonly url: string;
+      readonly user?: string;
+    }[];
+    devices: readonly Immutable<LibraryDeviceView>[];
     /** This browser's id in the device list. */
     selfId: string;
     disabled: boolean;
-    write: (group: string, changes: Changes) => Promise<boolean>;
+    setApiKey: (service: LibraryApiKeyService, value: string | null) => Promise<boolean>;
+    installPlugin: (manifestUrl: string) => Promise<boolean>;
+    removePlugin: (manifestUrl: string) => Promise<boolean>;
+    setPluginTrust: (manifestUrl: string, publicKey: string | null) => Promise<boolean>;
+    removeServer: (server: 'jellyfin' | 'plex') => Promise<boolean>;
+    sealHandover: (
+      handoverKey: string,
+      host: string,
+      linkKey: string,
+    ) => Promise<{ sealed: string; linkKey: string; inboxKey: string }>;
     /** False when the device's entry wasn't removed. */
     removeDevice: (id: string) => Promise<boolean>;
     /**
@@ -86,7 +108,7 @@
      * Moves the library to a new key, cutting off every other device (library v4 §12). Null when it moved, else why it
      * didn't. Absent where this browser can't: no linked library, or one not on v4 yet.
      */
-    onresetkey?: () => Promise<KeyResetRefusal | null>;
+    onresetkey?: () => Promise<KeyResetOutcome | null>;
     /** The library has a recovery code, which a reset ends. */
     hasRecoveryCode?: boolean;
     /** A reset whose outcome den-edge couldn't prove is held, its new key kept (`PendingReset.held`). */
@@ -96,6 +118,9 @@
     /** The library's recovery code, under Linked devices; none for a browser's own library. */
     recovery?: Snippet;
   } = $props();
+
+  const apiService = (name: KeyService['name']): LibraryApiKeyService =>
+    name === 'doesthedogdie' ? 'content-warnings' : name;
 
   /**
    * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
@@ -131,10 +156,10 @@
   };
   let checkedOnOpen = false;
   $effect(() => {
-    if (checkedOnOpen || !keys) return;
+    if (checkedOnOpen || disabled) return;
     checkedOnOpen = true;
     for (const service of KEY_SERVICES) {
-      const key = readApiKey(keys, service.name);
+      const key = rawApiKeys[apiService(service.name)];
       if (!key) continue;
       checks.set(service.name, 'checking');
       void service.check(key).then((result) => checks.set(service.name, result));
@@ -160,7 +185,7 @@
       };
       return;
     }
-    if (!(await write('keys', { [service.name]: { string: key } }))) {
+    if (!(await setApiKey(apiService(service.name), key))) {
       if (before) checks.set(service.name, before);
       else checks.delete(service.name);
       delete notes[service.name];
@@ -172,7 +197,7 @@
   }
 
   async function removeKey(service: KeyService) {
-    if (!(await write('keys', { [service.name]: null }))) return;
+    if (!(await setApiKey(apiService(service.name), null))) return;
     checks.delete(service.name);
     delete notes[service.name];
     // TMDB's terms: cached content goes when the key it was fetched with does.
@@ -210,7 +235,7 @@
     }
     addonProblem = null;
     const url = addonURL;
-    if (!(await write('plugins', { [url]: { bool: true } }))) return;
+    if (!(await installPlugin(url))) return;
     addonDraft = '';
     added = url;
   }
@@ -227,7 +252,7 @@
     const key = parsePublicKey(keyDraft);
     keyInvalid = !key;
     if (!key) return;
-    if (await write('trust', { [url]: { string: key } })) {
+    if (await setPluginTrust(url, key)) {
       pinning = null;
       keyDraft = '';
     }
@@ -355,10 +380,9 @@
         noCode = reject;
       }),
     );
-    const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
     const result = await host({
       signal: leaving.signal,
-      libraryKey,
+      seal: sealHandover,
       label: thisDevice.name,
       deviceId: selfId,
       onCode: (next) => {
@@ -462,7 +486,22 @@
     return 'computer';
   };
   const listedDevices = $derived(
-    syncedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
+    syncedDeviceRows(
+      devices.map((device) => ({
+        ...device,
+        seen: device.lastSeenAt,
+        format: device.libraryFormat,
+        pending: [],
+        facade: [],
+        delivers: [],
+        waiting: {},
+        connectedAt: {},
+        handoff: {},
+      })),
+      links.list,
+      links.shared,
+      link?.libraryKey,
+    ),
   );
 
   /**
@@ -540,8 +579,8 @@
   // Resetting the library key: every other device is cut off and pairs again; this browser keeps the library.
   let resetting = $state(false);
   let resetProblem = $state<string | null>(null);
-  const resetFailures: Record<KeyResetRefusal, string> = {
-    update_required:
+  const resetFailures: Partial<Record<KeyResetOutcome, string>> = {
+    'update-required':
       'Your library holds something only a newer version of Den can move. Update Den on your devices, then try again.',
     unavailable:
       'Couldn’t move your library to a new key, so nothing changed. Check that this device is on your network and try again.',
@@ -558,7 +597,8 @@
     const refused = await onresetkey();
     resetting = false;
     // A held reset has its own panel, with the way out.
-    if (refused && refused !== 'held') resetProblem = resetFailures[refused];
+    if (refused && refused !== 'held')
+      resetProblem = resetFailures[refused] ?? 'Couldn’t reset the library key.';
   }
 
   /**
@@ -602,11 +642,7 @@
               question="Remove your {server.kind === 'jellyfin' ? 'Jellyfin' : 'Plex'} server?"
               detail="Titles will stop playing from your own library, on every device."
               {disabled}
-              onconfirm={async () => {
-                const changes: Changes = { [server.kind]: null };
-                if (server.kind === 'jellyfin') changes['jellyfin.user'] = null;
-                if (await write('servers', changes)) await write('keys', { [server.kind]: null });
-              }}
+              onconfirm={() => void removeServer(server.kind)}
             />
           </li>
         {/each}
@@ -706,7 +742,7 @@
   </SettingRow>
 
   {#each KEY_SERVICES as service (service.name)}
-    {@const saved = !!readApiKey(keys, service.name)}
+    {@const saved = !!apiKeys[apiService(service.name)]}
     {@const note = notes[service.name]}
     <SettingRow
       id={service.name}
@@ -760,10 +796,11 @@
     <h3>Your plugins</h3>
     {#if plugins.length}
       <ul class="list">
-        {#each plugins as url (url)}
+        {#each plugins as plugin (plugin.manifestUrl)}
+          {@const url = plugin.manifestUrl}
           {@const den = denAddonOf(url, routes)}
-          {@const pinned = trust.get(url)}
-          {@const waitingOn = devices.filter((d) => d.kind === 'tv' && d.pending.includes(url))}
+          {@const pinned = plugin.signingKey}
+          {@const waitingOn = plugin.pendingApprovalOn}
           <li class="line">
             <span class="label"
               >{den?.label ?? hostOf(url)}<small
@@ -783,7 +820,7 @@
                   question="Stop verifying this plugin?"
                   detail="Den will accept its index without checking a signature, as before."
                   {disabled}
-                  onconfirm={() => void write('trust', { [url]: null })}
+                  onconfirm={() => void setPluginTrust(url, null)}
                 />
               {:else if pinning !== url}
                 <button
@@ -802,7 +839,7 @@
                 question="Remove {den?.label ?? hostOf(url)}?"
                 detail="You can add it back by its URL."
                 {disabled}
-                onconfirm={() => void write('plugins', { [url]: null })}
+                onconfirm={() => void removePlugin(url)}
               />
             </span>
             {#if pinning === url}

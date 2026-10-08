@@ -8,8 +8,6 @@ import {
   scoutTicket,
   fetchSources,
 } from './titleSources';
-import { DownloadQueue } from './downloadQueue.svelte';
-import { testClock, testLog } from './downloadTestLog';
 const addon = { install: 'http://lan:8080/config', base: '/scout/config' };
 const routes = { scout: [{ url: 'http://lan:8080' }] };
 const raw = {
@@ -230,18 +228,4 @@ it('asks to add as a prefetch, which scout holds back for Play', async () => {
   }) as typeof fetch;
   await prepareSource('/scout/p/ticket', true, network, true);
   expect(asked).toEqual(['/scout/p/ticket?prefetch=1']);
-});
-it('coalesces duplicate download presses across page instances', async () => {
-  const requests: boolean[] = [];
-  const queue = new DownloadQueue(async (_, start) => {
-    requests.push(start);
-    await Promise.resolve();
-    return { state: 'preparing' };
-  });
-  queue.attach(testLog().log, testClock('bbbbbbbbbbbbbbbb'));
-  const source = parseSources({ streams: [raw] }, addon, routes)![0]!;
-  const title = { mediaType: 'movie' as const, mediaId: 42, title: 'Film' };
-  await Promise.all([queue.start({ title, source }), queue.start({ title, source })]);
-  await queue.poll(queue.list()[0]!);
-  expect(requests).toEqual([true, false]);
 });

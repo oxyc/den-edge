@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { LibraryLog } from './log';
-import type { SettingsRow } from './wire';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { availability } from './availability.svelte';
+import type { LibraryModel } from './libraryModel.svelte';
+import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import { SessionServices } from './sessionServices.svelte';
 
+let discoveries = 0;
+let reaches: string | undefined;
 vi.mock('./discoverServices', () => ({
   discoverServices: (
     _installed: string[],
@@ -11,189 +13,148 @@ vi.mock('./discoverServices', () => ({
     publish: {
       scout?: (value: { base: string; install: string } | null) => void;
       atlas: (value: { base: string } | null) => void;
+      reel: (value: { base: string } | null) => void;
       remux?: (value: string | null) => void;
     },
   ) => {
-    discoveries++;
-    queueMicrotask(() => publish.scout?.({ base: `/scout-${discoveries}`, install: '/scout' }));
-    queueMicrotask(() => publish.atlas({ base: `/atlas-${discoveries}` }));
-    const remux = reaches;
-    if (remux) queueMicrotask(() => publish.remux?.(remux));
+    const run = ++discoveries;
+    queueMicrotask(() => publish.scout?.({ base: `/scout-${run}`, install: '/scout' }));
+    queueMicrotask(() => publish.atlas({ base: `/atlas-${run}` }));
+    queueMicrotask(() => publish.reel({ base: `/reel-${run}` }));
+    if (reaches) queueMicrotask(() => publish.remux?.(reaches!));
     return () => undefined;
   },
 }));
-vi.mock('./syncLoader', () => ({ ensureSyncPolicy: async () => undefined }));
 vi.mock('./grants.svelte', () => ({
   guestGrants: { refresh: async () => undefined, pluginUrls: () => [] },
 }));
-let discoveries = 0;
-/** Where the mocked discovery finds den-remux; undefined publishes nothing for it. */
-let reaches: string | undefined;
 
-const logWith = (plugins: string[]) =>
+const runtime = (tmdbKey: string, pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
+  kind: 'runtime',
+  tmdbKey,
+  providerKeys: { tmdb: tmdbKey },
+  pluginManifestUrls,
+  privateRemuxUrl: null,
+});
+
+const fakeModel = (overrides: Record<string, unknown> = {}) =>
   ({
-    settings: (name: string) =>
-      name === 'plugins'
-        ? {
-            kind: 'set',
-            schema: 2,
-            name,
-            values: Object.fromEntries(
-              plugins.map((url) => [url, { value: { bool: true }, at: [1, 0, 'x'] }]),
-            ),
-          }
-        : undefined,
-    kept: async () => undefined,
-    keep: async () => undefined,
-  }) as unknown as LibraryLog;
+    retainedServices: vi.fn().mockResolvedValue(null),
+    retainServices: vi.fn().mockResolvedValue(undefined),
+    rememberPrivateRemux: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  }) as unknown as LibraryModel;
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  reaches = undefined;
+});
 
 describe('SessionServices', () => {
-  it('starts member discovery from compact settings before the log hydrates', async () => {
-    discoveries = 0;
-    reaches = undefined;
-    const services = new SessionServices(
-      async () => ({}),
-      () => undefined,
-    );
-    services.configureActive({
-      tmdbKey: 'compact-key',
-      plugins: ['https://addon.test/manifest.json'],
-      remux: 'https://remux.test',
-      prefs: {
-        excludedGenres: [],
-        excludedLanguages: [],
-        hideAnime: false,
-        hideWatched: false,
-        services: [],
-        servicesConfigured: false,
-      },
-    });
-
-    await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
-    expect(services.tmdbKey).toBe('compact-key');
-    expect(services.plugins).toEqual(['https://addon.test/manifest.json']);
-    expect(discoveries).toBe(1);
-    services.stop();
-  });
-
-  it('publishes identity before yielded discovery and cancels a run replaced across that yield', async () => {
+  it('discovers once per normalized input and replaces a run cancelled across its yield', async () => {
     vi.useFakeTimers();
-    try {
-      discoveries = 0;
-      reaches = undefined;
-      let asked = 0;
-      const services = new SessionServices(
-        async () => ({ [`routes-${++asked}`]: [{ url: `/route-${asked}` }] }),
-        () => undefined,
-      );
-      const settings = (tmdbKey: string) => ({
-        tmdbKey,
-        plugins: [`https://${tmdbKey}.test/manifest.json`],
-        remux: null,
-        prefs: {
-          excludedGenres: [],
-          excludedLanguages: [],
-          hideAnime: false,
-          hideWatched: false,
-          services: [],
-          servicesConfigured: false,
-        },
-      });
+    discoveries = 0;
+    let asked = 0;
+    const services = new SessionServices(fakeModel(), async () => ({
+      [`routes-${++asked}`]: [{ url: `/route-${asked}` }],
+    }));
 
-      services.configureActive(settings('first'));
-      expect(services.tmdbKey).toBe('first');
-      expect(services.plugins).toEqual(['https://first.test/manifest.json']);
-      await Promise.resolve();
-      expect(discoveries).toBe(0);
-      expect(services.routes).toEqual({});
+    services.configure(runtime('first', ['https://first.test/manifest.json']));
+    expect(services.tmdbKey).toBe('first');
+    await Promise.resolve();
+    services.configure(runtime('second', ['https://second.test/manifest.json']));
+    await Promise.resolve();
+    await vi.runAllTimersAsync();
 
-      // Replacing the inputs while the first run is yielded must prevent its routes and probes from publishing.
-      services.configureActive(settings('second'));
-      expect(services.tmdbKey).toBe('second');
-      await Promise.resolve();
-      await vi.runAllTimersAsync();
-
-      expect(asked).toBe(2);
-      expect(discoveries).toBe(1);
-      expect(services.routes).toEqual({ 'routes-2': [{ url: '/route-2' }] });
-      services.stop();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(asked).toBe(2);
+    expect(discoveries).toBe(1);
+    expect(services.routes).toEqual({ 'routes-2': [{ url: '/route-2' }] });
+    services.stop();
+    vi.useRealTimers();
   });
 
-  it('discovers Scout but holds availability requests until the foreground is ready', async () => {
+  it('holds availability until the foreground signal', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(
-      async () => ({}),
-      () => undefined,
-    );
-    services.configure(logWith([]));
+    const services = new SessionServices(fakeModel(), async () => ({}));
+    services.configure(runtime('tmdb'));
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
-    expect(connect).not.toHaveBeenCalledWith(services.scout, expect.any(String));
+    expect(connect).not.toHaveBeenCalledWith(services.scout, 'tmdb');
 
     connect.mockClear();
     services.foregroundReady();
-    expect(connect).toHaveBeenCalledWith(services.scout, services.tmdbKey);
+    expect(connect).toHaveBeenCalledWith(services.scout, 'tmdb');
     services.stop();
   });
 
-  it('discovers once for every page, and again only when what it reads changes, keeping what it found', async () => {
-    discoveries = 0;
-    let asked = 0;
-    const services = new SessionServices(
-      async () => (asked++, {}),
-      () => undefined,
+  it('paints retained discovery while live probes are pending', async () => {
+    let release!: (routes: Record<string, Array<{ url: string }>>) => void;
+    const routes = new Promise<Record<string, Array<{ url: string }>>>(
+      (resolve) => (release = resolve),
     );
-    const log = logWith([]);
-    // Three pages mount, each asking.
-    services.configure(log);
-    services.configure(log);
-    services.configure(log);
-    await vi.waitFor(() => expect(services.atlasReady).toBe(true));
-    expect(asked).toBe(1);
-    expect(discoveries).toBe(1);
-    expect(services.atlas).toBe('/atlas-1');
-
-    // A settings change that leaves discovery's inputs alone starts nothing.
-    services.configure(logWith([]));
-    await Promise.resolve();
-    expect(asked).toBe(1);
-
-    // One that changes them asks again, and what was found stays until the new answer.
-    services.configure(logWith(['https://addon.test/manifest.json']));
-    expect(services.atlasReady).toBe(true);
-    expect(services.atlas).toBe('/atlas-1');
-    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-2'));
-    expect(asked).toBe(2);
+    const model = fakeModel({
+      retainedServices: vi.fn().mockResolvedValue({
+        routes: { retained: [{ url: '/retained' }] },
+        scout: { base: '/retained-scout', install: '/scout' },
+        atlas: '/retained-atlas',
+        reel: '/retained-reel',
+        remux: null,
+      }),
+    });
+    const services = new SessionServices(model, () => routes);
+    services.configure(runtime('tmdb'));
+    await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
+    release({ live: [{ url: '/live' }] });
+    await vi.waitFor(() => expect(services.atlas).not.toBe('/retained-atlas'));
     services.stop();
   });
 
-  it('keeps where den-remux answered without discovering again for that write', async () => {
+  it('reports discovered private remux through the semantic model command', async () => {
     discoveries = 0;
-    reaches = 'https://den-remux.tail1234.ts.net';
-    let stored: SettingsRow | undefined;
-    const log = {
-      settings: (name: string) => (name === 'addresses' ? stored : undefined),
-      newestStamp: () => [0, 0, 'x'],
-      write: async (row: SettingsRow) => ((stored = row), true),
-      kept: async () => undefined,
-      keep: async () => undefined,
-    } as unknown as LibraryLog;
-    let changes = 0;
-    const services: SessionServices = new SessionServices(
-      async () => ({}),
-      // As the session does: the settings revision moves, and every page configures again.
-      () => (changes++, services.configure(log)),
-    );
-    services.configure(log);
-    await vi.waitFor(() => expect(changes).toBe(1));
-    expect(Object.keys(stored?.values ?? {})).toEqual(['remux']);
-    expect(services.remux).toBe('https://den-remux.tail1234.ts.net');
-    await Promise.resolve();
-    expect(discoveries).toBe(1);
+    reaches = 'https://den-remux.tail.test';
+    const rememberPrivateRemux = vi.fn().mockResolvedValue(undefined);
+    const services = new SessionServices(fakeModel({ rememberPrivateRemux }), async () => ({}));
+    services.configure(runtime('tmdb'));
+    await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
+    services.stop();
     reaches = undefined;
+  });
+
+  it('cancels an old retention timer when discovery inputs change', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('scheduler', { yield: () => Promise.resolve() });
+    discoveries = 0;
+    const retainServices = vi.fn().mockResolvedValue(undefined);
+    const services = new SessionServices(fakeModel({ retainServices }), async () => ({
+      scout: [{ url: '/scout' }],
+    }));
+
+    services.configure(runtime('first'));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(services.atlas).toBe('/atlas-1');
+    services.configure(runtime('second'));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(retainServices).toHaveBeenCalledOnce();
+    expect(retainServices.mock.calls[0]?.[0]).toMatchObject({
+      scout: { base: '/scout-2' },
+      atlas: '/atlas-2',
+      reel: '/reel-2',
+    });
+    services.stop();
+  });
+
+  it('treats a rejected retained hint as a cache miss', async () => {
+    const services = new SessionServices(
+      fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
+      async () => ({}),
+    );
+    services.configure(runtime('tmdb'));
+    await vi.waitFor(() => expect(services.atlasReady).toBe(true));
+    expect(services.atlas).toBeTruthy();
     services.stop();
   });
 });
