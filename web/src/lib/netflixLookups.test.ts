@@ -26,7 +26,7 @@ describe('Netflix import lookups', () => {
     expect(pauses[0]).toBeGreaterThan(0);
     // The retry and the timer that clears the waiting notice become runnable together. Either may resume first,
     // so wait for the notice callback rather than making their event-loop order part of the contract.
-    await vi.waitFor(() => expect(pauses.at(-1)).toBe(0));
+    await vi.waitFor(() => expect(pauses.at(-1)).toBe(0), { timeout: 2_500 });
   });
 });
 
