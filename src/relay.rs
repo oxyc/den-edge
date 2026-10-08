@@ -1664,7 +1664,7 @@ pub async fn transport_reel(state: &Arc<AppState>, req: Request, rid: &str) -> R
     let observed = crate::handler::client_addr(state, &req);
     let request = match read_reel_json::<ReelTransportRequest>(req).await {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some((blob, query)) = reel_capability(&request.capability) else {
         return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
@@ -1685,7 +1685,7 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
     let observed = crate::handler::client_addr(state, &req);
     let legacy = match read_reel_json::<LegacyReelActivation>(req).await {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(capability) = legacy.media.strip_prefix("/reel/").map(str::to_owned) else {
         return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
@@ -1726,14 +1726,17 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
     direct_json(StatusCode::OK, &answer)
 }
 
-async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T, Response> {
+async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T, Box<Response>> {
     if req
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_none_or(|value| value.split(';').next().map(str::trim) != Some("application/json"))
     {
-        return Err(direct_json(StatusCode::UNSUPPORTED_MEDIA_TYPE, &error("content_type_required")));
+        return Err(Box::new(direct_json(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &error("content_type_required"),
+        )));
     }
     let body = match tokio::time::timeout(
         TIMEOUT,
@@ -1742,10 +1745,21 @@ async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T,
     .await
     {
         Ok(Ok(body)) => body,
-        Ok(Err(_)) => return Err(direct_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))),
-        Err(_) => return Err(direct_json(StatusCode::REQUEST_TIMEOUT, &error("request_timeout"))),
+        Ok(Err(_)) => {
+            return Err(Box::new(direct_json(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &error("payload_too_large"),
+            )))
+        }
+        Err(_) => {
+            return Err(Box::new(direct_json(
+                StatusCode::REQUEST_TIMEOUT,
+                &error("request_timeout"),
+            )))
+        }
     };
-    serde_json::from_slice(&body).map_err(|_| direct_json(StatusCode::BAD_REQUEST, &error("bad_request")))
+    serde_json::from_slice(&body)
+        .map_err(|_| Box::new(direct_json(StatusCode::BAD_REQUEST, &error("bad_request"))))
 }
 
 async fn build_reel_transport(

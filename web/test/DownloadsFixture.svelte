@@ -5,16 +5,13 @@
   // device, and `?device=` other than this one is how a test is "another device".
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
-  import DownloadPosterCard from '../src/components/DownloadPosterCard.svelte';
   import DownloadsPage from '../src/components/DownloadsPage.svelte';
-  import RoutePage from '../src/components/RoutePage.svelte';
   import '../src/app.css';
-  import { downloads } from '../src/lib/downloadQueue.svelte';
-  import type { Download } from '../src/lib/downloadRows';
-  import type { Title } from '../src/lib/library';
+  import { downloadStill } from '../src/lib/downloadArtwork';
   import type { LibraryLog } from '../src/lib/log';
   import { syncPolicy } from '../src/lib/syncCore';
   import { rowName, type Row, type SettingsRow, type Stamp } from '../src/lib/wire';
+  import { fixtureLibraryService } from './libraryService';
 
   const params = new URLSearchParams(location.search);
   const requestedPage = params.get('page');
@@ -36,34 +33,40 @@
   });
   let artworkActive = $state(!params.has('hidden'));
   let artworkMounted = $state(true);
-  let legacyEpisode = $state<Download>({
-    name: 'download:tv:1399:2:4',
-    content: 'tv:1399:2:4',
-    release: { identity: 'episode.mkv', label: 'Episode', url: '/scout/p/episode' },
-    title: {
-      mediaType: 'tv',
-      mediaId: 1399,
-      season: 2,
-      episode: 4,
-      title: 'Legacy episode',
-      posterPath: '/portrait.jpg',
-    },
-    queuedAt: 1,
-    queuedBy: device,
-    tried: [],
-    exhausted: false,
-    announced: false,
-    reported: false,
-    reannounced: false,
-    row: { kind: 'set', schema: 2, name: 'download:tv:1399:2:4', values: {} },
-    seq: 0,
-  });
-  const legacyTitle: Title = {
-    type: 'tv',
-    id: 1399,
-    title: 'Legacy episode',
-    posterPath: '/portrait.jpg',
+  const legacyRow = (season: number, episode: number): SettingsRow => {
+    const at: Stamp = [1, 0, device];
+    return {
+      kind: 'set',
+      schema: 2,
+      name: `download:tv:1399:${season}:${episode}`,
+      values: {
+        release: {
+          value: {
+            string: JSON.stringify({
+              identity: 'episode.mkv',
+              label: 'Episode',
+              url: '/scout/p/episode',
+            }),
+          },
+          at,
+        },
+        title: {
+          value: {
+            string: JSON.stringify({
+              mediaType: 'tv',
+              mediaId: 1399,
+              season,
+              episode,
+              title: 'Legacy episode',
+            }),
+          },
+          at,
+        },
+        queuedAt: { value: { int: 1 }, at },
+      },
+    };
   };
+  let artworkRow = legacyRow(2, 4);
   (
     window as unknown as {
       downloadsFixture: {
@@ -76,23 +79,23 @@
   ).downloadsFixture = {
     setActive: (active) => (artworkActive = active),
     setMounted: (mounted) => (artworkMounted = mounted),
-    refreshIdentity: () =>
-      (legacyEpisode = {
-        ...legacyEpisode,
-        title: { ...legacyEpisode.title },
-        row: { ...legacyEpisode.row },
-      }),
-    changeEpisode: () =>
-      (legacyEpisode = {
-        ...legacyEpisode,
-        content: 'tv:1399:3:1',
-        name: 'download:tv:1399:3:1',
-        title: { ...legacyEpisode.title, season: 3, episode: 1 },
-      }),
+    refreshIdentity: () => {
+      artworkRow = structuredClone(artworkRow);
+      held.set(rowName(artworkRow), artworkRow);
+      library.publish([{ kind: 'downloads' }]);
+    },
+    changeEpisode: () => {
+      held.delete(rowName(artworkRow));
+      artworkRow = legacyRow(3, 1);
+      held.set(rowName(artworkRow), artworkRow);
+      library.publish([{ kind: 'downloads' }]);
+    },
   };
 
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each read; the queue's `touch` redraws.
-  let held = new Map<string, SettingsRow>();
+  let held = new Map<string, SettingsRow>(
+    page === 'artwork' ? [[rowName(artworkRow), artworkRow]] : [],
+  );
   const read = async () => {
     const rows = (await (await fetch('/fixture-store/rows')).json()) as SettingsRow[];
     held = new Map(rows.map((row) => [rowName(row), row]));
@@ -108,10 +111,14 @@
   const log = {
     readOnly: false,
     wireMinimum: 4,
+    pendingActions: 0,
     rows: (): Row[] => [...held.values()],
     settings: (name: string) => held.get(`set:${name}`),
     seqOf: () => 0,
     newestStamp: newest,
+    kept: async () => undefined,
+    keep: async () => {},
+    relayMembership: async () => null,
     async write(row: SettingsRow) {
       const seen = held.get(rowName(row));
       const merged = seen ? syncPolicy<SettingsRow>({ op: 'merge', a: seen, b: row }) : row;
@@ -119,39 +126,46 @@
       held.set(rowName(merged), merged);
       return merged;
     },
-    async writeAt() {
-      return false;
+    async writeAt(row: SettingsRow) {
+      await this.write(row);
+      return true;
     },
+    close() {},
   } as unknown as LibraryLog;
-  let last: Stamp = [0, 0, device];
-  const clock = {
+  const library = fixtureLibraryService({
+    log,
     device,
-    issue(at = Date.now()) {
-      last = at > last[0] ? [at, 0, device] : [last[0], last[1] + 1, device];
-      return last;
+    ...(page === 'artwork' ? { refreshDownloads: async () => false } : {}),
+    effects: {
+      resolve: async () => ({
+        sources: [
+          source('first.mkv', '/scout/p/first', 'First release'),
+          source('second.mkv', '/scout/p/second', 'Second release'),
+        ],
+      }),
     },
-    see(stamp: Stamp) {
-      if (stamp[0] > last[0]) last = [stamp[0], stamp[1], device];
-    },
-  };
+    downloadArtwork: async (target) =>
+      target.type === 'tv'
+        ? ((await downloadStill({
+            mediaType: 'tv',
+            mediaId: target.id,
+            season: target.season,
+            episode: target.episode,
+            title: '',
+          })) ?? null)
+        : null,
+  });
 
   let ready = $state(false);
   onMount(() => {
     if (page === 'artwork') return;
     // What the library's held read does: another device's write shows here within one read.
-    const timer = setInterval(() => void read().then(() => downloads.touch()), 300);
+    const timer = setInterval(
+      () => void read().then(() => library.publish([{ kind: 'downloads' }])),
+      300,
+    );
     void read().then(() => {
-      downloads.attach(
-        log,
-        clock,
-        (url) => (url.startsWith('/scout/') ? url : null),
-        async () => ({
-          sources: [
-            source('first.mkv', '/scout/p/first', 'First release'),
-            source('second.mkv', '/scout/p/second', 'Second release'),
-          ],
-        }),
-      );
+      library.publish([{ kind: 'downloads' }]);
       ready = true;
     });
     return () => clearInterval(timer);
@@ -160,18 +174,9 @@
 
 <main style="padding:100px 20px">
   {#if page === 'artwork'}
-    <RoutePage active={artworkActive}>
-      {#if artworkMounted}
-        <DownloadPosterCard
-          download={legacyEpisode}
-          title={legacyTitle}
-          active={artworkActive}
-          menu={false}
-        />
-      {/if}
-    </RoutePage>
+    {#if artworkActive && artworkMounted}<DownloadsPage model={library.model} />{/if}
   {:else if ready && page === 'downloads'}
-    <DownloadsPage />
+    <DownloadsPage model={library.model} />
   {:else if ready}
     <Detail
       ref={{ type: 'movie', id: 42 }}
@@ -183,6 +188,7 @@
       busy={false}
       failure={null}
       notice={null}
+      model={library.model}
       onwatchlist={noop}
       onseen={noop}
       onreact={noop}
