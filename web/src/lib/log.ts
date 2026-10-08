@@ -592,7 +592,7 @@ export class LibraryLog {
   }
 
   private listenForRuntimeChanges(): void {
-    if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return;
+    if (typeof BroadcastChannel === 'undefined') return;
     try {
       this.runtimeChannel = new BroadcastChannel(`den-library-runtime:${this.keys.id}`);
       this.runtimeChannel.onmessage = (event: MessageEvent<{ key?: string; value?: string }>) => {

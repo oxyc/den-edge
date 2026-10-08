@@ -128,6 +128,31 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('listens for runtime changes in a Worker global without window', async () => {
+    const opened: string[] = [];
+    class WorkerChannel {
+      onmessage: ((event: MessageEvent<{ key?: string; value?: string }>) => void) | null = null;
+      constructor(name: string) {
+        opened.push(name);
+      }
+      postMessage() {}
+      close() {}
+    }
+    vi.stubGlobal('window', undefined);
+    vi.stubGlobal('BroadcastChannel', WorkerChannel);
+    try {
+      const server = await edge();
+      const { vault } = memoryVault();
+
+      await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault);
+
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatch(/^den-library-runtime:/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('imports legacy runtime state once, with an existing vault value winning', async () => {
     const { data: legacy, storage } = memoryStorage();
     const { data, vault } = memoryVault();
