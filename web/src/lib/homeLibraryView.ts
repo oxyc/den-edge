@@ -350,7 +350,15 @@ export function continueWithShapes(
   view: HomeLibraryView,
   shapes: ReadonlyArray<readonly [string, Shape]>,
 ): ActiveHomeContinueCandidate[] {
-  const library = { ...view.continueLibrary, shapes: new Map(shapes) };
+  return continueLibraryWithShapes(view.continueLibrary, shapes);
+}
+
+/** Re-run compact Continue policy after the Worker-owned snapshot has hydrated onto the page. */
+export function continueLibraryWithShapes(
+  continueLibrary: Library,
+  shapes: ReadonlyArray<readonly [string, Shape]>,
+): ActiveHomeContinueCandidate[] {
+  const library = { ...continueLibrary, shapes: new Map(shapes) };
   return withExistingContinueTitles(new ContinueProjector().project(library), library);
 }
 
