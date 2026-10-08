@@ -1,6 +1,10 @@
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type {
   ContinueView,
+  DownloadReleaseDescriptor,
+  DownloadTarget,
+  DownloadTitleDescriptor,
+  DownloadsView,
   EpisodeRef,
   HistoryView,
   LibraryCommand,
@@ -66,7 +70,7 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
   { kind: Kind }
 >;
 
-type LeasedView = HistoryView | TitleView | PresenceView;
+type LeasedView = HistoryView | DownloadsView | TitleView | PresenceView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
@@ -79,6 +83,7 @@ export class LibraryModel {
   #openFailure = $state.raw<Immutable<LibraryServiceFailure> | undefined>();
   readonly #rootStops: Array<() => void> = [];
   #history?: SharedSelection<HistoryView>;
+  #downloads?: SharedSelection<DownloadsView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
@@ -131,6 +136,17 @@ export class LibraryModel {
       () => (this.#history = undefined),
     );
     return this.#history.acquire();
+  }
+
+  /** Downloads stay lazy because only the Downloads/settings surfaces render the queue. */
+  downloads(): LibraryModelLease<DownloadsView> {
+    this.#assertOpen();
+    this.#downloads ??= new SharedSelection<DownloadsView>(
+      this.service,
+      { kind: 'downloads' },
+      () => (this.#downloads = undefined),
+    );
+    return this.#downloads.acquire();
   }
 
   get settings(): LibraryModelSnapshot<SettingsView> {
@@ -266,6 +282,38 @@ export class LibraryModel {
     return this.#command({ kind: 'preferences.patch', patch }, operationId);
   }
 
+  enqueueDownload(
+    title: DownloadTitleDescriptor,
+    release: DownloadReleaseDescriptor,
+    candidates?: number,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command(
+      {
+        kind: 'download.enqueue',
+        title,
+        release,
+        ...(candidates === undefined ? {} : { candidates }),
+      },
+      operationId,
+    );
+  }
+
+  removeDownload(
+    target: DownloadTarget,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'download.remove', target }, operationId);
+  }
+
+  tryDownloadRelease(
+    target: DownloadTarget,
+    release: DownloadReleaseDescriptor,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'download.release.try', target, release }, operationId);
+  }
+
   preparePlayback(
     title: TitleRef,
     episode?: EpisodeRef,
@@ -297,6 +345,8 @@ export class LibraryModel {
     this.#continue = closedSnapshot(this.#continue);
     this.#history?.close();
     this.#history = undefined;
+    this.#downloads?.close();
+    this.#downloads = undefined;
     this.#settings = closedSnapshot(this.#settings);
     this.#connection = 'closed';
     this.#status = Object.freeze({ kind: 'closed' });
@@ -340,6 +390,7 @@ class SharedSelection<View extends LeasedView> {
     service: LibraryModelService,
     selection:
       | { kind: 'history' }
+      | { kind: 'downloads' }
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,

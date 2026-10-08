@@ -78,6 +78,7 @@ class FakeService {
     query: LibraryQuery,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     this.queries.push(query);
+    if (query.kind !== 'playback.prepare') throw new Error(`unexpected query: ${query.kind}`);
     return {
       result: {
         kind: 'playback.prepare',
@@ -154,6 +155,11 @@ const historyValue = (): LibrarySelectionValue => ({
   items: [{ title: { type: 'movie', id: 2 }, watchedAt: 100, episodes: 0 }],
 });
 
+const downloadsValue = (): LibrarySelectionValue => ({
+  kind: 'downloads',
+  items: [],
+});
+
 const settingsValue = (): LibrarySelectionValue => ({
   kind: 'settings',
   preferences: {
@@ -172,7 +178,7 @@ const settingsValue = (): LibrarySelectionValue => ({
   },
 });
 
-it('opens only Home-critical roots and keeps watched history lazy', async () => {
+it('opens only Home-critical roots and keeps history and downloads lazy', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
 
@@ -199,6 +205,13 @@ it('opens only Home-critical roots and keeps watched history lazy', async () => 
   service.publish({ kind: 'history' }, historyValue(), 5);
   expect(history.snapshot.value?.items[0]).toMatchObject({ watchedAt: 100 });
   history.release();
+  expect(service.subscriptions.at(-1)?.stopped).toBe(true);
+
+  const downloads = model.downloads();
+  expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'downloads' });
+  service.publish({ kind: 'downloads' }, downloadsValue(), 6);
+  expect(downloads.snapshot.value).toEqual({ kind: 'downloads', items: [] });
+  downloads.release();
   expect(service.subscriptions.at(-1)?.stopped).toBe(true);
 
   const before = model.continueWatching;
@@ -285,6 +298,42 @@ it('forwards semantic commands, playback queries, and observations without UI po
     episodes: [1, 2, 3],
     watched: true,
   });
+  const downloadTitle = { target: episode, name: 'Episode Three' };
+  const downloadRelease = {
+    identity: 'release-one',
+    label: 'Release One',
+    url: '/scout/p/ticket',
+  };
+  await model.enqueueDownload(downloadTitle, downloadRelease, 3, 'download-one');
+  await model.tryDownloadRelease(
+    episode,
+    { ...downloadRelease, identity: 'release-two' },
+    'download-two',
+  );
+  await model.removeDownload(episode, 'download-remove');
+  expect(service.commands.slice(-3)).toEqual([
+    {
+      command: {
+        kind: 'download.enqueue',
+        title: downloadTitle,
+        release: downloadRelease,
+        candidates: 3,
+      },
+      operationId: 'download-one',
+    },
+    {
+      command: {
+        kind: 'download.release.try',
+        target: episode,
+        release: { ...downloadRelease, identity: 'release-two' },
+      },
+      operationId: 'download-two',
+    },
+    {
+      command: { kind: 'download.remove', target: episode },
+      operationId: 'download-remove',
+    },
+  ]);
   await expect(model.preparePlayback(title, episode)).resolves.toMatchObject({
     result: { kind: 'playback.prepare', action: 'resume', target: episode },
   });
