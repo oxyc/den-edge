@@ -1,14 +1,11 @@
 import { LIVE_PULL_MS } from './livePosition';
 import { browserClock } from './clock';
-import { LibraryLog } from './log';
-import { dueAtLaunch, markReconciled, reconcile, recoveryContext } from './recovery';
-import { deliverSimkl } from './simklDelivery';
-import { driveDownloads } from './downloadDriver';
+import type { LibraryLog } from './log';
+import { loadLibraryLog } from './libraryLogLoader';
 import { downloads } from './downloadQueue.svelte';
 import type { DownloadTitle } from './downloadRows';
 import { fetchImdbId } from './tmdb';
 import { fetchSourceList, scoutTicket, type SourceAnswer, type TitleSource } from './titleSources';
-import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import {
   applyLog,
   applyLogInSlices,
@@ -206,6 +203,7 @@ export class LibrarySession {
       if (!this.active) return null;
       if (!opened && this.key !== null) {
         try {
+          const LibraryLog = await loadLibraryLog();
           opened = await LibraryLog.open(this.key);
         } catch {
           opened = null;
@@ -262,6 +260,7 @@ export class LibrarySession {
           forgetLibraryCredential();
           if (!this.log) {
             const before = this.log;
+            const LibraryLog = await loadLibraryLog();
             const opened = await LibraryLog.openLocal(this.key);
             if (!opened) {
               if (this.log === before) this.log = null;
@@ -269,7 +268,10 @@ export class LibrarySession {
             }
             if (!(await this.publishOpened(before, opened, true))) return;
           }
-          if (this.log && (await upgradeLibrary(this.log, true))) this.changed(true);
+          if (this.log) {
+            const { upgradeLibrary } = await import('./libraryUpgrade');
+            if (await upgradeLibrary(this.log, true)) this.changed(true);
+          }
           return;
         }
         if (!this.log && this.activeHome) return;
@@ -289,6 +291,7 @@ export class LibrarySession {
             this.adoptActiveHome(engine.payload, engine);
             return;
           }
+          const LibraryLog = await loadLibraryLog();
           const opened = await LibraryLog.open(this.key);
           if (!opened) {
             if (this.log === before) this.log = null;
@@ -304,6 +307,7 @@ export class LibrarySession {
           JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => log.settings(name)));
         const before = settings();
         if (await log.refresh()) this.changed(before !== settings());
+        const { switchLibraryToV4, upgradeLibrary } = await import('./libraryUpgrade');
         if (await upgradeLibrary(log, false)) this.changed(true);
         if (await switchLibraryToV4(log)) {
           this.changed(true);
@@ -319,7 +323,10 @@ export class LibrarySession {
           // every 30 s (5 s while something plays), so a renewal due at 60 s always lands. A tick slower than 120 s
           // would make den-core stop the hold, and the page would wait ten minutes to take it back.
           const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
-          if (visible && (await driveDownloads(log, downloads, this.device))) this.changed();
+          if (visible) {
+            const { driveDownloads } = await import('./downloadDriver');
+            if (await driveDownloads(log, downloads, this.device)) this.changed();
+          }
         }
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
@@ -338,6 +345,7 @@ export class LibrarySession {
    * each generation change once the write-back is done. Settings reconciles again when its screen opens.
    */
   private async reconcileRecovery(log: LibraryLog, key: string): Promise<void> {
+    const { dueAtLaunch, markReconciled, reconcile, recoveryContext } = await import('./recovery');
     if (log.moved) return;
     const generations = log.generationChanges;
     const ctx = await recoveryContext(key, log, browserClock());
@@ -429,6 +437,7 @@ export class LibrarySession {
 
   private async runSimkl(log: LibraryLog): Promise<void> {
     try {
+      const { deliverSimkl } = await import('./simklDelivery');
       if ((await deliverSimkl(log, this.device)) && this.active && this.log === log) this.changed();
     } catch (error) {
       console.warn('den: SIMKL delivery failed', error);

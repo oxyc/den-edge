@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
+  import { loadHls } from '../lib/hlsLoader';
   import {
     cropStyle,
     fetchSources,
@@ -515,7 +516,7 @@
     if (!player || !master) return;
     let live = true;
     let engine: Hls | undefined;
-    const starting = import('hls.js').then(({ default: Hls }) => {
+    const starting = loadHls().then(({ default: Hls }) => {
       if (!live) return;
       if (!Hls.isSupported()) {
         nextTrailer();

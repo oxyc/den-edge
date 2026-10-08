@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { warmHls } from './hlsLoader';
 import { forgetWarmOnIntent, warmOnIntent } from './warmOnIntent';
+
+vi.mock('./hlsLoader', () => ({ warmHls: vi.fn() }));
 
 /** A press that lands on a link to `href`, or on nothing that is a link at all. */
 const press = (on: EventTarget, href: string | null) => {
@@ -15,7 +18,10 @@ const press = (on: EventTarget, href: string | null) => {
 
 // The listener and the last-pressed title are module state, so one test's registration would otherwise
 // decide whether the next one registers a listener of its own.
-afterEach(forgetWarmOnIntent);
+afterEach(() => {
+  forgetWarmOnIntent();
+  vi.mocked(warmHls).mockClear();
+});
 
 describe('warmOnIntent', () => {
   it('warms the title a press is heading to', () => {
@@ -24,6 +30,18 @@ describe('warmOnIntent', () => {
     warmOnIntent((ref) => warmed.push(ref), on);
     press(on, '/movie/42-the-movie');
     expect(warmed).toEqual([{ type: 'movie', id: 42 }]);
+  });
+
+  it('starts the split trailer engine only on a title pointerdown, not startup or hover', () => {
+    const on = new EventTarget();
+    warmOnIntent(() => {}, on);
+    expect(warmHls, 'registration is Home startup, not playback intent').not.toHaveBeenCalled();
+
+    on.dispatchEvent(new Event('pointerover'));
+    expect(warmHls, 'hover must not add playback network fanout').not.toHaveBeenCalled();
+
+    press(on, '/movie/42-the-movie');
+    expect(warmHls).toHaveBeenCalledOnce();
   });
 
   /**
@@ -52,6 +70,10 @@ describe('warmOnIntent', () => {
     press(on, '/movie/42-the-movie');
     press(on, '/movie/42-the-movie');
     expect(warmed, 'a second press tells reel nothing it is not already doing').toHaveLength(1);
+    expect(
+      warmHls,
+      'the shared module load follows the same title de-duplication',
+    ).toHaveBeenCalledOnce();
     press(on, '/tv/7-a-series');
     expect(warmed).toEqual([
       { type: 'movie', id: 42 },

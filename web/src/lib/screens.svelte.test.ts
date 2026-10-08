@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Component } from 'svelte';
 import {
   HOME_SCREEN_PRELOADS,
+  DownloadsScreen,
   lazy,
   permitsScreenPreload,
   PlayerScreen,
@@ -55,6 +56,7 @@ describe('screen preloading', () => {
   it('leaves heavy and uncommon routes to explicit intent', () => {
     const preloaded = HOME_SCREEN_PRELOADS.flat();
     expect(preloaded).not.toContain(SettingsScreen);
+    expect(preloaded).not.toContain(DownloadsScreen);
     expect(preloaded).not.toContain(PlayerScreen);
     expect(preloaded).not.toContain(ServiceScreen);
     expect(preloaded).not.toContain(WatchlistScreen);

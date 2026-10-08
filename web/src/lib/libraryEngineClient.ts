@@ -8,7 +8,8 @@ import type {
   LibraryEngineProjection,
   LibraryEngineReply,
 } from './libraryEngine';
-import { LibraryLog, type LibraryLogSnapshotEntry, type LibraryLogSnapshotHeader } from './log';
+import type { LibraryLog, LibraryLogSnapshotEntry, LibraryLogSnapshotHeader } from './log';
+import { loadLibraryLog } from './libraryLogLoader';
 import { useLibraryCredential } from './relayFetch';
 import { deriveKeys } from './wire';
 
@@ -134,6 +135,8 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
     };
     const hydrate = () =>
       (hydration ??= (async () => {
+        // Fetch the mutable-log code beside the Worker's chunked transfer, not on Home's compact startup path.
+        const logClass = loadLibraryLog();
         const entries: LibraryLogSnapshotEntry[] = [];
         let header: LibraryLogSnapshotHeader | undefined;
         let projection: LibraryEngineProjection | undefined;
@@ -157,6 +160,7 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
           }
           if (!header) throw new Error('library engine hydration omitted its header');
           if (!projection) throw new Error('library engine hydration omitted its projection');
+          const LibraryLog = await logClass;
           const log = await LibraryLog.importSnapshot(key, { header, entries });
           return log ? { log, projection } : null;
         } catch {
