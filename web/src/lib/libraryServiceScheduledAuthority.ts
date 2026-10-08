@@ -64,6 +64,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   #running?: Promise<void>;
   #deliveryRunning?: Promise<void>;
   #deliveryPending = false;
+  #deliveryWaitsForMaintenance = false;
   #foregroundReady = false;
   #lastStatus?: LibraryAuthorityStatus;
   #halted = false;
@@ -113,8 +114,10 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     const previousInterval = this.#interval();
     this.#lifecycle = structuredClone(observation);
     const eligible = this.#eligible();
-    if (!eligible) this.#cancelTimer();
-    else if (!wasEligible) this.#schedule(0);
+    if (!eligible) {
+      this.#cancelTimer();
+      this.#deliveryWaitsForMaintenance = false;
+    } else if (!wasEligible) this.#schedule(0);
     else if (this.#interval() !== previousInterval) this.#schedule(this.#interval());
     return result;
   }
@@ -129,6 +132,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (this.#closed) return;
     this.#closed = true;
     this.#cancelTimer();
+    this.#deliveryWaitsForMaintenance = false;
     this.#stopAuthority?.();
     this.#stopBackground?.();
     this.#listeners.clear();
@@ -151,6 +155,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (this.#closed || !this.#eligible()) return;
     // Local libraries have no remote log to poll. They get one foreground maintenance pass for upgrades only.
     if (this.maintenance.mode === 'local' && this.#running) return;
+    this.#deliveryWaitsForMaintenance = delay === 0 && this.#foregroundReady;
     this.#timer = this.#setTimer(
       () => {
         this.#timer = undefined;
@@ -207,6 +212,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#running = running;
     void running.finally(() => {
       if (this.#running === running) this.#running = undefined;
+      this.#deliveryWaitsForMaintenance = false;
       this.#requestDelivery();
       if (!this.#closed && this.#eligible() && this.maintenance.mode === 'online') {
         const elapsed = Math.max(0, this.#now() - started);
@@ -225,6 +231,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
       this.maintenance.mode !== 'online'
     )
       return;
+    if (this.#deliveryWaitsForMaintenance) return;
     if (this.#running) {
       return;
     }
@@ -254,6 +261,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (event.kind === 'status' && event.status.kind === 'moved') {
       this.#halted = true;
       this.#cancelTimer();
+      this.#deliveryWaitsForMaintenance = false;
     }
     for (const listener of this.#listeners)
       try {

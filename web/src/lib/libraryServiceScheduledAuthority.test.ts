@@ -268,6 +268,7 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(delivery).not.toHaveBeenCalled();
 
     await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
     expect(delivery).toHaveBeenCalledOnce();
     await scheduled.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'add');
     await scheduled.command({ kind: 'watchlist.add', title: { type: 'movie', id: 2 } }, 'add-2');
