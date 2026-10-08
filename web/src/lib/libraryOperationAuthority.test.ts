@@ -74,4 +74,31 @@ describe('DurableOperationAuthority', () => {
       failure: { code: 'conflict', retryable: false },
     });
   });
+
+  it('does not journal an incomplete import so the same operation can resume', async () => {
+    const stored = storedLog();
+    const authority = base();
+    vi.mocked(authority.task)
+      .mockResolvedValueOnce({
+        result: { kind: 'history.import', written: 250, total: 300, complete: false },
+        affected: [{ kind: 'history' }],
+      })
+      .mockResolvedValueOnce({
+        result: { kind: 'history.import', written: 50, total: 50, complete: true },
+        affected: [{ kind: 'history' }],
+      });
+    const wrapped = new DurableOperationAuthority(authority, stored.log);
+    const task = {
+      kind: 'history.import' as const,
+      items: [{ title: { type: 'movie' as const, id: 1 }, watchedAt: 10 }],
+    };
+
+    await expect(wrapped.task(task, 'import-1')).resolves.toMatchObject({
+      result: { complete: false },
+    });
+    await expect(wrapped.task(task, 'import-1')).resolves.toMatchObject({
+      result: { complete: true },
+    });
+    expect(authority.task).toHaveBeenCalledTimes(2);
+  });
 });

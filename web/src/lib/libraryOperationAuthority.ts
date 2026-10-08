@@ -100,6 +100,13 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
     }
 
     const result = await work();
+    const taskResult = result as LibraryAuthorityTaskResult;
+    if (
+      kind === 'task' &&
+      taskResult.result.kind === 'history.import' &&
+      !taskResult.result.complete
+    )
+      return result;
     entries.push({ kind, operationId, request: requestText, result } as Entry);
     if (entries.length > LIMIT) entries.splice(0, entries.length - LIMIT);
     await this.log.keep(JOURNAL, entries);
