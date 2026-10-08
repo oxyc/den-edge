@@ -17,6 +17,21 @@ import {
 } from './actions';
 import type { ClockStore } from './clockStore';
 import { episodeProgress } from './detailPresentation';
+import {
+  contentKey,
+  deviceName,
+  downloadName,
+  emptyRow,
+  readDownload,
+  readDownloads,
+  releaseValue,
+  removedRow,
+  titleValue,
+  withValues,
+  type Download,
+  type DownloadRelease,
+  type DownloadTitle,
+} from './downloadRows';
 import { watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import {
@@ -31,6 +46,8 @@ import {
 } from './library';
 import type {
   EpisodeRef,
+  DownloadReleaseDescriptor,
+  DownloadTarget,
   LibraryCommand,
   LibraryObservation,
   LibraryQuery,
@@ -51,6 +68,7 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog } from './log';
 import { recordTrackerEvent } from './trackerEvents';
+import { syncPolicy } from './syncCore';
 import { change as preferenceChange, readSyncedPrefs, type PrefChanges } from '../settings/values';
 import {
   compareStamps,
@@ -59,6 +77,7 @@ import {
   type Row,
   type SettingsRow,
   type TitleRow,
+  type Stamped,
 } from './wire';
 
 type Delivery = 'synced' | 'queued' | 'local';
@@ -116,6 +135,49 @@ const effectiveStanding = (
   return row.status.value === 'inProgress' ? 'in-progress' : row.status.value;
 };
 
+interface DurableDownloadStatus {
+  state:
+    | 'starting'
+    | 'fetching'
+    | 'not_started'
+    | 'refused'
+    | 'paused'
+    | 'unreachable'
+    | 'ready'
+    | 'no_working_release'
+    | 'release_gone'
+    | null;
+  service?: string;
+  until?: number;
+  clock: { lastProgress: number; progressAt: number };
+  stalled: boolean;
+}
+
+const publicRelease = (
+  release: DownloadRelease | NonNullable<DownloadRelease['hedge']>,
+  fallbackLabel?: string,
+): Omit<DownloadReleaseDescriptor, 'url'> => ({
+  identity: release.identity,
+  label: release.label ?? fallbackLabel ?? release.identity,
+  ...(release.sizeBytes !== undefined ? { sizeBytes: release.sizeBytes } : {}),
+  ...(release.cached !== undefined ? { cached: release.cached } : {}),
+});
+
+const downloadPhase = (
+  state: NonNullable<DurableDownloadStatus['state']>,
+): 'queued' | 'downloading' | 'trouble' | 'ready' => {
+  if (state === 'ready') return 'ready';
+  if (state === 'fetching') return 'downloading';
+  if (
+    state === 'refused' ||
+    state === 'unreachable' ||
+    state === 'release_gone' ||
+    state === 'no_working_release'
+  )
+    return 'trouble';
+  return 'queued';
+};
+
 /**
  * The production domain boundary around one `LibraryLog`.
  *
@@ -160,10 +222,7 @@ export class LibraryLogAuthority {
       case 'settings':
         return this.#settings();
       case 'downloads':
-        throw authorityError(
-          'invalid-request',
-          `${selection.kind} selection is not implemented by the log authority`,
-        );
+        return this.#downloads();
     }
   }
 
@@ -210,6 +269,12 @@ export class LibraryLogAuthority {
         return this.#progress(command);
       case 'preferences.patch':
         return this.#patchPreferences(command.patch);
+      case 'download.enqueue':
+        return this.#enqueueDownload(command);
+      case 'download.remove':
+        return this.#removeDownload(command.target);
+      case 'download.release.try':
+        return this.#tryDownloadRelease(command.target, command.release);
     }
   }
 
@@ -409,6 +474,59 @@ export class LibraryLogAuthority {
         ).slice(0, 256),
         services,
       },
+    };
+  }
+
+  #downloads(): Extract<LibrarySelectionValue, { kind: 'downloads' }> {
+    return {
+      kind: 'downloads',
+      items: readDownloads(this.#log.rows()).map((download) => {
+        const durable = syncPolicy<DurableDownloadStatus>({
+          op: 'download_status',
+          row: download.row,
+          now: Date.now(),
+        });
+        const state = durable.state ?? 'starting';
+        const fraction = Math.max(
+          0,
+          Math.min(1, download.progress?.lastProgress ?? durable.clock.lastProgress),
+        );
+        return {
+          content: download.content,
+          title: { type: download.title.mediaType, id: download.title.mediaId },
+          name: download.title.title || download.release.label,
+          ...(download.title.imdbId ? { imdbId: download.title.imdbId } : {}),
+          ...(download.title.season !== undefined ? { season: download.title.season } : {}),
+          ...(download.title.episode !== undefined ? { episode: download.title.episode } : {}),
+          ...(download.title.posterPath ? { posterPath: download.title.posterPath } : {}),
+          ...(download.title.stillPath ? { stillPath: download.title.stillPath } : {}),
+          queuedAt: download.queuedAt,
+          queuedBy: {
+            device: download.queuedBy,
+            ...(deviceName(this.#log.settings('devices'), download.queuedBy)
+              ? { name: deviceName(this.#log.settings('devices'), download.queuedBy) }
+              : {}),
+          },
+          release: publicRelease(download.release),
+          ...(download.release.hedge
+            ? { alternate: publicRelease(download.release.hedge, download.release.label) }
+            : {}),
+          status: {
+            state: state.replaceAll('_', '-') as Extract<
+              LibrarySelectionValue,
+              { kind: 'downloads' }
+            >['items'][number]['status']['state'],
+            phase: downloadPhase(state),
+            ...(fraction > 0 ? { fraction } : {}),
+            ...(durable.service ? { service: durable.service } : {}),
+            ...(durable.until !== undefined ? { until: durable.until } : {}),
+            stalled: durable.stalled,
+          },
+          tried: new Set([...download.tried, download.release.identity]).size,
+          ...(download.candidates !== undefined ? { candidates: download.candidates } : {}),
+          announced: download.announced,
+        };
+      }),
     };
   }
 
@@ -658,6 +776,119 @@ export class LibraryLogAuthority {
     const values = { ...base.values };
     for (const [name, value] of changed) values[name] = { value, at };
     return this.#writeRow({ ...base, values }, [{ kind: 'settings' }]);
+  }
+
+  async #enqueueDownload(
+    command: Extract<LibraryCommand, { kind: 'download.enqueue' }>,
+  ): Promise<LibraryAuthorityCommandResult> {
+    const target = command.title.target;
+    const name = downloadName(
+      contentKey(
+        target.type,
+        target.id,
+        target.type === 'tv' ? target.season : undefined,
+        target.type === 'tv' ? target.episode : undefined,
+      ),
+    );
+    const existing = this.#log.settings(name);
+    const current = existing ? readDownload(existing) : null;
+    await this.#clock.see(this.#log.newestStamp());
+    const now = Date.now();
+    if (
+      existing &&
+      current &&
+      current.release.identity === command.release.identity &&
+      !current.exhausted
+    ) {
+      const at = await this.#clock.issue(now);
+      return this.#writeRow(withValues(existing, { queuedAt: { value: { int: now }, at } }), [
+        { kind: 'downloads' },
+      ]);
+    }
+
+    const values: Record<string, Stamped<ConfigValue | null>> = {};
+    const base = existing ?? emptyRow(name);
+    if (existing) values.removed = { value: { bool: true }, at: await this.#clock.issue(now) };
+    const at = await this.#clock.issue(now);
+    const release: DownloadRelease = command.release;
+    const title: DownloadTitle = {
+      mediaType: target.type,
+      mediaId: target.id,
+      ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
+      title: command.title.name,
+      ...(command.title.imdbId ? { imdbId: command.title.imdbId } : {}),
+      ...(command.title.posterPath ? { posterPath: command.title.posterPath } : {}),
+      ...(command.title.stillPath ? { stillPath: command.title.stillPath } : {}),
+      ...(command.title.originalLanguage
+        ? { originalLanguage: command.title.originalLanguage }
+        : {}),
+      ...(readSyncedPrefs(this.#log.settings('prefs')).audioLanguage
+        ? { preferredLanguage: readSyncedPrefs(this.#log.settings('prefs')).audioLanguage }
+        : {}),
+    };
+    values.release = { value: releaseValue(release), at };
+    values.title = { value: titleValue(title), at };
+    values.queuedAt = { value: { int: now }, at };
+    if (command.candidates !== undefined)
+      values.candidates = { value: { int: command.candidates }, at };
+    return this.#writeRow(withValues(base, values), [{ kind: 'downloads' }]);
+  }
+
+  async #removeDownload(target: DownloadTarget): Promise<LibraryAuthorityCommandResult> {
+    const download = this.#download(target);
+    if (!download) return this.#unchanged();
+    await this.#clock.see(this.#log.newestStamp());
+    return this.#writeRow(removedRow(download.row, await this.#clock.issue()), [
+      { kind: 'downloads' },
+    ]);
+  }
+
+  async #tryDownloadRelease(
+    target: DownloadTarget,
+    release: DownloadReleaseDescriptor,
+  ): Promise<LibraryAuthorityCommandResult> {
+    const download = this.#download(target);
+    if (!download) throw authorityError('not-found', 'download is no longer in the queue');
+    if (
+      release.identity === download.release.identity ||
+      release.identity === download.release.hedge?.identity
+    )
+      return this.#unchanged();
+    if (download.release.hedge)
+      throw authorityError('conflict', 'download is already trying an alternate release', true);
+    await this.#clock.see(this.#log.newestStamp());
+    const now = Date.now();
+    const at = await this.#clock.issue(now);
+    return this.#writeRow(
+      withValues(download.row, {
+        release: {
+          value: releaseValue({
+            ...download.release,
+            hedge: {
+              ...release,
+              queuedAt: now,
+              lastProgress: 0,
+              progressAt: now,
+            },
+          }),
+          at,
+        },
+      }),
+      [{ kind: 'downloads' }],
+    );
+  }
+
+  #download(target: DownloadTarget): Download | null {
+    const name = downloadName(
+      contentKey(
+        target.type,
+        target.id,
+        target.type === 'tv' ? target.season : undefined,
+        target.type === 'tv' ? target.episode : undefined,
+      ),
+    );
+    const row = this.#log.settings(name);
+    return row ? readDownload(row) : null;
   }
 
   #preparePlayback(title: TitleRef, requested?: EpisodeRef): LibraryQueryResult {

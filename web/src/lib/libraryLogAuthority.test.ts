@@ -476,10 +476,87 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
-  it('reports protocol surfaces it does not implement', async () => {
+  it('owns download enqueue, alternate, projection, and removal without exposing tickets', async () => {
     const { authority } = await localAuthority();
-    await expect(authority.select({ kind: 'downloads' })).rejects.toMatchObject({
-      failure: { code: 'invalid-request', retryable: false },
+    await expect(authority.select({ kind: 'downloads' })).resolves.toEqual({
+      kind: 'downloads',
+      items: [],
+    });
+
+    const title = {
+      target: movie,
+      name: 'Seven',
+      imdbId: 'tt0000007',
+      posterPath: '/seven.jpg',
+      originalLanguage: 'en',
+    };
+    const release = {
+      identity: 'release-one',
+      label: 'Release One',
+      url: '/scout/p/secret-one',
+      sizeBytes: 7_000,
+      cached: true,
+    };
+    await expect(
+      authority.command(
+        { kind: 'download.enqueue', title, release, candidates: 2 },
+        'download-enqueue',
+      ),
+    ).resolves.toMatchObject({
+      outcome: 'applied',
+      affected: [{ kind: 'downloads' }],
+    });
+    await expect(authority.select({ kind: 'downloads' })).resolves.toMatchObject({
+      kind: 'downloads',
+      items: [
+        {
+          content: 'movie:7:-1:-1',
+          title: movie,
+          name: 'Seven',
+          imdbId: 'tt0000007',
+          posterPath: '/seven.jpg',
+          queuedAt: expect.any(Number),
+          queuedBy: { device: '0123456789abcdef' },
+          release: {
+            identity: 'release-one',
+            label: 'Release One',
+            sizeBytes: 7_000,
+            cached: true,
+          },
+          status: { phase: 'queued', stalled: false },
+          tried: 1,
+          candidates: 2,
+          announced: false,
+        },
+      ],
+    });
+    const projected = await authority.select({ kind: 'downloads' });
+    expect(JSON.stringify(projected)).not.toContain('secret-one');
+
+    await expect(
+      authority.command(
+        {
+          kind: 'download.release.try',
+          target: movie,
+          release: {
+            identity: 'release-two',
+            label: 'Release Two',
+            url: '/scout/p/secret-two',
+          },
+        },
+        'download-alternate',
+      ),
+    ).resolves.toMatchObject({ affected: [{ kind: 'downloads' }] });
+    await expect(authority.select({ kind: 'downloads' })).resolves.toMatchObject({
+      items: [{ alternate: { identity: 'release-two', label: 'Release Two' } }],
+    });
+
+    await expect(
+      authority.command({ kind: 'download.remove', target: movie }, 'download-remove'),
+    ).resolves.toMatchObject({ affected: [{ kind: 'downloads' }] });
+    await expect(authority.select({ kind: 'downloads' })).resolves.toEqual({
+      kind: 'downloads',
+      items: [],
     });
   });
 });

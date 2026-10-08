@@ -46,6 +46,28 @@ export interface LibraryWatchedSetCommand {
   watched: boolean;
 }
 
+/** A title or exact episode that can have one durable download request. */
+export type DownloadTarget = (TitleRef & { type: 'movie' }) | EpisodeRef;
+
+/** Presentation metadata retained with a download so every device can render it without refetching title detail. */
+export interface DownloadTitleDescriptor {
+  target: DownloadTarget;
+  name: string;
+  imdbId?: string;
+  posterPath?: string;
+  stillPath?: string;
+  originalLanguage?: string;
+}
+
+/** One source release. Its URL is a play-ticket capability, not a durable-row or transport concern. */
+export interface DownloadReleaseDescriptor {
+  identity: string;
+  label: string;
+  url: string;
+  sizeBytes?: number;
+  cached?: boolean;
+}
+
 export type LibraryCommand =
   | { kind: 'watchlist.add'; title: TitleRef }
   | { kind: 'library.remove'; title: TitleRef }
@@ -69,7 +91,21 @@ export type LibraryCommand =
       seconds: number;
       observedAt: number;
     }
-  | { kind: 'preferences.patch'; patch: LibraryPreferencesPatch };
+  | { kind: 'preferences.patch'; patch: LibraryPreferencesPatch }
+  | {
+      kind: 'download.enqueue';
+      title: DownloadTitleDescriptor;
+      release: DownloadReleaseDescriptor;
+      /** Number of viable releases in the source list this release was selected from. */
+      candidates?: number;
+    }
+  | { kind: 'download.remove'; target: DownloadTarget }
+  | {
+      /** Preserve the current partial release and try this release beside it. */
+      kind: 'download.release.try';
+      target: DownloadTarget;
+      release: DownloadReleaseDescriptor;
+    };
 
 export interface LibraryPreferencesPatch {
   excludedGenres?: number[];
@@ -202,12 +238,39 @@ export interface LibraryPreferences {
 }
 
 export interface DownloadViewItem {
+  /** Stable domain key, not a settings-row name. */
   content: string;
   title: TitleRef;
+  name: string;
+  imdbId?: string;
   season?: number;
   episode?: number;
-  state: 'queued' | 'preparing' | 'downloading' | 'complete' | 'failed';
-  fraction?: number;
+  posterPath?: string;
+  stillPath?: string;
+  queuedAt: number;
+  queuedBy: { device: string; name?: string };
+  release: Omit<DownloadReleaseDescriptor, 'url'>;
+  alternate?: Omit<DownloadReleaseDescriptor, 'url'>;
+  status: {
+    state:
+      | 'starting'
+      | 'fetching'
+      | 'not-started'
+      | 'refused'
+      | 'paused'
+      | 'unreachable'
+      | 'ready'
+      | 'no-working-release'
+      | 'release-gone';
+    phase: 'queued' | 'downloading' | 'trouble' | 'ready';
+    fraction?: number;
+    service?: string;
+    until?: number;
+    stalled: boolean;
+  };
+  tried: number;
+  candidates?: number;
+  announced: boolean;
 }
 
 export interface DownloadsView {

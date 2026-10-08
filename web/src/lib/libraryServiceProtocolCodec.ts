@@ -2,6 +2,9 @@ import {
   LIBRARY_SERVICE_PROTOCOL,
   LIBRARY_SERVICE_WIRE_LIMITS,
   type ContinueItem,
+  type DownloadReleaseDescriptor,
+  type DownloadTarget,
+  type DownloadTitleDescriptor,
   type DownloadViewItem,
   type HistoryItem,
   type LibraryCommand,
@@ -78,6 +81,42 @@ function episodeRef(value: unknown): value is TitleRef & {
     integer(value.season) &&
     integer(value.episode) &&
     value.episode > 0
+  );
+}
+
+function downloadTarget(value: unknown): value is DownloadTarget {
+  return (titleRef(value) && value.type === 'movie') || episodeRef(value);
+}
+
+function boundedText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
+function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
+  return (
+    record(value) &&
+    exact(value, ['target', 'name', 'imdbId', 'posterPath', 'stillPath', 'originalLanguage']) &&
+    downloadTarget(value.target) &&
+    boundedText(value.name, 1_024) &&
+    optional(value.imdbId, (candidate): candidate is string => boundedText(candidate, 128)) &&
+    optional(value.posterPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
+    optional(value.stillPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
+    optional(value.originalLanguage, languageCode)
+  );
+}
+
+function downloadRelease(value: unknown): value is DownloadReleaseDescriptor {
+  return (
+    record(value) &&
+    exact(value, ['identity', 'label', 'url', 'sizeBytes', 'cached']) &&
+    boundedText(value.identity, 4_096) &&
+    boundedText(value.label, 4_096) &&
+    boundedText(value.url, 16_384) &&
+    optional(
+      value.sizeBytes,
+      (candidate): candidate is number => integer(candidate) && candidate > 0,
+    ) &&
+    optional(value.cached, bool)
   );
 }
 
@@ -269,6 +308,24 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'preferences.patch':
       return exact(value, ['kind', 'patch']) && preferencesPatch(value.patch);
+    case 'download.enqueue':
+      return (
+        exact(value, ['kind', 'title', 'release', 'candidates']) &&
+        downloadTitle(value.title) &&
+        downloadRelease(value.release) &&
+        optional(
+          value.candidates,
+          (candidate): candidate is number => integer(candidate) && candidate > 0,
+        )
+      );
+    case 'download.remove':
+      return exact(value, ['kind', 'target']) && downloadTarget(value.target);
+    case 'download.release.try':
+      return (
+        exact(value, ['kind', 'target', 'release']) &&
+        downloadTarget(value.target) &&
+        downloadRelease(value.release)
+      );
     default:
       return false;
   }
@@ -431,22 +488,86 @@ function historyItem(value: unknown): value is HistoryItem {
 }
 
 function download(value: unknown): value is DownloadViewItem {
+  const release = (candidate: unknown): candidate is Omit<DownloadReleaseDescriptor, 'url'> =>
+    record(candidate) &&
+    exact(candidate, ['identity', 'label', 'sizeBytes', 'cached']) &&
+    boundedText(candidate.identity, 4_096) &&
+    boundedText(candidate.label, 4_096) &&
+    optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
+    optional(candidate.cached, bool);
+  const status = value && record(value) ? value.status : undefined;
   return (
     record(value) &&
-    exact(value, ['content', 'title', 'season', 'episode', 'state', 'fraction']) &&
+    exact(value, [
+      'content',
+      'title',
+      'name',
+      'imdbId',
+      'season',
+      'episode',
+      'posterPath',
+      'stillPath',
+      'queuedAt',
+      'queuedBy',
+      'release',
+      'alternate',
+      'status',
+      'tried',
+      'candidates',
+      'announced',
+    ]) &&
     text(value.content) &&
     titleRef(value.title) &&
+    boundedText(value.name, 1_024) &&
+    optional(value.imdbId, (candidate): candidate is string => boundedText(candidate, 128)) &&
     optional(value.season, integer) &&
     optional(value.episode, integer) &&
-    (value.state === 'queued' ||
-      value.state === 'preparing' ||
-      value.state === 'downloading' ||
-      value.state === 'complete' ||
-      value.state === 'failed') &&
+    (value.season === undefined) === (value.episode === undefined) &&
+    (value.season === undefined || value.title.type === 'tv') &&
+    optional(value.posterPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
+    optional(value.stillPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
+    integer(value.queuedAt) &&
+    value.queuedAt >= 0 &&
+    record(value.queuedBy) &&
+    exact(value.queuedBy, ['device', 'name']) &&
+    boundedText(value.queuedBy.device, 256) &&
+    optional(value.queuedBy.name, (candidate): candidate is string =>
+      boundedText(candidate, 256),
+    ) &&
+    release(value.release) &&
+    optional(value.alternate, release) &&
+    record(status) &&
+    exact(status, ['state', 'phase', 'fraction', 'service', 'until', 'stalled']) &&
+    (status.state === 'starting' ||
+      status.state === 'fetching' ||
+      status.state === 'not-started' ||
+      status.state === 'refused' ||
+      status.state === 'paused' ||
+      status.state === 'unreachable' ||
+      status.state === 'ready' ||
+      status.state === 'no-working-release' ||
+      status.state === 'release-gone') &&
+    (status.phase === 'queued' ||
+      status.phase === 'downloading' ||
+      status.phase === 'trouble' ||
+      status.phase === 'ready') &&
     optional(
-      value.fraction,
+      status.fraction,
       (candidate): candidate is number => finite(candidate) && candidate >= 0 && candidate <= 1,
-    )
+    ) &&
+    optional(status.service, (candidate): candidate is string => boundedText(candidate, 256)) &&
+    optional(
+      status.until,
+      (candidate): candidate is number => integer(candidate) && candidate >= 0,
+    ) &&
+    bool(status.stalled) &&
+    integer(value.tried) &&
+    value.tried >= 0 &&
+    optional(
+      value.candidates,
+      (candidate): candidate is number => integer(candidate) && candidate > 0,
+    ) &&
+    bool(value.announced)
   );
 }
 
