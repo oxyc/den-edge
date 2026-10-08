@@ -446,7 +446,12 @@ describe('LibraryLog', () => {
         headers,
       });
     };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage, null))!;
+    const log = (await LibraryLog.open(
+      LIBRARY_KEY,
+      connection,
+      memoryStorage().storage,
+      memoryVault().vault,
+    ))!;
     // A final v2 write lands after this browser's read but before the rewrite fence. The switch must refresh through
     // the offered base and include it rather than converting its stale in-memory snapshot.
     const latest = row(550, { status: { value: 'watched', at: at(2400, device) } });
