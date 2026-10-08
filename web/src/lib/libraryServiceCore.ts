@@ -62,7 +62,9 @@ export type LibraryAuthorityStatus =
   | { kind: 'moved'; successor?: string }
   | { kind: 'failed'; error: LibraryServiceFailure };
 
-type OpenAuthority = (request: LibraryServiceHello) => Promise<LibraryServiceAuthority | null>;
+export type LibraryAuthorityOpener = (
+  request: LibraryServiceHello,
+) => Promise<LibraryServiceAuthority | null>;
 
 interface Subscription {
   selection: LibrarySelection;
@@ -138,7 +140,7 @@ export class LibraryServiceCore {
   #requests: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly openAuthority: OpenAuthority,
+    private readonly openAuthority: LibraryAuthorityOpener,
     instance: string = crypto.randomUUID(),
   ) {
     this.#instance = instance;

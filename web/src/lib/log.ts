@@ -707,6 +707,12 @@ export class LibraryLog {
     this.runtimeChannel = undefined;
   }
 
+  /** Release runtime-only resources when a service authority gives up this log. */
+  close(): void {
+    this.runtimeChannel?.close();
+    this.runtimeChannel = undefined;
+  }
+
   /**
    * A library kept only in this browser, for someone using Den with no TV: the same rows, sealed and merged the same
    * way, kept in IndexedDB rather than on den-edge. Null where this browser keeps nothing (a private window, blocked

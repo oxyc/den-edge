@@ -97,6 +97,10 @@ export class LibraryLogAuthority {
     return this.#log.currentGeneration ?? null;
   }
 
+  close(): void {
+    this.#log.close();
+  }
+
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
     if (selection.kind !== 'title')
       throw authorityError(

@@ -14,7 +14,7 @@ interface LibraryServiceDispatcher {
   close(): void | Promise<void>;
 }
 
-interface WorkerHostScope {
+export interface WorkerHostScope {
   addEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   removeEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   postMessage(message: LibraryServiceServerMessage[]): void;
