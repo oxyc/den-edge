@@ -12,6 +12,8 @@ import {
   ContinueProjector,
   emptyLibrary,
   nameContinueCandidates,
+  standings,
+  titleKey,
   type ContinueCandidate,
   type ContinueEntry,
   type Library,
@@ -23,7 +25,12 @@ import type { Row } from './wire';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
-import { continueLibraryWithShapes, type ActiveHomePayload } from './homeLibraryView';
+import { nameLibraryTitles } from './libraryNaming';
+import {
+  compactContinueLibrary,
+  continueLibraryWithShapes,
+  type ActiveHomePayload,
+} from './homeLibraryView';
 import {
   openLibraryEngine,
   projectLibraryEngineShapes,
@@ -36,6 +43,15 @@ interface StagedLibraryEngine {
   keep<T>(name: string, value: T): Promise<void>;
   hydrate(): Promise<HydratedLibraryEngine | null>;
   release(): Promise<void>;
+}
+
+/** The small, render-facing library state a title route owns independently of Home's full projection. */
+export interface DetailLibrarySnapshot {
+  revision: number;
+  continue: ContinueEntry[];
+  standings: Map<string, Standing>;
+  /** False when a direct load could not name every candidate or obtain every policy-critical TV layout. */
+  exactContinue: boolean;
 }
 
 /** Directly opened routes may never paint Home's billboard; background providers still start eventually. */
@@ -609,6 +625,74 @@ export class LibrarySession {
   detailBridgeStandings(): Map<string, Standing> | null {
     const payload = this.detailBridgeHome();
     return payload ? new Map(payload.view.standings) : null;
+  }
+
+  /**
+   * Rebuild a title route's compact state away from its render flush. The full fold is cooperative/Worker-backed;
+   * only the reduced Continue graph is projected on the page once that fold has completed.
+   */
+  async projectDetailLibrarySnapshot(
+    tmdbKey: string,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<DetailLibrarySnapshot | null> {
+    const revision = this.revision;
+    const log = this.log;
+    const current = () =>
+      this.active && shouldContinue() && this.log === log && this.revision === revision;
+    if (!log || !current()) return null;
+
+    const held =
+      this.projection?.revision === revision && this.projection.log === log
+        ? this.projection
+        : undefined;
+    // Even a Worker-hydrated projection yields once: a caller may start this from a title-route effect, and the
+    // compact refresh must never lengthen the navigation flush that asked for it.
+    await Promise.resolve();
+    if (!current()) return null;
+    const rows = held?.rows ?? (await log.rowsInSlices({ shouldContinue: current }));
+    if (!rows || !current()) return null;
+    const library =
+      held?.library ?? (await applyLogInSlices(emptyLibrary(), rows, { shouldContinue: current }));
+    if (!library || !current()) return null;
+
+    const compact = compactContinueLibrary(library);
+    const mediaRef = (type: string, id: number): Array<Pick<Title, 'type' | 'id'>> =>
+      type === 'movie' || type === 'tv' ? [{ type, id }] : [];
+    const refs: Array<Pick<Title, 'type' | 'id'>> = [
+      ...compact.records.flatMap(({ title: { type, id } }) => mediaRef(type, id)),
+      ...compact.marks.flatMap(({ type, id }) => mediaRef(type, id)),
+      ...[...(compact.flags?.values() ?? [])].flatMap(({ type, id }) => mediaRef(type, id)),
+    ];
+    await nameLibraryTitles(
+      this,
+      [...new Map(refs.map((ref) => [titleKey(ref), ref])).values()],
+      tmdbKey,
+    );
+    if (!current()) return null;
+    const wanted = new Set([
+      ...compact.records.map((record) => titleKey(record.title)),
+      ...compact.marks.map((mark) => titleKey(mark)),
+      ...[...(compact.flags?.values() ?? [])].map((flag) => titleKey(flag)),
+    ]);
+    const shaped = continueLibraryWithShapes(
+      compact,
+      [...this.shapes].filter(([key]) => wanted.has(key)),
+    );
+    const continued = shaped.flatMap(({ ref, display: _display, title: retained, ...entry }) => {
+      const title = this.displayTitle(ref) ?? retained;
+      return title?.title ? [{ ...entry, title }] : [];
+    });
+    const criticalShapesPresent = refs.every(
+      (ref) => ref.type !== 'tv' || this.shapes.has(titleKey(ref)),
+    );
+    return current()
+      ? {
+          revision,
+          continue: continued,
+          standings: standings(library),
+          exactContinue: criticalShapesPresent && continued.length === shaped.length,
+        }
+      : null;
   }
 
   /** The settled active answer is already safe before route hydration publishes its retained successor. */

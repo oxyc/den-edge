@@ -624,6 +624,68 @@ it('shares one immutable library projection per revision across retained pages',
   expect(log.rows).toHaveBeenCalledTimes(2);
 });
 
+it('rebuilds an exact compact detail snapshot without the synchronous display projection', async () => {
+  await ensureSyncPolicy();
+  const rows: Row[] = [
+    {
+      kind: 'rec',
+      schema: 2,
+      title: { type: 'tv', id: 7 },
+      status: { value: 'inProgress', at: [1000, 0, 'web'] },
+      resume: { value: 0, at: [1000, 0, 'web'], viewing: 0 },
+      reaction: { value: null, at: [0, 0, ''] },
+      deleted: { value: false, at: [0, 0, ''] },
+      dismissed: { value: false, at: [0, 0, ''] },
+      episodesReset: null,
+      addedAt: 1000,
+      watchedAt: null,
+    },
+    {
+      kind: 'ep',
+      schema: 2,
+      title: { type: 'tv', id: 7 },
+      season: 1,
+      episode: 2,
+      progress: { value: 0.4, seconds: 900, viewing: 0, at: [2000, 0, 'web'] },
+    },
+  ];
+  const log = fakeLog(rows);
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+  session.publishLibraryMetadata(
+    [{ type: 'tv', id: 7, title: 'Seven' }],
+    [['tv:7', { counts: new Map([[1, 8]]) }]],
+  );
+  const displayed = vi.spyOn(session, 'displayedLibrary');
+  const synchronousRows = log.rows.mock.calls.length;
+  const slicedRows = log.rowsInSlices.mock.calls.length;
+
+  const snapshot = await session.projectDetailLibrarySnapshot('tmdb');
+
+  expect(snapshot).toMatchObject({
+    revision: session.revision,
+    exactContinue: true,
+    continue: [{ title: { type: 'tv', id: 7, title: 'Seven' } }],
+  });
+  expect(snapshot?.standings.get('tv:7')).toBe('inProgress');
+  expect(displayed).not.toHaveBeenCalled();
+  expect(log.rows).toHaveBeenCalledTimes(synchronousRows);
+  expect(log.rowsInSlices).toHaveBeenCalledTimes(slicedRows);
+});
+
+it('abandons a deferred detail snapshot when its library revision changes', async () => {
+  const log = fakeLog();
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+
+  const snapshot = session.projectDetailLibrarySnapshot('tmdb');
+  session.changed();
+
+  await expect(snapshot).resolves.toBeNull();
+});
+
 it('patches only records and marks named by a metadata batch', () => {
   const session = new LibrarySession(null);
   const records = Array.from({ length: 1_000 }, (_, id) => ({

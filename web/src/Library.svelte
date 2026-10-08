@@ -60,7 +60,7 @@
   import { links, type Link } from './lib/links.svelte';
   import { clock as timecode, livePosition } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
-  import type { LibrarySession } from './lib/librarySession.svelte';
+  import type { DetailLibrarySnapshot, LibrarySession } from './lib/librarySession.svelte';
   import {
     nameActiveHomeShelfTitles,
     nameLibraryHistoryTitles,
@@ -249,7 +249,7 @@
       else discovered.configure(opened ?? null);
       // A title page reads its own rows directly. Rebuilding every Home shelf while its hero mounts used to run
       // the whole Continue policy for an invisible retained route; returning Home starts a fresh naming run.
-      if (route.page === 'title' && (session.detailBridgeContinueWatching?.() ?? null) !== null) {
+      if (route.page === 'title') {
         libraryNamingDeferredForTitle = true;
         return;
       }
@@ -348,19 +348,60 @@
   /** The log's rows and fold, only when the log changes: names arrive more often and are laid over it below. */
   const projection = $derived.by(() => {
     void version;
+    if (route.page === 'title') return null;
     return session.libraryProjection();
   });
   const applied = $derived(projection?.library ?? null);
   /**
-   * Home's Worker answer remains exact across route hydration. Use it on a title page until a real row revision,
-   * avoiding an otherwise invisible whole-library display/Continue pass during the detail hero's first paint.
+   * A title route owns the compact answer that Home already had before navigation. Broad background revisions must
+   * not turn its render into a synchronous full-library fallback; a cooperative refresh replaces this snapshot
+   * after the route has yielded instead.
    */
-  const retainedDetailContinue = $derived(
-    route.page === 'title' ? (session.detailBridgeContinueWatching?.() ?? null) : null,
-  );
-  const retainedDetailStandings = $derived(
-    route.page === 'title' ? (session.detailBridgeStandings?.() ?? null) : null,
-  );
+  let detailLibrary = $state.raw<DetailLibrarySnapshot | null>(null);
+  let detailLibraryRun = 0;
+  let detailLibraryWork: Promise<DetailLibrarySnapshot | null> | null = null;
+  const bridgedDetailLibrary = (): DetailLibrarySnapshot | null => {
+    const continued = session.detailBridgeContinueWatching?.() ?? null;
+    const marked = session.detailBridgeStandings?.() ?? null;
+    return continued !== null && marked !== null
+      ? {
+          revision: session.revision,
+          continue: continued,
+          standings: marked,
+          exactContinue: true,
+        }
+      : null;
+  };
+  $effect(() => {
+    const revision = version;
+    if (!(active && route.page === 'title')) {
+      detailLibraryRun++;
+      detailLibraryWork = null;
+      detailLibrary = bridgedDetailLibrary();
+      return;
+    }
+    if (!untrack(() => detailLibrary)) detailLibrary = bridgedDetailLibrary();
+    const run = ++detailLibraryRun;
+    const timer = setTimeout(() => {
+      const work = session.projectDetailLibrarySnapshot(
+        tmdbKey,
+        () => active && route.page === 'title' && run === detailLibraryRun,
+      );
+      detailLibraryWork = work;
+      void work.then((snapshot) => {
+        if (
+          snapshot &&
+          active &&
+          route.page === 'title' &&
+          run === detailLibraryRun &&
+          snapshot.revision === revision
+        )
+          detailLibrary = snapshot;
+        if (detailLibraryWork === work) detailLibraryWork = null;
+      });
+    });
+    return () => clearTimeout(timer);
+  });
   /** One pass shared by recommendation weighting, personal seeds and owned-title filtering. */
   const personalTitleRows = $derived.by(() => {
     const titleRows: TitleRow[] = [];
@@ -373,7 +414,9 @@
     }
     return { titleRows, reactions, selected: personalSeedRows(titleRows) };
   });
-  const library = $derived(applied && session.displayedLibrary(applied));
+  const library = $derived(
+    route.page === 'title' ? null : applied && session.displayedLibrary(applied),
+  );
   /**
    * TMDB names arrive in small batches. They change the cards, but not den-core's answer about which episode
    * continues a series. Keep those policy decisions across display-only flushes and invalidate each series only
@@ -382,8 +425,8 @@
   const continueEntries = $derived(
     stagedHome
       ? session.activeHomeContinueWatching()
-      : retainedDetailContinue !== null
-        ? retainedDetailContinue
+      : route.page === 'title'
+        ? (detailLibrary?.continue ?? [])
         : applied && library
           ? session.continueWatching(applied, library)
           : [],
@@ -394,7 +437,11 @@
     libraryStandings.set(
       stagedHome
         ? new Map(stagedHome.view.standings)
-        : (retainedDetailStandings ?? (applied ? standings(applied) : new Map())),
+        : route.page === 'title'
+          ? new Map(detailLibrary?.standings ?? [])
+          : applied
+            ? standings(applied)
+            : new Map(),
     ),
   );
   $effect(() => () => libraryStandings.set(new Map()));
@@ -771,6 +818,21 @@
       : undefined,
   );
 
+  /** An intentional default-episode press waits for an exact compact answer instead of guessing during fallback. */
+  async function detailContinueForAction(): Promise<ContinueEntry[] | null> {
+    if (route.page !== 'title') return continueEntries;
+    const held = detailLibrary;
+    if (held?.revision === session.revision && held.exactContinue) return held.continue;
+    const work =
+      detailLibraryWork ??
+      session.projectDetailLibrarySnapshot(tmdbKey, () => active && route.page === 'title');
+    detailLibraryWork = work;
+    const snapshot = await work;
+    if (detailLibraryWork === work) detailLibraryWork = null;
+    if (snapshot && active && route.page === 'title') detailLibrary = snapshot;
+    return snapshot?.exactContinue ? snapshot.continue : null;
+  }
+
   /**
    * Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. A series with
    * no episode named picks up where Continue Watching would, or starts at the beginning.
@@ -789,7 +851,12 @@
             return;
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
-            const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
+            const compact = await detailContinueForAction();
+            if (compact === null) {
+              failure = 'Couldn’t read where you left off. Try again.';
+              return;
+            }
+            const up = compact.find((e) => titleKey(e.title) === titleKey(title))?.episode;
             playing = { title, ...(up ?? { season: 1, episode: 1 }) };
           } else {
             playing = { title, season, episode, filename };

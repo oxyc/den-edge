@@ -3,6 +3,7 @@ import {
   ContinueProjector,
   emptyLibrary,
   nameContinueCandidates,
+  standings,
   withDisplay,
   type Library,
   type Shape,
@@ -90,5 +91,28 @@ export const fixtureLibrarySessionMethods = {
       projector.project({ ...projection, shapes: this.shapes }),
       displayed,
     );
+  },
+
+  async projectDetailLibrarySnapshot(
+    this: FixtureSession,
+    _tmdbKey: string,
+    shouldContinue: () => boolean = () => true,
+  ) {
+    const revision = this.revision;
+    await Promise.resolve();
+    if (!shouldContinue() || this.revision !== revision) return null;
+    const projection = fixtureLibrarySessionMethods.libraryProjection.call(this);
+    if (!projection) return null;
+    const displayed = fixtureLibrarySessionMethods.displayedLibrary.call(this, projection.library);
+    return {
+      revision,
+      continue: fixtureLibrarySessionMethods.continueWatching.call(
+        this,
+        projection.library,
+        displayed,
+      ),
+      standings: standings(projection.library),
+      exactContinue: true,
+    };
   },
 };
