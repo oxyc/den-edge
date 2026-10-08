@@ -46,7 +46,14 @@
   let frame: HTMLDivElement;
   let video = $state<HTMLVideoElement>();
   const artwork = $derived(backdrop ?? poster ?? '');
-  let canResolveTrailer = $state(false);
+  /**
+   * Whether media may replace the artwork.
+   *
+   * Trailer discovery and Reel's small control requests run before this: they do not compete for the
+   * backdrop's image bytes, and having their answer ready lets playback begin as soon as the picture has
+   * painted. Only the actual video/HLS mount waits here, so the backdrop remains the detail page's first paint.
+   */
+  let canMountTrailer = $state(false);
   /**
    * The artwork that has loaded. Until it has, it is transparent rather than blank: it fades in over the
    * placeholder (or the page's background) instead of arriving in one cut. One already in the cache is shown as
@@ -58,7 +65,7 @@
   }
   $effect(() => {
     void artwork;
-    canResolveTrailer = !artwork;
+    canMountTrailer = !artwork;
   });
   let candidates = $state<TrailerCandidate[]>([]);
   let candidate = $state(0);
@@ -80,7 +87,7 @@
    * and a trailer neither direct listener can serve is not shown.
    */
   const relay = relaysMedia();
-  const source = $derived(asking ? null : (upgraded ?? (relay ? url : null)));
+  const source = $derived(!canMountTrailer || asking ? null : (upgraded ?? (relay ? url : null)));
   /**
    * What reel offered for this candidate, best first, and which of them is mounted.
    *
@@ -89,7 +96,7 @@
    */
   let rungs = $state<Source[]>([]);
   let rung = $state(0);
-  const mounted = $derived(rungs[rung] ?? null);
+  const mounted = $derived(canMountTrailer ? (rungs[rung] ?? null) : null);
   /** Where the picture sits inside the frame; null until reel has measured this trailer. */
   let heroCrop = $state<Crop | null>(null);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
@@ -216,7 +223,7 @@
   function press() {
     pressed = true;
     // Explicit intent need not wait for artwork; it is stronger than speculative sequencing.
-    canResolveTrailer = true;
+    canMountTrailer = true;
   }
 
   /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
@@ -383,8 +390,7 @@
     const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
     const identity = JSON.stringify([ids, mediaType]);
     const key = JSON.stringify([ids, base, mediaType]);
-    const wanted =
-      canResolveTrailer && autoplay && !reduced && !saving && !!(ids.tmdb || ids.imdb) && !!base;
+    const wanted = autoplay && !reduced && !saving && !!(ids.tmdb || ids.imdb) && !!base;
     // The page left and come back to: the same trailer, already found. Found again, it started over from
     // the backdrop; kept, it carries on from where it was left (`keepFrame`).
     if (wanted && key === foundFor) return;
@@ -755,13 +761,13 @@
       onload={(event) => {
         const image = event.currentTarget as HTMLImageElement;
         painted = image.src;
-        canResolveTrailer = true;
+        canMountTrailer = true;
         // A one-off animation rather than a standing `transition`, which kept the picture on a layer of its
         // own for good and shifted the antialiasing of what is drawn beside it.
         if (!reduced && placeholder)
           image.animate([{ opacity: 0 }, {}], { duration: 150, easing: 'ease-out' });
       }}
-      onerror={() => (canResolveTrailer = true)}
+      onerror={() => (canMountTrailer = true)}
     />
   {/if}
   <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout.

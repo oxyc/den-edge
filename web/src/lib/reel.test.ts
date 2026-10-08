@@ -403,7 +403,10 @@ describe('fetchSources', () => {
     await vi.waitFor(() => expect(sourceRequests).toBe(3));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(activations).toBe(1);
-    expect(permission).toHaveBeenCalledOnce();
+    expect(
+      permission,
+      'each consumer applies its own current browser permission',
+    ).toHaveBeenCalledTimes(2);
 
     allowLan();
     const expected = [`https://lan.media.example:8449${media}`, `https://media.example${media}`];
@@ -412,6 +415,109 @@ describe('fetchSources', () => {
     });
     await expect(third).resolves.toMatchObject({
       sources: expected.map((url) => ({ url })),
+    });
+  });
+
+  describe('the just-completed activation lease', () => {
+    const blob = 'G'.repeat(40);
+    const otherBlob = 'H'.repeat(40);
+    const tag = 'c'.repeat(24);
+    const source = (which = blob) => `/reel/m/s/${which}?s=${tag}`;
+    const ask = (fetchImpl: typeof fetch, which = blob, config = 'cfg') =>
+      fetchSources(`/reel/${config}/sources/${which}.json?s=${tag}`, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+      });
+    const responder =
+      (activations: { count: number }, failFirst = false): typeof fetch =>
+      async (input, init) => {
+        const url = String(input);
+        const match = url.match(/\/sources\/([^/.]+)\.json/);
+        if (match) {
+          return new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${match[1]}?s=${tag}` }] }),
+          );
+        }
+        activations.count += 1;
+        if (failFirst && activations.count === 1)
+          return new Response(JSON.stringify({ error: 'temporary' }), { status: 500 });
+        const media = JSON.parse(String(init?.body)).media as string;
+        return new Response(
+          JSON.stringify({
+            publicBase: 'https://media.example',
+            media: `https://media.example${media}`,
+          }),
+        );
+      };
+
+    it('reuses one successful mount lease for a different signed source during the grace window', async () => {
+      const activations = { count: 0 };
+      const fetchImpl = responder(activations);
+      expect((await ask(fetchImpl))?.sources[0]?.url).toBe(`https://media.example${source()}`);
+      expect((await ask(fetchImpl, otherBlob))?.sources[0]?.url).toBe(
+        `https://media.example${source(otherBlob)}`,
+      );
+      expect(activations.count).toBe(1);
+    });
+
+    it('does not share a completed lease with a different Reel mount/config', async () => {
+      const activations = { count: 0 };
+      const fetchImpl = responder(activations);
+      await ask(fetchImpl);
+      await ask(fetchImpl, otherBlob, 'other');
+      expect(activations.count).toBe(2);
+    });
+
+    it('asks again after the mount grace expires', async () => {
+      vi.useFakeTimers();
+      try {
+        const activations = { count: 0 };
+        const fetchImpl = responder(activations);
+        await ask(fetchImpl);
+        await vi.advanceTimersByTimeAsync(5_001);
+        await ask(fetchImpl, otherBlob);
+        expect(activations.count, 'an old completed mount lease is activated again').toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never remembers a failed activation', async () => {
+      const activations = { count: 0 };
+      const fetchImpl = responder(activations, true);
+      expect(await ask(fetchImpl)).toBeNull();
+      expect(await ask(fetchImpl)).not.toBeNull();
+      expect(activations.count).toBe(2);
+    });
+
+    it('applies the current local-network permission to every reuse of the raw answer', async () => {
+      let state: 'denied' | 'granted' = 'denied';
+      vi.stubGlobal('navigator', { permissions: { query: async () => ({ state }) } });
+      const activations = { count: 0 };
+      const fetchImpl: typeof fetch = async (input, init) => {
+        if (String(input).includes('/sources/'))
+          return new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+          );
+        activations.count += 1;
+        const media = JSON.parse(String(init?.body)).media as string;
+        return new Response(
+          JSON.stringify({
+            publicBase: 'https://media.example',
+            lanBase: 'https://lan.media.example:8449',
+            media: `https://media.example${media}`,
+          }),
+        );
+      };
+      expect((await ask(fetchImpl))?.sources.map((one) => one.direct)).toEqual(['public']);
+      state = 'granted';
+      expect((await ask(fetchImpl, otherBlob))?.sources.map((one) => one.direct)).toEqual([
+        'lan',
+        'public',
+      ]);
+      expect(activations.count).toBe(1);
     });
   });
 
@@ -448,6 +554,52 @@ describe('fetchSources', () => {
     expect(lookups).toBe(1);
     expect(bodies).toEqual([{ media }, { media, ipv4Hint: '8.8.8.8' }]);
     expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
+  });
+
+  it('remembers that this page needs an IPv4 hint for later distinct activations', async () => {
+    const firstBlob = 'I'.repeat(40);
+    const secondBlob = 'J'.repeat(40);
+    const tag = 'd'.repeat(24);
+    const bodies: Array<{ media: string; ipv4Hint?: string }> = [];
+    let lookups = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const source = url.match(/\/sources\/([^/.]+)\.json/)?.[1];
+      if (source)
+        return new Response(
+          JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${source}?s=${tag}` }] }),
+        );
+      const body = JSON.parse(String(init?.body)) as { media: string; ipv4Hint?: string };
+      bodies.push(body);
+      if (!body.ipv4Hint)
+        return new Response(JSON.stringify({ error: 'ipv4_hint_wanted' }), { status: 428 });
+      return new Response(
+        JSON.stringify({
+          publicBase: 'https://media.example',
+          media: `https://media.example${body.media}`,
+        }),
+      );
+    };
+    const ask = (blob: string, config: string) =>
+      fetchSources(`/reel/${config}/sources/${blob}.json?s=${tag}`, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+        lookupIpv4: async () => {
+          lookups += 1;
+          return '8.8.8.8';
+        },
+      });
+
+    expect(await ask(firstBlob, 'cfg')).not.toBeNull();
+    expect(await ask(secondBlob, 'other')).not.toBeNull();
+    expect(bodies).toEqual([
+      { media: `/reel/m/s/${firstBlob}?s=${tag}` },
+      { media: `/reel/m/s/${firstBlob}?s=${tag}`, ipv4Hint: '8.8.8.8' },
+      { media: `/reel/m/s/${secondBlob}?s=${tag}`, ipv4Hint: '8.8.8.8' },
+    ]);
+    expect(lookups).toBe(2);
   });
 
   describe('as remux plays a session (oxyc/den#197)', () => {
@@ -549,7 +701,7 @@ describe('fetchSources', () => {
       expect(next).toBeNull();
     });
 
-    it('keeps activation available for the next candidate after the public copy times out at home', async () => {
+    it('keeps the completed activation available after the public copy times out at home', async () => {
       let activations = 0;
       const fetchImpl: typeof fetch = async (input) => {
         if (String(input).includes('/sources/')) {
@@ -576,7 +728,7 @@ describe('fetchSources', () => {
         fetchImpl,
         relay: false,
       });
-      expect(activations).toBe(2);
+      expect(activations).toBe(1);
       expect(next?.sources[0]).toMatchObject({
         direct: 'lan',
         url: `https://lan.media.example:8449${media}`,

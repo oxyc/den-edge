@@ -462,6 +462,8 @@ const DIRECT_ACTIVATION_MS = 15_000;
  */
 const ACTIVATION_PAUSE_MS = 5 * 60_000;
 let activationPausedUntil = 0;
+/** This page reached edge over IPv6, so later activations can include its already-cached IPv4 answer first. */
+let activationNeedsIpv4Hint = false;
 /** Until when the home-network origin is passed over, once a copy on it showed nothing from here. */
 let lanPausedUntil = 0;
 /**
@@ -483,11 +485,13 @@ function pauseActivation(response: Response, now = Date.now()): void {
   }
 }
 
-/** For tests: forget a pause. */
+/** For tests: forget a pause and the one just-completed lease. */
 export function resetActivationPause(): void {
   activationPausedUntil = 0;
+  activationNeedsIpv4Hint = false;
   lanPausedUntil = 0;
   lanOfferedUntil = 0;
+  completedActivation = null;
 }
 
 /**
@@ -602,8 +606,16 @@ interface Direct {
   lan: string | null;
 }
 
-/** One activation lease being opened. It is shared only while pending; Reel remains the cache authority. */
+/** One activation lease being opened. */
 const activating = new Map<string, Promise<Direct | null>>();
+
+// A press warm-up and the detail hero commonly ask the same Reel mount for adjacent signed sources a fraction
+// of a second apart. The listener remains leased for ten minutes, so repeating the activation does not make it
+// readier: it only adds another control round trip and consumes another rate-limit unit. Keep just the most
+// recently completed mount for a deliberately much shorter window. This is not a source cache: every URL still
+// comes from the current `/sources` answer and carries its own capability, which Reel validates on the media GET.
+const COMPLETED_ACTIVATION_GRACE_MS = 5_000;
+let completedActivation: { mount: string; direct: Direct; at: number } | null = null;
 
 /**
  * Let one caller stop waiting without aborting the activation another caller has joined.
@@ -638,23 +650,41 @@ function waitForActivation(
  */
 async function activateDirect(
   media: string,
-  mount: string,
+  edgeMount: string,
+  reelMount: string,
   fetchImpl: typeof fetch,
   signal: AbortSignal | undefined,
   lookup: () => Promise<string | undefined>,
 ): Promise<Direct | null> {
   if (signal?.aborted || Date.now() < activationPausedUntil) return null;
-  const key = `${mount}\n${media}`;
+  const completed = completedActivation;
+  if (completed?.mount === reelMount && Date.now() - completed.at < COMPLETED_ACTIVATION_GRACE_MS)
+    return permittedDirect(completed.direct, signal);
+  const key = `${edgeMount}\n${media}`;
   let pending = activating.get(key);
   if (!pending) {
-    pending = performActivation(media, mount, fetchImpl, lookup);
+    pending = performActivation(media, edgeMount, fetchImpl, lookup).then((direct) => {
+      if (direct) completedActivation = { mount: reelMount, direct, at: Date.now() };
+      return direct;
+    });
     activating.set(key, pending);
     const clear = () => {
       if (activating.get(key) === pending) activating.delete(key);
     };
     void pending.then(clear, clear);
   }
-  return waitForActivation(pending, signal);
+  const direct = await waitForActivation(pending, signal);
+  return direct ? permittedDirect(direct, signal) : null;
+}
+
+/** Apply browser-local authority for every consumer, including consumers of the completed lease. */
+async function permittedDirect(
+  direct: Direct,
+  signal: AbortSignal | undefined,
+): Promise<Direct | null> {
+  if (signal?.aborted) return null;
+  const lan = direct.lan && (await mayUseLocalNetwork()) ? direct.lan : null;
+  return signal?.aborted ? null : { public: direct.public, lan };
 }
 
 /** The shared work behind `activateDirect`, bounded independently of any one caller. */
@@ -673,16 +703,26 @@ async function performActivation(
       signal: deadline,
     });
   };
+  const hintBeforeDeadline = async (): Promise<string | undefined> => {
+    const stopped = new Promise<undefined>((resolve) => {
+      if (deadline.aborted) resolve(undefined);
+      else deadline.addEventListener('abort', () => resolve(undefined), { once: true });
+    });
+    return Promise.race([lookup(), stopped]);
+  };
   try {
-    let response = await ask();
+    // Once this edge has told the page its connection needs an IPv4 hint, later distinct leases can use
+    // ipv4Hint's two-minute memory in their first POST. That avoids a known-to-fail 428 round trip and one
+    // activation rate-limit unit without making the address outlive the existing lookup's own policy.
+    const rememberedHint = activationNeedsIpv4Hint ? await hintBeforeDeadline() : undefined;
+    let response = await ask(rememberedHint);
     if (response.status === 428) {
       const refusal = await response.json().catch(() => null);
       if (refusal?.error !== 'ipv4_hint_wanted') return null;
-      const stopped = new Promise<undefined>((resolve) => {
-        if (deadline.aborted) resolve(undefined);
-        else deadline.addEventListener('abort', () => resolve(undefined), { once: true });
-      });
-      const hint = await Promise.race([lookup(), stopped]);
+      activationNeedsIpv4Hint = true;
+      // A hinted request receiving the same refusal cannot be improved by repeating it.
+      if (rememberedHint) return null;
+      const hint = await hintBeforeDeadline();
       if (!hint) return null;
       response = await ask(hint);
     }
@@ -694,9 +734,7 @@ async function performActivation(
     const base = bareOrigin(answer?.publicBase);
     if (!base || typeof answer?.media !== 'string') return null;
     if (answer.media !== new URL(media, base).href) return null;
-    const offeredLan = bareOrigin(answer.lanBase);
-    const lan = offeredLan && (await mayUseLocalNetwork()) ? offeredLan : null;
-    return { public: base, lan };
+    return { public: base, lan: bareOrigin(answer.lanBase) };
   } catch {
     return null;
   }
@@ -728,7 +766,7 @@ async function directSources(
   if (!edgeMount) return sources;
   const first = sources.map((source) => carriedPath(source.url)).find((path) => path !== null);
   if (!first) return sources;
-  const direct = await activateDirect(first, edgeMount, fetchImpl, signal, lookup);
+  const direct = await activateDirect(first, edgeMount, mount, fetchImpl, signal, lookup);
   const lan = direct?.lan && Date.now() >= lanPausedUntil ? direct.lan : null;
   const result: Source[] = [];
   let includedLan = false;
