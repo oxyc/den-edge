@@ -8,6 +8,7 @@ import { exclusive } from './exclusive';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
+import type { LibraryRelayMembership } from './relayFetch';
 import {
   believe,
   compareStamps,
@@ -1294,6 +1295,17 @@ export class LibraryLog {
   /** `x-den-library-member` for this library: a new library's first write names it (`NEW_LIBRARIES=members`). */
   get memberProof(): string {
     return `${this.keys.id}:${this.keys.member}`;
+  }
+
+  /**
+   * Register, then reveal only the derived capability the page-side relay may use. The raw library key and the
+   * broader read/write tokens never cross the LibraryService boundary.
+   */
+  async relayMembership(): Promise<LibraryRelayMembership | null> {
+    if (this.offline || this.moved || this.refused) return null;
+    await this.registerMember();
+    if (!this.memberRegistered || this.moved || this.refused) return null;
+    return { libraryId: this.keys.id, memberToken: this.keys.member };
   }
 
   /**

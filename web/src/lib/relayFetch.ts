@@ -12,6 +12,15 @@
 import type { LibraryKeys } from './wire';
 
 /**
+ * The least authority a page needs to receive the household relay allowance. This is derived from the library key
+ * inside LibraryService; it can authenticate only the allow-listed relay paths below and cannot open the library.
+ */
+export interface LibraryRelayMembership {
+  libraryId: string;
+  memberToken: string;
+}
+
+/**
  * The paths den-edge relays to the addons (`ADDON_RELAY`), and the same-origin APIs where membership changes
  * the allowance or permits spending a household key. Anything else is somebody else's server.
  */
@@ -80,6 +89,13 @@ export function credentialVersion(): number {
 export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'member'>): void {
   credential = `${keys.id}:${keys.member}`;
   libraryId = keys.id;
+  version++;
+}
+
+/** Install the bounded relay capability returned by LibraryService, without giving the page the library key. */
+export function useLibraryRelayMembership(membership: LibraryRelayMembership): void {
+  credential = `${membership.libraryId}:${membership.memberToken}`;
+  libraryId = membership.libraryId;
   version++;
 }
 
