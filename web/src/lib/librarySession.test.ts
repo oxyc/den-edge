@@ -287,6 +287,54 @@ it('does not retain compact Continue before required TV shapes settle', async ()
   expect(session.detailBridgeContinueWatching()).toBeNull();
 });
 
+it('reuses settled Worker Continue when its staged projection hydrates', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const payload = activeHomePayload();
+  payload.view.requiredShapeRefs = ['tv:7'];
+  const answer: ActiveHomeShapeReply = {
+    handle: payload.handle,
+    continue: [
+      {
+        ref: { type: 'tv', id: 7 },
+        display: 'record',
+        fraction: 0.4,
+        title: { type: 'tv', id: 7, title: 'Seven' },
+      },
+    ],
+  };
+  vi.spyOn(libraryEngineClient, 'projectLibraryEngineShapes').mockResolvedValue(answer);
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload,
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate: vi.fn(async () => ({
+      log: log as unknown as LibraryLog,
+      projection: {
+        rows: [] as Row[],
+        library: emptyLibrary(),
+        // A replay of this graph would erase the settled answer above.
+        continueLibrary: emptyLibrary(),
+      },
+    })),
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+  await session.settleActiveHomeContinue();
+  const compactProject = vi.spyOn(ContinueProjector.prototype, 'project');
+
+  await session.ensureLog(true);
+
+  expect(compactProject).not.toHaveBeenCalled();
+  expect(session.detailBridgeContinueWatching()).toEqual([
+    {
+      fraction: 0.4,
+      title: { type: 'tv', id: 7, title: 'Seven' },
+    },
+  ]);
+});
+
 it('keeps reduced Continue policy reactive when detail hydration wins the TV-shape race', async () => {
   const log = fakeLog();
   log.refresh.mockResolvedValue(false);
@@ -346,6 +394,8 @@ it('keeps reduced Continue policy reactive when detail hydration wins the TV-sha
     ...continueLibrary,
     shapes: new Map([['tv:7', shape]]),
   });
+  const initial = continueWatching(continueLibrary);
+  const compactProject = vi.spyOn(ContinueProjector.prototype, 'project');
   let bridgeWhilePublishing: ReturnType<LibrarySession['detailBridgeContinueWatching']> = null;
   let activeWhilePublishing: ReturnType<LibrarySession['activeHomeContinueWatching']> = [];
   vi.spyOn(downloads, 'touch').mockImplementation(() => {
@@ -362,7 +412,8 @@ it('keeps reduced Continue policy reactive when detail hydration wins the TV-sha
   await background;
   await detail;
 
-  expect(bridgeWhilePublishing).toEqual(continueWatching(continueLibrary));
+  expect(compactProject).toHaveBeenCalledTimes(2);
+  expect(bridgeWhilePublishing).toEqual(initial);
   expect(activeWhilePublishing).toEqual(shaped);
   expect(session.detailBridgeContinueWatching()).toEqual(shaped);
 });
