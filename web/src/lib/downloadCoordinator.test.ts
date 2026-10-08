@@ -42,6 +42,9 @@ function clock(options: { gate?: Promise<void>; issued?: Stamp[] } = {}): ClockS
       options.issued?.push([...last]);
       return [...last];
     },
+    async historical(times) {
+      return times.map((at) => [at, ++last[1], DEVICE]);
+    },
     async see(stamp) {
       if (stamp[0] > last[0] || (stamp[0] === last[0] && stamp[1] > last[1]))
         last = [stamp[0], stamp[1], DEVICE];

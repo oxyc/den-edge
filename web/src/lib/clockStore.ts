@@ -15,6 +15,7 @@ interface StoredClock {
   version: 1;
   device: string;
   last: Stamp;
+  historicalCounter: number;
 }
 
 /** Values read from the old localStorage clock by the page and handed to the service at startup. */
@@ -26,6 +27,8 @@ export interface LegacyClockBootstrap {
 export interface ClockStore {
   readonly device: string;
   issue(now?: number): Promise<Stamp>;
+  /** Reserve collision-free stamps whose physical component must remain an imported event time. */
+  historical(milliseconds: readonly number[]): Promise<Stamp[]>;
   see(stamp: Stamp): Promise<void>;
   /** Waits for earlier operations and returns a copy of the last stamp issued or seen. */
   current(): Promise<Stamp>;
@@ -66,7 +69,14 @@ const decode = (bytes: Uint8Array | undefined): StoredClock | undefined => {
     const candidate = value as Partial<StoredClock>;
     if (candidate.version !== 1 || !validDevice(candidate.device) || !validStamp(candidate.last))
       return undefined;
-    return { version: 1, device: candidate.device, last: copyStamp(candidate.last) };
+    const historicalCounter = candidate.historicalCounter ?? 0;
+    if (!Number.isSafeInteger(historicalCounter) || historicalCounter < 0) return undefined;
+    return {
+      version: 1,
+      device: candidate.device,
+      last: copyStamp(candidate.last),
+      historicalCounter,
+    };
   } catch {
     return undefined;
   }
@@ -97,7 +107,7 @@ export async function openClockStore(
     const last = validStamp(options.legacy?.last)
       ? copyStamp(options.legacy.last)
       : ([0, 0, ''] as Stamp);
-    return { version: 1, device, last };
+    return { version: 1, device, last, historicalCounter: 0 };
   };
   let state: StoredClock;
   if (update) {
@@ -146,7 +156,7 @@ export async function openClockStore(
   };
   const commit = async (next: Stamp) => {
     const owned = copyStamp(next);
-    const updated: StoredClock = { version: 1, device: state.device, last: owned };
+    const updated: StoredClock = { ...state, version: 1, device: state.device, last: owned };
     await vault.put(key, encode(updated));
     state = updated;
   };
@@ -159,6 +169,7 @@ export async function openClockStore(
       return serialized(async () => {
         if (update) {
           const updated = await atomically((current) => ({
+            ...current,
             version: 1,
             device: current.device,
             last: new Clock(current.device, current.last).issue(now),
@@ -173,13 +184,50 @@ export async function openClockStore(
         });
       });
     },
+    historical(milliseconds) {
+      return serialized(async () => {
+        if (
+          milliseconds.some(
+            (value) => !Number.isSafeInteger(value) || value < 0,
+          )
+        )
+          throw new Error('invalid historical clock time');
+        if (!milliseconds.length) return [];
+        let reserved: Stamp[] = [];
+        const reserve = (current: StoredClock): StoredClock => {
+          if (current.historicalCounter + milliseconds.length > Number.MAX_SAFE_INTEGER)
+            throw new Error('historical clock counter exhausted');
+          reserved = milliseconds.map(
+            (at, index): Stamp => [at, current.historicalCounter + index + 1, current.device],
+          );
+          const newest = reserved.reduce(
+            (last, stamp) => (compareStamps(stamp, last) > 0 ? stamp : last),
+            current.last,
+          );
+          return {
+            ...current,
+            historicalCounter: current.historicalCounter + reserved.length,
+            last: copyStamp(newest),
+          };
+        };
+        if (update) await atomically(reserve);
+        else
+          await exclusively(lockName, async () => {
+            await refresh();
+            const next = reserve(state);
+            await vault.put(key, encode(next));
+            state = next;
+          });
+        return reserved.map(copyStamp);
+      });
+    },
     see(stamp) {
       return serialized(async () => {
         if (!validStamp(stamp)) throw new Error('invalid clock stamp');
         if (update) {
           await atomically((current) =>
             compareStamps(stamp, current.last) > 0
-              ? { version: 1, device: current.device, last: copyStamp(stamp) }
+              ? { ...current, last: copyStamp(stamp) }
               : current,
           );
           return;

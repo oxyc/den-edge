@@ -17,6 +17,7 @@ const moving: Moving = {
 const clock: ClockStore = {
   device: '0123456789abcdef',
   issue: async () => [10, 0, '0123456789abcdef'],
+  historical: async (times) => times.map((at, index) => [at, index + 1, '0123456789abcdef']),
   see: async () => {},
   current: async () => [10, 0, '0123456789abcdef'],
 };

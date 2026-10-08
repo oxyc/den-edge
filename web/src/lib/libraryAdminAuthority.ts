@@ -24,10 +24,17 @@ import {
   type RecoveryContext,
 } from './recovery';
 import { fromBase64url, toBase64url } from './wire';
+import type { Row, Stamp } from './wire';
 
 const RESET_ROUNDS = 3;
 const IMPORT_BATCH = 250;
 const STALE_IMPORT_MS = 182 * 86_400_000;
+const RECOVERY_MAKES = 'library-service-recovery-makes.v1';
+
+interface DurableRecoveryMake {
+  prepared: Prepared;
+  baseLive: string[];
+}
 
 const affectedLibrary = [
   { kind: 'overview' as const },
@@ -221,7 +228,8 @@ export class LibraryAdminAuthority {
   async #beginRecovery(
     task: Extract<LibraryTask, { kind: 'recovery.begin' }>,
   ): Promise<LibraryAuthorityTaskResult> {
-    this.#recoveryMakes.get(task.locator)?.done();
+    const previous = await this.#recoveryMake(task.locator);
+    previous?.done();
     this.#recoveryMakes.delete(task.locator);
     const prepared: Prepared = {
       code: '',
@@ -241,6 +249,17 @@ export class LibraryAdminAuthority {
       baseLive: begun.baseLive,
       done: begun.done,
     });
+    try {
+      await this.#keepRecoveryMakes();
+    } catch {
+      begun.done();
+      this.#recoveryMakes.delete(task.locator);
+      await abandon(this.#recoveryContext(), task.locator);
+      return {
+        result: { kind: 'recovery.begin', outcome: 'failed' },
+        affected: [{ kind: 'recovery' }],
+      };
+    }
     return {
       result: { kind: 'recovery.begin', outcome: 'begun' },
       affected: [{ kind: 'recovery' }],
@@ -248,7 +267,7 @@ export class LibraryAdminAuthority {
   }
 
   async #confirmRecovery(locator: string): Promise<LibraryAuthorityTaskResult> {
-    const making = this.#recoveryMakes.get(locator);
+    const making = await this.#recoveryMake(locator);
     if (!making)
       return {
         result: { kind: 'recovery.confirm', outcome: 'lost' },
@@ -258,6 +277,7 @@ export class LibraryAdminAuthority {
     if (result.ok || 'lost' in result) {
       making.done();
       this.#recoveryMakes.delete(locator);
+      await this.#keepRecoveryMakes();
     }
     return {
       result: {
@@ -269,14 +289,54 @@ export class LibraryAdminAuthority {
   }
 
   async #abandonRecovery(locator: string): Promise<LibraryAuthorityTaskResult> {
-    const making = this.#recoveryMakes.get(locator);
+    const making = await this.#recoveryMake(locator);
     making?.done();
     this.#recoveryMakes.delete(locator);
+    await this.#keepRecoveryMakes();
     await abandon(this.#recoveryContext(), locator);
     return {
       result: { kind: 'recovery.abandon', outcome: 'abandoned' },
       affected: [{ kind: 'recovery' }],
     };
+  }
+
+  async #recoveryMake(locator: string) {
+    const active = this.#recoveryMakes.get(locator);
+    if (active) return active;
+    const kept = await this.log.kept<unknown>(RECOVERY_MAKES);
+    if (!Array.isArray(kept)) return undefined;
+    for (const value of kept) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const candidate = value as Partial<DurableRecoveryMake>;
+      const prepared = candidate.prepared;
+      if (
+        !prepared ||
+        typeof prepared.locator !== 'string' ||
+        typeof prepared.sealed !== 'string' ||
+        !Number.isSafeInteger(prepared.createdAt) ||
+        !Array.isArray(candidate.baseLive) ||
+        !candidate.baseLive.every((entry) => typeof entry === 'string')
+      )
+        continue;
+      this.#recoveryMakes.set(prepared.locator, {
+        prepared,
+        baseLive: new Set(candidate.baseLive),
+        done: () => {},
+      });
+    }
+    return this.#recoveryMakes.get(locator);
+  }
+
+  async #keepRecoveryMakes(): Promise<void> {
+    await this.log.keep(
+      RECOVERY_MAKES,
+      [...this.#recoveryMakes.values()].map(
+        ({ prepared, baseLive }): DurableRecoveryMake => ({
+          prepared,
+          baseLive: [...baseLive],
+        }),
+      ),
+    );
   }
 
   async #disableRecovery(): Promise<LibraryAuthorityTaskResult> {
@@ -291,19 +351,16 @@ export class LibraryAdminAuthority {
   async #importHistory(
     items: Extract<LibraryTask, { kind: 'history.import' }>['items'],
   ): Promise<LibraryAuthorityTaskResult> {
-    const rows = [];
-    let counter = 0;
-    const historicalStamp = (at: number): [number, number, string] => [
-      at,
-      counter++,
-      this.clock.device,
-    ];
+    const pending: Array<{ at: number; build: (stamp: Stamp) => Row }> = [];
     await this.clock.see(this.log.newestStamp());
     for (const item of items) {
       if (item.title.type === 'movie' && item.watchedAt !== undefined) {
         const before = this.log.title(item.title) ?? blankTitle(item.title, item.watchedAt);
         if (before.status.at[0] < item.watchedAt)
-          rows.push(markWatched(before, historicalStamp(item.watchedAt)));
+          pending.push({
+            at: item.watchedAt,
+            build: (stamp) => markWatched(before, stamp),
+          });
         continue;
       }
       if (item.title.type !== 'tv' || !item.episodes?.length) continue;
@@ -314,14 +371,22 @@ export class LibraryAdminAuthority {
           this.log.episode(item.title, episode.season, episode.episode) ??
           blankEpisode(item.title, episode.season, episode.episode);
         if (before.progress.at[0] < episode.watchedAt)
-          rows.push(markEpisode(before, true, historicalStamp(episode.watchedAt)));
+          pending.push({
+            at: episode.watchedAt,
+            build: (stamp) => markEpisode(before, true, stamp),
+          });
       }
       const title = this.log.title(item.title) ?? blankTitle(item.title, latest);
       if (item.complete && title.status.at[0] < latest)
-        rows.push(markWatched(title, historicalStamp(latest)));
+        pending.push({ at: latest, build: (stamp) => markWatched(title, stamp) });
       else if (latest && Date.now() - latest > STALE_IMPORT_MS && title.dismissed.at[0] <= latest)
-        rows.push(dismissFromContinueWatching(title, historicalStamp(latest + 1)));
+        pending.push({
+          at: latest + 1,
+          build: (stamp) => dismissFromContinueWatching(title, stamp),
+        });
     }
+    const stamps = await this.clock.historical(pending.map(({ at }) => at));
+    const rows = pending.map(({ build }, index) => build(stamps[index]!));
     let written = 0;
     for (let start = 0; start < rows.length; start += IMPORT_BATCH) {
       const batch = rows.slice(start, start + IMPORT_BATCH);

@@ -135,6 +135,28 @@ describe('openClockStore', () => {
     expect(await one.issue(1_000)).toEqual([8_000, 3, one.device]);
   });
 
+  it('durably reserves unique historical stamps across instances without moving time backwards', async () => {
+    const memory = atomicMemoryVault();
+    const [one, two] = await Promise.all([
+      openClockStore(memory.vault, { createDevice: () => '1111111111111111' }),
+      openClockStore(memory.vault, { createDevice: () => '2222222222222222' }),
+    ]);
+    await one.issue(10_000);
+
+    const [first, second] = await Promise.all([
+      one.historical([1_000, 2_000]),
+      two.historical([1_000]),
+    ]);
+    expect(new Set([...first, ...second].map((stamp) => JSON.stringify(stamp))).size).toBe(3);
+    expect([...first, ...second].map((stamp) => stamp[0]).sort()).toEqual([1_000, 1_000, 2_000]);
+    expect(await one.current()).toEqual([10_000, 0, one.device]);
+
+    const reopened = await openClockStore(memory.vault);
+    expect((await reopened.historical([1_000]))[0]![1]).toBeGreaterThan(
+      Math.max(...[...first, ...second].map((stamp) => stamp[1])),
+    );
+  });
+
   it('does not expose a state that failed to become durable, and keeps the queue usable', async () => {
     const memory = memoryVault();
     const clock = await openClockStore(memory.vault, {
