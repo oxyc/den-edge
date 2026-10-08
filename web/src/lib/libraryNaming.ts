@@ -371,25 +371,30 @@ export function nameLibraryShelfTitles(
   yieldToBrowser: () => Promise<void> = yieldTask,
 ): ShelfNaming {
   const run = namingRun(session, key);
-  const critical = shelfTitleRefs(library, rows);
+  // This is also the exact seed set published after shape preflight. Selecting it twice used to scan and sort the
+  // whole title history twice during startup.
+  const seeds = personalSeedRows(rows);
+  const critical = shelfTitleRefs(library, rows, seeds);
   const requiredShapes = shapeRefs(library, critical);
   // The session-owned projector retains this fold and later applies only the shapes published below. Lightweight
   // fixtures without one get the same property from one projector local to this naming run.
   const fallbackProjector = new ContinueProjector();
-  const queuesFor = () => {
+  const continueQueue = () => {
     const continued =
       session.continueTitleRefs?.(library) ??
       fallbackProjector.project({ ...library, shapes: session.shapes }).map(({ ref }) => ({
         type: ref.type,
         id: ref.id,
       }));
-    const saved = library.records
+    return uniqueRefs(continued);
+  };
+  const watchlistQueue = uniqueRefs(
+    library.records
       .filter((record) => !record.deleted && record.status === 'watchlist')
       .sort((a, b) => b.addedAt - a.addedAt)
-      .map(({ title }) => ({ type: title.type, id: title.id }));
-    return { continue: uniqueRefs(continued), watchlist: uniqueRefs(saved) };
-  };
-  const initialQueues = queuesFor();
+      .map(({ title }) => ({ type: title.type, id: title.id })),
+  );
+  const initialQueues = { continue: continueQueue(), watchlist: watchlistQueue };
   const job: ShelfJob = {
     // Own every former shelf-critical ref until shapes reveal the exact two visible queues. This also lets a
     // retained title route promote its own key while the initial pass is still running.
@@ -424,8 +429,11 @@ export function nameLibraryShelfTitles(
 
       // With no shape work, reuse the initial projection exactly. Production's session projector also makes the
       // shaped path incremental, rather than replaying the whole library after metadata arrives.
-      queues = requiredShapes.length ? queuesFor() : initialQueues;
-      const seeds = personalSeedRows(rows);
+      // Shapes can change Continue membership, but never Watchlist. Keep the already ordered Watchlist queue rather
+      // than scanning and sorting every record a second time.
+      queues = requiredShapes.length
+        ? { continue: continueQueue(), watchlist: initialQueues.watchlist }
+        : initialQueues;
       const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
       visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
       const initial = uniqueRefs([
@@ -603,25 +611,39 @@ export function nameLibraryHistoryTitles(
 
 /** Select by log recency before looking up names: network order must never select the recommendation seeds. */
 export function personalSeedRows(rows: Row[]) {
-  const titles = rows.filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value);
   const recency = (r: TitleRow) => Math.max(r.watchedAt ?? 0, r.reaction.at[0], r.addedAt);
-  const latest = (keep: (r: TitleRow) => boolean) =>
-    titles
-      .filter(keep)
-      .sort((a, b) => recency(b) - recency(a) || titleKey(a.title).localeCompare(titleKey(b.title)))
-      .slice(0, 2);
-  return {
-    watched: latest(
-      (r) =>
-        r.status.value === 'watched' || r.reaction.value === 'like' || r.reaction.value === 'love',
-    ),
-    watchlisted: latest((r) => r.status.value === 'watchlist'),
+  const compare = (a: TitleRow, b: TitleRow) =>
+    recency(b) - recency(a) || titleKey(a.title).localeCompare(titleKey(b.title));
+  const watched: TitleRow[] = [];
+  const watchlisted: TitleRow[] = [];
+  const offer = (latest: TitleRow[], row: TitleRow) => {
+    const at = latest.findIndex((held) => compare(row, held) < 0);
+    if (at < 0) {
+      if (latest.length < 2) latest.push(row);
+      return;
+    }
+    latest.splice(at, 0, row);
+    if (latest.length > 2) latest.pop();
   };
+  for (const row of rows) {
+    if (row.kind !== 'rec' || row.deleted.value) continue;
+    if (
+      row.status.value === 'watched' ||
+      row.reaction.value === 'like' ||
+      row.reaction.value === 'love'
+    )
+      offer(watched, row);
+    if (row.status.value === 'watchlist') offer(watchlisted, row);
+  }
+  return { watched, watchlisted };
 }
 
 /** Only titles that can determine a visible shelf; older watched history can be named afterward. */
-export function shelfTitleRefs(library: Library, rows: Row[]): Ref[] {
-  const seeds = personalSeedRows(rows);
+export function shelfTitleRefs(
+  library: Library,
+  rows: Row[],
+  seeds = personalSeedRows(rows),
+): Ref[] {
   const refs: Ref[] = [...seeds.watched, ...seeds.watchlisted].map((r) => r.title);
   refs.push(
     ...library.records

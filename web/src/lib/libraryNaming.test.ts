@@ -175,6 +175,43 @@ it('prioritizes shelf titles and stable recent seeds ahead of older watched hist
   ]);
 });
 
+it('selects the same two personal seeds without sorting a large history', async () => {
+  const { personalSeedRows } = await import('./libraryNaming');
+  const { addToWatchlist, blankTitle, markWatched } = await import('./actions');
+  const watched = Array.from({ length: 2_000 }, (_, id) =>
+    markWatched(blankTitle({ type: 'movie', id }, id % 19), [id % 31, 0, 'test']),
+  );
+  const saved = Array.from({ length: 2_000 }, (_, id) =>
+    addToWatchlist(blankTitle({ type: 'movie', id: 10_000 + id }, id % 23), [id % 29, 0, 'test']),
+  );
+  // Interleave old and new rows so the bounded selector cannot rely on input order. Ties keep title-key ordering,
+  // exactly as the former whole-array sort did.
+  const rows = watched.flatMap((row, index) => [saved.at(-index - 1)!, row]);
+  const recency = (row: (typeof watched)[number]) =>
+    Math.max(row.watchedAt ?? 0, row.reaction.at[0], row.addedAt);
+  const expected = (matches: (row: (typeof watched)[number]) => boolean) =>
+    rows
+      .filter(
+        (row): row is (typeof watched)[number] =>
+          row.kind === 'rec' && !row.deleted.value && matches(row),
+      )
+      .sort(
+        (a, b) =>
+          recency(b) - recency(a) ||
+          `${a.title.type}:${a.title.id}`.localeCompare(`${b.title.type}:${b.title.id}`),
+      )
+      .slice(0, 2)
+      .map(({ title }) => title.id);
+
+  const selected = personalSeedRows(rows);
+  expect(selected.watched.map(({ title }) => title.id)).toEqual(
+    expected((row) => row.status.value === 'watched'),
+  );
+  expect(selected.watchlisted.map(({ title }) => title.id)).toEqual(
+    expected((row) => row.status.value === 'watchlist'),
+  );
+});
+
 it('publishes only the first viewport of each shelf, then admits the intended shelf in bounded tranches', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { addToWatchlist, blankTitle, updateProgress } = await import('./actions');
@@ -340,6 +377,7 @@ it('reuses a session-owned Continue projection when forming shelf queues', async
   const naming = nameLibraryShelfTitles(state, library, rows, 'key', lookup);
   await naming.ready;
 
+  expect(state.continueTitleRefs).toHaveBeenCalledOnce();
   expect(state.continueTitleRefs).toHaveBeenCalledWith(library);
   expect(lookup).toHaveBeenCalledWith({ type: 'movie', id: 900 }, 'key');
   expect(lookup).not.toHaveBeenCalledWith({ type: 'movie', id: 100 }, 'key');

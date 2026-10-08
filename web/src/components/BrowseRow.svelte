@@ -34,8 +34,7 @@
   let track = $state<HTMLDivElement>();
   const page = pageVisibility();
   let rowNear = $state(false);
-  let windowStart = $state(0);
-  let windowEnd = $state(0);
+  let materialized = $state<number[]>([]);
   let focusedIndex = $state<number | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
   // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
@@ -91,10 +90,29 @@
   // frame/listener is removed when the row or retained route leaves the viewport.
   $effect(() => {
     void visible.length;
-    if (!page.active || !rowNear || !track) return;
+    if (!page.active || !rowNear || !track) {
+      materialized = [];
+      return;
+    }
     const scroller = track;
     let frame: number | undefined;
+    let materializeFrame: number | undefined;
     let viewportWidth = 0;
+    let materializeOrder: number[] = [];
+
+    // A PosterCard owns its image, availability and menu trees. Admitting a whole desktop window at once made a
+    // newly visible row one large style/layout task on a throttled phone. Its light slots already have exact final
+    // geometry, so fill two per frame: cards in the viewport first, followed by the window's overscan. A pointer or
+    // keyboard target is promoted synchronously below and never waits for this queue.
+    const materializeNext = () => {
+      materializeFrame = undefined;
+      const next = materializeOrder.filter((index) => !materialized.includes(index)).slice(0, 2);
+      if (next.length === 0) return;
+      materialized = [...materialized, ...next];
+      if (materializeOrder.some((index) => !materialized.includes(index)))
+        materializeFrame = requestAnimationFrame(materializeNext);
+    };
+
     const update = () => {
       if (!viewportWidth) return;
       const window = cardWindow(
@@ -105,8 +123,22 @@
         posterCardWidth(viewportWidth),
         14,
       );
-      windowStart = window.start;
-      windowEnd = window.end;
+      const viewport = cardWindow(
+        visible.length,
+        cachedScrollLeft,
+        viewportWidth,
+        posterCardWidth(viewportWidth),
+        14,
+        0,
+      );
+      materialized = materialized.filter((index) => index >= window.start && index < window.end);
+      materializeOrder = [
+        ...Array.from({ length: viewport.end - viewport.start }, (_, i) => viewport.start + i),
+        ...Array.from({ length: viewport.start - window.start }, (_, i) => viewport.start - i - 1),
+        ...Array.from({ length: window.end - viewport.end }, (_, i) => viewport.end + i),
+      ];
+      if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
+      materializeNext();
     };
     const schedule = () => {
       if (frame === undefined)
@@ -122,7 +154,12 @@
     const press = (event: PointerEvent) => {
       const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
       const index = Number(slot?.dataset.cardIndex);
-      if (Number.isInteger(index)) focusedIndex = index;
+      if (Number.isInteger(index)) promote(index);
+    };
+    const point = (event: PointerEvent) => {
+      const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
+      const index = Number(slot?.dataset.cardIndex);
+      if (Number.isInteger(index)) promote(index);
     };
     // Observer delivery must not read layout-sensitive element geometry or synchronously mount cards. Record only
     // the browser-supplied size, then update in the next frame after the current layout/observer cycle is complete.
@@ -136,11 +173,14 @@
     resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', scroll, { passive: true });
     scroller.addEventListener('pointerdown', press, { passive: true });
+    scroller.addEventListener('pointerover', point, { passive: true });
     return () => {
       scroller.removeEventListener('scroll', scroll);
       scroller.removeEventListener('pointerdown', press);
+      scroller.removeEventListener('pointerover', point);
       resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
+      if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
     };
   });
 
@@ -162,7 +202,11 @@
   });
 
   const mounted = (index: number) =>
-    (page.active && rowNear && index >= windowStart && index < windowEnd) || index === focusedIndex;
+    (page.active && rowNear && materialized.includes(index)) || index === focusedIndex;
+
+  function promote(index: number) {
+    if (!materialized.includes(index)) materialized = [...materialized, index];
+  }
 
   function remember(index: number) {
     focusedIndex = index;
@@ -276,6 +320,8 @@
   .slot.vacant {
     contain: strict;
     height: calc(var(--card-w) * 1.5 + 47.2px);
+    border-radius: 12px;
+    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
   }
 
   .proxy {

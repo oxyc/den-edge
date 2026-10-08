@@ -12,6 +12,7 @@
   let active = $state(!params.has('hidden'));
   const control = params.has('all-cards');
   const catalog = params.has('catalog');
+  const below = params.has('below');
   const titles: Title[] = Array.from({ length: 200 }, (_, index) => ({
     type: 'movie',
     id: index + 1,
@@ -34,7 +35,7 @@
   };
 </script>
 
-<main>
+<main class:below>
   <RoutePage {active}>
     {#if catalog}
       <Browse {rows} shown={() => true} />
@@ -53,5 +54,9 @@
 <style>
   main {
     padding: var(--bar-space) var(--gutter);
+  }
+
+  main.below {
+    padding-top: 2400px;
   }
 </style>

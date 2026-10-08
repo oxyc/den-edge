@@ -35,8 +35,70 @@ const remux = process.env.DEN_REMUX ?? 'http://192.168.86.193:8095';
 // phone — `env DEN_PROBE=1 npm run dev -- --host` — and off the rest of the time.
 const watching = process.env.DEN_PROBE === '1';
 
+/**
+ * Keep the full application graph on the wire beside the tiny entry without evaluating it. The entry can then
+ * give a retained parser-time hero one paint without adding a request chain for guests or other routes.
+ */
+const preloadApplication = () => ({
+  name: 'den-preload-application',
+  enforce: 'post' as const,
+  transformIndexHtml: {
+    order: 'post' as const,
+    handler(html: string, context: { bundle?: Record<string, unknown> }) {
+      const outputs = Object.values(context.bundle ?? {});
+      const chunks = outputs.filter(
+        (
+          output,
+        ): output is {
+          type: 'chunk';
+          fileName: string;
+          facadeModuleId: string | null;
+          imports: string[];
+          viteMetadata?: { importedCss?: Set<string> };
+        } =>
+          typeof output === 'object' &&
+          output !== null &&
+          'type' in output &&
+          output.type === 'chunk',
+      );
+      const application = chunks.find((chunk) => chunk.facadeModuleId?.endsWith('/src/appMain.ts'));
+      if (!application) return html;
+      const byFile = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
+      const scripts = new Set<string>();
+      const styles = new Set<string>();
+      const visit = (chunk: (typeof chunks)[number]) => {
+        if (scripts.has(chunk.fileName)) return;
+        scripts.add(chunk.fileName);
+        for (const file of chunk.viteMetadata?.importedCss ?? []) styles.add(file);
+        for (const file of chunk.imports) {
+          const imported = byFile.get(file);
+          if (imported) visit(imported);
+        }
+      };
+      visit(application);
+      const absentFromHtml = (file: string) =>
+        !html.includes(`href="/${file}"`) && !html.includes(`src="/${file}"`);
+      return {
+        html,
+        tags: [
+          ...[...scripts].filter(absentFromHtml).map((file) => ({
+            tag: 'link',
+            attrs: { rel: 'modulepreload', crossorigin: '', href: `/${file}` },
+            injectTo: 'head' as const,
+          })),
+          ...[...styles].filter(absentFromHtml).map((file) => ({
+            tag: 'link',
+            attrs: { rel: 'stylesheet', crossorigin: '', href: `/${file}` },
+            injectTo: 'head' as const,
+          })),
+        ],
+      };
+    },
+  },
+});
+
 export default defineConfig({
-  plugins: [previewBuild(), ...(watching ? [probe()] : []), svelte()],
+  plugins: [previewBuild(), ...(watching ? [probe()] : []), svelte(), preloadApplication()],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
     // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`
