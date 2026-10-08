@@ -6,7 +6,11 @@ import { deriveKeys } from './wire';
 
 export interface Vault {
   get(key: string): Promise<Uint8Array | undefined>;
+  /** Every key/value pair whose key starts with `prefix`, in IndexedDB key order. */
+  entries(prefix: string): Promise<Array<[key: string, value: Uint8Array]>>;
   put(key: string, value: Uint8Array): Promise<void>;
+  /** Drop exactly `key`; unlike `remove`, longer keys with this prefix remain. */
+  delete(key: string): Promise<void>;
   /** Drop every value whose key starts with `prefix`. */
   remove(prefix: string): Promise<void>;
 }
@@ -14,7 +18,7 @@ export interface Vault {
 /** A transaction on one object store, with the request `work` makes in it: its result once the transaction is done. */
 export type Transact = <T>(
   mode: IDBTransactionMode,
-  work: (store: IDBObjectStore) => IDBRequest<T> | void,
+  work: (store: IDBObjectStore) => IDBRequest<T> | (() => T) | void,
 ) => Promise<T | undefined>;
 
 /**
@@ -58,12 +62,18 @@ export function transactions(
   const once = <T>(
     database: IDBDatabase,
     mode: IDBTransactionMode,
-    work: (store: IDBObjectStore) => IDBRequest<T> | void,
+    work: (store: IDBObjectStore) => IDBRequest<T> | (() => T) | void,
   ) =>
     new Promise<T | undefined>((resolve, reject) => {
       const tx = database.transaction(store, mode);
-      const req = work(tx.objectStore(store));
-      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      const result = work(tx.objectStore(store));
+      tx.oncomplete = () => {
+        try {
+          resolve(typeof result === 'function' ? result() : result ? result.result : undefined);
+        } catch (error) {
+          reject(error);
+        }
+      };
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
@@ -81,15 +91,11 @@ export function transactions(
   };
 }
 
-/** This browser's IndexedDB, or null where there is none or it is refused (a private window, blocked site data). */
-function indexedVault(): Vault | null {
-  let factory: IDBFactory;
-  try {
-    factory = globalThis.indexedDB;
-    if (!factory) return null;
-  } catch {
-    return null;
-  }
+const prefixRange = (prefix: string) =>
+  IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff));
+
+/** A vault on `factory`; injectable so its ordering and deletion contract can be exercised without a browser. */
+export function indexedVault(factory: IDBFactory): Vault {
   const run = transactions(
     factory,
     'den-library',
@@ -99,17 +105,46 @@ function indexedVault(): Vault | null {
   );
   return {
     get: (key) => run('readonly', (kept) => kept.get(key) as IDBRequest<Uint8Array | undefined>),
+    entries: async (prefix) => {
+      const found = await run('readonly', (kept) => {
+        const range = prefixRange(prefix);
+        const keys = kept.getAllKeys(range);
+        const values = kept.getAll(range) as IDBRequest<Uint8Array[]>;
+        // Both requests belong to this transaction, so their ordered results describe one snapshot.
+        return () =>
+          keys.result.flatMap((key, index) =>
+            typeof key === 'string' && values.result[index]
+              ? [[key, values.result[index]!] as [string, Uint8Array]]
+              : [],
+          );
+      });
+      return found ?? [];
+    },
     put: async (key, value) => {
       await run('readwrite', (kept) => kept.put(value, key));
     },
+    delete: async (key) => {
+      await run('readwrite', (kept) => kept.delete(key));
+    },
     remove: async (prefix) => {
-      const range = IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff));
-      await run('readwrite', (kept) => kept.delete(range));
+      await run('readwrite', (kept) => kept.delete(prefixRange(prefix)));
     },
   };
 }
 
-export const libraryVault = indexedVault();
+/** This browser's IndexedDB, or null where there is none or it is refused (a private window, blocked site data). */
+function browserVault(): Vault | null {
+  let factory: IDBFactory;
+  try {
+    factory = globalThis.indexedDB;
+    if (!factory) return null;
+  } catch {
+    return null;
+  }
+  return indexedVault(factory);
+}
+
+export const libraryVault = browserVault();
 
 /** Drop what this browser kept of the library `libraryKey` opens: the link to it is gone. */
 export async function forgetLibrary(libraryKey: string, vault = libraryVault): Promise<void> {
