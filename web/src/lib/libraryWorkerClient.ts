@@ -78,7 +78,9 @@ function stop(error: unknown): void {
 
 function sharedWorker(): Worker | undefined {
   if (worker) return worker;
-  if (typeof Worker === 'undefined') return undefined;
+  // `Worker` is also defined inside a Worker. Projection there stays local instead of spawning a nested Worker;
+  // the staged-open engine deliberately owns its entire open/fold until hydration.
+  if (typeof document === 'undefined' || typeof Worker === 'undefined') return undefined;
   try {
     const made = new Worker(new URL('./libraryWorker.ts', import.meta.url), { type: 'module' });
     made.onmessage = (event: MessageEvent<WorkerReply>) => {

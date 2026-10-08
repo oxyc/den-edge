@@ -11,6 +11,8 @@ import { BACKGROUND_PROVIDER_FALLBACK_MS, LibrarySession } from './librarySessio
 import { deliverSimkl } from './simklDelivery';
 import { ensureSyncPolicy } from './syncLoader';
 import type { Row } from './wire';
+import * as libraryEngineClient from './libraryEngineClient';
+import type { ActiveHomePayload } from './homeLibraryView';
 
 vi.mock('./simklDelivery', () => ({ deliverSimkl: vi.fn(async () => false) }));
 
@@ -85,6 +87,77 @@ const fakeLog = (held: Row[] = []) => {
     rowsInSlices: vi.fn(async () => rows()),
   };
 };
+
+const activeHomePayload = (): ActiveHomePayload => ({
+  handle: 1,
+  view: {
+    owned: ['movie:1'],
+    watched: ['movie:1'],
+    watchlist: [],
+    standings: [['movie:1', 'watched']],
+    weighted: [['movie:1', 1, 1]],
+    seeds: { watched: ['movie:1'], watchlisted: [] },
+    shelfRefs: ['movie:1'],
+    requiredShapeRefs: [],
+    continue: [],
+    downloads: [],
+  },
+  settings: {
+    tmdbKey: 'tmdb',
+    plugins: [],
+    remux: null,
+    prefs: {
+      excludedGenres: [],
+      excludedLanguages: [],
+      hideAnime: false,
+      hideWatched: false,
+      services: [],
+      servicesConfigured: false,
+    },
+  },
+  stamp: [1, 0, 'web'],
+  reconsiderAt: Infinity,
+  at: 1,
+});
+
+it('keeps staged Home compact while installing its mutable log and projects only on demand', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const hydrate = vi.fn(async () => log as unknown as LibraryLog);
+  const release = vi.fn(async () => {});
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload: activeHomePayload(),
+    hydrate,
+    release,
+  });
+  const ordinary = vi.spyOn(LibraryLog, 'open');
+  const session = new LibrarySession('test');
+
+  expect(await session.opened).toBeNull();
+  expect(session.activeHome?.view.owned).toEqual(['movie:1']);
+  expect(session.log).toBeUndefined();
+  expect(log.rowsInSlices).not.toHaveBeenCalled();
+  expect(ordinary).not.toHaveBeenCalled();
+
+  session.foregroundReady(false);
+  await Promise.resolve();
+  expect(
+    hydrate,
+    'provider fallback must not consume a still-validating Home engine',
+  ).not.toHaveBeenCalled();
+
+  expect(await session.ensureLog()).toBe(log);
+  expect(session.log).toBe(log);
+  expect(session.activeHome).not.toBeNull();
+  expect(log.rowsInSlices).not.toHaveBeenCalled();
+  expect(session.libraryProjection()).toBeNull();
+  expect(hydrate).toHaveBeenCalledOnce();
+
+  expect(await session.ensureLog(true)).toBe(log);
+  expect(session.activeHome).toBeNull();
+  expect(session.libraryProjection()).not.toBeNull();
+  expect(log.rows).toHaveBeenCalledOnce();
+});
 
 it('retries an initially failed open without discarding a recovered log', async () => {
   const log = fakeLog();

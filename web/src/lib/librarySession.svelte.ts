@@ -26,7 +26,13 @@ import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
 import type { ActiveHomePayload } from './homeLibraryView';
-import { projectActiveHomeShapes } from './libraryWorkerClient';
+import { openLibraryEngine, projectLibraryEngineShapes } from './libraryEngineClient';
+
+interface StagedLibraryEngine {
+  payload: ActiveHomePayload;
+  hydrate(): Promise<LibraryLog | null>;
+  release(): Promise<void>;
+}
 
 /** Directly opened routes may never paint Home's billboard; background providers still start eventually. */
 export const BACKGROUND_PROVIDER_FALLBACK_MS = 10_000;
@@ -98,6 +104,8 @@ export class LibrarySession {
   private readonly displayBatches: string[][] = [];
   private readonly shapeBatches: string[][] = [];
   private activeHomeShapeRun = 0;
+  private stagedEngine?: StagedLibraryEngine;
+  private hydrating?: Promise<LibraryLog | null>;
   private readonly device = this.clock.device;
   /** SIMKL delivery is independent of the visible library. Hold its large snapshot behind foreground readiness. */
   private providersReady = false;
@@ -133,13 +141,70 @@ export class LibrarySession {
   }
 
   /** Install the Worker's compact first reply. The log/facade owner decides when its retained handle hydrates. */
-  adoptActiveHome(payload: ActiveHomePayload): void {
+  adoptActiveHome(payload: ActiveHomePayload, engine?: StagedLibraryEngine): void {
+    this.stagedEngine = engine;
     this.activeHome = payload;
   }
 
   /** The retained snapshot has become the ordinary log; its compact first reply no longer owns page state. */
   clearActiveHome(handle?: number): void {
-    if (handle === undefined || this.activeHome?.handle === handle) this.activeHome = null;
+    if (handle === undefined || this.activeHome?.handle === handle) {
+      this.activeHome = null;
+      this.activeHomeShapeRun++;
+    }
+  }
+
+  /** Materialize the ordinary mutable log once a route or action needs more than compact Home state. */
+  ensureLog(fullProjection = false): Promise<LibraryLog | null> {
+    if (this.log !== undefined) {
+      if (fullProjection) this.clearActiveHome();
+      return Promise.resolve(this.log);
+    }
+    if (this.hydrating)
+      return this.hydrating.then((log) => {
+        if (fullProjection && log) this.clearActiveHome();
+        return log;
+      });
+    const work = (async () => {
+      const staged = this.stagedEngine;
+      this.stagedEngine = undefined;
+      let opened: LibraryLog | null = null;
+      try {
+        opened = (await staged?.hydrate()) ?? null;
+      } catch {
+        // The ordinary open below is the compatibility and recovery path.
+      } finally {
+        void staged?.release().catch(() => {});
+      }
+      if (!this.active) return null;
+      if (!opened && this.key !== null) {
+        try {
+          opened = await LibraryLog.open(this.key);
+        } catch {
+          opened = null;
+        }
+      }
+      if (!opened) {
+        this.clearActiveHome();
+        this.log = null;
+        return null;
+      }
+      if (!this.active || this.log !== undefined) return this.log ?? null;
+      this.attachDownloads(opened);
+      this.log = opened;
+      this.revision++;
+      this.settingsRevision++;
+      downloads.touch();
+      if (fullProjection) this.clearActiveHome();
+      // A cached engine open still receives the same immediate catch-up as the ordinary cached path. An unchanged
+      // refresh leaves compact Home in place; a changed one invalidates it through `changed` below.
+      queueMicrotask(() => void this.refresh());
+      return opened;
+    })().finally(() => {
+      if (this.hydrating === work) this.hydrating = undefined;
+    });
+    this.hydrating = work;
+    return work;
   }
 
   /** One refresh owner for every route, including Settings. Failed opens are retryable. */
@@ -169,8 +234,23 @@ export class LibrarySession {
           if (this.log && (await upgradeLibrary(this.log, true))) this.changed(true);
           return;
         }
+        if (!this.log && this.activeHome) return;
         if (!this.log) {
           const before = this.log;
+          let engine: StagedLibraryEngine | undefined;
+          try {
+            engine = (await openLibraryEngine(this.key)) ?? undefined;
+          } catch {
+            // Older browsers and a failed cached-engine open use the established LibraryLog path.
+          }
+          if (engine) {
+            if (!this.active || this.log !== before) {
+              void engine.release().catch(() => {});
+              return;
+            }
+            this.adoptActiveHome(engine.payload, engine);
+            return;
+          }
           const opened = await LibraryLog.open(this.key);
           if (!opened) {
             if (this.log === before) this.log = null;
@@ -206,7 +286,7 @@ export class LibrarySession {
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
         console.warn('den: the library could not be refreshed', error);
-        if (!this.log) this.log = null;
+        if (!this.log && !this.activeHome) this.log = null;
       } finally {
         this.alert = this.log ? libraryAlert(this.log) : null;
         this.refreshing = undefined;
@@ -248,7 +328,7 @@ export class LibrarySession {
     let providersDue = false;
     const releaseProviders = () => {
       providersDue = true;
-      if (!document.hidden) this.foregroundReady();
+      if (!document.hidden) this.foregroundReady(false);
     };
     const providerTimer = setTimeout(releaseProviders, BACKGROUND_PROVIDER_FALLBACK_MS);
     const tick = async () => {
@@ -259,12 +339,15 @@ export class LibrarySession {
     window.addEventListener('online', refresh);
     const visible = () => {
       void refresh();
-      if (providersDue && !document.hidden) this.foregroundReady();
+      if (providersDue && !document.hidden) this.foregroundReady(false);
     };
     document.addEventListener('visibilitychange', visible);
     return () => {
       this.active = false;
       disposed = true;
+      const staged = this.stagedEngine;
+      this.stagedEngine = undefined;
+      void staged?.release().catch(() => {});
       clearTimeout(timer);
       clearTimeout(providerTimer);
       window.removeEventListener('online', refresh);
@@ -276,11 +359,16 @@ export class LibrarySession {
    * The foreground has painted its critical hero. Release provider synchronization and poster availability now;
    * neither decides the shelves or hero, but both otherwise begin large/slow requests while those are loading.
    */
-  foregroundReady(): void {
-    if (!this.active || this.providersReady) return;
-    this.providersReady = true;
-    this.services.foregroundReady();
-    this.startSimkl();
+  foregroundReady(hydrate = true): void {
+    if (!this.active) return;
+    if (!this.providersReady) {
+      this.providersReady = true;
+      this.services.foregroundReady();
+      this.startSimkl();
+    }
+    // The timeout above may release providers while slow TV layout lookups are still deciding Continue. Only the
+    // component's post-shelf signal may consume the retained engine; route/action intent can still force it sooner.
+    if (hydrate && this.activeHome) void this.ensureLog();
   }
 
   private deferSimkl(log: LibraryLog): void {
@@ -309,6 +397,7 @@ export class LibrarySession {
     }
   }
   changed(settings = false) {
+    if (this.log && this.activeHome) this.clearActiveHome();
     this.revision++;
     if (settings) this.settingsRevision++;
     downloads.touch();
@@ -354,7 +443,7 @@ export class LibrarySession {
     const wanted = new Set(active.view.requiredShapeRefs);
     const shapes = [...this.shapes].filter(([key]) => wanted.has(key));
     const run = ++this.activeHomeShapeRun;
-    const projected = await projectActiveHomeShapes(active.handle, shapes);
+    const projected = await projectLibraryEngineShapes(active.handle, shapes);
     if (
       !projected ||
       run !== this.activeHomeShapeRun ||
@@ -365,6 +454,21 @@ export class LibrarySession {
       ...this.activeHome,
       view: { ...this.activeHome.view, continue: projected.continue },
     };
+  }
+
+  /** Wait for exact compact Continue membership after Home's required layouts have been published. */
+  settleActiveHomeContinue(): Promise<void> {
+    return this.projectActiveHomeContinue();
+  }
+
+  /** Compact Continue candidates with the TMDB titles already published by Home's naming pass. */
+  activeHomeContinueWatching(): ContinueEntry[] {
+    const active = this.activeHome;
+    if (!active) return [];
+    return active.view.continue.flatMap(({ ref, display: _display, ...entry }) => {
+      const title = this.displayTitle(ref);
+      return title?.title ? [{ ...entry, title }] : [];
+    });
   }
 
   /** Remember metadata learned outside the background naming queue (for example, a pressed billboard card). */
@@ -433,7 +537,7 @@ export class LibrarySession {
   libraryProjection(): { rows: Row[]; library: Library } | null {
     const revision = this.revision;
     const log = this.log;
-    if (!log) return null;
+    if (!log || this.activeHome) return null;
     if (!this.projection || this.projection.revision !== revision || this.projection.log !== log) {
       const rows = log.rows();
       this.projection = { revision, log, rows, library: applyLog(emptyLibrary(), rows) };

@@ -1546,6 +1546,62 @@ describe('LibraryLog', () => {
     expect(log.newestStamp()).toEqual(at(11_000, 'import'));
   });
 
+  it('exports and imports the exact current and acknowledged states without network or journal replay', async () => {
+    const { data, vault } = memoryVault();
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    data.set(
+      `${keys.id}:runtime:pending:held`,
+      new TextEncoder().encode(JSON.stringify({ k: 'held', v: 'sealed' })),
+    );
+    const acknowledged = row(1);
+    const current = row(1, { reaction: { value: 'love', at: at(2_000, 'web') } });
+    const snapshot = {
+      header: {
+        version: 1 as const,
+        generation: 'generation',
+        head: 9,
+        memberRegistered: false,
+        wireMin: 4,
+        upgradeRequired: null,
+        unreadable: [],
+        newerFraming: [],
+        newerDocuments: [],
+        switchFailure: null,
+        predatesV3: false,
+        compactionRefused: null,
+        moved: false,
+        refused: false,
+        refusedAt: 0,
+        refusal: null,
+        rejected: [],
+        fromCache: true,
+        generationChanges: 0,
+        unreported: false,
+      },
+      entries: [
+        {
+          name: 'rec:movie:1',
+          current: [0, current] as [number, Row],
+          acknowledged: [9, acknowledged] as [number, Row],
+        },
+      ],
+    };
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    const imported = await LibraryLog.importSnapshot(
+      LIBRARY_KEY,
+      snapshot,
+      fetchImpl,
+      undefined,
+      vault,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(imported?.pendingActions).toBe(1);
+    expect(imported?.title({ type: 'movie', id: 1 })?.reaction.value).toBe('love');
+    expect(imported?.exportSnapshot()).toEqual(snapshot);
+  });
+
   it('shares one projected row snapshot until an entry changes', async () => {
     const server = await edge([row(1)]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;

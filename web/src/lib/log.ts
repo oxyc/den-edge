@@ -200,6 +200,49 @@ interface Snapshot {
   wireMin?: number;
 }
 
+/**
+ * One row in a live log handed from the staged-open Worker to the page. `current` includes projected pending work;
+ * `acknowledged` is the den-edge base against which later writes compare. Keeping both avoids opening the network or
+ * replaying the pending journal a second time during hydration.
+ */
+export interface LibraryLogSnapshotEntry {
+  name: string;
+  current?: [seq: number, row: Row];
+  acknowledged?: [seq: number, row: Row];
+}
+
+/** Non-row state needed to resume an already-opened online log on the page. */
+export interface LibraryLogSnapshotHeader {
+  version: 1;
+  generation?: string;
+  writeGeneration?: string;
+  head: number;
+  memberRegistered: boolean;
+  wireMin: number;
+  upgradeRequired: number | null;
+  unreadable: Array<[string, string]>;
+  newerFraming: string[];
+  newerDocuments: string[];
+  switchFailure: string | null;
+  predatesV3: boolean;
+  compactionRefused: string | null;
+  recoveryRows?: Row[];
+  moved: boolean;
+  refused: boolean;
+  refusedAt: number;
+  refusal: string | null;
+  rejected: Array<[string, number]>;
+  fromCache: boolean;
+  generationChanges: number;
+  unreported: boolean;
+}
+
+/** Exact, clone-safe state of an online `LibraryLog`. */
+export interface LibraryLogSnapshot {
+  header: LibraryLogSnapshotHeader;
+  entries: LibraryLogSnapshotEntry[];
+}
+
 /** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
 interface SwitchContext {
   performer: string;
@@ -1687,6 +1730,79 @@ export class LibraryLog {
     }
   }
 
+  /**
+   * Resume a log exported by `exportSnapshot` without reading den-edge, reopening the kept log, or replaying its
+   * journal. Runtime pending/meta records are still initialized so subsequent writes and cross-tab replay retain
+   * their ordinary durability contract.
+   */
+  static async importSnapshot(
+    libraryKey: string,
+    snapshot: LibraryLogSnapshot,
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+    vault: Vault | null = libraryVault,
+  ): Promise<LibraryLog | null> {
+    if (snapshot.header.version !== 1) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const log = new LibraryLog(
+      keys,
+      fetchImpl,
+      storage,
+      vault && { vault, key: await localKey(raw) },
+      false,
+      vault,
+    );
+    await log.initializeRuntime();
+    await ensureSyncPolicy();
+    const header = snapshot.header;
+    log.generation = header.generation;
+    log.writeGeneration = header.writeGeneration;
+    log.head = header.head;
+    log.memberRegistered = header.memberRegistered;
+    log.wireMin = Math.max(log.wireMin, header.wireMin);
+    log.upgradeRequired =
+      log.upgradeRequired === null
+        ? header.upgradeRequired
+        : header.upgradeRequired === null
+          ? log.upgradeRequired
+          : Math.max(log.upgradeRequired, header.upgradeRequired);
+    log.switchFailure = header.switchFailure;
+    log.predatesV3 = header.predatesV3;
+    log.compactionRefused = header.compactionRefused;
+    log.recoveryRows = header.recoveryRows;
+    log.moved = header.moved;
+    log.refused = header.refused;
+    log.refusedAt = header.refusedAt;
+    log.refusal = header.refusal;
+    log.fromCache = header.fromCache;
+    log.generationChanges = header.generationChanges;
+    log.unreported = header.unreported;
+    for (const [key, why] of header.unreadable) log.unreadable.set(key, why);
+    for (const key of header.newerFraming) log.newerFraming.add(key);
+    for (const key of header.newerDocuments) log.newerDocuments.add(key);
+    for (const [key, at] of header.rejected) log.rejected.set(key, at);
+    let valid = true;
+    await inPolicySlices(snapshot.entries, (entry) => {
+      if (entry.current) {
+        const [seq, row] = entry.current;
+        if (!wellFormed(row)) valid = false;
+        else log.entries.set(entry.name, { seq, row });
+      }
+      if (entry.acknowledged) {
+        const [seq, row] = entry.acknowledged;
+        if (!wellFormed(row)) valid = false;
+        else log.acknowledged.set(entry.name, { seq, row });
+      }
+    });
+    if (!valid) {
+      log.runtimeChannel?.close();
+      return null;
+    }
+    if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
+    return log;
+  }
+
   /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
   rows(): Row[] {
     const version = this.entriesVersion;
@@ -1991,6 +2107,51 @@ export class LibraryLog {
     };
   }
 
+  /**
+   * Clone-safe live state for the staged-open handoff. This is deliberately not the kept `Snapshot`: pending work
+   * may have changed `entries` without changing `acknowledged`, and both sides are required to resume exact writes.
+   */
+  exportSnapshot(): LibraryLogSnapshot {
+    const names = new Set([...this.entries.keys(), ...this.acknowledged.keys()]);
+    return {
+      header: {
+        version: 1,
+        generation: this.generation,
+        writeGeneration: this.writeGeneration,
+        head: this.head,
+        memberRegistered: this.memberRegistered,
+        wireMin: this.wireMin,
+        upgradeRequired: this.upgradeRequired,
+        unreadable: [...this.unreadable],
+        newerFraming: [...this.newerFraming],
+        newerDocuments: [...this.newerDocuments],
+        switchFailure: this.switchFailure,
+        predatesV3: this.predatesV3,
+        compactionRefused: this.compactionRefused,
+        recoveryRows: this.recoveryRows,
+        moved: this.moved,
+        refused: this.refused,
+        refusedAt: this.refusedAt,
+        refusal: this.refusal,
+        rejected: [...this.rejected],
+        fromCache: this.fromCache,
+        generationChanges: this.generationChanges,
+        unreported: this.unreported,
+      },
+      entries: [...names].map((name) => {
+        const current = this.entries.get(name);
+        const acknowledged = this.acknowledged.get(name);
+        return {
+          name,
+          ...(current ? { current: [current.seq, current.row] as [number, Row] } : {}),
+          ...(acknowledged
+            ? { acknowledged: [acknowledged.seq, acknowledged.row] as [number, Row] }
+            : {}),
+        };
+      }),
+    };
+  }
+
   /** The pages a first read has read so far (`PARTIAL`); a failure only costs the next visit those pages. */
   private keepPartial(): void {
     if (!this.local) return;
@@ -2100,6 +2261,11 @@ export class LibraryLog {
 
   /** The newest stamp read, so this browser's next edit is stamped after everything it has seen. */
   newestStamp(now = Date.now()): Stamp {
+    return this.currentSummary(now).stamp;
+  }
+
+  /** Stamp summary paired with the instant at which future document stamps must be reconsidered. */
+  currentSummary(now = Date.now()): { stamp: Stamp; reconsiderAt: number; at: number } {
     const cached = this.newestCache;
     if (
       cached &&
@@ -2107,7 +2273,7 @@ export class LibraryLog {
       now >= cached.at &&
       now < cached.reconsiderAt
     )
-      return cached.stamp;
+      return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
     let latest = ZERO_STAMP;
     let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
@@ -2116,7 +2282,7 @@ export class LibraryLog {
       reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
     }
     this.newestCache = { version: this.entriesVersion, at: now, stamp: latest, reconsiderAt };
-    return latest;
+    return { stamp: latest, reconsiderAt, at: now };
   }
 
   /**

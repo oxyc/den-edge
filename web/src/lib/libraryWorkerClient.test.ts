@@ -7,6 +7,16 @@ afterEach(() => {
   vi.resetModules();
 });
 
+it('does not spawn a projection Worker from a Worker global', async () => {
+  const Worker = vi.fn();
+  vi.stubGlobal('Worker', Worker);
+  vi.stubGlobal('document', undefined);
+  const { projectRowsInWorker } = await import('./libraryWorkerClient');
+
+  await expect(projectRowsInWorker([], 0)).resolves.toBeUndefined();
+  expect(Worker).not.toHaveBeenCalled();
+});
+
 it('reuses the fold returned with projected rows instead of posting the whole history again', async () => {
   const rows: Row[] = [];
   const library: Library = {
@@ -38,6 +48,7 @@ it('reuses the fold returned with projected rows instead of posting the whole hi
     terminate(): void {}
   }
 
+  vi.stubGlobal('document', {});
   vi.stubGlobal('Worker', FakeWorker);
   const { applyRowsInWorker, projectRowsInWorker } = await import('./libraryWorkerClient');
   const projected = await projectRowsInWorker([], 0);
@@ -101,6 +112,7 @@ it('opens and projects a kept snapshot in one reply without cloning its rows twi
     terminate(): void {}
   }
 
+  vi.stubGlobal('document', {});
   vi.stubGlobal('Worker', FakeWorker);
   const { applyRowsInWorker, openKeptInWorker, projectRowsInWorker } =
     await import('./libraryWorkerClient');
@@ -179,6 +191,7 @@ it('does not reuse the opened projection after the authoritative row order chang
     terminate(): void {}
   }
 
+  vi.stubGlobal('document', {});
   vi.stubGlobal('Worker', FakeWorker);
   const { openKeptInWorker, projectRowsInWorker } = await import('./libraryWorkerClient');
   const opened = await openKeptInWorker<{ entries: [string, number, Row][] }>(
@@ -255,6 +268,7 @@ it('opens Home compactly, projects late shapes, and hydrates the retained snapsh
     terminate(): void {}
   }
 
+  vi.stubGlobal('document', {});
   vi.stubGlobal('Worker', FakeWorker);
   const { hydrateActiveHomeInWorker, openActiveHomeInWorker, projectActiveHomeShapes } =
     await import('./libraryWorkerClient');

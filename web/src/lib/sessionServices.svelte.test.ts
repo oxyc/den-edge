@@ -48,6 +48,34 @@ const logWith = (plugins: string[]) =>
   }) as unknown as LibraryLog;
 
 describe('SessionServices', () => {
+  it('starts member discovery from compact settings before the log hydrates', async () => {
+    discoveries = 0;
+    reaches = undefined;
+    const services = new SessionServices(
+      async () => ({}),
+      () => undefined,
+    );
+    services.configureActive({
+      tmdbKey: 'compact-key',
+      plugins: ['https://addon.test/manifest.json'],
+      remux: 'https://remux.test',
+      prefs: {
+        excludedGenres: [],
+        excludedLanguages: [],
+        hideAnime: false,
+        hideWatched: false,
+        services: [],
+        servicesConfigured: false,
+      },
+    });
+
+    await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
+    expect(services.tmdbKey).toBe('compact-key');
+    expect(services.plugins).toEqual(['https://addon.test/manifest.json']);
+    expect(discoveries).toBe(1);
+    services.stop();
+  });
+
   it('discovers Scout but holds availability requests until the foreground is ready', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');

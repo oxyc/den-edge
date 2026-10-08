@@ -30,6 +30,7 @@
   const open = (own: string | null) =>
     untrack(() => new LibrarySession(link?.libraryKey ?? own, !link && own !== null));
   let session = $state.raw(open(ownKey));
+  let currentPage = $state<Route['page']>();
   $effect(() => {
     const current = session;
     return untrack(() => {
@@ -41,6 +42,12 @@
         current.services.stop();
       };
     });
+  });
+  // The initial route can arrive before the staged Worker open. React to both sides of that race so a direct
+  // Settings visit cannot leave its ordinary log stranded behind Home-only compact state.
+  $effect(() => {
+    if (currentPage && currentPage !== 'library' && session.activeHome)
+      void session.ensureLog(true);
   });
   // Another tab made this browser's own library at the same moment, and its key is the one kept: this tab's rows go
   // into that library, and the page goes on with it.
@@ -58,6 +65,9 @@
   <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   <Router
     onchange={(route) => {
+      currentPage = route.page;
+      // Compact startup serves Home only. Direct and subsequent routes materialize the ordinary mutable log.
+      if (route.page !== 'library' && session.activeHome) void session.ensureLog(true);
       // With no library at all — a browser that keeps nothing — there are no keys or plugins to show, so Settings is
       // where pairing lives. A browser with its own library has every setting, pairing among them.
       if (route.page === 'settings')
