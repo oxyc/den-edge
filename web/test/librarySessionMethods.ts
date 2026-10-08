@@ -12,7 +12,11 @@ import type { Row } from '../src/lib/wire';
 
 interface FixtureSession {
   revision: number;
-  log?: { rows: () => Row[] } | null;
+  log?: {
+    rows: () => Row[];
+    kept?: <T>(name: string) => Promise<T | undefined>;
+    keep?: <T>(name: string, value: T) => Promise<void>;
+  } | null;
   displays: Title[];
   shapes: Map<string, Shape>;
   publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>): void;
@@ -28,6 +32,14 @@ const projectors = new WeakMap<object, ContinueProjector>();
 export const fixtureLibrarySessionMethods = {
   /** Provider delivery is outside these lightweight layout/navigation fixtures. */
   foregroundReady(): void {},
+
+  kept<T>(this: FixtureSession, name: string): Promise<T | undefined> {
+    return this.log?.kept?.<T>(name) ?? Promise.resolve(undefined);
+  },
+
+  async keep<T>(this: FixtureSession, name: string, value: T): Promise<void> {
+    await this.log?.keep?.(name, value);
+  },
 
   publishLibraryMetadata(
     this: FixtureSession,
