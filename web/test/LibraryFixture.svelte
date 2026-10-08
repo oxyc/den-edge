@@ -187,7 +187,6 @@
   const library = fixtureLibraryService({ log });
   publish = () => library.publish();
   const session: LibrarySession = library.session;
-  void library.model.ready.then(() => session.configureServices());
   if (!unnamedMany)
     session.publishLibraryMetadata(
       Array.from({ length: many }, (_, index) => ({

@@ -114,9 +114,12 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  const SHELF_TRANCHE = 8;
   let shelvesReady = $state(model === null);
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
   let retainedContinue = $state(false);
+  let continueNames = $state(SHELF_TRANCHE);
+  let watchlistNames = $state(SHELF_TRANCHE);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -210,12 +213,13 @@
       return;
     }
     let disposed = false;
-    shelvesReady = false;
+    const initial = untrack(() => shelfPlan === null);
+    if (initial) shelvesReady = false;
     shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
     const refs = [
       ...continued.needsShapes,
-      ...continued.items.slice(0, 8).map(({ title }) => title),
-      ...view.watchlist.slice(0, 8),
+      ...continued.items.slice(0, continueNames).map(({ title }) => title),
+      ...view.watchlist.slice(0, watchlistNames),
       ...view.seeds.watched,
       ...view.seeds.watchlisted,
     ];
@@ -229,7 +233,7 @@
     };
   });
   $effect(() => {
-    if (!model || continueView) return;
+    if (!model) return;
     let current = true;
     void model.retainedHomeContinue().then(
       (present) => {
@@ -241,6 +245,9 @@
       current = false;
     };
   });
+
+  const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
+  const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
 
   // The Watchlist screen is the only owner of the potentially large history naming tail.
   $effect(() => {
@@ -1376,7 +1383,7 @@
       onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
-  {#if !shelvesReady && (!retainedContinue || facet)}
+  {#if !shelvesReady && (!(retainedContinue || shelfPlan?.continue) || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
     {#if shelvesReady && resume.length}
@@ -1386,6 +1393,7 @@
         itemKey={(entry) => `${entry.title.type}:${entry.title.id}`}
         itemHref={(entry) => titleHref(entry.title)}
         itemLabel={(entry) => entry.title.title}
+        onintent={admitContinueNames}
       >
         {#snippet children(entry)}
           <PosterCard
@@ -1398,7 +1406,7 @@
           />
         {/snippet}
       </WindowedPosterRow>
-    {:else if !shelvesReady && !facet && shelfPlan?.continue}
+    {:else if !shelvesReady && !facet && (shelfPlan?.continue || retainedContinue)}
       <PendingPosterRow heading="Continue Watching" />
     {/if}
     {#if !facet && downloading.length && shelvesReady}
@@ -1443,6 +1451,7 @@
         itemKey={(title) => `${title.type}:${title.id}`}
         itemHref={titleHref}
         itemLabel={(title) => title.title}
+        onintent={admitWatchlistNames}
       >
         {#snippet children(title)}
           <PosterCard
