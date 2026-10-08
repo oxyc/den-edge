@@ -116,7 +116,6 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (!eligible) this.#cancelTimer();
     else if (!wasEligible) this.#schedule(0);
     else if (this.#interval() !== previousInterval) this.#schedule(this.#interval());
-    if (!wasEligible && eligible) this.#requestDelivery();
     return result;
   }
 
@@ -175,7 +174,6 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
         const result = await this.maintenance.run();
         if (this.#closed) return;
         if (result.changed) this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
-        if (result.changed) this.#requestDelivery();
         if (!sameStatus(this.#lastStatus, result.status)) {
           this.#lastStatus = result.status;
           this.#emit({ kind: 'status', status: result.status });
@@ -209,6 +207,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#running = running;
     void running.finally(() => {
       if (this.#running === running) this.#running = undefined;
+      this.#requestDelivery();
       if (!this.#closed && this.#eligible() && this.maintenance.mode === 'online') {
         const elapsed = Math.max(0, this.#now() - started);
         this.#schedule(Math.max(0, this.#interval() - elapsed));
@@ -226,6 +225,9 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
       this.maintenance.mode !== 'online'
     )
       return;
+    if (this.#running) {
+      return;
+    }
     if (this.#deliveryRunning) {
       this.#deliveryPending = true;
       return;
