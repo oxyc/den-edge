@@ -6,6 +6,7 @@ import {
 import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './libraryServiceProtocol';
 
 const version = { instance: 'worker-1', generation: 'generation-3', revision: 14 };
+const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
   it('accepts a handshake and semantic, idempotent commands', () => {
@@ -15,7 +16,7 @@ describe('library service client protocol', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'request-1',
         clientId: 'tab-1',
-        libraryKey: 'secret',
+        libraryKey,
         mode: 'online',
         legacyClock: {
           device: '0123456789abcdef',
@@ -385,10 +386,21 @@ describe('library service client protocol', () => {
     expect(
       decodeLibraryServiceClientMessage({
         type: 'hello',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-invalid-key',
+        clientId: 'tab-1',
+        libraryKey: 'secret',
+        mode: 'online',
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request', retryable: false } });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'hello',
         protocol: 99,
         requestId: 'request-1',
         clientId: 'tab-1',
-        libraryKey: 'secret',
+        libraryKey,
         mode: 'online',
       }),
     ).toEqual({
@@ -503,7 +515,7 @@ describe('library service client protocol', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'request-hello',
         clientId: 'tab-1',
-        libraryKey: 'secret',
+        libraryKey,
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
     expect(

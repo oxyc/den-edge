@@ -1625,7 +1625,7 @@ export function decodeLibraryServiceClientMessage(
           'legacyClock',
         ]) ||
         !text(input.clientId) ||
-        !text(input.libraryKey) ||
+        !libraryKey(input.libraryKey) ||
         (input.mode !== 'online' && input.mode !== 'local') ||
         !optional(input.legacyClock, legacyClock)
       )
