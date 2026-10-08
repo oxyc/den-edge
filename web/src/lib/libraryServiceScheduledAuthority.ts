@@ -97,6 +97,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     return result;
   };
   query: LibraryServiceAuthority['query'] = (query) => this.authority.query(query);
+  task: LibraryServiceAuthority['task'] = async (task) => {
+    const result = await this.authority.task(task);
+    if (result.affected.length) this.#requestDelivery();
+    return result;
+  };
 
   async observe(observation: LibraryObservation) {
     const result = await this.authority.observe(observation);

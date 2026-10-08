@@ -83,6 +83,51 @@ describe('library service client protocol', () => {
     expect(JSON.stringify(decoded)).not.toContain('row');
   });
 
+  it('accepts bounded semantic tasks and rejects row-shaped import payloads', () => {
+    const decodeTask = (task: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-task',
+        task,
+      });
+
+    expect(
+      decodeTask({
+        kind: 'history.import',
+        items: [
+          { title: { type: 'movie', id: 12 }, watchedAt: 1_800_000_000_000 },
+          {
+            title: { type: 'tv', id: 34 },
+            episodes: [{ season: 1, episode: 2, watchedAt: 1_800_000_000_001 }],
+            complete: false,
+          },
+        ],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'history.import',
+        items: [{ kind: 'rec', schema: 4, title: { type: 'movie', id: 12 } }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({
+        kind: 'key-reset.move',
+        destinationLibraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(3))),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-task',
+        result: { kind: 'history.import', written: 2, total: 2, complete: true },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('accepts the complete semantic preferences patch', () => {
     const decoded = decodeLibraryServiceClientMessage({
       type: 'command',

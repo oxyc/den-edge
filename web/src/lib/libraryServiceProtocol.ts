@@ -10,6 +10,7 @@ export const LIBRARY_SERVICE_PROTOCOL = 1 as const;
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
   collectionItems: 100_000,
+  importItems: 100_000,
   presenceTitles: 512,
   shapeSeasons: 256,
   seasonEpisodes: 2_048,
@@ -169,6 +170,7 @@ export type LibrarySelection =
   | { kind: 'settings' }
   | { kind: 'connections' }
   | { kind: 'simkl' }
+  | { kind: 'recovery' }
   | { kind: 'downloads' };
 
 export interface LibraryOverviewView {
@@ -345,6 +347,22 @@ export interface DownloadsView {
   items: DownloadViewItem[];
 }
 
+/** Recovery state is reconciled by the authority; locators and sealed keys never become page model state. */
+export interface RecoveryView {
+  kind: 'recovery';
+  availability: 'ready' | 'waits';
+  live: {
+    createdAt: number;
+    by: string;
+    byName: string;
+    opens: number;
+    lastOpenedAt: number | null;
+    reposted: boolean;
+  } | null;
+  broken: boolean;
+  notices: string[];
+}
+
 export type LibrarySelectionValue =
   | LibraryOverviewView
   | ContinueView
@@ -354,7 +372,47 @@ export type LibrarySelectionValue =
   | SettingsView
   | ConnectionsView
   | SimklView
+  | RecoveryView
   | DownloadsView;
+
+export interface HistoryImportItem {
+  title: TitleRef;
+  /** A provider import has one authoritative most-recent film viewing. */
+  watchedAt?: number;
+  episodes?: Array<{ season: number; episode: number; watchedAt: number }>;
+  /** The provider export covered every aired episode known by its matching pass. */
+  complete?: boolean;
+}
+
+export type LibraryTask =
+  | { kind: 'recovery.begin'; locator: string; sealed: string; createdAt: number }
+  | { kind: 'recovery.confirm'; locator: string }
+  | { kind: 'recovery.abandon'; locator: string }
+  | { kind: 'recovery.disable' }
+  | { kind: 'history.import'; items: HistoryImportItem[] }
+  | { kind: 'local-library.merge'; sourceLibraryKey: string }
+  | { kind: 'key-reset.move'; destinationLibraryKey: string }
+  | { kind: 'key-reset.settle'; destinationLibraryKey: string }
+  | { kind: 'key-reset.adopt'; destinationLibraryKey: string };
+
+export type KeyResetOutcome =
+  | 'moved'
+  | 'adopted'
+  | 'undone'
+  | 'held'
+  | 'foreign'
+  | 'unknown'
+  | 'update-required'
+  | 'unavailable';
+
+export type LibraryTaskResult =
+  | { kind: 'recovery.begin'; outcome: 'begun' | 'full' | 'taken' | 'waits' | 'failed' }
+  | { kind: 'recovery.confirm'; outcome: 'confirmed' | 'lost' | 'failed' }
+  | { kind: 'recovery.abandon'; outcome: 'abandoned' }
+  | { kind: 'recovery.disable'; outcome: 'disabled' }
+  | { kind: 'history.import'; written: number; total: number; complete: boolean }
+  | { kind: 'local-library.merge'; outcome: 'merged' | 'unavailable' }
+  | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome };
 
 export type LibraryQuery =
   | {
@@ -363,6 +421,20 @@ export type LibraryQuery =
       episode?: EpisodeRef;
     }
   | { kind: 'parental-pin.verify'; pin: string }
+  | { kind: 'key-reset.prepare' }
+  | {
+      kind: 'recovery.seal';
+      locator: string;
+      wrapKey: string;
+      createdAt: number;
+    }
+  | {
+      kind: 'pairing.handover';
+      handoverKey: string;
+      host: string;
+      linkKey?: string;
+    }
+  | { kind: 'history.export' }
   | { kind: 'relay.membership' };
 
 export type LibraryQueryResult =
@@ -373,6 +445,26 @@ export type LibraryQueryResult =
       resume: { fraction: number; seconds?: number } | null;
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
+  | { kind: 'key-reset.prepare'; destinationLibraryKey: string }
+  | { kind: 'recovery.seal'; sealed: string }
+  | { kind: 'pairing.handover'; sealed: string; linkKey: string; inboxKey: string }
+  | {
+      kind: 'history.export';
+      exportedAt: string;
+      titles: Array<{
+        type: MediaType;
+        tmdbId: number;
+        status: 'none' | 'watchlist' | 'inProgress' | 'watched';
+        reaction: Reaction | null;
+        addedAt: string | null;
+        plays?: Array<{ watchedAt: string | null; rewatch: boolean; source: 'den' | 'import' }>;
+        episodes?: Array<{
+          season: number;
+          episode: number;
+          plays: Array<{ watchedAt: string | null; rewatch: boolean; source: 'den' | 'import' }>;
+        }>;
+      }>;
+    }
   | {
       kind: 'relay.membership';
       /** Derived relay-only authority. It cannot decrypt, read, or write the library. */
@@ -426,6 +518,12 @@ export interface LibraryServiceQueryRequest extends ClientMessage {
   query: LibraryQuery;
 }
 
+export interface LibraryServiceTaskRequest extends ClientMessage {
+  type: 'task';
+  requestId: string;
+  task: LibraryTask;
+}
+
 export interface LibraryServiceSubscribeRequest extends ClientMessage {
   type: 'subscribe';
   requestId: string;
@@ -449,6 +547,7 @@ export type LibraryServiceClientMessage =
   | LibraryServiceHello
   | LibraryServiceCommandRequest
   | LibraryServiceQueryRequest
+  | LibraryServiceTaskRequest
   | LibraryServiceSubscribeRequest
   | LibraryServiceUnsubscribeRequest
   | LibraryServiceObserveRequest;
@@ -499,6 +598,13 @@ export interface LibraryServiceQueryResult extends ServerMessage {
   type: 'query-result';
   requestId: string;
   result: LibraryQueryResult;
+  version: LibraryVersion;
+}
+
+export interface LibraryServiceTaskResult extends ServerMessage {
+  type: 'task-result';
+  requestId: string;
+  result: LibraryTaskResult;
   version: LibraryVersion;
 }
 
@@ -553,6 +659,7 @@ export type LibraryServiceServerMessage =
   | LibraryServiceReady
   | LibraryServiceCommandResult
   | LibraryServiceQueryResult
+  | LibraryServiceTaskResult
   | LibraryServiceSubscribed
   | LibraryServiceUnsubscribed
   | LibraryServiceObserved

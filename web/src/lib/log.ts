@@ -810,7 +810,9 @@ export class LibraryLog {
       });
       let documents: DocumentRow[];
       try {
-        documents = v3Documents(rows.filter((row) => row.kind === 'wat' || row.kind === 'snt'));
+        documents = projectV3Documents(
+          rows.filter((row) => row.kind === 'wat' || row.kind === 'snt'),
+        );
       } catch (error) {
         console.warn('den: these rows could not be written into a Library v4 library', error);
         return false;
@@ -3111,7 +3113,7 @@ export class LibraryLog {
     const restore: Row[] = [];
     const ops: Op[] = [];
     if (work.kind !== 'restore')
-      restore.push(...v3Documents(work.rows.filter((row) => row.kind === 'wat')));
+      restore.push(...projectV3Documents(work.rows.filter((row) => row.kind === 'wat')));
     for (const row of work.rows) {
       const event = trackerEvent(row);
       if (event) {
@@ -3288,7 +3290,7 @@ function coalesce(rows: Row[]): Row[] {
  * v3 `wat` and `snt` rows as the documents den-core's switch makes of them (`v4_form`), to be merged with what a v4
  * log holds. Throws when den-core refuses them, so they are kept rather than lost.
  */
-function v3Documents(rows: Row[]): DocumentRow[] {
+export function projectV3Documents(rows: Row[]): DocumentRow[] {
   if (!rows.length) return [];
   return syncPolicy<{ documents: { document: DocumentRow }[] }>({
     op: 'v4_form',

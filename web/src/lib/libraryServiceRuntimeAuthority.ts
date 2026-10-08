@@ -33,6 +33,8 @@ export async function openLibraryServiceAuthority(
   const authority = new LibraryLogAuthority(log, clock, {
     mode: request.mode,
     downloads: downloads.coordinator,
+    libraryKey: request.libraryKey,
+    vault,
   });
   return new ScheduledLibraryServiceAuthority(
     authority,

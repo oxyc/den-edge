@@ -19,6 +19,8 @@ import {
   type LibraryServiceClientMessage,
   type LibraryServiceFailure,
   type LibraryServiceServerMessage,
+  type LibraryTask,
+  type LibraryTaskResult,
   type LibraryVersion,
   type RatingSource,
   type ServiceRef,
@@ -144,6 +146,18 @@ const languageCode = (value: unknown): value is string =>
   typeof value === 'string' && /^[a-z]{2}$/.test(value);
 const countryCode = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Z]{2}$/.test(value);
+const locator = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+const base64url32 = (value: unknown): value is string =>
+  typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+const libraryKey = (value: unknown): value is string => {
+  if (typeof value !== 'string' || value.length !== 44) return false;
+  try {
+    return atob(value).length === 32;
+  } catch {
+    return false;
+  }
+};
 const ratingSource = (value: unknown): value is RatingSource =>
   value === 'imdb' || value === 'tmdb' || value === 'rottenTomatoes' || value === 'metacritic';
 const unique = <T>(values: readonly T[], key: (value: T) => string = String): boolean =>
@@ -414,6 +428,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'settings':
     case 'connections':
     case 'simkl':
+    case 'recovery':
     case 'downloads':
       return exact(value, ['kind']);
     case 'title':
@@ -438,6 +453,22 @@ function query(value: unknown): value is LibraryQuery {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify') return exact(value, ['kind', 'pin']) && pin(value.pin);
   if (value.kind === 'relay.membership') return exact(value, ['kind']);
+  if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
+  if (value.kind === 'history.export') return exact(value, ['kind']);
+  if (value.kind === 'recovery.seal')
+    return (
+      exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
+      locator(value.locator) &&
+      base64url32(value.wrapKey) &&
+      integer(value.createdAt)
+    );
+  if (value.kind === 'pairing.handover')
+    return (
+      exact(value, ['kind', 'handoverKey', 'host', 'linkKey']) &&
+      base64url32(value.handoverKey) &&
+      boundedText(value.host, 256) &&
+      optional(value.linkKey, base64url32)
+    );
   return (
     value.kind === 'playback.prepare' &&
     exact(value, ['kind', 'title', 'episode']) &&
@@ -446,6 +477,75 @@ function query(value: unknown): value is LibraryQuery {
     (value.episode === undefined ||
       (value.title.type === 'tv' && value.episode.id === value.title.id))
   );
+}
+
+function task(value: unknown): value is LibraryTask {
+  if (!record(value) || !text(value.kind)) return false;
+  switch (value.kind) {
+    case 'recovery.begin':
+      return (
+        exact(value, ['kind', 'locator', 'sealed', 'createdAt']) &&
+        locator(value.locator) &&
+        boundedText(value.sealed, 4_096) &&
+        integer(value.createdAt)
+      );
+    case 'recovery.confirm':
+    case 'recovery.abandon':
+      return exact(value, ['kind', 'locator']) && locator(value.locator);
+    case 'recovery.disable':
+      return exact(value, ['kind']);
+    case 'history.import': {
+      if (
+        !exact(value, ['kind', 'items']) ||
+        !list(
+          value.items,
+          (
+            candidate,
+          ): candidate is Extract<LibraryTask, { kind: 'history.import' }>['items'][number] =>
+            record(candidate) &&
+            exact(candidate, ['title', 'watchedAt', 'episodes', 'complete']) &&
+            titleRef(candidate.title) &&
+            optional(candidate.watchedAt, integer) &&
+            optional(
+              candidate.episodes,
+              (
+                episodes,
+              ): episodes is Array<{ season: number; episode: number; watchedAt: number }> =>
+                list(
+                  episodes,
+                  (episode): episode is { season: number; episode: number; watchedAt: number } =>
+                    record(episode) &&
+                    exact(episode, ['season', 'episode', 'watchedAt']) &&
+                    integer(episode.season) &&
+                    integer(episode.episode) &&
+                    episode.episode > 0 &&
+                    integer(episode.watchedAt),
+                ),
+            ) &&
+            optional(candidate.complete, bool) &&
+            (candidate.title.type === 'movie'
+              ? candidate.watchedAt !== undefined && candidate.episodes === undefined
+              : candidate.watchedAt === undefined && candidate.episodes !== undefined),
+          LIBRARY_SERVICE_WIRE_LIMITS.importItems,
+        )
+      )
+        return false;
+      return (
+        value.items.reduce((total, item) => total + (item.episodes?.length ?? 1), 0) <=
+        LIBRARY_SERVICE_WIRE_LIMITS.importItems
+      );
+    }
+    case 'local-library.merge':
+      return exact(value, ['kind', 'sourceLibraryKey']) && libraryKey(value.sourceLibraryKey);
+    case 'key-reset.move':
+    case 'key-reset.settle':
+    case 'key-reset.adopt':
+      return (
+        exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+      );
+    default:
+      return false;
+  }
 }
 
 function observation(value: unknown): value is LibraryObservation {
@@ -935,6 +1035,34 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       return connectionsView(value);
     case 'simkl':
       return simklView(value);
+    case 'recovery':
+      return (
+        exact(value, ['kind', 'availability', 'live', 'broken', 'notices']) &&
+        (value.availability === 'ready' || value.availability === 'waits') &&
+        nullable(
+          value.live,
+          (
+            candidate,
+          ): candidate is {
+            createdAt: number;
+            by: string;
+            byName: string;
+            opens: number;
+            lastOpenedAt: number | null;
+            reposted: boolean;
+          } =>
+            record(candidate) &&
+            exact(candidate, ['createdAt', 'by', 'byName', 'opens', 'lastOpenedAt', 'reposted']) &&
+            integer(candidate.createdAt) &&
+            boundedText(candidate.by, 128) &&
+            boundedText(candidate.byName, 256) &&
+            integer(candidate.opens) &&
+            nullable(candidate.lastOpenedAt, integer) &&
+            bool(candidate.reposted),
+        ) &&
+        bool(value.broken) &&
+        list(value.notices, (notice): notice is string => boundedText(notice, 4_096), 32)
+      );
     case 'downloads':
       return exact(value, ['kind', 'items']) && list(value.items, download);
     default:
@@ -962,6 +1090,83 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       )
     );
   }
+  if (value.kind === 'key-reset.prepare')
+    return (
+      exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+    );
+  if (value.kind === 'recovery.seal')
+    return exact(value, ['kind', 'sealed']) && boundedText(value.sealed, 4_096);
+  if (value.kind === 'pairing.handover')
+    return (
+      exact(value, ['kind', 'sealed', 'linkKey', 'inboxKey']) &&
+      boundedText(value.sealed, 4_096) &&
+      base64url32(value.linkKey) &&
+      boundedText(value.inboxKey, 256)
+    );
+  if (value.kind === 'history.export')
+    return (
+      exact(value, ['kind', 'exportedAt', 'titles']) &&
+      boundedText(value.exportedAt, 64) &&
+      list(
+        value.titles,
+        (
+          candidate,
+        ): candidate is Extract<LibraryQueryResult, { kind: 'history.export' }>['titles'][number] =>
+          record(candidate) &&
+          exact(candidate, [
+            'type',
+            'tmdbId',
+            'status',
+            'reaction',
+            'addedAt',
+            'plays',
+            'episodes',
+          ]) &&
+          (candidate.type === 'movie' || candidate.type === 'tv') &&
+          integer(candidate.tmdbId) &&
+          candidate.tmdbId > 0 &&
+          (candidate.status === 'none' ||
+            candidate.status === 'watchlist' ||
+            candidate.status === 'inProgress' ||
+            candidate.status === 'watched') &&
+          nullable(candidate.reaction, reaction) &&
+          nullable(candidate.addedAt, (date): date is string => boundedText(date, 64)) &&
+          optional(candidate.plays, exportPlays) &&
+          optional(
+            candidate.episodes,
+            (
+              episodes,
+            ): episodes is Array<{
+              season: number;
+              episode: number;
+              plays: Array<{
+                watchedAt: string | null;
+                rewatch: boolean;
+                source: 'den' | 'import';
+              }>;
+            }> =>
+              list(
+                episodes,
+                (
+                  episode,
+                ): episode is {
+                  season: number;
+                  episode: number;
+                  plays: Array<{
+                    watchedAt: string | null;
+                    rewatch: boolean;
+                    source: 'den' | 'import';
+                  }>;
+                } =>
+                  record(episode) &&
+                  exact(episode, ['season', 'episode', 'plays']) &&
+                  integer(episode.season) &&
+                  integer(episode.episode) &&
+                  exportPlays(episode.plays),
+              ),
+          ),
+      )
+    );
   return (
     exact(value, ['kind', 'action', 'target', 'resume']) &&
     value.kind === 'playback.prepare' &&
@@ -979,6 +1184,81 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         candidate.updatedAt === undefined,
     )
   );
+}
+
+function exportPlays(value: unknown): value is Array<{
+  watchedAt: string | null;
+  rewatch: boolean;
+  source: 'den' | 'import';
+}> {
+  return list(
+    value,
+    (
+      play,
+    ): play is {
+      watchedAt: string | null;
+      rewatch: boolean;
+      source: 'den' | 'import';
+    } =>
+      record(play) &&
+      exact(play, ['watchedAt', 'rewatch', 'source']) &&
+      nullable(play.watchedAt, (date): date is string => boundedText(date, 64)) &&
+      bool(play.rewatch) &&
+      (play.source === 'den' || play.source === 'import'),
+  );
+}
+
+function taskResult(value: unknown): value is LibraryTaskResult {
+  if (!record(value) || !text(value.kind)) return false;
+  switch (value.kind) {
+    case 'recovery.begin':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'begun' ||
+          value.outcome === 'full' ||
+          value.outcome === 'taken' ||
+          value.outcome === 'waits' ||
+          value.outcome === 'failed')
+      );
+    case 'recovery.confirm':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'confirmed' || value.outcome === 'lost' || value.outcome === 'failed')
+      );
+    case 'recovery.abandon':
+      return exact(value, ['kind', 'outcome']) && value.outcome === 'abandoned';
+    case 'recovery.disable':
+      return exact(value, ['kind', 'outcome']) && value.outcome === 'disabled';
+    case 'history.import':
+      return (
+        exact(value, ['kind', 'written', 'total', 'complete']) &&
+        integer(value.written) &&
+        integer(value.total) &&
+        value.written <= value.total &&
+        bool(value.complete)
+      );
+    case 'local-library.merge':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'merged' || value.outcome === 'unavailable')
+      );
+    case 'key-reset.move':
+    case 'key-reset.settle':
+    case 'key-reset.adopt':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'moved' ||
+          value.outcome === 'adopted' ||
+          value.outcome === 'undone' ||
+          value.outcome === 'held' ||
+          value.outcome === 'foreign' ||
+          value.outcome === 'unknown' ||
+          value.outcome === 'update-required' ||
+          value.outcome === 'unavailable')
+      );
+    default:
+      return false;
+  }
 }
 
 function failure(value: unknown): value is LibraryServiceFailure {
@@ -1076,6 +1356,10 @@ export function decodeLibraryServiceClientMessage(
       if (!exact(input, ['type', 'protocol', 'requestId', 'query']) || !query(input.query))
         return invalid('query is invalid');
       break;
+    case 'task':
+      if (!exact(input, ['type', 'protocol', 'requestId', 'task']) || !task(input.task))
+        return invalid('task is invalid');
+      break;
     case 'subscribe':
       if (
         !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId', 'selection']) ||
@@ -1140,6 +1424,15 @@ export function decodeLibraryServiceServerMessage(
         !version(input.version)
       )
         return invalid('command result is invalid');
+      break;
+    case 'task-result':
+      if (
+        !exact(input, ['type', 'protocol', 'requestId', 'result', 'version']) ||
+        !text(input.requestId) ||
+        !taskResult(input.result) ||
+        !version(input.version)
+      )
+        return invalid('task result is invalid');
       break;
     case 'query-result':
       if (

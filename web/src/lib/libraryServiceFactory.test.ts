@@ -64,6 +64,9 @@ function emptyAuthority(close = vi.fn()): LibraryServiceAuthority {
     async query() {
       throw new Error('query not used by this test');
     },
+    async task() {
+      throw new Error('task not used by this test');
+    },
     async observe() {
       return { outcome: 'unchanged', affected: [] };
     },

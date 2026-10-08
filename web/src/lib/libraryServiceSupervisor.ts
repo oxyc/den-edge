@@ -13,6 +13,8 @@ import type {
   LibrarySelectionValue,
   LibraryServiceCommandResult,
   LibraryServiceFailure,
+  LibraryTask,
+  LibraryTaskResult,
   LibrarySessionStatus,
   LibraryVersion,
 } from './libraryServiceProtocol';
@@ -21,6 +23,7 @@ export interface LibraryServiceClientPort {
   open(options: LibraryServiceOpenOptions): Promise<LibraryVersion>;
   command(command: LibraryCommand, operationId?: string): Promise<LibraryServiceCommandResult>;
   query(query: LibraryQuery): Promise<{ result: LibraryQueryResult; version: LibraryVersion }>;
+  task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }>;
   observe(observation: LibraryObservation): Promise<LibraryVersion>;
   subscribe(
     selection: LibrarySelection,
@@ -147,6 +150,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     query: LibraryQuery,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     return await this.#readyClient().query(query);
+  }
+
+  async task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    return await this.#readyClient().task(task);
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {

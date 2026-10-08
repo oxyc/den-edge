@@ -8,12 +8,15 @@ import type {
   DownloadsView,
   EpisodeRef,
   HistoryView,
+  HistoryImportItem,
   LibraryApiKeyService,
   LibraryCommand,
   LibraryObservation,
   LibraryOverviewView,
   LibraryPreferencesPatch,
   LibraryQueryResult,
+  LibraryTask,
+  LibraryTaskResult,
   LibraryServiceCommandResult,
   LibraryServiceFailure,
   LibrarySessionStatus,
@@ -21,6 +24,7 @@ import type {
   MediaServerKind,
   PresenceView,
   Reaction,
+  RecoveryView,
   SettingsView,
   SimklView,
   TitleRef,
@@ -66,7 +70,15 @@ export interface LibraryModelLease<View> {
 
 type LibraryModelService = Pick<
   LibraryServiceSupervisor,
-  'open' | 'retry' | 'command' | 'query' | 'observe' | 'subscribeSnapshot' | 'onStatus' | 'close'
+  | 'open'
+  | 'retry'
+  | 'command'
+  | 'query'
+  | 'task'
+  | 'observe'
+  | 'subscribeSnapshot'
+  | 'onStatus'
+  | 'close'
 >;
 
 type Command<Kind extends LibraryCommand['kind']> = Extract<LibraryCommand, { kind: Kind }>;
@@ -76,7 +88,13 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
 >;
 
 type LeasedView =
-  HistoryView | DownloadsView | ConnectionsView | SimklView | TitleView | PresenceView;
+  | HistoryView
+  | DownloadsView
+  | ConnectionsView
+  | SimklView
+  | RecoveryView
+  | TitleView
+  | PresenceView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
@@ -92,6 +110,7 @@ export class LibraryModel {
   #downloads?: SharedSelection<DownloadsView>;
   #connections?: SharedSelection<ConnectionsView>;
   #simkl?: SharedSelection<SimklView>;
+  #recovery?: SharedSelection<RecoveryView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
@@ -186,6 +205,16 @@ export class LibraryModel {
       () => (this.#simkl = undefined),
     );
     return this.#simkl.acquire();
+  }
+
+  recovery(): LibraryModelLease<RecoveryView> {
+    this.#assertOpen();
+    this.#recovery ??= new SharedSelection<RecoveryView>(
+      this.service,
+      { kind: 'recovery' },
+      () => (this.#recovery = undefined),
+    );
+    return this.#recovery.acquire();
   }
 
   get settings(): LibraryModelSnapshot<SettingsView> {
@@ -433,6 +462,75 @@ export class LibraryModel {
     return this.#command({ kind: 'download.release.try', target, release }, operationId);
   }
 
+  task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    this.#assertOpen();
+    return this.service.task(task);
+  }
+
+  importHistory(items: readonly HistoryImportItem[]) {
+    return this.task({
+      kind: 'history.import',
+      items: structuredClone(items) as HistoryImportItem[],
+    });
+  }
+
+  exportHistory() {
+    this.#assertOpen();
+    return this.service.query({ kind: 'history.export' });
+  }
+
+  prepareKeyReset() {
+    this.#assertOpen();
+    return this.service.query({ kind: 'key-reset.prepare' });
+  }
+
+  sealRecovery(locator: string, wrapKey: string, createdAt: number) {
+    this.#assertOpen();
+    return this.service.query({ kind: 'recovery.seal', locator, wrapKey, createdAt });
+  }
+
+  beginRecovery(locator: string, sealed: string, createdAt: number) {
+    return this.task({ kind: 'recovery.begin', locator, sealed, createdAt });
+  }
+
+  confirmRecovery(locator: string) {
+    return this.task({ kind: 'recovery.confirm', locator });
+  }
+
+  abandonRecovery(locator: string) {
+    return this.task({ kind: 'recovery.abandon', locator });
+  }
+
+  disableRecovery() {
+    return this.task({ kind: 'recovery.disable' });
+  }
+
+  moveLibraryKey(destinationLibraryKey: string) {
+    return this.task({ kind: 'key-reset.move', destinationLibraryKey });
+  }
+
+  settleLibraryKey(destinationLibraryKey: string) {
+    return this.task({ kind: 'key-reset.settle', destinationLibraryKey });
+  }
+
+  adoptLibraryKey(destinationLibraryKey: string) {
+    return this.task({ kind: 'key-reset.adopt', destinationLibraryKey });
+  }
+
+  mergeLocalLibrary(sourceLibraryKey: string) {
+    return this.task({ kind: 'local-library.merge', sourceLibraryKey });
+  }
+
+  sealPairingHandover(handoverKey: string, host: string, linkKey?: string) {
+    this.#assertOpen();
+    return this.service.query({
+      kind: 'pairing.handover',
+      handoverKey,
+      host,
+      ...(linkKey ? { linkKey } : {}),
+    });
+  }
+
   preparePlayback(
     title: TitleRef,
     episode?: EpisodeRef,
@@ -476,6 +574,8 @@ export class LibraryModel {
     this.#connections = undefined;
     this.#simkl?.close();
     this.#simkl = undefined;
+    this.#recovery?.close();
+    this.#recovery = undefined;
     this.#settings = closedSnapshot(this.#settings);
     this.#forgetRelayMembership?.();
     this.#forgetRelayMembership = undefined;
@@ -552,6 +652,7 @@ class SharedSelection<View extends LeasedView> {
       | { kind: 'downloads' }
       | { kind: 'connections' }
       | { kind: 'simkl' }
+      | { kind: 'recovery' }
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,

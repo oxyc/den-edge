@@ -59,7 +59,7 @@ export interface RecoveryContext {
   member: string;
   /** This browser's stamp device id. */
   device: string;
-  issue: () => Stamp;
+  issue: () => Stamp | Promise<Stamp>;
   fetchImpl?: typeof fetch;
   now?: () => number;
   storage?: Storage;
@@ -404,13 +404,13 @@ async function update(
   return false;
 }
 
-function write(
+async function write(
   ctx: RecoveryContext,
   row: SettingsRow | undefined,
   base: number,
   changes: Record<string, RecoveryEntry | null>,
 ): Promise<boolean> {
-  const at = ctx.issue();
+  const at = await ctx.issue();
   const values = { ...(row?.values ?? {}) };
   for (const [locator, entry] of Object.entries(changes))
     values[locator] = { value: entry ? { string: JSON.stringify(entry) } : null, at };

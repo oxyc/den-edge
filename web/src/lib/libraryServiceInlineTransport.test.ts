@@ -47,6 +47,9 @@ it('delivers cloned messages asynchronously and preserves request order', async 
       async query(_query: LibraryQuery): Promise<never> {
         throw new Error('unsupported query');
       },
+      async task(): Promise<never> {
+        throw new Error('unsupported task');
+      },
       async observe(_observation: LibraryObservation) {
         return { outcome: 'unchanged' as const, affected: [] };
       },
@@ -133,6 +136,9 @@ it('composes with the client and isolates a throwing subscription listener', asy
       },
       async query(): Promise<never> {
         throw new Error('unsupported query');
+      },
+      async task(): Promise<never> {
+        throw new Error('unsupported task');
       },
       async observe() {
         return { outcome: 'unchanged' as const, affected: [] };

@@ -12,6 +12,8 @@ import type {
   LibraryServiceCommandResult,
   LibraryServiceFailure,
   LibrarySessionStatus,
+  LibraryTask,
+  LibraryTaskResult,
   LibraryVersion,
 } from './libraryServiceProtocol';
 
@@ -49,6 +51,10 @@ class FakeClient implements LibraryServiceClientPort {
   }
 
   query(_query: LibraryQuery): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
+    return Promise.reject(new Error('unused'));
+  }
+
+  task(_task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     return Promise.reject(new Error('unused'));
   }
 

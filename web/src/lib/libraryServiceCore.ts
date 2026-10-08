@@ -13,6 +13,8 @@ import {
   type LibraryServiceHello,
   type LibraryServiceServerMessage,
   type LibrarySessionStatus,
+  type LibraryTask,
+  type LibraryTaskResult,
   type TitleRef,
   type LibraryVersion,
 } from './libraryServiceProtocol';
@@ -29,6 +31,7 @@ export type LibrarySelectionScope =
   | { kind: 'settings' }
   | { kind: 'connections' }
   | { kind: 'simkl' }
+  | { kind: 'recovery' }
   | { kind: 'downloads' }
   | { kind: 'title'; title: TitleRef }
   | { kind: 'presence'; title: TitleRef };
@@ -44,12 +47,18 @@ export interface LibraryAuthorityObservationResult {
   affected: LibrarySelectionScope[];
 }
 
+export interface LibraryAuthorityTaskResult {
+  result: LibraryTaskResult;
+  affected: LibrarySelectionScope[];
+}
+
 /** The raw log stays behind this boundary. Tests and the eventual Worker host inject one exact authority. */
 export interface LibraryServiceAuthority {
   readonly generation: string | null;
   select(selection: LibrarySelection): Promise<LibrarySelectionValue>;
   command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult>;
   query(query: LibraryQuery): Promise<LibraryQueryResult>;
+  task(task: LibraryTask): Promise<LibraryAuthorityTaskResult>;
   observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult>;
   listen?(listener: (event: LibraryAuthorityEvent) => void): () => void;
   close?(): void | Promise<void>;
@@ -231,6 +240,26 @@ export class LibraryServiceCore {
               version: this.#version(),
             },
           ];
+        case 'task': {
+          const task = await this.#authority.task(request.task);
+          this.#revision++;
+          let updates: LibraryServiceServerMessage[] = [];
+          try {
+            updates = await this.#updates(task.affected);
+          } catch {
+            // The task is already complete; a later authority publication retries selector replacement.
+          }
+          return [
+            ...updates,
+            {
+              type: 'task-result',
+              protocol: LIBRARY_SERVICE_PROTOCOL,
+              requestId: request.requestId,
+              result: task.result,
+              version: this.#version(),
+            },
+          ];
+        }
         case 'observe':
           return await this.#observe(request);
       }
@@ -517,6 +546,7 @@ function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection)
     scope.kind === 'settings' ||
     scope.kind === 'connections' ||
     scope.kind === 'simkl' ||
+    scope.kind === 'recovery' ||
     scope.kind === 'downloads'
   )
     return selection.kind === scope.kind;

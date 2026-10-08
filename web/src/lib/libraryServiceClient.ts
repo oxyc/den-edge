@@ -11,6 +11,8 @@ import {
   type LibraryServiceFailure,
   type LibraryServiceHello,
   type LibraryServiceServerMessage,
+  type LibraryTask,
+  type LibraryTaskResult,
   type LibrarySessionStatus,
   type LibraryVersion,
 } from './libraryServiceProtocol';
@@ -105,6 +107,18 @@ export class LibraryServiceClient {
       query,
     });
     if (reply.type !== 'query-result') throw this.#unexpected(reply, 'query-result');
+    return { result: reply.result, version: reply.version };
+  }
+
+  async task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    const requestId = this.#requestId();
+    const reply = await this.#request({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      task,
+    });
+    if (reply.type !== 'task-result') throw this.#unexpected(reply, 'task-result');
     return { result: reply.result, version: reply.version };
   }
 
@@ -308,6 +322,7 @@ function selectionMatches(selection: LibrarySelection, value: LibrarySelectionVa
   if (selection.kind === 'settings') return value.kind === 'settings';
   if (selection.kind === 'connections') return value.kind === 'connections';
   if (selection.kind === 'simkl') return value.kind === 'simkl';
+  if (selection.kind === 'recovery') return value.kind === 'recovery';
   if (selection.kind === 'downloads') return value.kind === 'downloads';
   if (selection.kind === 'presence')
     return (
@@ -341,6 +356,8 @@ function replyMatches(
     const target = reply.result.target;
     return target.type === request.query.title.type && target.id === request.query.title.id;
   }
+  if (request.type === 'task')
+    return reply.type === 'task-result' && reply.result.kind === request.task.kind;
   if (request.type === 'subscribe')
     return reply.type === 'subscribed' && reply.subscriptionId === request.subscriptionId;
   if (request.type === 'unsubscribe')

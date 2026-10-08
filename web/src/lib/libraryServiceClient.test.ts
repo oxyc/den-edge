@@ -251,6 +251,27 @@ it('correlates connection replacements and non-playback query results without ti
   client.close();
 });
 
+it('correlates typed administrative task results', async () => {
+  const { client, transport } = await opened();
+  const running = client.task({
+    kind: 'history.import',
+    items: [{ title: { type: 'movie', id: 7 }, watchedAt: 10 }],
+  });
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'task') throw new Error('expected task');
+  transport.emit({
+    type: 'task-result',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    result: { kind: 'history.import', written: 1, total: 1, complete: true },
+    version: version(1),
+  });
+  await expect(running).resolves.toMatchObject({
+    result: { kind: 'history.import', written: 1, complete: true },
+  });
+  client.close();
+});
+
 it('rejects pending work when closed', async () => {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');

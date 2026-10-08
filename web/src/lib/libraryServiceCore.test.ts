@@ -63,6 +63,9 @@ function authority() {
     async query(_query: LibraryQuery): Promise<never> {
       throw new Error('unsupported query');
     },
+    async task(): Promise<never> {
+      throw new Error('unsupported task');
+    },
     async observe(_observation: LibraryObservation) {
       return { outcome: 'unchanged' as const, affected: [] };
     },
@@ -189,6 +192,40 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('serializes non-replayed administrative tasks with typed results', async () => {
+    const base = authority();
+    const held = {
+      ...base,
+      async task() {
+        return {
+          result: { kind: 'history.import' as const, written: 1, total: 1, complete: true },
+          affected: [{ kind: 'history' as const }],
+        };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+
+    await expect(
+      core.dispatch({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'task-1',
+        task: {
+          kind: 'history.import',
+          items: [{ title, watchedAt: 10 }],
+        },
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'history.import', written: 1, total: 1, complete: true },
+        version: expect.objectContaining({ revision: 1 }),
+      }),
+    ]);
+    expect(held.operations).toEqual([]);
+  });
+
   it('reselects history only for a history-scoped change', async () => {
     let watched = false;
     const held = {
@@ -222,6 +259,9 @@ describe('LibraryServiceCore', () => {
       },
       async query(): Promise<never> {
         throw new Error('unsupported query');
+      },
+      async task(): Promise<never> {
+        throw new Error('unsupported task');
       },
       async observe() {
         return { outcome: 'unchanged' as const, affected: [] };
@@ -332,6 +372,9 @@ describe('LibraryServiceCore', () => {
         },
         async query(): Promise<never> {
           throw new Error('unsupported query');
+        },
+        async task(): Promise<never> {
+          throw new Error('unsupported task');
         },
         async observe() {
           return { outcome: 'unchanged' as const, affected: [] };

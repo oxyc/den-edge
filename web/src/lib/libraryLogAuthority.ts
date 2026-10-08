@@ -47,6 +47,7 @@ import type {
   LibraryObservation,
   LibraryQuery,
   LibraryQueryResult,
+  LibraryTask,
   RatingSource,
   LibrarySelection,
   LibrarySelectionValue,
@@ -59,9 +60,12 @@ import {
   LibraryServiceAuthorityError,
   type LibraryAuthorityCommandResult,
   type LibraryAuthorityObservationResult,
+  type LibraryAuthorityTaskResult,
   type LibrarySelectionScope,
 } from './libraryServiceCore';
 import { LibraryLog } from './log';
+import { LibraryAdminAuthority } from './libraryAdminAuthority';
+import type { Vault } from './localVault';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { recordTrackerEvent } from './trackerEvents';
 import {
@@ -113,7 +117,10 @@ export interface LibraryLogAuthorityOptions {
   mode: 'online' | 'local';
   /** Worker-owned live download state. */
   downloads: DownloadCoordinator;
+  libraryKey?: string;
+  vault?: Vault;
   fetchImpl?: typeof fetch;
+  destination?: (key: string) => Promise<LibraryLog>;
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
@@ -201,6 +208,7 @@ export class LibraryLogAuthority {
   readonly #downloadsCoordinator: DownloadCoordinator;
   readonly #fetch: typeof fetch;
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
+  readonly #admin?: LibraryAdminAuthority;
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
@@ -209,6 +217,14 @@ export class LibraryLogAuthority {
     this.#options = options;
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
+    if (options.libraryKey && options.vault)
+      this.#admin = new LibraryAdminAuthority(log, clock, {
+        mode: options.mode,
+        libraryKey: options.libraryKey,
+        vault: options.vault,
+        fetchImpl: options.fetchImpl,
+        destination: options.destination,
+      });
   }
 
   get generation(): string | null {
@@ -216,6 +232,7 @@ export class LibraryLogAuthority {
   }
 
   close(): void {
+    this.#admin?.close();
     this.#log.close();
   }
 
@@ -237,6 +254,8 @@ export class LibraryLogAuthority {
         return this.#connections();
       case 'simkl':
         return this.#simkl();
+      case 'recovery':
+        return this.#administration().recoveryView();
       case 'downloads':
         return this.#downloads();
     }
@@ -331,9 +350,37 @@ export class LibraryLogAuthority {
       }
       case 'relay.membership':
         return { kind: 'relay.membership', capability: await this.#log.relayMembership() };
+      case 'key-reset.prepare':
+        return this.#administration().prepareReset();
+      case 'recovery.seal':
+        return this.#administration().sealRecovery(query.locator, query.wrapKey, query.createdAt);
+      case 'pairing.handover':
+        return this.#administration().pairingHandover(query.handoverKey, query.host, query.linkKey);
+      case 'history.export':
+        return this.#administration().historyExport();
       default:
         return query satisfies never;
     }
+  }
+
+  task(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+    // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
+    if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
+    if (
+      ((task.kind === 'key-reset.move' ||
+        task.kind === 'key-reset.settle' ||
+        task.kind === 'key-reset.adopt') &&
+        task.destinationLibraryKey === this.#options.libraryKey) ||
+      (task.kind === 'local-library.merge' && task.sourceLibraryKey === this.#options.libraryKey)
+    )
+      throw authorityError('invalid-request', 'source and destination library must differ');
+    return this.#administration().task(task);
+  }
+
+  #administration(): LibraryAdminAuthority {
+    if (!this.#admin)
+      throw authorityError('not-ready', 'administrative library service is unavailable', true);
+    return this.#admin;
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult> {

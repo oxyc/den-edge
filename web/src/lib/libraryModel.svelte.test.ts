@@ -12,6 +12,8 @@ import type {
   LibraryServiceCommandResult,
   LibraryServiceFailure,
   LibrarySessionStatus,
+  LibraryTask,
+  LibraryTaskResult,
   LibraryVersion,
   TitleRef,
 } from './libraryServiceProtocol';
@@ -95,6 +97,7 @@ class FakeService {
         result: { kind: 'parental-pin.verify', matches: query.pin === '1234' },
         version: version(6),
       };
+    if (query.kind !== 'playback.prepare') throw new Error('unsupported query in fake service');
     return {
       result: {
         kind: 'playback.prepare',
@@ -104,6 +107,10 @@ class FakeService {
       } as LibraryQueryResult,
       version: version(6),
     };
+  }
+
+  async task(_task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    throw new Error('unsupported task in fake service');
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {

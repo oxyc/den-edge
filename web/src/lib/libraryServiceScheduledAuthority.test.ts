@@ -42,6 +42,10 @@ function authority() {
       target: { type: 'movie', id: 1 },
       resume: null,
     })),
+    task: vi.fn<LibraryServiceAuthority['task']>(async () => ({
+      result: { kind: 'recovery.disable', outcome: 'disabled' },
+      affected: [],
+    })),
     observe,
     close,
   };
