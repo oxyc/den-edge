@@ -636,6 +636,7 @@ export interface LibraryServiceQueryRequest extends ClientMessage {
 export interface LibraryServiceTaskRequest extends ClientMessage {
   type: 'task';
   requestId: string;
+  operationId: string;
   task: LibraryTask;
 }
 
@@ -719,6 +720,7 @@ export interface LibraryServiceQueryResult extends ServerMessage {
 export interface LibraryServiceTaskResult extends ServerMessage {
   type: 'task-result';
   requestId: string;
+  operationId: string;
   result: LibraryTaskResult;
   version: LibraryVersion;
 }

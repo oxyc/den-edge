@@ -63,7 +63,7 @@ it('delivers cloned messages asynchronously and preserves request order', async 
     protocol: LIBRARY_SERVICE_PROTOCOL,
     requestId: 'hello',
     clientId: 'tab',
-    libraryKey: 'secret',
+    libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
     mode: 'online',
   });
   const command = {
@@ -99,7 +99,7 @@ it('does not deliver a request after the transport closes', async () => {
     protocol: LIBRARY_SERVICE_PROTOCOL,
     requestId: 'hello',
     clientId: 'tab',
-    libraryKey: 'secret',
+    libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
     mode: 'online',
   });
   transport.close();
@@ -150,7 +150,10 @@ it('composes with the client and isolates a throwing subscription listener', asy
   const reported = console.error;
   console.error = () => {};
   try {
-    await client.open({ libraryKey: 'secret', mode: 'online' });
+    await client.open({
+      libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      mode: 'online',
+    });
     const stop = await client.subscribe({ kind: 'title', title }, () => {
       throw new Error('render failed');
     });

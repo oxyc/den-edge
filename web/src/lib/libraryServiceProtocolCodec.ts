@@ -1644,7 +1644,11 @@ export function decodeLibraryServiceClientMessage(
         return invalid('query is invalid');
       break;
     case 'task':
-      if (!exact(input, ['type', 'protocol', 'requestId', 'task']) || !task(input.task))
+      if (
+        !exact(input, ['type', 'protocol', 'requestId', 'operationId', 'task']) ||
+        !text(input.operationId) ||
+        !task(input.task)
+      )
         return invalid('task is invalid');
       break;
     case 'subscribe':
@@ -1714,8 +1718,9 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'task-result':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'result', 'version']) ||
+        !exact(input, ['type', 'protocol', 'requestId', 'operationId', 'result', 'version']) ||
         !text(input.requestId) ||
+        !text(input.operationId) ||
         !taskResult(input.result) ||
         !version(input.version)
       )

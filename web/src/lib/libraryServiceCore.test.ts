@@ -78,7 +78,7 @@ const hello = {
   protocol: LIBRARY_SERVICE_PROTOCOL,
   requestId: 'hello-1',
   clientId: 'tab-1',
-  libraryKey: 'library-key',
+  libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   mode: 'online' as const,
 };
 
@@ -211,6 +211,7 @@ describe('LibraryServiceCore', () => {
         type: 'task',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'task-1',
+        operationId: 'operation-task',
         task: {
           kind: 'history.import',
           items: [{ title, watchedAt: 10 }],
@@ -219,6 +220,7 @@ describe('LibraryServiceCore', () => {
     ).resolves.toEqual([
       expect.objectContaining({
         type: 'task-result',
+        operationId: 'operation-task',
         result: { kind: 'history.import', written: 1, total: 1, complete: true },
         version: expect.objectContaining({ revision: 1 }),
       }),

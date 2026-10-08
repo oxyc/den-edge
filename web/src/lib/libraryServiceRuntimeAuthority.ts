@@ -1,6 +1,7 @@
 import { openClockStore } from './clockStore';
 import { DownloadServiceRuntime } from './downloadServiceRuntime';
 import { LibraryLogAuthority } from './libraryLogAuthority';
+import { DurableOperationAuthority } from './libraryOperationAuthority';
 import type { LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
 import { libraryVault, type Vault } from './localVault';
@@ -30,7 +31,7 @@ export async function openLibraryServiceAuthority(
       : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
   if (!log) return null;
   const downloads = new DownloadServiceRuntime(log, clock, () => {});
-  const authority = new LibraryLogAuthority(log, clock, {
+  const logAuthority = new LibraryLogAuthority(log, clock, {
     mode: request.mode,
     downloads: downloads.coordinator,
     libraryKey: request.libraryKey,
@@ -38,7 +39,7 @@ export async function openLibraryServiceAuthority(
     refreshDownloads: (target) => downloads.refresh(target),
   });
   return new ScheduledLibraryServiceAuthority(
-    authority,
+    new DurableOperationAuthority(logAuthority, log),
     libraryLogMaintenance(log, clock, request.mode),
     { background: downloads },
     librarySimklDelivery(log, clock),

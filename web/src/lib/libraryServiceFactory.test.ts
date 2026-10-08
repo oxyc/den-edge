@@ -34,7 +34,7 @@ class FakeWorker {
 
 const version = { instance: 'worker-1', generation: null, revision: 0 };
 const openOptions = {
-  libraryKey: 'library-1',
+  libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   mode: 'online' as const,
   legacyClock: {
     device: '0123456789abcdef',

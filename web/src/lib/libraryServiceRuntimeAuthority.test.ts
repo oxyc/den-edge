@@ -122,7 +122,7 @@ describe('openLibraryServiceAuthority', () => {
     const imported = await authority!.task!({
       kind: 'history.import',
       items: [{ title: { type: 'movie', id: 77 }, watchedAt: 20_000 }],
-    });
+    }, 'import-history');
     expect(imported.result).toEqual({
       kind: 'history.import',
       written: 1,
@@ -155,7 +155,7 @@ describe('openLibraryServiceAuthority', () => {
     );
     await source!.close?.();
     await expect(
-      authority!.task!({ kind: 'local-library.merge', sourceLibraryKey: sourceKey }),
+      authority!.task!({ kind: 'local-library.merge', sourceLibraryKey: sourceKey }, 'merge-local'),
     ).resolves.toMatchObject({ result: { outcome: 'merged' } });
     await expect(
       authority!.select({ kind: 'title', title: { type: 'movie', id: 88 } }),

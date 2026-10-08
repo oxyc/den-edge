@@ -538,9 +538,12 @@ export class LibraryModel {
     return this.service.query({ kind: 'download.releases', title });
   }
 
-  task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+  task(
+    task: LibraryTask,
+    operationId?: string,
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     this.#assertOpen();
-    return this.service.task(task);
+    return this.service.task(task, operationId);
   }
 
   importHistory(items: readonly HistoryImportItem[]) {

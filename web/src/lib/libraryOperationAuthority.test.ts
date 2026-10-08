@@ -1,0 +1,77 @@
+import { describe, expect, it, vi } from 'vitest';
+import { DurableOperationAuthority } from './libraryOperationAuthority';
+import type { LibraryServiceAuthority } from './libraryServiceCore';
+import type { LibraryLog } from './log';
+
+function storedLog() {
+  const kept = new Map<string, unknown>();
+  return {
+    log: {
+      kept: async <T>(name: string) => structuredClone(kept.get(name)) as T | undefined,
+      keep: async (name: string, value: unknown) => void kept.set(name, structuredClone(value)),
+    } as unknown as LibraryLog,
+    kept,
+  };
+}
+
+function base() {
+  return {
+    generation: 'generation-1',
+    select: vi.fn(),
+    query: vi.fn(),
+    observe: vi.fn(),
+    command: vi.fn(async () => ({
+      outcome: 'applied' as const,
+      delivery: 'queued' as const,
+      affected: [{ kind: 'downloads' as const }],
+    })),
+    task: vi.fn(async () => ({
+      result: { kind: 'history.import' as const, written: 1, total: 1, complete: true },
+      affected: [{ kind: 'history' as const }],
+    })),
+  } satisfies LibraryServiceAuthority;
+}
+
+describe('DurableOperationAuthority', () => {
+  it('returns the original command result after authority replacement without executing again', async () => {
+    const stored = storedLog();
+    const first = base();
+    const command = {
+      kind: 'download.enqueue' as const,
+      title: { target: { type: 'movie' as const, id: 1 }, name: 'One' },
+      release: { identity: 'release-1', label: 'One' },
+    };
+    await new DurableOperationAuthority(first, stored.log).command(command, 'operation-1');
+
+    const replacement = base();
+    const replayed = await new DurableOperationAuthority(replacement, stored.log).command(
+      command,
+      'operation-1',
+    );
+    expect(replayed).toEqual({
+      outcome: 'applied',
+      delivery: 'queued',
+      affected: [{ kind: 'downloads' }],
+    });
+    expect(replacement.command).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates tasks across replacement and rejects operation identity reuse', async () => {
+    const stored = storedLog();
+    const task = {
+      kind: 'history.import' as const,
+      items: [{ title: { type: 'movie' as const, id: 1 }, watchedAt: 10 }],
+    };
+    await new DurableOperationAuthority(base(), stored.log).task(task, 'task-1');
+
+    const replacement = base();
+    const authority = new DurableOperationAuthority(replacement, stored.log);
+    await expect(authority.task(task, 'task-1')).resolves.toMatchObject({
+      result: { kind: 'history.import', written: 1, complete: true },
+    });
+    expect(replacement.task).not.toHaveBeenCalled();
+    await expect(
+      authority.task({ kind: 'recovery.disable' }, 'task-1'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict', retryable: false } });
+  });
+});

@@ -32,7 +32,7 @@ const hello = (requestId: string): LibraryServiceClientMessage => ({
   protocol: LIBRARY_SERVICE_PROTOCOL,
   requestId,
   clientId: 'tab-1',
-  libraryKey: 'library-1',
+  libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   mode: 'online' as const,
 });
 

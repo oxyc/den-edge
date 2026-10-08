@@ -23,7 +23,10 @@ export interface LibraryServiceClientPort {
   open(options: LibraryServiceOpenOptions): Promise<LibraryVersion>;
   command(command: LibraryCommand, operationId?: string): Promise<LibraryServiceCommandResult>;
   query(query: LibraryQuery): Promise<{ result: LibraryQueryResult; version: LibraryVersion }>;
-  task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }>;
+  task(
+    task: LibraryTask,
+    operationId?: string,
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }>;
   observe(observation: LibraryObservation): Promise<LibraryVersion>;
   subscribe(
     selection: LibrarySelection,
@@ -152,8 +155,11 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     return await this.#readyClient().query(query);
   }
 
-  async task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    return await this.#readyClient().task(task);
+  async task(
+    task: LibraryTask,
+    operationId: string = crypto.randomUUID(),
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    return await this.#readyClient().task(task, operationId);
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {

@@ -36,7 +36,7 @@ const request: LibraryServiceClientMessage = {
   protocol: LIBRARY_SERVICE_PROTOCOL,
   requestId: 'hello',
   clientId: 'tab-1',
-  libraryKey: 'library-1',
+  libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   mode: 'online',
 };
 
@@ -105,7 +105,10 @@ it('rejects pending client work on a terminal worker failure and closes cleanly'
   const client = new LibraryServiceClient(transport, 'tab-1');
   const statuses = vi.fn();
   client.onStatus(statuses);
-  const opening = client.open({ libraryKey: 'library-1', mode: 'online' });
+  const opening = client.open({
+    libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    mode: 'online',
+  });
   const preventDefault = vi.fn();
 
   worker.emit('error', { message: 'worker crashed', preventDefault } as unknown as ErrorEvent);

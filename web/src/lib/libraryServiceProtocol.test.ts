@@ -90,6 +90,7 @@ describe('library service client protocol', () => {
         type: 'task',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'request-task',
+        operationId: 'operation-task',
         task,
       });
 
@@ -123,6 +124,7 @@ describe('library service client protocol', () => {
         type: 'task-result',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'request-task',
+        operationId: 'operation-task',
         result: { kind: 'history.import', written: 2, total: 2, complete: true },
         version,
       }),

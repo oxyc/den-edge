@@ -110,12 +110,16 @@ export class LibraryServiceClient {
     return { result: reply.result, version: reply.version };
   }
 
-  async task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+  async task(
+    task: LibraryTask,
+    operationId: string = crypto.randomUUID(),
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     const requestId = this.#requestId();
     const reply = await this.#request({
       type: 'task',
       protocol: LIBRARY_SERVICE_PROTOCOL,
       requestId,
+      operationId,
       task,
     });
     if (reply.type !== 'task-result') throw this.#unexpected(reply, 'task-result');
@@ -358,7 +362,11 @@ function replyMatches(
     return target.type === request.query.title.type && target.id === request.query.title.id;
   }
   if (request.type === 'task')
-    return reply.type === 'task-result' && reply.result.kind === request.task.kind;
+    return (
+      reply.type === 'task-result' &&
+      reply.operationId === request.operationId &&
+      reply.result.kind === request.task.kind
+    );
   if (request.type === 'subscribe')
     return reply.type === 'subscribed' && reply.subscriptionId === request.subscriptionId;
   if (request.type === 'unsubscribe')

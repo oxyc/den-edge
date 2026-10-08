@@ -263,6 +263,7 @@ it('correlates typed administrative task results', async () => {
     type: 'task-result',
     protocol: LIBRARY_SERVICE_PROTOCOL,
     requestId: request.requestId,
+    operationId: request.operationId,
     result: { kind: 'history.import', written: 1, total: 1, complete: true },
     version: version(1),
   });

@@ -59,7 +59,7 @@ export interface LibraryServiceAuthority {
   select(selection: LibrarySelection): Promise<LibrarySelectionValue>;
   command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult>;
   query(query: LibraryQuery): Promise<LibraryQueryResult>;
-  task(task: LibraryTask): Promise<LibraryAuthorityTaskResult>;
+  task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult>;
   observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult>;
   listen?(listener: (event: LibraryAuthorityEvent) => void): () => void;
   close?(): void | Promise<void>;
@@ -242,7 +242,7 @@ export class LibraryServiceCore {
             },
           ];
         case 'task': {
-          const task = await this.#authority.task(request.task);
+          const task = await this.#authority.task(request.task, request.operationId);
           this.#revision++;
           let updates: LibraryServiceServerMessage[] = [];
           try {
@@ -256,6 +256,7 @@ export class LibraryServiceCore {
               type: 'task-result',
               protocol: LIBRARY_SERVICE_PROTOCOL,
               requestId: request.requestId,
+              operationId: request.operationId,
               result: task.result,
               version: this.#version(),
             },
