@@ -30,15 +30,25 @@ export interface LibraryVersion {
   revision: number;
 }
 
+export interface LibraryWatchedSetCommand {
+  kind: 'watched.set';
+  /** A whole-series change requires a prior `title-shape` observation or fails with `not-ready`. */
+  title: TitleRef;
+  watched: boolean;
+}
+
 export type LibraryCommand =
-  | { kind: 'watchlist.set'; title: TitleRef; listed: boolean }
-  | { kind: 'watched.set'; title: TitleRef; watched: boolean }
+  | { kind: 'watchlist.add'; title: TitleRef }
+  | { kind: 'library.remove'; title: TitleRef }
+  | LibraryWatchedSetCommand
   | { kind: 'reaction.set'; title: TitleRef; reaction: Reaction | null }
   | { kind: 'episode-watched.set'; episode: EpisodeRef; watched: boolean }
   | {
       kind: 'season-watched.set';
       title: TitleRef & { type: 'tv' };
       season: number;
+      /** Exact episode numbers in this season, supplied by the caller's title detail. */
+      episodes: number[];
       watched: boolean;
     }
   | { kind: 'continue-dismissed.set'; title: TitleRef; dismissed: boolean }
@@ -162,8 +172,9 @@ export type LibraryQuery = {
 
 export type LibraryQueryResult = {
   kind: 'playback.prepare';
+  action: 'start' | 'resume' | 'next';
+  target: (TitleRef & { type: 'movie' }) | EpisodeRef;
   resume: { fraction: number; seconds?: number } | null;
-  continue: ContinueItem | null;
 };
 
 export type LibraryObservation =
@@ -239,6 +250,9 @@ export type LibraryServiceErrorCode =
   | 'conflict'
   | 'unauthorized'
   | 'not-found'
+  | 'refused'
+  | 'read-only'
+  | 'moved'
   | 'storage'
   | 'unavailable'
   | 'cancelled'
@@ -266,6 +280,8 @@ export interface LibraryServiceCommandResult extends ServerMessage {
   requestId: string;
   operationId: string;
   outcome: 'applied' | 'unchanged';
+  delivery: 'synced' | 'queued' | 'local';
+  /** Emitted only after every affected subscription update for this revision. */
   version: LibraryVersion;
 }
 
@@ -295,6 +311,18 @@ export interface LibraryServiceObserved extends ServerMessage {
   version: LibraryVersion;
 }
 
+export type LibrarySessionStatus =
+  | { kind: 'ready'; version: LibraryVersion }
+  | { kind: 'reconnecting'; version: LibraryVersion | null }
+  | { kind: 'read-only'; version: LibraryVersion; reason: string }
+  | { kind: 'moved'; successor?: string }
+  | { kind: 'failed'; error: LibraryServiceFailure };
+
+export interface LibraryServiceStatus extends ServerMessage {
+  type: 'status';
+  status: LibrarySessionStatus;
+}
+
 /** Replacements are intentional: one immutable assignment is one UI invalidation. */
 export interface LibraryServiceUpdate extends ServerMessage {
   type: 'update';
@@ -317,5 +345,6 @@ export type LibraryServiceServerMessage =
   | LibraryServiceSubscribed
   | LibraryServiceUnsubscribed
   | LibraryServiceObserved
+  | LibraryServiceStatus
   | LibraryServiceUpdate
   | LibraryServiceError;

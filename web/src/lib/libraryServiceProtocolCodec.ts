@@ -9,6 +9,7 @@ import {
   type LibraryQueryResult,
   type LibrarySelection,
   type LibrarySelectionValue,
+  type LibrarySessionStatus,
   type LibraryServiceClientMessage,
   type LibraryServiceFailure,
   type LibraryServiceServerMessage,
@@ -105,8 +106,9 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
 function command(value: unknown): value is LibraryCommand {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
-    case 'watchlist.set':
-      return titleRef(value.title) && bool(value.listed);
+    case 'watchlist.add':
+    case 'library.remove':
+      return titleRef(value.title);
     case 'watched.set':
       return titleRef(value.title) && bool(value.watched);
     case 'reaction.set':
@@ -118,6 +120,11 @@ function command(value: unknown): value is LibraryCommand {
         titleRef(value.title) &&
         value.title.type === 'tv' &&
         integer(value.season) &&
+        list(
+          value.episodes,
+          (candidate): candidate is number => integer(candidate) && candidate > 0,
+        ) &&
+        new Set(value.episodes).size === value.episodes.length &&
         bool(value.watched)
       );
     case 'continue-dismissed.set':
@@ -353,8 +360,18 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   return (
     record(value) &&
     value.kind === 'playback.prepare' &&
-    nullable(value.resume, progress) &&
-    nullable(value.continue, continueItem)
+    (value.action === 'start' || value.action === 'resume' || value.action === 'next') &&
+    ((titleRef(value.target) && value.target.type === 'movie') || episodeRef(value.target)) &&
+    nullable(
+      value.resume,
+      (candidate): candidate is { fraction: number; seconds?: number } =>
+        record(candidate) &&
+        finite(candidate.fraction) &&
+        candidate.fraction >= 0 &&
+        candidate.fraction <= 1 &&
+        optional(candidate.seconds, finite) &&
+        candidate.updatedAt === undefined,
+    )
   );
 }
 
@@ -367,6 +384,9 @@ function failure(value: unknown): value is LibraryServiceFailure {
       value.code === 'conflict' ||
       value.code === 'unauthorized' ||
       value.code === 'not-found' ||
+      value.code === 'refused' ||
+      value.code === 'read-only' ||
+      value.code === 'moved' ||
       value.code === 'storage' ||
       value.code === 'unavailable' ||
       value.code === 'cancelled' ||
@@ -375,6 +395,24 @@ function failure(value: unknown): value is LibraryServiceFailure {
     bool(value.retryable) &&
     optional(value.expectedProtocol, integer)
   );
+}
+
+function sessionStatus(value: unknown): value is LibrarySessionStatus {
+  if (!record(value) || !text(value.kind)) return false;
+  switch (value.kind) {
+    case 'ready':
+      return version(value.version);
+    case 'reconnecting':
+      return nullable(value.version, version);
+    case 'read-only':
+      return version(value.version) && typeof value.reason === 'string';
+    case 'moved':
+      return optional(value.successor, text);
+    case 'failed':
+      return failure(value.error);
+    default:
+      return false;
+  }
 }
 
 function protocol(value: Record<string, unknown>): ProtocolDecodeResult<never> | undefined {
@@ -441,6 +479,9 @@ export function decodeLibraryServiceServerMessage(
         !text(input.requestId) ||
         !text(input.operationId) ||
         (input.outcome !== 'applied' && input.outcome !== 'unchanged') ||
+        (input.delivery !== 'synced' &&
+          input.delivery !== 'queued' &&
+          input.delivery !== 'local') ||
         !version(input.version)
       )
         return invalid('command result is invalid');
@@ -460,6 +501,9 @@ export function decodeLibraryServiceServerMessage(
     case 'observed':
       if (!text(input.requestId) || !version(input.version))
         return invalid('observed reply is invalid');
+      break;
+    case 'status':
+      if (!sessionStatus(input.status)) return invalid('session status is invalid');
       break;
     case 'update':
       if (!text(input.subscriptionId) || !version(input.version) || !selectionValue(input.value))

@@ -35,6 +35,28 @@ describe('library service client protocol', () => {
         },
       }),
     ).toMatchObject({ ok: true, value: { type: 'command', operationId: 'operation-1' } });
+
+    for (const command of [
+      { kind: 'watchlist.add', title: { type: 'movie', id: 12 } },
+      { kind: 'library.remove', title: { type: 'movie', id: 12 } },
+      {
+        kind: 'season-watched.set',
+        title: { type: 'tv', id: 42 },
+        season: 2,
+        episodes: [1, 2, 3, 4, 5, 6],
+        watched: true,
+      },
+    ]) {
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'command',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-command',
+          operationId: 'operation-command',
+          command,
+        }),
+      ).toMatchObject({ ok: true });
+    }
   });
 
   it('accepts domain subscriptions without exposing durable rows', () => {
@@ -123,6 +145,21 @@ describe('library service client protocol', () => {
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request', retryable: false } });
+
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-3',
+        operationId: 'operation-2',
+        command: {
+          kind: 'season-watched.set',
+          title: { type: 'tv', id: 42 },
+          season: 2,
+          watched: true,
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
   });
 });
 
@@ -227,5 +264,56 @@ describe('library service server protocol', () => {
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+  });
+
+  it('carries delivery, resolved playback intent, and session status without storage details', () => {
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'command-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-6',
+        operationId: 'operation-6',
+        outcome: 'applied',
+        delivery: 'queued',
+        version,
+      }),
+    ).toMatchObject({ ok: true, value: { delivery: 'queued', version } });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-7',
+        version,
+        result: {
+          kind: 'playback.prepare',
+          action: 'next',
+          target: { type: 'tv', id: 42, season: 2, episode: 4 },
+          resume: null,
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: { result: { action: 'next', target: { episode: 4 }, resume: null } },
+    });
+
+    for (const status of [
+      { kind: 'ready', version },
+      { kind: 'reconnecting', version },
+      { kind: 'read-only', version, reason: 'library format is newer' },
+      { kind: 'moved', successor: 'successor-library' },
+      {
+        kind: 'failed',
+        error: { code: 'storage', message: 'journal unavailable', retryable: true },
+      },
+    ]) {
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'status',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          status,
+        }),
+      ).toMatchObject({ ok: true, value: { type: 'status' } });
+    }
   });
 });
