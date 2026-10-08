@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Loading from './Loading.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import DownloadStatus from './DownloadStatus.svelte';
-  import { downloads, inFlight, pollDelay } from '../lib/downloadQueue.svelte';
-  import { titleSummary } from '../lib/downloadStatus';
-  import { ensureSyncPolicy } from '../lib/syncLoader';
+  import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
+  import type {
+    DownloadTitleDescriptor,
+    DownloadsView,
+    DownloadViewItem,
+  } from '../lib/libraryServiceProtocol';
   import { ageOf, fetchSourceList, type SourceAnswer, type TitleSource } from '../lib/titleSources';
   import { playable } from '../lib/playable';
   import { listReleases, videoCodecsOf } from '../lib/remux';
@@ -23,6 +26,7 @@
     title,
     still,
     onplay,
+    model,
   }: {
     imdb?: string;
     scout: Addon | null;
@@ -43,7 +47,14 @@
     /** The episode's still, for a download of one. */
     still?: string;
     onplay?: (filename: string) => void;
+    /** Library-owned download commands/view. Detail supplies this during the final integration cutover. */
+    model?: LibraryModel;
   } = $props();
+  let downloadLease = $state<LibraryModelLease<DownloadsView>>();
+  onMount(() => {
+    downloadLease = model?.downloads();
+    return () => downloadLease?.release();
+  });
   let sources = $state<TitleSource[] | null | undefined>();
   /** What scout said about the list: whether empty means none exist, and whether it is old or short. */
   let answer = $state<SourceAnswer | undefined>();
@@ -54,47 +65,72 @@
   let panel = $state<HTMLDivElement>();
   const panelId = $props.id();
   /** Whether den-core is up to rank the list; until it is, nothing is offered to download. */
-  let ranked = $state(false);
+  let rankedIdentities = $state<string[]>();
+  const descriptor = $derived<DownloadTitleDescriptor | undefined>(
+    title
+      ? {
+          target:
+            title.type === 'movie'
+              ? { type: 'movie', id: title.id }
+              : { type: 'tv', id: title.id, season: season!, episode: episode! },
+          name: title.title,
+          ...(imdb ? { imdbId: imdb } : {}),
+          ...(title.posterPath ? { posterPath: title.posterPath } : {}),
+          ...(still ? { stillPath: still } : {}),
+          ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+        }
+      : undefined,
+  );
   /** The release a Download starts with: the TV's first pick (den-core `rank_releases`). */
   const best = $derived(
-    sources && ranked ? downloads.pick(sources, title?.originalLanguage) : undefined,
+    sources && rankedIdentities
+      ? sources.find((source) => source.identity === rankedIdentities?.[0])
+      : undefined,
   );
   /** This title's or episode's download, from the library: whichever device started it. */
-  const current = $derived(title ? downloads.of(title.type, title.id, season, episode) : undefined);
+  const current = $derived(
+    title
+      ? ((downloadLease?.snapshot.value?.items.find(
+          (item) =>
+            item.title.type === title.type &&
+            item.title.id === title.id &&
+            item.season === season &&
+            item.episode === episode,
+        ) as DownloadViewItem | undefined) ?? undefined)
+      : undefined,
+  );
   /** The download of `source`, when the one in the library is of this release. */
   const jobOf = (source: TitleSource) =>
     current && current.release.identity === source.identity ? current : undefined;
   const stateOf = (source: TitleSource) => {
     const job = jobOf(source);
-    return job ? downloads.status(job).state : undefined;
+    return job?.status.state;
   };
   /** Everything this title has queued, for the line that says whether a press took (the TV's title note). */
   const summary = $derived(
     title
-      ? titleSummary(
-          downloads
-            .forTitle(title.type, title.id)
-            .map((download) => ({ download, status: downloads.status(download) })),
+      ? downloadLease?.snapshot.value?.items.some(
+          (item) => item.title.type === title.type && item.title.id === title.id,
         )
+        ? 'This title has downloads in progress or ready.'
+        : ''
       : '',
   );
+  function inFlight(state?: string | null) {
+    return state === 'starting' || state === 'fetching' || state === 'not-started';
+  }
   function download(source: TitleSource) {
-    if (!title) return;
-    void downloads.start({
-      title: {
-        mediaType: title.type,
-        mediaId: title.id,
-        imdbId: imdb,
-        season,
-        episode,
-        title: title.title,
-        posterPath: title.posterPath,
-        stillPath: still,
-        originalLanguage: title.originalLanguage,
+    if (!descriptor || !model) return;
+    void model.enqueueDownload(
+      descriptor,
+      {
+        identity: source.identity,
+        label: source.label,
+        ...(source.size ? { sizeBytes: source.size } : {}),
+        ...(source.cached !== undefined ? { cached: source.cached } : {}),
       },
-      source,
-      sources: sources ?? undefined,
-    });
+      sources?.length,
+    );
   }
   $effect(() => {
     const [addon, id, table, s, e, visible] = [scout, imdb, routes, season, episode, active];
@@ -105,16 +141,21 @@
     answer = undefined;
     if (!addon || !id) return;
     const controller = new AbortController();
-    void ensureSyncPolicy().then(
-      () => (ranked = true),
-      (error: unknown) => console.warn('den: the release ranking could not be loaded', error),
-    );
     void fetchSourceList(addon, id, table, s, e, controller.signal).then((loaded) => {
       if (controller.signal.aborted) return;
       sources = loaded.sources;
       answer = loaded.answer;
     });
     return () => controller.abort();
+  });
+  $effect(() => {
+    const [service, requested, visible] = [model, descriptor, active];
+    if (!service || !requested || !visible) return;
+    rankedIdentities = undefined;
+    void service.downloadReleases(requested).then(({ result }) => {
+      if (result.kind === 'download.releases')
+        rankedIdentities = result.releases?.map((release) => release.identity) ?? [];
+    });
   });
   // Asked once per title or episode, and only where Play is offered. A den-remux that can't say leaves every
   // release playable.
@@ -143,18 +184,6 @@
       );
       if (asked === which) refused = unplayable(list);
     })().catch(() => undefined);
-  });
-  /** Asks in a row whose answers changed nothing, and what they last said (`pollDelay`). */
-  let quiet = 0;
-  let lastSaid = '';
-  $effect(() => {
-    const job = current;
-    if (!active || !job || !inFlight(downloads.status(job).state)) return;
-    const said = JSON.stringify(downloads.answers.get(job.name) ?? null);
-    quiet = said === lastSaid ? quiet + 1 : 0;
-    lastSaid = said;
-    const timer = setTimeout(() => void downloads.poll(job), pollDelay(quiet));
-    return () => clearTimeout(timer);
   });
   export async function show() {
     open = true;
@@ -243,10 +272,9 @@
                   Audio: {source.languages.join(', ')}
                 </p>{/if}
               {#if job && !ready}
-                {@const answer = downloads.answers.get(job.name)}
                 <DownloadStatus download={job} release={false} />
-                {#if answer?.state === 'preparing' && answer.progress !== undefined}<progress
-                    value={answer.progress}
+                {#if job.status.fraction !== undefined}<progress
+                    value={job.status.fraction}
                     max="1"
                     aria-label="Download progress"
                   ></progress>{/if}
@@ -280,9 +308,10 @@
                     : 'Download'}</button
                 >{/if}
 
-              {#if job && (state === 'unreachable' || state === 'not_started')}<button
+              {#if job && (state === 'unreachable' || state === 'not-started')}<button
                   class="text-button"
-                  onclick={() => void downloads.poll(job)}>Check status</button
+                  onclick={() => void model?.refreshDownloads(descriptor?.target)}
+                  >Check status</button
                 >{/if}
             </div>
           </li>

@@ -1,13 +1,9 @@
-import { SvelteMap } from 'svelte/reactivity';
 import type { Episode } from './detail';
 import { futureDate } from './detailPresentation';
-import { downloads, inFlight } from './downloadQueue.svelte';
-import { ensureSyncPolicy } from './syncLoader';
-import { fetchSourceList } from './titleSources';
-import type { Addon } from './scout';
-import type { Routes } from './routes';
+import type { LibraryModel } from './libraryModel.svelte';
+import type { DownloadTitleDescriptor } from './libraryServiceProtocol';
 
-interface SeasonJob {
+export interface SeasonJob {
   total: number;
   checked: number;
   queued: number;
@@ -16,11 +12,7 @@ interface SeasonJob {
   uncertain: number;
   running: boolean;
 }
-export const seasonJobs = new SvelteMap<string, SeasonJob>();
-export const seasonJobKey = (addon: Addon, imdb: string, season: number) =>
-  `${addon.install}:${imdb}:${season}`;
 
-/** The series a season pass downloads episodes of, as each episode's download is written down. */
 export interface SeasonTitle {
   type: 'movie' | 'tv';
   id: number;
@@ -31,70 +23,82 @@ export interface SeasonTitle {
 
 export type EpisodeDownloadResult = 'queued' | 'ready' | 'unavailable' | 'uncertain';
 
-/** Queue one episode with the same ranked pick as its Sources panel and a season download. */
-export async function downloadEpisode(
-  addon: Addon,
+const descriptor = (
   imdb: string,
   season: number,
   episode: Episode,
-  routes: Routes,
   title: SeasonTitle,
-  resolve = fetchSourceList,
-  queue = downloads,
+): DownloadTitleDescriptor => ({
+  target: { type: 'tv', id: title.id, season, episode: episode.number },
+  name: title.title,
+  imdbId: imdb,
+  ...(title.posterPath ? { posterPath: title.posterPath } : {}),
+  ...(episode.stillPath ? { stillPath: episode.stillPath } : {}),
+  ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+});
+
+async function downloadEpisodeWithModel(
+  model: LibraryModel,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  title: SeasonTitle,
 ): Promise<EpisodeDownloadResult> {
-  await ensureSyncPolicy();
-  const current = queue.of(title.type, title.id, season, episode.number);
-  if (current) {
-    const state = queue.status(current).state;
-    if (state === 'ready') return 'ready';
-    if (inFlight(state)) return 'queued';
-  }
-  const { sources } = await resolve(addon, imdb, routes, season, episode.number);
-  if (sources === null) return 'uncertain';
-  const source = queue.pick(sources, title.originalLanguage);
-  if (!source || (source.cached === false && source.seeders === 0)) return 'unavailable';
-  if (source.cached === true) return 'ready';
-  const result = await queue.start({
-    title: {
-      mediaType: title.type,
-      mediaId: title.id,
-      imdbId: imdb,
-      season,
-      episode: episode.number,
-      title: title.title,
-      posterPath: title.posterPath,
-      stillPath: episode.stillPath,
-      originalLanguage: title.originalLanguage,
-    },
-    source,
-    sources,
-  });
-  if (result.state === 'ready') return 'ready';
-  if (result.state === 'preparing' || result.state === 'paused') return 'queued';
-  if (result.state === 'unknown' || result.state === 'not-queued') return 'uncertain';
-  return 'unavailable';
+  const requested = descriptor(imdb, season, episode, title);
+  const { result } = await model.downloadReleases(requested);
+  if (result.kind !== 'download.releases' || result.releases === null) return 'uncertain';
+  const release = result.releases[0];
+  if (!release) return 'unavailable';
+  if (release.cached) return 'ready';
+  await model.enqueueDownload(requested, release, result.releases.length);
+  return 'queued';
 }
 
-/**
- * The queue owns this pass, not the page. Leaving a detail must not stop halfway through a season. One library row
- * per episode, each started with the TV's own pick (`rank_releases`), so a season queued here is the one the TV
- * would have queued, and shows on its shelf.
- */
+export function downloadEpisode(
+  model: LibraryModel,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  title: SeasonTitle,
+): Promise<EpisodeDownloadResult>;
+/** Temporary Detail call shape; final integration must supply LibraryModel. */
+export function downloadEpisode(
+  _legacyAddon: unknown,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  _legacyRoutes: unknown,
+  title: SeasonTitle,
+): Promise<EpisodeDownloadResult>;
+export function downloadEpisode(
+  first: LibraryModel | unknown,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  fifth: SeasonTitle | unknown,
+  _sixth?: SeasonTitle,
+): Promise<EpisodeDownloadResult> {
+  if (!first || typeof first !== 'object' || !('downloadReleases' in first))
+    return Promise.resolve('uncertain');
+  return downloadEpisodeWithModel(
+    first as LibraryModel,
+    imdb,
+    season,
+    episode,
+    fifth as SeasonTitle,
+  );
+}
+
+/** A small presentation coordinator; durable episode work remains owned by LibraryService. */
 export async function downloadSeason(
-  addon: Addon,
+  model: LibraryModel,
   imdb: string,
   season: number,
   episodes: Episode[],
-  routes: Routes,
   title: SeasonTitle,
-  resolve = fetchSourceList,
-  queue = downloads,
+  changed: (job: SeasonJob) => void,
 ): Promise<void> {
-  // Each episode's release is den-core's pick.
-  await ensureSyncPolicy();
-  const key = seasonJobKey(addon, imdb, season);
-  if (seasonJobs.get(key)?.running) return;
-  const aired = episodes.filter((e) => !futureDate(e.airDate));
+  const aired = episodes.filter((episode) => !futureDate(episode.airDate));
   let job: SeasonJob = {
     total: aired.length,
     checked: 0,
@@ -104,55 +108,11 @@ export async function downloadSeason(
     uncertain: 0,
     running: true,
   };
-  seasonJobs.set(key, job);
-  try {
-    for (const episode of aired) {
-      const current = queue.of(title.type, title.id, season, episode.number);
-      // Already fetching: asking again is a fresh add at the debrid, not a status check.
-      if (current && inFlight(queue.status(current).state)) {
-        job = { ...job, queued: job.queued + 1, checked: job.checked + 1 };
-        seasonJobs.set(key, job);
-        continue;
-      }
-      const { sources } = await resolve(addon, imdb, routes, season, episode.number);
-      if (sources === null) job = { ...job, uncertain: job.uncertain + 1 };
-      else {
-        const source = queue.pick(sources, title.originalLanguage);
-        if (!source || (source.cached === false && source.seeders === 0))
-          job = { ...job, unavailable: job.unavailable + 1 };
-        else if (source.cached === true) job = { ...job, ready: job.ready + 1 };
-        else {
-          const result = await queue.start({
-            title: {
-              mediaType: title.type,
-              mediaId: title.id,
-              imdbId: imdb,
-              season,
-              episode: episode.number,
-              title: title.title,
-              posterPath: title.posterPath,
-              stillPath: episode.stillPath,
-              originalLanguage: title.originalLanguage,
-            },
-            source,
-            sources,
-          });
-          if (result.state === 'ready') job = { ...job, ready: job.ready + 1 };
-          else if (result.state === 'preparing' || result.state === 'paused')
-            job = { ...job, queued: job.queued + 1 };
-          else if (result.state === 'unknown' || result.state === 'not-queued')
-            job = { ...job, uncertain: job.uncertain + 1 };
-          else job = { ...job, unavailable: job.unavailable + 1 };
-        }
-      }
-      job = { ...job, checked: job.checked + 1 };
-      seasonJobs.set(key, job);
-    }
-  } finally {
-    seasonJobs.set(key, { ...job, running: false });
+  changed(job);
+  for (const episode of aired) {
+    const result = await downloadEpisodeWithModel(model, imdb, season, episode, title);
+    job = { ...job, checked: job.checked + 1, [result]: job[result] + 1 };
+    changed(job);
   }
-  for (const [old, value] of seasonJobs) {
-    if (seasonJobs.size <= 20) break;
-    if (!value.running) seasonJobs.delete(old);
-  }
+  changed({ ...job, running: false });
 }
