@@ -813,9 +813,25 @@ export class LibraryLogAuthority {
 
   #runtime(): Extract<LibrarySelectionValue, { kind: 'runtime' }> {
     const remux = readPrivateAddresses(this.#log.settings(ADDRESSES)).remux;
+    const keys = this.#log.settings('keys');
+    const providerKeys = (
+      [
+        ['tmdb', 'tmdb'],
+        ['omdb', 'omdb'],
+        ['content-warnings', 'doesthedogdie'],
+      ] as const
+    ).reduce<Extract<LibrarySelectionValue, { kind: 'runtime' }>['providerKeys']>(
+      (found, [service, stored]) => {
+        const value = readApiKey(keys, stored);
+        if (value && value.length <= 16_384) found[service] = value;
+        return found;
+      },
+      {},
+    );
     return {
       kind: 'runtime',
-      tmdbKey: tmdbKeyOf(this.#log.settings('keys')),
+      tmdbKey: tmdbKeyOf(keys),
+      providerKeys,
       pluginManifestUrls: readPlugins(this.#log.settings('plugins'))
         .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
         .slice(0, 10_000),

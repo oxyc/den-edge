@@ -40,8 +40,9 @@ export interface EpisodeRef extends TitleRef {
 
 export interface RuntimeDiscoveryView {
   kind: 'runtime';
-  /** Explicit temporary capability for page-owned TMDB metadata fetches; remove with that subsystem's cutover. */
+  /** Explicit temporary capabilities for page-owned metadata fetches; remove with that subsystem's cutover. */
   tmdbKey: string;
+  providerKeys: Partial<Record<LibraryApiKeyService, string>>;
   pluginManifestUrls: string[];
   privateRemuxUrl: string | null;
 }

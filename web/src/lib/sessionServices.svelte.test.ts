@@ -32,6 +32,7 @@ vi.mock('./grants.svelte', () => ({
 const runtime = (tmdbKey: string, pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
   kind: 'runtime',
   tmdbKey,
+  providerKeys: { tmdb: tmdbKey },
   pluginManifestUrls,
   privateRemuxUrl: null,
 });

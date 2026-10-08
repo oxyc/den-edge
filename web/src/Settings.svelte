@@ -76,7 +76,7 @@
   const plugins = $derived(connections ? structuredClone(connections.plugins) : []);
   const pluginUrls = $derived(plugins.map((plugin) => plugin.manifestUrl));
   const disabled = $derived(!ready || saving);
-  const tmdbKey = $derived(connections?.apiKeys.tmdb ?? '');
+  const tmdbKey = $derived(model.runtime.value?.tmdbKey ?? '');
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
@@ -233,6 +233,7 @@
       {heldReset}
       {onadoptheld}
       apiKeys={connections?.apiKeys ?? {}}
+      rawApiKeys={model.runtime.value?.providerKeys ?? {}}
       simklConnected={!!simkl?.connected}
       {saveSimkl}
       heldRemovals={namedRemovals}

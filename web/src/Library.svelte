@@ -762,8 +762,8 @@
       autoSkipSegments: value?.autoSkipSegments ?? false,
     };
   });
-  const warningKey = $derived(connectionsLease?.snapshot.value?.apiKeys['content-warnings'] ?? '');
-  const omdbKey = $derived(connectionsLease?.snapshot.value?.apiKeys.omdb ?? '');
+  const warningKey = $derived(discovered.providerKeys['content-warnings'] ?? '');
+  const omdbKey = $derived(discovered.providerKeys.omdb ?? '');
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(new Set((overview?.watched ?? []).map(titleKey)));

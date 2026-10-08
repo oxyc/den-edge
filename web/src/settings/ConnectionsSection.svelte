@@ -42,6 +42,7 @@
   let {
     link,
     apiKeys,
+    rawApiKeys,
     simklConnected,
     saveSimkl,
     heldRemovals = [],
@@ -69,6 +70,7 @@
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
     apiKeys: ConnectionsView['apiKeys'];
+    rawApiKeys: Partial<Record<LibraryApiKeyService, string>>;
     simklConnected: boolean;
     saveSimkl: (token: string | null) => Promise<boolean>;
     /** SIMKL watchlist removals held back until someone approves them (more than 20 at once). */
@@ -157,7 +159,7 @@
     if (checkedOnOpen || disabled) return;
     checkedOnOpen = true;
     for (const service of KEY_SERVICES) {
-      const key = apiKeys[apiService(service.name)];
+      const key = rawApiKeys[apiService(service.name)];
       if (!key) continue;
       checks.set(service.name, 'checking');
       void service.check(key).then((result) => checks.set(service.name, result));
