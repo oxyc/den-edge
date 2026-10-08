@@ -50,6 +50,7 @@ async function mock(page) {
   });
   // This origin serves reel, which offers one file that plays.
   await page.route('**/reel/manifest.json', (r) => r.fulfill({ json: { id: 'com.den.reel' } }));
+  await page.route('**/reel/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.route('**/reel/meta/**', (r) =>
     r.fulfill({
       json: {

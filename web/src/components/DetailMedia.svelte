@@ -14,7 +14,7 @@
     trailerCandidates,
     watchDirect,
   } from '../lib/reel';
-  import type { Crop, Source, TrailerCandidate } from '../lib/reel';
+  import type { Crop, Source, Sources, TrailerCandidate } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -414,6 +414,10 @@
     void trailerCandidates(base, mediaType, ids, table, {
       signal: controller.signal,
       prewarm: 'direct',
+      sourceAsk: {
+        surface: 'audible',
+        player: playsHls ? 'native' : 'hls.js',
+      },
     }).then((found) => {
       if (controller.signal.aborted) return;
       candidates = found;
@@ -439,14 +443,29 @@
    * (measured from a phone, the second a 0 ms cache hit), and a reset of `sound` under a viewer who
    * had already turned the sound on. Compared by value, so an equal array asks for nothing.
    */
-  let asked = { play: '', sources: '' };
+  let asked: {
+    play: string;
+    sources: string;
+    prepared: Sources | null | undefined;
+    combined: boolean;
+  } = { play: '', sources: '', prepared: undefined, combined: false };
 
   $effect(() => {
     const play = url;
-    const offered = candidates[candidate]?.sources;
+    const discovered = candidates[candidate];
+    const offered = discovered?.sources;
+    const combined = !!discovered && Object.hasOwn(discovered, 'prepared');
+    const prepared = discovered?.prepared;
     // Both read before the check, so both stay tracked whichever way it goes.
-    if (play && asked.play === play && asked.sources === (offered ?? '')) return;
-    asked = { play: play ?? '', sources: offered ?? '' };
+    if (
+      play &&
+      asked.play === play &&
+      asked.sources === (offered ?? '') &&
+      asked.prepared === prepared &&
+      asked.combined === combined
+    )
+      return;
+    asked = { play: play ?? '', sources: offered ?? '', prepared, combined };
     // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
     // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
     // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
@@ -460,6 +479,23 @@
     if (!play) {
       upgraded = null;
       asking = false;
+      return;
+    }
+    if (combined) {
+      const top = prepared?.sources[0];
+      asking = false;
+      if (!top) {
+        // `/prepare` completed but its primary ladder was unavailable. Do not immediately repeat
+        // that provider work through a derived route or `/sources`; try an alternate Reel retained
+        // in the same discovery answer, if there is one.
+        upgraded = null;
+        nextTrailer();
+        return;
+      }
+      rungs = prepared.sources;
+      rung = 0;
+      heroCrop = prepared.crop ?? null;
+      upgraded = top.url;
       return;
     }
     if (!offered) {

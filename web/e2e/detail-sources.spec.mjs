@@ -37,6 +37,7 @@ const serveVideo = (route) => {
 };
 
 async function mock(page, sources) {
+  const counts = { prepare: 0, meta: 0, sources: 0 };
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -45,8 +46,27 @@ async function mock(page, sources) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
-  await page.route('**/reel/fixture/meta/**', (r) =>
-    r.fulfill({
+  await page.route('**/reel/fixture/prepare/**', (r) => {
+    counts.prepare++;
+    return r.fulfill({
+      json: {
+        meta: {
+          links: [
+            {
+              trailers: 'http://internal/play/trailer.webm',
+              sources: 'http://internal/sources/trailer.json',
+            },
+          ],
+        },
+        primary: { id: 'trailer', sourcesBase: 'http://internal/sources/trailer.json' },
+        prepared: { intent: 'play', playReady: true, provisional: false },
+        ...sources,
+      },
+    });
+  });
+  await page.route('**/reel/fixture/meta/**', (r) => {
+    counts.meta++;
+    return r.fulfill({
       json: {
         meta: {
           links: [
@@ -57,12 +77,16 @@ async function mock(page, sources) {
           ],
         },
       },
-    }),
-  );
-  await page.route('**/sources/trailer.json**', (r) => r.fulfill({ json: sources }));
+    });
+  });
+  await page.route('**/sources/trailer.json**', (r) => {
+    counts.sources++;
+    return r.fulfill({ json: sources });
+  });
   // The derived master is mounted first and replaced by reel's answer; it must not 404 into the ladder.
   await page.route('**/hls/trailer.m3u8**', (r) => r.fulfill({ status: 204, body: '' }));
   await page.route('**/play/trailer.webm', serveVideo);
+  return counts;
 }
 
 const open = (page) => page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
@@ -83,7 +107,7 @@ test('hero adopts reel’s source and crop', async () => {
         return animate.apply(this, args);
       };
     });
-    await mock(page, {
+    const counts = await mock(page, {
       sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: true, height: 1080 }],
       crop: { letterboxed: true, aspect: 1.85, rect: [0, 0.0194, 1, 0.9611] },
     });
@@ -100,6 +124,7 @@ test('hero adopts reel’s source and crop', async () => {
     await expect(backdrop).toHaveClass(/\bshown\b/);
     await backdrop.evaluate((image) => image.decode());
     expect(await page.evaluate(() => window.detailBackdropAnimations)).toBe(0);
+    expect(counts).toEqual({ prepare: 1, meta: 0, sources: 0 });
   } finally {
     await browser.close();
   }
@@ -129,9 +154,9 @@ test('hero prepares reel while its backdrop loads without mounting media early',
       mediaRequests++;
       return serveVideo(route);
     });
-    const sources = page.waitForResponse('**/sources/trailer.json**');
+    const prepared = page.waitForResponse('**/reel/fixture/prepare/**');
     await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`, { waitUntil: 'domcontentloaded' });
-    await sources;
+    await prepared;
     // Let the source answer cross Svelte's reactive boundary. It is prepared, but the backdrop is still the
     // only thing allowed to occupy the media element, so no video request can have left the page.
     await page.evaluate(

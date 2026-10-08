@@ -186,6 +186,163 @@ describe('trailerCandidates', () => {
       ['/reel/play/def456.mp4?s=tag2', null],
     ]);
   });
+
+  it('gets discovery and the primary ladder in one prepare request', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response(
+        JSON.stringify({
+          meta: {
+            links: [
+              {
+                trailers: 'http://internal/play/trailer.webm',
+                sources: 'http://internal/sources/trailer.json?s=tag',
+              },
+            ],
+          },
+          primary: {
+            id: 'trailer',
+            sourcesBase: 'http://internal/sources/trailer.json?s=tag',
+          },
+          prepared: { intent: 'play', playReady: true, provisional: false },
+          sources: [
+            {
+              kind: 'mp4',
+              url: '../m/s/chosen.webm',
+              audio: true,
+              width: 1920,
+              height: 1080,
+            },
+          ],
+          crop: null,
+          expires: 1234,
+        }),
+      );
+    };
+
+    const found = await trailerCandidates(
+      '/reel/cfg',
+      'movie',
+      { tmdb: 42, imdb: 'tt42' },
+      ROUTES,
+      {
+        fetchImpl,
+        secure: true,
+        sourceAsk: { surface: 'audible', player: 'hls.js' },
+      },
+    );
+
+    expect(asked).toEqual([
+      '/reel/cfg/prepare/movie/tmdb:42.json?surface=audible&player=hls.js&intent=play&imdb=tt42',
+    ]);
+    expect(found).toEqual([
+      {
+        play: '/reel/play/trailer.webm',
+        sources: '/reel/sources/trailer.json?s=tag',
+        prepared: {
+          sources: [
+            {
+              kind: 'mp4',
+              url: '/reel/m/s/chosen.webm',
+              audio: true,
+              width: 1920,
+              height: 1080,
+            },
+          ],
+          crop: null,
+          expires: 1234,
+        },
+      },
+    ]);
+  });
+
+  it('falls back to legacy meta when prepare is not deployed', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      if (String(input).includes('/prepare/')) return new Response('{}', { status: 404 });
+      return new Response(JSON.stringify(meta));
+    };
+
+    const found = await trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
+      fetchImpl,
+      secure: true,
+      sourceAsk: { surface: 'audible', player: 'native', intent: 'warm' },
+    });
+
+    expect(asked).toEqual([
+      '/reel/cfg/prepare/movie/tt0111161.json?surface=audible&player=native&intent=warm',
+      '/reel/cfg/meta/movie/tt0111161.json',
+    ]);
+    expect(found).toHaveLength(2);
+    expect(Object.hasOwn(found[0] ?? {}, 'prepared')).toBe(false);
+  });
+
+  it('does not duplicate a genuine prepare failure through legacy meta', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response('{}', { status: 503 });
+    };
+
+    expect(
+      await trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
+        fetchImpl,
+        secure: true,
+        sourceAsk: { surface: 'audible', player: 'native' },
+      }),
+    ).toEqual([]);
+    expect(asked).toEqual([
+      '/reel/cfg/prepare/movie/tt0111161.json?surface=audible&player=native&intent=play',
+    ]);
+  });
+
+  it('does not reuse a provisional prepared ladder as a later play answer', async () => {
+    let asks = 0;
+    const fetchImpl: typeof fetch = async () => {
+      asks += 1;
+      return new Response(
+        JSON.stringify({
+          meta: {
+            links: [
+              {
+                trailers: 'http://internal/play/trailer.webm',
+                sources: 'http://internal/sources/trailer.json',
+              },
+            ],
+          },
+          primary: { id: 'trailer', sourcesBase: 'http://internal/sources/trailer.json' },
+          prepared: { intent: 'warm', playReady: true, provisional: true },
+          sources: [{ kind: 'hls', url: 'https://google.example/master.m3u8', audio: true }],
+        }),
+      );
+    };
+    const options = {
+      fetchImpl,
+      secure: true,
+      sourceAsk: { surface: 'audible', player: 'native', intent: 'warm' } as const,
+    };
+
+    const warm = await trailerCandidates(
+      '/reel/cfg',
+      'movie',
+      { imdb: 'tt0111161' },
+      ROUTES,
+      options,
+    );
+    const later = await trailerCandidates(
+      '/reel/cfg',
+      'movie',
+      { imdb: 'tt0111161' },
+      ROUTES,
+      options,
+    );
+
+    expect(asks).toBe(1);
+    expect(warm[0]?.prepared?.sources).toHaveLength(1);
+    expect(Object.hasOwn(later[0] ?? {}, 'prepared')).toBe(false);
+  });
 });
 
 describe('hlsURL', () => {
