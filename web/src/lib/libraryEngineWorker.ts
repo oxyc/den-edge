@@ -4,18 +4,22 @@
 import { LibraryEngine, type LibraryEngineReply, type LibraryEngineRequest } from './libraryEngine';
 
 const engine = new LibraryEngine();
+let requests = Promise.resolve();
 
 function message(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
-self.onmessage = async (event: MessageEvent<LibraryEngineRequest>) => {
+self.onmessage = (event: MessageEvent<LibraryEngineRequest>) => {
   const request = event.data;
-  let reply: LibraryEngineReply;
-  try {
-    reply = { id: request.id, value: await engine.request(request) };
-  } catch (error) {
-    reply = { id: request.id, error: message(error) };
-  }
-  self.postMessage(reply);
+  // Retained writes must finish before a later hydration chunk snapshots their log state.
+  requests = requests.then(async () => {
+    let reply: LibraryEngineReply;
+    try {
+      reply = { id: request.id, value: await engine.request(request) };
+    } catch (error) {
+      reply = { id: request.id, error: message(error) };
+    }
+    self.postMessage(reply);
+  });
 };

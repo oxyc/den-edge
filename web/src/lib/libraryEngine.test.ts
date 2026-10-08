@@ -42,9 +42,12 @@ it('opens and folds in the owning worker, accepts shapes, and exports at most 25
   const rowsInSlices = vi.fn(() => {
     throw new Error('must not start a nested projection worker');
   });
+  const keep = vi.fn(async () => {});
   const log = {
     rows,
     rowsInSlices,
+    kept: vi.fn(async (name: string) => (name === 'billboard' ? ['retained'] : undefined)),
+    keep,
     currentSummary: () => ({ stamp: [10, 0, 'tv'] as const, reconsiderAt: Infinity, at: 10 }),
     exportSnapshot: () => snapshot,
   } as unknown as LibraryLog;
@@ -56,12 +59,25 @@ it('opens and folds in the owning worker, accepts shapes, and exports at most 25
     key: 'key',
     now: 10,
   })) as ActiveHomePayload;
-  const shaped = await engine.request({ id: 2, op: 'shapes', handle: payload.handle, shapes: [] });
+  await expect(
+    engine.request({ id: 2, op: 'kept', handle: payload.handle, name: 'billboard' }),
+  ).resolves.toEqual(['retained']);
+  await expect(
+    engine.request({
+      id: 3,
+      op: 'keep',
+      handle: payload.handle,
+      name: 'billboard',
+      value: ['new'],
+    }),
+  ).resolves.toBe(true);
+  expect(keep).toHaveBeenCalledWith('billboard', ['new']);
+  const shaped = await engine.request({ id: 4, op: 'shapes', handle: payload.handle, shapes: [] });
   const chunks = [];
   let cursor = 0;
   for (;;) {
     const chunk = (await engine.request({
-      id: 3 + chunks.length,
+      id: 5 + chunks.length,
       op: 'hydrate',
       handle: payload.handle,
       cursor,

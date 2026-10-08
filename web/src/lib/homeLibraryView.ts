@@ -5,9 +5,11 @@ import { WATCHED } from './actions';
 import { readDownloads, type Download } from './downloadRows';
 import {
   ContinueProjector,
+  nameContinueCandidates,
   standings,
   titleKey,
   type ContinueCandidate,
+  type ContinueEntry,
   type Library,
   type Shape,
   type Standing,
@@ -61,16 +63,21 @@ export interface ActiveHomeSettings {
 /** The only first reply for the fast path. The decrypted snapshot and policy fold stay behind `handle`. */
 export interface ActiveHomePayload {
   handle: number;
-  view: Omit<HomeLibraryView, 'continueLibrary'> & { continue: ContinueCandidate[] };
+  view: Omit<HomeLibraryView, 'continueLibrary'> & { continue: ActiveHomeContinueCandidate[] };
   settings: ActiveHomeSettings;
   stamp: Stamp;
   reconsiderAt: number;
   at: number;
 }
 
+/** A compact policy answer plus any display already carried by the library's playback rows. */
+export interface ActiveHomeContinueCandidate extends ContinueCandidate {
+  title?: ContinueEntry['title'];
+}
+
 export interface ActiveHomeShapeReply {
   handle: number;
-  continue: ContinueCandidate[];
+  continue: ActiveHomeContinueCandidate[];
 }
 
 export interface ActiveHomeHydrationChunk<THeader = Record<string, unknown>, TEntry = unknown> {
@@ -315,18 +322,36 @@ export function homeLibraryViewFromCurrent(inputs: CurrentHomeLibraryInputs): Ho
 /** Convert the internal compact policy input into the clone-safe first-paint contract. */
 export function activeHomeView(view: HomeLibraryView): ActiveHomePayload['view'] {
   const { continueLibrary, ...fixed } = view;
+  const candidates = new ContinueProjector().project(continueLibrary);
   return {
     ...fixed,
-    continue: new ContinueProjector().project(continueLibrary),
+    continue: withExistingContinueTitles(candidates, continueLibrary),
   };
+}
+
+function withExistingContinueTitles(
+  candidates: ContinueCandidate[],
+  library: Library,
+): ActiveHomeContinueCandidate[] {
+  const named = new Map(
+    nameContinueCandidates(candidates, library).map((entry) => [
+      titleKey(entry.title),
+      entry.title,
+    ]),
+  );
+  return candidates.map((candidate) => ({
+    ...candidate,
+    ...(named.get(titleKey(candidate.ref)) ? { title: named.get(titleKey(candidate.ref)) } : {}),
+  }));
 }
 
 /** Re-run only Continue policy after the page names the required TV layouts. */
 export function continueWithShapes(
   view: HomeLibraryView,
   shapes: ReadonlyArray<readonly [string, Shape]>,
-): ContinueCandidate[] {
-  return new ContinueProjector().project({ ...view.continueLibrary, shapes: new Map(shapes) });
+): ActiveHomeContinueCandidate[] {
+  const library = { ...view.continueLibrary, shapes: new Map(shapes) };
+  return withExistingContinueTitles(new ContinueProjector().project(library), library);
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */
