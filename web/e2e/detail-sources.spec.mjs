@@ -105,6 +105,50 @@ test('hero adopts reel’s source and crop', async () => {
   }
 });
 
+test('hero prepares reel while its backdrop loads without mounting media early', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await mock(page, {
+      sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: true, height: 1080 }],
+      crop: null,
+    });
+    let releaseBackdrop;
+    const backdrop = new Promise((resolve) => (releaseBackdrop = resolve));
+    await page.route('https://image.tmdb.org/**', async (route) => {
+      await backdrop;
+      await route.fulfill({
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"></svg>',
+      });
+    });
+    let mediaRequests = 0;
+    await page.route('**/m/s/chosen.webm', (route) => {
+      mediaRequests++;
+      return serveVideo(route);
+    });
+    const sources = page.waitForResponse('**/sources/trailer.json**');
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`, { waitUntil: 'domcontentloaded' });
+    await sources;
+    // Let the source answer cross Svelte's reactive boundary. It is prepared, but the backdrop is still the
+    // only thing allowed to occupy the media element, so no video request can have left the page.
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
+    const video = page.locator('[data-detail-media] video');
+    await expect(video).not.toHaveAttribute('src');
+    expect(mediaRequests).toBe(0);
+
+    releaseBackdrop();
+    await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm');
+    await expect.poll(() => mediaRequests).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('hero walks reel’s order when an entry will not play', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

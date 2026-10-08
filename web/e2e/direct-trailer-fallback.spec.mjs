@@ -305,7 +305,10 @@ test('detail hero tries the next LAN candidate when the first media file is unav
     DEADLINE_MS + 8_000,
   );
   expect(result.src).toBe(`${LAN}${SECOND_MEDIA}`);
-  expect(result.seen.activations).toBe(2);
+  expect(
+    result.seen.activations,
+    'the next signed candidate reuses the same short-lived listener lease',
+  ).toBe(1);
   expect(result.seen.lan).toBeGreaterThan(1);
   expect(result.seen.direct, 'the public copy between candidates was tried').toBeGreaterThan(0);
   expect(result.seen.relay).toBe(0);
