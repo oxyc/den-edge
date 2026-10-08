@@ -312,4 +312,36 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(delivery).toHaveBeenCalledTimes(2);
     await scheduled.close();
   });
+
+  it('invalidates an in-flight provider pass when hidden, offline, or closed', async () => {
+    vi.useFakeTimers();
+    let current!: () => boolean;
+    let finish!: () => void;
+    const delivery = vi.fn(
+      (isCurrent: () => boolean) =>
+        new Promise<boolean>((resolve) => {
+          current = isCurrent;
+          finish = () => resolve(false);
+        }),
+    );
+    const scheduled = new ScheduledLibraryServiceAuthority(
+      authority().port,
+      maintenance().port,
+      {},
+      { run: delivery },
+    );
+
+    await scheduled.observe(lifecycle());
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(current()).toBe(true);
+    await scheduled.observe(lifecycle({ online: false }));
+    expect(current()).toBe(false);
+    await scheduled.observe(lifecycle());
+    expect(current()).toBe(false);
+    const closing = scheduled.close();
+    expect(current()).toBe(false);
+    finish();
+    await closing;
+  });
 });

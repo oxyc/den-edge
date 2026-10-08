@@ -338,6 +338,7 @@ interface V4Pass {
   /** The next settle order in this epoch (`orderCounter`). */
   order: () => number;
   fetchImpl: typeof fetch;
+  current: () => boolean;
 }
 
 /** This page's own order counters, per library: what it used where storage is blocked. */
@@ -551,6 +552,7 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
   }
 
   for (const { command, at } of commands) {
+    if (!pass.current()) break;
     if (full.has(`${command.document}#${command.key}`)) {
       console.warn(`den: ${command.document} is full; ${command.key} is held, not sent`);
       continue;
@@ -583,6 +585,7 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
   }
 
   for (const [name, settles] of writes) {
+    if (!pass.current()) break;
     const written = syncPolicy<{ document: DocumentRow }>({
       op: 'delivery_write',
       ...shape(name),
@@ -615,7 +618,9 @@ export async function deliverSimklWithClock(
   clock: ClockStore,
   fetchImpl: typeof fetch = fetch,
   elapsed = pageElapsed(),
+  current: () => boolean = () => true,
 ): Promise<boolean> {
+  if (!current()) return false;
   const tracker = log.settings('trackers');
   const connection = Object.entries(tracker?.values ?? {}).find(
     ([name, value]) =>
@@ -638,7 +643,7 @@ export async function deliverSimklWithClock(
   }
   // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
   return exclusive(`den.simkl.${account}`, () =>
-    deliverAccount(log, clock, fetchImpl, elapsed, account, token),
+    deliverAccount(log, clock, fetchImpl, elapsed, account, token, current),
   );
 }
 
@@ -770,7 +775,9 @@ async function deliverAccount(
   elapsed: number,
   account: string,
   token: string,
+  current: () => boolean,
 ): Promise<boolean> {
+  if (!current()) return false;
   const device = clock.device;
   const name = `deliver:simkl:${account}`;
   const deliver = log.settings(name);
@@ -831,23 +838,27 @@ async function deliverAccount(
       values: { ...base.values, lease: { value: { strings: [device, String(epoch)] }, at } },
     };
     const sent = { at: Date.now(), mono: monoNow() };
+    if (!current()) return false;
     if (!(await log.writeAt(leased, log.seqOf(rowName(leased))))) return false;
     heldLeases.set(log, { account, epoch, ...sent });
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
+  if (!current()) return false;
   if (pendingV4) await writeAccountState(log, name, pendingV4, clock);
+  if (!current()) return false;
   const order = orderCounter(log, account, epoch);
 
   const clientId = await fetchSimklClientId(fetchImpl);
-  if (!clientId) return false;
+  if (!clientId || !current()) return false;
   const snapshotResponse = await simkl(
     '/sync/all-items?extended=full&include_all_episodes=yes&episode_watched_at=yes',
     clientId,
     token,
     fetchImpl,
   );
-  if (!snapshotResponse.ok) return false;
+  if (!snapshotResponse.ok || !current()) return false;
   const snapshot = collectSnapshot(await snapshotResponse.json());
+  if (!current()) return false;
   if (pendingV4) {
     const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
     await deliverV4(log, {
@@ -861,6 +872,7 @@ async function deliverAccount(
       device,
       order,
       fetchImpl,
+      current,
     });
     return true;
   }
@@ -874,6 +886,7 @@ async function deliverAccount(
     now: Date.now(),
   });
   for (const command of pending.slice(0, 100)) {
+    if (!current()) break;
     const target = command.built_from as Target;
     const id = identity(target.media, target.id, target.season, target.episode_number);
     const title = identity(target.media, target.id);
@@ -886,6 +899,7 @@ async function deliverAccount(
     if (outcome.action === 'send' && !holding(log, account)) break;
     if (outcome.action === 'send' && !(await send(command, target, clientId, token, fetchImpl)))
       continue;
+    if (!current()) break;
     const settled = syncPolicy<unknown>({
       op: 'settle',
       outcome,
@@ -899,10 +913,10 @@ async function deliverAccount(
       account,
       target: target.receipt_target,
     });
-    const current = log
+    const currentReceipt = log
       .rows()
       .find((row): row is ReceiptRow => row.kind === 'snt' && rowName(row) === name);
-    const receipt: ReceiptRow = current ?? {
+    const receipt: ReceiptRow = currentReceipt ?? {
       kind: 'snt',
       schema: 3,
       provider: 'simkl',
@@ -927,6 +941,12 @@ function legacyClock(log: LibraryLog, device: string): ClockStore {
     async issue(now = Date.now()) {
       last = syncPolicy<Stamp>({ op: 'issue', last, now, device });
       return last;
+    },
+    async historical(times) {
+      return times.map((at) => {
+        last = syncPolicy<Stamp>({ op: 'issue', last: [at, last[1], device], now: at, device });
+        return last;
+      });
     },
     async see(stamp) {
       if (stampOrder(last, stamp) < 0) last = stamp;

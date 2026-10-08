@@ -68,6 +68,8 @@ it('a switched v2 Simkl library sends missing work once and keeps its receipt', 
   const clock = {
     device: 'aaaaaaaaaaaaaaaa',
     issue: async (now = 2_000) => [now, counter++, 'aaaaaaaaaaaaaaaa'] as Stamp,
+    historical: async (times: readonly number[]) =>
+      times.map((time) => [time, counter++, 'aaaaaaaaaaaaaaaa'] as Stamp),
     see: async () => undefined,
     current: async () => [2_000, counter, 'aaaaaaaaaaaaaaaa'] as Stamp,
   };
