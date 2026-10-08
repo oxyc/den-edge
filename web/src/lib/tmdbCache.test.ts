@@ -86,6 +86,34 @@ describe('every device, with a key of its own or without', () => {
 });
 
 describe('cachingFetch', () => {
+  it('remembers only den-edge’s exact missing-record answer for six hours', async () => {
+    const { entries, store } = memory();
+    const asked: string[] = [];
+    let body = '{"error":"not_found"}';
+    let clock = 0;
+    const network: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response(body, { status: 404, headers: { 'content-type': 'application/json' } });
+    };
+    const cached = cachingFetch(store, network, () => clock);
+
+    const first = await cached(detail);
+    expect(first.status).toBe(404);
+    expect(await first.json()).toEqual({ error: 'not_found' });
+    await vi.waitFor(() => expect([...entries.values()][0]?.status).toBe(404));
+    expect((await cached(detail)).status).toBe(404);
+    expect(asked, 'the local tombstone answers the repeat').toHaveLength(1);
+
+    clock = 6 * HOUR;
+    await cached(detail);
+    expect(asked, 'a title may appear later, so absence expires').toHaveLength(2);
+
+    body = '{"error":"tmdb_proxy_off"}';
+    await cached(discover);
+    await cached(discover);
+    expect(asked, 'configuration failures remain visible and retryable').toHaveLength(4);
+  });
+
   it('reports a direct rate limit and den-edge’s 503 Retry-After when the page has no answer', async () => {
     const waits: number[] = [];
     const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
