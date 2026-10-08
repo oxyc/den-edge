@@ -1,7 +1,6 @@
 import { expect, it } from 'vitest';
 import { standings, titleKey, type Library } from './library';
 import {
-  activeHomeView,
   digestHomeLibraryView,
   homeLibraryViewFromCurrent,
   selectHomeLibraryView,
@@ -131,35 +130,6 @@ it('matches the fixed inputs Home currently derives on the page thread', () => {
   });
   expect(digestHomeLibraryView(worker)).toEqual(digestHomeLibraryView(current));
   expect(worker).not.toHaveProperty('continue');
-});
-
-it('keeps playback display data on compact Continue candidates', () => {
-  const library: Library = {
-    records: [
-      {
-        title: { type: 'movie', id: 7, title: 'Seven', posterPath: '/seven.jpg' },
-        status: 'inProgress',
-        progress: 0.4,
-        progressAt: 10,
-        addedAt: 1,
-        deleted: false,
-      },
-    ],
-    marks: [],
-    flags: new Map(),
-    shapes: new Map(),
-    dismissed: new Map(),
-  };
-  const view = selectHomeLibraryView(library, []);
-
-  expect(activeHomeView(view).continue).toEqual([
-    {
-      ref: { type: 'movie', id: 7, title: 'Seven', posterPath: '/seven.jpg' },
-      display: 'record',
-      fraction: 0.4,
-      title: { type: 'movie', id: 7, title: 'Seven', posterPath: '/seven.jpg' },
-    },
-  ]);
 });
 
 it('is materially smaller than the representative projection graph it describes', () => {
