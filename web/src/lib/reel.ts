@@ -12,6 +12,7 @@
 
 import type { MediaType } from './library';
 import { ipv4Hint } from './ipv4';
+import { mayUseLocalNetwork } from './remuxRoute';
 import { relayFetch } from './relayFetch';
 import type { Entry, Routes } from './routes';
 
@@ -601,6 +602,36 @@ interface Direct {
   lan: string | null;
 }
 
+/** One activation lease being opened. It is shared only while pending; Reel remains the cache authority. */
+const activating = new Map<string, Promise<Direct | null>>();
+
+/**
+ * Let one caller stop waiting without aborting the activation another caller has joined.
+ *
+ * The activation itself has its own bounded lifetime. Tying it to either surface's signal meant a disappearing
+ * warm-up could cancel the detail hero's identical request (or vice versa), defeating the coalescing precisely
+ * when the two asks overlap.
+ */
+function waitForActivation(
+  pending: Promise<Direct | null>,
+  signal: AbortSignal | undefined,
+): Promise<Direct | null> {
+  if (!signal) return pending;
+  if (signal.aborted) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (answer: Direct | null) => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener('abort', stopped);
+      resolve(answer);
+    };
+    const stopped = () => finish(null);
+    signal.addEventListener('abort', stopped, { once: true });
+    void pending.then(finish, () => finish(null));
+  });
+}
+
 /**
  * Lease Reel's DNS-only direct origin for this browser. The signed media path is the authority. At home den-edge
  * also names the home-network origin (`lanBase`), as it does for a remux session. Null on any failure.
@@ -612,25 +643,44 @@ async function activateDirect(
   signal: AbortSignal | undefined,
   lookup: () => Promise<string | undefined>,
 ): Promise<Direct | null> {
+  if (signal?.aborted || Date.now() < activationPausedUntil) return null;
+  const key = `${mount}\n${media}`;
+  let pending = activating.get(key);
+  if (!pending) {
+    pending = performActivation(media, mount, fetchImpl, lookup);
+    activating.set(key, pending);
+    const clear = () => {
+      if (activating.get(key) === pending) activating.delete(key);
+    };
+    void pending.then(clear, clear);
+  }
+  return waitForActivation(pending, signal);
+}
+
+/** The shared work behind `activateDirect`, bounded independently of any one caller. */
+async function performActivation(
+  media: string,
+  mount: string,
+  fetchImpl: typeof fetch,
+  lookup: () => Promise<string | undefined>,
+): Promise<Direct | null> {
   const deadline = AbortSignal.timeout(DIRECT_ACTIVATION_MS);
-  const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const ask = async (ipv4Hint?: string): Promise<Response> => {
     return fetchImpl(`${mount}/activate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ media, ...(ipv4Hint ? { ipv4Hint } : {}) }),
-      signal: bounded,
+      signal: deadline,
     });
   };
-  if (Date.now() < activationPausedUntil) return null;
   try {
     let response = await ask();
     if (response.status === 428) {
       const refusal = await response.json().catch(() => null);
       if (refusal?.error !== 'ipv4_hint_wanted') return null;
       const stopped = new Promise<undefined>((resolve) => {
-        if (bounded.aborted) resolve(undefined);
-        else bounded.addEventListener('abort', () => resolve(undefined), { once: true });
+        if (deadline.aborted) resolve(undefined);
+        else deadline.addEventListener('abort', () => resolve(undefined), { once: true });
       });
       const hint = await Promise.race([lookup(), stopped]);
       if (!hint) return null;
@@ -644,8 +694,8 @@ async function activateDirect(
     const base = bareOrigin(answer?.publicBase);
     if (!base || typeof answer?.media !== 'string') return null;
     if (answer.media !== new URL(media, base).href) return null;
-    const lan = bareOrigin(answer.lanBase);
-    if (lan) lanOfferedUntil = Date.now() + ACTIVATION_PAUSE_MS;
+    const offeredLan = bareOrigin(answer.lanBase);
+    const lan = offeredLan && (await mayUseLocalNetwork()) ? offeredLan : null;
     return { public: base, lan };
   } catch {
     return null;
@@ -681,18 +731,24 @@ async function directSources(
   const direct = await activateDirect(first, edgeMount, fetchImpl, signal, lookup);
   const lan = direct?.lan && Date.now() >= lanPausedUntil ? direct.lan : null;
   const result: Source[] = [];
+  let includedLan = false;
   for (const source of sources) {
     const path = carriedPath(source.url);
     if (!path) {
       result.push(source);
       continue;
     }
-    if (lan && (source.kind === 'mp4' || player === 'native'))
+    if (lan && (source.kind === 'mp4' || player === 'native')) {
       result.push({ ...source, url: new URL(path, lan).href, direct: 'lan' });
+      includedLan = true;
+    }
     if (direct)
       result.push({ ...source, url: new URL(path, direct.public).href, direct: 'public' });
     if (relay) result.push(source);
   }
+  // This flag exists only to distinguish a public-listener timeout at home. It must describe the ladder returned
+  // above, not merely a `lanBase` in the activation JSON that permission or player choice kept out of that ladder.
+  lanOfferedUntil = includedLan ? Date.now() + ACTIVATION_PAUSE_MS : 0;
   return result;
 }
 

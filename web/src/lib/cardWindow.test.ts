@@ -1,5 +1,11 @@
 import { expect, it } from 'vitest';
-import { cardWindow, posterCardWidth } from './cardWindow';
+import { cardMaterializationOrder, cardWindow, posterCardWidth } from './cardWindow';
+
+it('materializes the viewport before either overscan edge', () => {
+  expect(cardMaterializationOrder({ start: 2, end: 10 }, { start: 4, end: 7 })).toEqual([
+    4, 5, 6, 3, 2, 7, 8, 9,
+  ]);
+});
 
 it('keeps only the visible cards and one screen either side', () => {
   expect(cardWindow(100, 0, 1000, 190, 14)).toEqual({ start: 0, end: 10 });

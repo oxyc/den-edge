@@ -26,13 +26,17 @@ import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
 import type { ActiveHomePayload } from './homeLibraryView';
-import { openLibraryEngine, projectLibraryEngineShapes } from './libraryEngineClient';
+import {
+  openLibraryEngine,
+  projectLibraryEngineShapes,
+  type HydratedLibraryEngine,
+} from './libraryEngineClient';
 
 interface StagedLibraryEngine {
   payload: ActiveHomePayload;
   kept<T>(name: string): Promise<T | undefined>;
   keep<T>(name: string, value: T): Promise<void>;
-  hydrate(): Promise<LibraryLog | null>;
+  hydrate(): Promise<HydratedLibraryEngine | null>;
   release(): Promise<void>;
 }
 
@@ -189,8 +193,11 @@ export class LibrarySession {
       const staged = this.stagedEngine;
       this.stagedEngine = undefined;
       let opened: LibraryLog | null = null;
+      let stagedProjection: HydratedLibraryEngine['projection'] | undefined;
       try {
-        opened = (await staged?.hydrate()) ?? null;
+        const hydrated = (await staged?.hydrate()) ?? null;
+        opened = hydrated?.log ?? null;
+        stagedProjection = hydrated?.projection;
       } catch {
         // The ordinary open below is the compatibility and recovery path.
       } finally {
@@ -210,11 +217,22 @@ export class LibrarySession {
         return null;
       }
       if (!this.active || this.log !== undefined) return this.log ?? null;
-      this.attachDownloads(opened);
-      this.log = opened;
-      this.revision++;
-      this.settingsRevision++;
-      downloads.touch();
+      if (stagedProjection) {
+        // The staged Worker already folded these exact rows for compact Home. Install that answer before exposing
+        // the live log, so route hydration cannot make a reactive consumer replay the whole policy on this thread.
+        this.projection = {
+          revision: this.revision + 1,
+          log: opened,
+          ...stagedProjection,
+        };
+        this.attachDownloads(opened);
+        this.log = opened;
+        this.revision++;
+        this.settingsRevision++;
+        downloads.touch();
+      } else if (!(await this.publishOpened(undefined, opened, true, true))) {
+        return null;
+      }
       if (fullProjection) this.clearActiveHome();
       // A cached engine open still receives the same immediate catch-up as the ordinary cached path. An unchanged
       // refresh leaves compact Home in place; a changed one invalidates it through `changed` below.

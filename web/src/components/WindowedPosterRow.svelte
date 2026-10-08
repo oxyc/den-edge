@@ -2,7 +2,7 @@
      stay exact, while only cards around the horizontal viewport own their menu, image and reactive trees. -->
 <script lang="ts" generics="T">
   import { onDestroy, tick, type Snippet } from 'svelte';
-  import { cardWindow, posterCardWidth } from '../lib/cardWindow';
+  import { cardMaterializationOrder, cardWindow, posterCardWidth } from '../lib/cardWindow';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import PosterRow from './PosterRow.svelte';
@@ -34,8 +34,7 @@
   let track = $state<HTMLDivElement>();
   const page = pageVisibility();
   let rowNear = $state(false);
-  let windowStart = $state(0);
-  let windowEnd = $state(0);
+  let materialized = $state<number[]>([]);
   let focusedKey = $state<string | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
   // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
@@ -66,10 +65,27 @@
 
   $effect(() => {
     void items.length;
-    if (!page.active || !rowNear || !track) return;
+    if (!page.active || !rowNear || !track) {
+      materialized = [];
+      return;
+    }
     const scroller = track;
     let frame: number | undefined;
+    let materializeFrame: number | undefined;
     let viewportWidth = 0;
+    let materializeOrder: number[] = [];
+
+    // Personal shelves can publish a desktop window of eight cards together. Keep the exact light slots in the
+    // document, but mount only two PosterCard trees per frame just as BrowseRow does.
+    const materializeNext = () => {
+      materializeFrame = undefined;
+      const next = materializeOrder.filter((index) => !materialized.includes(index)).slice(0, 2);
+      if (next.length === 0) return;
+      materialized = [...materialized, ...next];
+      if (materializeOrder.some((index) => !materialized.includes(index)))
+        materializeFrame = requestAnimationFrame(materializeNext);
+    };
+
     const update = () => {
       if (!viewportWidth) return;
       const window = cardWindow(
@@ -80,8 +96,18 @@
         posterCardWidth(viewportWidth) * (landscape ? 1.45 : 1),
         14,
       );
-      windowStart = window.start;
-      windowEnd = window.end;
+      const viewport = cardWindow(
+        items.length,
+        cachedScrollLeft,
+        viewportWidth,
+        posterCardWidth(viewportWidth) * (landscape ? 1.45 : 1),
+        14,
+        0,
+      );
+      materialized = materialized.filter((index) => index >= window.start && index < window.end);
+      materializeOrder = cardMaterializationOrder(window, viewport);
+      if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
+      materializeNext();
     };
     const schedule = () => {
       if (frame === undefined)
@@ -119,12 +145,12 @@
       scroller.removeEventListener('pointerdown', press);
       resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
+      if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
     };
   });
 
   const mounted = (item: T, index: number) =>
-    (page.active && rowNear && index >= windowStart && index < windowEnd) ||
-    itemKey(item) === focusedKey;
+    (page.active && rowNear && materialized.includes(index)) || itemKey(item) === focusedKey;
 
   function requestMore() {
     if (!onintent || intentLength === items.length) return;
@@ -203,6 +229,8 @@
   .slot.vacant {
     contain: strict;
     height: calc(var(--card-w) * 1.5 + 47.2px);
+    border-radius: 12px;
+    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
   }
 
   .slot.landscape {

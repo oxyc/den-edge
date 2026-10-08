@@ -19,6 +19,7 @@ import {
   rememberLink,
   listReleases,
   localNetworkRefused,
+  mayUseLocalNetwork,
   login,
   nativeHls,
   onLan,
@@ -455,7 +456,7 @@ describe('localNetworkRefused', () => {
     };
   };
 
-  it('reports only a refusal, and nothing where the browser has no such permission', async () => {
+  it('reports only a refusal and permits LAN media only after a grant', async () => {
     const asked: unknown[] = [];
     let restore = withPermissions({
       query: async (descriptor: unknown) => {
@@ -464,11 +465,18 @@ describe('localNetworkRefused', () => {
       },
     });
     expect(await localNetworkRefused()).toBe(true);
-    expect(asked).toEqual([{ name: 'local-network-access' }]);
+    expect(await mayUseLocalNetwork()).toBe(false);
+    expect(asked).toEqual([{ name: 'local-network-access' }, { name: 'local-network-access' }]);
     restore();
 
     restore = withPermissions({ query: async () => ({ state: 'prompt' }) });
     expect(await localNetworkRefused(), 'unanswered is not a refusal').toBe(false);
+    expect(await mayUseLocalNetwork(), 'a media load must not trigger the prompt').toBe(false);
+    restore();
+
+    restore = withPermissions({ query: async () => ({ state: 'granted' }) });
+    expect(await localNetworkRefused()).toBe(false);
+    expect(await mayUseLocalNetwork()).toBe(true);
     restore();
 
     restore = withPermissions({
@@ -477,10 +485,12 @@ describe('localNetworkRefused', () => {
       },
     });
     expect(await localNetworkRefused(), 'a browser without the policy').toBe(false);
+    expect(await mayUseLocalNetwork(), 'a browser without the policy keeps working').toBe(true);
     restore();
 
     restore = withPermissions(undefined);
     expect(await localNetworkRefused()).toBe(false);
+    expect(await mayUseLocalNetwork()).toBe(true);
     restore();
   });
 });

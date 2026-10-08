@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import type { RowDef } from '../lib/catalog';
-  import { cardWindow, posterCardWidth } from '../lib/cardWindow';
+  import { cardMaterializationOrder, cardWindow, posterCardWidth } from '../lib/cardWindow';
   import { titleCaption, type Title } from '../lib/library';
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
@@ -132,11 +132,7 @@
         0,
       );
       materialized = materialized.filter((index) => index >= window.start && index < window.end);
-      materializeOrder = [
-        ...Array.from({ length: viewport.end - viewport.start }, (_, i) => viewport.start + i),
-        ...Array.from({ length: viewport.start - window.start }, (_, i) => viewport.start - i - 1),
-        ...Array.from({ length: window.end - viewport.end }, (_, i) => viewport.end + i),
-      ];
+      materializeOrder = cardMaterializationOrder(window, viewport);
       if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
       materializeNext();
     };

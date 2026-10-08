@@ -3,7 +3,11 @@
 
 import type { ActiveHomePayload, ActiveHomeShapeReply } from './homeLibraryView';
 import type { Shape } from './library';
-import type { LibraryEngineHydrationChunk, LibraryEngineReply } from './libraryEngine';
+import type {
+  LibraryEngineHydrationChunk,
+  LibraryEngineProjection,
+  LibraryEngineReply,
+} from './libraryEngine';
 import { LibraryLog, type LibraryLogSnapshotEntry, type LibraryLogSnapshotHeader } from './log';
 import { useLibraryCredential } from './relayFetch';
 import { deriveKeys } from './wire';
@@ -66,8 +70,13 @@ export interface OpenedLibraryEngine {
   payload: ActiveHomePayload;
   kept<T>(name: string): Promise<T | undefined>;
   keep<T>(name: string, value: T): Promise<void>;
-  hydrate(): Promise<LibraryLog | null>;
+  hydrate(): Promise<HydratedLibraryEngine | null>;
   release(): Promise<void>;
+}
+
+export interface HydratedLibraryEngine {
+  log: LibraryLog;
+  projection: LibraryEngineProjection;
 }
 
 let nextHandle = 0;
@@ -109,7 +118,7 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
     const handle = ++nextHandle;
     const payload = { ...opened, handle };
     active.set(handle, { connection, remoteHandle: opened.handle });
-    let hydration: Promise<LibraryLog | null> | undefined;
+    let hydration: Promise<HydratedLibraryEngine | null> | undefined;
     let released = false;
     const release = async () => {
       if (released) return;
@@ -127,6 +136,7 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
       (hydration ??= (async () => {
         const entries: LibraryLogSnapshotEntry[] = [];
         let header: LibraryLogSnapshotHeader | undefined;
+        let projection: LibraryEngineProjection | undefined;
         let cursor = 0;
         try {
           for (;;) {
@@ -139,13 +149,16 @@ export async function openLibraryEngine(key: string): Promise<OpenedLibraryEngin
             if (chunk.entries.length > 256 || chunk.next < cursor)
               throw new Error('library engine returned an invalid hydration chunk');
             header ??= chunk.header;
+            projection ??= chunk.projection;
             entries.push(...chunk.entries);
             if (chunk.done) break;
             if (chunk.next === cursor) throw new Error('library engine hydration did not advance');
             cursor = chunk.next;
           }
           if (!header) throw new Error('library engine hydration omitted its header');
-          return await LibraryLog.importSnapshot(key, { header, entries });
+          if (!projection) throw new Error('library engine hydration omitted its projection');
+          const log = await LibraryLog.importSnapshot(key, { header, entries });
+          return log ? { log, projection } : null;
         } catch {
           return null;
         } finally {
