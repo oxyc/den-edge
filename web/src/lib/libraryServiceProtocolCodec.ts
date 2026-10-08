@@ -3,6 +3,7 @@ import {
   LIBRARY_SERVICE_WIRE_LIMITS,
   type ContinueItem,
   type DownloadViewItem,
+  type HistoryItem,
   type LibraryCommand,
   type LibraryObservation,
   type LibraryPreferencesPatch,
@@ -216,6 +217,7 @@ function selection(value: unknown): value is LibrarySelection {
   switch (value.kind) {
     case 'overview':
     case 'continue':
+    case 'history':
     case 'settings':
     case 'downloads':
       return exact(value, ['kind']);
@@ -345,6 +347,27 @@ function continueItem(value: unknown): value is ContinueItem {
   );
 }
 
+function historyItem(value: unknown): value is HistoryItem {
+  return (
+    record(value) &&
+    exact(value, ['title', 'watchedAt', 'episode', 'episodes']) &&
+    titleRef(value.title) &&
+    integer(value.watchedAt) &&
+    optional(
+      value.episode,
+      (candidate): candidate is { season: number; episode: number } =>
+        record(candidate) &&
+        exact(candidate, ['season', 'episode']) &&
+        integer(candidate.season) &&
+        integer(candidate.episode) &&
+        candidate.episode > 0,
+    ) &&
+    (value.episode === undefined || value.title.type === 'tv') &&
+    integer(value.episodes) &&
+    (value.title.type === 'tv' || value.episodes === 0)
+  );
+}
+
 function download(value: unknown): value is DownloadViewItem {
   return (
     record(value) &&
@@ -422,7 +445,23 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         list(value.seeds.watchlisted, titleRef)
       );
     case 'continue':
-      return exact(value, ['kind', 'items']) && list(value.items, continueItem);
+      return (
+        exact(value, ['kind', 'items', 'needsShapes']) &&
+        list(value.items, continueItem) &&
+        list(value.needsShapes, titleRef) &&
+        value.needsShapes.every((title) => title.type === 'tv') &&
+        new Set(value.items.map(({ title }) => `${title.type}:${title.id}`)).size ===
+          value.items.length &&
+        new Set(value.needsShapes.map((title) => `${title.type}:${title.id}`)).size ===
+          value.needsShapes.length
+      );
+    case 'history':
+      return (
+        exact(value, ['kind', 'items']) &&
+        list(value.items, historyItem) &&
+        new Set(value.items.map(({ title }) => `${title.type}:${title.id}`)).size ===
+          value.items.length
+      );
     case 'title':
       return (
         exact(value, [

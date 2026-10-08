@@ -152,6 +152,53 @@ it('observes revised subscriptions before resolving a command result', async () 
   client.close();
 });
 
+it('correlates history subscriptions with history replacements only', async () => {
+  const { client, transport } = await opened();
+  const values = vi.fn();
+  const subscribing = client.subscribe({ kind: 'history' }, values);
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'subscribe') throw new Error('expected subscribe');
+  transport.emit({
+    type: 'subscribed',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    subscriptionId: request.subscriptionId,
+    version: version(0),
+  });
+  await subscribing;
+
+  transport.emit({
+    type: 'update',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    subscriptionId: request.subscriptionId,
+    version: version(1),
+    value: {
+      kind: 'overview',
+      owned: [],
+      watched: [],
+      watchlist: [],
+      standings: [],
+      weighted: [],
+      seeds: { watched: [], watchlisted: [] },
+    },
+  });
+  const history = {
+    kind: 'history' as const,
+    items: [{ title: { type: 'movie' as const, id: 7 }, watchedAt: 10, episodes: 0 }],
+  };
+  transport.emit({
+    type: 'update',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    subscriptionId: request.subscriptionId,
+    version: version(2),
+    value: history,
+  });
+
+  expect(values).toHaveBeenCalledOnce();
+  expect(values).toHaveBeenCalledWith(history, version(2));
+  client.close();
+});
+
 it('rejects pending work when closed', async () => {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');

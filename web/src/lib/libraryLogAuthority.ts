@@ -17,7 +17,18 @@ import {
 } from './actions';
 import type { ClockStore } from './clockStore';
 import { episodeProgress } from './detailPresentation';
-import { isAired, titleKey, type Shape } from './library';
+import { watchedHistory } from './history';
+import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import {
+  applyLog,
+  ContinueProjector,
+  emptyLibrary,
+  isAired,
+  titleKey,
+  type Shape,
+  type Standing as ProjectedStanding,
+  type Title,
+} from './library';
 import type {
   EpisodeRef,
   LibraryCommand,
@@ -39,7 +50,7 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog } from './log';
 import { recordTrackerEvent } from './trackerEvents';
-import { compareStamps, type EpisodeRow, type SettingsRow, type TitleRow } from './wire';
+import { compareStamps, type EpisodeRow, type Row, type SettingsRow, type TitleRow } from './wire';
 
 type Delivery = 'synced' | 'queued' | 'local';
 
@@ -63,6 +74,19 @@ export interface LibraryLogAuthorityOptions {
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
 
+const serviceStanding = (standing: ProjectedStanding): Standing =>
+  standing === 'inProgress' ? 'in-progress' : standing;
+
+const refFromKey = (key: string): TitleRef => {
+  const [type, id] = key.split(':');
+  if ((type !== 'movie' && type !== 'tv') || !id)
+    throw authorityError('internal', 'library projection produced an invalid title reference');
+  const parsed = Number(id);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0)
+    throw authorityError('internal', 'library projection produced an invalid title reference');
+  return { type, id: parsed };
+};
+
 const effectiveStanding = (
   row: TitleRow | undefined,
   episodes: readonly TitleView['episodes'][number][],
@@ -83,9 +107,11 @@ const effectiveStanding = (
  */
 export class LibraryLogAuthority {
   readonly #shapes = new Map<string, StoredShape>();
+  readonly #continueProjector = new ContinueProjector();
   readonly #log: LibraryLog;
   readonly #clock: ClockStore;
   readonly #options: LibraryLogAuthorityOptions;
+  #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
     this.#log = log;
@@ -102,12 +128,24 @@ export class LibraryLogAuthority {
   }
 
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
-    if (selection.kind !== 'title')
-      throw authorityError(
-        'invalid-request',
-        `${selection.kind} selection is not implemented by the log authority`,
-      );
-    return this.#title(selection.title);
+    switch (selection.kind) {
+      case 'overview':
+        return this.#overview();
+      case 'continue':
+        return this.#continue();
+      case 'history':
+        return this.#history();
+      case 'title':
+        return this.#title(selection.title);
+      case 'presence':
+        return this.#presence(selection.titles);
+      case 'settings':
+      case 'downloads':
+        throw authorityError(
+          'invalid-request',
+          `${selection.kind} selection is not implemented by the log authority`,
+        );
+    }
   }
 
   async command(
@@ -138,6 +176,7 @@ export class LibraryLogAuthority {
           operationId,
           (row, at) => react(row, command.reaction, at),
           (row) => row.reaction.value === command.reaction,
+          false,
           false,
         );
       case 'episode-watched.set':
@@ -227,6 +266,91 @@ export class LibraryLogAuthority {
     };
   }
 
+  #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
+    const { home } = this.#projected();
+    return {
+      kind: 'overview',
+      owned: home.owned.map(refFromKey),
+      watched: home.watched.map(refFromKey),
+      watchlist: home.watchlist.map(refFromKey),
+      standings: home.standings.map(([key, standing]) => ({
+        title: refFromKey(key),
+        standing: serviceStanding(standing),
+      })),
+      weighted: home.weighted.map(([key, weight, updatedAt]) => ({
+        title: refFromKey(key),
+        weight,
+        updatedAt,
+      })),
+      seeds: {
+        watched: home.seeds.watched.map(refFromKey),
+        watchlisted: home.seeds.watchlisted.map(refFromKey),
+      },
+    };
+  }
+
+  #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
+    const { home } = this.#projected();
+    const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
+    const library = { ...home.continueLibrary, shapes };
+    return {
+      kind: 'continue',
+      items: this.#continueProjector
+        .project(library)
+        .map(({ ref, fraction, episode, seconds, at }) => ({
+          title: ref,
+          fraction,
+          ...(episode ? { episode } : {}),
+          ...(seconds !== undefined ? { seconds } : {}),
+          ...(at !== undefined ? { updatedAt: at } : {}),
+        })),
+      needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
+    };
+  }
+
+  #presence(titles: TitleRef[]): Extract<LibrarySelectionValue, { kind: 'presence' }> {
+    const standings = new Map(this.#projected().home.standings);
+    return {
+      kind: 'presence',
+      items: titles.map((title) => {
+        const row = this.#log.title(title);
+        const standing = standings.get(titleKey(title));
+        return {
+          title,
+          standing: standing ? serviceStanding(standing) : null,
+          reaction: row && !row.deleted.value ? row.reaction.value : null,
+        };
+      }),
+    };
+  }
+
+  #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
+    const { rows } = this.#projected();
+    const names = new Map<string, Title>();
+    for (const row of rows) {
+      if (row.kind !== 'rec' && row.kind !== 'ep') continue;
+      const key = titleKey(row.title);
+      if (!names.has(key)) names.set(key, { ...row.title, title: key });
+    }
+    return {
+      kind: 'history',
+      items: watchedHistory(rows, names).map(({ title, at, episode, episodes }) => ({
+        title: { type: title.type, id: title.id },
+        watchedAt: at,
+        ...(episode ? { episode } : {}),
+        episodes,
+      })),
+    };
+  }
+
+  #projected(): { rows: Row[]; home: HomeLibraryView } {
+    const rows = this.#log.rows();
+    if (this.#projection?.rows === rows) return this.#projection;
+    const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+    this.#projection = { rows, home };
+    return this.#projection;
+  }
+
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {
     if (ref.type !== 'tv') return [];
     const shape = this.#shapes.get(titleKey(ref))?.shape;
@@ -246,6 +370,7 @@ export class LibraryLogAuthority {
     change: (row: TitleRow, at: Awaited<ReturnType<ClockStore['issue']>>) => TitleRow,
     already: (row: TitleRow) => boolean,
     affectsContinue = true,
+    affectsHistory = true,
   ): Promise<LibraryAuthorityCommandResult> {
     const before = this.#log.title(ref) ?? blankTitle(ref, Date.now());
     if (already(before)) return this.#unchanged();
@@ -253,7 +378,7 @@ export class LibraryLogAuthority {
     const at = await this.#clock.issue();
     const event = recordTrackerEvent(before, change(before, at), at, operationId);
     if (!event) return this.#unchanged();
-    return this.#writeAction(event, this.#affected(ref, affectsContinue));
+    return this.#writeAction(event, this.#affected(ref, affectsContinue, affectsHistory));
   }
 
   async #episodeWatched(
@@ -528,11 +653,16 @@ export class LibraryLogAuthority {
     return { outcome: 'unchanged', delivery: this.#idleDelivery(), affected: [] };
   }
 
-  #affected(title: TitleRef, affectsContinue = true): LibraryAffectedSelection[] {
+  #affected(
+    title: TitleRef,
+    affectsContinue = true,
+    affectsHistory = true,
+  ): LibraryAffectedSelection[] {
     return [
       { kind: 'title', title },
       { kind: 'presence', title },
       { kind: 'overview' },
+      ...(affectsHistory ? ([{ kind: 'history' }] as const) : []),
       ...(affectsContinue ? ([{ kind: 'continue' }] as const) : []),
     ];
   }

@@ -60,6 +60,7 @@ describe('LibraryLogAuthority', () => {
         { kind: 'title', title: movie },
         { kind: 'presence', title: movie },
         { kind: 'overview' },
+        { kind: 'history' },
         { kind: 'continue' },
       ],
     });
@@ -68,7 +69,15 @@ describe('LibraryLogAuthority', () => {
       authority.command({ kind: 'watchlist.add', title: movie }, 'add-again'),
     ).resolves.toMatchObject({ outcome: 'unchanged', affected: [] });
 
-    await authority.command({ kind: 'reaction.set', title: movie, reaction: 'love' }, 'love-movie');
+    await expect(
+      authority.command({ kind: 'reaction.set', title: movie, reaction: 'love' }, 'love-movie'),
+    ).resolves.toMatchObject({
+      affected: [
+        { kind: 'title', title: movie },
+        { kind: 'presence', title: movie },
+        { kind: 'overview' },
+      ],
+    });
     const progress = await authority.command(
       {
         kind: 'progress.record',
@@ -253,9 +262,80 @@ describe('LibraryLogAuthority', () => {
     );
   });
 
+  it('projects normalized overview, presence, Continue, and history views', async () => {
+    const { authority } = await localAuthority();
+
+    await authority.command({ kind: 'watchlist.add', title: movie }, 'overview-movie');
+    await authority.command(
+      { kind: 'reaction.set', title: movie, reaction: 'love' },
+      'overview-love',
+    );
+    await authority.command(
+      {
+        kind: 'episode-watched.set',
+        episode: { ...series, season: 1, episode: 1 },
+        watched: true,
+      },
+      'history-episode',
+    );
+
+    await expect(authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      kind: 'overview',
+      owned: [movie],
+      watchlist: [movie],
+      standings: expect.arrayContaining([
+        { title: movie, standing: 'watchlist' },
+        { title: series, standing: 'in-progress' },
+      ]),
+      weighted: [{ title: movie, weight: 1.6, updatedAt: expect.any(Number) }],
+      seeds: { watched: [movie], watchlisted: [movie] },
+    });
+    await expect(authority.select({ kind: 'presence', titles: [series, movie] })).resolves.toEqual({
+      kind: 'presence',
+      items: [
+        { title: series, standing: 'in-progress', reaction: null },
+        { title: movie, standing: 'watchlist', reaction: 'love' },
+      ],
+    });
+    await expect(authority.select({ kind: 'continue' })).resolves.toEqual({
+      kind: 'continue',
+      items: [],
+      needsShapes: [series],
+    });
+    await expect(authority.select({ kind: 'history' })).resolves.toMatchObject({
+      kind: 'history',
+      items: [
+        {
+          title: series,
+          watchedAt: expect.any(Number),
+          episode: { season: 1, episode: 1 },
+          episodes: 1,
+        },
+      ],
+    });
+
+    await authority.observe({
+      kind: 'title-shape',
+      title: series,
+      seasons: [{ season: 1, episodes: 2 }],
+      lastAired: { season: 1, episode: 2 },
+    });
+    await expect(authority.select({ kind: 'continue' })).resolves.toEqual({
+      kind: 'continue',
+      items: [
+        {
+          title: series,
+          fraction: 0,
+          episode: { season: 1, episode: 2 },
+        },
+      ],
+      needsShapes: [],
+    });
+  });
+
   it('reports protocol surfaces it does not implement', async () => {
     const { authority } = await localAuthority();
-    await expect(authority.select({ kind: 'overview' })).rejects.toMatchObject({
+    await expect(authority.select({ kind: 'settings' })).rejects.toMatchObject({
       failure: { code: 'invalid-request', retryable: false },
     });
   });

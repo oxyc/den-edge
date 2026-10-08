@@ -24,6 +24,7 @@ type CommandDelivery = 'synced' | 'queued' | 'local';
 export type LibrarySelectionScope =
   | { kind: 'overview' }
   | { kind: 'continue' }
+  | { kind: 'history' }
   | { kind: 'settings' }
   | { kind: 'downloads' }
   | { kind: 'title'; title: TitleRef }
@@ -508,6 +509,7 @@ function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection)
   if (
     scope.kind === 'overview' ||
     scope.kind === 'continue' ||
+    scope.kind === 'history' ||
     scope.kind === 'settings' ||
     scope.kind === 'downloads'
   )

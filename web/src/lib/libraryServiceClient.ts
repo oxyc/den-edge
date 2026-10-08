@@ -304,16 +304,17 @@ function newer(candidate: LibraryVersion, current: LibraryVersion | undefined): 
 function selectionMatches(selection: LibrarySelection, value: LibrarySelectionValue): boolean {
   if (selection.kind === 'overview') return value.kind === 'overview';
   if (selection.kind === 'continue') return value.kind === 'continue';
+  if (selection.kind === 'history') return value.kind === 'history';
   if (selection.kind === 'settings') return value.kind === 'settings';
   if (selection.kind === 'downloads') return value.kind === 'downloads';
   if (selection.kind === 'presence')
     return (
       value.kind === 'presence' &&
-      value.items.every((item) =>
-        selection.titles.some(
-          (title) => title.type === item.title.type && title.id === item.title.id,
-        ),
-      )
+      value.items.length === selection.titles.length &&
+      value.items.every((item, index) => {
+        const title = selection.titles[index];
+        return title?.type === item.title.type && title.id === item.title.id;
+      })
     );
   return (
     value.kind === 'title' &&

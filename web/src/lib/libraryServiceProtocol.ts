@@ -87,6 +87,7 @@ export interface ServiceRef {
 export type LibrarySelection =
   | { kind: 'overview' }
   | { kind: 'continue' }
+  | { kind: 'history' }
   | { kind: 'title'; title: TitleRef }
   | { kind: 'presence'; titles: TitleRef[] }
   | { kind: 'settings' }
@@ -113,6 +114,23 @@ export interface ContinueItem {
 export interface ContinueView {
   kind: 'continue';
   items: ContinueItem[];
+  /** Series whose exact Continue decision needs a title-shape observation. */
+  needsShapes: TitleRef[];
+}
+
+export interface HistoryItem {
+  title: TitleRef;
+  /** Most recent known watch time in epoch milliseconds, or 0 for an undated import. */
+  watchedAt: number;
+  /** Latest watched episode for a series. */
+  episode?: { season: number; episode: number };
+  /** Number of watched episodes currently represented by the library. */
+  episodes: number;
+}
+
+export interface HistoryView {
+  kind: 'history';
+  items: HistoryItem[];
 }
 
 export interface TitleView {
@@ -170,7 +188,13 @@ export interface DownloadsView {
 }
 
 export type LibrarySelectionValue =
-  LibraryOverviewView | ContinueView | TitleView | PresenceView | SettingsView | DownloadsView;
+  | LibraryOverviewView
+  | ContinueView
+  | HistoryView
+  | TitleView
+  | PresenceView
+  | SettingsView
+  | DownloadsView;
 
 export type LibraryQuery = {
   kind: 'playback.prepare';

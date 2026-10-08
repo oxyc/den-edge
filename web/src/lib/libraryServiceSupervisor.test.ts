@@ -108,6 +108,7 @@ const continueValue = (instance: string): LibrarySelectionValue => ({
       fraction: 0.5,
     },
   ],
+  needsShapes: [],
 });
 
 it('rejects in-flight commands, preserves stale views, and installs a fresh replacement', async () => {

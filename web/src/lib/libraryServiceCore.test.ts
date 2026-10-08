@@ -189,6 +189,71 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('reselects history only for a history-scoped change', async () => {
+    let watched = false;
+    const held = {
+      generation: null,
+      async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
+        if (selection.kind === 'history')
+          return {
+            kind: 'history',
+            items: watched ? [{ title, watchedAt: 10, episodes: 0 }] : [],
+          };
+        if (selection.kind === 'title')
+          return {
+            kind: 'title',
+            title,
+            listed: false,
+            watched: false,
+            reaction: null,
+            standing: null,
+            progress: null,
+            episodes: [],
+          };
+        throw new Error('unsupported selection');
+      },
+      async command() {
+        watched = true;
+        return {
+          outcome: 'applied' as const,
+          delivery: 'synced' as const,
+          affected: [{ kind: 'history' as const }],
+        };
+      },
+      async query(): Promise<never> {
+        throw new Error('unsupported query');
+      },
+      async observe() {
+        return { outcome: 'unchanged' as const, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    await core.dispatch(subscribe);
+    await core.dispatch({
+      type: 'subscribe',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'subscribe-history',
+      subscriptionId: 'history',
+      selection: { kind: 'history' },
+    });
+
+    const messages = await core.dispatch({
+      type: 'command',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'watch',
+      operationId: 'watch-1',
+      command: { kind: 'watched.set', title, watched: true },
+    });
+
+    expect(messages.map(({ type }) => type)).toEqual(['update', 'command-result']);
+    expect(messages[0]).toMatchObject({
+      type: 'update',
+      subscriptionId: 'history',
+      value: { kind: 'history', items: [{ title }] },
+    });
+  });
+
   it('preserves typed authority failures', async () => {
     const held = authority();
     held.command = async () => {

@@ -337,12 +337,33 @@ describe('library service server protocol', () => {
               updatedAt: 1_800_000_000_000,
             },
           ],
+          needsShapes: [{ type: 'tv', id: 84 }],
         },
       }),
     ).toMatchObject({
       ok: true,
       value: { type: 'update', version: { revision: 15 }, value: { kind: 'continue' } },
     });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'history',
+        version: { ...version, revision: 16 },
+        value: {
+          kind: 'history',
+          items: [
+            {
+              title: { type: 'tv', id: 42 },
+              watchedAt: 1_800_000_000_000,
+              episode: { season: 2, episode: 3 },
+              episodes: 11,
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({ ok: true, value: { value: { kind: 'history' } } });
 
     expect(
       decodeLibraryServiceServerMessage({
@@ -409,6 +430,26 @@ describe('library service server protocol', () => {
         subscriptionId: 'continue',
         version,
         value: { kind: 'continue', items: [], row: { kind: 'rec' } },
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'history',
+        version,
+        value: {
+          kind: 'history',
+          items: [
+            {
+              title: { type: 'movie', id: 9 },
+              watchedAt: 100,
+              episodes: 0,
+              stamp: [100, 0, 'device'],
+            },
+          ],
+        },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
   });
