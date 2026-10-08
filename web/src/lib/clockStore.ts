@@ -186,20 +186,18 @@ export async function openClockStore(
     },
     historical(milliseconds) {
       return serialized(async () => {
-        if (
-          milliseconds.some(
-            (value) => !Number.isSafeInteger(value) || value < 0,
-          )
-        )
+        if (milliseconds.some((value) => !Number.isSafeInteger(value) || value < 0))
           throw new Error('invalid historical clock time');
         if (!milliseconds.length) return [];
         let reserved: Stamp[] = [];
         const reserve = (current: StoredClock): StoredClock => {
           if (current.historicalCounter + milliseconds.length > Number.MAX_SAFE_INTEGER)
             throw new Error('historical clock counter exhausted');
-          reserved = milliseconds.map(
-            (at, index): Stamp => [at, current.historicalCounter + index + 1, current.device],
-          );
+          reserved = milliseconds.map((at, index): Stamp => [
+            at,
+            current.historicalCounter + index + 1,
+            current.device,
+          ]);
           const newest = reserved.reduce(
             (last, stamp) => (compareStamps(stamp, last) > 0 ? stamp : last),
             current.last,

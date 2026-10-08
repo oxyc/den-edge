@@ -70,8 +70,8 @@ describe('DurableOperationAuthority', () => {
       result: { kind: 'history.import', written: 1, complete: true },
     });
     expect(replacement.task).not.toHaveBeenCalled();
-    await expect(
-      authority.task({ kind: 'recovery.disable' }, 'task-1'),
-    ).rejects.toMatchObject({ failure: { code: 'conflict', retryable: false } });
+    await expect(authority.task({ kind: 'recovery.disable' }, 'task-1')).rejects.toMatchObject({
+      failure: { code: 'conflict', retryable: false },
+    });
   });
 });

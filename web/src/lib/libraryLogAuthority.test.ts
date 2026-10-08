@@ -801,8 +801,7 @@ describe('LibraryLogAuthority', () => {
     const onlineClock = {
       device: '0123456789abcdef',
       issue: async () => [1, 0, '0123456789abcdef'],
-      historical: async (times) =>
-        times.map((at, index) => [at, index + 1, '0123456789abcdef']),
+      historical: async (times) => times.map((at, index) => [at, index + 1, '0123456789abcdef']),
       see: async () => undefined,
       current: async () => [1, 0, '0123456789abcdef'],
     } as ClockStore;

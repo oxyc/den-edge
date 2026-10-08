@@ -331,12 +331,10 @@ export class LibraryAdminAuthority {
   async #keepRecoveryMakes(): Promise<void> {
     await this.log.keep(
       RECOVERY_MAKES,
-      [...this.#recoveryMakes.values()].map(
-        ({ prepared, baseLive }): DurableRecoveryMake => ({
-          prepared,
-          baseLive: [...baseLive],
-        }),
-      ),
+      [...this.#recoveryMakes.values()].map(({ prepared, baseLive }): DurableRecoveryMake => ({
+        prepared,
+        baseLive: [...baseLive],
+      })),
     );
   }
 

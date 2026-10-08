@@ -43,7 +43,8 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
 
   select: LibraryServiceAuthority['select'] = (selection) => this.authority.select(selection);
   query: LibraryServiceAuthority['query'] = (query) => this.authority.query(query);
-  observe: LibraryServiceAuthority['observe'] = (observation) => this.authority.observe(observation);
+  observe: LibraryServiceAuthority['observe'] = (observation) =>
+    this.authority.observe(observation);
   listen: NonNullable<LibraryServiceAuthority['listen']> = (listener) =>
     this.authority.listen?.(listener) ?? (() => {});
 
@@ -79,7 +80,9 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
     kind: K,
     operationId: string,
     request: LibraryCommand | LibraryTask,
-    work: () => Promise<K extends 'command' ? LibraryAuthorityCommandResult : LibraryAuthorityTaskResult>,
+    work: () => Promise<
+      K extends 'command' ? LibraryAuthorityCommandResult : LibraryAuthorityTaskResult
+    >,
   ): Promise<K extends 'command' ? LibraryAuthorityCommandResult : LibraryAuthorityTaskResult> {
     const requestText = JSON.stringify(request);
     const entries = await this.#entries();
@@ -105,21 +108,23 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
 
   async #entries(): Promise<Entry[]> {
     if (!this.#loaded)
-      this.#loaded = this.log.kept<unknown>(JOURNAL).then((stored) =>
-        Array.isArray(stored)
-          ? stored.filter(
-              (entry): entry is Entry =>
-                !!entry &&
-                typeof entry === 'object' &&
-                !Array.isArray(entry) &&
-                ((entry as { kind?: unknown }).kind === 'command' ||
-                  (entry as { kind?: unknown }).kind === 'task') &&
-                typeof (entry as { operationId?: unknown }).operationId === 'string' &&
-                typeof (entry as { request?: unknown }).request === 'string' &&
-                !!(entry as { result?: unknown }).result,
-            )
-          : [],
-      );
+      this.#loaded = this.log
+        .kept<unknown>(JOURNAL)
+        .then((stored) =>
+          Array.isArray(stored)
+            ? stored.filter(
+                (entry): entry is Entry =>
+                  !!entry &&
+                  typeof entry === 'object' &&
+                  !Array.isArray(entry) &&
+                  ((entry as { kind?: unknown }).kind === 'command' ||
+                    (entry as { kind?: unknown }).kind === 'task') &&
+                  typeof (entry as { operationId?: unknown }).operationId === 'string' &&
+                  typeof (entry as { request?: unknown }).request === 'string' &&
+                  !!(entry as { result?: unknown }).result,
+              )
+            : [],
+        );
     return this.#loaded;
   }
 }
