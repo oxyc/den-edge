@@ -43,25 +43,27 @@ import {
   type Standing as ProjectedStanding,
   type Title,
 } from './library';
-import type {
-  EpisodeRef,
-  DownloadReleaseDescriptor,
-  DownloadSourceOption,
-  DownloadTitleDescriptor,
-  DownloadTarget,
-  LibraryCommand,
-  LibraryObservation,
-  LibraryQuery,
-  LibraryQueryResult,
-  LibraryTask,
-  RetainedBillboard,
-  RatingSource,
-  LibrarySelection,
-  LibrarySelectionValue,
-  LibraryServiceErrorCode,
-  Standing,
-  TitleRef,
-  TitleView,
+import {
+  LIBRARY_SERVICE_WIRE_LIMITS,
+  type DownloadViewItem,
+  type EpisodeRef,
+  type DownloadReleaseDescriptor,
+  type DownloadSourceOption,
+  type DownloadTitleDescriptor,
+  type DownloadTarget,
+  type LibraryCommand,
+  type LibraryObservation,
+  type LibraryQuery,
+  type LibraryQueryResult,
+  type LibraryTask,
+  type RetainedBillboard,
+  type RatingSource,
+  type LibrarySelection,
+  type LibrarySelectionValue,
+  type LibraryServiceErrorCode,
+  type Standing,
+  type TitleRef,
+  type TitleView,
 } from './libraryServiceProtocol';
 import {
   LibraryServiceAuthorityError,
@@ -215,6 +217,72 @@ const publicRelease = (
   ...(release.sizeBytes !== undefined ? { sizeBytes: release.sizeBytes } : {}),
   ...(release.cached !== undefined ? { cached: release.cached } : {}),
 });
+
+const providerText = (value: unknown, max: number): string | undefined =>
+  typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined;
+
+const providerInteger = (value: unknown, positive = false): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) >= (positive ? 1 : 0)
+    ? (value as number)
+    : undefined;
+
+const providerStrings = (value: unknown, count: number, length: number): string[] =>
+  Array.isArray(value)
+    ? value.slice(0, count).flatMap((item) => {
+        const text = providerText(item, length);
+        return text ? [text] : [];
+      })
+    : [];
+
+const providerSource = (value: unknown): DownloadSourceOption | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const identity =
+    typeof source.identity === 'string' && source.identity.length <= 4_096
+      ? providerText(source.identity, 4_096)
+      : undefined;
+  const filename = providerText(source.filename, 4_096);
+  if (!identity || !filename) return null;
+  const label = providerText(source.label, 4_096) ?? filename;
+  const sizeBytes = providerInteger(source.size, true);
+  const seeders = providerInteger(source.seeders);
+  const packSizeBytes = providerInteger(source.packSize, true);
+  return {
+    identity,
+    label,
+    filename,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    ...(typeof source.cached === 'boolean' ? { cached: source.cached } : {}),
+    ...(seeders !== undefined ? { seeders } : {}),
+    ...(packSizeBytes !== undefined ? { packSizeBytes } : {}),
+    badges: providerStrings(source.badges, 32, 256),
+    languages: providerStrings(source.languages, 64, 64),
+    probed: source.probed === true,
+  };
+};
+
+const providerFetch = (value: unknown): DownloadViewItem['status']['fetch'] | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const fetch = value as Record<string, unknown>;
+  const state: NonNullable<DownloadViewItem['status']['fetch']>['state'] =
+    fetch.state === 'queued' ||
+    fetch.state === 'fetching' ||
+    fetch.state === 'downloading' ||
+    fetch.state === 'stalled' ||
+    fetch.state === 'failed'
+      ? fetch.state
+      : undefined;
+  const seeds = providerInteger(fetch.seeds);
+  const peers = providerInteger(fetch.peers);
+  const service = providerText(fetch.service, 256);
+  const sanitized = {
+    ...(state ? { state } : {}),
+    ...(seeds !== undefined ? { seeds } : {}),
+    ...(peers !== undefined ? { peers } : {}),
+    ...(service ? { service } : {}),
+  };
+  return Object.keys(sanitized).length ? sanitized : undefined;
+};
 
 const internalDownloadTitle = (title: DownloadTitleDescriptor) => {
   const target = title.target;
@@ -434,29 +502,25 @@ export class LibraryLogAuthority {
       case 'download.sources': {
         const title = internalDownloadTitle(query.title);
         const snapshot = await this.#downloadsCoordinator.sourcesForTitle(title, query.refresh);
+        const sources = Array.isArray(snapshot.sources)
+          ? snapshot.sources
+              .slice(0, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)
+              .flatMap((source) => {
+                const sanitized = providerSource(source);
+                return sanitized ? [sanitized] : [];
+              })
+          : null;
+        const missing = providerInteger(snapshot.answer?.missing);
+        const outageBuiltAt = providerInteger(snapshot.answer?.outage?.builtAt);
         return {
           kind: 'download.sources',
-          sources:
-            snapshot.sources?.map((source): DownloadSourceOption => ({
-              identity: source.identity,
-              label: source.label.slice(0, 4_096),
-              filename: source.filename.slice(0, 4_096),
-              ...(source.size !== undefined ? { sizeBytes: source.size } : {}),
-              ...(source.cached !== undefined ? { cached: source.cached } : {}),
-              ...(source.seeders !== undefined ? { seeders: source.seeders } : {}),
-              ...(source.packSize !== undefined ? { packSizeBytes: source.packSize } : {}),
-              badges: source.badges.slice(0, 32).map((badge) => badge.slice(0, 256)),
-              languages: source.languages.slice(0, 64).map((language) => language.slice(0, 64)),
-              probed: source.probed,
-            })) ?? null,
-          ...(snapshot.answer
+          sources,
+          ...(snapshot.answer && missing !== undefined
             ? {
                 answer: {
                   kind: snapshot.answer.kind,
-                  missing: snapshot.answer.missing,
-                  ...(snapshot.answer.outage
-                    ? { outageBuiltAt: snapshot.answer.outage.builtAt }
-                    : {}),
+                  missing,
+                  ...(outageBuiltAt !== undefined ? { outageBuiltAt } : {}),
                 },
               }
             : {}),
@@ -501,7 +565,7 @@ export class LibraryLogAuthority {
     }
   }
 
-  task(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+  task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
     if (
@@ -512,7 +576,7 @@ export class LibraryLogAuthority {
       (task.kind === 'local-library.merge' && task.sourceLibraryKey === this.#options.libraryKey)
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
-    return this.#administration().task(task);
+    return this.#administration().task(task, operationId);
   }
 
   #administration(): LibraryAdminAuthority {
@@ -792,6 +856,9 @@ export class LibraryLogAuthority {
       items: readDownloads(this.#log.rows()).map((download) => {
         const durable = this.#downloadsCoordinator.status(download);
         const live = this.#downloadsCoordinator.answers.get(download.name);
+        const fetch = providerFetch(live?.fetch);
+        const service =
+          providerText(live?.fetch?.service, 256) ?? providerText(durable.service, 256);
         const state = durable.state ?? 'starting';
         const fraction = Math.max(
           0,
@@ -837,10 +904,8 @@ export class LibraryLogAuthority {
             live.bytesPerSecond >= 0
               ? { bytesPerSecond: live.bytesPerSecond }
               : {}),
-            ...(live?.fetch ? { fetch: { ...live.fetch } } : {}),
-            ...(live?.fetch?.service || durable.service
-              ? { service: live?.fetch?.service ?? durable.service }
-              : {}),
+            ...(fetch ? { fetch } : {}),
+            ...(service ? { service } : {}),
             ...(durable.until !== undefined ? { until: durable.until } : {}),
             stalled: durable.stalled || live?.fetch?.state === 'stalled',
           },

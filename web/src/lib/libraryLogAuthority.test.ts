@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { blankTitle } from './actions';
 import { openClockStore, type ClockStore } from './clockStore';
 import { DownloadCoordinator } from './downloadCoordinator';
+import { source } from './downloadTestLog';
 import { LibraryLogAuthority } from './libraryLogAuthority';
 import { LibraryServiceAuthorityError } from './libraryServiceCore';
+import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './libraryServiceProtocol';
+import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import { ensureSyncPolicy } from './syncLoader';
+import type { TitleSource } from './titleSources';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -903,5 +907,102 @@ describe('LibraryLogAuthority', () => {
       kind: 'downloads',
       items: [],
     });
+  });
+
+  it('bounds and sanitizes provider download data before it reaches the wire', async () => {
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'provider-boundary-test-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const malformed = {
+      identity: 'malformed-release',
+      filename: 'f'.repeat(5_000),
+      label: 'l'.repeat(5_000),
+      url: '/scout/p/malformed',
+      size: Number.POSITIVE_INFINITY,
+      cached: 'yes',
+      seeders: 1.5,
+      packSize: Number.MAX_SAFE_INTEGER + 1,
+      badges: [...Array.from({ length: 40 }, () => 'b'.repeat(300)), '', 4],
+      languages: [...Array.from({ length: 70 }, () => 'language'.repeat(20)), '', null],
+      probed: 'yes',
+      attributes: {},
+    } as unknown as TitleSource;
+    const providerSources = [
+      malformed,
+      ...Array.from({ length: LIBRARY_SERVICE_WIRE_LIMITS.downloadSources }, (_, index) =>
+        source(`release-${index}.mkv`),
+      ),
+    ];
+    const downloads = new DownloadCoordinator(log, clock, {
+      prepare: async () => ({ state: 'preparing', progress: 0 }),
+      cancel: async () => true,
+      resolve: async () => ({
+        sources: providerSources,
+        answer: {
+          kind: 'partial',
+          missing: Number.POSITIVE_INFINITY,
+          outage: { builtAt: Number.NaN },
+        },
+      }),
+      ticket: (url) => (url.startsWith('/scout/') ? url : null),
+    });
+    const service = new LibraryLogAuthority(log, clock, { mode: 'local', downloads });
+    const title = { target: movie, name: 'Seven' };
+    const alternatives = await service.query({ kind: 'download.sources', title });
+    expect(alternatives.kind).toBe('download.sources');
+    if (alternatives.kind !== 'download.sources') throw new Error('wrong query result');
+    expect(alternatives.sources).toHaveLength(LIBRARY_SERVICE_WIRE_LIMITS.downloadSources);
+    expect(alternatives.sources?.[0]).toMatchObject({
+      identity: 'malformed-release',
+      probed: false,
+    });
+    expect(alternatives.sources?.[0]).not.toHaveProperty('cached');
+    expect(alternatives.sources?.[0]).not.toHaveProperty('sizeBytes');
+    expect(alternatives.sources?.[0]).not.toHaveProperty('seeders');
+    expect(alternatives.sources?.[0]).not.toHaveProperty('packSizeBytes');
+    expect(alternatives.sources?.[0]?.label).toHaveLength(4_096);
+    expect(alternatives.sources?.[0]?.filename).toHaveLength(4_096);
+    expect(alternatives.sources?.[0]?.badges).toHaveLength(32);
+    expect(alternatives.sources?.[0]?.badges.every((badge) => badge.length === 256)).toBe(true);
+    expect(alternatives.sources?.[0]?.languages).toHaveLength(64);
+    expect(alternatives.sources?.[0]?.languages.every((language) => language.length === 64)).toBe(
+      true,
+    );
+    expect(alternatives.answer).toBeUndefined();
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'bounded-provider-sources',
+        version: { instance: 'worker', generation: null, revision: 0 },
+        result: alternatives,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const internalTitle = { mediaType: 'movie' as const, mediaId: 7, title: 'Seven' };
+    await downloads.enqueue(internalTitle, providerSources[1]!, providerSources.length);
+    const queued = downloads.list()[0]!;
+    downloads.answers.set(queued.name, {
+      state: 'preparing',
+      progress: 0,
+      fetch: { state: 'fetching', seeds: 2, peers: 3, service: 's'.repeat(300) },
+    });
+    const projected = await service.select({ kind: 'downloads' });
+    expect(projected.kind).toBe('downloads');
+    if (projected.kind !== 'downloads') throw new Error('wrong selection');
+    expect(projected.items[0]?.status.fetch?.service).toHaveLength(256);
+    expect(projected.items[0]?.status.service).toHaveLength(256);
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'downloads',
+        version: { instance: 'worker', generation: null, revision: 0 },
+        value: projected,
+      }),
+    ).toMatchObject({ ok: true });
   });
 });

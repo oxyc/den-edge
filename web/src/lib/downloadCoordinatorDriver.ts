@@ -340,7 +340,7 @@ export class DownloadCoordinatorDriver {
   }
 
   async #retryExhausted(download: Download, now: number): Promise<boolean> {
-    const { sources, answer } = await this.queue.effects.resolve(download.title);
+    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
     if (!this.#stillHeld(now) || sources === null || !completeAnswer(answer)) return false;
     const viable = sources.filter((source) => !(source.cached === false && source.seeders === 0));
     const tried = new Set([...download.tried, download.release.identity]);
@@ -377,7 +377,7 @@ export class DownloadCoordinatorDriver {
 
   async #startHedge(download: Download, now: number): Promise<boolean> {
     if (!this.queue.hedgeResolveDue(download, now)) return false;
-    const { sources, answer } = await this.queue.effects.resolve(download.title);
+    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
     if (!this.#stillHeld(now) || !sources) return false;
     const excluded = new Set([...download.tried, download.release.identity]);
     const candidates = sources.filter(
@@ -488,7 +488,7 @@ export class DownloadCoordinatorDriver {
   }
 
   async #fallBack(download: Download, status: DownloadStatus, now: number): Promise<boolean> {
-    const { sources, answer } = await this.queue.effects.resolve(download.title);
+    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
     if (!this.#stillHeld(now)) return false;
     const next = syncPolicy<{
       decision: 'next' | 'exhausted' | 'undecided';

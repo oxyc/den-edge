@@ -422,7 +422,7 @@ export class DownloadCoordinator {
   }
 
   async renew(download: Download): Promise<string | 'gone' | null> {
-    const { sources, answer } = await this.effects.resolve(download.title);
+    const { sources, answer } = await this.sourcesForTitle(download.title, true);
     if (!sources) return null;
     const same = sources.find((source) => source.identity === download.release.identity);
     if (same) {
@@ -492,7 +492,7 @@ export class DownloadCoordinator {
       this.effects.ticket(hedge.url) ??
       undefined;
     if (!url) {
-      const { sources } = await this.effects.resolve(download.title);
+      const { sources } = await this.sourcesForTitle(download.title, true);
       if ((this.#hedgeTokens.get(download.name) ?? 0) !== token) return undefined;
       const same = sources?.find((source) => source.identity === hedge.identity);
       if (same) {

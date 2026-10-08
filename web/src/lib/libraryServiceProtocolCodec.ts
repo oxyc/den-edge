@@ -1452,7 +1452,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (value.kind === 'download.refresh')
     return exact(value, ['kind', 'refreshed']) && bool(value.refreshed);
   if (value.kind === 'download.sources') {
-    const source = (candidate: unknown): boolean =>
+    const source = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
       exact(candidate, [
         'identity',
@@ -1489,7 +1489,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
     return (
       exact(value, ['kind', 'sources', 'answer', 'failure']) &&
-      (value.sources === null || (Array.isArray(value.sources) && value.sources.every(source))) &&
+      (value.sources === null ||
+        list(value.sources, source, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)) &&
       optional(value.answer, answer) &&
       optional(
         value.failure,

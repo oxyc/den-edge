@@ -14,6 +14,7 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   presenceTitles: 512,
   shapeSeasons: 256,
   seasonEpisodes: 2_048,
+  downloadSources: 512,
   retainedTitles: 64,
   routeServices: 64,
   routeEntries: 32,

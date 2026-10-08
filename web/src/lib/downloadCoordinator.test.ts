@@ -183,6 +183,68 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
   });
 
+  it('coalesces concurrent fresh UI, renewal, hedge, and fallback source resolution', async () => {
+    const shared = testLog([stalledRow()]);
+    let resolves = 0;
+    let releaseFresh!: () => void;
+    let announceFresh!: () => void;
+    const freshGate = new Promise<void>((resolve) => (releaseFresh = resolve));
+    const freshStarted = new Promise<void>((resolve) => (announceFresh = resolve));
+    let fresh = false;
+    const refreshedFirst = { ...first, url: '/scout/p/fresh-primary' };
+    const refreshedSecond = { ...second, url: '/scout/p/fresh-hedge' };
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => {
+          resolves++;
+          if (fresh) {
+            announceFresh();
+            await freshGate;
+          }
+          return { sources: fresh ? [refreshedFirst, refreshedSecond] : [first, second] };
+        },
+      },
+      { now: () => T0 + 21 * MINUTE, monotonicNow: () => 0 },
+    );
+
+    await queue.sourcesForTitle(title);
+    expect(resolves).toBe(1);
+    fresh = true;
+    const download = queue.get(NAME)!;
+    const hedged = {
+      ...download,
+      release: {
+        ...download.release,
+        hedge: {
+          identity: second.identity,
+          url: '/foreign/expired-hedge-ticket',
+          queuedAt: T0,
+          lastProgress: 0,
+          progressAt: T0,
+        },
+      },
+    };
+    const fallback = new DownloadCoordinatorDriver(queue).run({
+      now: T0 + 21 * MINUTE,
+      observedFor: 0,
+    });
+    await freshStarted;
+    expect(resolves).toBe(2);
+    const shown = queue.sourcesForTitle(title, true);
+    const renewed = queue.renew(download);
+    const hedge = queue.hedgeUrl(hedged);
+
+    releaseFresh();
+    await expect(shown).resolves.toMatchObject({ sources: [refreshedFirst, refreshedSecond] });
+    await expect(renewed).resolves.toBe(refreshedFirst.url);
+    await expect(hedge).resolves.toBe(refreshedSecond.url);
+    await expect(fallback).resolves.toBe(true);
+    expect(resolves).toBe(2);
+  });
+
   it('does not reactivate an already queued release', async () => {
     const shared = testLog();
     const asked: string[] = [];
