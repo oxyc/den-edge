@@ -188,6 +188,16 @@ export class DownloadCoordinator {
     }
   }
 
+  async enqueueIdentity(
+    title: DownloadTitle,
+    identity: string,
+    candidates?: number,
+  ): Promise<boolean> {
+    const { sources } = await this.effects.resolve(title);
+    const source = sources?.find((candidate) => candidate.identity === identity);
+    return source ? this.enqueue(title, source, candidates) : false;
+  }
+
   async #enqueue(
     name: string,
     title: DownloadTitle,
@@ -316,6 +326,25 @@ export class DownloadCoordinator {
       console.warn('den: alternate download activation failed', error),
     );
     return true;
+  }
+
+  async releases(download: Download): Promise<TitleSource[] | null> {
+    return this.releasesForTitle(download.title);
+  }
+
+  async releasesForTitle(title: DownloadTitle): Promise<TitleSource[] | null> {
+    const { sources } = await this.effects.resolve(title);
+    if (!sources?.length) return sources;
+    const preferred = this.pick(sources, title.originalLanguage);
+    return preferred
+      ? [preferred, ...sources.filter((source) => source.identity !== preferred.identity)]
+      : sources;
+  }
+
+  async tryReleaseIdentity(download: Download, identity: string): Promise<boolean> {
+    const sources = await this.releases(download);
+    const source = sources?.find((candidate) => candidate.identity === identity);
+    return source ? this.tryRelease(download, source) : false;
   }
 
   urlFor(download: Download): string | null {

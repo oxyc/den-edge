@@ -47,7 +47,32 @@ function authority(
   const downloads = new DownloadCoordinator(log, clock, {
     prepare: async () => ({ state: 'preparing', progress: 0 }),
     cancel: async () => true,
-    resolve: async () => ({ sources: null }),
+    resolve: async () => ({
+      sources: [
+        {
+          identity: 'release-one',
+          filename: 'Release One',
+          label: 'Release One',
+          url: '/scout/p/secret-one',
+          size: 7_000,
+          cached: true,
+          badges: [],
+          languages: [],
+          probed: false,
+          attributes: {},
+        },
+        {
+          identity: 'release-two',
+          filename: 'Release Two',
+          label: 'Release Two',
+          url: '/scout/p/secret-two',
+          badges: [],
+          languages: [],
+          probed: false,
+          attributes: {},
+        },
+      ],
+    }),
     ticket: (url) => (url.startsWith('/scout/') ? url : null),
   });
   return new LibraryLogAuthority(log, clock, { mode, downloads, fetchImpl });
@@ -718,12 +743,12 @@ describe('LibraryLogAuthority', () => {
       items: [
         {
           content: 'movie:7:-1:-1',
+          queuedBy: { device: '0123456789abcdef', isSelf: true },
           title: movie,
           name: 'Seven',
           imdbId: 'tt0000007',
           posterPath: '/seven.jpg',
           queuedAt: expect.any(Number),
-          queuedBy: { device: '0123456789abcdef' },
           release: {
             identity: 'release-one',
             label: 'Release One',
@@ -739,17 +764,16 @@ describe('LibraryLogAuthority', () => {
     });
     const projected = await authority.select({ kind: 'downloads' });
     expect(JSON.stringify(projected)).not.toContain('secret-one');
+    const alternatives = await authority.query({ kind: 'download.releases', title });
+    expect(alternatives.kind).toBe('download.releases');
+    expect(JSON.stringify(alternatives)).not.toContain('/scout/');
 
     await expect(
       authority.command(
         {
           kind: 'download.release.try',
           target: movie,
-          release: {
-            identity: 'release-two',
-            label: 'Release Two',
-            url: '/scout/p/secret-two',
-          },
+          identity: 'release-two',
         },
         'download-alternate',
       ),

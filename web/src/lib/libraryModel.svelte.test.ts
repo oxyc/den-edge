@@ -97,6 +97,10 @@ class FakeService {
         result: { kind: 'parental-pin.verify', matches: query.pin === '1234' },
         version: version(6),
       };
+    if (query.kind === 'download.refresh')
+      return { result: { kind: 'download.refresh', refreshed: true }, version: version(6) };
+    if (query.kind === 'download.releases')
+      return { result: { kind: 'download.releases', releases: [] }, version: version(6) };
     if (query.kind !== 'playback.prepare') throw new Error('unsupported query in fake service');
     return {
       result: {
@@ -396,14 +400,9 @@ it('forwards semantic commands, playback queries, and observations without UI po
   const downloadRelease = {
     identity: 'release-one',
     label: 'Release One',
-    url: '/scout/p/ticket',
   };
   await model.enqueueDownload(downloadTitle, downloadRelease, 3, 'download-one');
-  await model.tryDownloadRelease(
-    episode,
-    { ...downloadRelease, identity: 'release-two' },
-    'download-two',
-  );
+  await model.tryDownloadRelease(episode, 'release-two', 'download-two');
   await model.removeDownload(episode, 'download-remove');
   expect(service.commands.slice(-3)).toEqual([
     {
@@ -419,7 +418,7 @@ it('forwards semantic commands, playback queries, and observations without UI po
       command: {
         kind: 'download.release.try',
         target: episode,
-        release: { ...downloadRelease, identity: 'release-two' },
+        identity: 'release-two',
       },
       operationId: 'download-two',
     },

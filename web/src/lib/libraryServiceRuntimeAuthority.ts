@@ -35,6 +35,7 @@ export async function openLibraryServiceAuthority(
     downloads: downloads.coordinator,
     libraryKey: request.libraryKey,
     vault,
+    refreshDownloads: (target) => downloads.refresh(target),
   });
   return new ScheduledLibraryServiceAuthority(
     authority,

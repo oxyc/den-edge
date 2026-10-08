@@ -35,6 +35,7 @@ export interface LibraryAuthoritySchedulerOptions {
   /** Optional domains that must stay behind the first foreground paint. */
   background?: {
     run(current: () => boolean): Promise<boolean>;
+    nextDelay?(now: number): number | undefined;
     listen?(listener: () => void): () => void;
   };
 }
@@ -152,7 +153,12 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   }
 
   #interval(): number {
-    return this.#lifecycle.playbackActive ? ACTIVE_PLAYBACK_REFRESH_MS : VISIBLE_REFRESH_MS;
+    const maintenance = this.#lifecycle.playbackActive
+      ? ACTIVE_PLAYBACK_REFRESH_MS
+      : VISIBLE_REFRESH_MS;
+    if (!this.#background || !this.#foregroundReady || !this.#lifecycle.online) return maintenance;
+    const background = this.#background.nextDelay?.(this.#now());
+    return background === undefined ? maintenance : Math.min(maintenance, background);
   }
 
   #schedule(delay: number): void {

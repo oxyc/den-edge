@@ -66,10 +66,12 @@ export interface DownloadTitleDescriptor {
 export interface DownloadReleaseDescriptor {
   identity: string;
   label: string;
-  url: string;
   sizeBytes?: number;
   cached?: boolean;
 }
+
+/** A release choice safe to render. Playback tickets remain inside the service. */
+export type DownloadReleaseOption = DownloadReleaseDescriptor;
 
 export type LibraryCommand =
   | { kind: 'watchlist.add'; title: TitleRef }
@@ -130,7 +132,7 @@ export type LibraryCommand =
       /** Preserve the current partial release and try this release beside it. */
       kind: 'download.release.try';
       target: DownloadTarget;
-      release: DownloadReleaseDescriptor;
+      identity: string;
     };
 
 export interface LibraryPreferencesPatch {
@@ -317,7 +319,7 @@ export interface DownloadViewItem {
   posterPath?: string;
   stillPath?: string;
   queuedAt: number;
-  queuedBy: { device: string; name?: string };
+  queuedBy: { device: string; name?: string; isSelf: boolean };
   release: Omit<DownloadReleaseDescriptor, 'url'>;
   alternate?: Omit<DownloadReleaseDescriptor, 'url'>;
   status: {
@@ -333,6 +335,15 @@ export interface DownloadViewItem {
       | 'release-gone';
     phase: 'queued' | 'downloading' | 'trouble' | 'ready';
     fraction?: number;
+    progressAt?: number;
+    etaSeconds?: number;
+    bytesPerSecond?: number;
+    fetch?: {
+      state?: 'queued' | 'fetching' | 'downloading' | 'stalled' | 'failed';
+      seeds?: number;
+      peers?: number;
+      service?: string;
+    };
     service?: string;
     until?: number;
     stalled: boolean;
@@ -435,7 +446,9 @@ export type LibraryQuery =
       linkKey?: string;
     }
   | { kind: 'history.export' }
-  | { kind: 'relay.membership' };
+  | { kind: 'relay.membership' }
+  | { kind: 'download.refresh'; target?: DownloadTarget }
+  | { kind: 'download.releases'; title: DownloadTitleDescriptor };
 
 export type LibraryQueryResult =
   | {
@@ -469,7 +482,9 @@ export type LibraryQueryResult =
       kind: 'relay.membership';
       /** Derived relay-only authority. It cannot decrypt, read, or write the library. */
       capability: { libraryId: string; memberToken: string } | null;
-    };
+    }
+  | { kind: 'download.refresh'; refreshed: boolean }
+  | { kind: 'download.releases'; releases: DownloadReleaseOption[] | null };
 
 export type LibraryObservation =
   | {

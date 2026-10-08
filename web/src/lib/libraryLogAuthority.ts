@@ -42,6 +42,8 @@ import {
 import type {
   EpisodeRef,
   DownloadReleaseDescriptor,
+  DownloadReleaseOption,
+  DownloadTitleDescriptor,
   DownloadTarget,
   LibraryCommand,
   LibraryObservation,
@@ -121,6 +123,7 @@ export interface LibraryLogAuthorityOptions {
   vault?: Vault;
   fetchImpl?: typeof fetch;
   destination?: (key: string) => Promise<LibraryLog>;
+  refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
@@ -170,12 +173,26 @@ const effectiveStanding = (
 const publicRelease = (
   release: DownloadRelease | NonNullable<DownloadRelease['hedge']>,
   fallbackLabel?: string,
-): Omit<DownloadReleaseDescriptor, 'url'> => ({
+): DownloadReleaseDescriptor => ({
   identity: release.identity,
   label: release.label ?? fallbackLabel ?? release.identity,
   ...(release.sizeBytes !== undefined ? { sizeBytes: release.sizeBytes } : {}),
   ...(release.cached !== undefined ? { cached: release.cached } : {}),
 });
+
+const internalDownloadTitle = (title: DownloadTitleDescriptor) => {
+  const target = title.target;
+  return {
+    mediaType: target.type,
+    mediaId: target.id,
+    ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
+    title: title.name,
+    ...(title.imdbId ? { imdbId: title.imdbId } : {}),
+    ...(title.posterPath ? { posterPath: title.posterPath } : {}),
+    ...(title.stillPath ? { stillPath: title.stillPath } : {}),
+    ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+  };
+};
 
 const downloadPhase = (
   state: NonNullable<DownloadStatus['state']>,
@@ -333,7 +350,7 @@ export class LibraryLogAuthority {
       case 'download.remove':
         return this.#removeDownload(command.target);
       case 'download.release.try':
-        return this.#tryDownloadRelease(command.target, command.release);
+        return this.#tryDownloadRelease(command.target, command.identity);
     }
   }
 
@@ -358,6 +375,25 @@ export class LibraryLogAuthority {
         return this.#administration().pairingHandover(query.handoverKey, query.host, query.linkKey);
       case 'history.export':
         return this.#administration().historyExport();
+      case 'download.refresh':
+        return {
+          kind: 'download.refresh',
+          refreshed: (await this.#options.refreshDownloads?.(query.target)) ?? false,
+        };
+      case 'download.releases': {
+        const title = internalDownloadTitle(query.title);
+        const sources = await this.#downloadsCoordinator.releasesForTitle(title);
+        return {
+          kind: 'download.releases',
+          releases:
+            sources?.map((source): DownloadReleaseOption => ({
+              identity: source.identity,
+              label: source.label,
+              ...(source.size !== undefined ? { sizeBytes: source.size } : {}),
+              ...(source.cached !== undefined ? { cached: source.cached } : {}),
+            })) ?? null,
+        };
+      }
       default:
         return query satisfies never;
     }
@@ -647,6 +683,7 @@ export class LibraryLogAuthority {
       kind: 'downloads',
       items: readDownloads(this.#log.rows()).map((download) => {
         const durable = this.#downloadsCoordinator.status(download);
+        const live = this.#downloadsCoordinator.answers.get(download.name);
         const state = durable.state ?? 'starting';
         const fraction = Math.max(
           0,
@@ -664,6 +701,7 @@ export class LibraryLogAuthority {
           queuedAt: download.queuedAt,
           queuedBy: {
             device: download.queuedBy,
+            isSelf: download.queuedBy === this.#clock.device,
             ...(deviceName(this.#log.settings('devices'), download.queuedBy)
               ? { name: deviceName(this.#log.settings('devices'), download.queuedBy) }
               : {}),
@@ -679,6 +717,10 @@ export class LibraryLogAuthority {
             >['items'][number]['status']['state'],
             phase: downloadPhase(state),
             ...(fraction > 0 ? { fraction } : {}),
+            ...(durable.clock.progressAt > 0 ? { progressAt: durable.clock.progressAt } : {}),
+            ...(live?.etaSeconds !== undefined ? { etaSeconds: live.etaSeconds } : {}),
+            ...(live?.bytesPerSecond !== undefined ? { bytesPerSecond: live.bytesPerSecond } : {}),
+            ...(live?.fetch ? { fetch: { ...live.fetch } } : {}),
             ...(durable.service ? { service: durable.service } : {}),
             ...(durable.until !== undefined ? { until: durable.until } : {}),
             stalled: durable.stalled,
@@ -1293,33 +1335,10 @@ export class LibraryLogAuthority {
   async #enqueueDownload(
     command: Extract<LibraryCommand, { kind: 'download.enqueue' }>,
   ): Promise<LibraryAuthorityCommandResult> {
-    const target = command.title.target;
     const pending = this.#log.pendingActions;
-    const saved = await this.#downloadsCoordinator.enqueue(
-      {
-        mediaType: target.type,
-        mediaId: target.id,
-        ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
-        title: command.title.name,
-        ...(command.title.imdbId ? { imdbId: command.title.imdbId } : {}),
-        ...(command.title.posterPath ? { posterPath: command.title.posterPath } : {}),
-        ...(command.title.stillPath ? { stillPath: command.title.stillPath } : {}),
-        ...(command.title.originalLanguage
-          ? { originalLanguage: command.title.originalLanguage }
-          : {}),
-      },
-      {
-        filename: command.release.label,
-        url: command.release.url,
-        label: command.release.label,
-        identity: command.release.identity,
-        ...(command.release.sizeBytes !== undefined ? { size: command.release.sizeBytes } : {}),
-        ...(command.release.cached !== undefined ? { cached: command.release.cached } : {}),
-        badges: [],
-        languages: [],
-        probed: false,
-        attributes: {},
-      },
+    const saved = await this.#downloadsCoordinator.enqueueIdentity(
+      internalDownloadTitle(command.title),
+      command.release.identity,
       command.candidates,
     );
     if (!saved) this.#writeFailed();
@@ -1334,7 +1353,9 @@ export class LibraryLogAuthority {
     const download = this.#download(target);
     if (!download) return this.#unchanged();
     const pending = this.#log.pendingActions;
-    if (!(await this.#downloadsCoordinator.remove(download, true))) this.#writeFailed();
+    const state = this.#downloadsCoordinator.status(download).state;
+    const cancel = state === 'starting' || state === 'fetching' || state === 'not_started';
+    if (!(await this.#downloadsCoordinator.remove(download, cancel))) this.#writeFailed();
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),
@@ -1344,30 +1365,16 @@ export class LibraryLogAuthority {
 
   async #tryDownloadRelease(
     target: DownloadTarget,
-    release: DownloadReleaseDescriptor,
+    identity: string,
   ): Promise<LibraryAuthorityCommandResult> {
     const download = this.#download(target);
     if (!download) throw authorityError('not-found', 'download is no longer in the queue');
-    if (
-      release.identity === download.release.identity ||
-      release.identity === download.release.hedge?.identity
-    )
+    if (identity === download.release.identity || identity === download.release.hedge?.identity)
       return this.#unchanged();
     if (download.release.hedge)
       throw authorityError('conflict', 'download is already trying an alternate release', true);
     const pending = this.#log.pendingActions;
-    const saved = await this.#downloadsCoordinator.tryRelease(download, {
-      filename: release.label,
-      url: release.url,
-      label: release.label,
-      identity: release.identity,
-      ...(release.sizeBytes !== undefined ? { size: release.sizeBytes } : {}),
-      ...(release.cached !== undefined ? { cached: release.cached } : {}),
-      badges: [],
-      languages: [],
-      probed: false,
-      attributes: {},
-    });
+    const saved = await this.#downloadsCoordinator.tryReleaseIdentity(download, identity);
     if (!saved) this.#writeFailed();
     return {
       outcome: 'applied',

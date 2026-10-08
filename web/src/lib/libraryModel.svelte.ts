@@ -440,7 +440,12 @@ export class LibraryModel {
       {
         kind: 'download.enqueue',
         title,
-        release,
+        release: {
+          identity: release.identity,
+          label: release.label,
+          ...(release.sizeBytes !== undefined ? { sizeBytes: release.sizeBytes } : {}),
+          ...(release.cached !== undefined ? { cached: release.cached } : {}),
+        },
         ...(candidates === undefined ? {} : { candidates }),
       },
       operationId,
@@ -456,10 +461,20 @@ export class LibraryModel {
 
   tryDownloadRelease(
     target: DownloadTarget,
-    release: DownloadReleaseDescriptor,
+    identity: string,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'download.release.try', target, release }, operationId);
+    return this.#command({ kind: 'download.release.try', target, identity }, operationId);
+  }
+
+  refreshDownloads(target?: DownloadTarget) {
+    this.#assertOpen();
+    return this.service.query({ kind: 'download.refresh', ...(target ? { target } : {}) });
+  }
+
+  downloadReleases(title: DownloadTitleDescriptor) {
+    this.#assertOpen();
+    return this.service.query({ kind: 'download.releases', title });
   }
 
   task(task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
@@ -549,9 +564,14 @@ export class LibraryModel {
     return this.service.observe({ kind: 'lifecycle', ...lifecycle });
   }
 
-  observeForegroundReady(): Promise<LibraryVersion> {
+  foregroundReady(): Promise<LibraryVersion> {
     this.#assertOpen();
     return this.service.observe({ kind: 'foreground-ready' });
+  }
+
+  /** @deprecated Use foregroundReady. */
+  observeForegroundReady(): Promise<LibraryVersion> {
+    return this.foregroundReady();
   }
 
   close(): void {

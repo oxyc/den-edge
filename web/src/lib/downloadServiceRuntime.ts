@@ -1,7 +1,9 @@
 import type { ClockStore } from './clockStore';
-import { DownloadCoordinator } from './downloadCoordinator';
+import { DownloadCoordinator, downloadPollDelay } from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import type { LibraryLog } from './log';
+import type { DownloadTarget } from './libraryServiceProtocol';
+import { contentKeyOf, downloadName } from './downloadRows';
 import { readPlugins } from './prefs';
 import { relayFetch } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
@@ -19,6 +21,7 @@ import { tmdbKeyOf } from './tmdb';
 export interface DownloadBackgroundWork {
   /** Runs only after foreground readiness while visible and online. */
   run(current: () => boolean): Promise<boolean>;
+  nextDelay(now: number): number | undefined;
   listen?(listener: () => void): () => void;
 }
 
@@ -95,6 +98,25 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     return wrote || before !== this.#digest();
   }
 
+  nextDelay(now = Date.now()): number | undefined {
+    const downloads = this.coordinator.list().filter((download) => {
+      const state = this.coordinator.status(download, now).state;
+      return (
+        state !== 'ready' &&
+        state !== 'no_working_release' &&
+        state !== 'release_gone' &&
+        state !== 'paused'
+      );
+    });
+    if (!downloads.length) return undefined;
+    return Math.min(
+      ...downloads.map((download) => {
+        const asked = this.coordinator.asked.get(download.name);
+        return asked ? Math.max(0, downloadPollDelay(asked.quiet) - (now - asked.at)) : 0;
+      }),
+    );
+  }
+
   listen(listener: () => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
@@ -102,6 +124,25 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
 
   async prepare(url: string, queue: boolean, prefetch: boolean): Promise<Preparation> {
     return this.coordinator.effects.prepare(url, queue, prefetch);
+  }
+
+  async refresh(target?: DownloadTarget): Promise<boolean> {
+    const before = this.#digest();
+    const name = target
+      ? downloadName(
+          contentKeyOf({
+            mediaType: target.type,
+            mediaId: target.id,
+            ...(target.type === 'tv' ? { season: target.season, episode: target.episode } : {}),
+            title: '',
+          }),
+        )
+      : undefined;
+    const wrote = await this.driver.run({
+      force: true,
+      ...(name ? { names: new Set([name]) } : {}),
+    });
+    return wrote || before !== this.#digest();
   }
 
   #digest(): string {

@@ -43,6 +43,7 @@ export interface DownloadDriveOptions {
   observedFor?: number;
   force?: boolean;
   current?: () => boolean;
+  names?: ReadonlySet<string>;
 }
 
 /** Serial, worker-owned lifecycle for one coordinator. It deliberately owns no timer; the service scheduler calls it. */
@@ -66,7 +67,9 @@ export class DownloadCoordinatorDriver {
   async #run(options: DownloadDriveOptions): Promise<boolean> {
     const now = options.now ?? this.queue.now();
     const current = options.current ?? (() => true);
-    const downloads = this.queue.list();
+    const downloads = this.queue
+      .list()
+      .filter((download) => !options.names || options.names.has(download.name));
     await this.#refresh(downloads, now, options.force ?? false, current);
     if (!current() || !downloads.length) return false;
     if (!(await this.#holdLease(now, options.observedFor))) return false;

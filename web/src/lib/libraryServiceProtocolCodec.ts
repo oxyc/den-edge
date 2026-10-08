@@ -126,10 +126,9 @@ function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
 function downloadRelease(value: unknown): value is DownloadReleaseDescriptor {
   return (
     record(value) &&
-    exact(value, ['identity', 'label', 'url', 'sizeBytes', 'cached']) &&
+    exact(value, ['identity', 'label', 'sizeBytes', 'cached']) &&
     boundedText(value.identity, 4_096) &&
     boundedText(value.label, 4_096) &&
-    boundedText(value.url, 16_384) &&
     optional(
       value.sizeBytes,
       (candidate): candidate is number => integer(candidate) && candidate > 0,
@@ -410,9 +409,9 @@ function command(value: unknown): value is LibraryCommand {
       return exact(value, ['kind', 'target']) && downloadTarget(value.target);
     case 'download.release.try':
       return (
-        exact(value, ['kind', 'target', 'release']) &&
+        exact(value, ['kind', 'target', 'identity']) &&
         downloadTarget(value.target) &&
-        downloadRelease(value.release)
+        boundedText(value.identity, 4_096)
       );
     default:
       return false;
@@ -469,6 +468,10 @@ function query(value: unknown): value is LibraryQuery {
       boundedText(value.host, 256) &&
       optional(value.linkKey, base64url32)
     );
+  if (value.kind === 'download.refresh')
+    return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);
+  if (value.kind === 'download.releases')
+    return exact(value, ['kind', 'title']) && downloadTitle(value.title);
   return (
     value.kind === 'playback.prepare' &&
     exact(value, ['kind', 'title', 'episode']) &&
@@ -676,6 +679,23 @@ function download(value: unknown): value is DownloadViewItem {
     optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
     optional(candidate.cached, bool);
   const status = value && record(value) ? value.status : undefined;
+  const downloadFetch = (
+    candidate: unknown,
+  ): candidate is NonNullable<DownloadViewItem['status']['fetch']> =>
+    record(candidate) &&
+    exact(candidate, ['state', 'seeds', 'peers', 'service']) &&
+    optional(
+      candidate.state,
+      (item): item is string =>
+        item === 'queued' ||
+        item === 'fetching' ||
+        item === 'downloading' ||
+        item === 'stalled' ||
+        item === 'failed',
+    ) &&
+    optional(candidate.seeds, (item): item is number => integer(item) && item >= 0) &&
+    optional(candidate.peers, (item): item is number => integer(item) && item >= 0) &&
+    optional(candidate.service, (item): item is string => boundedText(item, 256));
   return (
     record(value) &&
     exact(value, [
@@ -709,15 +729,27 @@ function download(value: unknown): value is DownloadViewItem {
     integer(value.queuedAt) &&
     value.queuedAt >= 0 &&
     record(value.queuedBy) &&
-    exact(value.queuedBy, ['device', 'name']) &&
+    exact(value.queuedBy, ['device', 'name', 'isSelf']) &&
     boundedText(value.queuedBy.device, 256) &&
+    bool(value.queuedBy.isSelf) &&
     optional(value.queuedBy.name, (candidate): candidate is string =>
       boundedText(candidate, 256),
     ) &&
     release(value.release) &&
     optional(value.alternate, release) &&
     record(status) &&
-    exact(status, ['state', 'phase', 'fraction', 'service', 'until', 'stalled']) &&
+    exact(status, [
+      'state',
+      'phase',
+      'fraction',
+      'progressAt',
+      'etaSeconds',
+      'bytesPerSecond',
+      'fetch',
+      'service',
+      'until',
+      'stalled',
+    ]) &&
     (status.state === 'starting' ||
       status.state === 'fetching' ||
       status.state === 'not-started' ||
@@ -735,6 +767,19 @@ function download(value: unknown): value is DownloadViewItem {
       status.fraction,
       (candidate): candidate is number => finite(candidate) && candidate >= 0 && candidate <= 1,
     ) &&
+    optional(
+      status.progressAt,
+      (candidate): candidate is number => integer(candidate) && candidate >= 0,
+    ) &&
+    optional(
+      status.etaSeconds,
+      (candidate): candidate is number => finite(candidate) && candidate >= 0,
+    ) &&
+    optional(
+      status.bytesPerSecond,
+      (candidate): candidate is number => finite(candidate) && candidate >= 0,
+    ) &&
+    optional(status.fetch, downloadFetch) &&
     optional(status.service, (candidate): candidate is string => boundedText(candidate, 256)) &&
     optional(
       status.until,
@@ -1167,6 +1212,21 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           ),
       )
     );
+  if (value.kind === 'download.refresh')
+    return exact(value, ['kind', 'refreshed']) && bool(value.refreshed);
+  if (value.kind === 'download.releases') {
+    const release = (candidate: unknown): boolean =>
+      record(candidate) &&
+      exact(candidate, ['identity', 'label', 'sizeBytes', 'cached']) &&
+      boundedText(candidate.identity, 4_096) &&
+      boundedText(candidate.label, 4_096) &&
+      optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
+      optional(candidate.cached, bool);
+    return (
+      exact(value, ['kind', 'releases']) &&
+      (value.releases === null || (Array.isArray(value.releases) && value.releases.every(release)))
+    );
+  }
   return (
     exact(value, ['kind', 'action', 'target', 'resume']) &&
     value.kind === 'playback.prepare' &&

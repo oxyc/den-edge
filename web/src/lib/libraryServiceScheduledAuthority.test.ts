@@ -129,6 +129,28 @@ describe('ScheduledLibraryServiceAuthority', () => {
     await scheduled.close();
   });
 
+  it('honors a sooner worker-owned download cadence after foreground readiness', async () => {
+    vi.useFakeTimers();
+    const work = maintenance();
+    const background = {
+      run: vi.fn(async () => false),
+      nextDelay: vi.fn(() => 5_000),
+    };
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port, {
+      background,
+    });
+
+    await scheduled.observe(lifecycle());
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(background.run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(background.run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(background.run).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+  });
+
   it('pauses while hidden or offline and catches up immediately on return', async () => {
     vi.useFakeTimers();
     const work = maintenance();
