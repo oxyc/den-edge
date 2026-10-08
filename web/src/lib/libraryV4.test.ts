@@ -729,7 +729,7 @@ describe('SIMKL delivery on Library v4', () => {
 
     // A visit while the library was v3: it is kept here, and an edit den-edge refused for now is kept with it.
     const visit = (await LibraryLog.open(LIBRARY_KEY, connection, storage, vault.vault))!;
-    await vi.waitFor(() => expect(vault.data.size).toBe(1));
+    await vi.waitFor(() => expect(vault.data.has(`${visit.libraryId}:log.v1`)).toBe(true));
     server.log.refuseNext = 'rewrite_in_progress';
     const film = visit.title({ type: 'movie', id: 550 })!;
     expect(await visit.write({ ...film, dismissed: { value: true, at: at(9000) } })).not.toBeNull();

@@ -128,6 +128,110 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('imports legacy runtime state once, with an existing vault value winning', async () => {
+    const { data: legacy, storage } = memoryStorage();
+    const { data, vault } = memoryVault();
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const runtime = `${keys.id}:runtime:`;
+    const pending = JSON.stringify({ k: 'ab', v: 'AAAA' });
+    legacy.set(`den.pendingTracker.${keys.id}.old`, pending);
+    legacy.set(`den.libraryObservedGeneration.${keys.id}`, 'legacy-generation');
+    legacy.set(`den.libraryWireMin.${keys.id}`, '3');
+    legacy.set(`den.libraryCompacted.${keys.id}`, JSON.stringify(['old-row']));
+    data.set(`${runtime}meta:observed`, new TextEncoder().encode('vault-generation'));
+    data.set(`${runtime}meta:wireMin`, new TextEncoder().encode('2'));
+    data.set(`${runtime}meta:compacted`, new TextEncoder().encode(JSON.stringify(['vault-row'])));
+    const server = await edge([row(1)]);
+
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
+
+    expect(log.observedGeneration).toBe('vault-generation');
+    expect(log.wireMinimum).toBeGreaterThanOrEqual(3);
+    expect(log.pendingActions).toBe(1);
+    expect([...legacy.keys()].filter((key) => key.includes(keys.id))).toEqual([]);
+    expect(new TextDecoder().decode(data.get(`${runtime}pending:old`))).toBe(pending);
+    expect(JSON.parse(new TextDecoder().decode(data.get(`${runtime}meta:compacted`)))).toEqual([
+      'vault-row',
+      'old-row',
+    ]);
+
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
+    expect(reopened.observedGeneration).toBe('vault-generation');
+    expect(reopened.pendingActions).toBe(1);
+  });
+
+  it('fails a durable edit before the request when the vault refuses its pending record', async () => {
+    const memory = memoryVault();
+    const vault: Vault = {
+      ...memory.vault,
+      put: async (key, value) => {
+        if (key.includes(':runtime:pending:'))
+          throw new DOMException('quota', 'QuotaExceededError');
+        await memory.vault.put(key, value);
+      },
+    };
+    const server = await edge();
+    let writes = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST') writes++;
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    const before = blankTitle({ type: 'movie', id: 10 }, 0);
+
+    expect(await log.write(addToWatchlist(before, at(1000)))).toBeNull();
+    expect(writes).toBe(0);
+    expect(log.pendingActions).toBe(0);
+  });
+
+  it('re-scans vault pending work written by another tab before replay', async () => {
+    const { vault } = memoryVault();
+    const server = await edge();
+    let refuse = false;
+    const connection: typeof fetch = async (input, init) => {
+      if (refuse && init?.method === 'POST') {
+        refuse = false;
+        return new Response(JSON.stringify({ error: 'rewrite_in_progress' }), { status: 409 });
+      }
+      return server.fetchImpl(input, init);
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    const second = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    refuse = true;
+    const before = blankTitle({ type: 'movie', id: 10 }, 0);
+
+    expect(await first.write(addToWatchlist(before, at(1000)))).not.toBeNull();
+    expect(first.pendingActions).toBe(1);
+    expect(await second.refresh()).toBe(true);
+    expect(second.pendingActions).toBe(0);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(reopened.pendingActions).toBe(0);
+    expect(reopened.title(before.title)?.status.value).toBe('watchlist');
+  });
+
+  it('rekeys vault pending work without leaving the old copy behind', async () => {
+    const { vault } = memoryVault();
+    const server = await edge();
+    let refuse = true;
+    const connection: typeof fetch = async (input, init) => {
+      if (refuse && init?.method === 'POST') {
+        refuse = false;
+        return new Response(JSON.stringify({ error: 'rewrite_in_progress' }), { status: 409 });
+      }
+      return server.fetchImpl(input, init);
+    };
+    const from = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    const before = blankTitle({ type: 'movie', id: 10 }, 0);
+    expect(await from.write(addToWatchlist(before, at(1000)))).not.toBeNull();
+    const nextKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(8)));
+    const to = await LibraryLog.destination(nextKey, server.fetchImpl, undefined, vault);
+
+    await from.rekeyKept(to);
+
+    expect(from.pendingActions).toBe(0);
+    expect(to.pendingActions).toBe(1);
+  });
+
   it('keeps an acknowledged write before it returns so an immediate reload cannot restore stale data', async () => {
     const server = await edge([row(1)]);
     const { storage } = memoryStorage();
@@ -1570,7 +1674,7 @@ describe('a library kept only in this browser', () => {
     expect(tv.title({ type: 'movie', id: 1 })).toBeDefined();
     expect(tv.title({ type: 'movie', id: 2 })?.status.value).toBe('watched');
     expect(await local.forget()).toBe(true);
-    expect(data.size).toBe(0);
+    expect([...data.keys()].some((key) => key.startsWith(`${local.libraryId}:`))).toBe(false);
   });
 
   const watched = (number: number, t: number): EpisodeRow => ({
