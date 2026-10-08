@@ -20,6 +20,8 @@ export type MediaType = 'movie' | 'tv';
 export type Reaction = 'seen' | 'dislike' | 'like' | 'love';
 export type Standing = 'watchlist' | 'in-progress' | 'watched';
 export type RatingSource = 'imdb' | 'tmdb' | 'rottenTomatoes' | 'metacritic';
+export type LibraryApiKeyService = 'tmdb' | 'omdb' | 'content-warnings';
+export type MediaServerKind = 'jellyfin' | 'plex';
 
 export interface TitleRef {
   type: MediaType;
@@ -93,6 +95,26 @@ export type LibraryCommand =
     }
   | { kind: 'preferences.patch'; patch: LibraryPreferencesPatch }
   | {
+      kind: 'api-key.set';
+      service: LibraryApiKeyService;
+      value: string | null;
+    }
+  | { kind: 'parental-pin.set'; pin: string | null }
+  | {
+      kind: 'remote-access.set';
+      credentials: { clientId: string; clientSecret: string } | null;
+    }
+  | { kind: 'plugin.install'; manifestUrl: string }
+  | { kind: 'plugin.remove'; manifestUrl: string }
+  | { kind: 'plugin-trust.set'; manifestUrl: string; publicKey: string | null }
+  | {
+      kind: 'server.patch';
+      server: MediaServerKind;
+      value: { url: string; user?: string; credential?: string } | null;
+    }
+  | { kind: 'device.heartbeat'; name: string }
+  | { kind: 'device.remove'; deviceId: string }
+  | {
       kind: 'download.enqueue';
       title: DownloadTitleDescriptor;
       release: DownloadReleaseDescriptor;
@@ -142,6 +164,7 @@ export type LibrarySelection =
   | { kind: 'title'; title: TitleRef }
   | { kind: 'presence'; titles: TitleRef[] }
   | { kind: 'settings' }
+  | { kind: 'connections' }
   | { kind: 'downloads' };
 
 export interface LibraryOverviewView {
@@ -216,6 +239,36 @@ export interface SettingsView {
   preferences: LibraryPreferences;
 }
 
+export interface LibraryDeviceView {
+  id: string;
+  name: string;
+  kind: 'tv' | 'browser';
+  lastSeenAt?: number;
+  libraryFormat?: number;
+}
+
+export interface LibraryPluginView {
+  manifestUrl: string;
+  signingKey?: string;
+  pendingApprovalOn: Array<{ id: string; name: string }>;
+}
+
+/** Settings-facing connection state with storage names, stamps, and ConfigValue deliberately erased. */
+export interface ConnectionsView {
+  kind: 'connections';
+  apiKeys: Partial<Record<LibraryApiKeyService, string>>;
+  parentalPinConfigured: boolean;
+  remoteAccessConfigured: boolean;
+  plugins: LibraryPluginView[];
+  servers: Array<{ kind: MediaServerKind; url: string; user?: string }>;
+  devices: LibraryDeviceView[];
+  diagnostics: {
+    libraryFormat: number;
+    pendingChanges: number;
+    selfDeviceId: string;
+  };
+}
+
 /** Every preference synchronized in the library, projected with the same defaults as the settings screen. */
 export interface LibraryPreferences {
   excludedGenres: number[];
@@ -285,20 +338,31 @@ export type LibrarySelectionValue =
   | TitleView
   | PresenceView
   | SettingsView
+  | ConnectionsView
   | DownloadsView;
 
-export type LibraryQuery = {
-  kind: 'playback.prepare';
-  title: TitleRef;
-  episode?: EpisodeRef;
-};
+export type LibraryQuery =
+  | {
+      kind: 'playback.prepare';
+      title: TitleRef;
+      episode?: EpisodeRef;
+    }
+  | { kind: 'parental-pin.verify'; pin: string }
+  | { kind: 'relay.membership' };
 
-export type LibraryQueryResult = {
-  kind: 'playback.prepare';
-  action: 'start' | 'resume' | 'next';
-  target: (TitleRef & { type: 'movie' }) | EpisodeRef;
-  resume: { fraction: number; seconds?: number } | null;
-};
+export type LibraryQueryResult =
+  | {
+      kind: 'playback.prepare';
+      action: 'start' | 'resume' | 'next';
+      target: (TitleRef & { type: 'movie' }) | EpisodeRef;
+      resume: { fraction: number; seconds?: number } | null;
+    }
+  | { kind: 'parental-pin.verify'; matches: boolean }
+  | {
+      kind: 'relay.membership';
+      /** Derived relay-only authority. It cannot decrypt, read, or write the library. */
+      capability: { libraryId: string; memberToken: string } | null;
+    };
 
 export type LibraryObservation =
   | {

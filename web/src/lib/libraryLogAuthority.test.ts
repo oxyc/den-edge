@@ -476,6 +476,159 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('owns normalized connections and semantic settings commands without exposing rows', async () => {
+    const { log, authority } = await localAuthority();
+    const manifestUrl = 'https://addon.example/manifest.json';
+    const publicKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+    const tv = 'fedcba9876543210';
+    const at = [1_000, 0, tv] as [number, number, string];
+    await log.write({
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: {
+        [`${tv}.name`]: { value: { string: 'Apple TV' }, at },
+        [`${tv}.kind`]: { value: { string: 'tv' }, at },
+        [`${tv}.seen`]: { value: { int: 900 }, at },
+        [`${tv}.format`]: { value: { int: 3 }, at },
+        [`${tv}.pending`]: { value: { strings: [manifestUrl] }, at },
+      },
+    });
+    await log.write({
+      kind: 'set',
+      schema: 2,
+      name: `handoff:simkl:${tv}`,
+      values: { token: { value: { string: 'handoff-secret' }, at } },
+    });
+
+    for (const [command, operation] of [
+      [{ kind: 'api-key.set', service: 'tmdb', value: 'tmdb-secret' }, 'tmdb'],
+      [{ kind: 'api-key.set', service: 'content-warnings', value: 'warnings-secret' }, 'warnings'],
+      [{ kind: 'parental-pin.set', pin: '1234' }, 'pin'],
+      [
+        {
+          kind: 'remote-access.set',
+          credentials: { clientId: 'access-id', clientSecret: 'access-secret' },
+        },
+        'access',
+      ],
+      [{ kind: 'plugin.install', manifestUrl }, 'plugin'],
+      [{ kind: 'plugin-trust.set', manifestUrl, publicKey: `ed25519:${publicKey}` }, 'trust'],
+      [
+        {
+          kind: 'server.patch',
+          server: 'jellyfin',
+          value: {
+            url: 'http://jellyfin.local:8096',
+            user: 'viewer',
+            credential: 'server-secret',
+          },
+        },
+        'server',
+      ],
+      [{ kind: 'device.heartbeat', name: 'MacBook' }, 'heartbeat'],
+    ] as const)
+      await expect(authority.command(command, operation)).resolves.toMatchObject({
+        outcome: 'applied',
+        delivery: 'local',
+        affected: [{ kind: 'connections' }],
+      });
+
+    await expect(authority.select({ kind: 'connections' })).resolves.toEqual({
+      kind: 'connections',
+      apiKeys: { tmdb: 'tmdb-secret', 'content-warnings': 'warnings-secret' },
+      parentalPinConfigured: true,
+      remoteAccessConfigured: true,
+      plugins: [
+        {
+          manifestUrl,
+          signingKey: publicKey,
+          pendingApprovalOn: [{ id: tv, name: 'Apple TV' }],
+        },
+      ],
+      servers: [{ kind: 'jellyfin', url: 'http://jellyfin.local:8096', user: 'viewer' }],
+      devices: [
+        {
+          id: '0123456789abcdef',
+          name: 'MacBook',
+          kind: 'browser',
+          lastSeenAt: expect.any(Number),
+          libraryFormat: 3,
+        },
+        { id: tv, name: 'Apple TV', kind: 'tv', lastSeenAt: 900, libraryFormat: 3 },
+      ],
+      diagnostics: {
+        libraryFormat: 2,
+        pendingChanges: 0,
+        selfDeviceId: '0123456789abcdef',
+      },
+    });
+    const serialized = JSON.stringify(await authority.select({ kind: 'connections' }));
+    expect(serialized).not.toContain('server-secret');
+    expect(serialized).not.toContain('access-secret');
+    expect(serialized).not.toContain('parentalPIN');
+    expect(serialized).not.toContain('"values"');
+    await expect(authority.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    await expect(authority.query({ kind: 'parental-pin.verify', pin: '4321' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: false,
+    });
+    await expect(
+      authority.command({ kind: 'parental-pin.set', pin: '1234' }, 'same-pin'),
+    ).resolves.toMatchObject({ outcome: 'unchanged', affected: [] });
+    await expect(authority.query({ kind: 'relay.membership' })).resolves.toEqual({
+      kind: 'relay.membership',
+      capability: null,
+    });
+
+    await expect(
+      authority.command({ kind: 'device.remove', deviceId: tv }, 'remove-tv'),
+    ).resolves.toMatchObject({ affected: [{ kind: 'connections' }] });
+    expect(log.settings(`handoff:simkl:${tv}`)?.values.token?.value).toBeNull();
+    await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
+      devices: [{ id: '0123456789abcdef' }],
+      plugins: [{ pendingApprovalOn: [] }],
+    });
+    await expect(
+      authority.command({ kind: 'device.remove', deviceId: '0123456789abcdef' }, 'remove-self'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+
+    await authority.command(
+      { kind: 'server.patch', server: 'jellyfin', value: null },
+      'remove-server',
+    );
+    await authority.command({ kind: 'plugin.remove', manifestUrl }, 'remove-plugin');
+    await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
+      servers: [],
+      plugins: [],
+    });
+    expect(log.settings('keys')?.values.jellyfin?.value).toBeNull();
+  });
+
+  it('returns only the relay-scoped member capability from an online log', async () => {
+    const capability = { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) };
+    const authority = new LibraryLogAuthority(
+      {
+        currentGeneration: 'generation-1',
+        relayMembership: async () => capability,
+      } as unknown as LibraryLog,
+      {
+        device: '0123456789abcdef',
+        issue: async () => [1, 0, '0123456789abcdef'],
+        see: async () => undefined,
+        current: async () => [1, 0, '0123456789abcdef'],
+      },
+      { mode: 'online' },
+    );
+
+    const result = await authority.query({ kind: 'relay.membership' });
+    expect(result).toEqual({ kind: 'relay.membership', capability });
+    expect(JSON.stringify(result)).not.toContain('libraryKey');
+  });
+
   it('owns download enqueue, alternate, projection, and removal without exposing tickets', async () => {
     const { authority } = await localAuthority();
     await expect(authority.select({ kind: 'downloads' })).resolves.toEqual({

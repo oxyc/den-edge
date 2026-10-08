@@ -1,5 +1,6 @@
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type {
+  ConnectionsView,
   ContinueView,
   DownloadReleaseDescriptor,
   DownloadTarget,
@@ -7,6 +8,7 @@ import type {
   DownloadsView,
   EpisodeRef,
   HistoryView,
+  LibraryApiKeyService,
   LibraryCommand,
   LibraryObservation,
   LibraryOverviewView,
@@ -16,6 +18,7 @@ import type {
   LibraryServiceFailure,
   LibrarySessionStatus,
   LibraryVersion,
+  MediaServerKind,
   PresenceView,
   Reaction,
   SettingsView,
@@ -27,6 +30,7 @@ import type {
   LibrarySelectionSnapshot,
   LibraryServiceSupervisor,
 } from './libraryServiceSupervisor';
+import { useLibraryRelayMembership } from './relayFetch';
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 
@@ -70,7 +74,7 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
   { kind: Kind }
 >;
 
-type LeasedView = HistoryView | DownloadsView | TitleView | PresenceView;
+type LeasedView = HistoryView | DownloadsView | ConnectionsView | TitleView | PresenceView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
@@ -84,10 +88,14 @@ export class LibraryModel {
   readonly #rootStops: Array<() => void> = [];
   #history?: SharedSelection<HistoryView>;
   #downloads?: SharedSelection<DownloadsView>;
+  #connections?: SharedSelection<ConnectionsView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
   #closed = false;
+  #forgetRelayMembership?: () => void;
+  #installingRelayMembership?: Promise<void>;
+  #relayMembershipAllowed = true;
 
   /** Settles only after the service and all three Home-critical root replacements are ready. */
   readonly ready: Promise<LibraryVersion>;
@@ -108,15 +116,21 @@ export class LibraryModel {
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
-    this.ready = service.open(options).catch((error: unknown) => {
-      const failure = failureFrom(error);
-      if (!this.#closed) {
-        this.#openFailure = failure;
-        this.#connection = 'failed';
-        this.#status = Object.freeze({ kind: 'failed', error: failure });
-      }
-      throw error;
-    });
+    this.ready = service
+      .open(options)
+      .then((version) => {
+        void this.#installRelayMembership();
+        return version;
+      })
+      .catch((error: unknown) => {
+        const failure = failureFrom(error);
+        if (!this.#closed) {
+          this.#openFailure = failure;
+          this.#connection = 'failed';
+          this.#status = Object.freeze({ kind: 'failed', error: failure });
+        }
+        throw error;
+      });
   }
 
   get overview(): LibraryModelSnapshot<LibraryOverviewView> {
@@ -147,6 +161,17 @@ export class LibraryModel {
       () => (this.#downloads = undefined),
     );
     return this.#downloads.acquire();
+  }
+
+  /** Connection secrets and device diagnostics load only for Settings, never as Home payload. */
+  connections(): LibraryModelLease<ConnectionsView> {
+    this.#assertOpen();
+    this.#connections ??= new SharedSelection<ConnectionsView>(
+      this.service,
+      { kind: 'connections' },
+      () => (this.#connections = undefined),
+    );
+    return this.#connections.acquire();
   }
 
   get settings(): LibraryModelSnapshot<SettingsView> {
@@ -203,7 +228,9 @@ export class LibraryModel {
     this.#connection = 'reconnecting';
     this.#status = Object.freeze({ kind: 'reconnecting', version: null });
     try {
-      return await this.service.retry();
+      const version = await this.service.retry();
+      void this.#installRelayMembership();
+      return version;
     } catch (error) {
       const failure = failureFrom(error);
       if (!this.#closed) {
@@ -282,6 +309,69 @@ export class LibraryModel {
     return this.#command({ kind: 'preferences.patch', patch }, operationId);
   }
 
+  setApiKey(
+    service: LibraryApiKeyService,
+    value: string | null,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'api-key.set', service, value }, operationId);
+  }
+
+  setParentalPin(pin: string | null, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'parental-pin.set', pin }, operationId);
+  }
+
+  async verifyParentalPin(pin: string): Promise<boolean> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'parental-pin.verify', pin });
+    if (result.kind !== 'parental-pin.verify')
+      throw new LibraryServiceError({
+        code: 'internal',
+        message: 'library service returned the wrong parental PIN result',
+        retryable: true,
+      });
+    return result.matches;
+  }
+
+  setRemoteAccess(
+    credentials: { clientId: string; clientSecret: string } | null,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'remote-access.set', credentials }, operationId);
+  }
+
+  installPlugin(manifestUrl: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'plugin.install', manifestUrl }, operationId);
+  }
+
+  removePlugin(manifestUrl: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'plugin.remove', manifestUrl }, operationId);
+  }
+
+  setPluginTrust(
+    manifestUrl: string,
+    publicKey: string | null,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'plugin-trust.set', manifestUrl, publicKey }, operationId);
+  }
+
+  patchServer(
+    server: MediaServerKind,
+    value: { url: string; user?: string; credential?: string } | null,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'server.patch', server, value }, operationId);
+  }
+
+  heartbeatDevice(name: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'device.heartbeat', name }, operationId);
+  }
+
+  removeDevice(deviceId: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'device.remove', deviceId }, operationId);
+  }
+
   enqueueDownload(
     title: DownloadTitleDescriptor,
     release: DownloadReleaseDescriptor,
@@ -335,6 +425,7 @@ export class LibraryModel {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#relayMembershipAllowed = false;
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();
@@ -347,7 +438,11 @@ export class LibraryModel {
     this.#history = undefined;
     this.#downloads?.close();
     this.#downloads = undefined;
+    this.#connections?.close();
+    this.#connections = undefined;
     this.#settings = closedSnapshot(this.#settings);
+    this.#forgetRelayMembership?.();
+    this.#forgetRelayMembership = undefined;
     this.#connection = 'closed';
     this.#status = Object.freeze({ kind: 'closed' });
     this.service.close();
@@ -360,14 +455,42 @@ export class LibraryModel {
       : this.service.command(command, operationId);
   }
 
+  #installRelayMembership(): Promise<void> {
+    if (this.#installingRelayMembership) return this.#installingRelayMembership;
+    const installing = (async () => {
+      try {
+        const { result } = await this.service.query({ kind: 'relay.membership' });
+        if (!this.#relayMembershipAllowed || result.kind !== 'relay.membership') return;
+        this.#forgetRelayMembership?.();
+        this.#forgetRelayMembership = result.capability
+          ? useLibraryRelayMembership(result.capability)
+          : undefined;
+      } catch {
+        // Membership only raises same-origin relay allowance. The library and direct providers remain usable as guest.
+      }
+    })();
+    this.#installingRelayMembership = installing;
+    void installing.finally(() => {
+      if (this.#installingRelayMembership === installing)
+        this.#installingRelayMembership = undefined;
+    });
+    return installing;
+  }
+
   #receiveStatus(status: LibrarySessionStatus): void {
     if (this.#closed) return;
     this.#status = Object.freeze(status) as Immutable<LibrarySessionStatus>;
     if (status.kind === 'ready') {
       this.#connection = 'ready';
       this.#openFailure = undefined;
+      void this.#installRelayMembership();
     } else if (status.kind === 'reconnecting') this.#connection = 'reconnecting';
-    else if (status.kind === 'failed') this.#connection = 'failed';
+    else if (status.kind === 'moved') {
+      this.#relayMembershipAllowed = false;
+      this.#forgetRelayMembership?.();
+      this.#forgetRelayMembership = undefined;
+      this.#connection = 'failed';
+    } else if (status.kind === 'failed') this.#connection = 'failed';
   }
 
   #assertOpen(): void {
@@ -391,6 +514,7 @@ class SharedSelection<View extends LeasedView> {
     selection:
       | { kind: 'history' }
       | { kind: 'downloads' }
+      | { kind: 'connections' }
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,

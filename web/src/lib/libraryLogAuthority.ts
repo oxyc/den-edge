@@ -67,9 +67,22 @@ import {
   type LibrarySelectionScope,
 } from './libraryServiceCore';
 import { LibraryLog } from './log';
+import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { recordTrackerEvent } from './trackerEvents';
 import { syncPolicy } from './syncCore';
-import { change as preferenceChange, readSyncedPrefs, type PrefChanges } from '../settings/values';
+import {
+  change as preferenceChange,
+  forgetDevice,
+  hashPin,
+  parsePublicKey,
+  pinMatches,
+  readDevices,
+  readServers,
+  readSyncedPrefs,
+  readTrust,
+  selfEntry,
+  type PrefChanges,
+} from '../settings/values';
 import {
   compareStamps,
   type ConfigValue,
@@ -110,6 +123,15 @@ const isRatingSource = (value: string): value is RatingSource =>
 
 const uniqueSorted = <T>(values: Iterable<T>, compare?: (a: T, b: T) => number): T[] =>
   [...new Set(values)].sort(compare);
+
+const webUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 const serviceStanding = (standing: ProjectedStanding): Standing =>
   standing === 'inProgress' ? 'in-progress' : standing;
@@ -221,6 +243,8 @@ export class LibraryLogAuthority {
         return this.#presence(selection.titles);
       case 'settings':
         return this.#settings();
+      case 'connections':
+        return this.#connections();
       case 'downloads':
         return this.#downloads();
     }
@@ -269,6 +293,24 @@ export class LibraryLogAuthority {
         return this.#progress(command);
       case 'preferences.patch':
         return this.#patchPreferences(command.patch);
+      case 'api-key.set':
+        return this.#setApiKey(command.service, command.value);
+      case 'parental-pin.set':
+        return this.#setParentalPin(command.pin);
+      case 'remote-access.set':
+        return this.#setRemoteAccess(command.credentials);
+      case 'plugin.install':
+        return this.#setPlugin(command.manifestUrl, true);
+      case 'plugin.remove':
+        return this.#setPlugin(command.manifestUrl, false);
+      case 'plugin-trust.set':
+        return this.#setPluginTrust(command.manifestUrl, command.publicKey);
+      case 'server.patch':
+        return this.#patchServer(command.server, command.value);
+      case 'device.heartbeat':
+        return this.#heartbeatDevice(command.name);
+      case 'device.remove':
+        return this.#removeDevice(command.deviceId);
       case 'download.enqueue':
         return this.#enqueueDownload(command);
       case 'download.remove':
@@ -279,9 +321,21 @@ export class LibraryLogAuthority {
   }
 
   async query(query: LibraryQuery): Promise<LibraryQueryResult> {
-    if (query.kind !== 'playback.prepare')
-      throw authorityError('invalid-request', 'unsupported library query');
-    return this.#preparePlayback(query.title, query.episode);
+    switch (query.kind) {
+      case 'playback.prepare':
+        return this.#preparePlayback(query.title, query.episode);
+      case 'parental-pin.verify': {
+        const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+        return {
+          kind: 'parental-pin.verify',
+          matches: !!stored && (await pinMatches(stored, query.pin)),
+        };
+      }
+      case 'relay.membership':
+        return { kind: 'relay.membership', capability: await this.#log.relayMembership() };
+      default:
+        return query satisfies never;
+    }
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult> {
@@ -473,6 +527,71 @@ export class LibraryLogAuthority {
           stored.shownWarnings.filter((warning) => warning.length > 0 && warning.length <= 4_096),
         ).slice(0, 256),
         services,
+      },
+    };
+  }
+
+  #connections(): Extract<LibrarySelectionValue, { kind: 'connections' }> {
+    const keys = this.#log.settings('keys');
+    const devices = readDevices(this.#log.settings('devices'))
+      .filter(({ id }) => id.length > 0 && id.length <= 128)
+      .slice(0, 512);
+    const trust = readTrust(this.#log.settings('trust'));
+    const plugins = readPlugins(this.#log.settings('plugins'))
+      .filter((manifestUrl) => manifestUrl.length <= 4_096 && acceptsAddonURL(manifestUrl))
+      .slice(0, 10_000)
+      .map((manifestUrl) => {
+        const signingKey = parsePublicKey(trust.get(manifestUrl) ?? '');
+        return {
+          manifestUrl,
+          ...(signingKey ? { signingKey } : {}),
+          pendingApprovalOn: devices
+            .filter((device) => device.kind === 'tv' && device.pending.includes(manifestUrl))
+            .map(({ id, name }) => ({ id, name: name.slice(0, 256) })),
+        };
+      });
+    const apiKeys = (
+      [
+        ['tmdb', 'tmdb'],
+        ['omdb', 'omdb'],
+        ['content-warnings', 'doesthedogdie'],
+      ] as const
+    ).reduce<Extract<LibrarySelectionValue, { kind: 'connections' }>['apiKeys']>(
+      (found, [service, stored]) => {
+        const value = readApiKey(keys, stored);
+        if (value && value.length <= 16_384) found[service] = value;
+        return found;
+      },
+      {},
+    );
+    return {
+      kind: 'connections',
+      apiKeys,
+      parentalPinConfigured: !!readApiKey(keys, 'parentalPIN'),
+      remoteAccessConfigured:
+        !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
+      plugins,
+      servers: readServers(this.#log.settings('servers'))
+        .filter(({ url }) => url.length <= 4_096 && webUrl(url))
+        .map((server) => ({
+          ...server,
+          ...(server.user ? { user: server.user.slice(0, 4_096) } : {}),
+        })),
+      devices: devices.map(({ id, name, kind, seen, format }) => ({
+        id,
+        name: name.slice(0, 256),
+        kind,
+        ...(seen !== undefined && Number.isSafeInteger(seen) && seen >= 0
+          ? { lastSeenAt: seen }
+          : {}),
+        ...(format !== undefined && Number.isSafeInteger(format) && format >= 0
+          ? { libraryFormat: format }
+          : {}),
+      })),
+      diagnostics: {
+        libraryFormat: this.#log.wireMinimum,
+        pendingChanges: this.#log.pendingActions,
+        selfDeviceId: this.#clock.device,
       },
     };
   }
@@ -778,6 +897,209 @@ export class LibraryLogAuthority {
     return this.#writeRow({ ...base, values }, [{ kind: 'settings' }]);
   }
 
+  #keyName(service: 'tmdb' | 'omdb' | 'content-warnings'): string {
+    return service === 'content-warnings' ? 'doesthedogdie' : service;
+  }
+
+  async #setApiKey(
+    service: 'tmdb' | 'omdb' | 'content-warnings',
+    value: string | null,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (value !== null && (!value.length || value.length > 16_384))
+      throw authorityError('invalid-request', 'API key is empty or too long');
+    return this.#patchSettings(
+      'keys',
+      { [this.#keyName(service)]: value === null ? null : { string: value } },
+      [{ kind: 'connections' }],
+    );
+  }
+
+  async #setParentalPin(pin: string | null): Promise<LibraryAuthorityCommandResult> {
+    if (pin !== null && !/^\d{4}$/.test(pin))
+      throw authorityError('invalid-request', 'parental PIN must be four digits');
+    const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    if (pin !== null && current && (await pinMatches(current, pin))) return this.#unchanged();
+    return this.#patchSettings(
+      'keys',
+      { parentalPIN: pin === null ? null : { string: await hashPin(pin) } },
+      [{ kind: 'connections' }],
+    );
+  }
+
+  async #setRemoteAccess(
+    credentials: { clientId: string; clientSecret: string } | null,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (
+      credentials &&
+      (!credentials.clientId.length ||
+        credentials.clientId.length > 4_096 ||
+        !credentials.clientSecret.length ||
+        credentials.clientSecret.length > 4_096)
+    )
+      throw authorityError('invalid-request', 'remote access credentials are empty or too long');
+    return this.#patchSettings(
+      'keys',
+      {
+        cfAccessId: credentials ? { string: credentials.clientId } : null,
+        cfAccessSecret: credentials ? { string: credentials.clientSecret } : null,
+      },
+      [{ kind: 'connections' }],
+    );
+  }
+
+  async #setPlugin(
+    manifestUrl: string,
+    installed: boolean,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (manifestUrl.length > 4_096 || !acceptsAddonURL(manifestUrl))
+      throw authorityError('invalid-request', 'plugin manifest URL is not allowed');
+    return this.#patchSettings('plugins', { [manifestUrl]: installed ? { bool: true } : null }, [
+      { kind: 'connections' },
+    ]);
+  }
+
+  async #setPluginTrust(
+    manifestUrl: string,
+    publicKey: string | null,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (manifestUrl.length > 4_096 || !acceptsAddonURL(manifestUrl))
+      throw authorityError('invalid-request', 'plugin manifest URL is not allowed');
+    if (publicKey !== null && !readPlugins(this.#log.settings('plugins')).includes(manifestUrl))
+      throw authorityError('not-found', 'plugin is not installed');
+    const normalized = publicKey === null ? null : parsePublicKey(publicKey);
+    if (publicKey !== null && !normalized)
+      throw authorityError('invalid-request', 'plugin signing key is not Ed25519');
+    return this.#patchSettings(
+      'trust',
+      { [manifestUrl]: normalized ? { string: normalized } : null },
+      [{ kind: 'connections' }],
+    );
+  }
+
+  async #patchServer(
+    server: 'jellyfin' | 'plex',
+    value: { url: string; user?: string; credential?: string } | null,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (
+      value &&
+      (!webUrl(value.url) ||
+        value.url.length > 4_096 ||
+        (value.user !== undefined && (!value.user.length || value.user.length > 4_096)) ||
+        (value.credential !== undefined &&
+          (!value.credential.length || value.credential.length > 16_384)) ||
+        (server === 'plex' && value.user !== undefined))
+    )
+      throw authorityError('invalid-request', 'media server URL must use HTTP or HTTPS');
+    const stamp = await this.#settingsStamp();
+    const rows = [
+      this.#changedSettingsRow(
+        'servers',
+        {
+          [server]: value ? { string: value.url } : null,
+          ...(server === 'jellyfin'
+            ? { 'jellyfin.user': value?.user ? { string: value.user } : null }
+            : {}),
+        },
+        stamp,
+      ),
+      this.#changedSettingsRow(
+        'keys',
+        { [server]: value?.credential ? { string: value.credential } : value ? undefined : null },
+        stamp,
+      ),
+    ].filter((row): row is SettingsRow => row !== null);
+    return rows.length ? this.#writeRows(rows, [{ kind: 'connections' }]) : this.#unchanged();
+  }
+
+  async #heartbeatDevice(name: string): Promise<LibraryAuthorityCommandResult> {
+    if (!name.trim() || name.length > 256)
+      throw authorityError('invalid-request', 'device name is empty or too long');
+    const changes = selfEntry(
+      this.#log.settings('devices'),
+      { id: this.#clock.device, name: name.trim(), kind: 'browser' },
+      Date.now(),
+    );
+    return changes
+      ? this.#patchSettings('devices', changes, [{ kind: 'connections' }])
+      : this.#unchanged();
+  }
+
+  async #removeDevice(deviceId: string): Promise<LibraryAuthorityCommandResult> {
+    if (!/^[0-9a-z]{1,128}$/i.test(deviceId))
+      throw authorityError('invalid-request', 'device id is invalid');
+    if (deviceId === this.#clock.device)
+      throw authorityError('conflict', 'this device cannot remove its own live entry');
+    const device = readDevices(this.#log.settings('devices')).some(({ id }) => id === deviceId);
+    const suffix = `:${deviceId}`;
+    const handoffs = this.#log
+      .rows()
+      .filter(
+        (row): row is SettingsRow =>
+          row.kind === 'set' && row.name.startsWith('handoff:') && row.name.endsWith(suffix),
+      );
+    if (!device && !handoffs.some((row) => Object.values(row.values).some(({ value }) => value)))
+      return this.#unchanged();
+
+    const pending = this.#log.pendingActions;
+    await this.#clock.see(this.#log.newestStamp());
+    if (device) {
+      const row = this.#changedSettingsRow(
+        'devices',
+        forgetDevice(deviceId),
+        await this.#clock.issue(),
+      );
+      if (row && !(await this.#log.write(row))) this.#writeFailed();
+    }
+    for (const handoff of handoffs) {
+      const row = this.#changedSettingsRow(
+        handoff.name,
+        Object.fromEntries(Object.keys(handoff.values).map((name) => [name, null])),
+        await this.#clock.issue(),
+      );
+      if (row && !(await this.#log.write(row))) this.#writeFailed();
+    }
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'connections' }]),
+    };
+  }
+
+  async #patchSettings(
+    name: string,
+    changes: Record<string, ConfigValue | null>,
+    affected: LibraryAffectedSelection[],
+  ): Promise<LibraryAuthorityCommandResult> {
+    const row = this.#changedSettingsRow(name, changes, await this.#settingsStamp());
+    return row ? this.#writeRow(row, affected) : this.#unchanged();
+  }
+
+  async #settingsStamp() {
+    await this.#clock.see(this.#log.newestStamp());
+    return this.#clock.issue();
+  }
+
+  #changedSettingsRow(
+    name: string,
+    changes: Record<string, ConfigValue | null | undefined>,
+    at: Stamped<ConfigValue | null>['at'],
+  ): SettingsRow | null {
+    const base = this.#log.settings(name) ?? {
+      kind: 'set' as const,
+      schema: 2,
+      name,
+      values: {},
+    };
+    const changed = Object.entries(changes).filter(
+      (entry): entry is [string, ConfigValue | null] =>
+        entry[1] !== undefined && !sameConfig(base.values[entry[0]]?.value ?? null, entry[1]),
+    );
+    if (!changed.length) return null;
+    const values = { ...base.values };
+    for (const [setting, settingValue] of changed) values[setting] = { value: settingValue, at };
+    return { ...base, values };
+  }
+
   async #enqueueDownload(
     command: Extract<LibraryCommand, { kind: 'download.enqueue' }>,
   ): Promise<LibraryAuthorityCommandResult> {
@@ -985,7 +1307,11 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const written = await this.#log.writeAction(journal);
     if (!written) this.#writeFailed();
-    return { outcome: 'applied', delivery: this.#delivery(pending), affected };
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, affected),
+    };
   }
 
   async #writeActions(
@@ -995,7 +1321,11 @@ export class LibraryLogAuthority {
     if (!journals.length) return this.#unchanged();
     const pending = this.#log.pendingActions;
     if (!(await this.#log.writeActions(journals))) this.#writeFailed();
-    return { outcome: 'applied', delivery: this.#delivery(pending), affected };
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, affected),
+    };
   }
 
   async #writeRow(
@@ -1004,7 +1334,36 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;
     if (!(await this.#log.write(row))) this.#writeFailed();
-    return { outcome: 'applied', delivery: this.#delivery(pending), affected };
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, affected),
+    };
+  }
+
+  async #writeRows(
+    rows: SettingsRow[],
+    affected: LibraryAffectedSelection[],
+  ): Promise<LibraryAuthorityCommandResult> {
+    const pending = this.#log.pendingActions;
+    if (!(await this.#log.writeRows(rows))) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, affected),
+    };
+  }
+
+  #withPendingStatus(
+    pendingBefore: number,
+    affected: LibraryAffectedSelection[],
+  ): LibraryAffectedSelection[] {
+    if (
+      this.#log.pendingActions === pendingBefore ||
+      affected.some(({ kind }) => kind === 'connections' || kind === 'all')
+    )
+      return affected;
+    return [...affected, { kind: 'connections' }];
   }
 
   #delivery(pendingBefore: number): Delivery {

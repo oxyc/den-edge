@@ -199,6 +199,58 @@ it('correlates history subscriptions with history replacements only', async () =
   client.close();
 });
 
+it('correlates connection replacements and non-playback query results without title fields', async () => {
+  const { client, transport } = await opened();
+  const values = vi.fn();
+  const subscribing = client.subscribe({ kind: 'connections' }, values);
+  const subscription = transport.sent.at(-1)!;
+  if (subscription.type !== 'subscribe') throw new Error('expected subscribe');
+  transport.emit({
+    type: 'subscribed',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: subscription.requestId,
+    subscriptionId: subscription.subscriptionId,
+    version: version(0),
+  });
+  await subscribing;
+  const connections = {
+    kind: 'connections' as const,
+    apiKeys: {},
+    parentalPinConfigured: false,
+    remoteAccessConfigured: false,
+    plugins: [],
+    servers: [],
+    devices: [],
+    diagnostics: { libraryFormat: 4, pendingChanges: 0, selfDeviceId: '0123456789abcdef' },
+  };
+  transport.emit({
+    type: 'update',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    subscriptionId: subscription.subscriptionId,
+    version: version(1),
+    value: connections,
+  });
+  expect(values).toHaveBeenCalledWith(connections, version(1));
+
+  const querying = client.query({ kind: 'relay.membership' });
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'query') throw new Error('expected query');
+  transport.emit({
+    type: 'query-result',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    version: version(1),
+    result: {
+      kind: 'relay.membership',
+      capability: { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) },
+    },
+  });
+  await expect(querying).resolves.toMatchObject({
+    result: { kind: 'relay.membership', capability: { libraryId: 'a'.repeat(32) } },
+  });
+  client.close();
+});
+
 it('rejects pending work when closed', async () => {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');

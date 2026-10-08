@@ -2,6 +2,7 @@ import {
   LIBRARY_SERVICE_PROTOCOL,
   LIBRARY_SERVICE_WIRE_LIMITS,
   type ContinueItem,
+  type ConnectionsView,
   type DownloadReleaseDescriptor,
   type DownloadTarget,
   type DownloadTitleDescriptor,
@@ -91,6 +92,20 @@ function downloadTarget(value: unknown): value is DownloadTarget {
 function boundedText(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
+
+const apiKeyService = (value: unknown) =>
+  value === 'tmdb' || value === 'omdb' || value === 'content-warnings';
+const mediaServer = (value: unknown) => value === 'jellyfin' || value === 'plex';
+const pin = (value: unknown): value is string => typeof value === 'string' && /^\d{4}$/.test(value);
+const webUrl = (value: unknown): value is string => {
+  if (!boundedText(value, 4_096)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
   return (
@@ -308,6 +323,58 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'preferences.patch':
       return exact(value, ['kind', 'patch']) && preferencesPatch(value.patch);
+    case 'api-key.set':
+      return (
+        exact(value, ['kind', 'service', 'value']) &&
+        apiKeyService(value.service) &&
+        nullable(value.value, (candidate): candidate is string => boundedText(candidate, 16_384))
+      );
+    case 'parental-pin.set':
+      return exact(value, ['kind', 'pin']) && nullable(value.pin, pin);
+    case 'remote-access.set':
+      return (
+        exact(value, ['kind', 'credentials']) &&
+        nullable(
+          value.credentials,
+          (candidate): candidate is { clientId: string; clientSecret: string } =>
+            record(candidate) &&
+            exact(candidate, ['clientId', 'clientSecret']) &&
+            boundedText(candidate.clientId, 4_096) &&
+            boundedText(candidate.clientSecret, 4_096),
+        )
+      );
+    case 'plugin.install':
+    case 'plugin.remove':
+      return exact(value, ['kind', 'manifestUrl']) && webUrl(value.manifestUrl);
+    case 'plugin-trust.set':
+      return (
+        exact(value, ['kind', 'manifestUrl', 'publicKey']) &&
+        webUrl(value.manifestUrl) &&
+        nullable(value.publicKey, (candidate): candidate is string => boundedText(candidate, 256))
+      );
+    case 'server.patch':
+      return (
+        exact(value, ['kind', 'server', 'value']) &&
+        mediaServer(value.server) &&
+        nullable(
+          value.value,
+          (candidate): candidate is { url: string; user?: string; credential?: string } =>
+            record(candidate) &&
+            exact(candidate, ['url', 'user', 'credential']) &&
+            webUrl(candidate.url) &&
+            optional(candidate.user, (item): item is string => boundedText(item, 4_096)) &&
+            optional(candidate.credential, (item): item is string => boundedText(item, 16_384)) &&
+            (value.server === 'jellyfin' || candidate.user === undefined),
+        )
+      );
+    case 'device.heartbeat':
+      return exact(value, ['kind', 'name']) && boundedText(value.name, 256);
+    case 'device.remove':
+      return (
+        exact(value, ['kind', 'deviceId']) &&
+        typeof value.deviceId === 'string' &&
+        /^[0-9a-z]{1,128}$/i.test(value.deviceId)
+      );
     case 'download.enqueue':
       return (
         exact(value, ['kind', 'title', 'release', 'candidates']) &&
@@ -338,6 +405,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'continue':
     case 'history':
     case 'settings':
+    case 'connections':
     case 'downloads':
       return exact(value, ['kind']);
     case 'title':
@@ -359,10 +427,12 @@ function selection(value: unknown): value is LibrarySelection {
 }
 
 function query(value: unknown): value is LibraryQuery {
+  if (!record(value) || !text(value.kind)) return false;
+  if (value.kind === 'parental-pin.verify') return exact(value, ['kind', 'pin']) && pin(value.pin);
+  if (value.kind === 'relay.membership') return exact(value, ['kind']);
   return (
-    record(value) &&
-    exact(value, ['kind', 'title', 'episode']) &&
     value.kind === 'playback.prepare' &&
+    exact(value, ['kind', 'title', 'episode']) &&
     titleRef(value.title) &&
     optional(value.episode, episodeRef) &&
     (value.episode === undefined ||
@@ -634,6 +704,85 @@ function preferencesView(value: unknown): boolean {
   );
 }
 
+function connectionsView(value: unknown): value is ConnectionsView {
+  if (
+    !record(value) ||
+    !exact(value, [
+      'kind',
+      'apiKeys',
+      'parentalPinConfigured',
+      'remoteAccessConfigured',
+      'plugins',
+      'servers',
+      'devices',
+      'diagnostics',
+    ]) ||
+    value.kind !== 'connections' ||
+    !record(value.apiKeys) ||
+    !exact(value.apiKeys, ['tmdb', 'omdb', 'content-warnings']) ||
+    !Object.values(value.apiKeys).every((candidate) => boundedText(candidate, 16_384)) ||
+    !bool(value.parentalPinConfigured) ||
+    !bool(value.remoteAccessConfigured)
+  )
+    return false;
+  const plugins = value.plugins;
+  const servers = value.servers;
+  const devices = value.devices;
+  const diagnostics = value.diagnostics;
+  return (
+    list(
+      plugins,
+      (candidate): candidate is ConnectionsView['plugins'][number] =>
+        record(candidate) &&
+        exact(candidate, ['manifestUrl', 'signingKey', 'pendingApprovalOn']) &&
+        webUrl(candidate.manifestUrl) &&
+        optional(candidate.signingKey, (item): item is string => boundedText(item, 256)) &&
+        list(
+          candidate.pendingApprovalOn,
+          (device): device is { id: string; name: string } =>
+            record(device) &&
+            exact(device, ['id', 'name']) &&
+            boundedText(device.id, 128) &&
+            boundedText(device.name, 256),
+          512,
+        ) &&
+        unique(candidate.pendingApprovalOn, (device) => device.id),
+      10_000,
+    ) &&
+    unique(plugins, (plugin) => plugin.manifestUrl) &&
+    list(
+      servers,
+      (candidate): candidate is ConnectionsView['servers'][number] =>
+        record(candidate) &&
+        exact(candidate, ['kind', 'url', 'user']) &&
+        mediaServer(candidate.kind) &&
+        webUrl(candidate.url) &&
+        optional(candidate.user, (item): item is string => boundedText(item, 4_096)) &&
+        (candidate.kind === 'jellyfin' || candidate.user === undefined),
+      2,
+    ) &&
+    unique(servers, (server) => server.kind) &&
+    list(
+      devices,
+      (candidate): candidate is ConnectionsView['devices'][number] =>
+        record(candidate) &&
+        exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat']) &&
+        boundedText(candidate.id, 128) &&
+        boundedText(candidate.name, 256) &&
+        (candidate.kind === 'tv' || candidate.kind === 'browser') &&
+        optional(candidate.lastSeenAt, integer) &&
+        optional(candidate.libraryFormat, integer),
+      512,
+    ) &&
+    unique(devices, (device) => device.id) &&
+    record(diagnostics) &&
+    exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId']) &&
+    integer(diagnostics.libraryFormat) &&
+    integer(diagnostics.pendingChanges) &&
+    boundedText(diagnostics.selfDeviceId, 128)
+  );
+}
+
 function episodeProgress(value: unknown): value is {
   season: number;
   episode: number;
@@ -754,6 +903,8 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'settings':
       return exact(value, ['kind', 'preferences']) && preferencesView(value.preferences);
+    case 'connections':
+      return connectionsView(value);
     case 'downloads':
       return exact(value, ['kind', 'items']) && list(value.items, download);
     default:
@@ -762,8 +913,26 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
 }
 
 function queryResult(value: unknown): value is LibraryQueryResult {
+  if (!record(value) || !text(value.kind)) return false;
+  if (value.kind === 'parental-pin.verify')
+    return exact(value, ['kind', 'matches']) && bool(value.matches);
+  if (value.kind === 'relay.membership') {
+    const capability = value.capability;
+    return (
+      exact(value, ['kind', 'capability']) &&
+      nullable(
+        capability,
+        (candidate): candidate is { libraryId: string; memberToken: string } =>
+          record(candidate) &&
+          exact(candidate, ['libraryId', 'memberToken']) &&
+          typeof candidate.libraryId === 'string' &&
+          /^[0-9a-f]{32}$/.test(candidate.libraryId) &&
+          typeof candidate.memberToken === 'string' &&
+          /^[0-9a-f]{64}$/.test(candidate.memberToken),
+      )
+    );
+  }
   return (
-    record(value) &&
     exact(value, ['kind', 'action', 'target', 'resume']) &&
     value.kind === 'playback.prepare' &&
     (value.action === 'start' || value.action === 'resume' || value.action === 'next') &&

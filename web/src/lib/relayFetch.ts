@@ -93,10 +93,14 @@ export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'member'>): 
 }
 
 /** Install the bounded relay capability returned by LibraryService, without giving the page the library key. */
-export function useLibraryRelayMembership(membership: LibraryRelayMembership): void {
+export function useLibraryRelayMembership(membership: LibraryRelayMembership): () => void {
   credential = `${membership.libraryId}:${membership.memberToken}`;
   libraryId = membership.libraryId;
   version++;
+  const installed = version;
+  return () => {
+    if (version === installed) forgetLibraryCredential();
+  };
 }
 
 /** Forget it — an unlinked browser is a visitor again, and must stop claiming otherwise. */

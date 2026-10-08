@@ -125,6 +125,67 @@ describe('library service client protocol', () => {
     });
   });
 
+  it('accepts only typed connection commands and queries', () => {
+    const decodeCommand = (command: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-connections',
+        operationId: 'operation-connections',
+        command,
+      });
+    for (const command of [
+      { kind: 'api-key.set', service: 'tmdb', value: 'key' },
+      { kind: 'parental-pin.set', pin: '1234' },
+      {
+        kind: 'remote-access.set',
+        credentials: { clientId: 'client', clientSecret: 'secret' },
+      },
+      { kind: 'plugin.install', manifestUrl: 'https://addon.example/manifest.json' },
+      {
+        kind: 'plugin-trust.set',
+        manifestUrl: 'https://addon.example/manifest.json',
+        publicKey: 'ed25519-key',
+      },
+      {
+        kind: 'server.patch',
+        server: 'jellyfin',
+        value: { url: 'http://jellyfin.local:8096', user: 'u1', credential: 'token' },
+      },
+      { kind: 'device.heartbeat', name: 'Living room browser' },
+      { kind: 'device.remove', deviceId: 'abcdef0123456789' },
+    ])
+      expect(decodeCommand(command)).toMatchObject({ ok: true });
+
+    expect(decodeCommand({ kind: 'parental-pin.set', pin: '12345' })).toMatchObject({ ok: false });
+    expect(
+      decodeCommand({ kind: 'api-key.set', service: 'simkl', value: 'not-in-this-slice' }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeCommand({ kind: 'settings.write', group: 'keys', changes: { tmdb: 'secret' } }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeCommand({
+        kind: 'server.patch',
+        server: 'plex',
+        value: { url: 'https://plex.example', user: 'not-a-plex-field' },
+      }),
+    ).toMatchObject({ ok: false });
+
+    for (const query of [
+      { kind: 'parental-pin.verify', pin: '1234' },
+      { kind: 'relay.membership' },
+    ])
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'query',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-query',
+          query,
+        }),
+      ).toMatchObject({ ok: true });
+  });
+
   it('accepts title-shape and lifecycle observations without route semantics', () => {
     expect(
       decodeLibraryServiceClientMessage({
@@ -561,6 +622,74 @@ describe('library service server protocol', () => {
       update({ ...preferences, servicesConfigured: false, services: [{ id: 8, country: 'FI' }] }),
     ).toMatchObject({ ok: false });
     expect(update({ ...preferences, subtitlesPerLanguage: -1 })).toMatchObject({ ok: false });
+  });
+
+  it('accepts normalized connection views and bounded relay capabilities', () => {
+    const connection = {
+      kind: 'connections',
+      apiKeys: { tmdb: 'tmdb-secret' },
+      parentalPinConfigured: true,
+      remoteAccessConfigured: false,
+      plugins: [
+        {
+          manifestUrl: 'https://addon.example/manifest.json',
+          signingKey: 'public-key',
+          pendingApprovalOn: [{ id: 'abcdef0123456789', name: 'Apple TV' }],
+        },
+      ],
+      servers: [{ kind: 'jellyfin', url: 'http://jellyfin.local:8096', user: 'u1' }],
+      devices: [
+        {
+          id: 'abcdef0123456789',
+          name: 'Apple TV',
+          kind: 'tv',
+          lastSeenAt: 100,
+          libraryFormat: 3,
+        },
+      ],
+      diagnostics: {
+        libraryFormat: 4,
+        pendingChanges: 1,
+        selfDeviceId: '0123456789abcdef',
+      },
+    };
+    const update = (value: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'connections',
+        version,
+        value,
+      });
+    expect(update(connection)).toMatchObject({ ok: true });
+    expect(update({ ...connection, row: { kind: 'set', name: 'keys' } })).toMatchObject({
+      ok: false,
+    });
+    expect(
+      update({
+        ...connection,
+        devices: [{ ...connection.devices[0], stamp: [1, 0, 'device'] }],
+      }),
+    ).toMatchObject({ ok: false });
+
+    const membership = (capability: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'relay',
+        version,
+        result: { kind: 'relay.membership', capability },
+      });
+    expect(membership({ libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) })).toMatchObject({
+      ok: true,
+    });
+    expect(
+      membership({
+        libraryId: 'a'.repeat(32),
+        memberToken: 'b'.repeat(64),
+        libraryKey: 'must-not-cross',
+      }),
+    ).toMatchObject({ ok: false });
   });
 
   it('carries delivery, resolved playback intent, and session status without storage details', () => {

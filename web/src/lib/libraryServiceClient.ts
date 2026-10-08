@@ -306,6 +306,7 @@ function selectionMatches(selection: LibrarySelection, value: LibrarySelectionVa
   if (selection.kind === 'continue') return value.kind === 'continue';
   if (selection.kind === 'history') return value.kind === 'history';
   if (selection.kind === 'settings') return value.kind === 'settings';
+  if (selection.kind === 'connections') return value.kind === 'connections';
   if (selection.kind === 'downloads') return value.kind === 'downloads';
   if (selection.kind === 'presence')
     return (
@@ -334,6 +335,8 @@ function replyMatches(
     return reply.type === 'command-result' && reply.operationId === request.operationId;
   if (request.type === 'query') {
     if (reply.type !== 'query-result' || reply.result.kind !== request.query.kind) return false;
+    if (request.query.kind !== 'playback.prepare') return true;
+    if (reply.result.kind !== 'playback.prepare') return false;
     const target = reply.result.target;
     return target.type === request.query.title.type && target.id === request.query.title.id;
   }

@@ -16,6 +16,7 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import type { LibrarySelectionSnapshot } from './libraryServiceSupervisor';
+import { hasLibraryCredential } from './relayFetch';
 
 type Subscription = {
   selection: LibrarySelection;
@@ -45,6 +46,7 @@ class FakeService {
   readonly close = vi.fn();
   readonly retry = vi.fn(async () => version(9));
   openFailure?: LibraryServiceFailure;
+  relayFailure = false;
   subscriptionsSeenAtOpen: LibrarySelection[] = [];
 
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
@@ -78,7 +80,21 @@ class FakeService {
     query: LibraryQuery,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     this.queries.push(query);
-    if (query.kind !== 'playback.prepare') throw new Error(`unexpected query: ${query.kind}`);
+    if (query.kind === 'relay.membership') {
+      if (this.relayFailure) throw new Error('relay membership unavailable');
+      return {
+        result: {
+          kind: 'relay.membership',
+          capability: { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) },
+        },
+        version: version(6),
+      };
+    }
+    if (query.kind === 'parental-pin.verify')
+      return {
+        result: { kind: 'parental-pin.verify', matches: query.pin === '1234' },
+        version: version(6),
+      };
     return {
       result: {
         kind: 'playback.prepare',
@@ -155,6 +171,17 @@ const historyValue = (): LibrarySelectionValue => ({
   items: [{ title: { type: 'movie', id: 2 }, watchedAt: 100, episodes: 0 }],
 });
 
+const connectionsValue = (): LibrarySelectionValue => ({
+  kind: 'connections',
+  apiKeys: { tmdb: 'key' },
+  parentalPinConfigured: true,
+  remoteAccessConfigured: false,
+  plugins: [],
+  servers: [],
+  devices: [],
+  diagnostics: { libraryFormat: 4, pendingChanges: 0, selfDeviceId: '0123456789abcdef' },
+});
+
 const downloadsValue = (): LibrarySelectionValue => ({
   kind: 'downloads',
   items: [],
@@ -188,6 +215,8 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     { kind: 'settings' },
   ]);
   await expect(model.ready).resolves.toEqual(version(4));
+  expect(service.queries[0]).toEqual({ kind: 'relay.membership' });
+  await vi.waitFor(() => expect(hasLibraryCredential()).toBe(true));
 
   expect(model.connection).toBe('ready');
   expect(model.status).toEqual({ kind: 'ready', version: version(4) });
@@ -207,6 +236,12 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   history.release();
   expect(service.subscriptions.at(-1)?.stopped).toBe(true);
 
+  const connections = model.connections();
+  service.publish({ kind: 'connections' }, connectionsValue(), 6);
+  expect(connections.snapshot.value?.diagnostics.libraryFormat).toBe(4);
+  connections.release();
+  expect(service.subscriptions.at(-1)?.stopped).toBe(true);
+
   const downloads = model.downloads();
   expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'downloads' });
   service.publish({ kind: 'downloads' }, downloadsValue(), 6);
@@ -219,6 +254,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   service.publish({ kind: 'continue' }, continueValue(), 5);
   expect(model.continueWatching).not.toBe(before);
   model.close();
+  expect(hasLibraryCredential()).toBe(false);
 });
 
 it('shares exact keyed title and ordered-presence subscriptions until their last lease releases', async () => {
@@ -298,6 +334,29 @@ it('forwards semantic commands, playback queries, and observations without UI po
     episodes: [1, 2, 3],
     watched: true,
   });
+  await model.setApiKey('tmdb', 'secret', 'key-one');
+  await model.setParentalPin('1234', 'pin-one');
+  await model.setRemoteAccess({ clientId: 'client', clientSecret: 'secret' }, 'access-one');
+  await model.installPlugin('https://addon.example/manifest.json', 'plugin-one');
+  await model.setPluginTrust('https://addon.example/manifest.json', 'public-key', 'trust-one');
+  await model.patchServer(
+    'jellyfin',
+    { url: 'http://jellyfin.local:8096', user: 'u1', credential: 'token' },
+    'server-one',
+  );
+  await model.heartbeatDevice('MacBook', 'heartbeat-one');
+  await model.removeDevice('fedcba9876543210', 'device-one');
+  await expect(model.verifyParentalPin('1234')).resolves.toBe(true);
+  expect(service.commands.slice(-8).map(({ command }) => command.kind)).toEqual([
+    'api-key.set',
+    'parental-pin.set',
+    'remote-access.set',
+    'plugin.install',
+    'plugin-trust.set',
+    'server.patch',
+    'device.heartbeat',
+    'device.remove',
+  ]);
   const downloadTitle = { target: episode, name: 'Episode Three' };
   const downloadRelease = {
     identity: 'release-one',
@@ -375,4 +434,16 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   expect(model.overview.connection).toBe('closed');
   expect(lease.snapshot.connection).toBe('closed');
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
+});
+
+it('keeps an opened model ready when relay membership is temporarily unavailable', async () => {
+  const service = new FakeService();
+  service.relayFailure = true;
+  const model = new LibraryModel(service, options);
+
+  await expect(model.ready).resolves.toEqual(version(4));
+  await vi.waitFor(() => expect(service.queries).toContainEqual({ kind: 'relay.membership' }));
+  expect(model.connection).toBe('ready');
+  expect(hasLibraryCredential()).toBe(false);
+  model.close();
 });
