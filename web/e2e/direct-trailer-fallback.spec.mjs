@@ -204,8 +204,7 @@ async function play(launch, surface, origin, network, wait = 15_000) {
         if (!permissions) return;
         const query = permissions.prototype.query;
         permissions.prototype.query = function (descriptor) {
-          if (descriptor?.name === 'local-network-access')
-            return Promise.resolve({ state: 'granted' });
+          if (descriptor?.name === 'local-network') return Promise.resolve({ state: 'granted' });
           return query.call(this, descriptor);
         };
       });
