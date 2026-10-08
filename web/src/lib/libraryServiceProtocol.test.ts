@@ -228,6 +228,41 @@ describe('library service client protocol', () => {
     ).toMatchObject({ ok: true, value: { observation: { kind: 'foreground-ready' } } });
   });
 
+  it('keeps the SIMKL wire surface semantic and credentials one-way', () => {
+    const request = (command: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-simkl',
+        operationId: 'operation-simkl',
+        command,
+      });
+    expect(request({ kind: 'simkl.connect', token: 'secret' })).toMatchObject({ ok: true });
+    expect(request({ kind: 'simkl.disconnect' })).toMatchObject({ ok: true });
+    expect(request({ kind: 'simkl.removals.approve', approvalId: 'shown-batch' })).toMatchObject({
+      ok: true,
+    });
+    expect(request({ kind: 'simkl.write-row', row: { credential: 'secret' } })).toMatchObject({
+      ok: false,
+    });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'simkl-settings',
+        version,
+        value: {
+          kind: 'simkl',
+          connected: true,
+          account: '42',
+          heldRemovals: [{ type: 'movie', id: 550 }],
+          approvalId: 'shown-batch',
+        },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('rejects mismatched protocols and malformed domain values with typed failures', () => {
     expect(
       decodeLibraryServiceClientMessage({

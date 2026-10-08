@@ -187,6 +187,14 @@ const downloadsValue = (): LibrarySelectionValue => ({
   items: [],
 });
 
+const simklValue = (): LibrarySelectionValue => ({
+  kind: 'simkl',
+  connected: true,
+  account: '42',
+  heldRemovals: [{ type: 'movie', id: 550 }],
+  approvalId: 'shown-batch',
+});
+
 const settingsValue = (): LibrarySelectionValue => ({
   kind: 'settings',
   preferences: {
@@ -241,6 +249,26 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(connections.snapshot.value?.diagnostics.libraryFormat).toBe(4);
   connections.release();
   expect(service.subscriptions.at(-1)?.stopped).toBe(true);
+
+  const simkl = model.simkl();
+  expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'simkl' });
+  service.publish({ kind: 'simkl' }, simklValue(), 8);
+  expect(simkl.snapshot.value).toMatchObject({ connected: true, account: '42' });
+  await model.connectSimkl('token', 'connect-simkl');
+  await model.approveSimklRemovals('shown-batch', 'approve-simkl');
+  await model.observeForegroundReady();
+  expect(service.commands.slice(-2)).toEqual([
+    {
+      command: { kind: 'simkl.connect', token: 'token' },
+      operationId: 'connect-simkl',
+    },
+    {
+      command: { kind: 'simkl.removals.approve', approvalId: 'shown-batch' },
+      operationId: 'approve-simkl',
+    },
+  ]);
+  expect(service.observations.at(-1)).toEqual({ kind: 'foreground-ready' });
+  simkl.release();
 
   const downloads = model.downloads();
   expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'downloads' });

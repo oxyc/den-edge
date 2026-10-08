@@ -22,6 +22,7 @@ import type {
   PresenceView,
   Reaction,
   SettingsView,
+  SimklView,
   TitleRef,
   TitleView,
 } from './libraryServiceProtocol';
@@ -74,7 +75,8 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
   { kind: Kind }
 >;
 
-type LeasedView = HistoryView | DownloadsView | ConnectionsView | TitleView | PresenceView;
+type LeasedView =
+  HistoryView | DownloadsView | ConnectionsView | SimklView | TitleView | PresenceView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
@@ -89,6 +91,7 @@ export class LibraryModel {
   #history?: SharedSelection<HistoryView>;
   #downloads?: SharedSelection<DownloadsView>;
   #connections?: SharedSelection<ConnectionsView>;
+  #simkl?: SharedSelection<SimklView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
@@ -172,6 +175,17 @@ export class LibraryModel {
       () => (this.#connections = undefined),
     );
     return this.#connections.acquire();
+  }
+
+  /** SIMKL delivery state is Settings-only and never joins the Home subscription set. */
+  simkl(): LibraryModelLease<SimklView> {
+    this.#assertOpen();
+    this.#simkl ??= new SharedSelection<SimklView>(
+      this.service,
+      { kind: 'simkl' },
+      () => (this.#simkl = undefined),
+    );
+    return this.#simkl.acquire();
   }
 
   get settings(): LibraryModelSnapshot<SettingsView> {
@@ -372,6 +386,21 @@ export class LibraryModel {
     return this.#command({ kind: 'device.remove', deviceId }, operationId);
   }
 
+  connectSimkl(token: string, operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'simkl.connect', token }, operationId);
+  }
+
+  disconnectSimkl(operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'simkl.disconnect' }, operationId);
+  }
+
+  approveSimklRemovals(
+    approvalId: string,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'simkl.removals.approve', approvalId }, operationId);
+  }
+
   enqueueDownload(
     title: DownloadTitleDescriptor,
     release: DownloadReleaseDescriptor,
@@ -445,6 +474,8 @@ export class LibraryModel {
     this.#downloads = undefined;
     this.#connections?.close();
     this.#connections = undefined;
+    this.#simkl?.close();
+    this.#simkl = undefined;
     this.#settings = closedSnapshot(this.#settings);
     this.#forgetRelayMembership?.();
     this.#forgetRelayMembership = undefined;
@@ -520,6 +551,7 @@ class SharedSelection<View extends LeasedView> {
       | { kind: 'history' }
       | { kind: 'downloads' }
       | { kind: 'connections' }
+      | { kind: 'simkl' }
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,

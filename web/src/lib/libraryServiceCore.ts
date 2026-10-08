@@ -28,6 +28,7 @@ export type LibrarySelectionScope =
   | { kind: 'history' }
   | { kind: 'settings' }
   | { kind: 'connections' }
+  | { kind: 'simkl' }
   | { kind: 'downloads' }
   | { kind: 'title'; title: TitleRef }
   | { kind: 'presence'; title: TitleRef };
@@ -515,6 +516,7 @@ function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection)
     scope.kind === 'history' ||
     scope.kind === 'settings' ||
     scope.kind === 'connections' ||
+    scope.kind === 'simkl' ||
     scope.kind === 'downloads'
   )
     return selection.kind === scope.kind;

@@ -307,6 +307,7 @@ function selectionMatches(selection: LibrarySelection, value: LibrarySelectionVa
   if (selection.kind === 'history') return value.kind === 'history';
   if (selection.kind === 'settings') return value.kind === 'settings';
   if (selection.kind === 'connections') return value.kind === 'connections';
+  if (selection.kind === 'simkl') return value.kind === 'simkl';
   if (selection.kind === 'downloads') return value.kind === 'downloads';
   if (selection.kind === 'presence')
     return (

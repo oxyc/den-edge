@@ -38,17 +38,62 @@ async function localAuthority() {
   return { log, authority: authority(log, clock, 'local') };
 }
 
-function authority(log: LibraryLog, clock: ClockStore, mode: 'online' | 'local') {
+function authority(
+  log: LibraryLog,
+  clock: ClockStore,
+  mode: 'online' | 'local',
+  fetchImpl?: typeof fetch,
+) {
   const downloads = new DownloadCoordinator(log, clock, {
     prepare: async () => ({ state: 'preparing', progress: 0 }),
     cancel: async () => true,
     resolve: async () => ({ sources: null }),
     ticket: (url) => (url.startsWith('/scout/') ? url : null),
   });
-  return new LibraryLogAuthority(log, clock, { mode, downloads });
+  return new LibraryLogAuthority(log, clock, { mode, downloads, fetchImpl });
 }
 
 describe('LibraryLogAuthority', () => {
+  it('owns SIMKL credentials and exposes only normalized connection state', async () => {
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'simkl-authority-test-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url === '/config')
+        return new Response(JSON.stringify({ simklClientId: 'public-client' }));
+      if (url.endsWith('/users/settings'))
+        return new Response(JSON.stringify({ user: { id: 42 } }));
+      return new Response('{}', { status: 404 });
+    };
+    const service = authority(log, clock, 'local', fetchImpl);
+
+    await expect(service.select({ kind: 'simkl' })).resolves.toEqual({
+      kind: 'simkl',
+      connected: false,
+      heldRemovals: [],
+    });
+    await expect(
+      service.command({ kind: 'simkl.connect', token: 'private-token' }, 'connect'),
+    ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'simkl' }] });
+    const view = await service.select({ kind: 'simkl' });
+    expect(view).toEqual({
+      kind: 'simkl',
+      connected: true,
+      heldRemovals: [],
+    });
+    expect(JSON.stringify(view)).not.toContain('private-token');
+    expect(JSON.stringify(log.settings('keys'))).toContain('private-token');
+
+    await expect(
+      service.command({ kind: 'simkl.disconnect' }, 'disconnect'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+    await expect(service.select({ kind: 'simkl' })).resolves.toMatchObject({ connected: false });
+  });
+
   it('owns title actions and returns only semantic title views', async () => {
     const { log, authority } = await localAuthority();
 

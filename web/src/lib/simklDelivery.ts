@@ -1,4 +1,5 @@
 import { fetchSimklClientId } from '../settings/simkl';
+import type { ClockStore } from './clockStore';
 import { exclusive } from './exclusive';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
@@ -604,6 +605,17 @@ export async function deliverSimkl(
   fetchImpl: typeof fetch = fetch,
   elapsed = pageElapsed(),
 ): Promise<boolean> {
+  const clock = legacyClock(log, device);
+  return deliverSimklWithClock(log, clock, fetchImpl, elapsed);
+}
+
+/** Service-owned delivery. Every durable stamp comes from the worker-safe, cross-tab clock store. */
+export async function deliverSimklWithClock(
+  log: LibraryLog,
+  clock: ClockStore,
+  fetchImpl: typeof fetch = fetch,
+  elapsed = pageElapsed(),
+): Promise<boolean> {
   const tracker = log.settings('trackers');
   const connection = Object.entries(tracker?.values ?? {}).find(
     ([name, value]) =>
@@ -626,7 +638,7 @@ export async function deliverSimkl(
   }
   // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
   return exclusive(`den.simkl.${account}`, () =>
-    deliverAccount(log, device, fetchImpl, elapsed, account, token),
+    deliverAccount(log, clock, fetchImpl, elapsed, account, token),
   );
 }
 
@@ -639,13 +651,12 @@ async function writeAccountState(
   log: LibraryLog,
   name: string,
   pending: V4Pending,
-  device: string,
+  clock: ClockStore,
 ) {
   const row = log.settings(name);
   if (!row) return;
   const values = { ...row.values };
-  const at = (): Stamp =>
-    syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
   let changed = false;
   const removals = latchSetting(row);
   const latch =
@@ -654,7 +665,10 @@ async function writeAccountState(
   const stored = Array.isArray(latch.held) ? (latch.held as Stamp) : null;
   if (closing && (!stored || stampOrder(stored, closing) < 0)) {
     // Beside the stored approval, never over it: removals approved before this batch are still decided.
-    values.removals = { value: { string: latchText({ ...latch, held: closing }) }, at: at() };
+    values.removals = {
+      value: { string: latchText({ ...latch, held: closing }) },
+      at: await clock.issue(),
+    };
     changed = true;
   }
   if (pending.unverified) {
@@ -662,7 +676,7 @@ async function writeAccountState(
     const current = listed && 'ints' in listed ? listed.ints : [];
     const epochs = [...pending.unverified].sort((a, b) => a - b);
     if (JSON.stringify(epochs) !== JSON.stringify(current)) {
-      values.unverified = { value: { ints: epochs }, at: at() };
+      values.unverified = { value: { ints: epochs }, at: await clock.issue() };
       changed = true;
     }
   }
@@ -720,13 +734,22 @@ export async function approveSimklRemovals(
   device: string,
   shown: HeldRemovals,
 ): Promise<boolean> {
+  return approveSimklRemovalsWithClock(log, legacyClock(log, device), shown);
+}
+
+export async function approveSimklRemovalsWithClock(
+  log: LibraryLog,
+  clock: ClockStore,
+  shown: HeldRemovals,
+): Promise<boolean> {
   const account = simklAccountOf(log);
   const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
   if (!row || !shown.approval) return false;
   const removals = latchSetting(row);
   const latch =
     removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
-  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
+  const at = await clock.issue();
   const values = {
     ...row.values,
     removals: { value: { string: latchText({ ...latch, approved: shown.approval }) }, at },
@@ -742,12 +765,13 @@ function jsonSetting(row: SettingsRow, name: string): unknown {
 
 async function deliverAccount(
   log: LibraryLog,
-  device: string,
+  clock: ClockStore,
   fetchImpl: typeof fetch,
   elapsed: number,
   account: string,
   token: string,
 ): Promise<boolean> {
+  const device = clock.device;
   const name = `deliver:simkl:${account}`;
   const deliver = log.settings(name);
   const base: SettingsRow = deliver ?? { kind: 'set', schema: 2, name, values: {} };
@@ -775,7 +799,8 @@ async function deliverAccount(
     });
     if (decision.action !== 'take') return false;
   }
-  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  await clock.see(log.newestStamp());
+  const at = await clock.issue();
   const since = (jsonSetting(base, 'since') as Stamp | undefined) ?? at;
   // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
   const held = log.wireMinimum >= 4 ? log.documents() : [];
@@ -812,7 +837,7 @@ async function deliverAccount(
     heldLeases.set(log, { account, epoch, ...sent });
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
-  if (pendingV4) await writeAccountState(log, name, pendingV4, device);
+  if (pendingV4) await writeAccountState(log, name, pendingV4, clock);
   const order = orderCounter(log, account, epoch);
 
   const clientId = await fetchSimklClientId(fetchImpl);
@@ -894,4 +919,22 @@ async function deliverAccount(
     );
   }
   return true;
+}
+
+/** Compatibility for the page-owned session while the final atomic UI cutover is still in progress. */
+function legacyClock(log: LibraryLog, device: string): ClockStore {
+  let last = log.newestStamp();
+  return {
+    device,
+    async issue(now = Date.now()) {
+      last = syncPolicy<Stamp>({ op: 'issue', last, now, device });
+      return last;
+    },
+    async see(stamp) {
+      if (stampOrder(last, stamp) < 0) last = stamp;
+    },
+    async current() {
+      return last;
+    },
+  };
 }

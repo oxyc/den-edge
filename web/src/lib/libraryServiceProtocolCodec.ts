@@ -22,6 +22,7 @@ import {
   type LibraryVersion,
   type RatingSource,
   type ServiceRef,
+  type SimklView,
   type TitleRef,
 } from './libraryServiceProtocol';
 
@@ -375,6 +376,12 @@ function command(value: unknown): value is LibraryCommand {
         typeof value.deviceId === 'string' &&
         /^[0-9a-z]{1,128}$/i.test(value.deviceId)
       );
+    case 'simkl.connect':
+      return exact(value, ['kind', 'token']) && boundedText(value.token, 16_384);
+    case 'simkl.disconnect':
+      return exact(value, ['kind']);
+    case 'simkl.removals.approve':
+      return exact(value, ['kind', 'approvalId']) && boundedText(value.approvalId, 256);
     case 'download.enqueue':
       return (
         exact(value, ['kind', 'title', 'release', 'candidates']) &&
@@ -406,6 +413,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'history':
     case 'settings':
     case 'connections':
+    case 'simkl':
     case 'downloads':
       return exact(value, ['kind']);
     case 'title':
@@ -785,6 +793,21 @@ function connectionsView(value: unknown): value is ConnectionsView {
   );
 }
 
+function simklView(value: unknown): value is SimklView {
+  return (
+    record(value) &&
+    exact(value, ['kind', 'connected', 'account', 'heldRemovals', 'approvalId']) &&
+    value.kind === 'simkl' &&
+    bool(value.connected) &&
+    optional(value.account, (candidate): candidate is string => boundedText(candidate, 256)) &&
+    list(value.heldRemovals, titleRef, 10_000) &&
+    unique(value.heldRemovals, (title) => `${title.type}:${title.id}`) &&
+    optional(value.approvalId, (candidate): candidate is string => boundedText(candidate, 256)) &&
+    (value.connected || (value.account === undefined && value.heldRemovals.length === 0)) &&
+    (value.heldRemovals.length === 0 || value.approvalId !== undefined)
+  );
+}
+
 function episodeProgress(value: unknown): value is {
   season: number;
   episode: number;
@@ -907,6 +930,8 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       return exact(value, ['kind', 'preferences']) && preferencesView(value.preferences);
     case 'connections':
       return connectionsView(value);
+    case 'simkl':
+      return simklView(value);
     case 'downloads':
       return exact(value, ['kind', 'items']) && list(value.items, download);
     default:

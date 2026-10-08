@@ -114,6 +114,9 @@ export type LibraryCommand =
     }
   | { kind: 'device.heartbeat'; name: string }
   | { kind: 'device.remove'; deviceId: string }
+  | { kind: 'simkl.connect'; token: string }
+  | { kind: 'simkl.disconnect' }
+  | { kind: 'simkl.removals.approve'; approvalId: string }
   | {
       kind: 'download.enqueue';
       title: DownloadTitleDescriptor;
@@ -165,6 +168,7 @@ export type LibrarySelection =
   | { kind: 'presence'; titles: TitleRef[] }
   | { kind: 'settings' }
   | { kind: 'connections' }
+  | { kind: 'simkl' }
   | { kind: 'downloads' };
 
 export interface LibraryOverviewView {
@@ -269,6 +273,16 @@ export interface ConnectionsView {
   };
 }
 
+/** Tracker state needed by Settings. Credentials, delivery rows and approval stamps stay in the service. */
+export interface SimklView {
+  kind: 'simkl';
+  connected: boolean;
+  account?: string;
+  heldRemovals: TitleRef[];
+  /** Opaque identity for exactly the currently shown removal batch. */
+  approvalId?: string;
+}
+
 /** Every preference synchronized in the library, projected with the same defaults as the settings screen. */
 export interface LibraryPreferences {
   excludedGenres: number[];
@@ -339,6 +353,7 @@ export type LibrarySelectionValue =
   | PresenceView
   | SettingsView
   | ConnectionsView
+  | SimklView
   | DownloadsView;
 
 export type LibraryQuery =

@@ -65,6 +65,12 @@ import { LibraryLog } from './log';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { recordTrackerEvent } from './trackerEvents';
 import {
+  approveSimklRemovalsWithClock,
+  heldSimklRemovals,
+  type HeldRemovals,
+} from './simklDelivery';
+import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
+import {
   change as preferenceChange,
   forgetDevice,
   hashPin,
@@ -107,6 +113,7 @@ export interface LibraryLogAuthorityOptions {
   mode: 'online' | 'local';
   /** Worker-owned live download state. */
   downloads: DownloadCoordinator;
+  fetchImpl?: typeof fetch;
 }
 
 const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.id === b.id;
@@ -192,6 +199,8 @@ export class LibraryLogAuthority {
   readonly #clock: ClockStore;
   readonly #options: LibraryLogAuthorityOptions;
   readonly #downloadsCoordinator: DownloadCoordinator;
+  readonly #fetch: typeof fetch;
+  #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
@@ -199,6 +208,7 @@ export class LibraryLogAuthority {
     this.#clock = clock;
     this.#options = options;
     this.#downloadsCoordinator = options.downloads;
+    this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
   get generation(): string | null {
@@ -225,6 +235,8 @@ export class LibraryLogAuthority {
         return this.#settings();
       case 'connections':
         return this.#connections();
+      case 'simkl':
+        return this.#simkl();
       case 'downloads':
         return this.#downloads();
     }
@@ -291,6 +303,12 @@ export class LibraryLogAuthority {
         return this.#heartbeatDevice(command.name);
       case 'device.remove':
         return this.#removeDevice(command.deviceId);
+      case 'simkl.connect':
+        return this.#connectSimkl(command.token);
+      case 'simkl.disconnect':
+        return this.#disconnectSimkl();
+      case 'simkl.removals.approve':
+        return this.#approveSimklRemovals(command.approvalId);
       case 'download.enqueue':
         return this.#enqueueDownload(command);
       case 'download.remove':
@@ -624,6 +642,47 @@ export class LibraryLogAuthority {
         };
       }),
     };
+  }
+
+  #simkl(): Extract<LibrarySelectionValue, { kind: 'simkl' }> {
+    const account = this.#simklAccount();
+    if (!account) {
+      this.#simklApproval = undefined;
+      return {
+        kind: 'simkl',
+        connected: !!readApiKey(this.#log.settings('keys'), 'simkl'),
+        heldRemovals: [],
+      };
+    }
+    let shown: HeldRemovals = { titles: [], approval: null };
+    try {
+      shown = heldSimklRemovals(this.#log);
+    } catch (error) {
+      console.warn('den: held SIMKL removals could not be projected', error);
+    }
+    const signature = JSON.stringify([account, shown.titles, shown.approval]);
+    if (!shown.approval || shown.titles.length === 0) this.#simklApproval = undefined;
+    else if (this.#simklApproval?.signature !== signature)
+      this.#simklApproval = { signature, id: crypto.randomUUID(), shown };
+    return {
+      kind: 'simkl',
+      connected: true,
+      account,
+      heldRemovals: shown.titles,
+      ...(this.#simklApproval ? { approvalId: this.#simklApproval.id } : {}),
+    };
+  }
+
+  #simklAccount(): string | undefined {
+    return Object.entries(this.#log.settings('trackers')?.values ?? {})
+      .find(
+        ([name, stamped]) =>
+          name.startsWith('simkl:') &&
+          !name.endsWith('.token') &&
+          stamped.value !== null &&
+          stamped.value !== undefined,
+      )?.[0]
+      .slice('simkl:'.length);
   }
 
   #projected(): { rows: Row[]; home: HomeLibraryView } {
@@ -1039,6 +1098,95 @@ export class LibraryLogAuthority {
       outcome: 'applied',
       delivery: this.#delivery(pending),
       affected: this.#withPendingStatus(pending, [{ kind: 'connections' }]),
+    };
+  }
+
+  async #connectSimkl(token: string): Promise<LibraryAuthorityCommandResult> {
+    if (!token.length || token.length > 16_384)
+      throw authorityError('invalid-request', 'SIMKL token is empty or too long');
+    if (this.#log.wireMinimum < 3)
+      return this.#patchSettings('keys', { simkl: { string: token } }, [{ kind: 'simkl' }]);
+
+    const clientId = await fetchSimklClientId(this.#fetch);
+    const account = clientId && (await simklAccountID(clientId, token, this.#fetch));
+    if (!account || account.length > 256)
+      throw authorityError('unavailable', 'SIMKL account could not be verified', true);
+    const trackerName = `simkl:${account}`;
+    const deliveryName = `deliver:simkl:${account}`;
+    const current = this.#log.settings('trackers');
+    const currentConnection = current?.values[trackerName]?.value;
+    let same = false;
+    if (currentConnection && 'string' in currentConnection)
+      try {
+        same =
+          (JSON.parse(currentConnection.string) as { access_token?: unknown }).access_token ===
+          token;
+      } catch {
+        // A malformed credential is replaced below.
+      }
+    if (same && this.#log.settings(deliveryName)) return this.#unchanged();
+
+    const pending = this.#log.pendingActions;
+    await this.#clock.see(this.#log.newestStamp());
+    const connectedAt = await this.#clock.issue();
+    if (!same) {
+      const row = this.#changedSettingsRow(
+        'trackers',
+        {
+          [trackerName]: {
+            string: JSON.stringify({ access_token: token, connectedAt }),
+          },
+        },
+        connectedAt,
+      );
+      if (row && !(await this.#log.write(row))) this.#writeFailed();
+    }
+    if (!this.#log.settings(deliveryName)) {
+      const at = await this.#clock.issue();
+      const row: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: deliveryName,
+        values: {
+          since: { value: { string: JSON.stringify(connectedAt) }, at },
+          lease: { value: { strings: ['', '1'] }, at },
+        },
+      };
+      if (!(await this.#log.write(row))) this.#writeFailed();
+    }
+    this.#simklApproval = undefined;
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'simkl' }]),
+    };
+  }
+
+  async #disconnectSimkl(): Promise<LibraryAuthorityCommandResult> {
+    if (this.#log.wireMinimum < 3 || !this.#simklAccount())
+      return this.#patchSettings('keys', { simkl: null }, [{ kind: 'simkl' }]);
+    const account = this.#simklAccount();
+    if (!account) return this.#unchanged();
+    this.#simklApproval = undefined;
+    return this.#patchSettings('trackers', { [`simkl:${account}`]: null }, [{ kind: 'simkl' }]);
+  }
+
+  async #approveSimklRemovals(approvalId: string): Promise<LibraryAuthorityCommandResult> {
+    const cached = this.#simklApproval;
+    // Re-project before accepting: a concurrent delivery may have replaced the batch since Settings rendered it.
+    this.#simkl();
+    if (!cached || this.#simklApproval?.id !== approvalId || cached.id !== approvalId)
+      throw authorityError('conflict', 'SIMKL removal approvals changed; review them again');
+    const pending = this.#log.pendingActions;
+    if (!(await approveSimklRemovalsWithClock(this.#log, this.#clock, cached.shown))) {
+      this.#simklApproval = undefined;
+      throw authorityError('conflict', 'SIMKL removal approvals changed; review them again');
+    }
+    this.#simklApproval = undefined;
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'simkl' }]),
     };
   }
 
