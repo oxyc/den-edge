@@ -1746,17 +1746,9 @@ async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T,
     {
         Ok(Ok(body)) => body,
         Ok(Err(_)) => {
-            return Err(Box::new(direct_json(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                &error("payload_too_large"),
-            )))
+            return Err(Box::new(direct_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))))
         }
-        Err(_) => {
-            return Err(Box::new(direct_json(
-                StatusCode::REQUEST_TIMEOUT,
-                &error("request_timeout"),
-            )))
-        }
+        Err(_) => return Err(Box::new(direct_json(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")))),
     };
     serde_json::from_slice(&body)
         .map_err(|_| Box::new(direct_json(StatusCode::BAD_REQUEST, &error("bad_request"))))
