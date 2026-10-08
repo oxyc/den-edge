@@ -25,6 +25,26 @@ function memoryVault() {
   return { values, vault, writes };
 }
 
+function atomicMemoryVault() {
+  const memory = memoryVault();
+  let held = Promise.resolve();
+  memory.vault.update = (key, updater) => {
+    const result = held.then(() => {
+      const current = memory.values.get(key)?.slice();
+      const next = updater(current);
+      memory.writes.push(key);
+      memory.values.set(key, next.slice());
+      return next.slice();
+    });
+    held = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+  return memory;
+}
+
 function lock(): Exclusive {
   let held = Promise.resolve();
   return (_name, work) => {
@@ -89,6 +109,30 @@ describe('openClockStore', () => {
     expect(second).toEqual([5_000, 1, one.device]);
     expect(await one.current()).toEqual(second);
     expect(await two.current()).toEqual(second);
+  });
+
+  it('coordinates two tabs atomically without Web Locks', async () => {
+    const memory = atomicMemoryVault();
+    const noLock: Exclusive = async () => {
+      throw new Error('atomic vault must not need Web Locks');
+    };
+    const [one, two] = await Promise.all([
+      openClockStore(memory.vault, {
+        createDevice: () => '1111111111111111',
+        exclusive: noLock,
+      }),
+      openClockStore(memory.vault, {
+        createDevice: () => '2222222222222222',
+        exclusive: noLock,
+      }),
+    ]);
+    expect(two.device).toBe(one.device);
+
+    const [first, second] = await Promise.all([one.issue(5_000), two.issue(5_000)]);
+    expect(first).toEqual([5_000, 0, one.device]);
+    expect(second).toEqual([5_000, 1, one.device]);
+    await Promise.all([one.see([8_000, 2, 'remote']), two.see([7_000, 9, 'older'])]);
+    expect(await one.issue(1_000)).toEqual([8_000, 3, one.device]);
   });
 
   it('does not expose a state that failed to become durable, and keeps the queue usable', async () => {

@@ -28,13 +28,25 @@ function fakeIndexedDB() {
           transaction(this: { closed: boolean }) {
             if (this.closed) throw new DOMException('closing', 'InvalidStateError');
             const tx = {} as IDBTransaction;
+            let pending = 0;
             let completionQueued = false;
+            const complete = () => {
+              if (pending || completionQueued) return;
+              completionQueued = true;
+              queueMicrotask(() => {
+                completionQueued = false;
+                if (!pending) tx.oncomplete?.(new Event('complete'));
+              });
+            };
             const request = <T>(result: T) => {
-              if (!completionQueued) {
-                completionQueued = true;
-                queueMicrotask(() => tx.oncomplete?.(new Event('complete')));
-              }
-              return { result } as IDBRequest<T>;
+              pending += 1;
+              const req = { result } as IDBRequest<T>;
+              queueMicrotask(() => {
+                req.onsuccess?.(new Event('success'));
+                pending -= 1;
+                complete();
+              });
+              return req;
             };
             const selected = (range?: IDBKeyRange | IDBValidKey) =>
               [...data]
@@ -154,8 +166,13 @@ describe('indexedVault', () => {
     await vault.delete('lib:pending:a');
     expect(await vault.entries('lib:pending:a')).toEqual([['lib:pending:a:longer', bytes(3)]]);
 
+    expect(await vault.update?.('lib:meta', (current) => bytes(current![0]! + 1))).toEqual(
+      bytes(5),
+    );
+    expect(await vault.get('lib:meta')).toEqual(bytes(5));
+
     await vault.remove('lib:pending:');
     expect(await vault.entries('lib:pending:')).toEqual([]);
-    expect(await vault.get('lib:meta')).toEqual(bytes(4));
+    expect(await vault.get('lib:meta')).toEqual(bytes(5));
   });
 });

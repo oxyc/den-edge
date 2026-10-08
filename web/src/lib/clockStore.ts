@@ -87,9 +87,8 @@ export async function openClockStore(
   const key = options.key ?? CLOCK_STORE_KEY;
   const lockName = `den.clock.${key}`;
   const exclusively = options.exclusive ?? browserExclusive;
-  let state = await exclusively(lockName, async () => {
-    const durable = decode(await vault.get(key));
-    if (durable) return durable;
+  const update = vault.update?.bind(vault);
+  const seed = (): StoredClock => {
     const device = validDevice(options.legacy?.device)
       ? options.legacy.device
       : (options.createDevice ?? randomDevice)();
@@ -98,10 +97,27 @@ export async function openClockStore(
     const last = validStamp(options.legacy?.last)
       ? copyStamp(options.legacy.last)
       : ([0, 0, ''] as Stamp);
-    const seeded: StoredClock = { version: 1, device, last };
-    await vault.put(key, encode(seeded));
-    return seeded;
-  });
+    return { version: 1, device, last };
+  };
+  let state: StoredClock;
+  if (update) {
+    const opened = decode(
+      await update(key, (current) => {
+        const durable = decode(current);
+        return durable ? current! : encode(seed());
+      }),
+    );
+    if (!opened) throw new Error('atomic clock update returned invalid state');
+    state = opened;
+  } else {
+    state = await exclusively(lockName, async () => {
+      const durable = decode(await vault.get(key));
+      if (durable) return durable;
+      const seeded = seed();
+      await vault.put(key, encode(seeded));
+      return seeded;
+    });
+  }
 
   let tail: Promise<void> = Promise.resolve();
   const serialized = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -111,6 +127,17 @@ export async function openClockStore(
       () => undefined,
     );
     return result;
+  };
+  const atomically = async (change: (current: StoredClock) => StoredClock) => {
+    const bytes = await update!(key, (current) => {
+      const durable = decode(current) ?? state;
+      const changed = change(durable);
+      return current && changed === durable ? current : encode(changed);
+    });
+    const durable = decode(bytes);
+    if (!durable) throw new Error('atomic clock update returned invalid state');
+    state = durable;
+    return durable;
   };
   const refresh = async () => {
     const durable = decode(await vault.get(key));
@@ -129,31 +156,48 @@ export async function openClockStore(
       return state.device;
     },
     issue(now = Date.now()) {
-      return serialized(() =>
-        exclusively(lockName, async () => {
+      return serialized(async () => {
+        if (update) {
+          const updated = await atomically((current) => ({
+            version: 1,
+            device: current.device,
+            last: new Clock(current.device, current.last).issue(now),
+          }));
+          return copyStamp(updated.last);
+        }
+        return exclusively(lockName, async () => {
           await refresh();
           const stamp = new Clock(state.device, state.last).issue(now);
           await commit(stamp);
           return copyStamp(stamp);
-        }),
-      );
+        });
+      });
     },
     see(stamp) {
-      return serialized(() =>
-        exclusively(lockName, async () => {
+      return serialized(async () => {
+        if (!validStamp(stamp)) throw new Error('invalid clock stamp');
+        if (update) {
+          await atomically((current) =>
+            compareStamps(stamp, current.last) > 0
+              ? { version: 1, device: current.device, last: copyStamp(stamp) }
+              : current,
+          );
+          return;
+        }
+        return exclusively(lockName, async () => {
           await refresh();
-          if (!validStamp(stamp)) throw new Error('invalid clock stamp');
           if (compareStamps(stamp, state.last) > 0) await commit(stamp);
-        }),
-      );
+        });
+      });
     },
     current() {
-      return serialized(() =>
-        exclusively(lockName, async () => {
+      return serialized(async () => {
+        if (update) return copyStamp((await atomically((current) => current)).last);
+        return exclusively(lockName, async () => {
           await refresh();
           return copyStamp(state.last);
-        }),
-      );
+        });
+      });
     },
   };
 }
