@@ -1,10 +1,7 @@
 import type { DownloadViewItem } from './libraryServiceProtocol';
 
 /** Temporary Library.svelte adapter; delete when its Home row consumes DownloadsView. */
-export function headline(
-  status: { state: string | null },
-  answer?: { progress?: number },
-): string {
+export function headline(status: { state: string | null }, answer?: { progress?: number }): string {
   if (status.state === 'ready') return 'Ready to play';
   if (status.state === 'fetching')
     return `Downloading${answer?.progress === undefined ? '' : ` ${Math.floor(answer.progress * 100)}%`}`;
