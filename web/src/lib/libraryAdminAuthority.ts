@@ -335,12 +335,12 @@ export class LibraryAdminAuthority {
   }
 
   async #mergeLocal(sourceLibraryKey: string): Promise<LibraryAuthorityTaskResult> {
-    if (this.options.mode !== 'local')
+    if (sourceLibraryKey === this.options.libraryKey)
       return {
         result: { kind: 'local-library.merge', outcome: 'unavailable' },
         affected: [],
       };
-    const source = await LibraryLog.openLocal(sourceLibraryKey, this.options.vault);
+    const source = await LibraryLog.openExistingLocal(sourceLibraryKey, this.options.vault);
     if (!source)
       return {
         result: { kind: 'local-library.merge', outcome: 'unavailable' },

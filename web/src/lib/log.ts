@@ -278,6 +278,8 @@ interface KeptWork {
 const SNAPSHOT = 'log.v1';
 /** The same for a library at v4, whose documents a build from before it would misread as rows. */
 const SNAPSHOT_V4 = 'log.v4';
+/** Unsealed existence marker for a browser-local library. It contains no key or library data. */
+const LOCAL_LIBRARY = 'runtime:meta:local-library';
 
 /**
  * Under what a first read of the log keeps the pages it has read so far, so a read cut off on a slow link goes on
@@ -725,10 +727,33 @@ export class LibraryLog {
     // Kept for `moveTo`, which asks den-edge once the library is being handed to a TV's.
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
   ): Promise<LibraryLog | null> {
+    return this.openLocalFromVault(libraryKey, vault, fetchImpl, true);
+  }
+
+  /** Open only a browser-local library that was previously created in this vault. */
+  static async openExistingLocal(
+    libraryKey: string,
+    vault: Vault | null = libraryVault,
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+  ): Promise<LibraryLog | null> {
+    return this.openLocalFromVault(libraryKey, vault, fetchImpl, false);
+  }
+
+  private static async openLocalFromVault(
+    libraryKey: string,
+    vault: Vault | null,
+    fetchImpl: typeof fetch,
+    create: boolean,
+  ): Promise<LibraryLog | null> {
     if (!vault) return null;
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const marker = `${keys.id}:${LOCAL_LIBRARY}`;
+    const registered = await vault.get(marker);
+    if (!create && !registered) return null;
+    if (create && !registered) await vault.put(marker, Uint8Array.of(1));
     const log = new LibraryLog(
-      await deriveKeys(raw),
+      keys,
       fetchImpl,
       undefined,
       { vault, key: await localKey(raw) },

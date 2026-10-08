@@ -1738,6 +1738,17 @@ describe('LibraryLog', () => {
 describe('a library kept only in this browser', () => {
   const LOCAL_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
 
+  it('opens as an existing local library only after this vault created it', async () => {
+    const { vault } = memoryVault();
+    await expect(LibraryLog.openExistingLocal(LOCAL_KEY, vault)).resolves.toBeNull();
+    const created = await LibraryLog.openLocal(LOCAL_KEY, vault);
+    expect(created).not.toBeNull();
+    const reopened = await LibraryLog.openExistingLocal(LOCAL_KEY, vault);
+    expect(reopened).not.toBeNull();
+    await created!.forget();
+    await expect(LibraryLog.openExistingLocal(LOCAL_KEY, vault)).resolves.toBeNull();
+  });
+
   it('prepares the newest maximum while projecting, so reads do not rescan the log', async () => {
     const { vault } = memoryVault();
     const log = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;

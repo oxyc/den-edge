@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import type { ClockStore } from './clockStore';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
-import { successorTag, type LibraryLog, type Moving } from './log';
+import { LibraryLog, successorTag, type Moving } from './log';
 import type { Vault } from './localVault';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(1)));
@@ -80,4 +80,59 @@ it('settles only the destination named by the retired library', async () => {
   ).resolves.toMatchObject({ result: { outcome: 'adopted' } });
   expect(log.rekeyKept).toHaveBeenCalledWith(next);
   expect(next.forget).not.toHaveBeenCalled();
+});
+
+it('merges only a distinct registered browser-local source into an online target', async () => {
+  const source = {
+    rows: vi.fn(() => [{ kind: 'set', schema: 2, name: 'prefs', values: {} }]),
+    forget: vi.fn(async () => true),
+    close: vi.fn(),
+  };
+  const existing = vi
+    .spyOn(LibraryLog, 'openExistingLocal')
+    .mockResolvedValueOnce(source as unknown as LibraryLog);
+  const log = { writeRows: vi.fn(async () => true) };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+  });
+
+  await expect(
+    authority.task({ kind: 'local-library.merge', sourceLibraryKey: DESTINATION }),
+  ).resolves.toEqual({
+    result: { kind: 'local-library.merge', outcome: 'merged' },
+    affected: expect.any(Array),
+  });
+  expect(existing).toHaveBeenCalledWith(DESTINATION, vault);
+  expect(log.writeRows).toHaveBeenCalledWith(source.rows());
+  expect(source.forget).toHaveBeenCalledOnce();
+  expect(source.close).toHaveBeenCalledOnce();
+
+  await expect(
+    authority.task({ kind: 'local-library.merge', sourceLibraryKey: KEY }),
+  ).resolves.toEqual({
+    result: { kind: 'local-library.merge', outcome: 'unavailable' },
+    affected: [],
+  });
+  expect(existing).toHaveBeenCalledOnce();
+});
+
+it('rejects a source key that has no browser-local library', async () => {
+  const existing = vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValueOnce(null);
+  const log = { writeRows: vi.fn(async () => true) };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+  });
+
+  await expect(
+    authority.task({ kind: 'local-library.merge', sourceLibraryKey: DESTINATION }),
+  ).resolves.toEqual({
+    result: { kind: 'local-library.merge', outcome: 'unavailable' },
+    affected: [],
+  });
+  expect(existing).toHaveBeenCalledWith(DESTINATION, vault);
+  expect(log.writeRows).not.toHaveBeenCalled();
 });
