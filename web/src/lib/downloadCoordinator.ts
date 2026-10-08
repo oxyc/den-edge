@@ -224,7 +224,7 @@ export class DownloadCoordinator {
         at,
       };
       values.queuedAt = { value: { int: now }, at };
-      if (sources)
+      if (sources !== undefined)
         values.candidates = {
           value: {
             int:
