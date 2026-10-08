@@ -27,7 +27,7 @@ import {
   type Download,
   type DownloadRelease,
 } from './downloadRows';
-import { watchedHistory } from './history';
+import { seenEpisodes, watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import {
   applyLog,
@@ -615,6 +615,7 @@ export class LibraryLogAuthority {
 
   #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
     const { rows } = this.#projected();
+    const seen = seenEpisodes(rows);
     const names = new Map<string, Title>();
     for (const row of rows) {
       if (row.kind !== 'rec' && row.kind !== 'ep') continue;
@@ -628,6 +629,7 @@ export class LibraryLogAuthority {
         watchedAt: at,
         ...(episode ? { episode } : {}),
         episodes,
+        ...(title.type === 'tv' ? { seen: seen.get(titleKey(title)) ?? [] } : {}),
       })),
     };
   }

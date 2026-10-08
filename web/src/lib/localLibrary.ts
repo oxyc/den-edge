@@ -2,8 +2,7 @@
 // this browser like a link's, so the watchlist, what was watched and Settings are all still there next visit. Linking a
 // TV moves the library into the TV's and drops this one.
 
-import { forgetLibrary, libraryVault, type Vault } from './localVault';
-import { loadLibraryLog } from './libraryLogLoader';
+import { forgetLibrary } from './localVault';
 
 const STORAGE_KEY = 'den.localLibrary';
 
@@ -44,43 +43,23 @@ export async function dropLocalLibrary(
  * dropped, and `rekey` is told the key to go on with. `rekey` is told even when the rows couldn't be moved: staying on
  * the lost key would lose everything after too. The function returned stops following.
  */
-export function followLocalLibrary(
+/**
+ * Observe only the winning local key. The LibraryModel owner performs the guarded semantic merge before replacing
+ * its session; this key watcher deliberately has no storage or row authority of its own.
+ */
+export function followLocalLibraryKey(
   own: string,
-  rekey: (key: string) => void,
+  changed: (next: string, previous: string) => void,
   target: EventTarget = window,
-  vault: Vault | null = libraryVault,
 ): () => void {
   let current = own;
-  let moving = Promise.resolve();
   const listener = (event: Event) => {
     const { key, newValue } = event as StorageEvent;
     if (key !== STORAGE_KEY || !newValue || newValue === current) return;
-    const lost = current;
+    const previous = current;
     current = newValue;
-    moving = moving
-      .then(() => mergeLocalLibrary(lost, newValue, vault))
-      .catch(() => false)
-      .then(() => {
-        if (current === newValue) rekey(newValue);
-      });
+    changed(newValue, previous);
   };
   target.addEventListener('storage', listener);
   return () => target.removeEventListener('storage', listener);
-}
-
-/** Every row of the library `lost` opens written into `kept`'s, and `lost` dropped. False when either can't be opened. */
-async function mergeLocalLibrary(
-  lost: string,
-  kept: string,
-  vault: Vault | null,
-): Promise<boolean> {
-  const LibraryLog = await loadLibraryLog();
-  const [from, into] = await Promise.all([
-    LibraryLog.openLocal(lost, vault),
-    LibraryLog.openLocal(kept, vault),
-  ]);
-  // A browser's own library never holds `set:recovery`, but a code stays with the library it opens (recovery-code §9).
-  const rows = from?.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
-  if (!from || !into || !rows || !(await into.writeRows(rows))) return false;
-  return from.forget();
 }

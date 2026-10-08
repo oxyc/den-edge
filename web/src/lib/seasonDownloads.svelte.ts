@@ -60,33 +60,8 @@ export function downloadEpisode(
   season: number,
   episode: Episode,
   title: SeasonTitle,
-): Promise<EpisodeDownloadResult>;
-/** Temporary Detail call shape; final integration must supply LibraryModel. */
-export function downloadEpisode(
-  _legacyAddon: unknown,
-  imdb: string,
-  season: number,
-  episode: Episode,
-  _legacyRoutes: unknown,
-  title: SeasonTitle,
-): Promise<EpisodeDownloadResult>;
-export function downloadEpisode(
-  first: LibraryModel | unknown,
-  imdb: string,
-  season: number,
-  episode: Episode,
-  fifth: SeasonTitle | unknown,
-  _sixth?: SeasonTitle,
 ): Promise<EpisodeDownloadResult> {
-  if (!first || typeof first !== 'object' || !('downloadReleases' in first))
-    return Promise.resolve('uncertain');
-  return downloadEpisodeWithModel(
-    first as LibraryModel,
-    imdb,
-    season,
-    episode,
-    fifth as SeasonTitle,
-  );
+  return downloadEpisodeWithModel(model, imdb, season, episode, title);
 }
 
 /** A small presentation coordinator; durable episode work remains owned by LibraryService. */

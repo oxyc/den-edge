@@ -840,10 +840,10 @@ function continueItem(value: unknown): value is ContinueItem {
 }
 
 function historyItem(value: unknown): value is HistoryItem {
+  if (!record(value) || !titleRef(value.title)) return false;
+  const title = value.title;
   return (
-    record(value) &&
-    exact(value, ['title', 'watchedAt', 'episode', 'episodes']) &&
-    titleRef(value.title) &&
+    exact(value, ['title', 'watchedAt', 'episode', 'episodes', 'seen']) &&
     integer(value.watchedAt) &&
     optional(
       value.episode,
@@ -854,9 +854,24 @@ function historyItem(value: unknown): value is HistoryItem {
         integer(candidate.episode) &&
         candidate.episode > 0,
     ) &&
-    (value.episode === undefined || value.title.type === 'tv') &&
+    (value.episode === undefined || title.type === 'tv') &&
     integer(value.episodes) &&
-    (value.title.type === 'tv' || value.episodes === 0)
+    (title.type === 'tv' || value.episodes === 0) &&
+    optional(
+      value.seen,
+      (candidate): candidate is Array<{ season: number; episode: number }> =>
+        title.type === 'tv' &&
+        list(
+          candidate,
+          (episode): episode is { season: number; episode: number } =>
+            record(episode) &&
+            exact(episode, ['season', 'episode']) &&
+            integer(episode.season) &&
+            integer(episode.episode) &&
+            episode.episode > 0,
+        ) &&
+        unique(candidate, (episode) => `${episode.season}:${episode.episode}`),
+    )
   );
 }
 
@@ -1335,7 +1350,10 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   }
   if (value.kind === 'key-reset.prepare')
     return (
-      exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+      exact(value, ['kind', 'destinationLibraryKey', 'device']) &&
+      libraryKey(value.destinationLibraryKey) &&
+      typeof value.device === 'string' &&
+      /^[0-9a-f]{16}$/.test(value.device)
     );
   if (value.kind === 'recovery.seal')
     return exact(value, ['kind', 'sealed']) && boundedText(value.sealed, 4_096);

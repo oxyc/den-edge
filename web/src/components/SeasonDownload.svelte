@@ -2,32 +2,25 @@
   import DetailIcon from './DetailIcon.svelte';
   import { downloadSeason, type SeasonJob, type SeasonTitle } from '../lib/seasonDownloads.svelte';
   import type { Episode } from '../lib/detail';
-  import type { Addon } from '../lib/scout';
-  import type { Routes } from '../lib/routes';
   import type { LibraryModel } from '../lib/libraryModel.svelte';
   let {
-    scout: _scout,
     title,
     imdb,
     season,
     episodes,
-    routes: _routes,
     disabled = false,
     compact = false,
     model,
   }: {
-    scout: Addon;
     /** The series, as each episode's download is written down for every device to show. */
     title: SeasonTitle;
     imdb: string;
     season: number;
     episodes: Episode[];
-    routes: Routes;
     disabled?: boolean;
     /** Beside the season tabs: the icon alone, since the tab it sits next to already says which season. */
     compact?: boolean;
-    /** Detail supplies this during the final LibraryModel integration. */
-    model?: LibraryModel;
+    model: LibraryModel;
   } = $props();
   let job = $state<SeasonJob>();
   const label = $derived(`Download season ${season}`);
@@ -44,11 +37,11 @@
 
 <div class="download" class:compact>
   <button
-    disabled={disabled || !model || job?.running}
+    disabled={disabled || job?.running}
     aria-label={compact && !job?.running ? label : undefined}
     title={job?.running ? undefined : label}
     onclick={() =>
-      model && void downloadSeason(model, imdb, season, episodes, title, (next) => (job = next))}
+      void downloadSeason(model, imdb, season, episodes, title, (next) => (job = next))}
   >
     <DetailIcon name="download" />{#if job?.running}{running}{:else if !compact}Download season {season}{/if}
   </button>

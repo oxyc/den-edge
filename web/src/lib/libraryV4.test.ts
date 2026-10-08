@@ -8,8 +8,7 @@ import {
   react,
   updateEpisodeProgress,
 } from './actions';
-import { libraryAlert } from './librarySession.svelte';
-import { switchLibraryToV4 } from './libraryUpgrade';
+import { libraryAlert, switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';

@@ -36,25 +36,23 @@
     onadoptheld,
   }: {
     link: Link | null;
-    model?: LibraryModel;
+    model: LibraryModel;
     local?: boolean;
     onjoin?: (libraryKey: string) => Promise<boolean>;
     onresetkey?: () => Promise<KeyResetOutcome | null>;
     heldReset?: boolean;
     onadoptheld?: () => Promise<void>;
-    /** Temporary route compatibility; remove when RoutedLibrary passes `model`. */
-    session?: unknown;
   } = $props();
 
-  const connectionsLease = untrack(() => model?.connections());
-  const simklLease = untrack(() => model?.simkl());
-  const recoveryLease = untrack(() => model?.recovery());
+  const connectionsLease = untrack(() => model.connections());
+  const simklLease = untrack(() => model.simkl());
+  const recoveryLease = untrack(() => model.recovery());
   onDestroy(() => {
     connectionsLease?.release();
     simklLease?.release();
     recoveryLease?.release();
   });
-  const settings = $derived(model?.settings.value);
+  const settings = $derived(model.settings.value);
   const connections = $derived(connectionsLease?.snapshot.value);
   const simkl = $derived(simklLease?.snapshot.value);
   const recoveryView = $derived(
@@ -82,7 +80,6 @@
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
-    if (!model) return false;
     if (!quiet) {
       saving = true;
       failure = null;
@@ -99,9 +96,8 @@
     }
   }
 
-  const savePrefs = (changes: PreferenceChanges) =>
-    void run(() => model!.patchPreferences(changes));
-  const removeLibraryDevice = (id: string) => run(() => model!.removeDevice(id));
+  const savePrefs = (changes: PreferenceChanges) => void run(() => model.patchPreferences(changes));
+  const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
@@ -132,7 +128,7 @@
   });
 
   async function saveSimkl(token: string | null): Promise<boolean> {
-    return run(() => (token ? model!.connectSimkl(token) : model!.disconnectSimkl()));
+    return run(() => (token ? model.connectSimkl(token) : model.disconnectSimkl()));
   }
 
   const heldRemovals = $derived(simkl?.heldRemovals ?? []);
@@ -168,21 +164,20 @@
    * row, which counts for every device. False when the row changed meanwhile; the list is read and shown again.
    */
   async function approveRemovals(): Promise<boolean> {
-    return !!simkl?.approvalId && run(() => model!.approveSimklRemovals(simkl.approvalId!));
+    const approvalId = simkl?.approvalId;
+    return !!approvalId && run(() => model.approveSimklRemovals(approvalId));
   }
 
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
 
   async function sealHandover(handoverKey: string, host: string, linkKey: string) {
-    if (!model) throw new Error('library unavailable');
     const { result } = await model.sealPairingHandover(handoverKey, host, linkKey);
     if (result.kind !== 'pairing.handover') throw new Error('wrong pairing response');
     return result;
   }
 
   async function sealRecovery(locator: string, wrapKey: string, createdAt: number) {
-    if (!model) throw new Error('library unavailable');
     const { result } = await model.sealRecovery(locator, wrapKey, createdAt);
     if (result.kind !== 'recovery.seal') throw new Error('wrong recovery response');
     return result.sealed;
@@ -196,14 +191,12 @@
   }
 
   async function importHistory(items: Parameters<LibraryModel['importHistory']>[0]) {
-    if (!model) return { written: 0, total: items.length, complete: false };
     const { result } = await model.importHistory(items);
     if (result.kind !== 'history.import') throw new Error('wrong history import response');
     return result;
   }
 
   async function exportHistory() {
-    if (!model) throw new Error('library unavailable');
     const { result } = await model.exportHistory();
     if (result.kind !== 'history.export') throw new Error('wrong history export response');
     return result;
@@ -212,7 +205,7 @@
   // This browser lists itself among the devices with the library, as each device does when it opens it: again when its
   // name changes, and otherwise at most once a day.
   $effect(() => {
-    if (!model || !ready) return;
+    if (!ready) return;
     const name = thisDevice.name;
     const timer = setTimeout(() => void run(() => model.heartbeatDevice(name), true), 1000);
     return () => clearTimeout(timer);
@@ -227,7 +220,7 @@
       <ExpandAll label="Settings" />
     </div>
     <SettingsNav variant="bar" />
-    {#if !model || !settings || !connections}
+    {#if !settings || !connections}
       <p class="banner" role="status">Loading your settings…</p>
     {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
@@ -250,11 +243,11 @@
       devices={connections ? structuredClone(connections.devices) : []}
       {selfId}
       {disabled}
-      setApiKey={(service, value) => run(() => model!.setApiKey(service, value))}
-      installPlugin={(url) => run(() => model!.installPlugin(url))}
-      removePlugin={(url) => run(() => model!.removePlugin(url))}
-      setPluginTrust={(url, key) => run(() => model!.setPluginTrust(url, key))}
-      removeServer={(server) => run(() => model!.patchServer(server, null))}
+      setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
+      installPlugin={(url) => run(() => model.installPlugin(url))}
+      removePlugin={(url) => run(() => model.removePlugin(url))}
+      setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
+      removeServer={(server) => run(() => model.patchServer(server, null))}
       {sealHandover}
       removeDevice={removeLibraryDevice}
       recovery={link && !local ? recovery : undefined}
@@ -265,12 +258,12 @@
         {ready}
         seal={sealRecovery}
         begin={(locator, sealed, createdAt) =>
-          recoveryOutcome(() => model!.beginRecovery(locator, sealed, createdAt))}
-        confirm={(locator) => recoveryOutcome(() => model!.confirmRecovery(locator))}
+          recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
+        confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
         abandon={async (locator) => {
-          await model?.abandonRecovery(locator);
+          await model.abandonRecovery(locator);
         }}
-        disable={async () => run(() => model!.disableRecovery())}
+        disable={async () => run(() => model.disableRecovery())}
       />
     {/snippet}
     <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
@@ -280,7 +273,7 @@
       <ImportSection
         {ready}
         {tmdbKey}
-        watched={model?.overview.value?.watched ?? []}
+        watched={model.overview.value?.watched ?? []}
         {importHistory}
         {exportHistory}
       />
@@ -290,8 +283,8 @@
         pinConfigured={connections?.parentalPinConfigured ?? false}
         {disabled}
         save={savePrefs}
-        savePin={(pin) => run(() => model!.setParentalPin(pin))}
-        verifyPin={(pin) => model?.verifyParentalPin(pin) ?? Promise.resolve(false)}
+        savePin={(pin) => run(() => model.setParentalPin(pin))}
+        verifyPin={(pin) => model.verifyParentalPin(pin)}
       />
       <AdvancedSection
         remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
@@ -300,7 +293,7 @@
         pendingActions={connections?.diagnostics.pendingChanges ?? 0}
         {edgeVersion}
         {libraryFormat}
-        setRemoteAccess={(credentials) => run(() => model!.setRemoteAccess(credentials))}
+        setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
       />
     {/if}
     <AboutSection credits={mergeCredits(addonCredits)} />

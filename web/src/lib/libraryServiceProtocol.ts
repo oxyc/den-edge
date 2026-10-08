@@ -295,6 +295,8 @@ export interface HistoryItem {
   episode?: { season: number; episode: number };
   /** Number of watched episodes currently represented by the library. */
   episodes: number;
+  /** Exact watched episodes, retained only in the lazy history view. */
+  seen?: Array<{ season: number; episode: number }>;
 }
 
 export interface HistoryView {
@@ -549,7 +551,7 @@ export type LibraryQueryResult =
       resume: { fraction: number; seconds?: number } | null;
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
-  | { kind: 'key-reset.prepare'; destinationLibraryKey: string }
+  | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }
   | { kind: 'recovery.seal'; sealed: string }
   | { kind: 'pairing.handover'; sealed: string; linkKey: string; inboxKey: string }
   | {

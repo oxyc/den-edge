@@ -23,6 +23,16 @@ const RETRY_MS = 10 * 60_000;
 
 const tried = new WeakMap<LibraryLog, number>();
 
+/** What stops the authority writing an old-format library, said the way the v4 spec words it. */
+export function libraryAlert(log: LibraryLog): string | null {
+  if (log.upgradeRequired !== null) return 'Library update required';
+  if (log.predatesV3) return 'Library backup predates v3';
+  if (log.switchFailure) return `Library update failed: ${log.switchFailure}`;
+  if (log.compactionRefused && log.unreadable.size)
+    return 'Delivery paused: library rows can’t be read';
+  return null;
+}
+
 /**
  * Switch `log` to v3 when it may be, at most once per `RETRY_MS`. True when it switched. `local` is a library kept only
  * in this browser: no other device can hold it, so nothing has to be ready first.

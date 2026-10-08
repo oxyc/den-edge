@@ -73,7 +73,11 @@ export class LibraryAdminAuthority {
   }
 
   prepareReset(): Extract<LibraryQueryResult, { kind: 'key-reset.prepare' }> {
-    return { kind: 'key-reset.prepare', destinationLibraryKey: standardKey() };
+    return {
+      kind: 'key-reset.prepare',
+      destinationLibraryKey: standardKey(),
+      device: this.clock.device,
+    };
   }
 
   async sealRecovery(
