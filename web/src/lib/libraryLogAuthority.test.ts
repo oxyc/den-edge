@@ -509,6 +509,43 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('projects an in-progress movie as a protocol-only title reference', async () => {
+    const { authority } = await localAuthority();
+    await authority.command(
+      {
+        kind: 'progress.record',
+        title: movie,
+        fraction: 0.4,
+        seconds: 240,
+        observedAt: 5_000,
+      },
+      'movie-progress',
+    );
+
+    const value = await authority.select({ kind: 'continue' });
+    expect(value).toEqual({
+      kind: 'continue',
+      items: [
+        {
+          title: movie,
+          fraction: 0.4,
+          seconds: 240,
+          updatedAt: expect.any(Number),
+        },
+      ],
+      needsShapes: [],
+    });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'continue',
+        version: { instance: 'test', generation: null, revision: 0 },
+        value,
+      }).ok,
+    ).toBe(true);
+  });
+
   it('owns every synced preference with semantic default and explicit-empty patches', async () => {
     const { log, authority } = await localAuthority();
 

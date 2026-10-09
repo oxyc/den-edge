@@ -82,6 +82,7 @@ jobs:
       # Real-time player switching soaks run weekly/on demand in player-switch-soak.yml.
       - run: npm run test:e2e
       - run: npm run build
+      - run: npm run test:worker-build
       - run: npm run build:cast
 
   # The image is what ships, and it builds differently from `cargo build` (musl, scratch). Caught on the PR
