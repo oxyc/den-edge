@@ -52,8 +52,10 @@
     void model.ready
       .then(async () => {
         const client = session.content!;
+        // Production resolves Atlas through SessionServices. This fixture asks the Worker directly, so establish the
+        // same authoritative source before either Atlas reads or optional Atlas-backed title extras begin.
+        await client.query({ kind: 'sources.configure', atlas: '/atlas' });
         if (queryAtlas) {
-          await client.query({ kind: 'sources.configure', atlas: '/atlas' });
           const [filter, related, row, catalogs, chart, recommendation] = await Promise.all([
             client.query({
               kind: 'atlas.query',

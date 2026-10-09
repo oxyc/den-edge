@@ -13,6 +13,9 @@
   const services = createWorkerServiceSession();
   const content = services.content;
   setContentServiceContext(content);
+  // Production resolves this through SessionServices before service pages ask Atlas questions. Keep the standalone
+  // fixture on that same semantic configuration boundary instead of relying on a Worker-private default URL.
+  void content.query({ kind: 'sources.configure', atlas: '/atlas' });
   onDestroy(() => services.close());
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());
