@@ -149,7 +149,7 @@
       <h2>Full-width choices</h2>
       <div class="menu" role="menu" aria-label="Download actions">
         <DenButton variant="menu" icon="download" label="Download" role="menuitem" />
-        <DenButton variant="menu" icon="eye" label="Mark as seen" role="menuitem" pressed />
+        <DenButton variant="menu" icon="eye" label="Mark as seen" role="menuitemcheckbox" pressed />
         <DenButton variant="menu" icon="share" label="Share" role="menuitem" />
         <DenButton variant="menu" icon="trash" label="Remove download" role="menuitem" />
       </div>

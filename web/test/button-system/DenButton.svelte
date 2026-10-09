@@ -15,7 +15,7 @@
     busy?: boolean;
     disabled?: boolean;
     trailing?: DenIconName;
-    role?: 'menuitem';
+    role?: 'menuitem' | 'menuitemcheckbox' | 'menuitemradio';
     onclick?: (event: MouseEvent) => void;
   }
 </script>
@@ -44,7 +44,8 @@
   class:pressed
   {role}
   aria-label={ariaLabel ?? label}
-  aria-pressed={pressed}
+  aria-pressed={role ? undefined : pressed}
+  aria-checked={role === 'menuitemcheckbox' || role === 'menuitemradio' ? pressed : undefined}
   aria-busy={busy || undefined}
   aria-disabled={busy || undefined}
   {disabled}
