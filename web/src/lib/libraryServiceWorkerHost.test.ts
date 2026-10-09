@@ -43,7 +43,7 @@ const ready = (requestId: string): LibraryServiceServerMessage => ({
   version: { instance: 'worker-1', generation: null, revision: 0 },
 });
 
-it('serializes requests and posts each ordered reply batch once', async () => {
+it('admits a later request while an earlier reply is pending and posts each reply batch once', async () => {
   const scope = new FakeScope();
   let releaseFirst!: () => void;
   const first = new Promise<void>((resolve) => (releaseFirst = resolve));
@@ -64,7 +64,11 @@ it('serializes requests and posts each ordered reply batch once', async () => {
 
   scope.emit(hello('first'));
   scope.emit(hello('second'));
-  await expect.poll(() => dispatched).toEqual(['first']);
+  await expect.poll(() => dispatched).toEqual(['first', 'second']);
+  await expect.poll(() => scope.posted.length).toBe(1);
+  expect(
+    scope.posted[0]?.map((message) => ('requestId' in message ? message.requestId : undefined)),
+  ).toEqual(['second', 'second-after']);
   releaseFirst();
   await expect.poll(() => scope.posted.length).toBe(2);
 
@@ -74,8 +78,8 @@ it('serializes requests and posts each ordered reply batch once', async () => {
       batch.map((message) => ('requestId' in message ? message.requestId : undefined)),
     ),
   ).toEqual([
-    ['first', 'first-after'],
     ['second', 'second-after'],
+    ['first', 'first-after'],
   ]);
   await host.close();
 });

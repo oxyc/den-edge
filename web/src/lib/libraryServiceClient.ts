@@ -386,7 +386,12 @@ function replyMatches(
   if (request.type === 'command')
     return reply.type === 'command-result' && reply.operationId === request.operationId;
   if (request.type === 'query') {
-    if (reply.type !== 'query-result' || reply.result.kind !== request.query.kind) return false;
+    if (reply.type !== 'query-result' || reply.result.kind !== queryResultKind(request.query.kind))
+      return false;
+    if (request.query.kind === 'retained.billboard.get') {
+      if (reply.result.kind !== 'retained.billboard') return false;
+      return sameBillboardScope(request.query.scope, reply.result.scope);
+    }
     if (request.query.kind !== 'playback.prepare') return true;
     if (reply.result.kind !== 'playback.prepare') return false;
     const target = reply.result.target;
@@ -403,4 +408,18 @@ function replyMatches(
   if (request.type === 'unsubscribe')
     return reply.type === 'unsubscribed' && reply.subscriptionId === request.subscriptionId;
   return reply.type === 'observed';
+}
+
+function sameBillboardScope(
+  left: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
+  right: Extract<LibraryQueryResult, { kind: 'retained.billboard' }>['scope'],
+): boolean {
+  return left.kind === right.kind && left.facet === right.facet && left.fresh === right.fresh;
+}
+
+function queryResultKind(kind: LibraryQuery['kind']): LibraryQueryResult['kind'] {
+  if (kind === 'retained.services.get') return 'retained.services';
+  if (kind === 'retained.home-continue.get') return 'retained.home-continue';
+  if (kind === 'retained.billboard.get') return 'retained.billboard';
+  return kind;
 }

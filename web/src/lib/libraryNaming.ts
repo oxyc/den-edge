@@ -1,130 +1,174 @@
+import { untrack } from 'svelte';
 import { titleKey, type MediaType, type Shape, type Title } from './library';
-import { fetchDetails, type Details } from './tmdb';
+import type { LibraryMetadataShape, LibraryMetadataTitle } from './libraryServiceProtocol';
+
+type Ref = { type: MediaType; id: number };
 
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
-  /** Sessions publish one keyed metadata batch without making every consumer diff snapshots. */
+  libraryMetadata(refs: readonly Ref[]): Promise<{
+    titles: LibraryMetadataTitle[];
+    shapes: LibraryMetadataShape[];
+    retryable: Ref[];
+  }>;
   publishLibraryMetadata?: (
     titles: Title[],
     shapes: ReadonlyArray<readonly [string, Shape]>,
   ) => void;
 }
 
-type Ref = { type: MediaType; id: number };
+const shapeFromWire = (shape: LibraryMetadataShape): Shape => ({
+  counts: new Map(shape.seasons.map(({ season, episodes }) => [season, episodes])),
+  ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
+});
 
-interface NamingRun {
-  key: string;
-  pending: Map<string, Promise<void>>;
-  displays: Title[];
-  known: Set<string>;
-  /** Found but not yet published: batching avoids one Home derivation per TMDB answer. */
-  found: Map<string, Details>;
+/** Small enough to paint progressively and to leave room in the relay's per-minute member allowance. */
+export const LIBRARY_METADATA_BATCH = 64;
+const RETRIES = 2;
+const RETRY_DELAY_MS = 1_000;
+
+interface RetryState {
+  pending: Map<string, Ref>;
+  attempts: Map<string, number>;
   timer?: ReturnType<typeof setTimeout>;
+  running: boolean;
 }
 
-const runs = new WeakMap<NamedLibrary, NamingRun>();
-const BATCH_MS = 100;
+const retryStates = new WeakMap<NamedLibrary, RetryState>();
+const closedSessions = new WeakSet<NamedLibrary>();
 
-function knownTitles(session: NamedLibrary, run: NamingRun): Set<string> {
-  if (run.displays !== session.displays) {
-    run.displays = session.displays;
-    run.known = new Set(session.displays.map(titleKey));
-  }
-  return run.known;
+/**
+ * Ask the library service to name an explicit set. A large lazy screen paints one bounded batch at a time;
+ * transient Worker/provider failures are retried without discarding successful neighbours.
+ */
+export async function nameLibraryTitles(session: NamedLibrary, refs: Ref[]): Promise<void> {
+  if (closedSessions.has(session)) return;
+  // This function is commonly started inside a route effect. Its page cache is an implementation detail, not an
+  // input to that effect: progressive publication must not restart the owning naming pass after every 64-title batch.
+  const { known, wanted } = untrack(() => {
+    const known = new Set(session.displays.map(titleKey));
+    const wanted = [
+      ...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values(),
+    ].filter(
+      (ref) =>
+        !known.has(titleKey(ref)) ||
+        (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+    );
+    return { known, wanted };
+  });
+  const retry = await nameBatches(session, wanted, known);
+  // Readiness is the first bounded pass, not the provider's backoff. Successful neighbours are already visible;
+  // retry transient holes in the background without holding Home's shelves behind them.
+  queueLibraryTitleRetries(session, retry);
 }
 
-function publish(session: NamedLibrary, run: NamingRun): void {
-  clearTimeout(run.timer);
-  run.timer = undefined;
-  const found = [...run.found];
-  run.found.clear();
-  if (runs.get(session) !== run || !found.length) return;
-  const known = knownTitles(session, run);
-  const titles = found.filter(([id]) => !known.has(id)).map(([, details]) => details.title);
-  const shapes = found.flatMap(([id, { shape }]) => (shape ? [[id, shape] as const] : []));
-  if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes);
-  else {
-    if (titles.length) session.displays = [...session.displays, ...titles];
-    if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
-  }
-  if (!titles.length) return;
-  run.displays = session.displays;
-  for (const title of titles) known.add(titleKey(title));
-}
-
-function namingRun(session: NamedLibrary, key: string): NamingRun {
-  let run = runs.get(session);
-  if (!run || run.key !== key) {
-    if (run?.timer) clearTimeout(run.timer);
-    const displays = session.displays;
-    run = {
-      key,
-      pending: new Map(),
-      displays,
-      known: new Set(displays.map(titleKey)),
-      found: new Map(),
-    };
-    runs.set(session, run);
-  }
-  return run;
-}
-
-function requestName(
-  session: NamedLibrary,
-  run: NamingRun,
-  ref: Ref,
-  lookup: typeof fetchDetails,
-): Promise<void> {
-  const id = titleKey(ref);
-  let work = run.pending.get(id);
-  if (!work) {
-    work = Promise.resolve()
-      .then(() => lookup(ref, run.key))
-      .then((found) => {
-        if (!found || runs.get(session) !== run) return;
-        run.found.set(id, found);
-        run.timer ??= setTimeout(() => publish(session, run), BATCH_MS);
-      })
-      .catch(() => {})
-      .finally(() => run.pending.delete(id));
-    run.pending.set(id, work);
-  }
-  return work;
-}
-
-/** Name an explicit bounded set, sharing requests and publishing one metadata batch per session. */
-export async function nameLibraryTitles(
-  session: NamedLibrary,
-  refs: Ref[],
-  key: string,
-  lookup: typeof fetchDetails = fetchDetails,
-): Promise<void> {
-  const run = namingRun(session, key);
-  const queue = [...new Map(refs.map((ref) => [titleKey(ref), ref])).values()];
-  let next = 0;
-  const worker = async () => {
-    for (let ref = queue[next++]; ref; ref = queue[next++]) {
-      if (runs.get(session) !== run) return;
-      const id = titleKey(ref);
-      if (
-        run.found.has(id) ||
-        (knownTitles(session, run).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))
-      )
-        continue;
-      await requestName(session, run, ref, lookup);
+async function nameBatches(session: NamedLibrary, refs: Ref[], known: Set<string>): Promise<Ref[]> {
+  const retry: Ref[] = [];
+  for (let at = 0; at < refs.length; at += LIBRARY_METADATA_BATCH) {
+    if (closedSessions.has(session)) return [];
+    const batch = refs.slice(at, at + LIBRARY_METADATA_BATCH);
+    const found = await session.libraryMetadata(batch).catch(() => null);
+    if (closedSessions.has(session)) return [];
+    if (!found) {
+      retry.push(...batch);
+      continue;
     }
-  };
-  await Promise.all(Array.from({ length: 6 }, worker));
-  publish(session, run);
+    const titles = found.titles.filter((title) => !known.has(titleKey(title)));
+    for (const title of found.titles) known.add(titleKey(title));
+    const shapes = found.shapes.map(
+      (shape) => [titleKey(shape.title), shapeFromWire(shape)] as const,
+    );
+    if (titles.length || shapes.length) {
+      if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes);
+      else {
+        if (titles.length) session.displays = [...session.displays, ...titles];
+        if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
+      }
+    }
+    retry.push(...found.retryable);
+  }
+  return missing(session, retry, known);
 }
 
-/** A direct route or pointer intent is foreground work and joins an identical pending lookup. */
-export function promoteLibraryTitle(
-  session: NamedLibrary,
-  ref: Ref,
-  key: string,
-  lookup: typeof fetchDetails = fetchDetails,
-): Promise<void> {
-  return nameLibraryTitles(session, [ref], key, lookup);
+function queueLibraryTitleRetries(session: NamedLibrary, refs: Ref[]): void {
+  if (!refs.length || closedSessions.has(session)) return;
+  let state = retryStates.get(session);
+  if (!state) {
+    state = { pending: new Map(), attempts: new Map(), running: false };
+    retryStates.set(session, state);
+  }
+  for (const ref of refs) state.pending.set(titleKey(ref), ref);
+  scheduleLibraryTitleRetries(session, state);
+}
+
+function scheduleLibraryTitleRetries(session: NamedLibrary, state: RetryState): void {
+  if (state.timer || state.running || !state.pending.size || closedSessions.has(session)) return;
+  state.timer = setTimeout(() => {
+    state.timer = undefined;
+    void runLibraryTitleRetries(session, state);
+  }, RETRY_DELAY_MS);
+}
+
+async function runLibraryTitleRetries(session: NamedLibrary, state: RetryState): Promise<void> {
+  if (closedSessions.has(session)) return;
+  state.running = true;
+  const offered = [...state.pending.values()];
+  state.pending.clear();
+  const known = new Set(session.displays.map(titleKey));
+  const due = missing(session, offered, known);
+  const dueKeys = new Set(due.map(titleKey));
+  for (const ref of offered) if (!dueKeys.has(titleKey(ref))) state.attempts.delete(titleKey(ref));
+  for (const ref of due) {
+    const key = titleKey(ref);
+    state.attempts.set(key, (state.attempts.get(key) ?? 0) + 1);
+  }
+  const retry = await nameBatches(session, due, known);
+  if (closedSessions.has(session)) return;
+  const retryKeys = new Set(retry.map(titleKey));
+  const exhausted: Ref[] = [];
+  for (const ref of due) {
+    const key = titleKey(ref);
+    if (!retryKeys.has(key)) {
+      state.pending.delete(key);
+      state.attempts.delete(key);
+    } else if ((state.attempts.get(key) ?? 0) >= RETRIES) {
+      state.pending.delete(key);
+      state.attempts.delete(key);
+      exhausted.push(ref);
+    } else state.pending.set(key, ref);
+  }
+  if (exhausted.length)
+    console.warn(
+      `den: ${exhausted.length} library title${exhausted.length === 1 ? '' : 's'} could not be named`,
+    );
+  state.running = false;
+  scheduleLibraryTitleRetries(session, state);
+}
+
+/** End the session's one retry timer and prevent an in-flight answer from publishing after close. */
+export function cancelLibraryTitleNaming(session: NamedLibrary): void {
+  closedSessions.add(session);
+  const state = retryStates.get(session);
+  if (!state) return;
+  clearTimeout(state.timer);
+  state.pending.clear();
+  state.attempts.clear();
+  retryStates.delete(session);
+}
+
+const missing = (session: NamedLibrary, refs: Ref[], known: Set<string>): Ref[] => [
+  ...new Map(
+    refs
+      .filter(
+        (ref) =>
+          !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+      )
+      .map((ref) => [titleKey(ref), ref]),
+  ).values(),
+];
+
+/** A direct route or pointer intent asks the same Worker-owned metadata path at foreground priority. */
+export function promoteLibraryTitle(session: NamedLibrary, ref: Ref): Promise<void> {
+  return nameLibraryTitles(session, [ref]);
 }

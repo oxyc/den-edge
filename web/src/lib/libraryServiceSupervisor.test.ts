@@ -2,19 +2,20 @@ import { expect, it, vi } from 'vitest';
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type { LibraryServiceClientPort } from './libraryServiceSupervisor';
 import { LibraryServiceSupervisor } from './libraryServiceSupervisor';
-import type {
-  LibraryCommand,
-  LibraryObservation,
-  LibraryQuery,
-  LibraryQueryResult,
-  LibrarySelection,
-  LibrarySelectionValue,
-  LibraryServiceCommandResult,
-  LibraryServiceFailure,
-  LibrarySessionStatus,
-  LibraryTask,
-  LibraryTaskResult,
-  LibraryVersion,
+import {
+  LIBRARY_SERVICE_PROTOCOL,
+  type LibraryCommand,
+  type LibraryObservation,
+  type LibraryQuery,
+  type LibraryQueryResult,
+  type LibrarySelection,
+  type LibrarySelectionValue,
+  type LibraryServiceCommandResult,
+  type LibraryServiceFailure,
+  type LibrarySessionStatus,
+  type LibraryTask,
+  type LibraryTaskResult,
+  type LibraryVersion,
 } from './libraryServiceProtocol';
 
 type Subscription = {
@@ -40,6 +41,7 @@ class FakeClient implements LibraryServiceClientPort {
     reject: (error: LibraryServiceError) => void;
   }> = [];
   openFailure?: LibraryServiceFailure;
+  subscriptionFailure?: { kind: LibrarySelection['kind']; failure: LibraryServiceFailure };
   instance = 'worker-1';
   subscriptionRevision = 1;
 
@@ -79,9 +81,11 @@ class FakeClient implements LibraryServiceClientPort {
     listener: (value: LibrarySelectionValue, version: LibraryVersion) => void,
   ): Promise<() => void> {
     this.events.push(`subscribe:${selection.kind}`);
+    if (this.subscriptionFailure?.kind === selection.kind)
+      throw new LibraryServiceError(this.subscriptionFailure.failure);
     const subscription = { selection, listener };
     this.subscriptions.push(subscription);
-    listener(continueValue(this.instance), this.version(this.subscriptionRevision));
+    listener(selectionValue(selection, this.instance), this.version(this.subscriptionRevision));
     return () => {
       const index = this.subscriptions.indexOf(subscription);
       if (index >= 0) this.subscriptions.splice(index, 1);
@@ -102,6 +106,28 @@ class FakeClient implements LibraryServiceClientPort {
 
   version(revision: number): LibraryVersion {
     return { instance: this.instance, generation: 'generation-1', revision };
+  }
+}
+
+class StaggeredSubscriptionClient extends FakeClient {
+  readonly releaseSubscriptions: Array<() => void> = [];
+
+  override subscribe(
+    selection: LibrarySelection,
+    listener: (value: LibrarySelectionValue, version: LibraryVersion) => void,
+  ): Promise<() => void> {
+    this.events.push(`subscribe:${selection.kind}`);
+    const subscription = { selection, listener };
+    this.subscriptions.push(subscription);
+    return new Promise((resolve) =>
+      this.releaseSubscriptions.push(() => {
+        listener(selectionValue(selection, this.instance), this.version(this.subscriptionRevision));
+        resolve(() => {
+          const index = this.subscriptions.indexOf(subscription);
+          if (index >= 0) this.subscriptions.splice(index, 1);
+        });
+      }),
+    );
   }
 }
 
@@ -148,6 +174,59 @@ const continueValue = (instance: string): LibrarySelectionValue => ({
   needsShapes: [],
 });
 
+const selectionValue = (selection: LibrarySelection, instance: string): LibrarySelectionValue => {
+  if (selection.kind === 'history')
+    return {
+      kind: 'history',
+      items: [
+        {
+          title: { type: 'movie', id: 680 },
+          watchedAt: 1_800_000_000_000,
+          episodes: 0,
+        },
+      ],
+    };
+  if (selection.kind === 'connections')
+    return {
+      kind: 'connections',
+      apiKeys: { tmdb: { configured: true, masked: '••••-key' } },
+      parentalPinConfigured: false,
+      remoteAccessConfigured: false,
+      plugins: [
+        {
+          manifestUrl: 'https://den.example/scout/config/manifest.json',
+          pendingApprovalOn: [{ id: 'aaaaaaaaaaaaaaaa', name: 'Living Room TV' }],
+        },
+      ],
+      servers: [],
+      devices: [
+        {
+          id: 'aaaaaaaaaaaaaaaa',
+          name: 'Living Room TV',
+          kind: 'tv',
+          lastSeenAt: 1_800_000_000_000,
+          libraryFormat: 4,
+        },
+      ],
+      diagnostics: {
+        libraryFormat: 4,
+        pendingChanges: 0,
+        selfDeviceId: 'bbbbbbbbbbbbbbbb',
+      },
+    };
+  if (selection.kind === 'overview')
+    return {
+      kind: 'overview',
+      owned: [{ type: 'movie', id: 617126 }],
+      watched: [],
+      watchlist: [{ type: 'movie', id: 617126 }],
+      standings: [{ title: { type: 'movie', id: 617126 }, standing: 'watchlist' }],
+      weighted: [],
+      seeds: { watched: [], watchlisted: [{ type: 'movie', id: 617126 }] },
+    };
+  return continueValue(instance);
+};
+
 it('replays an in-flight command with the same operation ID and preserves stale views', async () => {
   const first = new FakeClient();
   const second = new FakeClient();
@@ -177,7 +256,7 @@ it('replays an in-flight command with the same operation ID and preserves stale 
   expect(second.commands[0]?.operationId).toBe('operation-1');
   second.commands[0]!.resolve({
     type: 'command-result',
-    protocol: 2,
+    protocol: LIBRARY_SERVICE_PROTOCOL,
     requestId: 'replacement',
     operationId: 'operation-1',
     outcome: 'applied',
@@ -274,6 +353,111 @@ it('reports the newest initial replacement version as the ready version', async 
   expect(opened).toEqual(client.version(7));
   expect(statuses).toHaveBeenLastCalledWith({ kind: 'ready', version: client.version(7) });
   supervisor.close();
+});
+
+it('publishes staggered initial Worker replacements together once the connection is complete', async () => {
+  const client = new StaggeredSubscriptionClient();
+  const supervisor = new LibraryServiceSupervisor(() => client);
+  const events: string[] = [];
+  supervisor.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
+    if (snapshot.connection === 'ready') events.push('overview');
+  });
+  supervisor.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
+    if (snapshot.connection === 'ready') events.push('continue');
+  });
+  supervisor.onStatus((status) => events.push(`status:${status.kind}`));
+
+  const opening = supervisor.open(openOptions);
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(2));
+
+  client.releaseSubscriptions[0]!();
+  await Promise.resolve();
+  expect(events).toEqual([]);
+
+  client.releaseSubscriptions[1]!();
+  await expect(opening).resolves.toEqual(client.version(1));
+  expect(events).toEqual(['overview', 'continue', 'status:ready']);
+  supervisor.close();
+});
+
+it('binds History and Connections acquired while initial Worker replacements are still arriving', async () => {
+  const client = new StaggeredSubscriptionClient();
+  const supervisor = new LibraryServiceSupervisor(() => client);
+  const events: string[] = [];
+  supervisor.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
+    if (snapshot.connection === 'ready') events.push('overview');
+  });
+
+  const opening = supervisor.open(openOptions);
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(1));
+  supervisor.subscribeSnapshot({ kind: 'history' }, (snapshot) => {
+    if (snapshot.connection === 'ready') events.push(`history:${snapshot.value?.kind}`);
+  });
+  supervisor.subscribeSnapshot({ kind: 'connections' }, (snapshot) => {
+    if (snapshot.connection === 'ready') {
+      const connections = snapshot.value?.kind === 'connections' ? snapshot.value : undefined;
+      events.push(
+        `connections:${connections?.devices[0]?.name}:${connections?.plugins[0]?.pendingApprovalOn[0]?.name}`,
+      );
+    }
+  });
+  client.releaseSubscriptions[0]!();
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(3));
+  expect(events).toEqual([]);
+
+  client.releaseSubscriptions[1]!();
+  client.releaseSubscriptions[2]!();
+  await expect(opening).resolves.toEqual(client.version(1));
+  expect(events).toEqual([
+    'overview',
+    'history:history',
+    'connections:Living Room TV:Living Room TV',
+  ]);
+  supervisor.close();
+});
+
+it('isolates a lazy subscription failure without weakening required root readiness', async () => {
+  const client = new FakeClient();
+  client.subscriptionFailure = {
+    kind: 'history',
+    failure: { code: 'internal', message: 'history projection failed', retryable: true },
+  };
+  const supervisor = new LibraryServiceSupervisor(() => client, { maxAutomaticRestarts: 0 });
+  const root = vi.fn();
+  const history = vi.fn();
+  supervisor.subscribeSnapshot({ kind: 'continue' }, root);
+
+  const opening = supervisor.open(openOptions);
+  supervisor.subscribeSnapshot({ kind: 'history' }, history);
+
+  await expect(opening).resolves.toEqual(client.version(1));
+  expect(root).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      connection: 'ready',
+      value: expect.objectContaining({ kind: 'continue' }),
+    }),
+  );
+  expect(history).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      connection: 'failed',
+      error: expect.objectContaining({ message: 'history projection failed' }),
+    }),
+  );
+  supervisor.close();
+
+  const requiredClient = new FakeClient();
+  requiredClient.subscriptionFailure = {
+    kind: 'continue',
+    failure: { code: 'internal', message: 'root projection failed', retryable: false },
+  };
+  const required = new LibraryServiceSupervisor(() => requiredClient, {
+    maxAutomaticRestarts: 0,
+  });
+  required.subscribeSnapshot({ kind: 'continue' }, () => {});
+  await expect(required.open(openOptions)).rejects.toMatchObject({
+    failure: { message: 'root projection failed' },
+  });
+  required.close();
 });
 
 it('stops after the bounded replacement attempt and retains the failed stale view', async () => {

@@ -1,114 +1,186 @@
 import { expect, it, vi } from 'vitest';
-import { nameLibraryTitles, promoteLibraryTitle } from './libraryNaming';
-import type { MediaType, Shape, Title } from './library';
-import type { Details } from './tmdb';
+import { LIBRARY_METADATA_BATCH, nameLibraryTitles, promoteLibraryTitle } from './libraryNaming';
+import type { Shape, Title } from './library';
+import type { LibraryModel } from './libraryModel.svelte';
+import { LibrarySession } from './librarySession.svelte';
+import type { LibraryMetadataShape, LibraryMetadataTitle } from './libraryServiceProtocol';
 
-const ref = { type: 'movie' as const, id: 42 };
-type Ref = { type: MediaType; id: number };
-const title: Title = { ...ref, title: 'Movie' };
-const session = () => ({ displays: [] as Title[], shapes: new Map<string, Shape>() });
+const movie = { type: 'movie' as const, id: 42 };
+const title: LibraryMetadataTitle = { ...movie, title: 'Movie' };
 
-const turns = async () => {
-  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
-};
+type MetadataLookup = (refs: readonly { type: 'movie' | 'tv'; id: number }[]) => Promise<{
+  titles: LibraryMetadataTitle[];
+  shapes: LibraryMetadataShape[];
+  retryable: Array<{ type: 'movie' | 'tv'; id: number }>;
+}>;
 
-it('shares in-flight naming and skips already named titles', async () => {
-  const state = session();
-  let finish!: (value: Details) => void;
-  const lookup = vi.fn(
-    () =>
-      new Promise<Details>((resolve) => {
-        finish = resolve;
-      }),
-  );
-  const first = nameLibraryTitles(state, [ref], 'key', lookup);
-  const second = promoteLibraryTitle(state, ref, 'key', lookup);
-  await Promise.resolve();
-  expect(lookup).toHaveBeenCalledTimes(1);
-  finish({ title });
-  await Promise.all([first, second]);
-  await nameLibraryTitles(state, [ref], 'key', lookup);
-  expect(lookup).toHaveBeenCalledTimes(1);
+const session = (
+  libraryMetadata: MetadataLookup = vi.fn(async () => ({ titles: [], shapes: [], retryable: [] })),
+) => ({
+  displays: [] as Title[],
+  shapes: new Map<string, Shape>(),
+  libraryMetadata,
+});
+
+it('asks the service once for deduplicated missing metadata and skips what the page already has', async () => {
+  const libraryMetadata = vi.fn(async () => ({ titles: [title], shapes: [], retryable: [] }));
+  const state = session(libraryMetadata);
+  await nameLibraryTitles(state, [movie, movie]);
+  expect(libraryMetadata).toHaveBeenCalledWith([movie]);
   expect(state.displays).toEqual([title]);
+
+  await promoteLibraryTitle(state, movie);
+  expect(libraryMetadata).toHaveBeenCalledTimes(1);
 });
 
-it('publishes names in one batch instead of one Home update per title', async () => {
-  let assignments = 0;
-  let displays: Title[] = [];
+it('publishes the Worker title and TV shape together in one page assignment', async () => {
+  const series = { type: 'tv' as const, id: 7 };
   const state = {
-    get displays() {
-      return displays;
-    },
-    set displays(next) {
-      assignments++;
-      displays = next;
-    },
-    shapes: new Map<string, Shape>(),
-  };
-  const refs = Array.from({ length: 40 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
-  await nameLibraryTitles(state, refs, 'key', async (wanted) => ({
-    title: { ...wanted, title: `#${wanted.id}` },
-  }));
-  expect(displays).toHaveLength(40);
-  expect(assignments).toBe(1);
-});
-
-it('hands sessions one exact metadata publication', async () => {
-  const state = {
-    ...session(),
+    ...session(
+      vi.fn(async () => ({
+        titles: [{ ...series, title: 'Seven' }],
+        shapes: [
+          {
+            title: series,
+            seasons: [{ season: 1, episodes: 8 }],
+            lastAired: { season: 1, episode: 8 },
+          },
+        ],
+        retryable: [],
+      })),
+    ),
     publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
       state.displays = [...state.displays, ...titles];
       state.shapes = new Map([...state.shapes, ...shapes]);
     },
   };
   const publish = vi.spyOn(state, 'publishLibraryMetadata');
-  const series = { type: 'tv' as const, id: 7 };
-  const shape = { counts: new Map([[1, 8]]) };
-  await nameLibraryTitles(state, [series], 'key', async () => ({
-    title: { ...series, title: 'Seven' },
-    shape,
+
+  await nameLibraryTitles(state, [series]);
+
+  expect(publish).toHaveBeenCalledTimes(1);
+  expect(state.displays).toEqual([{ ...series, title: 'Seven' }]);
+  expect(state.shapes.get('tv:7')).toEqual({
+    counts: new Map([[1, 8]]),
+    lastAired: { season: 1, episode: 8 },
+  });
+});
+
+it('publishes each small service batch progressively across a tail larger than the wire bound', async () => {
+  const count = 513;
+  const refs = Array.from({ length: count }, (_, index) => ({
+    type: 'movie' as const,
+    id: index + 1,
   }));
-  expect(publish).toHaveBeenCalledWith([{ ...series, title: 'Seven' }], [['tv:7', shape]]);
+  const libraryMetadata = vi.fn(async (batch: readonly { type: 'movie' | 'tv'; id: number }[]) => ({
+    titles: batch.map((ref) => ({ ...ref, title: `#${ref.id}` })),
+    shapes: [],
+    retryable: [],
+  }));
+  const state = {
+    ...session(libraryMetadata),
+    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
+      state.displays = [...state.displays, ...titles];
+      state.shapes = new Map([...state.shapes, ...shapes]);
+    },
+  };
+  const publish = vi.spyOn(state, 'publishLibraryMetadata');
+
+  await nameLibraryTitles(state, refs);
+
+  expect(libraryMetadata.mock.calls.map(([batch]) => batch.length)).toEqual([
+    ...Array(8).fill(LIBRARY_METADATA_BATCH),
+    1,
+  ]);
+  expect(publish).toHaveBeenCalledTimes(9);
+  expect(state.displays).toHaveLength(count);
 });
 
-it('keeps six lookups in flight', async () => {
-  const state = session();
-  const refs = Array.from({ length: 7 }, (_, id) => ({ type: 'movie' as const, id: id + 1 }));
-  const finishes: (() => void)[] = [];
-  const lookup = vi.fn(
-    (wanted: Ref) =>
-      new Promise<Details>((resolve) => {
-        finishes.push(() => resolve({ title: { ...wanted, title: `#${wanted.id}` } }));
-      }),
-  );
-  const naming = nameLibraryTitles(state, refs, 'key', lookup);
-  await turns();
-  expect(lookup).toHaveBeenCalledTimes(6);
-  finishes.shift()?.();
-  await turns();
-  expect(lookup).toHaveBeenCalledTimes(7);
-  for (const finish of finishes) finish();
-  await naming;
-  expect(state.displays).toHaveLength(7);
+it('leaves a failed Worker question retryable', async () => {
+  vi.useFakeTimers();
+  try {
+    const libraryMetadata = vi
+      .fn<MetadataLookup>()
+      .mockRejectedValueOnce(new Error('worker restarted'))
+      .mockResolvedValueOnce({ titles: [title], shapes: [], retryable: [] });
+    const state = session(libraryMetadata);
+
+    await expect(nameLibraryTitles(state, [movie])).resolves.toBeUndefined();
+    expect(state.displays).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(state.displays).toEqual([title]));
+    expect(libraryMetadata).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
-it('ignores stale API-key results and permits retry after a failed request', async () => {
-  const state = session();
-  let finish!: (value: Details) => void;
-  const old = nameLibraryTitles(
-    state,
-    [ref],
-    'old',
-    () =>
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
-  );
-  await Promise.resolve();
-  await nameLibraryTitles(state, [ref], 'new', async () => null);
-  finish({ title: { ...title, title: 'Stale' } });
-  await old;
-  expect(state.displays).toEqual([]);
-  await nameLibraryTitles(state, [ref], 'new', async () => ({ title }));
-  expect(state.displays).toEqual([title]);
+it('retries only transient refs while publishing successful neighbours immediately', async () => {
+  vi.useFakeTimers();
+  try {
+    const later = { type: 'movie' as const, id: 43 };
+    const libraryMetadata = vi
+      .fn<MetadataLookup>()
+      .mockResolvedValueOnce({ titles: [title], shapes: [], retryable: [later] })
+      .mockResolvedValueOnce({
+        titles: [{ ...later, title: 'Later' }],
+        shapes: [],
+        retryable: [],
+      });
+    const state = session(libraryMetadata);
+    await nameLibraryTitles(state, [movie, later]);
+    expect(state.displays).toEqual([title]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(state.displays).toHaveLength(2));
+
+    expect(libraryMetadata.mock.calls.map(([refs]) => refs)).toEqual([[movie, later], [later]]);
+    expect(state.displays).toEqual([title, { ...later, title: 'Later' }]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('coalesces overlapping background retries for the same session and title', async () => {
+  vi.useFakeTimers();
+  try {
+    const libraryMetadata = vi
+      .fn<MetadataLookup>()
+      .mockResolvedValueOnce({ titles: [], shapes: [], retryable: [movie] })
+      .mockResolvedValueOnce({ titles: [], shapes: [], retryable: [movie] })
+      .mockResolvedValueOnce({ titles: [title], shapes: [], retryable: [] });
+    const state = session(libraryMetadata);
+
+    await Promise.all([nameLibraryTitles(state, [movie]), nameLibraryTitles(state, [movie])]);
+    expect(libraryMetadata).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(state.displays).toEqual([title]));
+
+    expect(libraryMetadata).toHaveBeenCalledTimes(3);
+    expect(libraryMetadata.mock.calls[2]?.[0]).toEqual([movie]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('cancels a pending retry when its LibrarySession closes', async () => {
+  vi.useFakeTimers();
+  try {
+    const libraryMetadata = vi.fn<MetadataLookup>().mockResolvedValue({
+      titles: [],
+      shapes: [],
+      retryable: [movie],
+    });
+    const close = vi.fn();
+    const model = { libraryMetadata, close } as unknown as LibraryModel;
+    const state = new LibrarySession(model);
+
+    await nameLibraryTitles(state, [movie]);
+    state.close();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(libraryMetadata).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });

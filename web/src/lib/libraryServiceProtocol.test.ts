@@ -970,4 +970,69 @@ describe('library service server protocol', () => {
       ).toMatchObject({ ok: true, value: { type: 'status' } });
     }
   });
+
+  it('strictly bounds library metadata questions and validates the title/shape batch', () => {
+    const request = (titles: unknown[]) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'metadata',
+        query: { kind: 'library.metadata', titles },
+      });
+    expect(request([{ type: 'tv', id: 11 }])).toMatchObject({ ok: true });
+    expect(request([{ type: 'tv', id: 11, title: 'page field' }])).toMatchObject({ ok: false });
+    expect(
+      request(
+        Array.from({ length: LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles + 1 }, (_, id) => ({
+          type: 'movie',
+          id: id + 1,
+        })),
+      ),
+    ).toMatchObject({ ok: false });
+
+    const reply = (result: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'metadata',
+        version,
+        result,
+      });
+    expect(
+      reply({
+        kind: 'library.metadata',
+        titles: [{ type: 'tv', id: 11, title: 'Eleven', rating: 8, ratingSource: 'tmdb' }],
+        shapes: [
+          {
+            title: { type: 'tv', id: 11 },
+            seasons: [{ season: 1, episodes: 8 }],
+            lastAired: { season: 1, episode: 7 },
+          },
+        ],
+        retryable: [],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      reply({
+        kind: 'library.metadata',
+        titles: [{ type: 'movie', id: 7, title: 'Seven', private: 'secret' }],
+        shapes: [],
+        retryable: [],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      reply({
+        kind: 'library.metadata',
+        titles: [],
+        shapes: [
+          {
+            title: { type: 'tv', id: 11 },
+            seasons: [{ season: 1, episodes: 8 }],
+            lastAired: { season: 1, episode: 9 },
+          },
+        ],
+        retryable: [],
+      }),
+    ).toMatchObject({ ok: false });
+  });
 });

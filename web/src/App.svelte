@@ -13,7 +13,6 @@
   import { tabName } from './lib/tabName.svelte';
   import { parseRoute, type Explore, type PeopleView } from './lib/route';
   import { ConnectDialogScreen, InviteDialogScreen, LinkScreen } from './lib/screens.svelte';
-  import { preloadSyncPolicy } from './lib/syncLoader';
   import { onTmdbThrottle } from './lib/tmdbCache';
 
   let tmdbLimited = $state(false);
@@ -92,10 +91,11 @@
   });
 
   $effect(() => {
-    if (links.current) preloadSyncPolicy();
-    // Pairing, and the curve it runs on, load only for a browser that isn't paired yet and hasn't already
-    // chosen to look around without it.
-    else if (!links.browsing) void LinkScreen.load();
+    // The library service Worker owns storage and den-core. Keeping its WASM out of the page avoids compiling the
+    // same module twice; page-only recovery still loads its own dedicated Worker when someone opens that flow.
+    // Pairing, and the curve it runs on, load only for a browser that isn't paired yet and hasn't already chosen to
+    // look around without it.
+    if (!links.current && !links.browsing) void LinkScreen.load();
   });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
