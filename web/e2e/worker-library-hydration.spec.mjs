@@ -119,6 +119,22 @@ async function routes(page, metadata) {
       },
     }),
   );
+  await page.route('**/scout/fixture-install/stream/series/tt5194410%3A1%3A1.json', (route) => {
+    metadata.sourceMembers ??= [];
+    metadata.sourceMembers.push(route.request().headers()['x-den-library-member']);
+    return route.fulfill({
+      json: {
+        streams: [
+          {
+            title: 'Springfloden.S01E01.1080p.WEB.mkv',
+            url: `${E2E_ORIGIN}/scout/fixture-install/play/springfloden`,
+            behaviorHints: { filename: 'Springfloden.S01E01.1080p.WEB.mkv' },
+            attributes: { resolution: '1080p', cached: true, seeders: 5 },
+          },
+        ],
+      },
+    });
+  });
   await page.route('**/scout/fixture-install/play/queued**', (route) =>
     route.fulfill({
       status: 202,
@@ -326,6 +342,35 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   await openSettings.press('Enter');
   await openGuests();
   await expect.poll(() => [...metadata.grantMembers]).toEqual([membership]);
+});
+
+test('a cold paired Worker authenticates a direct-IMDb episode source request', async ({
+  page,
+}) => {
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+    sourceMembers: [],
+  };
+
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.goto(`${FIXTURE}?online&source`);
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Worker episode sources ready' }),
+  ).toBeVisible({ timeout: 15_000 });
+  expect(metadata.members.size).toBe(1);
+  expect(metadata.sourceMembers).toEqual([...metadata.members]);
 });
 
 test('paired billboard holds the early generic fallback until retained lookup settles', async ({
