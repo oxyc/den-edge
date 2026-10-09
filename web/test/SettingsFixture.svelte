@@ -4,12 +4,21 @@
   // without a paired TV or a den-edge behind it, and a save lands where the page reads it back from.
   import Settings from '../src/Settings.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
-  import type { LibrarySession } from '../src/lib/librarySession.svelte';
-  import { fetchRoutes } from '../src/lib/routes';
-  import type { ConfigValue, Row, SettingsRow, Stamp } from '../src/lib/wire';
+  import { browserClock } from '../src/lib/clock';
+  import type { LibraryLog } from '../src/lib/log';
+  import {
+    rowName,
+    type ConfigValue,
+    type Row,
+    type SettingsRow,
+    type Stamp,
+  } from '../src/lib/wire';
+  import { fixtureLibraryService } from './libraryService';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
+  const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
+  const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
     kind: 'set',
     schema: 2,
@@ -18,16 +27,16 @@
   });
 
   // Device ids are the stamp device ids each device lists itself under, newest `seen` first on the page.
-  const settings: Record<string, SettingsRow> = {
-    keys: row('keys', { tmdb: { string: 'K1' }, parentalPIN: { string: '1234' } }),
-    prefs: row('prefs', {
+  let stored: Row[] = [
+    row('keys', { tmdb: { string: 'K1' }, parentalPIN: { string: '1234' } }),
+    row('prefs', {
       'den.excludedGenreIDs': { ints: [27] },
       'den.hideAnime': { bool: true },
       'den.myServicePicks': { strings: ['8@FI'] },
       'den.maturityCeiling': { string: 'pg13' },
     }),
-    plugins: row('plugins', { 'https://addon.example/manifest.json': { bool: true } }),
-    devices: row('devices', {
+    row('plugins', { 'https://addon.example/manifest.json': { bool: true } }),
+    row('devices', {
       'aaaa000000000001.name': { string: 'Living Room TV' },
       'aaaa000000000001.kind': { string: 'tv' },
       'aaaa000000000001.seen': { int: 5000 },
@@ -35,20 +44,24 @@
       'bbbb000000000002.kind': { string: 'browser' },
       'bbbb000000000002.seen': { int: 9000 },
     }),
-  };
+  ];
 
-  const imported: Row[] = [];
+  const put = (next: Row) => {
+    stored = [...stored.filter((held) => rowName(held) !== rowName(next)), next];
+  };
   const log = {
-    settings: (name: string) => settings[name],
-    // A write lands in the same map the page reads, so a change made here shows here.
-    write: async (next: SettingsRow) => {
-      settings[next.name] = next;
-      return true;
-    },
-    moved: false,
+    readOnly: false,
     wireMinimum: 4,
+    currentGeneration: undefined,
+    pendingActions: 0,
+    libraryId: fixtureLibraryId,
+    memberProof: fixtureMemberToken,
+    settings: (name: string) =>
+      stored.find((held): held is SettingsRow => held.kind === 'set' && held.name === name),
     refresh: async () => false,
-    rows: () => Object.values(settings),
+    readToHead: async () => true,
+    rows: () => stored,
+    seqOf: () => 0,
     // One film seen twice and one on the watchlist, for the history export.
     documents: () => [
       {
@@ -76,36 +89,43 @@
     newestStamp: () => at,
     kept: async () => undefined,
     keep: async () => {},
+    relayMembership: async () => ({
+      libraryId: fixtureLibraryId,
+      memberToken: fixtureMemberToken,
+    }),
     title: () => undefined,
     episode: () => undefined,
-    refusal: null as string | null,
-    writeRows: async (rows: Row[]) => {
-      imported.push(...rows);
+    write: async (next: Row) => {
+      put(next);
+      return next;
+    },
+    writeAt: async (next: SettingsRow) => {
+      put(next);
       return true;
     },
-  };
-
-  const session = $state({
-    // Bumped as the real session does, so what a save wrote is what the page draws next.
-    changed(settings = false) {
-      this.revision++;
-      if (settings) this.settingsRevision++;
+    writeRows: async (rows: Row[]) => {
+      for (const next of rows) put(next);
+      return true;
     },
-    revision: 0,
-    settingsRevision: 0,
-    displays: [
+    close() {},
+  } as unknown as LibraryLog;
+
+  const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+  const library = fixtureLibraryService({
+    log,
+    device: browserClock().device,
+    libraryKey: fixtureLibraryKey,
+  });
+  const { model, session } = library;
+  session.publishLibraryMetadata(
+    [
       { type: 'movie', id: 550, title: 'Fight Club', year: 1999, imdbId: 'tt0137523' },
       { type: 'movie', id: 603, title: 'The Matrix', year: 1999, imdbId: 'tt0133093' },
     ],
-    shapes: new Map(),
-    log,
-    opened: Promise.resolve(log),
-    routes: fetchRoutes,
-    // `?switched`: this browser just moved the library to v4, as the real session says after `switchLibraryToV4`.
-    toast: new URLSearchParams(location.search).has('switched') ? 'Library updated to v4' : null,
-    alert: null,
-  }) as unknown as LibrarySession;
-  const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+    [],
+  );
+  // `?switched`: this browser just moved the library to v4, as the real session says after `switchLibraryToV4`.
+  if (new URLSearchParams(location.search).has('switched')) session.toast = 'Library updated to v4';
   const link = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
@@ -116,5 +136,5 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  <Settings {link} {session} />
+  <Settings {link} {model} onresetkey={async () => null} />
 </main>

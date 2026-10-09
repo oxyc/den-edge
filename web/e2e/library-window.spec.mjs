@@ -55,9 +55,20 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
   });
-  await expect(row.locator('[data-card-index]')).toHaveCount(201);
   await expect(row.locator('[data-card-index="200"] .card')).toHaveCount(1);
   await expect(row.locator('[data-card-index="0"] .card')).toHaveCount(0);
   expect(await row.locator('.card').count()).toBeLessThan(20);
   expect(await page.evaluate(() => window.takeFrameGeometryReads())).toEqual([]);
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=200&sparse-many`);
+  const sparse = page.getByRole('region', { name: 'Continue Watching', exact: true });
+  await expect(sparse).toBeVisible();
+  // A title cached far down the shelf must not jump ahead of unnamed titles or cause a 200-title lookup burst.
+  await expect(sparse.locator('[data-card-index]')).toHaveCount(8);
+  await sparse.locator('.track').evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+    node.dispatchEvent(new Event('scroll'));
+  });
+  await expect(sparse.locator('[data-card-index]')).toHaveCount(16);
+  await expect(sparse.getByRole('link', { name: 'Measured movie 1', exact: true })).toHaveCount(0);
 });

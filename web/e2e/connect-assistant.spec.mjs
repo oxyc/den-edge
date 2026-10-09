@@ -219,6 +219,12 @@ async function linkingContexts(browser, { expired = false } = {}) {
       return json(200, { deleted: true });
     if (url.pathname === '/inbox/append') return json(200, { appended: true });
     if (url.pathname === '/inbox/drain') return json(200, { messages: [] });
+    // The linked browser opens the handed-over library through LibraryService before it can prove membership to
+    // OAuth. Stand in for that existing (empty) den-edge library, including its bounded member registration.
+    if (/^\/lib\/[0-9a-f]+\/member$/.test(url.pathname) && request.method() === 'PUT')
+      return json(200, { registered: true });
+    if (/^\/lib\/[0-9a-f]+\/changes$/.test(url.pathname))
+      return json(200, { generation: 'fixture', entries: [], head: 0, more: false });
     if (url.pathname === '/routes' || url.pathname === '/config') return json(200, {});
     if (url.pathname === '/version') return json(200, { version: 'test' });
     if (/^\/(?:lib|tmdb|atlas|reel|scout|subs|grant)\//.test(url.pathname)) return json(404, {});

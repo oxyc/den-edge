@@ -17,6 +17,22 @@ const gate = () => {
   const promise = new Promise((r) => (release = r));
   return { promise, release };
 };
+const capability = `m/s/${'late-plan'.padEnd(40, '_')}?s=${'10'.repeat(12)}`;
+const planUrl = 'http://reel.invalid/sources/yt1.json?v=2';
+const sourcePlan = {
+  v: 2,
+  expires: 2_000_000_000,
+  crop: null,
+  sources: [
+    {
+      kind: 'mp4',
+      audio: true,
+      width: 1280,
+      height: 720,
+      delivery: { type: 'reel', capability },
+    },
+  ],
+};
 const film = (id) => ({
   id,
   media_type: 'movie',
@@ -44,33 +60,51 @@ async function setup(page) {
       return scrollTo.apply(this, args);
     };
   });
-  const gates = { sources: gate(), slow: gate() };
-  let sources = 0;
+  const gates = {
+    routes: gate(),
+    plan: gate(),
+    planAsked: gate(),
+    planReturned: gate(),
+    slow: gate(),
+  };
+  await page.route('**/routes', async (r) => {
+    await gates.routes.promise;
+    await r.fulfill({ json: { reel: [{ url: E2E_ORIGIN }] } });
+  });
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({ contentType: 'image/svg+xml', body: art }),
   );
-  await page.route('**/reel/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route('**/reel/meta/**', (r) =>
+  await page.route('**/reel/prepare/**', (r) =>
     r.fulfill({
       json: {
-        meta: {
-          links: [
-            {
-              trailers: 'http://reel.invalid/play/yt1',
-              sources: 'http://reel.invalid/sources/yt1.json',
-            },
-          ],
-        },
+        v: 2,
+        meta: { links: [{ planUrl }] },
+        primary: { id: 'yt1', planUrl },
+        // A degraded prepare makes the cursor fetch this plan lazily. That late plan publication is the
+        // trailer answer whose arrival must not move the title page.
+        primaryPlan: null,
       },
     }),
   );
-  // The hero's trailer is asked for once, and again when den-edge's routes table replaces the one kept from the
-  // last visit. The second answer is the slow one.
-  await page.route('**/reel/sources/**', async (r) => {
-    if (++sources > 1) await gates.sources.promise;
-    await r.fulfill({ json: { sources: [] } });
+  await page.route('**/reel/sources/yt1.json**', async (r) => {
+    gates.planAsked.release();
+    await gates.plan.promise;
+    await r.fulfill({ json: sourcePlan });
+    gates.planReturned.release();
   });
-  await page.route('**/reel/play/**', (r) => r.fulfill({ status: 404, body: '' }));
+  await page.route('**/reel/transport', (r) =>
+    r.fulfill({
+      json: {
+        v: 2,
+        capability,
+        attempts: [{ type: 'relay', url: `/reel/${capability}` }],
+      },
+    }),
+  );
+  await page.route(
+    (url) => `${url.pathname}${url.search}` === `/reel/${capability}`,
+    (r) => r.fulfill({ status: 404, body: '' }),
+  );
   await page.route('**/atlas/**', (r) => r.fulfill({ json: { ids: [] } }));
   await routeTmdb(page, async (r) => {
     const path = new URL(r.request().url()).pathname;
@@ -136,6 +170,7 @@ test('late answers leave a title opened from Search where the viewer scrolled it
     TITLE,
   );
   await expect(page.getByRole('heading', { level: 1, name: 'The Title' })).toBeVisible();
+  await gates.planAsked.promise;
   // Down toward the rows under the cast.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
   await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(300);
@@ -145,8 +180,8 @@ test('late answers leave a title opened from Search where the viewer scrolled it
   const before = (await at()).scrolls.length;
   const landed = {};
 
-  // den-edge's routes table, replacing the kept one: the trailer is looked up a second time.
-  await page.evaluate(() => window.fixtureRoutes());
+  // den-edge's routes table, replacing the kept one while the v2 plan is still in flight.
+  gates.routes.release();
   await page.waitForTimeout(300);
   landed.routes = (await at()).y;
   // A library sync that brought a row.
@@ -157,9 +192,12 @@ test('late answers leave a title opened from Search where the viewer scrolled it
   await page.evaluate(() => window.fixtureSync(true));
   await page.waitForTimeout(300);
   landed.settings = (await at()).y;
-  // The trailer's late second answer.
-  gates.sources.release();
-  await page.waitForTimeout(300);
+  // Reel's late source-plan answer, consumed through the next two render opportunities.
+  gates.plan.release();
+  await gates.planReturned.promise;
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
   landed.trailer = (await at()).y;
   // The last "More like this" title.
   gates.slow.release();

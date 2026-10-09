@@ -555,7 +555,7 @@ export class LibraryModel {
     return this.task(
       {
         kind: 'history.import',
-        items: structuredClone(items) as HistoryImportItem[],
+        items: structuredClone($state.snapshot(items)) as HistoryImportItem[],
       },
       operationId,
     );

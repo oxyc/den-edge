@@ -4,10 +4,10 @@
   import Library from '../src/Library.svelte';
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
-  import type { LibrarySession } from '../src/lib/librarySession.svelte';
-  import { fetchRoutes } from '../src/lib/routes';
-  import { SessionServices } from '../src/lib/sessionServices.svelte';
-  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
+  import type { LibraryLog } from '../src/lib/log';
+  import { LibrarySession } from '../src/lib/librarySession.svelte';
+  import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
+  import { fixtureLibraryService } from './libraryService';
   import '../src/app.css';
   let route = $state(parseRoute(location.pathname + location.search));
   // As App does it: the address owns the query, but the field keeps what was typed while a result is open.
@@ -33,9 +33,9 @@
     .split(',')
     .filter(Boolean)
     .map(Number);
-  const at = [100, 0, 'test'];
+  const at = [100, 0, 'aaaaaaaaaaaaaaaa'] as const satisfies Stamp;
   const stamped = <T,>(value: T) => ({ value, at });
-  const rows = watched.map((id) => ({
+  const rows: Row[] = watched.map((id): TitleRow => ({
     kind: 'rec',
     schema: 2,
     title: { type: 'movie', id },
@@ -53,15 +53,31 @@
   });
   // A kept billboard survives a reload, as it does in the library; nothing else is kept.
   const KEPT = 'fixture.kept.';
+  const keys: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'keys',
+    values: { tmdb: stamped({ string: 'fixture-key' }) },
+  };
   const log = {
-    settings: (group: string) =>
-      group === 'keys'
-        ? { values: { tmdb: { value: { string: 'fixture-key' }, at: [1, 0, 'test'] } } }
-        : undefined,
+    readOnly: false,
+    wireMinimum: 4,
+    currentGeneration: undefined,
+    pendingActions: 0,
+    libraryId: 'fixture-library',
+    memberProof: 'fixture-member',
+    settings: (group: string) => (group === 'keys' ? keys : undefined),
     refresh: async () => false,
+    readToHead: async () => true,
     rows: () => rows,
-    newestStamp: () => [1, 0, 'test'],
-    title: () => undefined,
+    seqOf: () => 0,
+    newestStamp: () => at,
+    title: (ref: { type: string; id: number }) =>
+      rows.find(
+        (row): row is TitleRow =>
+          row.kind === 'rec' && row.title.type === ref.type && row.title.id === ref.id,
+      ),
+    episode: () => undefined,
     kept: async (name: string) =>
       name.startsWith('billboard.')
         ? (JSON.parse(localStorage.getItem(KEPT + name) ?? 'null') ?? undefined)
@@ -69,19 +85,16 @@
     keep: async (name: string, value: unknown) => {
       if (name.startsWith('billboard.')) localStorage.setItem(KEPT + name, JSON.stringify(value));
     },
-  };
-  const session = {
-    ...fixtureLibrarySessionMethods,
-    changed: () => {},
-    revision: 0,
-    settingsRevision: 0,
-    displays: [],
-    shapes: new Map(),
-    log: guest ? null : log,
-    opened: Promise.resolve(guest ? null : log),
-    routes: fetchRoutes,
-    services: new SessionServices(fetchRoutes, () => {}),
-  } as unknown as LibrarySession;
+    relayMembership: async () => null,
+    write: async (row: Row) => row,
+    writeAt: async () => true,
+    close() {},
+  } as unknown as LibraryLog;
+  const library = guest ? null : fixtureLibraryService({ log });
+  const session: LibrarySession = library?.session ?? new LibrarySession(null);
+  // RoutedLibrary normally configures after opening the model; this fixture mounts Library directly.
+  if (library) void library.model.ready.then(() => session.configureServices());
+  else session.configureServices();
   const link = guest ? null : { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>
 

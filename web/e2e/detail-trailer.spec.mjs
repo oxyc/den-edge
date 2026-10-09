@@ -13,7 +13,48 @@ const movie = {
   overview: 'The description belongs below the title.',
   genres: [{ name: 'Drama' }],
 };
-async function mock(page, trailer, bytes = videoBytes) {
+
+const EXPIRES = 2_000_000_000;
+
+const capabilityFor = (media) => {
+  const name = new URL(media).pathname.split('/').at(-1) ?? 'media';
+  const blob = name
+    .replace(/[^A-Za-z0-9_-]/g, '_')
+    .padEnd(40, '_')
+    .slice(0, 40);
+  const signature = Buffer.from(name).toString('hex').padEnd(24, '0').slice(0, 24);
+  return `m/s/${blob}?s=${signature}`;
+};
+
+const relayUrl = (media) => `/reel/${capabilityFor(media)}`;
+const planUrl = (id) => `http://internal/sources/${id}.json?v=2`;
+const carried = (media) => ({
+  kind: 'mp4',
+  audio: true,
+  width: null,
+  height: 720,
+  delivery: { type: 'reel', capability: capabilityFor(media) },
+});
+const sourcePlan = (...sources) => ({
+  v: 2,
+  expires: EXPIRES,
+  crop: null,
+  sources,
+});
+const prepareAnswer = (id, plan, links = [id]) => ({
+  v: 2,
+  meta: { links: links.map((candidate) => ({ planUrl: planUrl(candidate) })) },
+  primary: id ? { id, planUrl: planUrl(id) } : null,
+  primaryPlan: plan,
+});
+const trailerAnswer = (media = 'http://internal/play/trailer.webm') =>
+  prepareAnswer('trailer', sourcePlan(carried(media)));
+const noTrailerAnswer = () => prepareAnswer(null, null, []);
+
+const routeMedia = (page, media, handler) =>
+  page.route((url) => `${url.pathname}${url.search}` === relayUrl(media), handler);
+
+async function mock(page, prepare, bytes = videoBytes) {
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -22,9 +63,18 @@ async function mock(page, trailer, bytes = videoBytes) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
-  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route('**/reel/fixture/meta/**', trailer);
-  await page.route('**/play/trailer.webm', (r) => {
+  await page.route('**/reel/fixture/prepare/**', prepare);
+  await page.route('**/reel/transport', (r) => {
+    const { capability } = r.request().postDataJSON();
+    return r.fulfill({
+      json: {
+        v: 2,
+        capability,
+        attempts: [{ type: 'relay', url: `/reel/${capability}` }],
+      },
+    });
+  });
+  await routeMedia(page, 'http://internal/play/trailer.webm', (r) => {
     const range = /bytes=(\d+)-(\d*)/.exec(r.request().headers().range ?? '');
     const start = range ? Number(range[1]) : 0;
     const end = range?.[2] ? Number(range[2]) : bytes.length - 1;
@@ -55,9 +105,7 @@ for (const width of [390, 1280])
       const ready = new Promise((r) => (releaseTrailer = r));
       await mock(page, async (r) => {
         await ready;
-        await r.fulfill({
-          json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } },
-        });
+        await r.fulfill({ json: trailerAnswer() });
       });
       await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       await expect(page.locator('h1')).toHaveText('The Movie');
@@ -184,7 +232,7 @@ for (const reduced of [false, true])
       let requests = 0;
       await mock(page, (r) => {
         requests++;
-        return r.fulfill({ json: { meta: { links: [] } } });
+        return r.fulfill({ json: noTrailerAnswer() });
       });
       await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       await expect(page.locator('h1')).toHaveText('The Movie');
@@ -207,13 +255,9 @@ for (const failure of ['media error', 'autoplay blocked'])
       const page = await browser.newPage();
       const errors = [];
       page.on('pageerror', (e) => errors.push(e.message));
-      await mock(page, (r) =>
-        r.fulfill({
-          json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } },
-        }),
-      );
+      await mock(page, (r) => r.fulfill({ json: trailerAnswer() }));
       if (failure === 'media error') {
-        await page.route('**/play/trailer.webm', (r) =>
+        await routeMedia(page, 'http://internal/play/trailer.webm', (r) =>
           r.fulfill({ status: 404, body: 'Unavailable' }),
         );
       } else {
@@ -251,12 +295,10 @@ test('detail trailer ignores a URL that resolves after leaving the page', async 
     const responseSent = new Promise((r) => (responded = r));
     await mock(page, async (r) => {
       await ready;
-      await r
-        .fulfill({ json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } } })
-        .catch(() => {});
+      await r.fulfill({ json: trailerAnswer() }).catch(() => {});
       responded();
     });
-    const requested = page.waitForRequest('**/reel/fixture/meta/**');
+    const requested = page.waitForRequest('**/reel/fixture/prepare/**');
     await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     await requested;
     await page.evaluate(() =>
@@ -290,9 +332,7 @@ test('mobile trailer reveals without a compositor callback or a tap', async () =
       HTMLVideoElement.prototype.requestVideoFrameCallback = () => 1;
       HTMLVideoElement.prototype.cancelVideoFrameCallback = () => {};
     });
-    await mock(page, (r) =>
-      r.fulfill({ json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } } }),
-    );
+    await mock(page, (r) => r.fulfill({ json: trailerAnswer() }));
     await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     const video = page.locator('video');
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0);
@@ -318,14 +358,7 @@ test('wide mobile trailer and its swipe snapshot have opaque letterboxing', asyn
   try {
     const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
     const wide = await readFile(new URL('./media/trailer-wide.webm', import.meta.url));
-    await mock(
-      page,
-      (r) =>
-        r.fulfill({
-          json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } },
-        }),
-      wide,
-    );
+    await mock(page, (r) => r.fulfill({ json: trailerAnswer() }), wide);
     await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     const video = page.locator('video');
     await expect(video).toHaveCSS('opacity', '1');
@@ -391,7 +424,7 @@ for (const width of [320, 1280])
           hasTouch: width < 760,
           reducedMotion: 'reduce',
         });
-        await mock(page, (r) => r.fulfill({ json: { meta: { links: [] } } }));
+        await mock(page, (r) => r.fulfill({ json: noTrailerAnswer() }));
         if (exact)
           await routeTmdb(page, (r) =>
             r.fulfill({
@@ -472,15 +505,14 @@ for (const failed of ['missing', 'portrait'])
       const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
       await mock(page, (r) =>
         r.fulfill({
-          json: {
-            meta: {
-              links: [
-                { trailers: 'http://internal/play/first.webm' },
-                { trailers: 'http://internal/play/trailer.webm' },
-              ],
-            },
-          },
+          json: prepareAnswer('first', sourcePlan(carried('http://internal/play/first.webm')), [
+            'first',
+            'trailer',
+          ]),
         }),
+      );
+      await page.route('**/sources/trailer.json**', (r) =>
+        r.fulfill({ json: sourcePlan(carried('http://internal/play/trailer.webm')) }),
       );
       if (failed === 'portrait')
         await page.addInitScript(() => {
@@ -490,11 +522,11 @@ for (const failed of ['missing', 'portrait'])
           );
           Object.defineProperty(HTMLVideoElement.prototype, 'videoHeight', {
             get() {
-              return this.currentSrc.includes('first.webm') ? 400 : descriptor.get.call(this);
+              return this.currentSrc.includes('first_webm') ? 400 : descriptor.get.call(this);
             },
           });
         });
-      await page.route('**/play/first.webm', (r) =>
+      await routeMedia(page, 'http://internal/play/first.webm', (r) =>
         r.fulfill(
           failed === 'missing'
             ? { status: 404, body: 'Gone' }
@@ -503,7 +535,7 @@ for (const failed of ['missing', 'portrait'])
       );
       await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       const video = page.locator('video');
-      await expect(video).toHaveAttribute('src', /trailer.webm$/);
+      await expect(video).toHaveAttribute('src', relayUrl('http://internal/play/trailer.webm'));
       await expect(video).toHaveClass(/playing/);
       expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(3);
       await expect(video).toHaveCSS('opacity', '1');

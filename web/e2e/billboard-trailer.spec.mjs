@@ -21,6 +21,42 @@ const movie = {
   genres: [{ name: 'Drama' }],
 };
 
+const EXPIRES = 2_000_000_000;
+
+/** Stable opaque capabilities let each assertion name its fixture without pretending the name is a media URL. */
+const capabilityFor = (media) => {
+  const name = new URL(media).pathname.split('/').at(-1) ?? 'media';
+  const blob = name
+    .replace(/[^A-Za-z0-9_-]/g, '_')
+    .padEnd(40, '_')
+    .slice(0, 40);
+  const signature = Buffer.from(name).toString('hex').padEnd(24, '0').slice(0, 24);
+  return `m/s/${blob}?s=${signature}`;
+};
+
+const relayUrl = (media) => `/reel/${capabilityFor(media)}`;
+
+const sourcePlan = ({ sources, crop = null }) => ({
+  v: 2,
+  expires: EXPIRES,
+  crop,
+  sources: sources.map(({ url, ...source }) => ({
+    ...source,
+    delivery: url.startsWith('http://internal/')
+      ? { type: 'reel', capability: capabilityFor(url) }
+      : { type: 'external', url },
+  })),
+});
+
+const planUrl = (id) => `http://internal/sources/${id}.json?v=2`;
+
+const prepareAnswer = (id, plan) => ({
+  v: 2,
+  meta: { links: [{ planUrl: planUrl(id) }] },
+  primary: { id, planUrl: planUrl(id) },
+  primaryPlan: sourcePlan(plan),
+});
+
 /** reel's media, served with ranges, since a `<video>` opens one and cannot seek without them. */
 const serveVideo = (route) => {
   const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range ?? '');
@@ -37,7 +73,8 @@ const serveVideo = (route) => {
   });
 };
 
-async function mock(page, sources, prepared) {
+async function mock(page, plan, prepared) {
+  const counts = { currentPrepare: 0, nextPrepare: 0, transport: 0 };
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -46,48 +83,49 @@ async function mock(page, sources, prepared) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
-  // Both halves of a link: the play URL every older path was built from, and the sources URL that
-  // replaces building anything.
-  await page.route('**/reel/fixture/prepare/**', (r) =>
-    prepared && r.request().url().includes('tmdb:42')
-      ? r.fulfill({ json: prepared })
-      : r.fulfill({ status: 404, json: {} }),
-  );
-  await page.route('**/reel/fixture/meta/**', (r) => {
+  // Reel v2 discovers logical sources in a versioned plan. Reel-carried entries expose only an opaque
+  // capability; Edge chooses its ordered network transports when the cursor reaches that entry.
+  await page.route('**/reel/fixture/prepare/**', (r) => {
     const current = r.request().url().includes('tmdb:42');
     const next = r.request().url().includes('tmdb:43');
+    if (current) {
+      counts.currentPrepare += 1;
+      return r.fulfill({ json: prepared ?? prepareAnswer('trailer', plan) });
+    }
+    if (next) {
+      counts.nextPrepare += 1;
+      return r.fulfill({
+        json: prepareAnswer('next', {
+          sources: [
+            {
+              kind: 'mp4',
+              url: 'https://rr3---sn-x.googlevideo.com/next',
+              audio: false,
+              height: 720,
+            },
+          ],
+        }),
+      });
+    }
+    return r.fulfill({ status: 404, json: {} });
+  });
+
+  await page.route('**/reel/transport', async (r) => {
+    counts.transport += 1;
+    const { capability } = r.request().postDataJSON();
     return r.fulfill({
       json: {
-        meta: {
-          links:
-            current || next
-              ? [
-                  {
-                    trailers: `http://internal/play/${current ? 'trailer' : 'next'}.webm`,
-                    sources: `http://internal/sources/${current ? 'trailer' : 'next'}.json`,
-                  },
-                ]
-              : [],
-        },
+        v: 2,
+        capability,
+        attempts: [{ type: 'relay', url: `/reel/${capability}` }],
       },
     });
   });
-  await page.route('**/sources/trailer.json**', (r) => r.fulfill({ json: sources }));
-  await page.route('**/sources/next.json**', (r) =>
-    r.fulfill({
-      json: {
-        sources: [
-          {
-            kind: 'mp4',
-            url: 'https://rr3---sn-x.googlevideo.com/next',
-            audio: false,
-            height: 720,
-          },
-        ],
-      },
-    }),
-  );
+  return counts;
 }
+
+const routeMedia = (page, media, handler) =>
+  page.route((url) => `${url.pathname}${url.search}` === relayUrl(media), handler);
 
 /** Titles arrive on an event, so the slide is not resolving while the page is still being set up. */
 const start = async (page) => {
@@ -105,13 +143,12 @@ test('billboard plays what reel offers, cropped where reel measured it', async (
       sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
       crop: { letterboxed: true, aspect: 1.85, rect: [0, 0.0194, 1, 0.9611] },
     });
-    await page.route('**/m/s/chosen.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/chosen.webm', serveVideo);
     await start(page);
     const video = page.locator('video.ambient');
-    // reel's URL, not one this page built: nothing about `/m/s/chosen` is derivable from the play URL.
-    // Moved onto the mount the page asked on, because reel names what it mints by the address it was
-    // asked at — which behind the relay is its LAN one, and unreachable from a phone or past the CSP.
-    await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
+    // Reel's capability, not a URL this page inferred from an older play link. Edge's transport answer
+    // mounts that capability on the relay origin selected for this browser.
+    await expect(video).toHaveAttribute('src', relayUrl('http://internal/m/s/chosen.webm'), {
       timeout: 15000,
     });
     // And the bars are trimmed, rather than drawn inside the hero.
@@ -135,7 +172,7 @@ test('an inactive retained billboard unloads its media resource before it can re
   await mock(page, {
     sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
   });
-  await page.route('**/m/s/chosen.webm', serveVideo);
+  await routeMedia(page, 'http://internal/m/s/chosen.webm', serveVideo);
   await start(page);
   const video = page.locator('video.ambient');
   await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15_000 });
@@ -158,7 +195,7 @@ test('an inactive retained billboard unloads its media resource before it can re
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
   );
-  await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm');
+  await expect(video).toHaveAttribute('src', relayUrl('http://internal/m/s/chosen.webm'));
   await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15_000 });
   await expect.poll(() => video.evaluate((element) => !element.paused)).toBe(true);
 });
@@ -169,26 +206,16 @@ test('equal title republishes do not restart the same ambient trailer request', 
   });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    let sourceRequests = 0;
-    await mock(page, {
+    const counts = await mock(page, {
       sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
     });
-    await page.unroute('**/sources/trailer.json**');
-    await page.route('**/sources/trailer.json**', (route) => {
-      sourceRequests += 1;
-      return route.fulfill({
-        json: {
-          sources: [
-            { kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 },
-          ],
-        },
-      });
-    });
-    await page.route('**/m/s/chosen.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/chosen.webm', serveVideo);
     await start(page);
-    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
-      timeout: 15000,
-    });
+    await expect(page.locator('video.ambient')).toHaveAttribute(
+      'src',
+      relayUrl('http://internal/m/s/chosen.webm'),
+      { timeout: 15000 },
+    );
 
     await page.evaluate(async () => {
       for (let n = 0; n < 3; n += 1) {
@@ -197,7 +224,7 @@ test('equal title republishes do not restart the same ambient trailer request', 
       }
     });
 
-    expect(sourceRequests).toBe(1);
+    expect(counts.transport).toBe(1);
   } finally {
     await browser.close();
   }
@@ -209,32 +236,17 @@ test('equal title republishes do not restart the next trailer prewarm', async ()
   });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    let nextRequests = 0;
-    await mock(page, {
+    const counts = await mock(page, {
       sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
     });
-    await page.unroute('**/sources/next.json**');
-    await page.route('**/sources/next.json**', (route) => {
-      nextRequests += 1;
-      return route.fulfill({
-        json: {
-          sources: [
-            {
-              kind: 'mp4',
-              url: 'https://rr3---sn-x.googlevideo.com/next',
-              audio: false,
-              height: 720,
-            },
-          ],
-        },
-      });
-    });
-    await page.route('**/m/s/chosen.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/chosen.webm', serveVideo);
     await start(page);
-    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
-      timeout: 15000,
-    });
-    await expect.poll(() => nextRequests).toBe(1);
+    await expect(page.locator('video.ambient')).toHaveAttribute(
+      'src',
+      relayUrl('http://internal/m/s/chosen.webm'),
+      { timeout: 15000 },
+    );
+    await expect.poll(() => counts.nextPrepare).toBe(1);
 
     await page.evaluate(async () => {
       for (let n = 0; n < 3; n += 1) {
@@ -243,7 +255,7 @@ test('equal title republishes do not restart the next trailer prewarm', async ()
       }
     });
 
-    expect(nextRequests).toBe(1);
+    expect(counts.nextPrepare).toBe(1);
   } finally {
     await browser.close();
   }
@@ -279,11 +291,11 @@ test('billboard passes over a portrait trailer for one that fills the slide', as
     });
     // Both play perfectly well. The first is passed over on its shape alone — not, as in the test
     // below, because it failed to load.
-    await page.route('**/m/s/tall.webm', serveVideo);
-    await page.route('**/m/s/wide.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/tall.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/wide.webm', serveVideo);
     await start(page);
     const video = page.locator('video.ambient');
-    await expect(video).toHaveAttribute('src', '/reel/m/s/wide.webm', {
+    await expect(video).toHaveAttribute('src', relayUrl('http://internal/m/s/wide.webm'), {
       timeout: 15000,
     });
   } finally {
@@ -305,11 +317,11 @@ test('billboard walks reel’s order when the first will not play', async () => 
       crop: null,
     });
     // Withdrawn under us, which is the case reel's ordering exists for.
-    await page.route('**/m/s/gone.webm', (r) => r.fulfill({ status: 404 }));
-    await page.route('**/m/s/second.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/gone.webm', (r) => r.fulfill({ status: 404 }));
+    await routeMedia(page, 'http://internal/m/s/second.webm', serveVideo);
     await start(page);
     const video = page.locator('video.ambient');
-    await expect(video).toHaveAttribute('src', '/reel/m/s/second.webm', {
+    await expect(video).toHaveAttribute('src', relayUrl('http://internal/m/s/second.webm'), {
       timeout: 15000,
     });
     // An unmeasured trailer draws as it always did, with no transform at all.
@@ -329,31 +341,26 @@ test('billboard tries a prepare alternate without repeating an unavailable prima
       page,
       { sources: [] },
       {
+        v: 2,
         meta: {
           links: [
             {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
-            },
-            {
-              trailers: 'http://internal/play/alternate.webm',
-              sources: 'http://internal/sources/alternate.json',
+              planUrl: planUrl('alternate'),
             },
           ],
         },
-        primary: { id: 'trailer', sourcesBase: 'http://internal/sources/trailer.json' },
-        prepared: null,
-        sources: [],
+        primary: null,
+        primaryPlan: null,
       },
     );
     let primarySources = 0;
     await page.route('**/sources/trailer.json**', (route) => {
       primarySources++;
-      return route.fulfill({ json: { sources: [] } });
+      return route.fulfill({ json: { v: 2, expires: EXPIRES, crop: null, sources: [] } });
     });
     await page.route('**/sources/alternate.json**', (route) =>
       route.fulfill({
-        json: {
+        json: sourcePlan({
           sources: [
             {
               kind: 'mp4',
@@ -363,15 +370,17 @@ test('billboard tries a prepare alternate without repeating an unavailable prima
               width: 1280,
             },
           ],
-        },
+        }),
       }),
     );
-    await page.route('**/m/s/alternate.webm', serveVideo);
+    await routeMedia(page, 'http://internal/m/s/alternate.webm', serveVideo);
 
     await start(page);
-    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/alternate.webm', {
-      timeout: 15000,
-    });
+    await expect(page.locator('video.ambient')).toHaveAttribute(
+      'src',
+      relayUrl('http://internal/m/s/alternate.webm'),
+      { timeout: 15000 },
+    );
     expect(primarySources).toBe(0);
   } finally {
     await browser.close();

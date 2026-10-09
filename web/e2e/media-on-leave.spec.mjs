@@ -7,6 +7,22 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
+const capability = `m/s/${'trailer'.padEnd(40, '_')}?s=${'42'.repeat(12)}`;
+const planUrl = 'http://internal/sources/trailer.json?v=2';
+const plan = {
+  v: 2,
+  expires: 2_000_000_000,
+  crop: null,
+  sources: [
+    {
+      kind: 'mp4',
+      audio: true,
+      width: 1280,
+      height: 720,
+      delivery: { type: 'reel', capability },
+    },
+  ],
+};
 const film = {
   id: 42,
   imdb_id: 'tt42',
@@ -48,47 +64,46 @@ async function mock(page) {
     // One answer that reads both as this film and as a list holding it, whichever was asked.
     return r.fulfill({ json: { ...film, page: 1, total_pages: 1, results: [film] } });
   });
-  // This origin serves reel, which offers one file that plays.
+  // This origin serves Reel v2: prepare names the logical plan, and transport chooses the relay URL only
+  // when the retained page reaches that source.
   await page.route('**/reel/manifest.json', (r) => r.fulfill({ json: { id: 'com.den.reel' } }));
-  await page.route('**/reel/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route('**/reel/meta/**', (r) =>
+  await page.route('**/reel/prepare/**', (r) =>
     r.fulfill({
       json: {
-        meta: {
-          links: [
-            {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
-            },
-          ],
+        v: 2,
+        meta: { links: [{ planUrl }] },
+        primary: { id: 'trailer', planUrl },
+        primaryPlan: plan,
+      },
+    }),
+  );
+  await page.route('**/reel/sources/trailer.json**', (r) => r.fulfill({ json: plan }));
+  await page.route('**/reel/transport', (r) =>
+    r.fulfill({
+      json: {
+        v: 2,
+        capability,
+        attempts: [{ type: 'relay', url: `/reel/${capability}` }],
+      },
+    }),
+  );
+  await page.route(
+    (url) => `${url.pathname}${url.search}` === `/reel/${capability}`,
+    (route) => {
+      const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range ?? '');
+      const start = range ? Number(range[1]) : 0;
+      const end = range?.[2] ? Number(range[2]) : videoBytes.length - 1;
+      return route.fulfill({
+        status: range ? 206 : 200,
+        contentType: 'video/webm',
+        body: videoBytes.subarray(start, end + 1),
+        headers: {
+          'accept-ranges': 'bytes',
+          ...(range ? { 'content-range': `bytes ${start}-${end}/${videoBytes.length}` } : {}),
         },
-      },
-    }),
+      });
+    },
   );
-  await page.route('**/sources/trailer.json**', (r) =>
-    r.fulfill({
-      json: {
-        sources: [
-          { kind: 'mp4', url: 'http://internal/m/s/trailer.webm', audio: true, height: 720 },
-        ],
-        crop: null,
-      },
-    }),
-  );
-  await page.route('**/m/s/trailer.webm', (route) => {
-    const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range ?? '');
-    const start = range ? Number(range[1]) : 0;
-    const end = range?.[2] ? Number(range[2]) : videoBytes.length - 1;
-    return route.fulfill({
-      status: range ? 206 : 200,
-      contentType: 'video/webm',
-      body: videoBytes.subarray(start, end + 1),
-      headers: {
-        'accept-ranges': 'bytes',
-        ...(range ? { 'content-range': `bytes ${start}-${end}/${videoBytes.length}` } : {}),
-      },
-    });
-  });
 }
 
 /** Every video in the document: where it is, and whether it is playing or could be heard. */

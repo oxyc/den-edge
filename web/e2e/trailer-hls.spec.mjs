@@ -7,6 +7,8 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
+const capability = `m/s/${'hls-trailer'.padEnd(40, '_')}?s=${'84'.repeat(12)}`;
+const planUrl = 'http://internal/sources/trailer.json?v=2';
 const master = [
   '#EXTM3U',
   '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
@@ -36,41 +38,64 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"/>',
     }),
   );
-  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route('**/reel/fixture/meta/**', (r) =>
+  await page.route('**/reel/fixture/prepare/**', (r) =>
     r.fulfill({
       json: {
-        meta: {
-          links: [
+        v: 2,
+        meta: { links: [{ planUrl }] },
+        primary: { id: 'trailer', planUrl },
+        primaryPlan: {
+          v: 2,
+          expires: 2_000_000_000,
+          crop: null,
+          sources: [
             {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
+              kind: 'hls',
+              audio: true,
+              width: 1280,
+              height: 720,
+              delivery: { type: 'reel', capability },
             },
           ],
         },
       },
     }),
   );
-  await page.route('**/sources/trailer.json**', (r) =>
+  await page.route('**/reel/transport', (r) =>
     r.fulfill({
       json: {
-        sources: [{ kind: 'hls', url: 'http://internal/m/s/master.m3u8', audio: true }],
-        crop: null,
+        v: 2,
+        capability,
+        attempts: [{ type: 'relay', url: `/reel/${capability}` }],
       },
     }),
   );
   const asked = new Map();
-  await page.route('**/m/s/**', async (r) => {
-    const path = new URL(r.request().url()).pathname;
-    asked.set(path, (asked.get(path) ?? 0) + 1);
-    if (path.endsWith('/master.m3u8'))
-      return r.fulfill({ contentType: 'application/vnd.apple.mpegurl', body: master });
-    const file = path.split('/').pop();
-    return r.fulfill({
-      contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
-      body: await readFile(new URL(file, hls)),
-    });
-  });
+  await page.route(
+    (url) => {
+      const request = `${url.pathname}${url.search}`;
+      return request === `/reel/${capability}` || url.pathname.startsWith('/reel/hls-fixture/');
+    },
+    async (r) => {
+      const path = new URL(r.request().url()).pathname;
+      asked.set(path, (asked.get(path) ?? 0) + 1);
+      if (
+        `${new URL(r.request().url()).pathname}${new URL(r.request().url()).search}` ===
+        `/reel/${capability}`
+      )
+        return r.fulfill({
+          contentType: 'application/vnd.apple.mpegurl',
+          body: master
+            .replaceAll('low/', '/reel/hls-fixture/low/')
+            .replaceAll('high/', '/reel/hls-fixture/high/'),
+        });
+      const file = path.split('/').pop();
+      return r.fulfill({
+        contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+        body: await readFile(new URL(file, hls)),
+      });
+    },
+  );
   await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
   const video = page.locator('[data-detail-media] video');
   await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15000 });

@@ -187,15 +187,17 @@
   const library = fixtureLibraryService({ log });
   publish = () => library.publish();
   const session: LibrarySession = library.session;
-  if (!unnamedMany)
+  if (!unnamedMany) {
+    const named = Array.from({ length: many }, (_, index) => ({
+      type: 'movie' as const,
+      id: 3000 + index,
+      title: `Measured movie ${index + 1}`,
+    }));
     session.publishLibraryMetadata(
-      Array.from({ length: many }, (_, index) => ({
-        type: 'movie' as const,
-        id: 3000 + index,
-        title: `Measured movie ${index + 1}`,
-      })),
+      params.has('sparse-many') ? [...named.slice(-8), named[0]!] : named,
       [],
     );
+  }
   const link = {
     inboxKey: 'fixture',
     name: 'Living Room TV',
