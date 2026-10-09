@@ -105,6 +105,70 @@ describe('ContentAuthority', () => {
     ]);
   });
 
+  it('keeps concurrent Atlas paging cursors and cancellation request-scoped', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('/atlas');
+    const pending: Array<{
+      signal: AbortSignal | null;
+      answer: (response: Response) => void;
+    }> = [];
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: (_input, init) =>
+        new Promise<Response>((resolve, reject) => {
+          const signal = init?.signal ?? null;
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          pending.push({ signal, answer: resolve });
+        }),
+    });
+    const first = new AbortController();
+    const second = new AbortController();
+    const query = {
+      kind: 'atlas.query' as const,
+      query: { operation: 'titles' as const, type: 'movie' as const, items: [], page: 1 },
+    };
+
+    const cancelled = authority.query(query, first.signal);
+    const surviving = authority.query(query, second.signal);
+    await expect.poll(() => pending.length).toBe(2);
+    expect(pending.map(({ signal }) => signal)).toEqual([first.signal, second.signal]);
+    first.abort();
+    pending[1]!.answer(json({ order: 'stable', titles: [] }));
+
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(surviving).resolves.toMatchObject({
+      kind: 'atlas.query',
+      answer: { state: 'ready', value: { operation: 'titles', titles: [] } },
+    });
+  });
+
+  it('passes cancellation into personalized Atlas recommendation POSTs', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('/atlas');
+    let requestSignal: AbortSignal | null | undefined;
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: (_input, init) => {
+        requestSignal = init?.signal;
+        return new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          }),
+        );
+      },
+    });
+    const controller = new AbortController();
+    const request = authority.query(
+      {
+        kind: 'atlas.recommend.personal',
+        body: { history: [], candidates: [], owned: [] },
+      },
+      controller.signal,
+    );
+
+    await expect.poll(() => requestSignal).toBe(controller.signal);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('coalesces an exact detail request and returns normalized detail without exposing its key', async () => {
     let answer!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => (answer = resolve));

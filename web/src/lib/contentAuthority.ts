@@ -168,11 +168,6 @@ export interface ContentAuthorityOptions {
   now?: () => number;
 }
 
-interface AtlasTitleLoader {
-  signal: AbortSignal;
-  load: ReturnType<typeof filterTitles>;
-}
-
 type Json = Record<string, unknown>;
 
 const object = (value: unknown): Json | null =>
@@ -242,7 +237,6 @@ function tmdbUrl(path: string, key: string, params: Record<string, string> = {})
 
 /** A single Worker-session owner for provider access and exact in-flight coalescing. */
 export class ContentAuthority implements ContentReader, ContentServiceAuthority {
-  readonly #atlasTitleLoaders = new Map<string, AtlasTitleLoader>();
   readonly #tmdbFetch: typeof fetch;
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
@@ -731,23 +725,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     try {
       switch (query.operation) {
         case 'titles': {
-          const key = JSON.stringify([atlas, query.type, query.items]);
-          let loader = this.#atlasTitleLoaders.get(key);
-          if (!loader) {
-            const current: AtlasTitleLoader = {
-              signal,
-              load: filterTitles(atlas, query.type, query.items, {
-                fetchImpl: (input, init) =>
-                  this.#providerFetch(input, { ...init, signal: current.signal }),
-              }),
-            };
-            loader = current;
-            this.#atlasTitleLoaders.set(key, loader);
-          }
-          loader.signal = signal;
+          const load = filterTitles(atlas, query.type, query.items, { fetchImpl });
           return {
             state: 'ready',
-            value: { operation: 'titles', titles: await loader.load(query.page) },
+            value: { operation: 'titles', titles: await load(query.page) },
           };
         }
         case 'counts':
@@ -1089,11 +1070,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       const response = await this.#providerFetch(
         url,
         shared
-          ? undefined
+          ? { signal }
           : {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify(request.body),
+              signal,
             },
       );
       if (response.status === 404) return { state: 'absent' } as const;
