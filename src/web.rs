@@ -26,8 +26,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 const EARLY_HERO_SCRIPT: &str = "'sha256-P6cePhQlg6yr8H83d+82ZJT+sXtcuBC1UKjtm577mkA='";
 #[cfg(test)]
 const EARLY_HERO_SHA256: [u8; 32] = [
-    63, 167, 30, 62, 20, 37, 131, 172, 171, 240, 127, 55, 119, 239, 54, 100, 148, 254, 177, 123,
-    92, 184, 16, 181, 80, 168, 237, 155, 158, 251, 154, 64,
+    63, 167, 30, 62, 20, 37, 131, 172, 171, 240, 127, 55, 119, 239, 54, 100, 148, 254, 177, 123, 92, 184, 16,
+    181, 80, 168, 237, 155, 158, 251, 154, 64,
 ];
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or

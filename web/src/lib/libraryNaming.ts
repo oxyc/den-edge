@@ -52,8 +52,7 @@ export async function nameLibraryTitles(session: NamedLibrary, refs: Ref[]): Pro
       ...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values(),
     ].filter(
       (ref) =>
-        !known.has(titleKey(ref)) ||
-        (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+        !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
     );
     return { known, wanted };
   });
