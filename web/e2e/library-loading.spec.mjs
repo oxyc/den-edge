@@ -10,6 +10,9 @@ test('local library keeps its progressive page visible while startup settles', a
   await page.goto(`${E2E_ORIGIN}/test/library.html?local&hold-open`);
 
   await expect(page.getByText('Loading your library', { exact: true })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => typeof window.denTestReleaseLibraryOpen))
+    .toBe('function');
   await page.evaluate(() => window.denTestReleaseLibraryOpen());
 });
 
