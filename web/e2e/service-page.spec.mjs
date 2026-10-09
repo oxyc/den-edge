@@ -119,19 +119,24 @@ test('resting on a service tile starts loading its page before the press', async
   expect(asked, 'nothing is fetched for a page nobody has gestured towards').toEqual([]);
 
   await tile.hover();
-  await expect
-    .poll(() => asked.filter((path) => path.includes('/catalog/movie/jw-nfx-new/')).length)
-    .toBe(1);
-  // The hero's own picture lookups are part of the page's first screen, so they start too.
-  await expect.poll(() => asked.filter((path) => /\/movie\/10[123]$/.test(path)).length).toBe(3);
-  expect(asked).toContain('/atlas/manifest.json');
+  const primedRequests = () => ({
+    manifest: asked.filter((path) => path === '/atlas/manifest.json').length,
+    directories: asked.filter((path) => path.includes('/watch/providers/')).length,
+    chart: asked.filter((path) => path.includes('/catalog/movie/jw-nfx-new/')).length,
+    heroPictures: asked.filter((path) => /\/movie\/10[123]$/.test(path)).length,
+    firstRows: asked.filter((path) => path === '/tmdb/3/discover/movie').length,
+  });
+  // The hover primes the complete first screen: the Atlas row, its hero art, and the next two rows. Waiting for that
+  // semantic boundary avoids mistaking a request still belonging to this first gesture for work from the next one.
+  const complete = { manifest: 1, directories: 2, chart: 1, heroPictures: 3, firstRows: 2 };
+  await expect.poll(primedRequests).toEqual(complete);
 
-  // A second gesture within the window asks for nothing more.
-  const before = asked.length;
+  // A second gesture within the reuse window asks none of those questions again. A frame lets the pointer event and
+  // any fetch it starts become observable without an elapsed-time guess.
   await page.mouse.move(0, 0);
   await tile.hover();
-  await page.waitForTimeout(300);
-  expect(asked.length).toBe(before);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  expect(primedRequests()).toEqual(complete);
 });
 
 test('settings re-read with nothing changed leave the page as it is', async ({ browser }) => {
