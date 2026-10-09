@@ -1,5 +1,5 @@
 import { openClockStore } from './clockStore';
-import type { ContentCredentialSource } from './contentAuthority';
+import type { ContentCredentialSource, ContentReader } from './contentAuthority';
 import { DownloadServiceRuntime, type DownloadContent } from './downloadServiceRuntime';
 import { LibraryLogAuthority } from './libraryLogAuthority';
 import { DurableOperationAuthority } from './libraryOperationAuthority';
@@ -62,7 +62,7 @@ export async function openLibraryServiceAuthority(
   request: LibraryServiceHello,
   providedVault: Vault | null | undefined,
   contentCredentials: LibraryContentCredentialSink | undefined,
-  content: DownloadContent,
+  content: DownloadContent & Pick<ContentReader, 'title'>,
 ): Promise<LibraryServiceAuthority | null> {
   const vault = providedVault === undefined ? libraryVault : providedVault;
   if (!vault) return null;
@@ -79,6 +79,7 @@ export async function openLibraryServiceAuthority(
   const logAuthority = new LibraryLogAuthority(log, clock, {
     mode: request.mode,
     downloads: downloads.coordinator,
+    content,
     libraryKey: request.libraryKey,
     vault,
     refreshDownloads: (target) => downloads.refresh(target),

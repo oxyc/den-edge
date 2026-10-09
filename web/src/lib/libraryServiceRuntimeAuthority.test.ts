@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openClockStore } from './clockStore';
+import type { ContentReader } from './contentAuthority';
 import type { DownloadContent } from './downloadServiceRuntime';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import { openLibraryServiceAuthority } from './libraryServiceRuntimeAuthority';
@@ -14,7 +15,8 @@ const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
 const content = {
   identifiers: async () => ({ kind: 'missing' as const }),
   season: async () => ({ kind: 'missing' as const }),
-} satisfies DownloadContent;
+  title: async () => ({ kind: 'missing' as const }),
+} satisfies DownloadContent & Pick<ContentReader, 'title'>;
 
 function memoryVault(): Vault {
   const data = new Map<string, Uint8Array>();

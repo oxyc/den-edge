@@ -78,6 +78,7 @@ import {
 import { LibraryLog } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
 import type { Vault } from './localVault';
+import type { ContentReader } from './contentAuthority';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
@@ -87,9 +88,6 @@ import {
   type HeldRemovals,
 } from './simklDelivery';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
-import { fetchDetailsResult, tmdbKeyOf } from './workerTmdbProvider';
-import { tmdbFetch } from './tmdbCache';
-import { useLibraryRelayMembership } from './relayFetch';
 import {
   isLibraryMetadataTitle,
   isRetainedBillboard,
@@ -165,11 +163,11 @@ export interface LibraryLogAuthorityOptions {
   mode: 'online' | 'local';
   /** Worker-owned live download state. */
   downloads: DownloadCoordinator;
+  /** The Worker's single metadata authority; library projection must not create a second provider client. */
+  content: Pick<ContentReader, 'title'>;
   libraryKey?: string;
   vault?: Vault;
   fetchImpl?: typeof fetch;
-  /** Test seam for the Worker-owned TMDB cache/fetch path. */
-  tmdbFetchImpl?: typeof fetch;
   destination?: (key: string) => Promise<LibraryLog>;
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
   downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
@@ -341,7 +339,6 @@ export class LibraryLogAuthority {
   readonly #options: LibraryLogAuthorityOptions;
   readonly #downloadsCoordinator: DownloadCoordinator;
   readonly #fetch: typeof fetch;
-  readonly #tmdbFetch: typeof fetch;
   readonly #metadataFlights = new Map<
     string,
     Promise<
@@ -361,7 +358,6 @@ export class LibraryLogAuthority {
     this.#options = options;
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
-    this.#tmdbFetch = options.tmdbFetchImpl ?? tmdbFetch;
     if (options.libraryKey && options.vault)
       this.#admin = new LibraryAdminAuthority(log, clock, {
         mode: options.mode,
@@ -645,18 +641,13 @@ export class LibraryLogAuthority {
   async #libraryMetadata(
     titles: TitleRef[],
   ): Promise<Extract<LibraryQueryResult, { kind: 'library.metadata' }>> {
-    // This runs in the service Worker, whose relay state is deliberately separate from the page's. Await member
-    // registration here before a cold library spends the anonymous allowance; the Worker owns one library for life.
-    const membership = await this.#log.relayMembership();
-    if (membership) useLibraryRelayMembership(membership);
-    const key = tmdbKeyOf(this.#log.settings('keys'));
     const found: Array<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape }> = [];
     const retryable: TitleRef[] = [];
     let retryAfterMs = 0;
     let next = 0;
     const lookup = async () => {
       for (let ref = titles[next++]; ref; ref = titles[next++]) {
-        const result = await this.#metadataFor(ref, key);
+        const result = await this.#metadataFor(ref);
         if (result?.kind === 'retryable') {
           retryable.push(ref);
           retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs ?? 0);
@@ -701,7 +692,6 @@ export class LibraryLogAuthority {
   /** Join overlapping route, pointer and shelf questions at the Worker boundary. */
   #metadataFor(
     ref: TitleRef,
-    key: string,
   ): Promise<
     | { kind: 'found'; title: LibraryMetadataTitle; shape?: LibraryMetadataShape }
     | { kind: 'retryable'; retryAfterMs?: number }
@@ -711,12 +701,18 @@ export class LibraryLogAuthority {
     const existing = this.#metadataFlights.get(flightKey);
     if (existing) return existing;
     const flight = (async () => {
-      const result = await fetchDetailsResult(ref, key, this.#tmdbFetch);
-      if (result.kind === 'retryable') return result;
+      const result = await this.#options.content.title(ref);
+      if (result.kind === 'unavailable' || result.kind === 'not-configured')
+        return {
+          kind: 'retryable' as const,
+          ...(result.kind === 'unavailable' && result.retryAfterMs !== undefined
+            ? { retryAfterMs: result.retryAfterMs }
+            : {}),
+        };
       if (result.kind === 'missing') return null;
-      const title = this.#metadataTitle(result.details.title);
+      const title = this.#metadataTitle(result.value.title);
       if (!title) return null;
-      const shape = result.details.shape && this.#metadataShape(ref, result.details.shape);
+      const shape = result.value.shape && this.#metadataShape(ref, result.value.shape);
       return { kind: 'found' as const, title, ...(shape ? { shape } : {}) };
     })();
     this.#metadataFlights.set(flightKey, flight);

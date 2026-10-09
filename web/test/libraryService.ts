@@ -1,4 +1,5 @@
 import type { ClockStore } from '../src/lib/clockStore';
+import { ContentAuthority } from '../src/lib/contentAuthority';
 import {
   DownloadCoordinator,
   type DownloadCoordinatorEffects,
@@ -268,6 +269,11 @@ export function fixtureLibraryService({
   const authority = new LibraryLogAuthority(log, clock, {
     mode: 'local',
     downloads: coordinator,
+    content: new ContentAuthority({
+      tmdb: () => 'fixture-key',
+      omdb: () => undefined,
+      contentWarnings: () => undefined,
+    }),
     ...(libraryKey ? { libraryKey, vault } : {}),
     refreshDownloads: refreshDownloads ?? (async () => driver.run({ force: true })),
     downloadArtwork,
