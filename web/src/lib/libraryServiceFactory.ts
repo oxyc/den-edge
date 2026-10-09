@@ -1,5 +1,9 @@
 import { LibraryServiceClient } from './libraryServiceClient';
-import { ContentServiceClient, ContentServiceError } from './contentServiceClient';
+import {
+  ContentServiceClient,
+  ContentServiceError,
+  type ContentServiceClientPort,
+} from './contentServiceClient';
 import type {
   ContentRequest,
   ContentResultFor,
@@ -30,14 +34,6 @@ export interface WorkerServiceConnection {
   /** Open only when this browser has a local or paired library key. */
   library: LibraryServiceClient;
   close(): void;
-}
-
-export interface ContentServiceClientPort {
-  query<Request extends ContentRequest>(
-    request: Request,
-    signal?: AbortSignal,
-  ): Promise<ContentResultFor<Request>>;
-  onStatus(listener: (status: ContentServiceStatusValue) => void): () => void;
 }
 
 export interface WorkerServiceSession {

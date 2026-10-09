@@ -23,7 +23,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
-  import type { ContentServiceClientPort } from './lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from './lib/contentServiceClient';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {

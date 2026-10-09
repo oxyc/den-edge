@@ -1,7 +1,7 @@
 // Page adapter from the import planners' semantic lookup interface to the typed content Worker. Provider URLs,
 // credentials, retry pacing and concurrency stay inside ContentImportAuthority.
 
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import type { ContentImportLookup, ContentImportLookupResult } from './contentServiceProtocol';
 import type { ImportShow, ViewingLookups } from './viewingImport';
 

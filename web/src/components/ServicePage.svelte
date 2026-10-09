@@ -12,7 +12,7 @@
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
   import { contentServices, matches, type Service } from '../settings/services';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';

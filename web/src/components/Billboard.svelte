@@ -37,7 +37,7 @@
     recommendationReason,
     type RecommendedTitle,
   } from '../lib/recommend';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     titles,

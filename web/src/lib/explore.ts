@@ -38,7 +38,7 @@ import { FilterUnavailable, type FilterCounts, type FilterItem } from './filterR
 import { contentFilterTitles } from './contentAtlas';
 import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { FACET, fansOf, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';

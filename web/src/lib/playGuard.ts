@@ -5,7 +5,7 @@
 // using the same normalized detail lookup and `isBlocked` rule.
 
 import type { MediaType } from './library';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { isBlocked } from './parental';
 
 /** The same line `Detail.svelte` shows in Play's place for a title its page already knows is blocked. */

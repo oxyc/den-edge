@@ -28,7 +28,7 @@ import {
 } from './explore';
 import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { ContentAuthority } from './contentAuthority';
 import type { ContentCatalogSpec } from './contentServiceProtocol';
 

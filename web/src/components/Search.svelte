@@ -43,7 +43,7 @@
   import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
   import { awaitingPicture, type Hit } from '../lib/search';
   import { rememberSearch } from '../lib/recentSearches';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     query,

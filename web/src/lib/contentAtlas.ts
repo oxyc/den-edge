@@ -1,4 +1,4 @@
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import type {
   FilterCounts,
   FilterItem,

@@ -37,7 +37,7 @@
     LibraryPluginView,
   } from '../lib/libraryServiceProtocol';
   import type { Immutable } from '../lib/libraryModel.svelte';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     link,

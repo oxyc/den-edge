@@ -1,5 +1,5 @@
 import { getContext, setContext } from 'svelte';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 const CONTENT_SERVICE = Symbol('content service');
 

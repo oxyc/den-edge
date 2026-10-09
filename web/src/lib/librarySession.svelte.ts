@@ -7,7 +7,7 @@ import type {
 } from './libraryServiceProtocol';
 import { cancelLibraryTitleNaming } from './libraryNaming';
 import { SessionServices } from './sessionServices.svelte';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 const TOAST_MS = 6_000;
 

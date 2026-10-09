@@ -19,7 +19,7 @@ import {
   type KeptBillboard,
 } from './recommend';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
   type: 'movie',

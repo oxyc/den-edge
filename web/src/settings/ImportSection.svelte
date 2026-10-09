@@ -24,7 +24,7 @@
   import SettingsSection from './SettingsSection.svelte';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
   import { contentImportLookups } from '../lib/contentImportLookups';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import { historyImportItems } from './historyImport';
   import type {
     HistoryImportItem,

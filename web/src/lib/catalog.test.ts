@@ -21,7 +21,7 @@ import {
 } from './catalog';
 import type { Title } from './library';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 describe('discover queries, as DenKit builds them', () => {
   it('joins genres AND or OR, keywords and countries OR, and dates by the type’s own field', () => {

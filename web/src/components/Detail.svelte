@@ -46,7 +46,7 @@
   import { yieldTask } from '../lib/taskYield';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type { DownloadsView } from '../lib/libraryServiceProtocol';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Warning } from '../lib/contentWarnings';
 
   type Reaction = TitleRow['reaction']['value'];

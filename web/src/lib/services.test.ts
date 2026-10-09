@@ -21,7 +21,7 @@ import type { Title } from './library';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 import { forgetReused } from './reuse';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 // The same questions are asked of a different fake in each test; nothing may be answered from the last one.
 beforeEach(forgetReused);

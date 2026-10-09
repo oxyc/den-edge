@@ -7,7 +7,7 @@ import { contentFilterTitles } from './contentAtlas';
 import type { MediaType, Title } from './library';
 import { titleHref } from './route';
 import type { ContentCatalogSpec } from './contentServiceProtocol';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
 export interface DiscoverQuery {

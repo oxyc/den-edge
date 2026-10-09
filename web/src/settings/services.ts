@@ -3,7 +3,7 @@
 // onto the service people recognise, ordered by that country's own prominence, movies and series merged.
 
 import { reuse } from '../lib/reuse';
-import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
 export interface Country {
   code: string;

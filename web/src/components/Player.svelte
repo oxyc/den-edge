@@ -94,7 +94,7 @@
   } from '../lib/switchPolicy';
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import {
     activeAt,
     canAutoSkip,

@@ -4,7 +4,7 @@
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
   import { groupFilmography, type FilmCredit, type PersonDetail } from '../lib/detail';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';

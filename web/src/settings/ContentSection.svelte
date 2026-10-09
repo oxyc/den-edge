@@ -33,7 +33,7 @@
     type Service,
     type ServiceDirectoryLoad,
   } from './services';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import {
     effectiveServicePicks,
     preferenceChange as change,

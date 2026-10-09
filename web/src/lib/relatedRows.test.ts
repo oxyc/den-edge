@@ -22,7 +22,7 @@ import {
 } from './relatedRows';
 import { NO_FACTS } from './titleFacts';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });

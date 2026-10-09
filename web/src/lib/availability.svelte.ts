@@ -8,7 +8,7 @@
 
 import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import type { Addon } from './scout';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';

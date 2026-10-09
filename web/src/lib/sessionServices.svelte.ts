@@ -11,7 +11,7 @@ import { localNetworkRefused } from './remuxRoute';
 import { fetchRoutes, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
 

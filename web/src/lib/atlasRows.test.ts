@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { atlasRows } from './atlasRows';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 describe('atlasRows', () => {
   const answering = (asked: string[]) =>

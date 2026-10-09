@@ -6,7 +6,7 @@
 
 import type { RowDef } from './catalog';
 import type { ExploreType, MediaType, Title } from './library';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 type Where = Record<string, string>;
 interface AtlasRow {

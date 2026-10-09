@@ -17,6 +17,15 @@ export interface ContentServiceTransport {
   close(): void;
 }
 
+/** The page's complete semantic content surface, independent of Worker/client implementation details. */
+export interface ContentServiceClientPort {
+  query<Request extends ContentRequest>(
+    request: Request,
+    signal?: AbortSignal,
+  ): Promise<ContentResultFor<Request>>;
+  onStatus(listener: (status: ContentServiceStatusValue) => void): () => void;
+}
+
 interface Pending {
   request: ContentRequest;
   resolve: (result: ContentResult) => void;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { BLOCKED_MESSAGE, playGuard } from './playGuard';
 
 const contentWith = (certification: string | null, rejects = false) => {

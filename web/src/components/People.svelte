@@ -62,7 +62,7 @@
   } from '../lib/people';
   import { peopleHref, searchHref, type PeopleView } from '../lib/route';
   import type { Hit } from '../lib/search';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     view = {},

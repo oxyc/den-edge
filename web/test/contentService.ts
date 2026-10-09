@@ -1,6 +1,6 @@
 import { ContentAuthority } from '../src/lib/contentAuthority';
 import { setContentServiceContext } from '../src/lib/contentContext';
-import type { ContentServiceClientPort } from '../src/lib/libraryServiceFactory';
+import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
 import type { ContentRequest, ContentResultFor } from '../src/lib/contentServiceProtocol';
 
 /** Test-only in-page authority for focused component fixtures; production always uses the DedicatedWorker. */

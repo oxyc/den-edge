@@ -5,7 +5,7 @@
   import SettingRow from './SettingRow.svelte';
   import { historyCsv, letterboxdCsv, type HistoryExport } from '../lib/historyExport';
   import { titleKey, type Title } from '../lib/library';
-  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { LibraryQueryResult } from '../lib/libraryServiceProtocol';
 
   type SemanticExport = Extract<LibraryQueryResult, { kind: 'history.export' }>;

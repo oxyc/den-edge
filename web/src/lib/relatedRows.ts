@@ -9,7 +9,7 @@ import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import { fansId, likeId, personHref, searchHref } from './route';
 import type { Browsable, TitleFacts } from './titleFacts';
-import type { ContentServiceClientPort } from './libraryServiceFactory';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 /** Titles a page adds: a screenful and a bit, the size TMDB's own pages come in. */
 const CHUNK = 20;
