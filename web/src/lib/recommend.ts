@@ -725,24 +725,6 @@ export function displayableKept(
     : null;
 }
 
-const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
-
-/**
- * `next` in place of every slide after `visible`, the one on screen. It and the slides before it stay where they
- * are, so nothing moves under the viewer and the rail keeps its place; `next` follows, less what they already show.
- * With nothing on screen, `next` is the whole billboard.
- */
-export function swapAfter<T extends Pick<Slide, 'type' | 'id'>>(
-  shown: T[],
-  visible: Pick<Slide, 'type' | 'id'> | undefined,
-  next: T[],
-): T[] {
-  const at = visible ? shown.findIndex((slide) => slideKey(slide) === slideKey(visible)) : -1;
-  const kept = shown.slice(0, at + 1);
-  const keys = new Set(kept.map(slideKey));
-  return [...kept, ...next.filter((slide) => !keys.has(slideKey(slide)))];
-}
-
 /**
  * The slides as titles to draw, in atlas's order. A title one of the offered lists already named is taken from there;
  * the rest — atlas's own lists name titles by id — are looked up, `lookups` at a time. One TMDB can't name is left

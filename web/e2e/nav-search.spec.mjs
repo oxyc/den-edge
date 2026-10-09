@@ -1837,13 +1837,26 @@ for (const fresh of [false, true])
       await expect(hero.locator('.slide')).toHaveCount(4);
       const slides = await hero.locator('.slide').allTextContents();
       expect(slides.map((text) => /(Film|Series) \d+/.exec(text)?.[0])).toEqual([
-        'Film 501',
         'Film 502',
         'Film 601',
         'Series 701',
+        'Film 501',
       ]);
       await expect(onScreen).toContainText('Film 502');
-      await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
+      await expect(hero.locator('.dot').first()).toHaveAttribute('aria-current', 'true');
+
+      // The retained/current title fronts the fresh ranking only until the carousel next moves. The fresh title
+      // reached by that move stays visible while it becomes index zero and the retained ranking disappears.
+      await hero.locator('.dot').nth(1).click();
+      await expect(onScreen).toContainText('Film 601');
+      await expect(hero.locator('.slide')).toHaveCount(3);
+      await expect(hero.locator('.dot').first()).toHaveAttribute('aria-current', 'true');
+      expect(
+        (await hero.locator('.slide').allTextContents()).map(
+          (text) => /(Film|Series) \d+/.exec(text)?.[0],
+        ),
+      ).toEqual(['Film 601', 'Series 701', 'Film 501']);
+      await expect.poll(() => hero.locator('.rail').evaluate((rail) => rail.scrollLeft)).toBe(0);
       expect(asked.fans).toEqual([]);
       expect(asked.gets).toHaveLength(1);
 
