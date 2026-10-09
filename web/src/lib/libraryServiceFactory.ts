@@ -112,8 +112,23 @@ class SessionContentService implements ContentServiceClientPort {
       // the first transport can fail while the request is in flight and install a different opening promise.
       const bootstrap = this.#bootstrap;
       const client = this.current();
+      if (bootstrap)
+        try {
+          await this.#waitForBootstrap(bootstrap, signal);
+        } catch (error) {
+          // A paired startup belongs exclusively to the library supervisor. Follow a replacement it has already
+          // installed, but never create an anonymous content-owned Worker when the paired startup stays failed.
+          if (
+            attempt > 0 ||
+            signal?.aborted ||
+            this.#closed ||
+            this.#bootstrap === bootstrap ||
+            this.current() === client
+          )
+            throw error;
+          continue;
+        }
       try {
-        if (bootstrap) await this.#waitForBootstrap(bootstrap, signal);
         if (this.#atlas !== undefined || requiresAtlas)
           await this.#ensureConfiguration(client, requiresAtlas);
         if (request.kind === 'sources.configure')

@@ -322,6 +322,92 @@ it('follows a replacement bootstrap when the initial paired Worker fails while c
   services.close();
 });
 
+it('leaves a terminal paired hello failure owned by explicit library retry', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({
+    createWorker,
+    supervisor: { maxAutomaticRestarts: 0 },
+  });
+
+  const opening = services.library.open(openOptions);
+  const failedOpen = expect(opening).rejects.toMatchObject({
+    failure: { code: 'unavailable', retryable: true },
+  });
+  const loading = services.content.query({ kind: 'service.regions' });
+  const failedContent = expect(loading).rejects.toMatchObject({
+    failure: { code: 'unavailable', retryable: true },
+  });
+  expect(first.posted).toHaveLength(1);
+  expect(first.posted[0]).toMatchObject({ type: 'hello' });
+  first.fail();
+
+  await failedOpen;
+  await failedContent;
+  expect(createWorker).toHaveBeenCalledOnce();
+  expect(replacement.posted).toEqual([]);
+
+  const retrying = services.library.retry();
+  expect(createWorker).toHaveBeenCalledTimes(2);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello')
+    throw new Error('explicit library retry did not own the replacement');
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await expect(retrying).resolves.toMatchObject({ instance: 'worker-2' });
+  expect(replacement.posted).toEqual([replacementHello]);
+  services.close();
+});
+
+it('cancels content waiting on paired hello without replacement or a later query', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const controller = new AbortController();
+  const loading = services.content.query({ kind: 'service.regions' }, controller.signal);
+  expect(first.posted).toHaveLength(1);
+  expect(first.posted[0]).toMatchObject({ type: 'hello' });
+  controller.abort();
+  await expect(loading).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  expect(createWorker).toHaveBeenCalledOnce();
+
+  first.fail();
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello') throw new Error('library replacement did not say hello');
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await opening;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(replacement.posted).toEqual([replacementHello]);
+  services.close();
+});
+
 it('restores the bootstrap barrier when a paired Worker is replaced', async () => {
   const first = new FakeWorker();
   const replacement = new FakeWorker();
