@@ -12,6 +12,7 @@
 
   const params = new URLSearchParams(location.search);
   const seed = params.has('seed');
+  const queryContent = params.has('content');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, { libraryKey, mode: 'local' });
@@ -21,6 +22,7 @@
   let route = $state<Route>({ page: 'title', type: initialType, id: initialId });
   let seeded = $state(false);
   let seedFailure = $state<string | null>(null);
+  let content = $state<string | null>(null);
 
   if (seed) {
     void model.ready
@@ -34,6 +36,23 @@
         );
         await model.addToWatchlist({ type: 'movie', id: 9001 }, 'detail-watchlist');
         seeded = true;
+      })
+      .catch((error: unknown) => {
+        seedFailure = error instanceof Error ? error.message : String(error);
+      });
+  } else if (queryContent) {
+    void model.ready
+      .then(async () => {
+        const client = session.content!;
+        const title = { type: 'tv' as const, id: initialId };
+        const [titles, detail, extras, externalId, season] = await Promise.all([
+          client.query({ kind: 'titles', titles: [title, { type: 'movie', id: 9001 }] }),
+          client.query({ kind: 'title.detail', title, region: 'FI' }),
+          client.query({ kind: 'title.extras', title, warningCategories: ['Violence'] }),
+          client.query({ kind: 'title.external-id', title }),
+          client.query({ kind: 'season', title, season: 1 }),
+        ]);
+        content = JSON.stringify({ titles, detail, extras, externalId, season });
       })
       .catch((error: unknown) => {
         seedFailure = error instanceof Error ? error.message : String(error);
@@ -53,9 +72,14 @@
 
 <main>
   <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+  {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
   {#if seed}
-    {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
     {#if seeded}<p role="status">Worker detail library seeded</p>{/if}
+  {:else if queryContent}
+    {#if content}
+      <p role="status">Worker content ready</p>
+      <pre data-content>{content}</pre>
+    {/if}
   {:else}
     <Library
       link={null}

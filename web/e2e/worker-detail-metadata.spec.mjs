@@ -89,6 +89,97 @@ function expectWorkerOwned(requests) {
   );
 }
 
+test('the shared Worker owns normalized title, detail, extras, identifier and season reads', async ({
+  page,
+}) => {
+  await seed(page);
+  const requests = await arrange(page, {
+    tmdb: async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/external_ids')) return route.fulfill({ json: { imdb_id: 'tt101' } });
+      if (path.endsWith('/season/1'))
+        return route.fulfill({
+          json: {
+            episodes: [
+              {
+                episode_number: 1,
+                name: 'Worker episode',
+                air_date: '2024-01-01',
+                runtime: 48,
+              },
+            ],
+          },
+        });
+      const id = Number(/\/(?:tv|movie)\/(\d+)$/.exec(path)?.[1] ?? 101);
+      return route.fulfill({ json: titleBody(id) });
+    },
+    ratings: async (route) =>
+      route.fulfill({
+        json: {
+          Response: 'True',
+          imdbRating: '8.2',
+          imdbVotes: '35,000',
+          Ratings: [{ Source: 'Rotten Tomatoes', Value: '90%' }],
+        },
+      }),
+    warnings: async (route) =>
+      route.fulfill({
+        json: {
+          id: 101,
+          warnings: [
+            { id: 1, name: 'Violence warning', category: 'Violence', yes: 4, no: 0 },
+            { id: 2, name: 'Body warning', category: 'Body', yes: 8, no: 0 },
+          ],
+        },
+      }),
+  });
+
+  await page.goto(`${FIXTURE}?content&type=tv&id=101`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker content ready' })).toBeVisible();
+  const result = JSON.parse(await page.locator('[data-content]').innerText());
+
+  expect(result.titles).toMatchObject({
+    kind: 'titles',
+    titles: [
+      { id: 101, title: 'Series 101' },
+      { id: 9001, title: 'Series 9001' },
+    ],
+    retryable: [],
+  });
+  expect(result.detail).toMatchObject({
+    kind: 'title.detail',
+    detail: { state: 'ready', value: { title: { id: 101 }, imdbId: 'tt101' } },
+  });
+  expect(result.externalId).toEqual({
+    kind: 'title.external-id',
+    imdbId: { state: 'ready', value: 'tt101' },
+  });
+  expect(result.season).toMatchObject({
+    kind: 'season',
+    episodes: { state: 'ready', value: [{ number: 1, name: 'Worker episode', runtime: 48 }] },
+  });
+  expect(result.extras).toMatchObject({
+    kind: 'title.extras',
+    extras: {
+      ratings: { state: 'ready', value: { imdb: 8.2, votes: 35000, rottenTomatoes: 90 } },
+      warnings: {
+        state: 'ready',
+        value: [{ id: 1, label: 'Violence warning', votes: 4 }],
+      },
+      facts: { state: 'absent' },
+      iconicStudios: { state: 'absent' },
+    },
+  });
+  expect(requests.find(({ provider }) => provider === 'ratings').headers['x-api-key']).toBe(
+    'worker-detail-omdb',
+  );
+  expect(requests.find(({ provider }) => provider === 'warnings').headers['x-api-key']).toBe(
+    'worker-detail-warnings',
+  );
+  expect(JSON.stringify(result)).not.toContain('worker-detail-');
+  expectWorkerOwned(requests);
+});
+
 // The suite is unskipped with Detail's ContentService cutover. Keeping it beside the boundary while that work is in
 // flight makes the acceptance criteria executable without coupling it to protocol message shapes or callbacks.
 test.describe.skip('Worker-owned detail metadata boundary', () => {
