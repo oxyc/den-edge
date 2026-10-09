@@ -8,7 +8,7 @@
   import { LibrarySession } from '../src/lib/librarySession.svelte';
   import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
   import { fixtureLibraryService } from './libraryService';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   let route = $state(parseRoute(location.pathname + location.search));
   // As App does it: the address owns the query, but the field keeps what was typed while a result is open.
@@ -92,7 +92,7 @@
     close() {},
   } as unknown as LibraryLog;
   const library = guest ? null : fixtureLibraryService({ log });
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
   const session: LibrarySession = new LibrarySession(library?.model ?? null, true, content);
   // RoutedLibrary normally configures after opening the model; this fixture mounts Library directly.
   if (library) void library.model.ready.then(() => session.configureServices());

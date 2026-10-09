@@ -2,11 +2,11 @@
   import { onMount } from 'svelte';
   import type { RecommendedTitle } from '../src/lib/recommend';
   import Billboard from '../src/components/Billboard.svelte';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   let titles = $state<RecommendedTitle[]>([]);
   let active = $state(true);
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
   // Off unless a test asks for it: the specs that measure layout mock no reel, and handing them one
   // would have them fetching a trailer the network guard refuses.
   const reel = new URLSearchParams(location.search).has('reel') ? '/reel/fixture' : null;

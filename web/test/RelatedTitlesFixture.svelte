@@ -4,7 +4,7 @@
   import type { TitleDetail } from '../src/lib/detail';
   import type { Title } from '../src/lib/library';
   import { NO_FACTS } from '../src/lib/titleFacts';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
 
   const more: Title[] = Array.from({ length: 20 }, (_, index) => ({
@@ -25,7 +25,7 @@
     creators: [],
     cast: [],
   } as unknown as TitleDetail;
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
 
   // Known from the start with `?atlas=`, as on a title page opened with atlas already found; otherwise the page learns
   // where atlas is after the rows have shown, as a title page does when its answer is late.

@@ -3,6 +3,7 @@
   import PosterCard from '../src/components/PosterCard.svelte';
   import PosterRow from '../src/components/PosterRow.svelte';
   import { availability } from '../src/lib/availability.svelte';
+  import { setContentServiceContext } from '../src/lib/contentContext';
   import type { Title } from '../src/lib/library';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import '../src/app.css';
@@ -26,6 +27,7 @@
   };
   const services = createWorkerServiceSession();
   const content = services.content;
+  setContentServiceContext(content);
   onDestroy(() => services.close());
 
   onMount(() => {

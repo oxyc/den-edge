@@ -9,11 +9,11 @@
   import { testLog } from '../src/lib/downloadTestLog';
   import { fetchSourceList } from '../src/lib/titleSources';
   import { fixtureLibraryService } from './libraryService';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
 
   const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
   const routes = { scout: [{ url: 'http://scout.internal' }] };
-  const content = fixtureContentService({
+  const content = fixtureContentServiceContext({
     tmdb: 'fixture-key',
     omdb: 'fixture-omdb',
     atlas: '/atlas',

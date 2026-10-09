@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   const noop = () => {};
   const search = new URLSearchParams(location.search);
   const series = search.has('series');
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
   let active = $state(!search.has('inactive'));
   onMount(() => {
     const setActive = (event: Event) => (active = (event as CustomEvent<boolean>).detail);

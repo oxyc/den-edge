@@ -3,7 +3,10 @@
   import PosterRow from '../src/components/PosterRow.svelte';
   import TitleActionsProvider from './TitleActionsProvider.svelte';
   import type { Title } from '../src/lib/library';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
+
+  fixtureContentServiceContext();
 
   const movie: Title = { type: 'movie', id: 101, title: 'Movie 101' };
   const series: Title = { type: 'tv', id: 701, title: 'Series 701' };

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   const noop = () => {};
   const ref = { type: 'movie' as const, id: 42 };
   const browserPlay = new URLSearchParams(location.search).has('browser-play');
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
   let active = $state(true);
   // What SessionServices.configure() would publish for `reel`/`routes`: a restored `services.v1`
   // result first, then replaced by live `/routes` discovery. `fixture:reel` lets a spec fire that

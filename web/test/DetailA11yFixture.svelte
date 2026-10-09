@@ -3,7 +3,7 @@
      library session. -->
 <script lang="ts">
   import Detail from '../src/components/Detail.svelte';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   import type { TitleRow } from '../src/lib/wire';
 
@@ -11,7 +11,7 @@
   let row = $state<TitleRow | undefined>(undefined);
   let watchlistCalls = $state(0);
   let seenCalls = $state(0);
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
 
   (
     window as unknown as {

@@ -12,7 +12,7 @@
   import { syncPolicy } from '../src/lib/syncCore';
   import { rowName, type Row, type SettingsRow, type Stamp } from '../src/lib/wire';
   import { fixtureLibraryService } from './libraryService';
-  import { fixtureContentService } from './contentService';
+  import { fixtureContentServiceContext } from './contentService';
 
   const params = new URLSearchParams(location.search);
   const requestedPage = params.get('page');
@@ -20,7 +20,7 @@
     requestedPage === 'downloads' || requestedPage === 'artwork' ? requestedPage : 'title';
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
-  const content = fixtureContentService();
+  const content = fixtureContentServiceContext();
   const source = (filename: string, url: string, label: string) => ({
     filename,
     url,
@@ -134,6 +134,14 @@
     },
     close() {},
   } as unknown as LibraryLog;
+  const loadSeason = async (seriesId: number, season: number) => {
+    const result = await content.query({
+      kind: 'season',
+      title: { type: 'tv', id: seriesId },
+      season,
+    });
+    return result.episodes.state === 'ready' ? result.episodes.value : null;
+  };
   const library = fixtureLibraryService({
     log,
     device,
@@ -156,14 +164,7 @@
               episode: target.episode,
               title: '',
             },
-            async (seriesId, season) => {
-              const result = await content.query({
-                kind: 'season',
-                title: { type: 'tv', id: seriesId },
-                season,
-              });
-              return result.episodes.state === 'ready' ? result.episodes.value : null;
-            },
+            loadSeason,
           )) ?? null)
         : null,
   });
