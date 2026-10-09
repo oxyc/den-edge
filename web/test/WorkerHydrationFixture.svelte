@@ -48,7 +48,8 @@
           'seed-plugin',
         );
         await model.heartbeatDevice('Paired browser', 'seed-device');
-        await model.addToWatchlist({ type: 'movie', id: 1002 }, 'seed-watchlist');
+        for (const id of [1002, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012])
+          await model.addToWatchlist({ type: 'movie', id }, `seed-watchlist-${id}`);
         await model.recordProgress(
           {
             title: { type: 'movie', id: 1001 },

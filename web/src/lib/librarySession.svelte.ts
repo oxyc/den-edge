@@ -17,6 +17,8 @@ const TOAST_MS = 6_000;
  */
 export class LibrarySession {
   displays = $state<Title[]>([]);
+  /** TMDB confirmed these records do not exist; unlike a transient refusal they must not strand a shelf prefix. */
+  missingDisplays = $state<Set<string>>(new Set());
   shapes = $state(new Map<string, Shape>());
   displayRevision = $state(0);
   shapeRevision = $state(0);
@@ -47,7 +49,11 @@ export class LibrarySession {
     this.services.configure(this.model?.runtime.value);
   }
 
-  publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>): void {
+  publishLibraryMetadata(
+    titles: Title[],
+    shapes: ReadonlyArray<readonly [string, Shape]>,
+    missing: readonly TitleRef[] = [],
+  ): void {
     const added: Title[] = [];
     for (const title of titles) {
       const key = `${title.type}:${title.id}`;
@@ -55,8 +61,14 @@ export class LibrarySession {
       this.#displayIndex.set(key, title);
       added.push(title);
     }
-    if (added.length) {
+    const absent = missing.filter((ref) => !this.#displayIndex.has(`${ref.type}:${ref.id}`));
+    if (added.length || absent.length) {
       this.displays = [...this.displays, ...added];
+      if (absent.length) {
+        const next = new Set(this.missingDisplays);
+        for (const ref of absent) next.add(`${ref.type}:${ref.id}`);
+        this.missingDisplays = next;
+      }
       this.displayRevision++;
     }
     if (!shapes.length) return;
@@ -72,6 +84,7 @@ export class LibrarySession {
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
     retryable: TitleRef[];
+    retryAfterMs?: number;
   }> {
     return this.model?.libraryMetadata(refs) ?? { titles: [], shapes: [], retryable: [] };
   }
@@ -83,6 +96,11 @@ export class LibrarySession {
   displayTitle(ref: Pick<Title, 'type' | 'id'>): Title | undefined {
     void this.displayRevision;
     return this.#displayIndex.get(`${ref.type}:${ref.id}`);
+  }
+
+  displayMissing(ref: Pick<Title, 'type' | 'id'>): boolean {
+    void this.displayRevision;
+    return this.missingDisplays.has(`${ref.type}:${ref.id}`);
   }
 
   displayTitles(): ReadonlyMap<string, Title> {

@@ -1451,7 +1451,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     return exact(value, ['kind', 'matches']) && bool(value.matches);
   if (value.kind === 'library.metadata')
     return (
-      exact(value, ['kind', 'titles', 'shapes', 'retryable']) &&
+      exact(value, ['kind', 'titles', 'shapes', 'retryable', 'retryAfterMs']) &&
       list(
         value.titles,
         isLibraryMetadataTitle,
@@ -1461,7 +1461,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       list(value.shapes, libraryMetadataShape, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
       unique(value.shapes, (shape) => `${shape.title.type}:${shape.title.id}`) &&
       list(value.retryable, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
-      unique(value.retryable, (title) => `${title.type}:${title.id}`)
+      unique(value.retryable, (title) => `${title.type}:${title.id}`) &&
+      optional(value.retryAfterMs, positiveInteger)
     );
   if (value.kind === 'relay.membership') {
     const capability = value.capability;

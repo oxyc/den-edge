@@ -145,16 +145,30 @@
   const overview = $derived(model?.overview.value);
   const continueView = $derived(model?.continueWatching.value);
   const settings = $derived(model?.settings.value);
-  const namedPrefix = (refs: readonly TitleRef[]) => {
-    const missing = refs.findIndex((ref) => !session.displayTitle(ref));
-    return missing < 0 ? refs.length : missing;
+  /**
+   * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
+   * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains
+   * unanswered, so it cannot make us spend the rate limit on the whole tail.
+   */
+  const metadataLimit = (refs: readonly TitleRef[], wanted: number) => {
+    let shown = 0;
+    let unanswered = 0;
+    let limit = 0;
+    for (const ref of refs) {
+      limit++;
+      if (session.displayTitle(ref)) shown++;
+      else if (!session.displayMissing(ref)) unanswered++;
+      if (shown >= wanted || unanswered >= SHELF_TRANCHE) break;
+    }
+    return limit;
   };
   const continueNameLimit = $derived(
-    Math.max(continueNames, namedPrefix((continueView?.items ?? []).map(({ title }) => title))),
+    metadataLimit(
+      (continueView?.items ?? []).map(({ title }) => title),
+      continueNames,
+    ),
   );
-  const watchlistNameLimit = $derived(
-    Math.max(watchlistNames, namedPrefix(overview?.watchlist ?? [])),
-  );
+  const watchlistNameLimit = $derived(metadataLimit(overview?.watchlist ?? [], watchlistNames));
   const libraryOpen = $derived(model === null || overview !== undefined);
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
@@ -259,8 +273,8 @@
 
   // A dense cached prefix appears at once. A sparse cached tail stays behind its unnamed predecessors, preserving
   // shelf and keyboard order without turning one old cached title into a large burst of TMDB requests.
-  const admitContinueNames = () => (continueNames = continueNameLimit + SHELF_TRANCHE);
-  const admitWatchlistNames = () => (watchlistNames = watchlistNameLimit + SHELF_TRANCHE);
+  const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
+  const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
 
   // The Watchlist screen is the only owner of the potentially large history naming tail.
   $effect(() => {
