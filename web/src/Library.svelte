@@ -75,7 +75,7 @@
     TitleRef,
     TitleView,
   } from './lib/libraryServiceProtocol';
-  import { overviewTitleRow, titleViewRows } from './lib/libraryViewPresentation';
+  import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
 
   let {
     link,
@@ -158,6 +158,8 @@
   const remuxBlocked = $derived(discovered.remuxBlocked);
 
   const overview = $derived(model?.overview.value);
+  // One lookup index per immutable service snapshot; billboard renders and actions never scan the whole library.
+  const overviewTitles = $derived(overview ? new OverviewTitleIndex(overview) : undefined);
   const continueView = $derived(model?.continueWatching.value);
   const settings = $derived(model?.settings.value);
   /**
@@ -461,7 +463,7 @@
   }
 
   /** A title's row as last read, for the billboard's Watchlist and Seen. */
-  const rowOf = (title: Title) => overviewTitleRow(title, overview);
+  const rowOf = (title: Title) => overviewTitles?.row(title);
 
   /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
   async function fromSlide(write: Promise<boolean | undefined>) {

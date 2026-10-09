@@ -2,30 +2,60 @@
 // every value comes from an immutable LibraryModel view, and every mutation goes back through semantic commands.
 
 import { blankEpisode, blankTitle, WATCHED } from './actions';
-import type { Title } from './library';
+import { titleKey, type Title } from './library';
 import type { Immutable } from './libraryModel.svelte';
-import type { LibraryOverviewView, TitleRef, TitleView } from './libraryServiceProtocol';
+import type { LibraryOverviewView, Standing, TitleView } from './libraryServiceProtocol';
 import type { EpisodeRow, Stamp, TitleRow } from './wire';
 
 const DISPLAY_STAMP: Stamp = [0, 0, 'service'];
 
-export function overviewTitleRow(
-  title: Title,
-  overview: Immutable<LibraryOverviewView> | undefined,
-): TitleRow | undefined {
-  if (!overview) return undefined;
-  const same = (ref: Immutable<TitleRef>) => ref.type === title.type && ref.id === title.id;
-  const standing = overview.standings.find(({ title: ref }) => same(ref))?.standing;
-  const watched = overview.watched.some(same);
-  const listed = overview.owned.some(same);
-  if (!listed && !standing && !watched) return undefined;
-  return rowFromState(title, {
-    listed,
-    watched,
-    standing: watched ? 'watched' : (standing ?? null),
-    reaction: null,
-    progress: null,
-  });
+interface OverviewTitleState {
+  listed?: true;
+  watched?: true;
+  standing?: Standing;
+}
+
+/**
+ * The title state Home needs, keyed once for one immutable overview replacement.
+ *
+ * Billboard slides ask for this state during presentation and interaction updates. Keeping the index beside that
+ * presentation boundary avoids repeatedly walking the whole library without giving components another library
+ * authority of their own.
+ */
+export class OverviewTitleIndex {
+  readonly #states = new Map<string, OverviewTitleState>();
+
+  constructor(overview: Immutable<LibraryOverviewView>) {
+    for (const title of overview.owned) this.#state(title).listed = true;
+    for (const title of overview.watched) this.#state(title).watched = true;
+    for (const { title, standing } of overview.standings) {
+      const state = this.#state(title);
+      // Preserve the old `find` behavior if a malformed projection contains the same title twice.
+      state.standing ??= standing;
+    }
+  }
+
+  row(title: Title): TitleRow | undefined {
+    const state = this.#states.get(titleKey(title));
+    if (!state) return undefined;
+    return rowFromState(title, {
+      listed: state.listed === true,
+      watched: state.watched === true,
+      standing: state.watched ? 'watched' : (state.standing ?? null),
+      reaction: null,
+      progress: null,
+    });
+  }
+
+  #state(title: { type: string; id: number }): OverviewTitleState {
+    const key = titleKey(title);
+    let state = this.#states.get(key);
+    if (!state) {
+      state = {};
+      this.#states.set(key, state);
+    }
+    return state;
+  }
 }
 
 export function titleViewRows(
