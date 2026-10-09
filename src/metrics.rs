@@ -607,7 +607,7 @@ impl Metrics {
              den_edge_build_info{{version=\"{}\"}} 1\n\
              # HELP den_edge_requests_total Requests answered, by route and status.\n\
              # TYPE den_edge_requests_total counter\n",
-            env!("CARGO_PKG_VERSION")
+            crate::release_version()
         );
         for ((route, status), n) in lock(&self.requests).iter() {
             out.push_str(&format!("den_edge_requests_total{{route=\"{route}\",status=\"{status}\"}} {n}\n"));

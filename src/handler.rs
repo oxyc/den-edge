@@ -551,7 +551,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     }
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
-        "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
+        "/version" => bare_json(StatusCode::OK, &json!({ "version": crate::release_version() })),
         "/config" => state.prepared_public_json.as_ref().map_or_else(
             || revalidated(config(state), req.headers()),
             |prepared| revalidated_prepared(&prepared.config, req.headers()),
@@ -1336,7 +1336,7 @@ pub mod tests {
         let h = Harness::new();
         assert_eq!(h.call("GET", "/health", None).await, (StatusCode::OK, json!({ "status": "ok" })));
         let (_, version) = h.call("GET", "/version", None).await;
-        assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(version["version"], crate::release_version());
         let (status, config) = h.call("GET", "/config", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(config["minSupportedVersion"], "0.1.0");
