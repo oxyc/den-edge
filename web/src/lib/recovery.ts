@@ -10,7 +10,7 @@
 import { evaluate } from '../vendor/den-core/index.js';
 import { hex } from './crypto';
 import { readDevices } from '../settings/values';
-import { thisDevice } from './device.svelte';
+import { deviceLabel as browserDeviceLabel } from './edge';
 import {
   deriveKeys,
   fromBase64url,
@@ -179,7 +179,7 @@ export function deviceSlug(guess: string): string {
 }
 
 function deviceLabel(): string {
-  return deviceSlug(thisDevice.guess);
+  return deviceSlug(browserDeviceLabel());
 }
 
 export interface DeriveOptions {
