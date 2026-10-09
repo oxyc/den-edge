@@ -18,6 +18,7 @@ import {
   parseCollection,
   parseDetail,
   parseFilmography,
+  parsePerson,
   parseSeason,
   type Episode,
   type TitleDetail,
@@ -316,6 +317,22 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         return {
           kind: 'collection',
           titles: body.kind === 'found' ? parseCollection(body.value) : [],
+        };
+      }
+      case 'person': {
+        const body = await this.#wait(
+          this.#tmdb(`/person/${request.id}`, this.#tmdbKey()),
+          signal,
+        );
+        const person = body.kind === 'found' ? parsePerson(request.id, body.value) : null;
+        return {
+          kind: 'person',
+          person:
+            body.kind === 'found'
+              ? person
+                ? { state: 'ready', value: person }
+                : { state: 'absent' }
+              : optional(body, 'tmdb'),
         };
       }
       case 'person.filmography': {

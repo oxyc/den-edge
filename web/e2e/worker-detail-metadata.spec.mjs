@@ -234,6 +234,44 @@ test('typed search keeps TMDB aggregation inside the shared Worker', async ({ pa
   expectWorkerOwned(requests);
 });
 
+test('a person and their filmography are normalized by the shared Worker', async ({ page }) => {
+  await seed(page);
+  const requests = await arrange(page, {
+    tmdb: async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/combined_credits'))
+        return route.fulfill({
+          json: {
+            cast: [
+              {
+                id: 808,
+                media_type: 'movie',
+                title: 'Worker Film',
+                release_date: '2025-01-01',
+                poster_path: '/worker-film.jpg',
+              },
+            ],
+            crew: [],
+          },
+        });
+      return route.fulfill({
+        json: {
+          id: 7,
+          name: 'Worker Person',
+          profile_path: '/worker-person.jpg',
+          biography: 'A biography supplied through the content Worker.',
+          known_for_department: 'Acting',
+        },
+      });
+    },
+  });
+
+  await page.goto(`${FIXTURE}?person&id=7`);
+  await expect(page.getByRole('heading', { name: 'Worker Person', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Worker Film 2025', exact: true })).toBeVisible();
+  expectWorkerOwned(requests);
+});
+
 test.describe('Worker-owned detail metadata boundary', () => {
   test('base detail paints before independent extras, and season/extras stay Worker-owned', async ({
     page,

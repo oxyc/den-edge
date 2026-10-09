@@ -1400,7 +1400,7 @@
 {:else if route.page === 'search' && !SearchScreen.current}
   <ScreenLoading screen={SearchScreen} />
 {:else if route.page === 'person'}
-  <PersonScreen.current id={route.id} {tmdbKey} {active} />
+  <PersonScreen.current id={route.id} content={session.content!} {active} />
 {:else if route.page === 'service' && !ServiceScreen.current}
   <ScreenLoading screen={ServiceScreen} />
 {:else if route.page === 'service'}
@@ -1432,7 +1432,7 @@
 {:else if route.page === 'people' && !PeopleScreen.current}
   <ScreenLoading screen={PeopleScreen} />
 {:else if route.page === 'people'}
-  <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
+  <PeopleScreen.current view={people} content={session.content!} {atlas} {atlasReady} />
 {:else if route.page === 'downloads'}
   {#if !model}
     <p class="note">

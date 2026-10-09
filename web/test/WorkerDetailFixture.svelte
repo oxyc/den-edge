@@ -23,6 +23,8 @@
   let route = $state<Route>(
     params.has('search')
       ? { page: 'search', query: initialQuery }
+      : params.has('person')
+        ? { page: 'person', id: initialId }
       : { page: 'title', type: initialType, id: initialId },
   );
   let seeded = $state(false);

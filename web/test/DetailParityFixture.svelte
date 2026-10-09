@@ -93,7 +93,7 @@
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
   <Router onchange={noop}>
     {#snippet children(route, active)}
-      {#if route.page === 'person'}<Person id={route.id} tmdbKey="fixture-key" {active} />
+      {#if route.page === 'person'}<Person id={route.id} {content} {active} />
       {:else if route.page === 'title'}
         <Detail
           ref={{ type: route.type, id: route.id }}

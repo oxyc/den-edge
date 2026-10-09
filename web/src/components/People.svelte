@@ -60,17 +60,17 @@
   } from '../lib/people';
   import { peopleHref, searchHref, type PeopleView } from '../lib/route';
   import type { Hit } from '../lib/search';
-  import { searchSources } from '../lib/searchSources';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
 
   let {
     view = {},
-    tmdbKey,
+    content,
     atlas,
     atlasReady = true,
   }: {
     /** What is browsed, from the address. */
     view?: PeopleView;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     atlas: string | null;
     /** Whether the search for atlas has finished: until then, no atlas is not yet an answer. */
     atlasReady?: boolean;
@@ -158,15 +158,15 @@
   });
 
   // Each person's photo, from TMDB as a person's page and search draw them.
-  const sources = $derived(searchSources(tmdbKey, undefined, atlas));
   let photos = $state<Record<number, string | null>>({});
   function loadPhoto(id: number) {
     if (id in photos) return;
     photos[id] = null;
-    sources
-      .person(id)
-      .then((found) => {
-        if (found?.profilePath) photos[id] = found.profilePath;
+    content
+      .query({ kind: 'person', id })
+      .then((answer) => {
+        if (answer.person.state === 'ready' && answer.person.value.profilePath)
+          photos[id] = answer.person.value.profilePath;
       })
       .catch((error: unknown) => console.warn('people: no photo for', id, error));
   }
