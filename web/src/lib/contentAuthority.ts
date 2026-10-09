@@ -64,6 +64,7 @@ import {
 } from '../settings/services';
 
 const TMDB = 'https://api.themoviedb.org/3';
+const MAX_ATLAS_TITLE_CURSORS = 64;
 
 export interface ContentRef {
   type: MediaType;
@@ -168,6 +169,11 @@ export interface ContentAuthorityOptions {
   now?: () => number;
 }
 
+interface AtlasTitleCursor {
+  selection: string;
+  load: ReturnType<typeof filterTitles>;
+}
+
 type Json = Record<string, unknown>;
 
 const object = (value: unknown): Json | null =>
@@ -241,6 +247,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
   readonly #flights = new Map<string, Promise<unknown>>();
+  readonly #atlasTitleCursors = new Map<string, AtlasTitleCursor>();
   readonly #imports: ContentImportAuthority;
   readonly #statusListeners = new Set<(status: ContentServiceStatusValue) => void>();
   readonly #stopThrottle: () => void;
@@ -267,12 +274,14 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   close(): void {
     this.#stopThrottle();
     this.#statusListeners.clear();
+    this.#atlasTitleCursors.clear();
   }
 
   async query(request: ContentRequest, signal: AbortSignal): Promise<ServiceContentResult> {
     // Source discovery is ordering-sensitive: configure synchronously before any later query can observe the old
     // source, even while paired credentials are still opening.
     if (request.kind === 'sources.configure') {
+      this.#atlasTitleCursors.clear();
       this.credentials.configureAtlas?.(request.atlas);
       return { kind: 'sources.configure' };
     }
@@ -725,10 +734,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     try {
       switch (query.operation) {
         case 'titles': {
-          const load = filterTitles(atlas, query.type, query.items, { fetchImpl });
           return {
             state: 'ready',
-            value: { operation: 'titles', titles: await load(query.page) },
+            value: {
+              operation: 'titles',
+              titles: await this.#atlasTitlePage(atlas, query, signal),
+            },
           };
         }
         case 'counts':
@@ -798,6 +809,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
     } catch (error) {
       if (error instanceof FilterUnavailable) return { state: 'absent' };
+      if (error instanceof ContentServiceFault) throw error;
       if ((error as Error)?.name === 'AbortError') throw error;
       return { state: 'unavailable', provider: 'atlas', reason: 'network' };
     }
@@ -925,6 +937,50 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') throw error;
       return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasTitlePage(
+    atlas: string,
+    query: Extract<
+      Extract<ContentRequest, { kind: 'atlas.query' }>['query'],
+      { operation: 'titles' }
+    >,
+    signal: AbortSignal,
+  ): Promise<import('./library').Title[]> {
+    const selection = JSON.stringify([atlas, query.type, query.items]);
+    let cursor = this.#atlasTitleCursors.get(query.cursor);
+    if (cursor && cursor.selection !== selection)
+      throw new ContentServiceFault({
+        code: 'invalid-request',
+        message: 'Atlas title cursor selection cannot change',
+        retryable: false,
+        provider: 'atlas',
+      });
+    if (!cursor) {
+      while (this.#atlasTitleCursors.size >= MAX_ATLAS_TITLE_CURSORS) {
+        const oldest = this.#atlasTitleCursors.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.#atlasTitleCursors.delete(oldest);
+      }
+      cursor = {
+        selection,
+        load: filterTitles(atlas, query.type, structuredClone(query.items), {
+          fetchImpl: this.#providerFetch,
+        }),
+      };
+    } else this.#atlasTitleCursors.delete(query.cursor);
+    // Map insertion order is the LRU list. A cursor remains stable while its request-local signal changes per page.
+    this.#atlasTitleCursors.set(query.cursor, cursor);
+    try {
+      const titles = await cursor.load(query.page, signal);
+      if (!titles.length && this.#atlasTitleCursors.get(query.cursor) === cursor)
+        this.#atlasTitleCursors.delete(query.cursor);
+      return titles;
+    } catch (error) {
+      if (this.#atlasTitleCursors.get(query.cursor) === cursor)
+        this.#atlasTitleCursors.delete(query.cursor);
+      throw error;
     }
   }
 
@@ -1066,16 +1122,16 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const url = shared
       ? `${atlas}/recommend/${request.scope}.json?day=${request.day}${request.fresh ? '&fresh=1' : ''}`
       : `${atlas}/recommend`;
-    const load = async () => {
+    const load = async (requestSignal?: AbortSignal) => {
       const response = await this.#providerFetch(
         url,
         shared
-          ? { signal }
+          ? undefined
           : {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify(request.body),
-              signal,
+              signal: requestSignal,
             },
       );
       if (response.status === 404) return { state: 'absent' } as const;
@@ -1086,10 +1142,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         : ({ state: 'absent' } as const);
     };
     try {
+      // A daily GET is safe to share, but one caller cancelling only leaves its wait: it must not cancel the
+      // underlying request for every other waiter. Personalized POSTs are request-owned and never coalesced.
       return await this.#wait(
-        shared
-          ? reuse(`content:${url}`, load)
-          : this.#join(`recommend\0${JSON.stringify(request.body)}`, load),
+        shared ? reuse(`content:${url}`, () => load()) : load(signal),
         signal,
       );
     } catch (error) {

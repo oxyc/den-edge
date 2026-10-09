@@ -190,7 +190,11 @@ function atlasQuery(value: unknown): value is ContentAtlasQuery {
   if (!filterItems(value.items)) return false;
   switch (value.operation) {
     case 'titles':
-      return exact(value, ['operation', 'type', 'items', 'page']) && integer(value.page, 1);
+      return (
+        exact(value, ['operation', 'cursor', 'type', 'items', 'page']) &&
+        text(value.cursor, CONTENT_SERVICE_WIRE_LIMITS.cursor) &&
+        integer(value.page, 1)
+      );
     case 'counts':
       return exact(value, ['operation', 'type', 'items']);
     case 'values':

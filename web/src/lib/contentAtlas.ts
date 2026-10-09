@@ -28,15 +28,22 @@ export const contentFilterTitles = (
   content: ContentServiceClientPort,
   type: ExploreType,
   items: FilterItem[],
-): ((page: number) => Promise<Title[]>) =>
-  async function load(page) {
+): ((page: number, signal?: AbortSignal) => Promise<Title[]>) => {
+  const cursor = crypto.randomUUID();
+  const selection = items.map((item) => ({ ...item }));
+  return async function load(page, signal) {
     const value = await answer(
       content,
-      { kind: 'atlas.query', query: { operation: 'titles', type, items, page } },
+      {
+        kind: 'atlas.query',
+        query: { operation: 'titles', cursor, type, items: selection, page },
+      },
       'titles',
+      signal,
     );
     return value.operation === 'titles' ? value.titles : [];
   };
+};
 
 export async function contentFilterCounts(
   content: ContentServiceClientPort,

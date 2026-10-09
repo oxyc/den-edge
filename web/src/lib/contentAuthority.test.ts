@@ -105,76 +105,250 @@ describe('ContentAuthority', () => {
     ]);
   });
 
-  it('keeps concurrent Atlas paging cursors and cancellation request-scoped', async () => {
+  it('keeps equal Atlas selections on independent cursors and cancels only one page', async () => {
     const credentials = new WorkerContentCredentials();
     credentials.configureAtlas('/atlas');
+    const asked: string[] = [];
     const pending: Array<{
       signal: AbortSignal | null;
       answer: (response: Response) => void;
     }> = [];
     const authority = new ContentAuthority(credentials, {
-      providerFetch: (_input, init) =>
-        new Promise<Response>((resolve, reject) => {
+      providerFetch: (input, init) => {
+        const url = String(input);
+        if (url === '/metadata/title/query') return Promise.resolve(json({ entries: [] }));
+        if (init?.signal?.aborted) return Promise.reject(init.signal.reason);
+        asked.push(url);
+        const skip = Number(new URL(url, 'https://example.test').searchParams.get('skip') ?? 0);
+        if (!skip)
+          return Promise.resolve(
+            json({
+              order: 'stable',
+              titles: [{ type: 'movie', id: asked.length, title: `Page ${asked.length}` }],
+            }),
+          );
+        return new Promise<Response>((resolve, reject) => {
           const signal = init?.signal ?? null;
           signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
           pending.push({ signal, answer: resolve });
-        }),
+        });
+      },
     });
+    const firstCursor = crypto.randomUUID();
+    const secondCursor = crypto.randomUUID();
+    const query = (
+      cursor: string,
+      page: number,
+      items: Array<{ kind: string; id: string }> = [],
+    ) => ({
+      kind: 'atlas.query' as const,
+      query: {
+        operation: 'titles' as const,
+        cursor,
+        type: 'movie' as const,
+        items,
+        page,
+      },
+    });
+
+    await authority.query(query(firstCursor, 1), new AbortController().signal);
+    await authority.query(query(secondCursor, 1), new AbortController().signal);
+
     const first = new AbortController();
     const second = new AbortController();
-    const query = {
-      kind: 'atlas.query' as const,
-      query: { operation: 'titles' as const, type: 'movie' as const, items: [], page: 1 },
-    };
-
-    const cancelled = authority.query(query, first.signal);
-    const surviving = authority.query(query, second.signal);
+    const cancelled = authority.query(query(firstCursor, 2), first.signal);
+    const surviving = authority.query(query(secondCursor, 2), second.signal);
     await expect.poll(() => pending.length).toBe(2);
     expect(pending.map(({ signal }) => signal)).toEqual([first.signal, second.signal]);
     first.abort();
-    pending[1]!.answer(json({ order: 'stable', titles: [] }));
+    pending[1]!.answer(
+      json({ order: 'stable', titles: [{ type: 'movie', id: 25, title: 'Page two' }] }),
+    );
 
     await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
     await expect(surviving).resolves.toMatchObject({
       kind: 'atlas.query',
-      answer: { state: 'ready', value: { operation: 'titles', titles: [] } },
+      answer: { state: 'ready', value: { operation: 'titles', titles: [{ id: 25 }] } },
     });
+    // Aborting retired only that cursor, so its opaque id can begin a different selection.
+    await expect(
+      authority.query(query(firstCursor, 1, [{ kind: 'genre', id: '18' }]), first.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      authority.query(
+        query(firstCursor, 1, [{ kind: 'genre', id: '18' }]),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ answer: { state: 'ready' } });
+    expect(asked).toEqual([
+      '/atlas/index/filter/movie/titles.json',
+      '/atlas/index/filter/movie/titles.json',
+      '/atlas/index/filter/movie/titles.json?skip=24',
+      '/atlas/index/filter/movie/titles.json?skip=24',
+      '/atlas/index/filter/movie/titles.json?sel=genre:18',
+    ]);
   });
 
-  it('passes cancellation into personalized Atlas recommendation POSTs', async () => {
+  it('rejects a cursor whose selection mutates, then retires it on completion and reconfiguration', async () => {
     const credentials = new WorkerContentCredentials();
     credentials.configureAtlas('/atlas');
-    let requestSignal: AbortSignal | null | undefined;
     const authority = new ContentAuthority(credentials, {
-      providerFetch: (_input, init) => {
-        requestSignal = init?.signal;
-        return new Promise<Response>((_resolve, reject) =>
-          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
-            once: true,
-          }),
-        );
+      providerFetch: async (input) => {
+        const url = String(input);
+        if (url === '/metadata/title/query') return json({ entries: [] });
+        return json({
+          order: 'stable',
+          titles: url.includes('genre:18') ? [{ type: 'movie', id: 1, title: 'One' }] : [],
+        });
       },
     });
-    const controller = new AbortController();
-    const request = authority.query(
-      {
-        kind: 'atlas.recommend.personal',
-        body: {
-          version: 1,
-          surface: 'home',
-          now: '2026-10-09T00:00:00.000Z',
-          services: [],
-          library: [],
-          owned: [],
-          hide: { minYear: 1900, genres: [], languages: [], anime: false },
-        },
+    const query = (cursor: string, genre: string) => ({
+      kind: 'atlas.query' as const,
+      query: {
+        operation: 'titles' as const,
+        cursor,
+        type: 'movie' as const,
+        items: [{ kind: 'genre', id: genre }],
+        page: 1,
       },
-      controller.signal,
-    );
+    });
 
-    await expect.poll(() => requestSignal).toBe(controller.signal);
-    controller.abort();
-    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    // An empty page retires the cursor, so the same opaque id no longer retains a completed selection.
+    const completed = crypto.randomUUID();
+    await expect(
+      authority.query(query(completed, '35'), new AbortController().signal),
+    ).resolves.toMatchObject({ answer: { state: 'ready' } });
+    await expect(
+      authority.query(query(completed, '18'), new AbortController().signal),
+    ).resolves.toMatchObject({ answer: { state: 'ready' } });
+
+    const active = crypto.randomUUID();
+    await authority.query(query(active, '18'), new AbortController().signal);
+    await expect(
+      authority.query(query(active, '35'), new AbortController().signal),
+    ).rejects.toMatchObject({ failure: { code: 'invalid-request', provider: 'atlas' } });
+
+    await authority.query(
+      { kind: 'sources.configure', atlas: '/atlas-next' },
+      new AbortController().signal,
+    );
+    await expect(
+      authority.query(query(active, '35'), new AbortController().signal),
+    ).resolves.toMatchObject({ answer: { state: 'ready' } });
+  });
+
+  it('bounds Atlas cursor state with least-recently-used retirement', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('/atlas');
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: async (input) =>
+        String(input) === '/metadata/title/query'
+          ? json({ entries: [] })
+          : json({
+              order: 'stable',
+              titles: [{ type: 'movie', id: 1, title: 'One' }],
+            }),
+    });
+    const cursors = Array.from({ length: 65 }, () => crypto.randomUUID());
+    const request = (cursor: string, genre: string) => ({
+      kind: 'atlas.query' as const,
+      query: {
+        operation: 'titles' as const,
+        cursor,
+        type: 'movie' as const,
+        items: [{ kind: 'genre', id: genre }],
+        page: 1,
+      },
+    });
+    for (const cursor of cursors)
+      await authority.query(request(cursor, '18'), new AbortController().signal);
+
+    // The oldest was evicted and may start over; the newest still owns its immutable selection.
+    await expect(
+      authority.query(request(cursors[0]!, '35'), new AbortController().signal),
+    ).resolves.toMatchObject({ answer: { state: 'ready' } });
+    await expect(
+      authority.query(request(cursors.at(-1)!, '35'), new AbortController().signal),
+    ).rejects.toMatchObject({ failure: { code: 'invalid-request', provider: 'atlas' } });
+  });
+
+  it('lets shared recommendation waiters cancel independently over one GET', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas(`/atlas-shared-${crypto.randomUUID()}`);
+    let answer!: (response: Response) => void;
+    const providerFetch = vi.fn<typeof fetch>(
+      (_input, init) =>
+        new Promise<Response>((resolve) => {
+          expect(init?.signal).toBeUndefined();
+          answer = resolve;
+        }),
+    );
+    const authority = new ContentAuthority(credentials, { providerFetch });
+    const request = {
+      kind: 'atlas.recommend.shared' as const,
+      scope: 'home' as const,
+      day: '2026-10-09',
+      fresh: false,
+    };
+    const first = new AbortController();
+    const second = new AbortController();
+    const cancelled = authority.query(request, first.signal);
+    const surviving = authority.query(request, second.signal);
+    await expect.poll(() => providerFetch).toHaveBeenCalledTimes(1);
+    first.abort();
+    answer(json({ slides: [] }));
+
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(surviving).resolves.toMatchObject({
+      kind: 'atlas.recommend.shared',
+      slides: { state: 'ready', value: [] },
+    });
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps personalized recommendation POSTs and cancellation request-owned', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('/atlas');
+    const pending: Array<{
+      signal: AbortSignal | null | undefined;
+      answer: (response: Response) => void;
+    }> = [];
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: (_input, init) =>
+        new Promise<Response>((resolve, reject) => {
+          pending.push({ signal: init?.signal, answer: resolve });
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    });
+    const request = {
+      kind: 'atlas.recommend.personal' as const,
+      body: {
+        version: 1 as const,
+        surface: 'home' as const,
+        now: '2026-10-09T00:00:00.000Z',
+        services: [],
+        library: [],
+        owned: [],
+        hide: { minYear: 1900, genres: [], languages: [], anime: false },
+      },
+    };
+    const first = new AbortController();
+    const second = new AbortController();
+    const cancelled = authority.query(request, first.signal);
+    const surviving = authority.query(request, second.signal);
+
+    await expect.poll(() => pending.length).toBe(2);
+    expect(pending.map(({ signal }) => signal)).toEqual([first.signal, second.signal]);
+    first.abort();
+    pending[1]!.answer(json({ slides: [] }));
+
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(surviving).resolves.toMatchObject({
+      kind: 'atlas.recommend.personal',
+      slides: { state: 'ready', value: [] },
+    });
   });
 
   it('coalesces an exact detail request and returns normalized detail without exposing its key', async () => {

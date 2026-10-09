@@ -61,6 +61,7 @@
               kind: 'atlas.query',
               query: {
                 operation: 'titles',
+                cursor: crypto.randomUUID(),
                 type: 'movie',
                 items: [{ kind: 'mood', id: 'Cozy' }],
                 page: 1,

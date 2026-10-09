@@ -14,7 +14,7 @@ import type {
 } from './filterRoutes';
 
 /** The read-only content protocol is versioned independently from encrypted library state. */
-export const CONTENT_SERVICE_PROTOCOL = 3 as const;
+export const CONTENT_SERVICE_PROTOCOL = 4 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -25,6 +25,7 @@ export const CONTENT_SERVICE_WIRE_LIMITS = {
   filters: 64,
   related: 512,
   importLookups: 10_000,
+  cursor: 128,
 } as const;
 
 export type ContentProvider = 'tmdb' | 'ratings' | 'warnings' | 'atlas';
@@ -62,7 +63,13 @@ export type ContentCatalogSpec =
   | { kind: 'recommendations'; title: ContentTitleRef };
 
 export type ContentAtlasQuery =
-  | { operation: 'titles'; type: 'movie' | 'tv' | 'all'; items: FilterItem[]; page: number }
+  | {
+      operation: 'titles';
+      cursor: string;
+      type: 'movie' | 'tv' | 'all';
+      items: FilterItem[];
+      page: number;
+    }
   | { operation: 'counts'; type: 'movie' | 'tv' | 'all'; items: FilterItem[] }
   | {
       operation: 'values';
