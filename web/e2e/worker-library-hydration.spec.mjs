@@ -202,6 +202,7 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   await expect(continued.getByText('Movie 1001')).toHaveCount(0);
 
   releaseMetadata();
+  await expect(watchlist.getByRole('heading', { name: 'Watchlist 10', exact: true })).toBeVisible();
   await expect(watched.getByRole('heading', { name: 'Watched 128', exact: true })).toBeVisible();
 
   const workerRequests = metadata.requests.filter(({ realm }) => realm === undefined);
