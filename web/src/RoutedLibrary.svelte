@@ -68,7 +68,7 @@
 
   const open = (key: string | null, local: boolean) => {
     if (!key) return new LibrarySession(null, false);
-    const service = createLibraryService({ dedicatedWorker: typeof Worker !== 'undefined' });
+    const service = createLibraryService();
     const clock = legacyClock();
     const model = new LibraryModel(service, {
       libraryKey: key,
