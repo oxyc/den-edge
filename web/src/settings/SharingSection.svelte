@@ -57,6 +57,10 @@
     reel: { label: 'Den Reel', role: 'Trailers' },
     subtitles: { label: 'Den Subtitles', role: 'Subtitles' },
   };
+  const DEVICE_LIMITS = Array.from({ length: 5 }, (_, index) => {
+    const devices = index + 1;
+    return { value: String(devices), label: `${devices} device${devices === 1 ? '' : 's'}` };
+  });
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 
@@ -79,6 +83,8 @@
   let linkField = $state<HTMLInputElement>();
   let codeField = $state<HTMLInputElement>();
   let renaming = $state<{ gid: string; name: string } | null>(null);
+  /** A native picker shows its choice immediately. Keep that optimistic value explicit so a refused edit rolls back. */
+  let deviceLimits = $state<Record<string, number>>({});
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
   let codes = $state<Record<string, string>>({});
 
@@ -174,19 +180,31 @@
     manualCode = result === 'manual';
   }
 
-  async function change(grant: Grant, patch: GrantChange) {
+  async function change(grant: Grant, patch: GrantChange): Promise<boolean> {
     const id = libraryCredentialId();
-    if (!id) return;
+    if (!id) return false;
     working = true;
     problem = null;
     const reply = await updateGrant(id, grant.gid, patch);
     working = false;
     if (!reply.ok) {
       problem = said(reply);
-      return;
+      return false;
     }
     grants = (grants ?? []).map((g) => (g.gid === grant.gid ? reply.value : g));
     renaming = null;
+    return true;
+  }
+
+  const deviceLimit = (grant: Grant) => deviceLimits[grant.gid] ?? grant.devices;
+
+  async function changeDeviceLimit(grant: Grant, devices: number): Promise<void> {
+    if (devices === grant.devices || devices < 1 || devices > 5) return;
+    deviceLimits = { ...deviceLimits, [grant.gid]: devices };
+    await change(grant, { devices });
+    const next = { ...deviceLimits };
+    delete next[grant.gid];
+    deviceLimits = next;
   }
 
   /** Give more time: to redeem the code while it is unused, and to watch once it is. */
@@ -407,10 +425,9 @@
             <li class="line">
               <span class="label"
                 >{grant.name}<small>{standing(grant)}</small><small
-                  >{grant.addons
-                    .map((addon) => NAMES[addon].label)
-                    .join(', ')}{#if grant.devices > 1}
-                    · {grant.deviceCount} of {grant.devices} devices{/if}</small
+                  >{grant.addons.map((addon) => NAMES[addon].label).join(', ')}
+                  · {grant.deviceCount} of {deviceLimit(grant)}
+                  {deviceLimit(grant) === 1 ? 'device' : 'devices'}</small
                 >{#if usage(grant)}<small>{usage(grant)}</small>{/if}</span
               >
               {#if grant.status !== 'revoked'}
@@ -444,6 +461,19 @@
                       />
                     {/key}
                   {/if}
+                  <span class="device-limit">
+                    <span>Device limit</span>
+                    <Select
+                      label="Device limit for {grant.name}"
+                      value={String(deviceLimit(grant))}
+                      disabled={working}
+                      options={DEVICE_LIMITS}
+                      onchange={(value) => {
+                        const limit = Number(value);
+                        if (limit !== deviceLimit(grant)) void changeDeviceLimit(grant, limit);
+                      }}
+                    />
+                  </span>
                   <button
                     type="button"
                     class="quiet"
@@ -613,5 +643,18 @@
     border: 1px solid var(--line);
     border-radius: 999px;
     color: var(--fg);
+  }
+
+  .device-limit {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .device-limit :global(select) {
+    max-width: none;
   }
 </style>

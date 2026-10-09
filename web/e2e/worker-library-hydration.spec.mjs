@@ -36,8 +36,21 @@ async function routeLibrary(page, metadata) {
     if (url.pathname.endsWith('/grants')) {
       return route.fulfill({
         headers,
-        json: request.method() === 'GET' ? { grants: [guest] } : { grant: guest },
+        json:
+          request.method() === 'GET'
+            ? { grants: [metadata.guest ?? guest] }
+            : { grant: metadata.guest ?? guest },
       });
+    }
+    if (url.pathname.endsWith(`/grants/${guest.gid}`) && request.method() === 'PUT') {
+      const change = request.postDataJSON();
+      metadata.grantUpdates?.push(change);
+      if (typeof change.devices === 'number') {
+        metadata.deviceUpdateStarted?.();
+        if (metadata.releaseDeviceUpdate) await metadata.releaseDeviceUpdate;
+        metadata.guest = { ...(metadata.guest ?? guest), devices: change.devices };
+      }
+      return route.fulfill({ headers, json: { grant: metadata.guest ?? guest } });
     }
     if (url.pathname.endsWith('/member') && request.method() === 'PUT') {
       metadata.members.add(request.headers()['x-den-library-member']);
@@ -365,4 +378,60 @@ test('a hidden paired library suspends background retries and resumes without a 
   expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(
     hiddenAgain,
   );
+});
+
+test('an invited guest device limit is saved and survives a Settings re-read', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let deviceUpdateStarted;
+  let releaseDeviceUpdate;
+  const updateStarted = new Promise((resolve) => (deviceUpdateStarted = resolve));
+  const releaseUpdate = new Promise((resolve) => (releaseDeviceUpdate = resolve));
+  const metadata = {
+    requests: [],
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    guest: { ...guest, devices: 2, deviceCount: 1 },
+    grantUpdates: [],
+    deviceUpdateStarted,
+    releaseDeviceUpdate: releaseUpdate,
+  };
+
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.goto(`${FIXTURE}?view=settings&online`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  let invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
+  const limit = invited.getByLabel('Device limit for Taylor');
+  await expect(limit).toHaveValue('2');
+  await expect(invited).toContainText('1 of 2 devices');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    )
+    .toBe(true);
+
+  await limit.selectOption('4');
+  await updateStarted;
+  await expect(limit).toBeDisabled();
+  await expect(invited).toContainText('1 of 4 devices');
+  releaseDeviceUpdate();
+
+  await expect(limit).toHaveValue('4');
+  await expect(invited).toContainText('1 of 4 devices');
+  expect(metadata.grantUpdates.filter((change) => 'devices' in change)).toEqual([{ devices: 4 }]);
+
+  // Reopening Settings asks den-edge for the grant again. The control must render the value returned by that fresh
+  // read, not a visit-local selection left behind by the native picker.
+  await page.reload();
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
+  await expect(invited.getByLabel('Device limit for Taylor')).toHaveValue('4');
+  await expect(invited).toContainText('1 of 4 devices');
 });
