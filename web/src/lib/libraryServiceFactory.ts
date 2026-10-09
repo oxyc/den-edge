@@ -110,9 +110,10 @@ class SessionContentService implements ContentServiceClientPort {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       // A replacement Worker belongs to the paired library handshake first. Re-read this barrier on every attempt:
       // the first transport can fail while the request is in flight and install a different opening promise.
-      if (this.#bootstrap) await this.#waitForBootstrap(signal);
+      const bootstrap = this.#bootstrap;
       const client = this.current();
       try {
+        if (bootstrap) await this.#waitForBootstrap(bootstrap, signal);
         if (this.#atlas !== undefined || requiresAtlas)
           await this.#ensureConfiguration(client, requiresAtlas);
         if (request.kind === 'sources.configure')
@@ -215,15 +216,14 @@ class SessionContentService implements ContentServiceClientPort {
     await this.#configuring;
   }
 
-  async #waitForBootstrap(signal?: AbortSignal): Promise<void> {
-    if (!this.#bootstrap) return;
+  async #waitForBootstrap(bootstrap: Promise<void>, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted)
       throw new ContentServiceError({
         code: 'cancelled',
         message: 'content request was cancelled',
         retryable: false,
       });
-    if (!signal) return this.#bootstrap;
+    if (!signal) return bootstrap;
     await new Promise<void>((resolve, reject) => {
       const abort = () => {
         signal.removeEventListener('abort', abort);
@@ -236,9 +236,9 @@ class SessionContentService implements ContentServiceClientPort {
         );
       };
       signal.addEventListener('abort', abort, { once: true });
-      void this.#bootstrap!.then(resolve, reject).finally(() =>
-        signal.removeEventListener('abort', abort),
-      );
+      void bootstrap
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener('abort', abort));
     });
   }
 }

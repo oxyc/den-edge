@@ -239,6 +239,89 @@ it('holds paired content traffic behind the library bootstrap barrier', async ()
   services.close();
 });
 
+it('follows a replacement bootstrap when the initial paired Worker fails while content waits', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const configuring = services.content.query({ kind: 'sources.configure', atlas: '/atlas' });
+  const initialConfiguration = first.posted[0];
+  if (initialConfiguration?.type !== 'content-query')
+    throw new Error('initial source configuration was not sent');
+  first.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: initialConfiguration.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+  await configuring;
+
+  const opening = services.library.open(openOptions);
+  const firstHello = first.posted[1];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  const loading = services.content.query({ kind: 'atlas.service.catalogs' });
+  expect(first.posted).toHaveLength(2);
+  first.fail();
+
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello')
+    throw new Error('replacement must begin with the paired hello');
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(replacement.posted).toEqual([replacementHello]);
+
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await opening;
+  await expect.poll(() => replacement.posted.length).toBe(2);
+  const replay = replacement.posted[1];
+  expect(replay).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'sources.configure', atlas: '/atlas' },
+  });
+  if (replay?.type !== 'content-query') throw new Error('source configuration was not replayed');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: replay.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+
+  await expect.poll(() => replacement.posted.length).toBe(3);
+  const query = replacement.posted[2];
+  expect(query).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'atlas.service.catalogs' },
+  });
+  if (query?.type !== 'content-query') throw new Error('content query was not retried');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: query.requestId,
+      result: { kind: 'atlas.service.catalogs', catalogs: { state: 'ready', value: [] } },
+    },
+  ]);
+  await expect(loading).resolves.toMatchObject({ kind: 'atlas.service.catalogs' });
+  services.close();
+});
+
 it('restores the bootstrap barrier when a paired Worker is replaced', async () => {
   const first = new FakeWorker();
   const replacement = new FakeWorker();
