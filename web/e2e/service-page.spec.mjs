@@ -12,7 +12,7 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
   const asked = [];
   await routeTmdb(page, (route) => {
     const url = new URL(route.request().url());
-    asked.push(url.pathname);
+    asked.push(`${url.pathname}${url.search}`);
     const path = url.pathname.replace(/^\/(tmdb\/)?3\//, '/');
     if (path.startsWith('/watch/providers/'))
       return route.fulfill({
@@ -119,16 +119,35 @@ test('resting on a service tile starts loading its page before the press', async
   expect(asked, 'nothing is fetched for a page nobody has gestured towards').toEqual([]);
 
   await tile.hover();
+  const count = (pathname, sort) =>
+    asked.filter((request) => {
+      const url = new URL(request, E2E_ORIGIN);
+      return url.pathname === pathname && (!sort || url.searchParams.get('sort_by') === sort);
+    }).length;
   const primedRequests = () => ({
-    manifest: asked.filter((path) => path === '/atlas/manifest.json').length,
-    directories: asked.filter((path) => path.includes('/watch/providers/')).length,
-    chart: asked.filter((path) => path.includes('/catalog/movie/jw-nfx-new/')).length,
-    heroPictures: asked.filter((path) => /\/movie\/10[123]$/.test(path)).length,
-    firstRows: asked.filter((path) => path === '/tmdb/3/discover/movie').length,
+    manifest: count('/atlas/manifest.json'),
+    movieDirectory: count('/tmdb/3/watch/providers/movie'),
+    tvDirectory: count('/tmdb/3/watch/providers/tv'),
+    chart: count('/atlas/catalog/movie/jw-nfx-new/country=US.json'),
+    film101: count('/tmdb/3/movie/101'),
+    film102: count('/tmdb/3/movie/102'),
+    film103: count('/tmdb/3/movie/103'),
+    popular: count('/tmdb/3/discover/movie', 'popularity.desc'),
+    acclaimed: count('/tmdb/3/discover/movie', 'vote_average.desc'),
   });
   // The hover primes the complete first screen: the Atlas row, its hero art, and the next two rows. Waiting for that
   // semantic boundary avoids mistaking a request still belonging to this first gesture for work from the next one.
-  const complete = { manifest: 1, directories: 2, chart: 1, heroPictures: 3, firstRows: 2 };
+  const complete = {
+    manifest: 1,
+    movieDirectory: 1,
+    tvDirectory: 1,
+    chart: 1,
+    film101: 1,
+    film102: 1,
+    film103: 1,
+    popular: 1,
+    acclaimed: 1,
+  };
   await expect.poll(primedRequests).toEqual(complete);
 
   // A second gesture within the reuse window asks none of those questions again. A frame lets the pointer event and
