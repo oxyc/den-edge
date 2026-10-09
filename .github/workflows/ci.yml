@@ -60,7 +60,6 @@ jobs:
       - run: npm run audit
       - run: npm run lint
       - run: npm test
-      - run: node test/sync-policy-browser.mjs
       - run: npm run build
       - run: npm run test:worker-build
       - run: npm run build:cast
@@ -98,6 +97,9 @@ jobs:
             exit 1
           }
           node --input-type=module -e "import { chromium, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"
+      - name: Browser sync policy
+        if: matrix.shard == 1
+        run: node test/sync-policy-browser.mjs
       - name: Browser behavior
         run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/2
 

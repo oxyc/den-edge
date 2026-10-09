@@ -173,6 +173,10 @@ jobs:
         env:
           EXPECTED: ${{ needs.source.outputs.version }}
         run: |
+          if [ ! -f VERSION ] || [ ! -f docker-bake.hcl ]; then
+            echo "::error::newest tag predates the candidate pipeline; cut one release from current main before running a patch rebuild"
+            exit 1
+          fi
           test "$(cat VERSION)" = "$EXPECTED"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR

@@ -178,7 +178,9 @@ passes. The tag workflow verifies and promotes those same digests; it does not r
 
 The weekly/manual patch workflow still performs a cache-free rebuild of the newest tag so base-image fixes
 ship even when application source has not changed. It follows the same probe, scan, signature, and `:latest`
-promotion gates.
+promotion gates. When adopting this pipeline, cut one ordinary release first: tags created before `VERSION`
+and the shared Bake graph existed cannot be rebuilt by the new patch job, which fails with that instruction
+instead of silently building a mismatched artifact.
 
 The homelab runs den-edge as the `den-edge` Quadlet unit on host port 8094, with state at
 `/var/lib/den/edge-data`; `den-update` deploys signed images and preserves its digest pin, live probe, and
