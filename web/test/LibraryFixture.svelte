@@ -37,6 +37,7 @@
     (window as unknown as { denTestReleaseContinueHint: () => void }).denTestReleaseContinueHint =
       releaseContinueHint;
   const many = Math.max(0, Math.min(500, Number(params.get('many')) || 0));
+  const manyWatchlist = params.has('many-watchlist');
   /** Let shelf naming, rather than fixture setup, supply the large row's display fields. */
   const unnamedMany = params.has('unnamed-many');
   let releaseOpen = () => {};
@@ -116,7 +117,10 @@
             : []),
           ...Array.from({ length: many }, (_, index) => {
             const id = 3000 + index;
-            return updateProgress(blankTitle({ type: 'movie', id }, id), 0.5, 40, [id, 0, 'test']);
+            const title = blankTitle({ type: 'movie', id }, id);
+            return manyWatchlist
+              ? addToWatchlist(title, [id, 0, 'test'])
+              : updateProgress(title, 0.5, 40, [id, 0, 'test']);
           }),
           ...(params.has('series-continue')
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
