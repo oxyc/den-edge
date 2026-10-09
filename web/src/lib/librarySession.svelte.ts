@@ -7,6 +7,7 @@ import type {
 } from './libraryServiceProtocol';
 import { cancelLibraryTitleNaming } from './libraryNaming';
 import { SessionServices } from './sessionServices.svelte';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 const TOAST_MS = 6_000;
 
@@ -34,6 +35,8 @@ export class LibrarySession {
   constructor(
     readonly model: LibraryModel | null,
     readonly local = false,
+    readonly content: ContentServiceClientPort | null = null,
+    private readonly closeWorkerServices: () => void = () => {},
   ) {
     this.services = new SessionServices(model);
   }
@@ -143,6 +146,7 @@ export class LibrarySession {
     clearTimeout(this.#toastTimer);
     this.services.stop();
     this.model?.close();
+    this.closeWorkerServices();
   }
 }
 /* eslint-enable svelte/prefer-svelte-reactivity */

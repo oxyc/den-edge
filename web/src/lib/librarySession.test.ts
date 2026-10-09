@@ -21,8 +21,13 @@ describe('LibrarySession presentation state', () => {
   it('forwards each foreground and close transition once', () => {
     const foregroundReady = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn();
+    const closeWorkerServices = vi.fn();
+    const content = {
+      query: vi.fn(),
+      onStatus: vi.fn(() => () => {}),
+    };
     const model = { foregroundReady, close } as unknown as LibraryModel;
-    const session = new LibrarySession(model);
+    const session = new LibrarySession(model, false, content, closeWorkerServices);
 
     session.foregroundReady();
     session.foregroundReady();
@@ -31,6 +36,8 @@ describe('LibrarySession presentation state', () => {
 
     expect(foregroundReady).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
+    expect(session.content).toBe(content);
+    expect(closeWorkerServices).toHaveBeenCalledOnce();
   });
 
   it('owns only transient toast and undo timing', () => {
