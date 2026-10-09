@@ -9,6 +9,52 @@
 
 let waiting = false;
 
+interface ReleaseWatcher {
+  /** True once this page has learned that den-edge serves another release. */
+  check(): Promise<boolean>;
+}
+
+/**
+ * Watch the shell release a page started on, without putting a request in the navigation path. `loaded` is the
+ * exact navigation marker (with diagnostics' early-HEAD fallback): sharing that answer matters, because a later
+ * first probe could already name a release this page is not running. Checks coalesce and stop after a new shell.
+ */
+export function watchRelease(
+  loaded: Promise<string | undefined>,
+  fetchImpl: typeof fetch = fetch,
+  path: () => string = () => (typeof location === 'undefined' ? '/' : location.pathname),
+): ReleaseWatcher {
+  let checking: Promise<boolean> | undefined;
+  let found = false;
+
+  return {
+    check() {
+      if (found) return Promise.resolve(true);
+      if (checking) return checking;
+      checking = (async () => {
+        try {
+          const original = await loaded;
+          if (!original) return false;
+          // Revalidate rather than bypassing the cache altogether: the shell itself is revalidated, and a HEAD
+          // carries no body. This is a quiet release probe, not work the page waits for.
+          const response = await fetchImpl(path(), { method: 'HEAD', cache: 'no-cache' });
+          const current = response.headers.get('x-den-release');
+          if (!current || current === original) return false;
+          found = true;
+          releaseWaiting();
+          return true;
+        } catch {
+          // Offline is not evidence of another release. The next scheduled/online check can try again.
+          return false;
+        }
+      })().finally(() => {
+        checking = undefined;
+      });
+      return checking;
+    },
+  };
+}
+
 /** A missing chunk found a newer release; the page moves onto it at the next chance it gets. */
 export function releaseWaiting(): void {
   waiting = true;

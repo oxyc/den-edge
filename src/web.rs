@@ -194,7 +194,7 @@ async fn serve_file(
                 respond(Body::from(html), length, etag, &file, false, media, cast_origin),
                 headers,
             );
-            resp.headers_mut().insert(RELEASE, release);
+            stamp_release(resp.headers_mut(), release);
             return ("preview", resp);
         }
         build = Some(release);
@@ -205,7 +205,7 @@ async fn serve_file(
     let mut resp =
         encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await;
     if let Some(release) = build {
-        resp.headers_mut().insert(RELEASE, release);
+        stamp_release(resp.headers_mut(), release);
     }
     // A browser loading this shell over the network can ask for the shared billboard while it is still
     // downloading/parsing the app bundle. This header only ever reaches an actual navigation, never a route the
@@ -704,6 +704,19 @@ const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
 /// drops that when it re-encodes the page, and it also moves with the policy. The shell names every other file
 /// of its build by hash, so its own hash is the build's.
 const RELEASE: HeaderName = HeaderName::from_static("x-den-release");
+const RELEASE_TIMING: HeaderName = HeaderName::from_static("server-timing");
+
+/// Name the shell both to a later fetch and to the page that is loading right now. Browsers do not expose a
+/// navigation's arbitrary response headers, but they do expose Server-Timing on its navigation entry; that lets
+/// the page retain the exact build it loaded without racing a second request across a deployment.
+fn stamp_release(headers: &mut HeaderMap, release: HeaderValue) {
+    let timing = HeaderValue::from_bytes(
+        format!("den-release;desc=\"{}\"", release.to_str().unwrap_or_default()).as_bytes(),
+    )
+    .expect("a shell digest is a valid Server-Timing description");
+    headers.insert(RELEASE, release);
+    headers.append(RELEASE_TIMING, timing);
+}
 
 /// The shell's digest, unquoted.
 fn release(shell: &HeaderValue) -> HeaderValue {
@@ -1010,6 +1023,7 @@ mod tests {
         let root = h.send("GET", "/", None, &[]).await;
         let first = release(&root);
         assert_eq!(first.len(), 64, "the shell's SHA-256, unquoted: {first}");
+        assert_eq!(root.headers()["server-timing"], format!("den-release;desc=\"{first}\""));
         let etag = root.headers()[header::ETAG].to_str().unwrap().to_owned();
         let unchanged = h.send("GET", "/", None, &[("if-none-match", &etag)]).await;
         assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
@@ -1022,6 +1036,7 @@ mod tests {
         // Not on the build's other files: they are named by hash already.
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
         assert!(!asset.headers().contains_key("x-den-release"));
+        assert!(!asset.headers().contains_key("server-timing"));
 
         std::fs::remove_file(h.dir.join("web/index.html.gz")).unwrap();
         let next = "<!doctype html><title>Den</title><script src=new>";

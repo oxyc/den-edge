@@ -109,6 +109,18 @@ describe('reportableLanguage', () => {
 });
 
 describe('loadRelease / currentRelease', () => {
+  it('reads the exact document navigation release without a second request', async () => {
+    const fetchImpl = vi.fn();
+    const performanceImpl = {
+      getEntriesByType: () => [
+        { serverTiming: [{ name: 'den-release', description: 'loaded-shell' }] },
+      ],
+    } as unknown as Pick<Performance, 'getEntriesByType'>;
+    await expect(loadRelease(fetchImpl, '/', performanceImpl)).resolves.toBe('loaded-shell');
+    expect(currentRelease()).toBe('loaded-shell');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('reads x-den-release from a HEAD of this page’s own path', async () => {
     const fetchImpl = vi
       .fn()
