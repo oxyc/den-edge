@@ -161,6 +161,13 @@ export type ContentRequest =
   | { kind: 'service.directory'; region: string }
   | { kind: 'atlas.query'; query: ContentAtlasQuery }
   | { kind: 'atlas.related'; query: ContentRelatedQuery }
+  | { kind: 'atlas.row'; type: MediaType; where: Record<string, string>; page: number }
+  | { kind: 'atlas.service.catalogs' }
+  | {
+      kind: 'atlas.service.chart';
+      catalog: { id: string; type: MediaType };
+      country: string;
+    }
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string };
@@ -206,6 +213,13 @@ export interface ContentServiceDirectoryEntry {
   variants: number[];
 }
 
+export interface ContentAtlasCatalog {
+  id: string;
+  name: string;
+  type: MediaType;
+  providerIds: number[];
+}
+
 export interface ContentImportLookupResult {
   id: string;
   value:
@@ -241,6 +255,9 @@ export type ContentResult =
     }
   | { kind: 'atlas.query'; answer: OptionalContent<ContentAtlasAnswer> }
   | { kind: 'atlas.related'; answer: OptionalContent<ContentRelatedAnswer> }
+  | { kind: 'atlas.row'; titles: OptionalContent<Title[]> }
+  | { kind: 'atlas.service.catalogs'; catalogs: OptionalContent<ContentAtlasCatalog[]> }
+  | { kind: 'atlas.service.chart'; titles: OptionalContent<Title[]> }
   | { kind: 'import.resolve'; results: ContentImportLookupResult[] }
   | { kind: 'prefetch.detail' }
   | {

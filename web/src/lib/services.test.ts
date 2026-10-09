@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   compactServiceName,
-  atlasCatalogs,
-  atlasServiceRows,
+  atlasCatalogs as atlasCatalogsImpl,
+  atlasServiceRows as atlasServiceRowsImpl,
   fillPosters,
   GUEST_PICKS,
   mergeNewRow,
   settleServiceRows,
-  radarRows,
+  radarRows as radarRowsImpl,
   resolvePicks,
   serviceHero,
   serviceRows,
@@ -64,7 +64,7 @@ const fixtureContent = (fetchImpl?: typeof fetch): ContentServiceClientPort => {
       tmdb: () => 'k',
       omdb: () => undefined,
       contentWarnings: () => undefined,
-      atlas: () => undefined,
+      atlas: () => '/atlas',
     },
     { tmdbFetch: fetchImpl, providerFetch: fetchImpl },
   );
@@ -73,6 +73,34 @@ const fixtureContent = (fetchImpl?: typeof fetch): ContentServiceClientPort => {
       authority.query(request, signal ?? new AbortController().signal) as never,
     onStatus: () => () => {},
   };
+};
+
+const atlasCatalogs = (_base: string, fetchImpl: typeof fetch) =>
+  atlasCatalogsImpl(fixtureContent(fetchImpl));
+
+const atlasServiceRows = (
+  _base: string,
+  catalogs: AtlasCatalog[],
+  picked: Service,
+  country: string,
+  options: { only?: 'movie' | 'tv'; content: ContentServiceClientPort; fetchImpl?: typeof fetch },
+) =>
+  atlasServiceRowsImpl(catalogs, picked, country, {
+    only: options.only,
+    content: options.fetchImpl ? fixtureContent(options.fetchImpl) : options.content,
+  });
+
+const radarRows = (
+  _base: string,
+  catalogs: AtlasCatalog[],
+  picks: Parameters<typeof radarRowsImpl>[1],
+  options: Parameters<typeof radarRowsImpl>[2] & { fetchImpl?: typeof fetch },
+) => {
+  const { fetchImpl, ...rest } = options;
+  return radarRowsImpl(catalogs, picks, {
+    ...rest,
+    content: fetchImpl ? fixtureContent(fetchImpl) : options.content,
+  });
 };
 
 describe('poster service captions', () => {
@@ -827,6 +855,7 @@ describe('radarRows', () => {
       '/atlas/catalog/movie/jw-nfx-new/country=US.json',
       '/atlas/catalog/movie/jw-mxx-new/country=US.json',
       '/metadata/title/query',
+      '/metadata/title/query',
     ]);
     expect(
       titles.map((t) => t.id),
@@ -835,7 +864,7 @@ describe('radarRows', () => {
     expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix');
     // A chart is one page: asking for a second must not repeat the first.
     expect(await at(rows, 0).load(2)).toEqual([]);
-    expect(asked).toHaveLength(3);
+    expect(asked).toHaveLength(4);
   });
 
   it('keeps and publishes ratings received by a pooled Atlas chart', async () => {

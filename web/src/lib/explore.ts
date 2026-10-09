@@ -25,7 +25,7 @@ import {
   type Pages,
   type RowDef,
 } from './catalog';
-import { atlasRows } from './atlasRows';
+import { atlasRowLabels, atlasRows } from './atlasRows';
 import {
   countedEmpty,
   filterItems,
@@ -458,9 +458,8 @@ function atlasChips(type: ExploreType): Chip[] {
     const films = atlasChips('movie');
     return [...films, ...atlasChips('tv').filter((c) => !films.some((f) => f.id === c.id))];
   }
-  const suffix = `-${type}`;
-  return atlasRows('', type).map((row) => {
-    const id = row.id.slice('atlas-'.length, -suffix.length);
+  return atlasRowLabels(type).map((row) => {
+    const id = row.id;
     return {
       id,
       label: row.title.replace(/ (Movies|Series)$/, ''),
@@ -1414,7 +1413,7 @@ function localFeed(
   const atlasId = set.find((pick) => slotOf(pick) === 'atlas');
   if (atlasId) {
     const row = sources.atlas
-      ? atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
+      ? atlasRows(sources.content, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
       : undefined;
     if (!row) return forYou(type, sources);
     return { ...drawn(row, sources.title), id, filter: atlasFilter(set, type) };

@@ -254,6 +254,14 @@ function relatedQuery(value: unknown): value is ContentRelatedQuery {
   }
 }
 
+function atlasWhere(value: unknown): value is Record<string, string> {
+  return (
+    record(value) &&
+    Object.keys(value).length <= CONTENT_SERVICE_WIRE_LIMITS.filters &&
+    Object.entries(value).every(([key, item]) => text(key, 64) && text(item, 256))
+  );
+}
+
 function importLookup(value: unknown): value is ContentImportLookup {
   if (!record(value) || !text(value.id, 256) || !text(value.kind, 32)) return false;
   if (value.kind === 'search')
@@ -334,6 +342,25 @@ function request(value: unknown): value is ContentRequest {
       return exact(value, ['kind', 'query']) && atlasQuery(value.query);
     case 'atlas.related':
       return exact(value, ['kind', 'query']) && relatedQuery(value.query);
+    case 'atlas.row':
+      return (
+        exact(value, ['kind', 'type', 'where', 'page']) &&
+        media(value.type) &&
+        atlasWhere(value.where) &&
+        integer(value.page, 1) &&
+        value.page <= CONTENT_SERVICE_WIRE_LIMITS.page
+      );
+    case 'atlas.service.catalogs':
+      return exact(value, ['kind']);
+    case 'atlas.service.chart':
+      return (
+        exact(value, ['kind', 'catalog', 'country']) &&
+        record(value.catalog) &&
+        exact(value.catalog, ['id', 'type']) &&
+        text(value.catalog.id, 256) &&
+        media(value.catalog.type) &&
+        region(value.country)
+      );
     case 'import.resolve':
       return (
         exact(value, ['kind', 'lookups']) &&
@@ -404,6 +431,11 @@ function result(value: unknown): value is ContentResult {
       return exact(value, ['kind', 'answer']) && resource(value.answer);
     case 'atlas.related':
       return exact(value, ['kind', 'answer']) && resource(value.answer);
+    case 'atlas.row':
+    case 'atlas.service.chart':
+      return exact(value, ['kind', 'titles']) && resource(value.titles);
+    case 'atlas.service.catalogs':
+      return exact(value, ['kind', 'catalogs']) && resource(value.catalogs);
     case 'search':
       return exact(value, ['kind', 'hits']) && boundedArray(value.hits);
     case 'service.regions':

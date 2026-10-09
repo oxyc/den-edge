@@ -32,6 +32,8 @@ import { retryAfterMs } from './retryAfter';
 import { seriesShape, toTitle, type Details } from './tmdb';
 import { parseTitleFacts, type TitleFacts } from './titleFacts';
 import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
+import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
+import { reuse } from './reuse';
 import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
@@ -420,6 +422,15 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         return {
           kind: 'atlas.related',
           answer: await this.#atlasRelated(request.query, signal),
+        };
+      case 'atlas.row':
+        return { kind: 'atlas.row', titles: await this.#atlasRow(request, signal) };
+      case 'atlas.service.catalogs':
+        return { kind: 'atlas.service.catalogs', catalogs: await this.#atlasCatalogs(signal) };
+      case 'atlas.service.chart':
+        return {
+          kind: 'atlas.service.chart',
+          titles: await this.#atlasServiceChart(request, signal),
         };
       case 'import.resolve':
         return {
@@ -901,6 +912,131 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasRow(
+    request: Extract<ContentRequest, { kind: 'atlas.row' }>,
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./library').Title[]>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const query = new URLSearchParams({
+      ...request.where,
+      skip: String((request.page - 1) * 24),
+      limit: '24',
+    });
+    const type = request.type === 'tv' ? 'series' : 'movie';
+    const url = `${atlas}/index/row/${type}.json?${query}`;
+    try {
+      return await this.#wait(
+        reuse(`content:${url}`, async () => {
+          const response = await this.#providerFetch(url);
+          if (response.status === 404) return { state: 'absent' } as const;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          const titles = titlesOf(await response.json());
+          return {
+            state: 'ready',
+            value: await withSharedTitleMetadata(titles, this.#providerFetch),
+          } as const;
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasCatalogs(
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./contentServiceProtocol').ContentAtlasCatalog[]>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    try {
+      return await this.#wait(
+        reuse(`content:manifest:${atlas}`, async () => {
+          const response = await this.#providerFetch(`${atlas}/manifest.json`);
+          if (response.status === 404) return { state: 'absent' } as const;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          const body = object(await response.json());
+          const catalogs = Array.isArray(body?.catalogs) ? body.catalogs : [];
+          const value = (catalogs as Json[]).flatMap((entry) => {
+            const providerIds = Array.isArray(entry.denProviderIds)
+              ? entry.denProviderIds.filter((id): id is number => Number.isSafeInteger(id))
+              : [];
+            const type: MediaType | null =
+              entry.type === 'series' ? 'tv' : entry.type === 'movie' ? 'movie' : null;
+            return providerIds.length &&
+              type &&
+              typeof entry.id === 'string' &&
+              typeof entry.name === 'string'
+              ? [{ id: entry.id, name: entry.name, type, providerIds }]
+              : [];
+          });
+          return { state: 'ready', value } as const;
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  #atlasChartTitles(body: unknown): import('./library').Title[] {
+    const metas = object(body)?.metas;
+    if (!Array.isArray(metas)) return [];
+    return (metas as Json[]).flatMap((meta) => {
+      const type = meta.type === 'series' ? 'tv' : meta.type === 'movie' ? 'movie' : null;
+      if (!type || !Number.isSafeInteger(meta.moviedb_id) || typeof meta.name !== 'string')
+        return [];
+      const year = Number(String(meta.releaseInfo ?? '').slice(0, 4));
+      const rating = Number(meta.imdbRating);
+      return [
+        {
+          type,
+          id: meta.moviedb_id as number,
+          title: meta.name,
+          posterPath: typeof meta.posterPath === 'string' ? meta.posterPath : undefined,
+          posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
+          year: Number.isInteger(year) && year > 1800 ? year : undefined,
+          rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? rating : undefined,
+          ratingSource:
+            Number.isFinite(rating) && rating > 0 && rating <= 10 ? 'justwatch-imdb' : undefined,
+          imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
+          arrivesAt: typeof meta.denAt === 'number' ? meta.denAt * 1000 : undefined,
+        },
+      ];
+    });
+  }
+
+  async #atlasServiceChart(
+    request: Extract<ContentRequest, { kind: 'atlas.service.chart' }>,
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./library').Title[]>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const type = request.catalog.type === 'tv' ? 'series' : 'movie';
+    const url = `${atlas}/catalog/${type}/${encodeURIComponent(request.catalog.id)}/country=${request.country}.json`;
+    try {
+      return await this.#wait(
+        reuse(`content:chart:${url}`, async () => {
+          const response = await this.#providerFetch(url);
+          if (response.status === 404) return { state: 'absent' } as const;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          const titles = this.#atlasChartTitles(await response.json());
+          if (!keptByEdge(response)) rememberAtlasMetadata(titles, this.#providerFetch);
+          return {
+            state: 'ready',
+            value: await withSharedTitleMetadata(titles, this.#providerFetch),
+          } as const;
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
       return { state: 'unavailable', provider: 'atlas', reason: 'network' };
     }
   }

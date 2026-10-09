@@ -893,7 +893,7 @@
     const here = atlas;
     if (!here) return;
     let current = true;
-    void atlasCatalogs(here).then(
+    void atlasCatalogs(session.content!).then(
       (listed) => {
         if (current) serviceCatalogs = listed;
       },
@@ -909,7 +909,7 @@
   const radar = (only?: 'movie' | 'tv') => {
     const content = session.content;
     return atlas && content
-      ? radarRows(atlas, serviceCatalogs, servicePicks, {
+      ? radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
           content,
@@ -925,9 +925,12 @@
       // The pooled rows need no key either — atlas's charts carry their own titles — so a visitor gets them too.
       if (route.page === 'movies' || route.page === 'series') {
         const type = route.page === 'movies' ? 'movie' : 'tv';
-        return [...radar(type), ...atlasRows(atlas, type)];
+        return [...radar(type), ...atlasRows(session.content!, type)];
       }
-      return [...radar(), ...interleave([atlasRows(atlas, 'movie'), atlasRows(atlas, 'tv')])];
+      return [
+        ...radar(),
+        ...interleave([atlasRows(session.content!, 'movie'), atlasRows(session.content!, 'tv')]),
+      ];
     }
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
@@ -948,7 +951,7 @@
       });
       // After Popular and the three genre rows, atlas's rows take turns with TMDB's categories and lead each
       // round, as the TV's index rows do: they say something a genre or a decade doesn't.
-      const own = atlas ? atlasRows(atlas, type) : [];
+      const own = atlas ? atlasRows(session.content!, type) : [];
       return [...browse.slice(0, 4), ...radar(type), ...interleave([own, browse.slice(4)])];
     }
     // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
@@ -961,7 +964,7 @@
       excludedLanguages: prefs.excludedLanguages,
       atlas: filter,
     });
-    const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
+    const plot = atlas ? atlasRows(session.content!, 'movie').slice(0, 3) : [];
     const pooled = radar();
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine = arrivals

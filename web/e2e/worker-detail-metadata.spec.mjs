@@ -271,6 +271,29 @@ test('typed Atlas filter and related reads stay inside the shared Worker', async
         });
       if (url.pathname.endsWith('/index/similar/movie/101.json'))
         return route.fulfill({ json: { mixed: [{ type: 'series', id: 303 }] } });
+      if (url.pathname.endsWith('/index/row/movie.json'))
+        return route.fulfill({
+          json: { titles: [{ type: 'movie', id: 404, title: 'Worker Browse Row' }] },
+        });
+      if (url.pathname.endsWith('/manifest.json'))
+        return route.fulfill({
+          json: {
+            catalogs: [
+              {
+                type: 'movie',
+                id: 'jw-nfx-new',
+                name: 'New on Netflix',
+                denProviderIds: [8],
+              },
+            ],
+          },
+        });
+      if (url.pathname.endsWith('/catalog/movie/jw-nfx-new/country=US.json'))
+        return route.fulfill({
+          json: {
+            metas: [{ type: 'movie', moviedb_id: 505, name: 'Worker Service Chart' }],
+          },
+        });
       return route.fulfill({ status: 404, json: {} });
     },
   });
@@ -289,6 +312,18 @@ test('typed Atlas filter and related reads stay inside the shared Worker', async
       state: 'ready',
       value: { operation: 'refs', refs: [{ type: 'tv', id: 303 }] },
     },
+  });
+  expect(result.row).toMatchObject({
+    kind: 'atlas.row',
+    titles: { state: 'ready', value: [{ id: 404, title: 'Worker Browse Row' }] },
+  });
+  expect(result.catalogs).toMatchObject({
+    kind: 'atlas.service.catalogs',
+    catalogs: { state: 'ready', value: [{ id: 'jw-nfx-new', providerIds: [8] }] },
+  });
+  expect(result.chart).toMatchObject({
+    kind: 'atlas.service.chart',
+    titles: { state: 'ready', value: [{ id: 505, title: 'Worker Service Chart' }] },
   });
   expectWorkerOwned(requests.filter(({ provider }) => provider === 'atlas'));
 });
