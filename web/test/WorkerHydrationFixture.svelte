@@ -1,7 +1,7 @@
 <!-- A production DedicatedWorker library, seeded once and then reopened cold. The target screen is mounted while
      the model is still connecting, so its lazy History/Connections subscription joins initial Worker hydration. -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import Library from '../src/Library.svelte';
   import Settings from '../src/Settings.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
@@ -17,6 +17,7 @@
   const seed = params.has('seed');
   const settings = params.get('view') === 'settings';
   const online = params.has('online');
+  const lifecycle = params.has('lifecycle');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
   const libraryId = '50724b489a92805f23be6bba897393c7';
   const memberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
@@ -97,12 +98,61 @@
         );
         if (!(await model.retainedBillboard({ kind: 'personal', facet: null, fresh: true })))
           throw new Error('retained billboard was not saved');
+        if (lifecycle) {
+          const title = {
+            target: { type: 'movie' as const, id: 1200 },
+            name: 'Queued movie',
+            imdbId: 'tt1200',
+          };
+          const { result } = await model.downloadSources(title, true);
+          if (result.kind !== 'download.sources' || !result.sources?.[0])
+            throw new Error('download source was not found');
+          await model.enqueueDownload(
+            title,
+            result.sources[0],
+            result.sources.length,
+            'seed-download',
+          );
+          await model.removePlugin(
+            `${location.origin}/scout/fixture-install/manifest.json`,
+            'remove-seed-plugin',
+          );
+        }
         seeded = true;
       })
       .catch((error: unknown) => {
         seedFailure = error instanceof Error ? error.message : String(error);
       });
   }
+
+  onMount(() => {
+    if (!lifecycle) return;
+    let stopped = false;
+    const observe = () => {
+      if (stopped) return;
+      void model
+        .observeLifecycle({
+          visible: !document.hidden,
+          online: navigator.onLine,
+          playbackActive: false,
+        })
+        .catch(() => {});
+    };
+    void model.ready.then(async () => {
+      if (stopped) return;
+      observe();
+      await model.foregroundReady();
+    });
+    window.addEventListener('online', observe);
+    window.addEventListener('offline', observe);
+    document.addEventListener('visibilitychange', observe);
+    return () => {
+      stopped = true;
+      window.removeEventListener('online', observe);
+      window.removeEventListener('offline', observe);
+      document.removeEventListener('visibilitychange', observe);
+    };
+  });
 
   onDestroy(() => session.close());
 </script>
