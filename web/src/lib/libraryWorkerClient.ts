@@ -73,8 +73,8 @@ function stop(error: unknown): void {
 
 function sharedWorker(): Worker | undefined {
   if (worker) return worker;
-  // `Worker` is also defined inside the library-service Worker. Projection there stays local instead of spawning a
-  // nested Worker; only the inline/page fallback needs this shared projection Worker.
+  // Projection already runs off the page inside LibraryService. Do not spawn a nested Worker there; this helper is
+  // retained only for page-owned callers outside the service.
   if (typeof document === 'undefined' || typeof Worker === 'undefined') return undefined;
   try {
     const made = new Worker(new URL('./libraryWorker.ts', import.meta.url), { type: 'module' });

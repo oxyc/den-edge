@@ -7,6 +7,7 @@ import { DownloadCoordinatorDriver } from '../src/lib/downloadCoordinatorDriver'
 import { LibraryLogAuthority } from '../src/lib/libraryLogAuthority';
 import { LibraryModel } from '../src/lib/libraryModel.svelte';
 import { LibrarySession } from '../src/lib/librarySession.svelte';
+import { LibraryServiceError } from '../src/lib/libraryServiceClient';
 import type { LibrarySelectionScope } from '../src/lib/libraryServiceCore';
 import type {
   DownloadTarget,
@@ -38,6 +39,8 @@ class FixtureService {
   constructor(
     readonly authority: LibraryLogAuthority,
     readonly refreshDownloadSources = false,
+    private failOpenOnce = false,
+    private openGate?: Promise<void>,
   ) {}
 
   get version(): LibraryVersion {
@@ -45,6 +48,16 @@ class FixtureService {
   }
 
   async open() {
+    if (this.failOpenOnce) {
+      this.failOpenOnce = false;
+      throw new LibraryServiceError({
+        code: 'unavailable',
+        message: 'fixture library service did not start',
+        retryable: true,
+      });
+    }
+    await this.openGate;
+    this.openGate = undefined;
     this.#ready = true;
     await this.publish();
     const status: LibrarySessionStatus = { kind: 'ready', version: this.version };
@@ -53,7 +66,7 @@ class FixtureService {
   }
 
   retry() {
-    return Promise.resolve(this.version);
+    return this.open();
   }
 
   async command(
@@ -171,6 +184,10 @@ export interface FixtureLibraryServiceOptions {
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
   refreshDownloadSources?: boolean;
   downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
+  /** Page fixture only: expose one startup failure, then let its Retry action recover normally. */
+  failOpenOnce?: boolean;
+  /** Page fixture only: hold startup so progressive loading behavior can be observed. */
+  openGate?: Promise<void>;
 }
 
 /**
@@ -185,6 +202,8 @@ export function fixtureLibraryService({
   refreshDownloads,
   refreshDownloadSources,
   downloadArtwork,
+  failOpenOnce,
+  openGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -238,12 +257,19 @@ export function fixtureLibraryService({
     refreshDownloads: refreshDownloads ?? (async () => driver.run({ force: true })),
     downloadArtwork,
   });
-  const fixtureService = new FixtureService(authority, refreshDownloadSources);
+  const fixtureService = new FixtureService(
+    authority,
+    refreshDownloadSources,
+    failOpenOnce,
+    openGate,
+  );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
     libraryKey: libraryKey ?? 'fixture',
     mode: 'local',
   });
+  // RoutedLibrary owns this observation in production; fixtures render the model directly.
+  void model.ready.catch(() => {});
   const session = new LibrarySession(model);
   return {
     model,

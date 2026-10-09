@@ -1,5 +1,4 @@
 import { expect, it, vi } from 'vitest';
-import type { LibraryServiceAuthority } from './libraryServiceCore';
 import { createLibraryService } from './libraryServiceFactory';
 import {
   LIBRARY_SERVICE_PROTOCOL,
@@ -42,46 +41,13 @@ const openOptions = {
   },
 };
 
-function emptyAuthority(close = vi.fn()): LibraryServiceAuthority {
-  return {
-    generation: null,
-    async select(selection) {
-      if (selection.kind !== 'title') throw new Error('selection not used by this test');
-      return {
-        kind: 'title',
-        title: selection.title,
-        listed: false,
-        watched: false,
-        reaction: null,
-        standing: null,
-        progress: null,
-        episodes: [],
-      };
-    },
-    async command() {
-      return { outcome: 'unchanged', delivery: 'local', affected: [] };
-    },
-    async query() {
-      throw new Error('query not used by this test');
-    },
-    async task() {
-      throw new Error('task not used by this test');
-    },
-    async observe() {
-      return { outcome: 'unchanged', affected: [] };
-    },
-    close,
-  };
-}
-
-it('locks an available runtime to DedicatedWorker before open', async () => {
+it('opens the library through its DedicatedWorker', async () => {
   const worker = new FakeWorker();
   const createWorker = vi.fn(() => worker as unknown as Worker);
-  const openAuthority = vi.fn(async () => emptyAuthority());
-  const service = createLibraryService(
-    { dedicatedWorker: true },
-    { createWorker, openAuthority, supervisor: { maxAutomaticRestarts: 0 } },
-  );
+  const service = createLibraryService({
+    createWorker,
+    supervisor: { maxAutomaticRestarts: 0 },
+  });
 
   const opening = service.open(openOptions);
   await expect.poll(() => worker.posted.length).toBe(1);
@@ -98,50 +64,20 @@ it('locks an available runtime to DedicatedWorker before open', async () => {
 
   await expect(opening).resolves.toEqual(version);
   expect(createWorker).toHaveBeenCalledOnce();
-  expect(openAuthority).not.toHaveBeenCalled();
   service.close();
   expect(worker.terminate).toHaveBeenCalledOnce();
 });
 
-it('uses the same Core authority boundary when the explicit capability requires inline', async () => {
-  const close = vi.fn();
-  const authority = emptyAuthority(close);
-  const openAuthority = vi.fn(async () => authority);
-  const createWorker = vi.fn();
-  const service = createLibraryService(
-    { dedicatedWorker: false },
-    { createWorker, openAuthority, supervisor: { maxAutomaticRestarts: 0 } },
-  );
-
-  await expect(service.open({ ...openOptions, mode: 'local' })).resolves.toMatchObject({
-    generation: null,
-    revision: 0,
-  });
-  expect(openAuthority).toHaveBeenCalledWith(
-    expect.objectContaining({ type: 'hello', ...openOptions, mode: 'local' }),
-  );
-  expect(createWorker).not.toHaveBeenCalled();
-
-  service.close();
-  await expect.poll(() => close.mock.calls.length).toBe(1);
-});
-
-it('never falls back to an inline authority when Worker construction fails', async () => {
-  const openAuthority = vi.fn(async () => emptyAuthority());
-  const service = createLibraryService(
-    { dedicatedWorker: true },
-    {
-      createWorker: () => {
-        throw new Error('worker construction failed');
-      },
-      openAuthority,
-      supervisor: { maxAutomaticRestarts: 0 },
+it('surfaces DedicatedWorker construction failure through the library status', async () => {
+  const service = createLibraryService({
+    createWorker: () => {
+      throw new Error('worker construction failed');
     },
-  );
+    supervisor: { maxAutomaticRestarts: 0 },
+  });
 
   await expect(service.open(openOptions)).rejects.toMatchObject({
     failure: { code: 'unavailable', message: 'worker construction failed', retryable: true },
   });
-  expect(openAuthority).not.toHaveBeenCalled();
   service.close();
 });

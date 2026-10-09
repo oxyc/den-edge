@@ -122,6 +122,7 @@
   let continueNames = $state(SHELF_TRANCHE);
   let watchlistNames = $state(SHELF_TRANCHE);
   let busy = $state(false);
+  let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
   /**
@@ -1229,16 +1230,30 @@
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
     return entry.title.year ? String(entry.title.year) : undefined;
   }
+
+  async function retryLibrary(): Promise<void> {
+    if (!model || retryingLibrary) return;
+    retryingLibrary = true;
+    try {
+      await model.retry();
+    } catch {
+      // The same failure surface stays in place; another press starts a fresh Worker attempt.
+    } finally {
+      retryingLibrary = false;
+    }
+  }
 </script>
 
 {#if link && model && !overview && !serviceFailed}
   <Loading label="Loading your library" page />
-{:else if link && serviceFailed}
-  <p class="note">
-    Couldn’t open your library. Check that this device is on your network. If your TV reset its
-    library key, unlink in
-    <a href="/settings">Settings</a> and pair again.
-  </p>
+{:else if serviceFailed}
+  <section class="library-failure" role="alert">
+    <h1>Couldn’t open your library</h1>
+    <p class="note">Den couldn’t start the library service.</p>
+    <button type="button" class="retry" disabled={retryingLibrary} onclick={retryLibrary}>
+      {retryingLibrary ? 'Trying again…' : 'Try again'}
+    </button>
+  </section>
 {:else if route.page !== 'library' && !tmdbKey}
   <p class="note">
     {#if link}
@@ -1531,6 +1546,35 @@
 <style>
   .note {
     color: var(--muted);
+  }
+
+  .library-failure {
+    max-width: 520px;
+    margin: 48px auto;
+    text-align: center;
+  }
+
+  .library-failure h1 {
+    margin-bottom: 8px;
+    font-size: clamp(1.5rem, 5vw, 2rem);
+  }
+
+  .retry {
+    min-height: 44px;
+    margin-top: 8px;
+    padding: 8px 18px;
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .retry:disabled {
+    cursor: wait;
+    opacity: 0.65;
   }
 
   .player-screen {
