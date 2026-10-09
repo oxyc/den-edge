@@ -39,6 +39,13 @@
   const many = Math.max(0, Math.min(500, Number(params.get('many')) || 0));
   /** Let shelf naming, rather than fixture setup, supply the large row's display fields. */
   const unnamedMany = params.has('unnamed-many');
+  let releaseOpen = () => {};
+  const openGate = params.has('hold-open')
+    ? new Promise<void>((resolve) => (releaseOpen = resolve))
+    : undefined;
+  if (openGate)
+    (window as unknown as { denTestReleaseLibraryOpen: () => void }).denTestReleaseLibraryOpen =
+      releaseOpen;
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
   const withDownload = params.has('downloading');
@@ -184,7 +191,11 @@
   } as unknown as LibraryLog;
 
   let publish = () => {};
-  const library = fixtureLibraryService({ log, failOpenOnce: params.has('open-failure') });
+  const library = fixtureLibraryService({
+    log,
+    failOpenOnce: params.has('open-failure'),
+    openGate,
+  });
   publish = () => library.publish();
   const session: LibrarySession = library.session;
   if (!unnamedMany) {

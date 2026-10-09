@@ -40,6 +40,7 @@ class FixtureService {
     readonly authority: LibraryLogAuthority,
     readonly refreshDownloadSources = false,
     private failOpenOnce = false,
+    private openGate?: Promise<void>,
   ) {}
 
   get version(): LibraryVersion {
@@ -55,6 +56,8 @@ class FixtureService {
         retryable: true,
       });
     }
+    await this.openGate;
+    this.openGate = undefined;
     this.#ready = true;
     await this.publish();
     const status: LibrarySessionStatus = { kind: 'ready', version: this.version };
@@ -183,6 +186,8 @@ export interface FixtureLibraryServiceOptions {
   downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
   /** Page fixture only: expose one startup failure, then let its Retry action recover normally. */
   failOpenOnce?: boolean;
+  /** Page fixture only: hold startup so progressive loading behavior can be observed. */
+  openGate?: Promise<void>;
 }
 
 /**
@@ -198,6 +203,7 @@ export function fixtureLibraryService({
   refreshDownloadSources,
   downloadArtwork,
   failOpenOnce,
+  openGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -251,7 +257,12 @@ export function fixtureLibraryService({
     refreshDownloads: refreshDownloads ?? (async () => driver.run({ force: true })),
     downloadArtwork,
   });
-  const fixtureService = new FixtureService(authority, refreshDownloadSources, failOpenOnce);
+  const fixtureService = new FixtureService(
+    authority,
+    refreshDownloadSources,
+    failOpenOnce,
+    openGate,
+  );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
     libraryKey: libraryKey ?? 'fixture',

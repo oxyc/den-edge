@@ -1244,7 +1244,7 @@
   }
 </script>
 
-{#if model && !overview && !serviceFailed}
+{#if link && model && !overview && !serviceFailed}
   <Loading label="Loading your library" page />
 {:else if serviceFailed}
   <section class="library-failure" role="alert">

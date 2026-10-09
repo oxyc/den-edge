@@ -2,6 +2,17 @@ import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
+test('local library keeps its progressive page visible while startup settles', async ({ page }) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { page: 1, results: [] } }));
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?local&hold-open`);
+
+  await expect(page.getByText('Loading your library', { exact: true })).toHaveCount(0);
+  await page.evaluate(() => window.denTestReleaseLibraryOpen());
+});
+
 for (const local of [false, true]) {
   test(`${local ? 'local' : 'linked'} library startup failure is visible and Retry recovers`, async ({
     page,
