@@ -109,7 +109,6 @@ describe('LibraryLogAuthority', () => {
     expect(runtime).toEqual({
       kind: 'runtime',
       tmdbKey: 'tmdb-secret',
-      providerKeys: { tmdb: 'tmdb-secret' },
       pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
       privateRemuxUrl: 'https://remux.tailnet.ts.net',
     });

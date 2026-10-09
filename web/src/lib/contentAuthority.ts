@@ -397,6 +397,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           kind: 'import.resolve',
           results: await this.#imports.resolve(request.lookups, signal),
         };
+      case 'provider-key.check':
+        return {
+          kind: 'provider-key.check',
+          service: request.service,
+          outcome: await this.#checkProviderKey(request.service, request.candidate, signal),
+        };
       default:
         throw new ContentServiceFault({
           code: 'not-ready',
@@ -519,6 +525,43 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   #tmdbKey(): string {
     return this.credentials.tmdb()?.trim() || TMDB_PROXY_KEY;
+  }
+
+  async #checkProviderKey(
+    service: 'tmdb' | 'omdb' | 'content-warnings',
+    candidate: string | undefined,
+    signal: AbortSignal,
+  ): Promise<'accepted' | 'refused' | 'unavailable'> {
+    const saved =
+      service === 'tmdb'
+        ? this.credentials.tmdb()
+        : service === 'omdb'
+          ? this.credentials.omdb()
+          : this.credentials.contentWarnings();
+    const key = candidate?.trim() || saved?.trim();
+    if (!key) return 'refused';
+    try {
+      const response = await this.#wait(
+        service === 'tmdb'
+          ? this.#tmdbFetch(tmdbUrl('/configuration', key), { signal })
+          : this.#providerFetch(service === 'omdb' ? '/ratings/check' : '/warnings/check', {
+              signal,
+              headers: {
+                ...(service === 'content-warnings' ? { accept: 'application/json' } : {}),
+                'x-api-key': key,
+              },
+            }),
+        signal,
+      );
+      if (response.status === 401 || response.status === 403) return 'refused';
+      if (service === 'tmdb')
+        return response.ok ? 'accepted' : response.status === 404 ? 'refused' : 'unavailable';
+      return response.ok || response.status === 404 ? 'accepted' : 'unavailable';
+    } catch (error) {
+      if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError'))
+        throw error;
+      return 'unavailable';
+    }
   }
 
   #fault(result: Exclude<ProviderResult<unknown>, { kind: 'found' }>, message: string) {

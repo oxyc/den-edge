@@ -24,6 +24,44 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   });
 
 describe('ContentAuthority', () => {
+  it('validates candidate and saved provider keys without returning either key', async () => {
+    const seen: Array<{ url: string; key: string | null }> = [];
+    const answer = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const key = new Headers(init?.headers).get('x-api-key');
+      seen.push({ url, key });
+      return new Response('{}', { status: url.includes('refused') || key === 'bad' ? 401 : 200 });
+    };
+    const authority = new ContentAuthority(
+      credentials({ tmdb: 'saved-tmdb', omdb: 'saved-omdb', warnings: 'saved-warnings' }),
+      { tmdbFetch: answer, providerFetch: answer },
+    );
+    const signal = new AbortController().signal;
+
+    await expect(
+      authority.query({ kind: 'provider-key.check', service: 'tmdb' }, signal),
+    ).resolves.toEqual({
+      kind: 'provider-key.check',
+      service: 'tmdb',
+      outcome: 'accepted',
+    });
+    await expect(
+      authority.query({ kind: 'provider-key.check', service: 'omdb', candidate: 'bad' }, signal),
+    ).resolves.toEqual({
+      kind: 'provider-key.check',
+      service: 'omdb',
+      outcome: 'refused',
+    });
+    await expect(
+      authority.query({ kind: 'provider-key.check', service: 'content-warnings' }, signal),
+    ).resolves.toMatchObject({ outcome: 'accepted' });
+    expect(seen).toEqual([
+      { url: expect.stringContaining('api_key=saved-tmdb'), key: null },
+      { url: '/ratings/check', key: 'bad' },
+      { url: '/warnings/check', key: 'saved-warnings' },
+    ]);
+  });
+
   it('keeps a useful service-directory half when the other provider request is unavailable', async () => {
     const tmdbFetch = vi.fn<typeof fetch>(async (input) => {
       const path = new URL(String(input)).pathname;

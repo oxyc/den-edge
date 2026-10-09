@@ -73,10 +73,7 @@ test('Prime import requires both schemas, previews locally, and writes the playe
     await expect(importRow.getByText('Found 1 film and 0 episodes from 0 series.')).toBeVisible();
     await importRow.getByRole('button', { name: 'Import viewing history' }).click();
     await expect(importRow.getByRole('status')).toContainText('Saved 1 change');
-    expect(
-      pageOwned.filter((url) => !new URL(url).pathname.endsWith('/configuration')),
-      'import provider requests must stay inside the content Worker',
-    ).toEqual([]);
+    expect(pageOwned, 'provider requests must stay inside the content Worker').toEqual([]);
   } finally {
     await browser.close();
   }

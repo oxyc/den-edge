@@ -250,7 +250,6 @@ const settingsValue = (): LibrarySelectionValue => ({
 const runtimeValue = (): LibrarySelectionValue => ({
   kind: 'runtime',
   tmdbKey: 'tmdb-key',
-  providerKeys: { tmdb: 'tmdb-key' },
   pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
   privateRemuxUrl: 'https://remux.tailnet.ts.net',
 });

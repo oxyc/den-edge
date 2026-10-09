@@ -19,14 +19,12 @@ type Runtime = Immutable<RuntimeDiscoveryView>;
 const inputs = (
   library: boolean,
   tmdbKey: string,
-  providerKeys: Runtime['providerKeys'],
   plugins: readonly string[],
   remux: string | null,
-) => JSON.stringify([library, tmdbKey, providerKeys, plugins, remux]);
+) => JSON.stringify([library, tmdbKey, plugins, remux]);
 
 export class SessionServices {
   tmdbKey = $state(TMDB_PROXY_KEY);
-  providerKeys = $state.raw<Partial<Record<keyof Runtime['providerKeys'], string>>>({});
   plugins = $state.raw<string[]>([]);
   scout = $state.raw<Addon | null>(null);
   atlas = $state<string | null>(null);
@@ -60,7 +58,6 @@ export class SessionServices {
     this.#configure(
       this.model !== null,
       runtime?.tmdbKey ?? TMDB_PROXY_KEY,
-      runtime?.providerKeys ?? {},
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
     );
@@ -69,7 +66,6 @@ export class SessionServices {
   #configure(
     library: boolean,
     tmdbKey: string,
-    providerKeys: Runtime['providerKeys'],
     libraryPlugins: readonly string[],
     remux: string | null,
   ): void {
@@ -82,7 +78,7 @@ export class SessionServices {
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
-    const wanted = inputs(library, tmdbKey, providerKeys, plugins, remux);
+    const wanted = inputs(library, tmdbKey, plugins, remux);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
     this.#for = wanted;
@@ -90,7 +86,6 @@ export class SessionServices {
     this.#keep = undefined;
     this.#stop?.();
     this.tmdbKey = tmdbKey;
-    this.providerKeys = { ...providerKeys };
     if (JSON.stringify(this.plugins) !== JSON.stringify(plugins)) this.plugins = plugins;
     let current = true;
     this.#stop = () => {

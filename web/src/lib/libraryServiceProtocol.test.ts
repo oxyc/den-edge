@@ -372,7 +372,6 @@ describe('library service client protocol', () => {
         value: {
           kind: 'runtime',
           tmdbKey: 'key',
-          providerKeys: { tmdb: 'key' },
           pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
           privateRemuxUrl: 'https://remux.tailnet.ts.net',
         },
@@ -387,7 +386,6 @@ describe('library service client protocol', () => {
         value: {
           kind: 'runtime',
           tmdbKey: 'key',
-          providerKeys: { tmdb: 'key' },
           pluginManifestUrls: [],
           privateRemuxUrl: null,
           otherApiKeys: { omdb: 'must-not-cross' },

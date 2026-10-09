@@ -76,10 +76,7 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
       }),
       expect.objectContaining({ type: 'movie', tmdbId: 603, status: 'watchlist', plays: [] }),
     ]);
-    expect(
-      pageOwned.filter((url) => !new URL(url).pathname.endsWith('/configuration')),
-      'export title naming must stay inside the content Worker',
-    ).toEqual([]);
+    expect(pageOwned, 'provider requests must stay inside the content Worker').toEqual([]);
   } finally {
     await browser.close();
   }
