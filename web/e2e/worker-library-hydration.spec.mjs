@@ -80,6 +80,9 @@ async function routes(page, metadata) {
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'worker-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await page.route('**/scout/fixture-install/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.scout' } }),
+  );
   await routeLibrary(page, metadata);
   await routeTmdb(page, async (route) => {
     const request = route.request();
@@ -272,7 +275,7 @@ test('personalized billboard waits for staged names without replacing its retain
 
   const [ranking] = recommendations;
   expect(ranking.library.length).toBeGreaterThan(100);
-  expect(ranking.library.find(({ id }) => id === 1002)?.hint?.title).toBe('Movie 1002');
+  expect(ranking.library.find(({ id }) => id === 1012)?.hint?.title).toBe('Movie 1012');
   releaseRanking();
   await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
 });

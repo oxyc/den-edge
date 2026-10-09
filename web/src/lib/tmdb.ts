@@ -69,7 +69,9 @@ export async function fetchDetailsResult(
     return { kind: 'retryable' };
   }
   const title = toTitle(ref, details);
-  if (!title) return { kind: 'missing' };
+  // Only den-edge's explicit 404 proves absence. A malformed/partial success may recover and must not become a
+  // sticky session-level missing record that permanently skips the title.
+  if (!title) return { kind: 'retryable' };
   return {
     kind: 'found',
     details: ref.type === 'tv' ? { title, shape: seriesShape(details) } : { title },
