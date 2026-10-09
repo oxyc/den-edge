@@ -21,6 +21,7 @@ import type {
 } from '../src/lib/libraryServiceProtocol';
 import type { LibrarySelectionSnapshot } from '../src/lib/libraryServiceSupervisor';
 import type { LibraryLog } from '../src/lib/log';
+import type { Vault } from '../src/lib/localVault';
 import { cancelSource, prepareSource } from '../src/lib/titleSources';
 import type { Stamp } from '../src/lib/wire';
 
@@ -164,6 +165,8 @@ function matches(scope: LibrarySelectionScope, selection: LibrarySelection) {
 export interface FixtureLibraryServiceOptions {
   log: LibraryLog;
   device?: string;
+  /** Enables the administrative queries Settings owns without exposing a production session/log escape hatch. */
+  libraryKey?: string;
   effects?: Partial<DownloadCoordinatorEffects>;
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
   refreshDownloadSources?: boolean;
@@ -177,6 +180,7 @@ export interface FixtureLibraryServiceOptions {
 export function fixtureLibraryService({
   log,
   device = 'aaaaaaaaaaaaaaaa',
+  libraryKey,
   effects = {},
   refreshDownloads,
   refreshDownloadSources,
@@ -217,16 +221,27 @@ export function fixtureLibraryService({
     { changed: () => void fixtureState.service?.publish([{ kind: 'downloads' }]) },
   );
   const driver = new DownloadCoordinatorDriver(coordinator);
+  const vaultValues = new Map<string, Uint8Array>();
+  const vault: Vault = {
+    get: async (key) => vaultValues.get(key),
+    entries: async (prefix) => [...vaultValues.entries()].filter(([key]) => key.startsWith(prefix)),
+    put: async (key, value) => void vaultValues.set(key, value),
+    delete: async (key) => void vaultValues.delete(key),
+    remove: async (prefix) => {
+      for (const key of vaultValues.keys()) if (key.startsWith(prefix)) vaultValues.delete(key);
+    },
+  };
   const authority = new LibraryLogAuthority(log, clock, {
     mode: 'local',
     downloads: coordinator,
+    ...(libraryKey ? { libraryKey, vault } : {}),
     refreshDownloads: refreshDownloads ?? (async () => driver.run({ force: true })),
     downloadArtwork,
   });
   const fixtureService = new FixtureService(authority, refreshDownloadSources);
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
-    libraryKey: 'fixture',
+    libraryKey: libraryKey ?? 'fixture',
     mode: 'local',
   });
   const session = new LibrarySession(model);

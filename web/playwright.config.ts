@@ -21,7 +21,7 @@ export default defineConfig({
   // Keep local runs deterministic while allowing CI to execute independent files in parallel.
   // GitHub's public ubuntu-latest runner has four CPUs. Keep local runs conservative,
   // but use the runner rather than leaving half of it idle.
-  workers: process.env.CI ? 4 : 1,
+  workers: 4,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',

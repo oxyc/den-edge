@@ -1,37 +1,13 @@
 <script lang="ts">
   import Router from '../src/Router.svelte';
   import Library from '../src/Library.svelte';
-  import type { LibrarySession } from '../src/lib/librarySession.svelte';
-  import { fetchRoutes } from '../src/lib/routes';
-  import { SessionServices } from '../src/lib/sessionServices.svelte';
-  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
+  import { LibrarySession } from '../src/lib/librarySession.svelte';
   import '../src/app.css';
   const noop = () => {};
-  const log = {
-    settings: (group: string) =>
-      group === 'keys'
-        ? { values: { tmdb: { value: { string: 'fixture-key' }, at: [1, 0, 'test'] } } }
-        : undefined,
-    refresh: async () => false,
-    rows: () => [],
-    newestStamp: () => [1, 0, 'test'],
-    title: () => undefined,
-    kept: async () => undefined,
-    keep: async () => {},
-  };
-  const session = {
-    ...fixtureLibrarySessionMethods,
-    changed: () => {},
-    revision: 0,
-    settingsRevision: 0,
-    displays: [],
-    shapes: new Map(),
-    log,
-    opened: Promise.resolve(log),
-    routes: fetchRoutes,
-    services: new SessionServices(fetchRoutes, () => {}),
-  } as unknown as LibrarySession;
-  const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
+  // This routing fixture is intentionally a guest: current session semantics make that a real session with no model.
+  const session = new LibrarySession(null);
+  session.configureServices();
+  const link = null;
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">

@@ -29,32 +29,36 @@ const movie = {
   genres: [{ name: 'Drama' }],
 };
 
-// The carried-source shape `carriedPath`/`activateDirect` require: a `/reel/m/s/<blob>?s=<tag>`
-// path, signed with a 24-hex tag.
+// A Reel-carried source is opaque until Edge redeems its capability into ordered browser transports.
 const BLOB = 'A'.repeat(40);
 const TAG = 'b'.repeat(24);
-const MEDIA = `/reel/m/s/${BLOB}?s=${TAG}`;
+const CAPABILITY = `m/s/${BLOB}?s=${TAG}`;
 const DIRECT = 'https://media.invalid';
+const EXPIRES = 2_000_000_000;
 
 /**
- * A reel install at `base`: its own `/meta` answer (one trailer, carrying a `/sources` link so the
- * activation path — the one the production log's doubled `/reel/activate` came from — is exercised,
- * not just the play-URL fallback `detail-trailer.spec.mjs` covers). `mediaBase()` collapses any
- * install's config segment to the bare `/reel` mount before `/sources` and `/activate` are ever
- * asked, so every install's activation lands on the same path — counted once, overall.
+ * A reel install at `base`: a v2 prepare answer with one carried source. Its plan URL owns the
+ * transport endpoint.
  */
-async function mockReelInstall(page, base, counts) {
-  const key = base.split('/').pop();
-  await page.route(`**${base}/prepare/**`, (route) => route.fulfill({ status: 404, json: {} }));
-  await page.route(`**${base}/meta/**`, (route) => {
-    counts.meta[key] = (counts.meta[key] ?? 0) + 1;
+async function mockReelInstall(page, base) {
+  const planUrl = `http://internal${base}/sources/trailer.json?v=2`;
+  await page.route(`**${base}/prepare/**`, (route) => {
     return route.fulfill({
       json: {
-        meta: {
-          links: [
+        v: 2,
+        meta: { links: [{ planUrl }] },
+        primary: { id: 'trailer', planUrl },
+        primaryPlan: {
+          v: 2,
+          expires: EXPIRES,
+          crop: null,
+          sources: [
             {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
+              kind: 'mp4',
+              audio: true,
+              width: 1280,
+              height: 720,
+              delivery: { type: 'reel', capability: CAPABILITY },
             },
           ],
         },
@@ -64,7 +68,6 @@ async function mockReelInstall(page, base, counts) {
 }
 
 async function mock(page) {
-  const counts = { meta: {}, activate: 0, direct: 0 };
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -73,25 +76,28 @@ async function mock(page) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
-  await mockReelInstall(page, '/reel/fixture', counts);
+  await mockReelInstall(page, '/reel/fixture');
   // The address live discovery would publish once it settles: the same reel service, reached at a
-  // different config segment. A fix at the wrong layer re-asks it; this must stay at zero.
-  await mockReelInstall(page, '/reel/fixture-alt', counts);
-  await page.route('**/sources/trailer.json**', (r) =>
-    r.fulfill({
-      json: {
-        sources: [{ kind: 'mp4', url: `http://internal${MEDIA}`, audio: true, height: 720 }],
-      },
-    }),
-  );
-  await page.route('**/reel/activate', (r) => {
-    counts.activate += 1;
+  // different config segment. Keep it valid so any regression reaches playback and is observed as
+  // a replaced, paused, or restarted video rather than being masked by a malformed fixture.
+  await mockReelInstall(page, '/reel/fixture-alt');
+  await page.route('**/reel/fixture*/transport', (r) => {
+    const { capability } = r.request().postDataJSON();
     return r.fulfill({
-      json: { publicBase: DIRECT, media: `${DIRECT}${MEDIA}`, form: 'progressive' },
+      json: {
+        v: 2,
+        capability,
+        attempts: [
+          { type: 'public', url: `${DIRECT}/${capability}` },
+          {
+            type: 'relay',
+            url: new URL(r.request().url()).pathname.replace('/transport', `/${capability}`),
+          },
+        ],
+      },
     });
   });
   await page.route(`${DIRECT}/**`, (route) => {
-    counts.direct += 1;
     const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range ?? '');
     const start = range ? Number(range[1]) : 0;
     const end = range?.[2] ? Number(range[2]) : videoBytes.length - 1;
@@ -106,7 +112,6 @@ async function mock(page) {
       },
     });
   });
-  return counts;
 }
 
 async function openPlaying(page) {
@@ -137,14 +142,12 @@ test('iOS detail trailer lifecycle: a late, equivalent reel address does not res
   try {
     const context = await browser.newContext({ ...devices['iPhone 15'] });
     const page = await context.newPage();
-    const counts = await mock(page);
+    await mock(page);
     const { video, errors } = await openPlaying(page);
 
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0.1);
     const srcBefore = await video.evaluate((v) => v.currentSrc);
     const timeBefore = await video.evaluate((v) => v.currentTime);
-    expect(counts.activate).toBe(1);
-    expect(counts.meta.fixture).toBe(1);
 
     // The live-discovery publish `SessionServices.configure()` makes after the restored
     // `services.v1` result: the same reel service, a different reachable base.
@@ -164,8 +167,6 @@ test('iOS detail trailer lifecycle: a late, equivalent reel address does not res
     expect(await video.evaluate((v) => v.currentTime)).toBeGreaterThanOrEqual(timeBefore);
     expect(await page.evaluate(() => window.pauseEvents)).toBe(0);
     expect(await page.evaluate(() => window.playCalls)).toBe(1);
-    expect(counts.meta['fixture-alt']).toBeUndefined();
-    expect(counts.activate).toBe(1);
 
     // Still actually playing, not merely frozen in place.
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(timeBefore);
@@ -182,13 +183,10 @@ test('iOS detail trailer lifecycle: in-app navigation after discovery settles st
     const page = await context.newPage();
     // Discovery has already settled by the time the page mounts — no `fixture:reel` publish
     // follows, exactly as in-app navigation never races `SessionServices.configure()`.
-    const counts = await mock(page);
+    await mock(page);
     const { video, errors } = await openPlaying(page);
 
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0.1);
-    expect(counts.activate).toBe(1);
-    expect(counts.meta.fixture).toBe(1);
-    expect(counts.meta['fixture-alt']).toBeUndefined();
     expect(await page.evaluate(() => window.playCalls)).toBe(1);
     expect(await page.evaluate(() => window.pauseEvents)).toBe(0);
     expect(errors).toEqual([]);
@@ -202,7 +200,7 @@ test('iOS detail trailer lifecycle: an unrelated settings publication keeps the 
   try {
     const context = await browser.newContext({ ...devices['iPhone 15'] });
     const page = await context.newPage();
-    const counts = await mock(page);
+    await mock(page);
     const { video, errors } = await openPlaying(page);
 
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0.1);
@@ -218,7 +216,6 @@ test('iOS detail trailer lifecycle: an unrelated settings publication keeps the 
     expect(await video.evaluate((v) => v.currentTime)).toBeGreaterThanOrEqual(timeBefore);
     expect(await page.evaluate(() => window.pauseEvents)).toBe(0);
     expect(await page.evaluate(() => window.playCalls)).toBe(1);
-    expect(counts.activate).toBe(1);
     expect(errors).toEqual([]);
   } finally {
     await browser.close();

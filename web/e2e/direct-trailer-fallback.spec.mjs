@@ -1,11 +1,10 @@
 // Where a trailer's bytes come from, and what happens when a direct listener cannot be reached (oxyc/den#197).
 //
 // The public web name is served through Cloudflare, whose terms do not allow serving video, so there a trailer plays
-// only from den-reel's direct listeners, routed as den-remux routes a session: the home-network listener first where
-// den-edge names one (`lanBase`, at home, where the router does not loop the public address back in), then the public
-// one. Each gets DIRECT_FIRST_FRAME_MS to show a frame; iOS's native player waits on an unreachable origin without an
-// error, so the deadline is what moves it on. When neither plays, no trailer is shown, as remux shows no playback.
-// A page on the LAN address or the tailnet is not Cloudflare and keeps the same-origin relay as its last copy.
+// from den-reel's direct listeners when they work. Reel v2 gives Edge an opaque carried-source capability and Edge
+// returns its ordered transports: the home-network listener when applicable, the public listener, and the same-origin
+// relay. Each direct attempt gets DIRECT_FIRST_FRAME_MS to show a frame; iOS's native player waits on an unreachable
+// origin without an error, so the deadline is what moves it on. The relay remains the complete final playback path.
 //
 // "Unreachable" is a request that is never answered, which is what a dropped connection looks like to the element.
 // The public web name is `den.localhost`: a name that is not local to the page (`relaysMedia`) but that the browser
@@ -24,8 +23,11 @@ const LAN = 'https://lan.media.invalid:8449';
 const BLOB = 'A'.repeat(40);
 const SECOND_BLOB = 'B'.repeat(40);
 const TAG = 'b'.repeat(24);
-const MEDIA = `/reel/m/s/${BLOB}?s=${TAG}`;
-const SECOND_MEDIA = `/reel/m/s/${SECOND_BLOB}?s=${TAG}`;
+const CAPABILITY = `m/s/${BLOB}?s=${TAG}`;
+const SECOND_CAPABILITY = `m/s/${SECOND_BLOB}?s=${TAG}`;
+const MEDIA = `/reel/${CAPABILITY}`;
+const SECOND_MEDIA = `/reel/${SECOND_CAPABILITY}`;
+const EXPIRES = 2_000_000_000;
 /** reel's `DIRECT_FIRST_FRAME_MS`, which these hold the page to. */
 const DEADLINE_MS = 2_000;
 
@@ -64,12 +66,33 @@ const POLICY = `media-src 'self' blob: data: https:; connect-src 'self' ${DIRECT
 const NAMED_ONLY = `media-src 'self' blob: data: ${DIRECT}; connect-src 'self' ${DIRECT}`;
 
 /**
- * reel offering one signed carried source, and den-edge activating with `lanBase` when `home`. `reach` says which
- * listeners answer: the others never do. The relay answers too, so a page that used it would be seen playing.
+ * Reel v2 offering one signed carried source, and den-edge returning LAN/public/relay transports when `home`.
+ * `reach` says which direct listeners answer: the others never do. The relay is the final complete path.
  * `csp` is the policy the page is served with; the dev server sends none of its own.
  */
 async function mock(page, origin, { home, reach, csp = POLICY, firstFails = false }) {
-  const seen = { activations: 0, lan: 0, direct: 0, relay: 0 };
+  const seen = { lan: 0, direct: 0, relay: 0, order: [] };
+  const sourcePlan = (capability) => ({
+    v: 2,
+    expires: EXPIRES,
+    crop: null,
+    sources: [
+      {
+        kind: 'mp4',
+        audio: true,
+        width: 1280,
+        height: 720,
+        delivery: { type: 'reel', capability },
+      },
+    ],
+  });
+  const planUrl = (id) => `http://internal/sources/${id}.json?v=2`;
+  const mediaFor = (capability) => `/reel/${capability}`;
+  const sourceName = (url) => (url.includes(SECOND_BLOB) ? 'second' : 'first');
+  const note = (transport, url) => {
+    const entry = `${transport}:${sourceName(url)}`;
+    if (!seen.order.includes(entry)) seen.order.push(entry);
+  };
   await guardNetwork(page, origin);
   // A request the policy refuses never leaves the browser, so it never reaches the routes below.
   await page.route(
@@ -89,67 +112,61 @@ async function mock(page, origin, { home, reach, csp = POLICY, firstFails = fals
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>',
     }),
   );
-  await page.route('**/reel/fixture/prepare/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route('**/reel/fixture/meta/**', (r) =>
+  await page.route('**/reel/fixture/prepare/**', (r) =>
     r.fulfill({
       json: {
+        v: 2,
         meta: {
           links: [
-            {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
-            },
-            ...(firstFails
-              ? [
-                  {
-                    trailers: 'http://internal/play/second.webm',
-                    sources: 'http://internal/sources/second.json',
-                  },
-                ]
-              : []),
+            { planUrl: planUrl('trailer') },
+            ...(firstFails ? [{ planUrl: planUrl('second') }] : []),
           ],
         },
+        primary: { id: 'trailer', planUrl: planUrl('trailer') },
+        primaryPlan: sourcePlan(CAPABILITY),
       },
     }),
   );
   await page.route('**/sources/*.json**', (r) => {
-    const media = new URL(r.request().url()).pathname.includes('/second.json')
-      ? SECOND_MEDIA
-      : MEDIA;
+    const second = new URL(r.request().url()).pathname.includes('/second.json');
+    return r.fulfill({ json: sourcePlan(second ? SECOND_CAPABILITY : CAPABILITY) });
+  });
+  await page.route(`${origin}/reel/transport`, (r) => {
+    const { capability } = r.request().postDataJSON();
+    const media = mediaFor(capability);
     return r.fulfill({
       json: {
-        sources: [{ kind: 'mp4', url: `http://internal${media}`, audio: true, height: 720 }],
+        v: 2,
+        capability,
+        attempts: [
+          ...(home ? [{ type: 'lan', url: `${LAN}${media}` }] : []),
+          { type: 'public', url: `${DIRECT}${media}` },
+          { type: 'relay', url: media },
+        ],
       },
     });
   });
-  await page.route(`${origin}/reel/activate`, (r) => {
-    seen.activations += 1;
-    const { media } = r.request().postDataJSON();
-    return r.fulfill({
-      json: {
-        publicBase: DIRECT,
-        media: `${DIRECT}${media}`,
-        form: 'progressive',
-        ...(home ? { lanBase: LAN } : {}),
-      },
-    });
-  });
-  // Every way a trailer's bytes could cross this origin: the carried copy, and reel's own file and siblings.
+  // Every carried source that could cross this origin.
   await page.route(
-    (url) => url.origin === origin && /^\/reel\/(?:m\/s|play|progressive|hls)\//.test(url.pathname),
+    (url) => url.origin === origin && /^\/reel\/m\/s\//.test(url.pathname),
     (route) => {
       seen.relay += 1;
+      note('relay', route.request().url());
+      if (firstFails && route.request().url().includes(BLOB))
+        return route.fulfill({ status: 502, body: 'relay unavailable' });
       return serveVideo(route);
     },
   );
   await page.route(`${LAN}/**`, (route) => {
     seen.lan += 1;
+    note('lan', route.request().url());
     if (firstFails && new URL(route.request().url()).pathname === MEDIA.split('?')[0])
       return route.fulfill({ status: 502, body: 'progressive unavailable' });
     if (reach.includes('lan')) return serveVideo(route);
   });
   await page.route(`${DIRECT}/**`, (route) => {
     seen.direct += 1;
+    note('public', route.request().url());
     if (reach.includes('public')) return serveVideo(route);
   });
   return seen;
@@ -183,7 +200,7 @@ const surfaces = [
 // reel.test.ts exhaustively covers the source order and timeout state machine. Here the browser is proving the
 // integration boundaries: each engine and each independently implemented surface sees every route class once,
 // without paying for their full 2 × 2 × 4 Cartesian product. The diagonal assignment also leaves every
-// engine/surface pair with one direct-success case and one relay-policy case.
+// engine/surface pair with one direct-success case and one direct-to-relay fallback case.
 const integrationCases = new Map([
   ['chromium hero', new Set(['away', 'public-failure'])],
   ['chromium billboard', new Set(['home', 'local-relay'])],
@@ -250,6 +267,7 @@ for (const [engine, launch, available = () => true] of engines) {
         const lanDown = await play(launch, surface, PUBLIC, { home: true, reach: ['public'] });
         expect(lanDown.src).toBe(`${DIRECT}${MEDIA}`);
         expect(lanDown.seen.relay).toBe(0);
+        expect(lanDown.seen.order).toEqual(['lan:first', 'public:first']);
         expect(lanDown.took).toBeLessThan(home.took + DEADLINE_MS + 1_500);
         test.info().annotations.push({
           type: 'time to playing',
@@ -270,7 +288,7 @@ for (const [engine, launch, available = () => true] of engines) {
       });
 
     if (covers.has('public-failure'))
-      test(`${name}: on the public web name a failed direct listener means no trailer, as remux`, async () => {
+      test(`${name}: on the public web name a failed direct listener falls through to the relay`, async () => {
         test.skip(!available(), `${engine} is not installed here`);
         const failed = await play(
           launch,
@@ -279,9 +297,10 @@ for (const [engine, launch, available = () => true] of engines) {
           { home: false, reach: [] },
           DEADLINE_MS + 4_000,
         );
-        expect(failed.took, 'no trailer plays').toBeNull();
+        expect(failed.src).toBe(MEDIA);
         expect(failed.seen.direct).toBeGreaterThan(0);
-        expect(failed.seen.relay, 'and nothing crosses the relay').toBe(0);
+        expect(failed.seen.relay).toBeGreaterThan(0);
+        expect(failed.seen.order).toEqual(['public:first', 'relay:first']);
       });
 
     if (covers.has('local-relay'))
@@ -290,6 +309,7 @@ for (const [engine, launch, available = () => true] of engines) {
         const local = await play(launch, surface, LOCAL, { home: false, reach: [] });
         expect(local.src).toBe(MEDIA);
         expect(local.seen.direct).toBeGreaterThan(0);
+        expect(local.seen.order).toEqual(['public:first', 'relay:first']);
         expect(local.took).toBeLessThan(DEADLINE_MS + 5_000);
       });
   }
@@ -305,11 +325,5 @@ test('detail hero tries the next LAN candidate when the first media file is unav
     DEADLINE_MS + 8_000,
   );
   expect(result.src).toBe(`${LAN}${SECOND_MEDIA}`);
-  expect(
-    result.seen.activations,
-    'the next signed candidate reuses the same short-lived listener lease',
-  ).toBe(1);
-  expect(result.seen.lan).toBeGreaterThan(1);
-  expect(result.seen.direct, 'the public copy between candidates was tried').toBeGreaterThan(0);
-  expect(result.seen.relay).toBe(0);
+  expect(result.seen.order).toEqual(['lan:first', 'public:first', 'relay:first', 'lan:second']);
 });

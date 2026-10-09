@@ -70,6 +70,7 @@
   import { atlasRows } from './lib/atlasRows';
   import type { LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
+    ContinueItem,
     HistoryView,
     RetainedBillboardScope,
     TitleRef,
@@ -143,6 +144,16 @@
   const overview = $derived(model?.overview.value);
   const continueView = $derived(model?.continueWatching.value);
   const settings = $derived(model?.settings.value);
+  const namedPrefix = (refs: readonly TitleRef[]) => {
+    const missing = refs.findIndex((ref) => !session.displayTitle(ref));
+    return missing < 0 ? refs.length : missing;
+  };
+  const continueNameLimit = $derived(
+    Math.max(continueNames, namedPrefix((continueView?.items ?? []).map(({ title }) => title))),
+  );
+  const watchlistNameLimit = $derived(
+    Math.max(watchlistNames, namedPrefix(overview?.watchlist ?? [])),
+  );
   const libraryOpen = $derived(model === null || overview !== undefined);
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
@@ -218,8 +229,8 @@
     shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
     const refs = [
       ...continued.needsShapes,
-      ...continued.items.slice(0, continueNames).map(({ title }) => title),
-      ...view.watchlist.slice(0, watchlistNames),
+      ...continued.items.slice(0, continueNameLimit).map(({ title }) => title),
+      ...view.watchlist.slice(0, watchlistNameLimit),
       ...view.seeds.watched,
       ...view.seeds.watchlisted,
     ];
@@ -246,8 +257,10 @@
     };
   });
 
-  const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
-  const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
+  // A dense cached prefix appears at once. A sparse cached tail stays behind its unnamed predecessors, preserving
+  // shelf and keyboard order without turning one old cached title into a large burst of TMDB requests.
+  const admitContinueNames = () => (continueNames = continueNameLimit + SHELF_TRANCHE);
+  const admitWatchlistNames = () => (watchlistNames = watchlistNameLimit + SHELF_TRANCHE);
 
   // The Watchlist screen is the only owner of the potentially large history naming tail.
   $effect(() => {
@@ -261,21 +274,25 @@
     );
   });
 
-  const continueEntries = $derived(
-    (continueView?.items ?? []).flatMap((entry): ContinueEntry[] => {
-      const title = session.displayTitle(entry.title);
-      return title
-        ? [
-            {
-              title,
-              fraction: entry.fraction,
-              ...(entry.episode ? { episode: entry.episode } : {}),
-              ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
-              ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
-            },
-          ]
-        : [];
-    }),
+  const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
+    const title = session.displayTitle(entry.title);
+    return title
+      ? [
+          {
+            title,
+            fraction: entry.fraction,
+            ...(entry.episode ? { episode: entry.episode } : {}),
+            ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
+            ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
+          },
+        ]
+      : [];
+  };
+  // Playback and title actions need every known resume point, including a directly opened title beyond Home's
+  // staged shelf. Only the shelf rendering is prefix-limited.
+  const continueEntries = $derived((continueView?.items ?? []).flatMap(displayContinueEntry));
+  const continueShelfEntries = $derived(
+    (continueView?.items ?? []).slice(0, continueNameLimit).flatMap(displayContinueEntry),
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
@@ -1203,7 +1220,9 @@
     );
   });
   const savedTitles = $derived(
-    (overview?.watchlist ?? []).flatMap((ref) => session.displayTitle(ref) ?? []),
+    (overview?.watchlist ?? [])
+      .slice(0, watchlistNameLimit)
+      .flatMap((ref) => session.displayTitle(ref) ?? []),
   );
 
   function caption(entry: ContinueEntry): string | undefined {
@@ -1363,7 +1382,7 @@
     />
   {/if}
 {:else}
-  {@const resume = continueEntries.filter((e) => !facet || e.title.type === facet)}
+  {@const resume = continueShelfEntries.filter((e) => !facet || e.title.type === facet)}
   {@const saved = savedTitles.filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
