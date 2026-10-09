@@ -94,8 +94,14 @@ try {
       return { worker, send, updates };
     };
     let request = 0;
-    const message = (body) => ({ protocol: 3, requestId: `request-${++request}`, ...body });
+    let protocol = 0;
+    const message = (body) => ({ protocol, requestId: `request-${++request}`, ...body });
     const first = open();
+    const mismatch = await first.send(
+      message({ type: 'hello', clientId: 'protocol-probe', libraryKey, mode: 'local' }),
+      'error',
+    );
+    protocol = mismatch.error.expectedProtocol;
     await first.send(
       message({ type: 'hello', clientId: 'seed', libraryKey, mode: 'local' }),
       'ready',
