@@ -810,7 +810,8 @@
   // It cycles on its own until you move it, and holds while you are reading it — pointer over it, or a control
   // in it focused. Nothing moves for a viewer who asked for less movement.
   $effect(() => {
-    if (!active || !onScreen || paging || held || shown.length < 2 || still()) return;
+    if (!active || !onScreen || !foreground || paging || held || shown.length < 2 || still())
+      return;
     const timer = setInterval(() => {
       const next = nextSlide(index, shown.length);
       // The wrap is a jump rather than a scroll back through forty slides.

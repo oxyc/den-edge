@@ -280,7 +280,7 @@ async function device(edge: Server, id: string, name: string, at = { now: 1_000_
   const ctx: RecoveryContext = {
     log: new FakeLog(edge),
     libraryId: keys.id,
-    member: keys.member,
+    memberProof: `${keys.id}:${keys.member}`,
     device: id,
     issue: (): Stamp => [at.now, counter++, id],
     fetchImpl: edgeFetch(edge, keys.id),

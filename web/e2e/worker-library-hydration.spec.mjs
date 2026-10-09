@@ -44,6 +44,7 @@ async function routeLibrary(page, metadata) {
       return route.fulfill({ status: 200, headers });
     }
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
+      metadata.changeRequests = (metadata.changeRequests ?? 0) + 1;
       const since = Number(url.searchParams.get('since') ?? 0);
       const entries = [...rows.values()].filter((entry) => entry.seq > since);
       return route.fulfill({
@@ -83,6 +84,32 @@ async function routes(page, metadata) {
   await page.route('**/scout/fixture-install/manifest.json', (route) =>
     route.fulfill({ json: { id: 'com.den.scout' } }),
   );
+  await page.route('**/scout/fixture-install/stream/movie/tt1200.json', (route) =>
+    route.fulfill({
+      json: {
+        streams: [
+          {
+            title: 'Queued.Movie.1080p.WEB.mkv',
+            url: `${E2E_ORIGIN}/scout/fixture-install/play/queued`,
+            behaviorHints: { filename: 'Queued.Movie.1080p.WEB.mkv' },
+            attributes: { resolution: '1080p', cached: false, seeders: 5 },
+          },
+        ],
+      },
+    }),
+  );
+  await page.route('**/scout/fixture-install/play/queued**', (route) =>
+    route.fulfill({
+      status: 202,
+      json: { progress: 0.2, state: 'downloading', seeds: 5, peers: 7 },
+    }),
+  );
+  await page.route(`${E2E_ORIGIN}/recovery`, (route) => {
+    metadata.recoveryRequests = (metadata.recoveryRequests ?? 0) + 1;
+    metadata.recoveryMembers ??= new Set();
+    metadata.recoveryMembers.add(route.request().headers()['x-den-library-member']);
+    return route.fulfill({ status: 403, json: { error: 'forbidden' } });
+  });
   await routeLibrary(page, metadata);
   await routeTmdb(page, async (route) => {
     const request = route.request();
@@ -283,4 +310,59 @@ test('personalized billboard waits for staged names without replacing its retain
   expect(ranking.library.find(({ id }) => id === 1012)?.hint?.title).toBe('Movie 1012');
   releaseRanking();
   await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
+});
+
+test('a hidden paired library suspends background retries and resumes without a Recovery spin', async ({
+  page,
+}) => {
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+    changeRequests: 0,
+    recoveryRequests: 0,
+    recoveryMembers: new Set(),
+  };
+
+  // Playwright cannot background one page deterministically. This presents the same visibility fact and event that
+  // the browser gives RoutedLibrary, while all scheduling, relay, Recovery, and download work remains in the real
+  // production DedicatedWorker.
+  await page.addInitScript(() => {
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    window.fixtureVisibility = (value) => {
+      hidden = value;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+  });
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed&lifecycle`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+
+  await page.goto(`${FIXTURE}?view=settings&online&lifecycle`);
+  await expect.poll(() => metadata.recoveryRequests).toBe(1);
+  expect([...metadata.recoveryMembers]).toEqual([...metadata.members]);
+  const hidden = { changes: metadata.changeRequests, recovery: metadata.recoveryRequests };
+  await page.waitForTimeout(1_000);
+  expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(hidden);
+
+  await page.evaluate(() => window.fixtureVisibility(false));
+  await expect.poll(() => metadata.changeRequests).toBeGreaterThan(hidden.changes);
+  const visible = { changes: metadata.changeRequests, recovery: metadata.recoveryRequests };
+  await page.waitForTimeout(1_000);
+  expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(
+    visible,
+  );
+
+  await page.evaluate(() => window.fixtureVisibility(true));
+  const hiddenAgain = { changes: metadata.changeRequests, recovery: metadata.recoveryRequests };
+  await page.waitForTimeout(1_000);
+  expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(
+    hiddenAgain,
+  );
 });

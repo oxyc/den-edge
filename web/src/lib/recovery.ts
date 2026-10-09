@@ -54,9 +54,9 @@ export interface RecoveryLog {
 
 export interface RecoveryContext {
   log: RecoveryLog;
-  /** The library's id and member proof, as `x-den-library-member` carries them. */
+  /** The complete `x-den-library-member` capability (`libraryId:memberToken`). */
   libraryId: string;
-  member: string;
+  memberProof: string;
   /** This browser's stamp device id. */
   device: string;
   issue: () => Stamp | Promise<Stamp>;
@@ -75,7 +75,7 @@ export async function recoveryContext(
   return {
     log,
     libraryId: keys.id,
-    member: keys.member,
+    memberProof: `${keys.id}:${keys.member}`,
     device: clock.device,
     issue: () => {
       // Settings and the session each hold a clock of this browser's; seeing the row's newest stamp keeps the two
@@ -317,7 +317,7 @@ function call(ctx: RecoveryContext, method: string, body?: unknown): Promise<Res
   return (ctx.fetchImpl ?? fetch)('/recovery', {
     method,
     headers: {
-      'x-den-library-member': `${ctx.libraryId}:${ctx.member}`,
+      'x-den-library-member': ctx.memberProof,
       ...(body ? { 'content-type': 'application/json' } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,

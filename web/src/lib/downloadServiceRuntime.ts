@@ -37,6 +37,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   readonly #seasonLoader: SeasonLoader;
   readonly #listeners = new Set<() => void>();
   #changeQueued = false;
+  #providersUnavailable = false;
 
   constructor(
     readonly log: LibraryLog,
@@ -98,7 +99,14 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   }
 
   async run(current: () => boolean = () => true): Promise<boolean> {
-    const { scout } = await this.#getProviders();
+    let scout: Addon | null;
+    try {
+      ({ scout } = await this.#getProviders());
+    } catch (error) {
+      this.#providersUnavailable = true;
+      throw error;
+    }
+    this.#providersUnavailable = !scout;
     if (!scout || !current()) return false;
     const before = this.#digest();
     const wrote = await this.driver.run({ current });
@@ -116,6 +124,10 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
       );
     });
     if (!downloads.length) return undefined;
+    // An unasked download is due immediately only when a pass can actually ask Scout. Without a configured or
+    // reachable provider, returning zero makes the authority run maintenance and this no-op again without pause.
+    // Fall back to its ordinary visible cadence; a plugin-row change is then observed before the next attempt.
+    if (this.#providersUnavailable) return undefined;
     return Math.min(
       ...downloads.map((download) => {
         const asked = this.coordinator.asked.get(download.name);

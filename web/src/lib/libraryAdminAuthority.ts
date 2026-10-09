@@ -79,7 +79,6 @@ export class LibraryAdminAuthority {
     }
   >();
   readonly #recoveryStorage = new MemoryStorage();
-
   constructor(
     private readonly log: LibraryLog,
     private readonly clock: ClockStore,
@@ -227,7 +226,7 @@ export class LibraryAdminAuthority {
     return {
       log: this.log,
       libraryId: this.log.libraryId,
-      member: this.log.memberProof,
+      memberProof: this.log.memberProof,
       device: this.clock.device,
       issue: async () => {
         await this.clock.see(this.log.newestStamp());
