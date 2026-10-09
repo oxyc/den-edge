@@ -91,7 +91,7 @@ class SessionContentService implements ContentServiceClientPort {
 
   constructor(
     private readonly current: () => ContentServiceClient,
-    private readonly replace: (expected: ContentServiceClient) => ContentServiceClient,
+    private readonly replace: (expected: ContentServiceClient) => Promise<ContentServiceClient>,
   ) {
     this.#bind(current());
   }
@@ -157,7 +157,7 @@ class SessionContentService implements ContentServiceClientPort {
           this.#closed
         )
           throw error;
-        const replacement = replacedWhilePending ? this.current() : this.replace(client);
+        const replacement = replacedWhilePending ? this.current() : await this.replace(client);
         if (replacement !== client) this.#bind(replacement);
       }
     }
@@ -296,8 +296,17 @@ export function createWorkerServiceSession(
   };
   const content = new SessionContentService(
     () => active.connection.content,
-    (expected) =>
-      active.connection.content === expected ? activate(false).content : active.connection.content,
+    async (expected) => {
+      if (active.connection.content !== expected) return active.connection.content;
+      // Before a library is opened, Content owns the anonymous Worker and may replace it directly. Afterwards the
+      // library supervisor is the sole generation owner: it reopens the paired authority and restores subscriptions
+      // before this query follows its content sibling. Letting Content call `activate(false)` here briefly created an
+      // anonymous Worker, which the supervisor then replaced again; in-flight detail and trailer work was cancelled
+      // in that ping-pong and retry kept following another dead channel.
+      if (!active.libraryClaimed) return activate(false).content;
+      await library.recoverSharedTransport();
+      return active.connection.content;
+    },
   );
   contentFacade.current = content;
 

@@ -3,6 +3,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import Library from '../src/Library.svelte';
+  import Router from '../src/Router.svelte';
   import Settings from '../src/Settings.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
@@ -18,6 +19,7 @@
   const online = params.has('online');
   const lifecycle = params.has('lifecycle');
   const source = params.has('source');
+  const routed = params.has('routed');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, {
@@ -33,6 +35,7 @@
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
   const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
+  const noop = () => {};
 
   $effect(() => session.configureServices());
 
@@ -188,6 +191,19 @@
     </nav>
     {#if view === 'settings'}
       <Settings {link} {model} />
+    {:else if routed}
+      <Router onchange={noop}>
+        {#snippet children(route, active)}
+          <Library
+            {link}
+            libraryIdentity={libraryKey}
+            {session}
+            {route}
+            {active}
+            watchedYear={undefined}
+          />
+        {/snippet}
+      </Router>
     {:else}
       <Library
         {link}

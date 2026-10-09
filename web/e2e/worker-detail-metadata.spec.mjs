@@ -480,6 +480,33 @@ test.describe('Worker-owned detail metadata boundary', () => {
     expectWorkerOwned(requests);
   });
 
+  test('Try again reissues a transient TMDB detail failure through the Worker', async ({
+    page,
+  }) => {
+    await seed(page);
+    let detailAttempts = 0;
+    const requests = await arrange(page, {
+      tmdb: async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname.endsWith('/season/1')) return route.fulfill({ json: { episodes: [] } });
+        if (
+          url.pathname.endsWith('/tv/308729') &&
+          url.searchParams.get('append_to_response')?.includes('aggregate_credits') &&
+          ++detailAttempts === 1
+        )
+          return route.fulfill({ status: 500, body: 'Temporary provider failure' });
+        return route.fulfill({ json: titleBody(308729) });
+      },
+    });
+
+    await page.goto(`${FIXTURE}?type=tv&id=308729`);
+    await expect(page.getByText('Couldn’t load this title from TMDB.')).toBeVisible();
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Series 308729' })).toBeVisible();
+    expect(detailAttempts).toBe(2);
+    expectWorkerOwned(requests);
+  });
+
   test('a TMDB 404 is stable and optional provider outages do not fail the next detail', async ({
     page,
   }) => {

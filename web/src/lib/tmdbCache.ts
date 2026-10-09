@@ -402,14 +402,16 @@ export function cachingFetch(
   const refreshing = new Set<string>();
   return async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (!store || !href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET')
-      return network(input, init);
-    if (keptSince === undefined) prune();
+    if (!href.startsWith(TMDB)) return network(input, init);
     const url = new URL(href);
+    const asked = proxied(url);
+    // Local storage is optional; the same-origin relay is not. A private/restricted browser without IndexedDB must
+    // still share den-edge's cache and must never send a household key directly to TMDB.
+    if (!store || (init?.method ?? 'GET') !== 'GET') return network(asked, init);
+    if (keptSince === undefined) prune();
     const key = keyOf(url);
     // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
     // already has rather than asking again.
-    const asked = proxied(url);
     const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
     const entry = (res: Response, body: string, parsed: object | undefined): Entry | undefined => {
       const fetchedAt = fetchedAtOf(res, lent, now());

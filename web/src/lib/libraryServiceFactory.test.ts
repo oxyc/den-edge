@@ -556,6 +556,95 @@ it('retries paired in-flight content only after replacement bootstrap and source
   services.close();
 });
 
+it('lets the library supervisor replace a paired Worker after a detail transport failure', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const firstHello = first.posted[0];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  first.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: firstHello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+
+  const loading = services.content.query({
+    kind: 'title.detail',
+    title: { type: 'tv', id: 213344 },
+    region: 'US',
+  });
+  await expect.poll(() => first.posted.length).toBe(2);
+  const firstDetail = first.posted[1];
+  if (firstDetail?.type !== 'content-query') throw new Error('detail query was not sent');
+  first.emit([
+    {
+      type: 'content-error',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: firstDetail.requestId,
+      error: {
+        code: 'unavailable',
+        message: 'content transport failed',
+        retryable: true,
+      },
+    },
+  ]);
+
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello')
+    throw new Error('the library supervisor did not own the replacement');
+  expect(createWorker).toHaveBeenCalledTimes(2);
+  expect(first.terminate).toHaveBeenCalledOnce();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(replacement.posted).toEqual([replacementHello]);
+
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await expect.poll(() => replacement.posted.length).toBe(2);
+  const retriedDetail = replacement.posted[1];
+  expect(retriedDetail).toMatchObject({
+    type: 'content-query',
+    request: {
+      kind: 'title.detail',
+      title: { type: 'tv', id: 213344 },
+      region: 'US',
+    },
+  });
+  if (retriedDetail?.type !== 'content-query') throw new Error('detail query was not retried');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: retriedDetail.requestId,
+      result: { kind: 'title.detail', detail: { state: 'absent' } },
+    },
+  ]);
+
+  await expect(loading).resolves.toEqual({ kind: 'title.detail', detail: { state: 'absent' } });
+  expect(createWorker).toHaveBeenCalledTimes(2);
+  services.close();
+  expect(replacement.terminate).toHaveBeenCalledOnce();
+});
+
 it('replays authoritative source configuration before retrying on a replacement Worker', async () => {
   const first = new FakeWorker();
   const replacement = new FakeWorker();
