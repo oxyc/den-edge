@@ -3,7 +3,7 @@
 // onto the service people recognise, ordered by that country's own prominence, movies and series merged.
 
 import { reuse } from '../lib/reuse';
-import { tmdbFetch } from '../lib/tmdbCache';
+import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
 
 export interface Country {
   code: string;
@@ -31,15 +31,13 @@ export interface ServiceDirectoryLoad {
   services: Service[];
   status: 'loading' | 'ready' | 'partial' | 'failed';
   request: number;
-  key: string;
 }
 
 export function beginServiceDirectoryLoad(
   previous: ServiceDirectoryLoad | undefined,
   request: number,
-  key: string,
 ): ServiceDirectoryLoad {
-  return { services: previous?.services ?? [], status: 'loading', request, key };
+  return { services: previous?.services ?? [], status: 'loading', request };
 }
 
 /** Complete only the request that still owns this country; an older answer cannot replace a retry. */
@@ -53,7 +51,6 @@ export function completeServiceDirectoryLoad(
     services: result.complete ? result.services : mergeServices(current.services, result.services),
     status: result.complete ? 'ready' : 'partial',
     request,
-    key: current.key,
   };
 }
 
@@ -170,22 +167,14 @@ export function serviceLabel(service: Service): string {
   return service.name;
 }
 
-async function tmdb(path: string, key: string, fetchImpl: typeof fetch): Promise<unknown> {
-  const url = new URL(`https://api.themoviedb.org/3${path}`);
-  url.searchParams.set('api_key', key);
-  const res = await fetchImpl(url.href, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`TMDB ${res.status}`);
-  return res.json();
-}
-
-const resultsOf = (body: unknown): ProviderEntry[] => {
+export const serviceProviderEntries = (body: unknown): ProviderEntry[] => {
   const results = (body as { results?: unknown } | null)?.results;
   return Array.isArray(results) ? (results as ProviderEntry[]) : [];
 };
 
-/** Every country TMDB has a directory for, A–Z by English name. */
-export async function fetchCountries(key: string, fetchImpl = tmdbFetch): Promise<Country[]> {
-  return resultsOf(await tmdb('/watch/providers/regions', key, fetchImpl))
+/** A provider-region answer normalized for the page-facing content protocol. */
+export function countriesFrom(body: unknown): Country[] {
+  return serviceProviderEntries(body)
     .flatMap((entry): Country[] => {
       const e = entry as { iso_3166_1?: unknown; english_name?: unknown };
       const code = typeof e.iso_3166_1 === 'string' ? e.iso_3166_1.trim().toUpperCase() : '';
@@ -198,48 +187,27 @@ export async function fetchCountries(key: string, fetchImpl = tmdbFetch): Promis
     );
 }
 
-/**
- * One country's services, movies and series merged, retaining either half when only the other request fails.
- * A caller that can show a retry keeps the partial list on screen; both halves failing still rejects.
- */
-export async function fetchServicesResult(
-  country: string,
-  key: string,
-  fetchImpl = tmdbFetch,
-): Promise<ServiceDirectoryResult> {
-  const settled = await Promise.allSettled(
-    (['movie', 'tv'] as const).map(async (kind) =>
-      servicesFrom(
-        resultsOf(await tmdb(`/watch/providers/${kind}?watch_region=${country}`, key, fetchImpl)),
-        kind,
-        country,
-      ),
-    ),
-  );
-  const fulfilled = settled.flatMap((result) =>
-    result.status === 'fulfilled' ? [result.value] : [],
-  );
-  if (!fulfilled.length) {
-    throw (
-      settled.find((result) => result.status === 'rejected')?.reason ?? new Error('TMDB failed')
-    );
-  }
-  return { services: mergeServices(...fulfilled), complete: fulfilled.length === settled.length };
+/** Countries normalized by the content Worker; provider credentials and response shapes never reach Settings. */
+export async function contentCountries(content: ContentServiceClientPort): Promise<Country[]> {
+  return (await content.query({ kind: 'service.regions' })).regions;
 }
 
-/**
- * One country's services for callers that do not render a partial/retry state.
- *
- * Shared (`reuse`): Home's service row, a tile's hover and the service page all ask for the same directory, and
- * each used to ask the network for it separately.
- */
-export function fetchServices(
+/** A country directory normalized by the content Worker, retaining a useful half on a partial provider outage. */
+export async function contentServicesResult(
+  content: ContentServiceClientPort,
   country: string,
-  key: string,
-  fetchImpl = tmdbFetch,
+): Promise<ServiceDirectoryResult> {
+  const result = await content.query({ kind: 'service.directory', region: country });
+  return { services: result.services, complete: result.complete };
+}
+
+/** Shared because Home, hover priming and the mounted service page ask the same public directory. */
+export function contentServices(
+  content: ContentServiceClientPort,
+  country: string,
 ): Promise<Service[]> {
   return reuse(
-    `services:${country}`,
-    async () => (await fetchServicesResult(country, key, fetchImpl)).services,
+    `content-services:${country}`,
+    async () => (await contentServicesResult(content, country)).services,
   );
 }

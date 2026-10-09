@@ -25,14 +25,15 @@
   import {
     beginServiceDirectoryLoad,
     completeServiceDirectoryLoad,
+    contentCountries,
+    contentServicesResult,
     failServiceDirectoryLoad,
-    fetchCountries,
-    fetchServicesResult,
     matches,
     type Country,
     type Service,
     type ServiceDirectoryLoad,
   } from './services';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
   import {
     effectiveServicePicks,
     preferenceChange as change,
@@ -43,7 +44,7 @@
 
   let {
     prefs,
-    tmdbKey,
+    content,
     pinConfigured,
     disabled,
     save,
@@ -51,8 +52,8 @@
     verifyPin,
   }: {
     prefs: SettingsPreferences;
-    /** What TMDB's country and service directories are asked with: the library's key, or den-edge's. */
-    tmdbKey: string;
+    /** Worker-owned provider metadata boundary. */
+    content: ContentServiceClientPort;
     /** The parental PIN, when one is set. */
     pinConfigured: boolean;
     disabled: boolean;
@@ -84,10 +85,9 @@
   let countriesRetry = $state(0);
   $effect(() => {
     void countriesRetry;
-    if (!tmdbKey) return;
     countriesFailed = false;
     let gone = false;
-    fetchCountries(tmdbKey)
+    contentCountries(content)
       .then((found) => {
         if (!gone) {
           countries = found;
@@ -133,18 +133,12 @@
   const directories = new SvelteMap<string, ServiceDirectoryLoad>();
   let serviceRequest = 0;
   function loadServices(code: string, retry = false) {
-    if (!tmdbKey) return;
     const current = directories.get(code);
-    if (
-      !retry &&
-      current?.key === tmdbKey &&
-      (current.status === 'loading' || current.status === 'ready')
-    )
-      return;
-    if (current?.status === 'loading' && current.key === tmdbKey) return;
+    if (!retry && (current?.status === 'loading' || current?.status === 'ready')) return;
+    if (current?.status === 'loading') return;
     const request = ++serviceRequest;
-    directories.set(code, beginServiceDirectoryLoad(current, request, tmdbKey));
-    void fetchServicesResult(code, tmdbKey).then(
+    directories.set(code, beginServiceDirectoryLoad(current, request));
+    void contentServicesResult(content, code).then(
       (found) => {
         const latest = directories.get(code);
         if (latest) directories.set(code, completeServiceDirectoryLoad(latest, request, found));
@@ -157,9 +151,9 @@
   }
   $effect(() => {
     const code = shownCountry;
-    if (!servicesOpen || !tmdbKey) return;
+    if (!servicesOpen) return;
     const current = directories.get(code);
-    if (!current || current.key !== tmdbKey) loadServices(code);
+    if (!current) loadServices(code);
   });
   const directoryLoad = $derived(directories.get(shownCountry));
   const directory = $derived(directoryLoad?.services ?? []);
@@ -342,64 +336,60 @@
           : 'None selected'}</span
       >
     </p>
-    {#if !tmdbKey}
-      <p class="status bad">Couldn’t load the country list. Check your TMDB key in Settings.</p>
-    {:else}
-      <div class="form">
-        <Select
-          label="Country"
-          value={shownCountry}
-          groups={countryGroups}
-          boxed
-          onchange={(code) => {
-            servicesCountry = code;
-            serviceFilter = '';
-          }}
-        />
-        <input
-          id="service-filter"
-          class="field"
-          type="search"
-          placeholder="Filter {countryName(shownCountry)}’s services"
-          aria-label="Filter services"
-          bind:value={serviceFilter}
-        />
-      </div>
-      {#if countriesFailed}
-        <p class="status bad">
-          Couldn’t refresh the country list. Check your TMDB key in Settings.
-          <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
-            >Try again</button
-          >
-        </p>
-      {/if}
-      {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
-        <p class="status bad">
-          {directoryLoad.status === 'partial'
-            ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
-            : `Couldn’t load ${countryName(shownCountry)}’s services.`}
-          <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
-            >Try again</button
-          >
-        </p>
-      {/if}
-      {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
-        <p class="status">Loading services…</p>
-      {:else if directory.length}
-        <CheckGrid
-          legend="{countryName(shownCountry)} · most prominent first"
-          options={serviceOptions}
-          checked={(id) => {
-            const service = directory.find((s) => s.id === id);
-            return !!service && isPicked(service, shownCountry);
-          }}
-          wide
-          {disabled}
-          onchange={toggleService}
-        />
-      {:else if directoryLoad.status === 'ready'}
-        <p class="status">No services listed for {countryName(shownCountry)}</p>
-      {/if}
+    <div class="form">
+      <Select
+        label="Country"
+        value={shownCountry}
+        groups={countryGroups}
+        boxed
+        onchange={(code) => {
+          servicesCountry = code;
+          serviceFilter = '';
+        }}
+      />
+      <input
+        id="service-filter"
+        class="field"
+        type="search"
+        placeholder="Filter {countryName(shownCountry)}’s services"
+        aria-label="Filter services"
+        bind:value={serviceFilter}
+      />
+    </div>
+    {#if countriesFailed}
+      <p class="status bad">
+        Couldn’t refresh the country list. Check your TMDB key in Settings.
+        <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
+          >Try again</button
+        >
+      </p>
+    {/if}
+    {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
+      <p class="status bad">
+        {directoryLoad.status === 'partial'
+          ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
+          : `Couldn’t load ${countryName(shownCountry)}’s services.`}
+        <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
+          >Try again</button
+        >
+      </p>
+    {/if}
+    {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
+      <p class="status">Loading services…</p>
+    {:else if directory.length}
+      <CheckGrid
+        legend="{countryName(shownCountry)} · most prominent first"
+        options={serviceOptions}
+        checked={(id) => {
+          const service = directory.find((s) => s.id === id);
+          return !!service && isPicked(service, shownCountry);
+        }}
+        wide
+        {disabled}
+        onchange={toggleService}
+      />
+    {:else if directoryLoad.status === 'ready'}
+      <p class="status">No services listed for {countryName(shownCountry)}</p>
     {/if}
     <p class="foot">
       Services are licensed per country, so pick them by country. Each becomes a brand tile on Home,

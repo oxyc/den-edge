@@ -38,7 +38,7 @@ export class LibrarySession {
     readonly content: ContentServiceClientPort | null = null,
     private readonly closeWorkerServices: () => void = () => {},
   ) {
-    this.services = new SessionServices(model);
+    this.services = new SessionServices(model, undefined, content);
   }
 
   get alert(): string | null {

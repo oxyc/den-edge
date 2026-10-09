@@ -20,6 +20,8 @@ import type { Pages, RowDef } from './catalog';
 import type { Title } from './library';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 import { forgetReused } from './reuse';
+import { ContentAuthority } from './contentAuthority';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 // The same questions are asked of a different fake in each test; nothing may be answered from the last one.
 beforeEach(forgetReused);
@@ -46,6 +48,32 @@ const title = (id: number, over: Partial<Title> = {}): Title => ({
   title: `Title ${id}`,
   ...over,
 });
+
+const fixtureContent = (fetchImpl?: typeof fetch): ContentServiceClientPort => {
+  if (!fetchImpl)
+    return {
+      query: async (request) => {
+        if (request.kind === 'titles')
+          return { kind: 'titles', titles: [], retryable: request.titles } as never;
+        throw new Error(`unexpected content request ${request.kind}`);
+      },
+      onStatus: () => () => {},
+    };
+  const authority = new ContentAuthority(
+    {
+      tmdb: () => 'k',
+      omdb: () => undefined,
+      contentWarnings: () => undefined,
+      atlas: () => undefined,
+    },
+    { tmdbFetch: fetchImpl, providerFetch: fetchImpl },
+  );
+  return {
+    query: (request, signal) =>
+      authority.query(request, signal ?? new AbortController().signal) as never,
+    onStatus: () => () => {},
+  };
+};
 
 describe('poster service captions', () => {
   it('drops every known marketplace suffix, including after surrounding whitespace', () => {
@@ -136,6 +164,7 @@ describe('atlas rows', () => {
     };
     const listed = await atlasCatalogs('/atlas', answering(manifest));
     const rows = atlasServiceRows('/atlas', listed, service({ id: 8, name: 'Netflix' }), 'FI', {
+      content: fixtureContent(),
       fetchImpl,
     });
     expect(
@@ -187,7 +216,7 @@ describe('atlas rows', () => {
       [{ id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] }],
       service({ id: 8, name: 'Netflix' }),
       'US',
-      { fetchImpl: answering(metas) },
+      { content: fixtureContent(), fetchImpl: answering(metas) },
     );
     const titles = await at(rows, 0).load(1);
     expect(
@@ -228,7 +257,7 @@ describe('atlas rows', () => {
       [{ id: 'jw-nfx', name: 'Popular', type: 'movie', providerIds: [8] }],
       service({ id: 8, name: 'Netflix' }),
       'US',
-      { fetchImpl },
+      { content: fixtureContent(), fetchImpl },
     );
     expect(await at(rows, 0).load(1)).toMatchObject([
       { id: 550, rating: 7.4, ratingSource: 'justwatch-imdb' },
@@ -262,7 +291,7 @@ describe('atlas rows', () => {
       [{ id: 'jw-nfx', name: 'Popular', type: 'movie', providerIds: [8] }],
       service({ id: 8, name: 'Netflix' }),
       'US',
-      { fetchImpl },
+      { content: fixtureContent(), fetchImpl },
     );
     expect(await at(rows, 0).load(1)).toMatchObject([{ id: 550, rating: 7.4 }]);
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -290,7 +319,7 @@ describe('atlas rows', () => {
       [{ id: 'jw-nfx-coming', name: 'Coming to Netflix', type: 'tv', providerIds: [8] }],
       service({ id: 8, name: 'Netflix' }),
       'US',
-      { fetchImpl: answering(metas) },
+      { content: fixtureContent(), fetchImpl: answering(metas) },
     );
     const titles = await at(rows, 0).load(1);
     expect(at(titles, 0).id).toBe(299939);
@@ -409,7 +438,10 @@ describe('atlas rows', () => {
       ],
       netflix,
       'US',
-      { fetchImpl: answering({ metas: [{ moviedb_id: 1, name: 'One', type: 'movie' }] }) },
+      {
+        content: fixtureContent(),
+        fetchImpl: answering({ metas: [{ moviedb_id: 1, name: 'One', type: 'movie' }] }),
+      },
     );
     const rows = await settleServiceRows(own, tmdb);
     expect(rows.slice(0, 6).map((row) => row.id)).toEqual(tmdb.slice(0, 6).map((row) => row.id));
@@ -451,7 +483,10 @@ describe('a service page asked twice', () => {
     ];
     const netflix = service({ id: 8, name: 'Netflix' });
     const build = () =>
-      atlasServiceRows('/atlas', catalogs, netflix, 'US', { fetchImpl: net.fetchImpl });
+      atlasServiceRows('/atlas', catalogs, netflix, 'US', {
+        content: fixtureContent(),
+        fetchImpl: net.fetchImpl,
+      });
     const [hover, mounted] = [at(build(), 0), at(build(), 0)];
     const [listed, loaded] = await Promise.all([hover.listed!(), mounted.load(1)]);
     expect(listed.map((t) => t.id)).toEqual([1]);
@@ -563,10 +598,12 @@ describe('withBackdrops', () => {
       const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
       asked.push(`${id}`);
       if (id === 4) return new Response('{}', { status: 500 });
-      return new Response(JSON.stringify({ backdrop_path: id === 2 ? '/two.jpg' : null }));
+      return new Response(
+        JSON.stringify({ id, name: `Title ${id}`, backdrop_path: id === 2 ? '/two.jpg' : null }),
+      );
     };
     const titles = [title(1, { backdropPath: '/one.jpg' }), title(2), title(3), title(4), title(5)];
-    const hero = await withBackdrops(titles, 'k', { head: 4, fetchImpl });
+    const hero = await withBackdrops(titles, fixtureContent(fetchImpl), { head: 4 });
     expect(asked, 'a title that already has one is not asked about').toEqual(['2', '3', '4']);
     expect(hero.map((t) => [t.id, t.backdropPath])).toEqual([
       [1, '/one.jpg'],
@@ -577,9 +614,12 @@ describe('withBackdrops', () => {
   });
 
   it('keeps the words when nothing has a picture at all', async () => {
-    const fetchImpl: typeof fetch = async () => new Response('{"backdrop_path":null}');
+    const fetchImpl: typeof fetch = async (url) => {
+      const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
+      return new Response(JSON.stringify({ id, name: `Title ${id}`, backdrop_path: null }));
+    };
     const titles = [title(1), title(2)];
-    expect(await withBackdrops(titles, 'k', { fetchImpl })).toEqual(titles);
+    expect(await withBackdrops(titles, fixtureContent(fetchImpl))).toEqual(titles);
   });
 
   it('drops only a relay-confirmed missing title from the hero', async () => {
@@ -588,52 +628,9 @@ describe('withBackdrops', () => {
         ? new Response('{"error":"not_found"}', { status: 404 })
         : new Response('{"error":"tmdb_proxy_off"}', { status: 404 });
     const titles = [title(1), title(2)];
-    expect((await withBackdrops(titles, 'k', { fetchImpl })).map((item) => item.id)).toEqual([1]);
-  });
-
-  it('bounds the hero’s missing-backdrop lookups', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    let active = 0;
-    let most = 0;
-    let asked = 0;
-    const fetchImpl: typeof fetch = async () => {
-      asked++;
-      most = Math.max(most, ++active);
-      await gate;
-      active--;
-      return new Response('{"backdrop_path":"/found.jpg"}');
-    };
-    const loading = withBackdrops(
-      Array.from({ length: 8 }, (_, id) => title(id + 1)),
-      'k',
-      {
-        atOnce: 3,
-        fetchImpl,
-      },
+    expect((await withBackdrops(titles, fixtureContent(fetchImpl))).map((item) => item.id)).toEqual(
+      [1],
     );
-    await vi.waitFor(() => expect(asked).toBe(3));
-    expect(most).toBe(3);
-    release();
-    expect(await loading).toHaveLength(8);
-    expect(asked).toBe(8);
-  });
-
-  it('cancels queued backdrop lookups after den-edge asks it to wait', async () => {
-    const asked: number[] = [];
-    const fetchImpl: typeof fetch = async (url) => {
-      const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
-      asked.push(id);
-      return id === 1
-        ? new Response('{"error":"tmdb_rate_limited"}', {
-            status: 503,
-            headers: { 'retry-after': '30' },
-          })
-        : new Response('{"backdrop_path":"/found.jpg"}');
-    };
-    const titles = Array.from({ length: 8 }, (_, id) => title(id + 1));
-    await withBackdrops(titles, 'k', { atOnce: 3, fetchImpl });
-    expect(asked, 'only work already active when the refusal arrived').toEqual([1, 2, 3]);
   });
 });
 
@@ -642,10 +639,13 @@ describe('fillPosters', () => {
     const asked: string[] = [];
     const fetchImpl: typeof fetch = async (url) => {
       asked.push(String(url).replace(/\?.*/, ''));
-      return new Response(JSON.stringify({ poster_path: '/found.jpg' }), { status: 200 });
+      const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
+      return new Response(JSON.stringify({ id, name: `Title ${id}`, poster_path: '/found.jpg' }), {
+        status: 200,
+      });
     };
     const titles = Array.from({ length: 20 }, (_, i) => title(i + 1));
-    const filled = await fillPosters(titles, 'k', { head: 3, atOnce: 2, fetchImpl });
+    const filled = await fillPosters(titles, fixtureContent(fetchImpl), { head: 3 });
     expect(asked).toEqual([
       'https://api.themoviedb.org/3/tv/1',
       'https://api.themoviedb.org/3/tv/2',
@@ -669,19 +669,19 @@ describe('fillPosters', () => {
     };
     // TMDB's own path is art and is left alone.
     const named = [title(1, { posterPath: '/a.jpg' })];
-    expect(await fillPosters(named, 'k', { fetchImpl })).toEqual(named);
+    expect(await fillPosters(named, fixtureContent(fetchImpl))).toEqual(named);
     expect(calls).toBe(0);
 
     // A configuration refusal is not evidence that the chart entry disappeared.
     const chartArt = [title(2, { posterUrl: 'https://art/b.jpg' })];
     expect(
-      await fillPosters(chartArt, 'k', { fetchImpl }),
+      await fillPosters(chartArt, fixtureContent(fetchImpl)),
       'and keeps it while TMDB cannot be asked',
     ).toEqual(chartArt);
     expect(calls).toBe(1);
 
     const unnamed = [title(3)];
-    expect(await fillPosters(unnamed, 'k', { fetchImpl })).toEqual([]);
+    expect(await fillPosters(unnamed, fixtureContent(fetchImpl))).toEqual([]);
     expect(calls).toBe(2);
   });
 });
@@ -815,7 +815,11 @@ describe('radarRows', () => {
   it('pools every service’s chart of a kind into one row, and asks each chart once', async () => {
     const asked: string[] = [];
     const fetchImpl = serving({ 'jw-nfx-new': [meta(1)], 'jw-mxx-new': [meta(2)] }, asked);
-    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    const rows = radarRows('/atlas', catalogs, picks, {
+      names,
+      content: fixtureContent(),
+      fetchImpl,
+    });
     expect(rows.map((row) => row.title)).toEqual(['New Releases', 'Coming Soon']);
 
     const titles = await at(rows, 0).load(1);
@@ -846,7 +850,11 @@ describe('radarRows', () => {
       return new Response(JSON.stringify({ metas: [meta(7, { imdbRating: '7.4' })] }));
     }) as unknown as typeof fetch;
     const titles = await at(
-      radarRows('/atlas', catalogs, [picks[0]!], { names, fetchImpl }),
+      radarRows('/atlas', catalogs, [picks[0]!], {
+        names,
+        content: fixtureContent(),
+        fetchImpl,
+      }),
       0,
     ).load(1);
     expect(titles).toMatchObject([{ id: 7, rating: 7.4, ratingSource: 'justwatch-imdb' }]);
@@ -862,7 +870,11 @@ describe('radarRows', () => {
   it('names a title both services carry once, and says both', async () => {
     const shared = meta(7);
     const fetchImpl = serving({ 'jw-nfx-new': [shared], 'jw-mxx-new': [shared] });
-    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    const rows = radarRows('/atlas', catalogs, picks, {
+      names,
+      content: fixtureContent(),
+      fetchImpl,
+    });
     const titles = await at(rows, 0).load(1);
     expect(titles.map((t) => t.id)).toEqual([7]);
     expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix · Max');
@@ -876,7 +888,11 @@ describe('radarRows', () => {
     ];
     const fetchImpl = serving({ 'jw-nfx-coming': [shared], 'jw-mxx-coming': [shared] });
     const longNames = { 8: 'Netflix', 1899: 'An Exceptionally Long Service Name' };
-    const rows = radarRows('/atlas', coming, picks, { names: longNames, fetchImpl });
+    const rows = radarRows('/atlas', coming, picks, {
+      names: longNames,
+      content: fixtureContent(),
+      fetchImpl,
+    });
     const titles = await at(rows, 0).load(1);
     expect(at(rows, 0).caption?.(at(titles, 0))).toMatch(/^Netflix · An E… · /);
   });
@@ -892,7 +908,11 @@ describe('radarRows', () => {
         meta(3, { type: 'series', denAt: Math.floor(soon / 1000) }),
       ],
     });
-    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    const rows = radarRows('/atlas', catalogs, picks, {
+      names,
+      content: fixtureContent(),
+      fetchImpl,
+    });
     const titles = await at(rows, 1).load(1);
     expect(
       titles.map((t) => t.id),
@@ -908,7 +928,14 @@ describe('radarRows', () => {
 
   it('leads New Releases with what just landed, and pages on with TMDB alone', async () => {
     const fetchImpl = serving({ 'jw-nfx-new': [meta(1)], 'jw-mxx-new': [meta(2)] });
-    const arrivals = at(radarRows('/atlas', catalogs, picks, { names, fetchImpl }), 0);
+    const arrivals = at(
+      radarRows('/atlas', catalogs, picks, {
+        names,
+        content: fixtureContent(),
+        fetchImpl,
+      }),
+      0,
+    );
     const asked: number[] = [];
     const releases: RowDef = {
       id: 'new-releases',
@@ -939,7 +966,14 @@ describe('radarRows', () => {
 
   it('keeps New Releases whole when atlas cannot answer', async () => {
     const failing: typeof fetch = async () => new Response('nope', { status: 502 });
-    const arrivals = at(radarRows('/atlas', catalogs, picks, { names, fetchImpl: failing }), 0);
+    const arrivals = at(
+      radarRows('/atlas', catalogs, picks, {
+        names,
+        content: fixtureContent(),
+        fetchImpl: failing,
+      }),
+      0,
+    );
     const releases: RowDef = {
       id: 'new-releases',
       title: 'New Releases',
@@ -950,13 +984,17 @@ describe('radarRows', () => {
 
   it('builds no row for a kind atlas has no chart of, and none at all without a pick it covers', () => {
     const onlyPopular = catalogs.filter((c) => !c.id.includes('-new') && !c.id.includes('-coming'));
-    expect(radarRows('/atlas', onlyPopular, picks)).toEqual([]);
-    expect(radarRows('/atlas', catalogs, [{ id: 337, country: 'US' }]).map((r) => r.title)).toEqual(
-      [],
-    );
+    expect(radarRows('/atlas', onlyPopular, picks, { content: fixtureContent() })).toEqual([]);
+    expect(
+      radarRows('/atlas', catalogs, [{ id: 337, country: 'US' }], {
+        content: fixtureContent(),
+      }).map((r) => r.title),
+    ).toEqual([]);
     // A screen showing one media type only pools the charts of that type.
-    expect(radarRows('/atlas', catalogs, picks, { only: 'tv' }).map((r) => r.title)).toEqual([
-      'Coming Soon',
-    ]);
+    expect(
+      radarRows('/atlas', catalogs, picks, { only: 'tv', content: fixtureContent() }).map(
+        (r) => r.title,
+      ),
+    ).toEqual(['Coming Soon']);
   });
 });

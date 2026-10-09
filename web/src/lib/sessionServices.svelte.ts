@@ -12,6 +12,7 @@ import { fetchRoutes, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import { TMDB_PROXY_KEY } from './tmdb';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
 
@@ -45,7 +46,14 @@ export class SessionServices {
   constructor(
     private readonly model: LibraryModel | null,
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
+    private readonly content: ContentServiceClientPort | null = null,
   ) {}
+
+  #configureAtlas(base: string | null): void {
+    void this.content
+      ?.query({ kind: 'sources.configure', atlas: base })
+      .catch((error: unknown) => console.warn('den: content source configuration failed', error));
+  }
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
@@ -103,6 +111,7 @@ export class SessionServices {
           );
           this.scout = saved.scout ? { ...saved.scout } : null;
           this.atlas = saved.atlas;
+          this.#configureAtlas(saved.atlas);
           this.reel = saved.reel;
           this.remux = saved.remux;
           if (this.#foregroundReady) availability.connect(this.scout, tmdbKey);
@@ -145,6 +154,7 @@ export class SessionServices {
           : {}),
         atlas: (found) => {
           this.atlas = found?.base ?? null;
+          this.#configureAtlas(this.atlas);
           this.atlasReady = true;
           this.#settled();
         },

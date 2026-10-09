@@ -24,11 +24,13 @@
   import { fetchTitle } from './lib/tmdb';
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
+  import type { ContentServiceClientPort } from './lib/libraryServiceFactory';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
     link,
     model,
+    content,
     local = false,
     onjoin,
     onresetkey,
@@ -37,6 +39,7 @@
   }: {
     link: Link | null;
     model: LibraryModel;
+    content: ContentServiceClientPort;
     local?: boolean;
     onjoin?: (libraryKey: string) => Promise<boolean>;
     onresetkey?: () => Promise<KeyResetOutcome | null>;
@@ -280,7 +283,7 @@
       />
       <ContentSection
         {prefs}
-        {tmdbKey}
+        {content}
         pinConfigured={connections?.parentalPinConfigured ?? false}
         {disabled}
         save={savePrefs}

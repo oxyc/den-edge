@@ -33,6 +33,12 @@ import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
 import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
+import {
+  countriesFrom,
+  mergeServices,
+  serviceProviderEntries,
+  servicesFrom,
+} from '../settings/services';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -92,11 +98,14 @@ export interface ContentCredentialSource {
   omdb(): string | undefined;
   contentWarnings(): string | undefined;
   atlas?(): string | undefined;
+  /** Session discovery configures the one Worker-owned Atlas source; queries never carry provider URLs. */
+  configureAtlas?(base: string | null): void;
 }
 
 /** Mutable only inside the Worker: an anonymous session starts keyless, then a library authority may bind keys. */
 export class WorkerContentCredentials implements ContentCredentialSource {
   #source?: ContentCredentialSource;
+  #atlas: string | null = '/atlas';
 
   bind(source: ContentCredentialSource): () => void {
     this.#source = source;
@@ -118,7 +127,11 @@ export class WorkerContentCredentials implements ContentCredentialSource {
   }
 
   atlas(): string | undefined {
-    return this.#source?.atlas?.() ?? '/atlas';
+    return this.#atlas ?? undefined;
+  }
+
+  configureAtlas(base: string | null): void {
+    this.#atlas = base?.replace(/\/$/, '') ?? null;
   }
 
   ready(): Promise<void> {
@@ -216,6 +229,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   }
 
   async query(request: ContentRequest, signal: AbortSignal): Promise<ServiceContentResult> {
+    // Source discovery is ordering-sensitive: configure synchronously before any later query can observe the old
+    // source, even while paired credentials are still opening.
+    if (request.kind === 'sources.configure') {
+      this.credentials.configureAtlas?.(request.atlas);
+      return { kind: 'sources.configure' };
+    }
     await this.#wait(this.credentials.ready?.() ?? Promise.resolve(), signal);
     switch (request.kind) {
       case 'titles': {
@@ -310,6 +329,50 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             body.kind === 'found'
               ? { state: 'ready', value: parseFilmography(body.value) }
               : optional(body, 'tmdb'),
+        };
+      }
+      case 'service.regions': {
+        const body = await this.#wait(
+          this.#tmdb('/watch/providers/regions', this.#tmdbKey()),
+          signal,
+        );
+        if (body.kind !== 'found') throw this.#fault(body, 'service regions unavailable');
+        return { kind: 'service.regions', regions: countriesFrom(body.value) };
+      }
+      case 'service.directory': {
+        const region = request.region.toUpperCase();
+        const answers = await Promise.all(
+          (['movie', 'tv'] as const).map((media) =>
+            this.#wait(
+              this.#tmdb(`/watch/providers/${media}`, this.#tmdbKey(), {
+                watch_region: region,
+              }),
+              signal,
+            ),
+          ),
+        );
+        const available = answers.flatMap((answer, index) =>
+          answer.kind === 'found'
+            ? [
+                {
+                  services: servicesFrom(
+                    serviceProviderEntries(answer.value),
+                    index === 0 ? 'movie' : 'tv',
+                    region,
+                  ),
+                },
+              ]
+            : [],
+        );
+        const failed = answers.find(
+          (answer): answer is Exclude<typeof answer, { kind: 'found' }> => answer.kind !== 'found',
+        );
+        if (!available.length)
+          throw this.#fault(failed!, 'streaming service directory unavailable');
+        return {
+          kind: 'service.directory',
+          services: mergeServices(...available.map(({ services }) => services)),
+          complete: available.length === answers.length,
         };
       }
       default:
@@ -434,6 +497,29 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   #tmdbKey(): string {
     return this.credentials.tmdb()?.trim() || TMDB_PROXY_KEY;
+  }
+
+  #fault(result: Exclude<ProviderResult<unknown>, { kind: 'found' }>, message: string) {
+    const rateLimited = result.kind === 'unavailable' && result.reason === 'rate-limited';
+    const unauthorized = result.kind === 'unavailable' && result.reason === 'unauthorized';
+    return new ContentServiceFault({
+      code:
+        result.kind === 'missing'
+          ? 'not-found'
+          : result.kind === 'not-configured'
+            ? 'not-configured'
+            : rateLimited
+              ? 'rate-limited'
+              : unauthorized
+                ? 'refused'
+                : 'unavailable',
+      message,
+      retryable: result.kind === 'unavailable' && !unauthorized,
+      provider: 'tmdb',
+      ...(result.kind === 'unavailable' && result.retryAfterMs !== undefined
+        ? { retryAfterMs: result.retryAfterMs }
+        : {}),
+    });
   }
 
   async #catalog(

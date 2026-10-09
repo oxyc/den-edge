@@ -46,7 +46,7 @@
     resolvePicks,
     type AtlasCatalog,
   } from './lib/services';
-  import { fetchServices, type Service } from './settings/services';
+  import { contentServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setToastContext } from './lib/toast';
@@ -834,8 +834,8 @@
    */
   function primeService(service: Service, country: string) {
     void ServiceScreen.load();
-    if (!tmdbKey || !atlasReady) return;
-    primeServicePage(service, country, tmdbKey, atlas, {
+    if (!session.content || !atlasReady) return;
+    primeServicePage(session.content, service, country, atlas, {
       minYear: prefs.minReleaseYear,
       excludedLanguages: prefs.excludedLanguages,
       shown: browseShown,
@@ -906,14 +906,16 @@
     };
   });
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
-  const radar = (only?: 'movie' | 'tv') =>
-    atlas
+  const radar = (only?: 'movie' | 'tv') => {
+    const content = session.content;
+    return atlas && content
       ? radarRows(atlas, serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
-          tmdbKey: tmdbKey ?? undefined,
+          content,
         })
       : [];
+  };
   const rows = $derived.by(() => {
     if (!pages) {
       // No TMDB key, so no TMDB rows — a guest, until the server-side key lands. atlas needs no key at all:
@@ -988,12 +990,12 @@
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
-    if (!tmdbKey || !serviceDirectoriesAdmitted) return;
+    if (!session.content || !serviceDirectoriesAdmitted) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
       naming++;
-      void fetchServices(country, tmdbKey)
+      void contentServices(session.content, country)
         .then(
           (listed) => {
             directories = { ...directories, [country]: listed };
@@ -1405,7 +1407,7 @@
   <ServiceScreen.current
     id={route.id}
     country={route.country}
-    {tmdbKey}
+    content={session.content!}
     {atlas}
     {atlasReady}
     minYear={prefs.minReleaseYear}
@@ -1456,11 +1458,11 @@
     <ScreenLoading screen={WatchlistScreen} />
   {:else}
     {@const slides = savedTitles.slice(0, 20)}
-    {#if tmdbKey && slides.length}
+    {#if slides.length}
       <Billboard
         active={active && !playing}
         titles={slides}
-        {tmdbKey}
+        content={session.content!}
         {reel}
         {routes}
         onplay={playHere && ((title) => playHere(title))}
@@ -1489,13 +1491,13 @@
   {@const resume = continueShelfEntries.filter((e) => !facet || e.title.type === facet)}
   {@const saved = savedTitles.filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
-  {#if tmdbKey}
+  {#if session.content}
     <Billboard
       active={active && !playing}
       titles={featured.filter(featuredShown)}
       bind:showing={slideShown}
       onadvance={acceptStagedFeatured}
-      {tmdbKey}
+      content={session.content!}
       {reel}
       {routes}
       onready={() => (heroReady = true)}

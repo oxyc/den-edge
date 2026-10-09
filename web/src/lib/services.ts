@@ -6,23 +6,23 @@
 // both surfaces carry its credit.
 
 import {
+  catalogPage,
   categories,
+  contentPages,
   discoverParams,
   interleave,
   matchesPrimaryGenre,
-  runBounded,
-  tmdbPages,
   type DiscoverQuery,
   type Pages,
   type RowDef,
 } from './catalog';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
 import { reuse } from './reuse';
-import { tmdbFetch, tmdbMissing } from './tmdbCache';
 import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
-import { fetchServices, matches, type Service } from '../settings/services';
+import { contentServices, matches, type Service } from '../settings/services';
 
 /**
  * What a visitor with no library sees: the six US services, in TMDB's own US order.
@@ -162,20 +162,14 @@ function titlesOfMetas(body: unknown): Title[] {
  * is the same bargain the rows themselves make.
  */
 const FILL_HEAD = 12;
-/** At once. den-edge answers /tmdb at 120 a minute per address, and a page has its own asking to do. */
-const FILL_AT_ONCE = 4;
-
 /**
- * The art atlas could not name, asked of TMDB by the id atlas gave — never by the IMDb id, which for a split anthology
- * names something else.
- *
- * Every browser asks through den-edge (`tmdbCache`), so a title is fetched from TMDB once and answered from its cache
- * for every device and visitor after that.
+ * The art atlas could not name, normalized by the content Worker from the TMDB id atlas gave — never by IMDb id,
+ * which for a split anthology can name a different title.
  */
 export async function fillPosters(
   titles: Title[],
-  key: string,
-  { head = FILL_HEAD, atOnce = FILL_AT_ONCE, fetchImpl = tmdbFetch } = {},
+  content: ContentServiceClientPort,
+  { head = FILL_HEAD } = {},
 ): Promise<Title[]> {
   // Only TMDB's own path counts as art already named. A chart's `poster` is metahub's, and metahub answers
   // from images.metahub.space with a redirect to live.metahub.space — a host the page's own CSP does not
@@ -183,31 +177,19 @@ export async function fillPosters(
   // Libang Libu blank on Netflix's row while TMDB held a perfectly good poster for it.
   const wanted = titles.filter((title) => !title.posterPath).slice(0, head);
   if (!wanted.length) return titles;
-  const found = new Map<string, string>();
-  const missing = new Set<string>();
-  const key_ = (title: Title) => `${title.type}:${title.id}`;
-  for (let at = 0; at < wanted.length; at += atOnce) {
-    await Promise.all(
-      wanted.slice(at, at + atOnce).map(async (title) => {
-        try {
-          const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
-          const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-          if (!res.ok) {
-            if (await tmdbMissing(res)) missing.add(key_(title));
-            return;
-          }
-          const body = (await res.json()) as { poster_path?: unknown };
-          if (typeof body.poster_path === 'string') found.set(key_(title), body.poster_path);
-        } catch {
-          // No art for this one: it keeps its placeholder, and the row is not held up for it.
-        }
-      }),
-    );
-  }
+  const key_ = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
+  const answer = await content.query({
+    kind: 'titles',
+    titles: wanted.map(({ type, id }) => ({ type, id })),
+  });
+  const found = new Map(answer.titles.map((title) => [key_(title), title]));
+  const retryable = new Set(answer.retryable.map(key_));
+  const asked = new Set(wanted.map(key_));
   return titles.flatMap((title) => {
     const id = key_(title);
-    if (missing.has(id)) return [];
-    return [found.has(id) ? { ...title, posterPath: found.get(id) } : title];
+    if (!asked.has(id) || retryable.has(id)) return [title];
+    const normalized = found.get(id);
+    return normalized ? [{ ...title, ...normalized }] : [];
   });
 }
 
@@ -224,14 +206,14 @@ export function atlasServiceRows(
   country: string,
   {
     only,
-    tmdbKey,
+    content,
     fetchImpl = relayFetch,
   }: {
     only?: MediaType;
-    /** With one, the head of a chart gets the art atlas could not name (`fillPosters`). */
-    tmdbKey?: string;
+    /** Worker-owned normalization for chart art atlas could not name. */
+    content: ContentServiceClientPort;
     fetchImpl?: typeof fetch;
-  } = {},
+  },
 ): AtlasServiceRow[] {
   const ids = new Set([service.id, ...service.variants]);
   // What has just arrived leads, as it does in the TMDB rows: then what is popular, then what is about to go or
@@ -260,9 +242,9 @@ export function atlasServiceRows(
           return withSharedTitleMetadata(received, fetchImpl);
         });
       const filled = () =>
-        reuse(`art:${tmdbKey ? 'tmdb' : 'none'}:${chart}`, async () => {
+        reuse(`art:content:${chart}`, async () => {
           const titles = await listed();
-          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
+          return fillPosters(titles, content);
         });
       return {
         id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
@@ -307,15 +289,15 @@ export function radarRows(
   {
     only,
     names = {},
-    tmdbKey,
+    content,
     fetchImpl = relayFetch,
   }: {
     only?: MediaType;
     /** Provider id → the service's name, for the card's caption. A visitor has no directory, and so no names. */
     names?: Record<number, string>;
-    tmdbKey?: string;
+    content: ContentServiceClientPort;
     fetchImpl?: typeof fetch;
-  } = {},
+  },
 ): RowDef[] {
   return POOLS.flatMap((pool) => {
     const asked = new Map<string, { catalog: AtlasCatalog; country: string }>();
@@ -351,7 +333,7 @@ export function radarRows(
           const merged = mergePool(charts, pool.soonest);
           rememberAtlasMetadata(unkept, fetchImpl);
           const titles = await withSharedTitleMetadata(merged, fetchImpl);
-          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
+          return fillPosters(titles, content);
         },
       },
     ];
@@ -611,47 +593,33 @@ export async function serviceHero(
  */
 export async function withBackdrops(
   titles: Title[],
-  key: string,
-  {
-    head = HERO_SLIDES,
-    atOnce = FILL_AT_ONCE,
-    fetchImpl = tmdbFetch,
-  }: { head?: number; atOnce?: number; fetchImpl?: typeof fetch } = {},
+  content: ContentServiceClientPort,
+  { head = HERO_SLIDES }: { head?: number } = {},
 ): Promise<Title[]> {
   const candidates = titles.slice(0, head);
   const looked: (Title | null)[] = [...candidates];
   const missing = candidates.flatMap((title, at) => (title.backdropPath ? [] : [{ title, at }]));
   const absent = new Set<number>();
-  let stopped = false;
-  await runBounded(
-    missing,
-    atOnce,
-    async ({ title, at }) => {
-      try {
-        const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
-        const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-        // den-edge turns TMDB's 429 into a 503 with the same Retry-After. Once one job sees either form, do not
-        // dequeue more speculative art lookups during the provider's requested rest.
-        if (res.status === 429 || (res.status === 503 && res.headers.has('retry-after')))
-          stopped = true;
-        if (!res.ok) {
-          if (await tmdbMissing(res)) {
-            absent.add(at);
-            looked[at] = null;
-          }
-          return;
-        }
-        const body = (await res.json()) as { backdrop_path?: unknown };
-        looked[at] =
-          typeof body.backdrop_path === 'string'
-            ? { ...title, backdropPath: body.backdrop_path }
-            : null;
-      } catch {
-        // It may still draw its own lookup when it is visible.
+  if (missing.length) {
+    const answer = await content.query({
+      kind: 'titles',
+      titles: missing.map(({ title: { type, id } }) => ({ type, id })),
+    });
+    const key = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
+    const found = new Map(answer.titles.map((title) => [key(title), title]));
+    const retryable = new Set(answer.retryable.map(key));
+    for (const { title, at } of missing) {
+      const id = key(title);
+      if (retryable.has(id)) continue;
+      const normalized = found.get(id);
+      if (!normalized) {
+        absent.add(at);
+        looked[at] = null;
+      } else {
+        looked[at] = normalized.backdropPath ? { ...title, ...normalized } : null;
       }
-    },
-    () => stopped,
-  );
+    }
+  }
   const pictured = looked.filter((title): title is Title => title !== null);
   // Nothing with a picture at all: the words are still a better hero than an empty one.
   return pictured.length ? pictured : candidates.filter((_, at) => !absent.has(at));
@@ -671,20 +639,20 @@ export interface ServicePageOptions {
  * page mounting after a hover primed it — joins what is already on its way.
  */
 export function servicePage(
+  content: ContentServiceClientPort,
   service: Service,
   country: string,
-  tmdbKey: string,
   atlas: string | null,
   { minYear, only, excludedLanguages, shown = () => true }: ServicePageOptions = {},
 ): { rows: Promise<RowDef[]>; hero: Promise<Title[]> } {
-  const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), {
+  const tmdb = serviceRows(service, country, contentPages(content), {
     minYear,
     only,
     excludedLanguages,
   });
   const own = atlas
     ? atlasCatalogs(atlas).then((catalogs) =>
-        atlasServiceRows(atlas, catalogs, service, country, { only, tmdbKey }),
+        atlasServiceRows(atlas, catalogs, service, country, { only, content }),
       )
     : Promise.resolve([]);
   return {
@@ -698,7 +666,7 @@ export function servicePage(
     hero: own
       .catch((): AtlasServiceRow[] => [])
       .then((rows) => serviceHero(rows, tmdb))
-      .then((titles) => withBackdrops(titles.filter(shown), tmdbKey)),
+      .then((titles) => withBackdrops(titles.filter(shown), content)),
   };
 }
 
@@ -711,16 +679,16 @@ const PRIMED_ROWS = 3;
  * page's first screen, on a gesture towards it, and a second gesture within a few minutes asks nothing more.
  */
 export function primeServicePage(
+  content: ContentServiceClientPort,
   service: Service,
   country: string,
-  tmdbKey: string,
   atlas: string | null,
   options: ServicePageOptions = {},
 ): void {
   const key = `prime:${service.id}:${country}:${atlas ?? ''}:${options.minYear ?? ''}`;
   void reuse(key, async () => {
-    void fetchServices(country, tmdbKey).catch(() => undefined);
-    const page = servicePage(service, country, tmdbKey, atlas, options);
+    void contentServices(content, country).catch(() => undefined);
+    const page = servicePage(content, service, country, atlas, options);
     await Promise.all([
       page.hero,
       page.rows.then((rows) => Promise.all(rows.slice(0, PRIMED_ROWS).map((row) => row.load(1)))),
@@ -778,7 +746,13 @@ function rowsFor(
       // one would let a reused surface keep the other's posters.
       id: `service-tmdb-${service.id}-${country}-${id}-${type}`,
       title: `${title} ${NOUN[type]}`,
-      load: (page: number) => pages(`/discover/${type}`, type, discoverParams(query), page),
+      load: (page: number) =>
+        catalogPage(
+          pages,
+          { kind: 'discover', query },
+          [`/discover/${type}`, type, discoverParams(query)],
+          page,
+        ),
     };
   });
 }
@@ -851,13 +825,16 @@ export function serviceRows(
       c.query.primaryGenre === undefined
         ? undefined
         : (title: Title) => matchesPrimaryGenre(title, c.query.primaryGenre!),
-    load: (page: number) =>
-      pages(
-        `/discover/${c.query.mediaType}`,
-        c.query.mediaType,
-        discoverParams(scoped(c.query)),
+    load: (page: number) => {
+      const query = scoped(c.query);
+      const { primaryGenre: _primaryGenre, ...contentQuery } = query;
+      return catalogPage(
+        pages,
+        { kind: 'discover', query: contentQuery },
+        [`/discover/${c.query.mediaType}`, c.query.mediaType, discoverParams(query)],
         page,
-      ),
+      );
+    },
   }));
   return [...lead, ...feed];
 }

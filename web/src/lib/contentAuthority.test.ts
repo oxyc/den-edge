@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ContentAuthority, type ContentCredentialSource } from './contentAuthority';
+import {
+  ContentAuthority,
+  WorkerContentCredentials,
+  type ContentCredentialSource,
+} from './contentAuthority';
 
 const credentials = (
   values: {
@@ -20,6 +24,49 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   });
 
 describe('ContentAuthority', () => {
+  it('keeps a useful service-directory half when the other provider request is unavailable', async () => {
+    const tmdbFetch = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/watch/providers/tv')) return json({}, { status: 503 });
+      return json({
+        results: [{ provider_id: 8, provider_name: 'Netflix', display_priority: 1 }],
+      });
+    });
+    const authority = new ContentAuthority(credentials(), { tmdbFetch });
+
+    await expect(
+      authority.query({ kind: 'service.directory', region: 'FI' }, new AbortController().signal),
+    ).resolves.toMatchObject({
+      kind: 'service.directory',
+      complete: false,
+      services: [{ id: 8, movies: true, series: false }],
+    });
+  });
+
+  it('configures one discovered Atlas source for later Worker-owned queries', async () => {
+    const credentials = new WorkerContentCredentials();
+    const asked: string[] = [];
+    const authority = new ContentAuthority(credentials, {
+      tmdbFetch: async () => json({ imdb_id: null }),
+      providerFetch: async (input) => {
+        asked.push(String(input));
+        return json({ error: 'not_found' }, { status: 404 });
+      },
+    });
+    const signal = new AbortController().signal;
+
+    await authority.query({ kind: 'sources.configure', atlas: 'http://atlas.test/base' }, signal);
+    await authority.query(
+      { kind: 'title.extras', title: { type: 'movie', id: 42 }, warningCategories: [] },
+      signal,
+    );
+
+    expect(asked).toEqual([
+      'http://atlas.test/base/index/title/movie/42.json',
+      'http://atlas.test/base/index/studios/movie/42.json',
+    ]);
+  });
+
   it('coalesces an exact detail request and returns normalized detail without exposing its key', async () => {
     let answer!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => (answer = resolve));

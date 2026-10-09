@@ -11,7 +11,8 @@
   import { servicePage } from '../lib/services';
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
-  import { fetchServices, matches, type Service } from '../settings/services';
+  import { contentServices, matches, type Service } from '../settings/services';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
@@ -21,7 +22,7 @@
   let {
     id,
     country,
-    tmdbKey,
+    content,
     atlas = null,
     atlasReady = true,
     minYear,
@@ -35,7 +36,8 @@
     id: number;
     /** ISO-3166 alpha-2: which country's catalogue this page is. */
     country: string;
-    tmdbKey: string;
+    /** Worker-owned provider metadata boundary. */
+    content: ContentServiceClientPort;
     /** Where atlas answers, when this page can reach it: its charts are what TMDB cannot say. */
     atlas?: string | null;
     /** False while addon discovery is unresolved; null Atlas is final only once this becomes true. */
@@ -61,7 +63,7 @@
     let current = true;
     directory = null;
     unreachable = false;
-    void fetchServices(wanted, tmdbKey).then(
+    void contentServices(content, wanted).then(
       (services) => {
         if (current) directory = services;
       },
@@ -118,7 +120,7 @@
     }
     if (!selected || !addonsSettled) return;
     // A tile's hover may already have asked all of this (`primeServicePage`); asking again joins it.
-    const page = servicePage(selected, country, tmdbKey, here, {
+    const page = servicePage(content, selected, country, here, {
       minYear: year,
       only: mediaType,
       excludedLanguages: languages,
@@ -161,7 +163,7 @@
   <div class="hero branded">
     <!-- Billboard reserves its final responsive height even with no titles. Keeping it mounted makes directory,
          atlas, poster and trailer latency unable to move the service rows below it. -->
-    <Billboard titles={featured} {tmdbKey} {reel} {routes} {active} />
+    <Billboard titles={featured} {content} {reel} {routes} {active} />
     {#if heroLoading}
       <div class="hero-loading"><Loading label="Loading featured titles" /></div>
     {/if}

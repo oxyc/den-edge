@@ -60,6 +60,22 @@ it('validates bounded semantic requests and unversioned content replies', () => 
       },
     }).ok,
   ).toBe(false);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'sources',
+      request: { kind: 'sources.configure', atlas: 'http://atlas.test/base' },
+    }).ok,
+  ).toBe(true);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'unsafe-source',
+      request: { kind: 'sources.configure', atlas: 'javascript:alert(1)' },
+    }).ok,
+  ).toBe(false);
   const reply = {
     type: 'content-result',
     protocol: CONTENT_SERVICE_PROTOCOL,

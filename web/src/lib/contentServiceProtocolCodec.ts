@@ -72,6 +72,23 @@ function region(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Z]{2}$/.test(value);
 }
 
+function serviceBase(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4_096) return false;
+  if (value.startsWith('/') && !value.startsWith('//')) return !value.includes('#');
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      !url.username &&
+      !url.password &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 function providerKey(value: unknown): value is ContentProviderKey {
   return value === 'tmdb' || value === 'omdb' || value === 'content-warnings';
 }
@@ -190,6 +207,8 @@ function importLookup(value: unknown): value is ContentImportLookup {
 function request(value: unknown): value is ContentRequest {
   if (!record(value) || !text(value.kind, 64)) return false;
   switch (value.kind) {
+    case 'sources.configure':
+      return exact(value, ['kind', 'atlas']) && serviceBase(value.atlas);
     case 'titles':
       return (
         exact(value, ['kind', 'titles']) &&
@@ -284,6 +303,8 @@ function result(value: unknown): value is ContentResult {
     );
   };
   switch (value.kind) {
+    case 'sources.configure':
+      return exact(value, ['kind']);
     case 'titles':
       return (
         exact(value, ['kind', 'titles', 'retryable']) &&

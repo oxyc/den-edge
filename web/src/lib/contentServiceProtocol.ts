@@ -64,6 +64,7 @@ export type ContentImportLookup =
   | { id: string; kind: 'series-shape'; title: ContentTitleRef & { type: 'tv' } };
 
 export type ContentRequest =
+  | { kind: 'sources.configure'; atlas: string | null }
   | { kind: 'titles'; titles: ContentTitleRef[] }
   | { kind: 'title.detail'; title: ContentTitleRef; region: string }
   | { kind: 'title.extras'; title: ContentTitleRef; warningCategories: string[] }
@@ -136,6 +137,7 @@ export interface ContentImportLookupResult {
 }
 
 export type ContentResult =
+  | { kind: 'sources.configure' }
   | { kind: 'titles'; titles: Title[]; retryable: ContentTitleRef[] }
   | { kind: 'title.detail'; detail: OptionalContent<TitleDetail> }
   | { kind: 'title.extras'; extras: ContentTitleExtras }

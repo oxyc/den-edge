@@ -396,6 +396,7 @@
             <SettingsScreen.current
               {link}
               model={session.model!}
+              content={session.content!}
               local={session.local}
               onjoin={joinLibrary}
               onresetkey={resetLibraryKey}

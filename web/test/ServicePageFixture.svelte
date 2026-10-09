@@ -4,9 +4,14 @@
   import ServicePage from '../src/components/ServicePage.svelte';
   import ServicesRow from '../src/components/ServicesRow.svelte';
   import { primeServicePage } from '../src/lib/services';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { onDestroy } from 'svelte';
   import '../src/app.css';
 
   const page = new URLSearchParams(location.search).has('page');
+  const services = createWorkerServiceSession();
+  const content = services.content;
+  onDestroy(() => services.close());
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());
   (window as unknown as { reread: () => Promise<void> }).reread = async () => {
@@ -29,7 +34,7 @@
     <ServicePage
       id={8}
       country="US"
-      tmdbKey="fixture-key"
+      {content}
       atlas="/atlas"
       excludedLanguages={languages}
       shown={() => true}
@@ -37,7 +42,7 @@
   {:else}
     <ServicesRow
       services={[{ pick: { id: 8, country: 'US' }, service: netflix }]}
-      onintent={(service, country) => primeServicePage(service, country, 'fixture-key', '/atlas')}
+      onintent={(service, country) => primeServicePage(content, service, country, '/atlas')}
     />
   {/if}
 </main>
