@@ -211,7 +211,9 @@ test('a trailer left playing comes back on its last frame and carries on from th
           playing,
           at: video.currentTime,
         });
-        if (playing) return;
+        // The retained component can restore its visual `playing` class one frame before the browser restores
+        // the media clock. Keep observing until both agree so this tests resumed playback, not Svelte's paint.
+        if (playing && video.currentTime > 0.4) return;
       }
       requestAnimationFrame(loop);
     };
@@ -220,6 +222,7 @@ test('a trailer left playing comes back on its last frame and carries on from th
   await page.goBack();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
   await expect(trailer).toHaveClass(/\bplaying\b/, { timeout: 15000 });
+  await expect.poll(() => page.evaluate(() => window.shown.at(-1)?.at ?? 0)).toBeGreaterThan(0.4);
   const shown = await page.evaluate(() => window.shown);
   expect(shown.length).toBeGreaterThan(0);
   expect(

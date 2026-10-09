@@ -1046,6 +1046,8 @@
   });
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
+  /** Discovery may settle before this encrypted first-paint answer; a generic fallback must wait for both. */
+  let retainedBillboardReady = $state(model === null);
   /**
    * Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`), and whether
    * the billboard is only new titles (`freshOn`).
@@ -1093,25 +1095,34 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const type = facet;
-    if (!model) return;
+    if (!model) {
+      retainedBillboardReady = true;
+      return;
+    }
+    retainedBillboardReady = false;
     const scope: RetainedBillboardScope = memberPost
       ? { kind: 'personal', facet: type, fresh }
       : { kind: 'shared', facet: type, fresh };
     let current = true;
-    void model.retainedBillboard(scope).then(
-      (saved) => {
-        if (!current || !saved || featured.length) return;
-        if (saved.kind === 'personal') {
-          const titles = displayableKept({
-            at: saved.at,
-            titles: structuredClone(saved.titles) as RecommendedTitle[],
-          })?.titles;
-          if (titles) featured = titles;
-        } else if (saved.titles.length)
-          featured = structuredClone(saved.titles) as RecommendedTitle[];
-      },
-      () => {},
-    );
+    void model.ready
+      .then(() => (current ? model.retainedBillboard(scope) : null))
+      .then(
+        (saved) => {
+          if (!current || !saved || featured.length) return;
+          if (saved.kind === 'personal') {
+            const titles = displayableKept({
+              at: saved.at,
+              titles: structuredClone(saved.titles) as RecommendedTitle[],
+            })?.titles;
+            if (titles) featured = titles;
+          } else if (saved.titles.length)
+            featured = structuredClone(saved.titles) as RecommendedTitle[];
+        },
+        () => {},
+      )
+      .finally(() => {
+        if (current) retainedBillboardReady = true;
+      });
     return () => {
       current = false;
     };
@@ -1144,6 +1155,10 @@
     // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
     // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
+      // Discovery may still be in flight, and Home deliberately lets its generic row paint in that interval. A
+      // paired library's retained answer outranks that fallback, though: wait until its lookup has either painted
+      // or definitively found nothing before admitting trending to the billboard.
+      if (model && !retainedBillboardReady) return;
       untrack(() => buildTrending(++billboardRun));
       return;
     }
