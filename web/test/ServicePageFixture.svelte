@@ -4,6 +4,7 @@
   import ServicePage from '../src/components/ServicePage.svelte';
   import ServicesRow from '../src/components/ServicesRow.svelte';
   import { primeServicePage } from '../src/lib/services';
+  import { setContentServiceContext } from '../src/lib/contentContext';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { onDestroy } from 'svelte';
   import '../src/app.css';
@@ -11,6 +12,7 @@
   const page = new URLSearchParams(location.search).has('page');
   const services = createWorkerServiceSession();
   const content = services.content;
+  setContentServiceContext(content);
   onDestroy(() => services.close());
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());

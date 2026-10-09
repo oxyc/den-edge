@@ -58,7 +58,9 @@ export function createWorkerServiceConnection(
 ): WorkerServiceConnection {
   const transport = new WorkerLibraryServiceTransport(createWorker());
   const content = new ContentServiceClient(transport.contentTransport());
-  const library = new LibraryServiceClient(transport, undefined, startupTimeoutMs);
+  const library = new LibraryServiceClient(transport, undefined, startupTimeoutMs, (membership) =>
+    membership ? useLibraryRelayMembership(membership) : undefined,
+  );
   let closed = false;
   return {
     content,

@@ -10,6 +10,7 @@ import {
   type ContentServiceClientMessage,
   type ContentServiceServerMessage,
 } from './contentServiceProtocol';
+import { hasLibraryCredential } from './relayFetch';
 
 type WorkerClientMessage = LibraryServiceClientMessage | ContentServiceClientMessage;
 type WorkerServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
@@ -174,17 +175,24 @@ it('opens a paired library on the public content Worker instead of creating a se
   const request = worker.posted.find(
     (message): message is LibraryServiceClientMessage => message.type === 'hello',
   )!;
+  const relayMembership = {
+    libraryId: '50724b489a92805f23be6bba897393c7',
+    memberToken: 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50',
+  };
   worker.emit([
     {
       type: 'ready',
       protocol: LIBRARY_SERVICE_PROTOCOL,
       requestId: request.requestId,
+      relayMembership,
       version,
     },
   ]);
 
   await expect(opening).resolves.toEqual(version);
+  expect(hasLibraryCredential()).toBe(true);
   expect(createWorker).toHaveBeenCalledOnce();
   services.close();
+  expect(hasLibraryCredential()).toBe(false);
   expect(worker.terminate).toHaveBeenCalledOnce();
 });
