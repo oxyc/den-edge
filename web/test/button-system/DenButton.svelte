@@ -1,0 +1,242 @@
+<script lang="ts" module>
+  import type { DenIconName } from './DenIcon.svelte';
+
+  export type DenButtonVariant =
+    'primary' | 'secondary' | 'tertiary' | 'device' | 'destructive' | 'menu' | 'player';
+  export type DenButtonSize = 'large' | 'regular' | 'compact' | 'icon';
+
+  export interface DenButtonProps {
+    label?: string;
+    ariaLabel?: string;
+    icon?: DenIconName;
+    variant?: DenButtonVariant;
+    size?: DenButtonSize;
+    pressed?: boolean;
+    busy?: boolean;
+    disabled?: boolean;
+    trailing?: DenIconName;
+    role?: 'menuitem';
+    onclick?: (event: MouseEvent) => void;
+  }
+</script>
+
+<script lang="ts">
+  import DenIcon from './DenIcon.svelte';
+
+  let {
+    label,
+    ariaLabel,
+    icon,
+    variant = 'secondary',
+    size = 'regular',
+    pressed,
+    busy = false,
+    disabled = false,
+    trailing,
+    role,
+    onclick,
+  }: DenButtonProps = $props();
+</script>
+
+<button
+  type="button"
+  class="den-button {variant} {size}"
+  class:pressed
+  {role}
+  aria-label={ariaLabel ?? label}
+  aria-pressed={pressed}
+  aria-busy={busy || undefined}
+  aria-disabled={busy || undefined}
+  {disabled}
+  onclick={(event) => !busy && !disabled && onclick?.(event)}
+>
+  {#if busy}<span class="spinner" aria-hidden="true"></span>{:else if icon}<DenIcon
+      name={icon}
+    />{/if}
+  {#if label}<span>{label}</span>{/if}
+  {#if trailing}<span class="trailing"><DenIcon name={trailing} /></span>{/if}
+</button>
+
+<style>
+  .den-button {
+    --button-bg: transparent;
+    --button-border: var(--line);
+    --button-fg: var(--fg);
+
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 16px;
+    border: 1px solid var(--button-border);
+    border-radius: 12px;
+    background: var(--button-bg);
+    color: var(--button-fg);
+    font: inherit;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease,
+      transform 80ms ease;
+  }
+
+  .large {
+    min-height: 48px;
+    padding-inline: 22px;
+    font-size: 16px;
+  }
+
+  .compact {
+    min-height: 36px;
+    padding-inline: 12px;
+    border-radius: 9px;
+    font-size: 14px;
+  }
+
+  .icon {
+    width: 44px;
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .primary {
+    --button-bg: var(--fg);
+    --button-border: var(--fg);
+    --button-fg: var(--bg);
+  }
+
+  .secondary {
+    --button-bg: rgb(255 255 255 / 0.08);
+    --button-border: rgb(255 255 255 / 0.14);
+  }
+
+  .tertiary {
+    --button-border: transparent;
+
+    color: var(--muted);
+  }
+
+  .device {
+    --button-bg: color-mix(in srgb, var(--accent) 16%, transparent);
+    --button-border: color-mix(in srgb, var(--accent) 62%, var(--line));
+
+    color: #aac2ff;
+  }
+
+  .destructive {
+    --button-bg: color-mix(in srgb, var(--danger) 12%, transparent);
+    --button-border: color-mix(in srgb, var(--danger) 48%, var(--line));
+
+    color: #ff9a9a;
+  }
+
+  .menu {
+    width: 100%;
+    justify-content: flex-start;
+    border-color: transparent;
+    background: transparent;
+    font-weight: 500;
+  }
+
+  .player {
+    --button-bg: var(--glass-bg);
+    --button-border: var(--glass-edge);
+
+    color: #fff;
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.08),
+      0 8px 24px rgb(0 0 0 / 0.3);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+  }
+
+  .pressed {
+    --button-bg: var(--fg);
+    --button-border: var(--fg);
+    --button-fg: var(--bg);
+  }
+
+  .tertiary.pressed,
+  .menu.pressed {
+    --button-bg: rgb(255 255 255 / 0.12);
+    --button-border: transparent;
+    --button-fg: var(--fg);
+  }
+
+  .den-button:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
+    outline-offset: 3px;
+  }
+
+  .den-button:disabled,
+  .den-button[aria-disabled='true'] {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .den-button[aria-busy='true'] {
+    cursor: progress;
+  }
+
+  .den-button:hover:not(:disabled, [aria-disabled='true']) {
+    border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
+    background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+  }
+
+  .den-button:active:not(:disabled, [aria-disabled='true']) {
+    transform: scale(0.975);
+  }
+
+  .trailing {
+    margin-left: auto;
+    opacity: 0.58;
+  }
+
+  .trailing :global(svg) {
+    width: 15px;
+    height: 15px;
+  }
+
+  .spinner {
+    width: 17px;
+    height: 17px;
+    border: 2px solid currentcolor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .den-button {
+      transition: none;
+    }
+
+    .spinner {
+      animation-duration: 1400ms;
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .player {
+      background: rgb(28 28 34);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+  }
+</style>
