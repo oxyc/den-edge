@@ -356,12 +356,21 @@
    * while something is playing, and meanwhile the library is pulled faster, so a pause stops it soon.
    */
   let now = $state(Date.now());
+  let foreground = $state(!document.hidden);
+  $effect(() => {
+    const visible = () => {
+      foreground = !document.hidden;
+      if (foreground) now = Date.now();
+    };
+    document.addEventListener('visibilitychange', visible);
+    return () => document.removeEventListener('visibilitychange', visible);
+  });
   const playingAnywhere = $derived(
     continueEntries.some((entry) => livePosition(entry, now) !== undefined),
   );
   $effect(() => {
     session.live = playingAnywhere || playOnTv.active;
-    if (!playingAnywhere) return;
+    if (!playingAnywhere || !foreground) return;
     const timer = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(timer);
   });
