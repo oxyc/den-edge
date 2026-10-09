@@ -2,6 +2,7 @@
      JSON (every title, its state and viewings), built in this browser from the decrypted library (`historyExport`).
      Titles are named from TMDB as the rest of the page names them; the library itself never leaves the browser. -->
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import SettingRow from './SettingRow.svelte';
   import { historyCsv, letterboxdCsv, type HistoryExport } from '../lib/historyExport';
   import { titleKey, type Title } from '../lib/library';
@@ -107,24 +108,24 @@
     a diary entry. All are made in this browser.
   </p>
   <div class="form">
-    <button
-      type="button"
-      class="primary"
+    <Button
+      variant="primary"
+      label="Download CSV"
       disabled={!ready || state.step === 'naming'}
-      onclick={() => void download('csv')}>Download CSV</button
-    >
-    <button
-      type="button"
-      class="quiet"
+      onclick={() => void download('csv')}
+    />
+    <Button
+      variant="secondary"
+      label="Download JSON"
       disabled={!ready || state.step === 'naming'}
-      onclick={() => void download('json')}>Download JSON</button
-    >
-    <button
-      type="button"
-      class="quiet"
+      onclick={() => void download('json')}
+    />
+    <Button
+      variant="secondary"
+      label="Letterboxd (films)"
       disabled={!ready || state.step === 'naming'}
-      onclick={() => void download('letterboxd')}>Letterboxd (films)</button
-    >
+      onclick={() => void download('letterboxd')}
+    />
   </div>
   {#if state.step === 'naming'}
     <p class="status" role="status">

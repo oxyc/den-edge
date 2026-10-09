@@ -23,6 +23,7 @@ describe('titleState, the one reading of a row TitleActions and the poster menu 
   it('reads the opinion, defaulting to no rating', () => {
     expect(titleState(dune).reaction).toBeNull();
     expect(titleState({ ...dune, reaction: { value: 'love', at: at(2) } }).reaction).toBe('love');
+    expect(titleState({ ...dune, reaction: { value: 'seen', at: at(2) } }).reaction).toBeNull();
   });
 
   it('a deleted row means not listed, not seen, and no opinion — a tombstone a later add undoes', () => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Button from './components/Button.svelte';
   import { thisDevice } from './lib/device.svelte';
   import { browserClock } from './lib/clock';
   import { links } from './lib/links.svelte';
@@ -122,9 +123,13 @@
         disabled={busy}
       />
     </label>
-    <button class="primary" disabled={busy || !whole}
-      >{busy ? 'Allow this device on your TV…' : 'Link'}</button
-    >
+    <Button
+      type="submit"
+      variant="primary"
+      size="large"
+      label={busy ? 'Allow this device on your TV…' : 'Link'}
+      disabled={busy || !whole}
+    />
   </form>
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>
@@ -139,7 +144,12 @@
   <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
        remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
   {#if !embedded}
-    <button type="button" class="quiet" onclick={() => links.browse()}>Look around instead</button>
+    <Button
+      class="browse"
+      variant="tertiary"
+      label="Look around instead"
+      onclick={() => links.browse()}
+    />
   {/if}
 </section>
 
@@ -216,21 +226,6 @@
     outline: none;
   }
 
-  .primary {
-    padding: 14px;
-    border: 0;
-    border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-
   /* Two phones of the same make guess the same name, and the TV's list would show two of it. */
   .name {
     display: grid;
@@ -272,18 +267,8 @@
     cursor: pointer;
   }
 
-  .quiet {
+  :global(.browse) {
     margin-top: 20px;
-    padding: 10px 16px;
-    border: 0;
-    border-radius: 999px;
-    background: none;
     color: var(--muted);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .quiet:hover {
-    color: var(--fg);
   }
 </style>

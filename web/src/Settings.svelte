@@ -390,36 +390,6 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 
-  .settings :global(.primary),
-  .settings :global(.quiet) {
-    min-height: 40px;
-    padding: 0 18px;
-    border-radius: 999px;
-    font: inherit;
-    font-size: 15px;
-    font-weight: 600;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .settings :global(.primary) {
-    border: 0;
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .settings :global(.quiet) {
-    border: 1px solid var(--line);
-    background: none;
-    color: var(--fg);
-  }
-
-  .settings :global(.primary:disabled),
-  .settings :global(.quiet:disabled) {
-    opacity: 0.4;
-    cursor: default;
-  }
-
   .settings :global(.link-button) {
     margin-left: auto;
     padding: 0;
@@ -511,8 +481,7 @@
   }
 
   @media (width < 760px) {
-    .settings :global(.form .primary),
-    .settings :global(.form .quiet) {
+    .settings :global(.form .den-button) {
       flex: 1 1 auto;
     }
   }

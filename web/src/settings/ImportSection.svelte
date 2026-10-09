@@ -18,6 +18,7 @@
 </script>
 
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import SettingRow from './SettingRow.svelte';
   import PrimeImportRow from './PrimeImportRow.svelte';
   import HistoryExportRow from './HistoryExportRow.svelte';
@@ -183,17 +184,13 @@
         </details>
       {/if}
       <div class="form">
-        <button
-          type="button"
-          class="primary"
+        <Button
+          variant="primary"
+          label={`Mark ${plural(chosen.length, 'film or series', 'films and series')} as seen`}
           disabled={!chosen.length}
           onclick={() => void write(chosen)}
-        >
-          Mark {plural(chosen.length, 'film or series', 'films and series')} as seen
-        </button>
-        <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}
-          >Cancel</button
-        >
+        />
+        <Button variant="secondary" label="Cancel" onclick={() => (state = { step: 'idle' })} />
       </div>
     {:else if state.step === 'writing'}
       <p class="status" role="status">Saving…</p>

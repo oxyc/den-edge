@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { onDestroy, tick } from 'svelte';
+  import Button from './Button.svelte';
   import type { MenuItem } from '../lib/titleActions';
 
   let {
@@ -53,17 +54,17 @@
    * later unrelated tap) stale-true.
    */
   let swallowNextClick = false;
-  let positionFrame: number | undefined;
+  // Native light-dismiss may close the popover between a trigger pointerdown and its click. Remember what
+  // that gesture started on so the click remains a true close instead of seeing "closed" and reopening it.
+  let triggerWasOpenOnPointerDown = false;
   let focusFrame: number | undefined;
 
-  function cancelFrames() {
-    if (positionFrame !== undefined) cancelAnimationFrame(positionFrame);
+  function cancelFocusFrame() {
     if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
-    positionFrame = undefined;
     focusFrame = undefined;
   }
 
-  onDestroy(cancelFrames);
+  onDestroy(cancelFocusFrame);
 
   // A closed poster contributes a trigger, not a matchMedia subscription and five global listeners. Native auto
   // popovers ensure only one menu is open, so listener work stays constant however many posters a long row retains.
@@ -110,13 +111,20 @@
       await tick();
     }
     if (!menu) return;
-    if (menu.matches(':popover-open')) position();
-    else menu.showPopover();
+    // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
+    // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
+    position();
+    if (!menu.matches(':popover-open')) menu.showPopover();
   }
 
-  function toggleFromTrigger() {
-    if (menu?.matches(':popover-open')) close();
-    else void show(null);
+  function toggleFromTrigger(event: MouseEvent) {
+    const closesPointerGesture = event.detail > 0 && triggerWasOpenOnPointerDown;
+    triggerWasOpenOnPointerDown = false;
+    if (closesPointerGesture || menu?.matches(':popover-open')) {
+      close();
+      open = false;
+      trigger?.focus();
+    } else void show(null);
   }
 
   /** Open anchored to a point rather than the trigger — a right-click or a long-press on the card. */
@@ -132,7 +140,7 @@
     // Removing a popover need not preserve its queued `toggle` event. Keep the trigger truthful synchronously even
     // when an outside gesture releases the body before that event is delivered.
     open = false;
-    cancelFrames();
+    cancelFocusFrame();
     prepared = false;
   }
 
@@ -144,24 +152,13 @@
     return menuItemEls().filter((el) => el.getAttribute('aria-disabled') !== 'true');
   }
 
-  /**
-   * Measured before the popover is actually shown (`beforetoggle`), so it never flashes into the wrong place.
-   *
-   * The write is deferred one frame (`requestAnimationFrame`), still ahead of the next paint: writing
-   * `menu.style` synchronously inside `beforetoggle` — after any prior pointer move had already queued a style
-   * recalc of its own (a hover, even an unrelated one) — silently drops the browser's own `toggle` event, which
-   * is what actually flips `open`/`aria-expanded`. The read stays synchronous; only the write moves.
-   */
+  /** Measured and written while the popover is hidden, before `showPopover` puts it in the top layer. */
   function position() {
     const positioned = menu;
     if (!positioned) return;
-    if (positionFrame !== undefined) cancelAnimationFrame(positionFrame);
     if (mobile) {
-      positionFrame = requestAnimationFrame(() => {
-        positionFrame = undefined;
-        positioned.style.removeProperty('left');
-        positioned.style.removeProperty('top');
-      });
+      positioned.style.removeProperty('left');
+      positioned.style.removeProperty('top');
       return;
     }
     const vw = window.innerWidth,
@@ -182,15 +179,8 @@
     }
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
-    positionFrame = requestAnimationFrame(() => {
-      positionFrame = undefined;
-      positioned.style.left = `${x}px`;
-      positioned.style.top = `${y}px`;
-    });
-  }
-
-  function beforeToggle(event: ToggleEvent) {
-    if (event.newState === 'open') position();
+    positioned.style.left = `${x}px`;
+    positioned.style.top = `${y}px`;
   }
 
   function toggled(event: ToggleEvent) {
@@ -333,6 +323,7 @@
   aria-expanded={open}
   aria-controls={prepared ? menuId : undefined}
   aria-label={label}
+  onpointerdown={() => (triggerWasOpenOnPointerDown = menu?.matches(':popover-open') ?? false)}
   onclick={toggleFromTrigger}
 >
   {@render glyph()}
@@ -348,7 +339,6 @@
     role="menu"
     aria-label={label}
     tabindex="-1"
-    onbeforetoggle={beforeToggle}
     ontoggle={toggled}
     onkeydown={onMenuKeydown}
     onpointerdown={sheetPointerDown}
@@ -358,8 +348,10 @@
   >
     {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
     {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}
-      <button
-        type="button"
+      <Button
+        variant="menu"
+        size="regular"
+        label={item.label}
         role={item.kind === 'item'
           ? 'menuitem'
           : item.kind === 'checkbox'
@@ -369,9 +361,7 @@
         aria-disabled={item.disabled || undefined}
         class="item"
         onclick={() => run(item)}
-      >
-        {item.label}
-      </button>
+      />
     {/each}
   </div>
 {/if}
@@ -386,6 +376,12 @@
     color: inherit;
     font: inherit;
     cursor: pointer;
+  }
+
+  .trigger[aria-expanded='true'] {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .menu {
@@ -403,36 +399,27 @@
     box-shadow: 0 12px 40px #0008;
   }
 
-  .item {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    min-height: 44px;
-    border: 0;
+  .menu :global(.item) {
     border-radius: 8px;
     padding: 8px 12px;
-    background: none;
-    color: var(--fg);
-    font: inherit;
     text-align: left;
-    cursor: pointer;
   }
 
-  .item:hover,
-  .item:focus-visible {
+  .menu :global(.item:hover),
+  .menu :global(.item:focus-visible) {
     background: #fff2;
   }
 
-  .item:focus-visible {
+  .menu :global(.item:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 
-  .item[aria-checked='true'] {
+  .menu :global(.item[aria-checked='true']) {
     font-weight: 600;
   }
 
-  .item[aria-disabled='true'] {
+  .menu :global(.item[aria-disabled='true']) {
     color: var(--muted);
     cursor: default;
   }
@@ -457,7 +444,7 @@
     font-weight: 600;
   }
 
-  .sheet .item {
+  .sheet :global(.item) {
     min-height: 48px;
   }
 </style>

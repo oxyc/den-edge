@@ -3,7 +3,8 @@
 
 import type { TitleRow } from './wire';
 
-export type Reaction = NonNullable<TitleRow['reaction']['value']>;
+/** A person's opinion. `seen` survives in the wire union for imported legacy logs, but it is not a rating. */
+export type Reaction = Exclude<NonNullable<TitleRow['reaction']['value']>, 'seen'>;
 
 export interface TitleState {
   listed: boolean;
@@ -13,9 +14,12 @@ export interface TitleState {
 
 export function titleState(row: TitleRow | undefined): TitleState {
   const active = row !== undefined && !row.deleted.value;
+  const rawReaction = active ? row.reaction.value : null;
   return {
     listed: active && row.status.value === 'watchlist',
     seen: active && row.status.value === 'watched',
-    reaction: active ? (row.reaction.value ?? null) : null,
+    // Older trackers encoded "seen" in the reaction field. Seen now has its own status and must never light up
+    // Like/Love or the phone rating picker merely because someone marked a title watched.
+    reaction: rawReaction === 'seen' ? null : rawReaction,
   };
 }

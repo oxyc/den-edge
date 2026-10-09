@@ -2,6 +2,7 @@
      typed back before it goes live, and show what den-edge counts of it. The code lives in this component's memory
      only, from the moment it is made until this screen closes; leaving before confirming ends it. -->
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import { onMount } from 'svelte';
   import Confirm from './Confirm.svelte';
   import Loading from '../components/Loading.svelte';
@@ -192,9 +193,11 @@
     </p>
     <b class="code" data-no-swipe bind:this={codeEl}>{made.code}</b>
     <span class="actions">
-      <button type="button" class="quiet" onclick={() => void copy(made.code)}
-        >{copied ? 'Copied' : 'Copy'}</button
-      >
+      <Button
+        variant="secondary"
+        label={copied ? 'Copied' : 'Copy'}
+        onclick={() => void copy(made.code)}
+      />
     </span>
     {#if manual}<p class="status" role="status">Select and copy the code.</p>{/if}
     <p class="small" role="status">
@@ -219,22 +222,25 @@
         aria-label="The code’s last four characters"
         bind:value={typed}
       />
-      <button class="primary" disabled={phase === 'confirming' || typed.trim().length < 4}
-        >{phase === 'confirming' ? 'Saving…' : 'I’ve saved it'}</button
-      >
-      <button type="button" class="quiet" onclick={() => void cancel()}>Cancel</button>
+      <Button
+        type="submit"
+        variant="primary"
+        label={phase === 'confirming' ? 'Saving…' : 'I’ve saved it'}
+        disabled={phase === 'confirming' || typed.trim().length < 4}
+      />
+      <Button variant="secondary" label="Cancel" onclick={() => void cancel()} />
     </form>
   </div>
 {:else if phase === 'lost'}
   <span class="actions">
-    <button
-      type="button"
-      class="quiet"
+    <Button
+      variant="secondary"
+      label="Close"
       onclick={() => {
         phase = 'idle';
         message = null;
-      }}>Close</button
-    >
+      }}
+    />
   </span>
 {:else if !ready}
   <p class="status">Your library isn’t open yet.</p>
@@ -279,12 +285,12 @@
         onconfirm={() => void off()}
       />
     {:else}
-      <button
-        type="button"
-        class="primary"
+      <Button
+        variant="primary"
+        label="Make a recovery code"
         disabled={view === undefined}
-        onclick={() => void make()}>Make a recovery code</button
-      >
+        onclick={() => void make()}
+      />
     {/if}
   </div>
   {#if live && live.opens > 0}

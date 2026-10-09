@@ -2,6 +2,7 @@
      and the assistants connected, each with Disconnect. A member sees their library's connections, their guests'
      included; a guest sees their own. Disconnecting ends a connection at its next call. -->
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -73,9 +74,11 @@
           value={address}
           bind:this={addressField}
         />
-        <button type="button" class="quiet" onclick={() => void copy(address)}
-          >{copied ? 'Copied' : 'Copy'}</button
-        >
+        <Button
+          variant="secondary"
+          label={copied ? 'Copied' : 'Copy'}
+          onclick={() => void copy(address)}
+        />
       </span>
       {#if manual}<p class="status" role="status">Select and copy the address.</p>{/if}
       <h3>Claude</h3>

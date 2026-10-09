@@ -10,6 +10,7 @@
   import { answer, consentRequest, consentRequestId, type ConsentRequest } from '../lib/oauth';
   import { canProve } from '../lib/relayFetch';
   import { LinkScreen } from '../lib/screens.svelte';
+  import Button from './Button.svelte';
   import ScreenLoading from './ScreenLoading.svelte';
 
   let dialog = $state<HTMLDialogElement>();
@@ -142,34 +143,33 @@
         <ScreenLoading screen={LinkScreen} page={false} />
       {/if}
       <div class="actions">
-        <button type="button" class="quiet" onclick={() => (linking = false)}>Back</button>
+        <Button label="Back" onclick={() => (linking = false)} />
       </div>
     {:else}
       <p>If someone invited you to their Den, open their invite in this browser instead.</p>
       <div class="actions">
-        <button type="button" class="primary" disabled={!request || expired} onclick={startLinking}
-          >Link this browser</button
-        >
-        <button type="button" class="quiet" onclick={close}>Close</button>
+        <Button
+          variant="primary"
+          label="Link this browser"
+          disabled={!request || expired}
+          onclick={startLinking}
+        />
+        <Button label="Close" onclick={close} />
       </div>
     {/if}
   {:else}
     <div class="actions">
-      <button
-        type="button"
-        class="primary"
-        disabled={working || !request || expired}
-        onclick={() => void reply(true)}>{working ? 'Connecting…' : 'Allow'}</button
-      >
+      <Button
+        variant="primary"
+        label={working ? 'Connecting…' : 'Allow'}
+        busy={working}
+        disabled={!request || expired}
+        onclick={() => void reply(true)}
+      />
       {#if expired}
-        <button type="button" class="quiet" onclick={close}>Close</button>
+        <Button label="Close" onclick={close} />
       {:else}
-        <button
-          type="button"
-          class="quiet"
-          disabled={working || !request}
-          onclick={() => void reply(false)}>Deny</button
-        >
+        <Button label="Deny" disabled={working || !request} onclick={() => void reply(false)} />
       {/if}
     </div>
   {/if}
@@ -226,35 +226,5 @@
     flex-wrap: wrap;
     gap: 8px;
     margin-top: 20px;
-  }
-
-  button {
-    min-height: 44px;
-    padding: 0 20px;
-    border-radius: 999px;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary {
-    border: 0;
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .quiet {
-    border: 1px solid var(--line);
-    background: none;
-    color: var(--fg);
-  }
-
-  .quiet:hover {
-    background: rgb(255 255 255 / 0.06);
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 </style>

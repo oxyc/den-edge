@@ -22,6 +22,7 @@
 </script>
 
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import { parsePrimeFiles } from '../lib/primeImport';
   import { planPrimeImport } from '../lib/primeImportPlan';
   import { contentImportLookups } from '../lib/contentImportLookups';
@@ -179,15 +180,13 @@
       </details>
     {/if}
     <div class="form">
-      <button
-        type="button"
-        class="primary"
+      <Button
+        variant="primary"
+        label="Import viewing history"
         disabled={!chosen.length}
         onclick={() => void write(chosen)}
-      >
-        Import viewing history
-      </button>
-      <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}>Cancel</button>
+      />
+      <Button variant="secondary" label="Cancel" onclick={() => (state = { step: 'idle' })} />
     </div>
   {:else if state.step === 'writing'}
     <p class="status" role="status">Saving…</p>

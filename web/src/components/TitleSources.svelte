@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Loading from './Loading.svelte';
-  import DetailIcon from './DetailIcon.svelte';
+  import Button from './Button.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
   import DownloadStatus from './DownloadStatus.svelte';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type {
@@ -150,36 +151,23 @@
   const size = (bytes?: number) => (bytes ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : '');
 </script>
 
-<div class="source-controls">
-  <button
-    class="control"
+<div class="source-accordion" class:open>
+  <Button
+    variant="tertiary"
+    class="sources-disclosure"
+    icon="sources"
+    label="Sources"
+    ariaLabel={`Sources${sources ? `, ${sources.length} available` : ''}`}
     aria-expanded={open}
     aria-controls={panelId}
     onclick={() => (open = !open)}
-    ><DetailIcon name="sources" />Sources{sources ? ` (${sources.length})` : ''}</button
   >
-  {#if title && best && best.cached === false && best.seeders !== 0}
-    {@const state = stateOf(best)}
-    <button
-      class="control"
-      disabled={inFlight(state ?? null) || state === 'ready'}
-      onclick={() => void download(best!)}
+    {#if sources}<span class="source-count">{sources.length}</span>{/if}
+    <span class="disclosure-chevron" class:open aria-hidden="true"
+      ><ButtonIcon name="chevron" /></span
     >
-      <DetailIcon name="download" />{state === 'ready'
-        ? 'Ready to play'
-        : state === 'fetching'
-          ? 'Downloading'
-          : state === 'starting' || state === 'paused'
-            ? 'Checking download'
-            : 'Download'}
-    </button>
-  {/if}
+  </Button>
 </div>
-{#if best?.cached === false && !jobOf(best)}<p class="readiness">
-    This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
-  </p>{/if}
-{#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
-{#if message}<p class="readiness" role="status">{message}</p>{/if}
 {#if open}
   <div id={panelId} bind:this={panel} class="source-panel">
     {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
@@ -191,11 +179,11 @@
       </p>
     {:else if sources === undefined}<Loading label="Loading sources" />
     {:else if sources === null}<p class="note">Couldn’t reach the source service.</p>
-      <button class="control" onclick={() => retry++}>Try again</button>
+      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
     {:else if sources.length === 0 && answer?.kind === 'unknown'}<p class="note">
         Your sources didn’t answer, so there may be releases this couldn’t see.
       </p>
-      <button class="control" onclick={() => retry++}>Try again</button>
+      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
     {:else if sources.length === 0}<p class="note">
         No sources found for this {season === undefined ? 'movie' : 'episode'}.
       </p>
@@ -249,24 +237,27 @@
               {/if}
             </div>
             <div class="source-actions">
-              {#if ready && onplay}<button class="control" onclick={() => onplay(source.filename)}
-                  ><DetailIcon name="play" />Play</button
-                >
-              {:else if !ready && title}<button
-                  class="control"
+              {#if ready && onplay}<Button
+                  variant="secondary"
+                  icon="play"
+                  label="Play"
+                  onclick={() => onplay(source.filename)}
+                />
+              {:else if !ready && title}<Button
+                  variant="secondary"
+                  icon="download"
+                  label={source.seeders === 0 ? 'Download anyway' : 'Download'}
                   disabled={inFlight(state ?? null)}
                   onclick={() => void download(source)}
-                  ><DetailIcon name="download" />{source.seeders === 0
-                    ? 'Download anyway'
-                    : 'Download'}</button
-                >{/if}
+                />{/if}
 
-              {#if job && (state === 'unreachable' || state === 'not-started')}<button
-                  class="text-button"
+              {#if job && (state === 'unreachable' || state === 'not-started')}<Button
+                  variant="tertiary"
+                  size="compact"
+                  label="Check status"
                   onclick={() =>
                     void model?.refreshDownloads(descriptor?.target).catch(() => undefined)}
-                  >Check status</button
-                >{/if}
+                />{/if}
             </div>
           </li>
         {/each}
@@ -274,8 +265,94 @@
     {/if}
   </div>
 {/if}
+{#if title && best && best.cached === false && best.seeders !== 0}
+  {@const state = stateOf(best)}
+  <div class="source-controls">
+    <Button
+      variant="secondary"
+      icon="download"
+      label={state === 'ready'
+        ? 'Ready to play'
+        : state === 'fetching'
+          ? 'Downloading'
+          : state === 'starting' || state === 'paused'
+            ? 'Checking download'
+            : 'Download'}
+      disabled={inFlight(state ?? null) || state === 'ready'}
+      onclick={() => void download(best!)}
+    />
+  </div>
+{/if}
+{#if best?.cached === false && !jobOf(best)}<p class="readiness">
+    This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
+  </p>{/if}
+{#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
+{#if message}<p class="readiness" role="status">{message}</p>{/if}
 
 <style>
+  .source-accordion {
+    max-width: 1100px;
+    margin-bottom: 20px;
+  }
+
+  .source-accordion.open {
+    margin-bottom: 0;
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure) {
+    --button-bg: transparent;
+    --button-border: transparent;
+    --button-fg: var(--fg);
+
+    width: auto;
+    max-width: 100%;
+    min-height: 44px;
+    justify-content: flex-start;
+    padding-inline: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: var(--section-heading-size);
+    font-weight: var(--section-heading-weight);
+    line-height: var(--section-heading-line-height);
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure:hover:not([aria-disabled='true'])) {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure:active:not([aria-disabled='true'])) {
+    transform: none;
+  }
+
+  .source-count {
+    color: var(--muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+
+  .disclosure-chevron {
+    --button-icon-size: 16px;
+
+    display: grid;
+    flex: 0 0 20px;
+    width: 20px;
+    height: 44px;
+    place-items: center;
+    opacity: 0.65;
+  }
+
+  .disclosure-chevron :global(svg) {
+    transform: rotate(-90deg);
+    transition: transform 110ms ease-out;
+  }
+
+  .disclosure-chevron.open :global(svg) {
+    transform: rotate(0);
+  }
+
   .source-controls {
     display: flex;
     flex-wrap: wrap;
@@ -283,28 +360,13 @@
     min-height: 48px;
   }
 
-  .control {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    min-height: 44px;
-    padding: 8px 18px;
-    border: 1px solid #ffffff24;
-    border-radius: 12px;
-    background: #ffffff15;
-    color: var(--fg);
-    cursor: pointer;
-  }
-
-  .control:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
   .source-panel {
     max-width: 1100px;
-    margin: 16px 0 24px;
+    margin: 4px 0 24px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgb(255 255 255 / 0.025);
     scroll-margin-top: var(--bar-space);
   }
 
@@ -414,20 +476,6 @@
     flex: none;
   }
 
-  .text-button {
-    min-height: 36px;
-    border: 0;
-    background: none;
-    color: var(--muted);
-    cursor: pointer;
-  }
-
-  .control:focus-visible,
-  .text-button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
-  }
-
   progress {
     margin-top: 10px;
     width: 200px;
@@ -446,15 +494,15 @@
       flex-flow: row wrap;
     }
 
-    .control {
-      font-size: 14px;
-      border-radius: 999px;
-      padding-inline: 14px;
-    }
-
     /* Narrow: the size chip alone, not the pack it came from. */
     .pack {
       display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .disclosure-chevron :global(svg) {
+      transition: none;
     }
   }
 </style>

@@ -25,7 +25,6 @@
   import SeasonDownload from './SeasonDownload.svelte';
   import { downloadEpisode } from '../lib/seasonDownloads.svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import DetailReactions from './DetailReactions.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
   import { isBlocked } from '../lib/parental';
@@ -620,7 +619,7 @@
             ></span>
           </div>
         </div>
-        <div class="hero-actions"><div class="loading-actions placeholder"></div></div>
+        <div class="hero-actions loading-slot"><div class="loading-actions placeholder"></div></div>
       </div>
     {:else}
       {@const d = detail}
@@ -735,12 +734,6 @@
         />
       </div>
     {/if}
-    <DetailReactions
-      value={row && !row.deleted.value ? row.reaction.value : null}
-      {busy}
-      onchange={(value) => onreact(d.title, value)}
-    />
-
     {#if d.seasons.length && !restricted}
       {@const regular = d.seasons.filter((s) => s.number > 0)}
       <section class="seasons" aria-label="Episodes">
@@ -928,20 +921,19 @@
        window — the actions sat just below the fold — which made the two surfaces disagree by a screenful. */
     --hero-h: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
 
-    /* How far the words sit BELOW the trailer's own box.
-       The block is bottom-aligned, so a negative bottom margin is what moves it down while the
-       picture keeps every pixel of its height. Enough of one to put the actions across the fold —
-       40px of bottom padding plus half the 80px row — so half a play button shows and the rest is
-       the cue that there is a page under it. Never positive: on a window taller than the hero the
-       words would be pulled up onto the picture instead. */
-    --hero-drop: max(0px, calc(100lvh + 80px - var(--hero-h)));
+    /* How far the words sit BELOW the trailer's own box. The block is bottom-aligned, so a negative
+       bottom margin moves it down while the picture keeps every pixel of its height. Eight pixels of
+       the 48px action remain below the fold: enough to cue the page without manufacturing an empty
+       80px action slot and 40px pad between the actions and the next section. Never positive: on a
+       window taller than the hero the words would otherwise be pulled up onto the picture. */
+    --hero-drop: max(0px, calc(100lvh + 8px - var(--hero-h)));
 
     min-height: var(--hero-h);
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
 
     /* The block now hangs past the hero, so the page below starts clear of it rather than under it. */
-    margin-bottom: calc(32px + var(--hero-drop));
+    margin-bottom: calc(24px + var(--hero-drop));
   }
 
   /* Past this width a height capped in pixels would letterbox the picture, exactly as it would on the
@@ -1002,12 +994,16 @@
        characters off every line. */
     max-width: var(--page-max);
     margin: 0 auto calc(-1 * var(--hero-drop));
-    padding: calc(var(--bar-space) + 40px) var(--gutter) 40px;
+    padding: calc(var(--bar-space) + 40px) var(--gutter) 0;
   }
 
   .hero-actions {
-    min-height: 80px;
+    min-height: 48px;
     margin-top: 24px;
+  }
+
+  .hero-actions :global(.actions.detail-page) {
+    margin-bottom: 0;
   }
 
   .head {
@@ -1268,13 +1264,16 @@
       padding: 24px var(--gutter) 0;
     }
 
-    .hero-actions {
-      min-height: 122px;
+    /* Reserve the full two-row action footprint only while the title is loading. Loaded actions size
+       themselves from their actual rows, so an old worst-case minimum cannot become empty space before
+       the overview; the explicit loading slot still keeps the hero steady when detail arrives. */
+    .hero-actions.loading-slot {
+      min-height: 106px;
     }
 
     .head {
       gap: 20px;
-      align-items: end;
+      align-items: start;
       min-height: clamp(144px, 33vw, 270px);
     }
 
@@ -1294,7 +1293,7 @@
 
     .mobile-overview {
       display: block;
-      margin: 0 0 32px;
+      margin: 0 0 24px;
     }
 
     .overview {

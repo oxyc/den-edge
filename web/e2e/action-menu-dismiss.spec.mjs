@@ -182,8 +182,47 @@ test('desktop: clicking outside the menu closes it without activating the poster
     const library = page.getByRole('region', { name: 'Library' });
     const trigger = library.getByRole('button', { name: 'Actions for Movie 101' });
     const otherCard = library.getByRole('link', { name: 'Series 701' });
+    const triggerBox = await trigger.boundingBox();
+    await page.evaluate(() => {
+      window.__firstActionMenuFrame = null;
+      document.addEventListener(
+        'beforetoggle',
+        (event) => {
+          if (event.newState !== 'open' || event.target.getAttribute('role') !== 'menu') return;
+          requestAnimationFrame(() => {
+            const rect = event.target.getBoundingClientRect();
+            window.__firstActionMenuFrame = {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+            };
+          });
+        },
+        { capture: true, once: true },
+      );
+    });
     await trigger.click();
     const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
+    await expect(menu).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.__firstActionMenuFrame)).not.toBeNull();
+    const firstFrame = await page.evaluate(() => window.__firstActionMenuFrame);
+    expect(firstFrame.left).toBeGreaterThan(4);
+    expect(firstFrame.top).toBeGreaterThan(4);
+    expect(firstFrame.left).toBeLessThan(triggerBox.x + triggerBox.width);
+    expect(firstFrame.right).toBeGreaterThan(triggerBox.x);
+    expect(
+      Math.min(
+        Math.abs(firstFrame.top - (triggerBox.y + triggerBox.height)),
+        Math.abs(firstFrame.bottom - triggerBox.y),
+      ),
+    ).toBeLessThan(80);
+    await expect(trigger).toHaveCSS('opacity', '1');
+    await trigger.click();
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).toBeFocused();
+    await trigger.click();
     await expect(menu).toBeVisible();
 
     // Same reason as the mobile tap test: the scrim now covers it, so the click needs `force` past

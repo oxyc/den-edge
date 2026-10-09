@@ -5,6 +5,7 @@
 <script lang="ts">
   import { onMount, untrack, type Snippet } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
+  import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
   import RecoveryRedeem from '../components/RecoveryRedeem.svelte';
   import SettingRow from './SettingRow.svelte';
@@ -731,13 +732,16 @@
         </p>
         <b class="code">{simklPin.userCode}</b>
         <p class="status" role="status">Waiting for SIMKL…</p>
-        <button type="button" class="quiet" onclick={cancelSimkl}>Cancel</button>
+        <Button variant="secondary" label="Cancel" onclick={cancelSimkl} />
       </div>
     {:else if simklClientId}
       <div class="form">
-        <button type="button" class="primary" {disabled} onclick={() => void connectSimkl()}
-          >Connect SIMKL</button
-        >
+        <Button
+          variant="primary"
+          label="Connect SIMKL"
+          {disabled}
+          onclick={() => void connectSimkl()}
+        />
       </div>
     {/if}
     {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
@@ -779,12 +783,14 @@
           aria-label="{service.label} API key"
           bind:value={drafts[service.name]}
         />
-        <button
-          class="primary"
+        <Button
+          type="submit"
+          variant="primary"
+          label="Save & validate"
           disabled={disabled ||
             !drafts[service.name]?.trim() ||
-            checks.get(service.name) === 'checking'}>Save &amp; validate</button
-        >
+            checks.get(service.name) === 'checking'}
+        />
         {#if saved}
           <Confirm
             label="Remove"
@@ -835,16 +841,16 @@
                   onconfirm={() => void setPluginTrust(url, null)}
                 />
               {:else if pinning !== url}
-                <button
-                  type="button"
-                  class="quiet"
+                <Button
+                  variant="secondary"
+                  label="Pin signing key"
                   {disabled}
                   onclick={() => {
                     pinning = url;
                     keyDraft = '';
                     keyInvalid = false;
-                  }}>Pin signing key</button
-                >
+                  }}
+                />
               {/if}
               <Confirm
                 label="Remove"
@@ -871,8 +877,13 @@
                   aria-label="Signing key for {den?.label ?? hostOf(url)}"
                   bind:value={keyDraft}
                 />
-                <button class="primary" disabled={disabled || !keyDraft.trim()}>Pin key</button>
-                <button type="button" class="quiet" onclick={() => (pinning = null)}>Cancel</button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  label="Pin key"
+                  disabled={disabled || !keyDraft.trim()}
+                />
+                <Button variant="secondary" label="Cancel" onclick={() => (pinning = null)} />
               </form>
               {#if keyInvalid}
                 <p class="status bad wide" role="alert">
@@ -922,7 +933,7 @@
         aria-label="Plugin manifest URL"
         bind:value={addonDraft}
       />
-      <button class="primary" disabled={disabled || !addonURL}>Add plugin</button>
+      <Button type="submit" variant="primary" label="Add plugin" disabled={disabled || !addonURL} />
     </form>
     {#if addonProblem}<p class="status bad" role="alert">{addonProblem}</p>{/if}
   </SettingRow>
@@ -945,7 +956,7 @@
               >{row.name}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
             >
             {#if row.device?.id === selfId}
-              <button type="button" class="quiet" disabled>This device</button>
+              <Button variant="secondary" label="This device" disabled />
             {:else}
               <Confirm
                 label="Remove"
@@ -970,9 +981,7 @@
           the key on this browser just now, use the new key. If another device also reset the key, pair
           again with a code from it instead.
         </p>
-        <button type="button" class="primary" onclick={() => void onadoptheld?.()}
-          >Use the new key</button
-        >
+        <Button variant="primary" label="Use the new key" onclick={() => void onadoptheld?.()} />
       </div>
     {/if}
     {#if onresetkey}
@@ -1133,14 +1142,17 @@
             and play on your TV.
           </p>
           <span class="actions">
-            <button type="button" class="primary" onclick={() => answer?.(true)}>Allow</button>
-            <button type="button" class="quiet" onclick={() => answer?.(false)}>Don’t Allow</button>
+            <Button variant="primary" label="Allow" onclick={() => answer?.(true)} />
+            <Button variant="secondary" label="Don’t Allow" onclick={() => answer?.(false)} />
           </span>
         {:else}
           {#if pairNotice}<p class="status" role="status">{pairNotice}</p>{/if}
-          <button type="button" class="primary" disabled={pairing} onclick={linkDevice}
-            >{pairing ? 'Waiting…' : 'Get a code'}</button
-          >
+          <Button
+            variant="primary"
+            label={pairing ? 'Waiting…' : 'Get a code'}
+            disabled={pairing}
+            onclick={linkDevice}
+          />
         {/if}
       </div>
       <p class="foot">

@@ -3,6 +3,7 @@
 <script lang="ts">
   import Loading from './Loading.svelte';
   import { redeem, redeemMessages } from '../lib/recovery';
+  import Button from './Button.svelte';
 
   let {
     question,
@@ -53,9 +54,12 @@
       a new one in Settings › Linked devices.
     </p>
     {#if question}<p>{question}</p>{/if}
-    <button type="button" class="primary" disabled={busy} onclick={() => void go()}
-      >{busy ? 'Opening…' : 'Open my library'}</button
-    >
+    <Button
+      variant="primary"
+      label={busy ? 'Opening…' : 'Open my library'}
+      {busy}
+      onclick={() => void go()}
+    />
   </div>
 {:else}
   <form
@@ -73,7 +77,12 @@
       disabled={busy}
       bind:value={code}
     />
-    <button class="primary" disabled={busy || !code.trim()}>Open with code</button>
+    <Button
+      type="submit"
+      variant="primary"
+      label="Open with code"
+      disabled={busy || !code.trim()}
+    />
   </form>
   <!-- Argon2id can take seconds on a slow phone (§3): say it is working, up to its timeout. -->
   {#if busy}<Loading label="Working…" inline />{/if}
@@ -109,24 +118,6 @@
   input:focus {
     border-color: var(--accent);
     outline: none;
-  }
-
-  .primary {
-    min-height: 40px;
-    padding: 0 18px;
-    border: 0;
-    border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
-    font: inherit;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary:disabled {
-    opacity: 0.4;
-    cursor: default;
   }
 
   .bad {

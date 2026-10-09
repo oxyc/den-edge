@@ -2,6 +2,7 @@
      change how that TV draws and plays, so each TV keeps them and they're listed here only to say so; the away-from-home
      token is the library's, and entered here once. -->
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -88,9 +89,12 @@
         aria-label="Access client secret"
         bind:value={accessSecret}
       />
-      <button class="primary" disabled={disabled || !accessId.trim() || !accessSecret.trim()}
-        >Save</button
-      >
+      <Button
+        type="submit"
+        variant="primary"
+        label="Save"
+        disabled={disabled || !accessId.trim() || !accessSecret.trim()}
+      />
       {#if hasAccess}
         <Confirm
           label="Remove"
