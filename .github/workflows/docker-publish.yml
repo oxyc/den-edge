@@ -283,8 +283,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PATCH" = true ]; then
-            jq '.Results |= map(select(.Class == "os-pkgs"))' trivy.json > gate.json
-            jq '.Results |= map(select(.Class == "os-pkgs"))' trivy-cast.json > gate-cast.json
+            jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy.json > gate.json
+            jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy-cast.json > gate-cast.json
           else
             cp trivy.json gate.json
             cp trivy-cast.json gate-cast.json
