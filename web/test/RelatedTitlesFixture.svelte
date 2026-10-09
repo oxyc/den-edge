@@ -31,16 +31,23 @@
   // where atlas is after the rows have shown, as a title page does when its answer is late.
   let atlas = $state<string | null>(new URLSearchParams(location.search).get('atlas'));
   let active = $state(new URLSearchParams(location.search).get('active') !== '0');
+  const setAtlas = (url: string) => {
+    // Production discovery configures the Worker before publishing its render-facing address. Keep that ordering in
+    // this standalone fixture so related queries never carry or guess a provider URL.
+    void content.query({ kind: 'sources.configure', atlas: url });
+    atlas = url;
+  };
+  if (atlas) void content.query({ kind: 'sources.configure', atlas });
   (
     window as unknown as {
       relatedFixture: { setActive: (value: boolean) => void; setAtlas: (url: string) => void };
     }
   ).relatedFixture = {
     setActive: (value) => (active = value),
-    setAtlas: (url) => (atlas = url),
+    setAtlas,
   };
   // Kept for the original fixture callers.
-  (window as unknown as { setAtlas: (url: string) => void }).setAtlas = (url) => (atlas = url);
+  (window as unknown as { setAtlas: (url: string) => void }).setAtlas = setAtlas;
 </script>
 
 <RoutePage {active}>

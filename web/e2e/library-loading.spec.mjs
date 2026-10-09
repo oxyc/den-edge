@@ -252,6 +252,7 @@ test('Downloading waits for exact shelf order when Continue Watching membership 
   await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Downloading', exact: true })).toHaveCount(0);
 
+  await page.waitForFunction(() => typeof window.denTestReleaseContinueHint === 'function');
   await page.evaluate(() => window.denTestReleaseContinueHint());
   // The encrypted last-known positive reserves geometry only: Watchlist may now follow that placeholder, while
   // real Download cards still wait for the current shelf contents.

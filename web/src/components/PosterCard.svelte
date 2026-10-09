@@ -429,6 +429,12 @@
     outline-offset: -3px;
   }
 
+  /* Chromium carries a keyboard focus-visible state across an async card replacement. RoutePage marks a focus
+     restored after touch until the viewer presses a key, so that replacement does not grow a false ring. */
+  :global([data-restored-pointer-focus]) .pick:focus-visible .art {
+    outline: none;
+  }
+
   img {
     display: block;
     width: 100%;
