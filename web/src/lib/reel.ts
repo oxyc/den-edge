@@ -279,19 +279,27 @@ function candidatesFrom(value: unknown, base: string, origin: string): TrailerCa
     meta?: { links?: unknown };
     primary?: { planUrl?: unknown } | null;
     primaryPlan?: unknown;
+    degraded?: { reason?: unknown };
   };
   if (answer.v !== 2 || !Array.isArray(answer.meta?.links)) return [];
   const primaryUrl = planUrl(answer.primary?.planUrl, base, origin);
   const primaryPlan = parseSourcePlan(answer.primaryPlan);
+  const primaryUnavailable = answer.degraded?.reason === 'primary_unavailable';
   const candidates: TrailerCandidate[] = [];
   for (const link of answer.meta.links) {
     const url = planUrl((link as { planUrl?: unknown })?.planUrl, base, origin);
     if (!url || candidates.some((candidate) => candidate.planUrl === url)) continue;
     candidates.push({
       planUrl: url,
-      // A degraded prepare names the primary but embeds null. Leaving it unloaded lets the cursor
-      // retry that exact plan lazily instead of permanently skipping the best candidate.
-      ...(url === primaryUrl && primaryPlan ? { plan: primaryPlan } : {}),
+      // Prepare already spent the primary's resolve and named its failure. `null` means this cursor
+      // advances to an alternate; an unadorned missing plan remains lazy for older/partial envelopes.
+      ...(url === primaryUrl
+        ? primaryPlan
+          ? { plan: primaryPlan }
+          : primaryUnavailable
+            ? { plan: null }
+            : {}
+        : {}),
     });
   }
   return candidates;
@@ -337,7 +345,11 @@ export async function prepareTrailers(
     const response = await fetchImpl(url, { signal });
     if (!response.ok) return [];
     const candidates = candidatesFrom(await response.json(), base, origin);
-    if (candidates.length) {
+    const noStore = response.headers
+      .get('cache-control')
+      ?.split(',')
+      .some((directive) => directive.trim().toLowerCase() === 'no-store');
+    if (candidates.length && !noStore) {
       const expires = candidates
         .map((candidate) => candidate.plan?.expires)
         .filter((value): value is number => typeof value === 'number');

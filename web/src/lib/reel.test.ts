@@ -139,7 +139,7 @@ describe('prepareTrailers', () => {
     expect(asked).toHaveLength(2);
   });
 
-  it('leaves a degraded primary lazy instead of caching null as its plan', async () => {
+  it('leaves an unmarked null primary lazy during the v2 transition', async () => {
     const found = await prepareTrailers(
       '/reel/cfg',
       'movie',
@@ -164,6 +164,60 @@ describe('prepareTrailers', () => {
       },
     );
     expect(found).toEqual([{ planUrl: '/reel/sources/a.json?v=2' }]);
+  });
+
+  it('skips an explicitly unavailable primary and does not cache its no-store answer', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      asked.push(url);
+      if (url.includes('/prepare/')) {
+        return new Response(
+          JSON.stringify({
+            v: 2,
+            meta: {
+              links: [
+                { planUrl: 'https://internal.invalid/reel/cfg/sources/a.json?v=2' },
+                { planUrl: 'https://internal.invalid/reel/cfg/sources/b.json?v=2' },
+              ],
+            },
+            primary: {
+              id: 'a',
+              planUrl: 'https://internal.invalid/reel/cfg/sources/a.json?v=2',
+            },
+            primaryPlan: null,
+            degraded: {
+              reason: 'primary_unavailable',
+              status: 502,
+              retryAfter: '300',
+            },
+          }),
+          { headers: { 'cache-control': 'no-store' } },
+        );
+      }
+      if (url.includes('/sources/b.json')) {
+        return new Response(JSON.stringify(plan(external('https://video.example/alternate.mp4'))));
+      }
+      throw new Error(`the unavailable primary must not be fetched: ${url}`);
+    };
+    const request = () =>
+      prepareTrailers(
+        '/reel/cfg',
+        'movie',
+        { tmdb: 42 },
+        ROUTES,
+        { surface: 'audible', player: 'native' },
+        { fetchImpl },
+      );
+
+    const found = await request();
+    expect(found[0]).toEqual({ planUrl: '/reel/cfg/sources/a.json?v=2', plan: null });
+    const cursor = new PlaybackCursor(found, { fetchImpl });
+    expect((await cursor.first())?.url).toBe('https://video.example/alternate.mp4');
+    expect(asked.some((url) => url.includes('/sources/a.json'))).toBe(false);
+
+    await request();
+    expect(asked.filter((url) => url.includes('/prepare/'))).toHaveLength(2);
   });
 
   it('preserves a direct route config prefix without duplicating its mount', async () => {
