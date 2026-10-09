@@ -2,17 +2,16 @@
 // gives a poster with nothing behind it. Asked a page of posters at a time. Scout answers from its verdicts at once
 // and checks the rest behind the reply, so an unknown is asked again a little later — and never fades.
 //
-// Scout wants IMDb ids, so each movie's is looked up at TMDB first, as the TV's probes do. Series aren't asked: they
-// need per-episode resolution. The web fades but never hides; hiding on scout's word is for a TV whose only stream
-// addon is scout.
+// Scout wants IMDb ids, so each movie's is resolved through the content Worker first. Series aren't asked: they need
+// per-episode resolution. The web fades but never hides; hiding on scout's word is for a TV whose only stream addon
+// is scout.
 
 import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 import type { Addon } from './scout';
-import { fetchImdbId } from './tmdb';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
-import { tmdbFetch } from './tmdbCache';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
 
@@ -20,7 +19,7 @@ type Verdict = 'available' | 'unavailable' | 'unknown';
 const GATHER_MS = 50;
 /** Scout's cap on ids per request. */
 const MAX_IDS = 100;
-/** TMDB lookups at once. */
+/** Identifier lookups at once. */
 const LOOKUPS = 6;
 /** How long before asking again about a movie scout was still checking, and how many times. */
 export const RETRY_MS = 10_000;
@@ -40,12 +39,12 @@ export class Availability {
   /** When each verdict was given, so a kept one expires. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Persistence bookkeeping; only verdicts are UI state.
   private readonly givenAt = new Map<number, number>();
-  /** A movie's IMDb id, or null when TMDB has none. */
+  /** A movie's IMDb id, or null when its content record has none. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Lookup cache; only verdicts are UI state.
   private readonly imdbIds = new Map<number, string | null>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request scheduling must not subscribe the components that enqueue titles.
   private readonly wanted = new Set<number>();
-  /** IDs in a TMDB/scout ask, or deliberately waiting for their retry time. A virtualized card may remount many
+  /** IDs in a content/scout ask, or deliberately waiting for their retry time. A virtualized card may remount many
    * times during either interval; it must not turn those mounts into duplicate requests or bypass the backoff. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
   private readonly pending = new Set<number>();
@@ -64,14 +63,11 @@ export class Availability {
    * so each poster was asked again 10 s later, three times, and then never — whatever the wait scout gave.
    */
   private pausedUntil = 0;
-  private scout: { base: string; tmdbKey: string; fetch: typeof fetch } | null = null;
+  private scout: { base: string; content: ContentServiceClientPort; fetch: typeof fetch } | null =
+    null;
 
-  /**
-   * TMDB's answers come from this browser's cache; scout's pass straight through it. The last day's verdicts from
-   * `storage` fade their posters at once, and scout is still asked, so one that changed is corrected.
-   */
+  /** The last day's verdicts from `storage` fade their posters at once, and scout is still asked. */
   constructor(
-    private readonly fetchImpl: typeof fetch = tmdbFetch,
     private readonly storage: Storage | undefined = typeof localStorage === 'undefined'
       ? undefined
       : localStorage,
@@ -95,14 +91,18 @@ export class Availability {
   /**
    * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none.
    *
-   * Through `relayFetch`, not this instance's fetch: that one is TMDB's, and scout is asked under this
-   * origin, where den-edge relays it. The difference is the membership claim. Without it a paired
+   * Through `relayFetch`: scout is asked under this origin, where den-edge relays it. The membership claim matters.
+   * Without it a paired
    * household is a visitor to the relay, and on the public name the `/scout/` gate answers 404 — which
    * is what it did, silently, to every availability request a browser made there.
    */
-  connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = relayFetch): void {
+  connect(
+    scout: Addon | null,
+    content: ContentServiceClientPort | null,
+    fetchImpl: typeof fetch = relayFetch,
+  ): void {
     const previous = this.scout?.base;
-    this.scout = scout && tmdbKey ? { base: scout.base, tmdbKey, fetch: fetchImpl } : null;
+    this.scout = scout && content ? { base: scout.base, content, fetch: fetchImpl } : null;
     if (previous !== undefined && this.scout?.base !== previous) {
       this.generation++;
       clearTimeout(this.timer);
@@ -129,7 +129,7 @@ export class Availability {
       this.pending.has(title.id)
     )
       return;
-    // A title named by TMDB's details or an atlas catalog already knows its IMDb id: no lookup for it.
+    // A title already carrying its IMDb id does not need a content query.
     if (title.imdbId) this.imdbIds.set(title.id, title.imdbId);
     this.wanted.add(title.id);
     this.gather();
@@ -169,7 +169,7 @@ export class Availability {
       const again: number[] = [];
       const noImdb: number[] = [];
       await each(ids, LOOKUPS, async (id) => {
-        const imdb = await this.imdbId(id, scout.tmdbKey);
+        const imdb = await this.imdbId(id, scout.content);
         if (imdb === undefined) again.push(id);
         else if (imdb === null) noImdb.push(id);
         else byImdb.set(imdb, id);
@@ -264,9 +264,20 @@ export class Availability {
     this.retryTimers.add(timer);
   }
 
-  private async imdbId(id: number, key: string): Promise<string | null | undefined> {
+  private async imdbId(
+    id: number,
+    content: ContentServiceClientPort,
+  ): Promise<string | null | undefined> {
     if (this.imdbIds.has(id)) return this.imdbIds.get(id);
-    const imdb = await fetchImdbId({ type: 'movie', id }, key, this.fetchImpl);
+    const answer = await content
+      .query({ kind: 'title.external-id', title: { type: 'movie', id } })
+      .catch(() => null);
+    const imdb =
+      answer?.imdbId.state === 'ready'
+        ? answer.imdbId.value
+        : answer?.imdbId.state === 'absent'
+          ? null
+          : undefined;
     if (imdb !== undefined) this.imdbIds.set(id, imdb);
     return imdb;
   }

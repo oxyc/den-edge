@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import PosterCard from '../src/components/PosterCard.svelte';
   import PosterRow from '../src/components/PosterRow.svelte';
   import { availability } from '../src/lib/availability.svelte';
   import type { Title } from '../src/lib/library';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import '../src/app.css';
 
   const titles: Title[] = Array.from({ length: 10 }, (_, index) => ({
@@ -23,11 +24,14 @@
     title: 'Continuing title',
     posterUrl: 'https://images.metahub.space/poster/medium/tt50/img',
   };
+  const services = createWorkerServiceSession();
+  const content = services.content;
+  onDestroy(() => services.close());
 
   onMount(() => {
     if (!new URLSearchParams(location.search).has('availability')) return;
-    availability.connect({ install: '/scout', base: '/scout' }, 'fixture-key', fetch);
-    return () => availability.connect(null, '');
+    availability.connect({ install: '/scout', base: '/scout' }, content, fetch);
+    return () => availability.connect(null, null);
   });
 </script>
 

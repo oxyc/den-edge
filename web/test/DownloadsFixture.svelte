@@ -148,13 +148,23 @@
     },
     downloadArtwork: async (target) =>
       target.type === 'tv'
-        ? ((await downloadStill({
-            mediaType: 'tv',
-            mediaId: target.id,
-            season: target.season,
-            episode: target.episode,
-            title: '',
-          })) ?? null)
+        ? ((await downloadStill(
+            {
+              mediaType: 'tv',
+              mediaId: target.id,
+              season: target.season,
+              episode: target.episode,
+              title: '',
+            },
+            async (seriesId, season) => {
+              const result = await content.query({
+                kind: 'season',
+                title: { type: 'tv', id: seriesId },
+                season,
+              });
+              return result.episodes.state === 'ready' ? result.episodes.value : null;
+            },
+          )) ?? null)
         : null,
   });
 

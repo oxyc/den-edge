@@ -6,7 +6,7 @@ import type { MediaType, Title } from './library';
 import { strictest } from './parental';
 import { toTitle } from './tmdb';
 
-import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson } from './tmdbCache';
+import { tmdbFetch, tmdbJson } from './tmdbCache';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -361,14 +361,6 @@ export async function fetchDetail(
       : 'credits,recommendations,videos,external_ids,release_dates,watch/providers';
   const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
   return body && parseDetail(ref, body, region);
-}
-
-/**
- * Ask for a title's details ahead of opening it — a finger is on its card. The page's own request, whatever key it
- * carries, joins this one in flight or reads its answer from the cache (`tmdbCache`), both keyed without the key.
- */
-export function warmDetail(ref: { type: MediaType; id: number }): void {
-  void fetchDetail({ type: ref.type, id: ref.id }, TMDB_PROXY_KEY);
 }
 
 /** The card last pressed: its title, and the picture it was showing, which this browser already holds. */

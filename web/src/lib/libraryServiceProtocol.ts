@@ -68,8 +68,6 @@ export interface EpisodeRef extends TitleRef {
 
 export interface RuntimeDiscoveryView {
   kind: 'runtime';
-  /** Explicit temporary capabilities for page-owned metadata fetches; remove with that subsystem's cutover. */
-  tmdbKey: string;
   pluginManifestUrls: string[];
   privateRemuxUrl: string | null;
 }

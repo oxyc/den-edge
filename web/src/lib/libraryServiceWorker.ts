@@ -7,10 +7,11 @@ import { LibraryServiceWorkerHost, type WorkerHostScope } from './libraryService
 // This Worker owns exactly one Core and therefore at most one live LibraryLog. A replacement Worker gets a fresh
 // authority; the page never hydrates or receives that log.
 const contentCredentials = new WorkerContentCredentials();
+const contentAuthority = new ContentAuthority(contentCredentials);
 new LibraryServiceWorkerHost(
   self as unknown as WorkerHostScope,
   new LibraryServiceCore((request) =>
-    openLibraryServiceAuthority(request, undefined, contentCredentials),
+    openLibraryServiceAuthority(request, undefined, contentCredentials, contentAuthority),
   ),
-  new ContentServiceCore(new ContentAuthority(contentCredentials)),
+  new ContentServiceCore(contentAuthority),
 );

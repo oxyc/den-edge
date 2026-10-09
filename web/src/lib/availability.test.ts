@@ -1,10 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Availability, KEPT_MS, RETRY_MS } from './availability.svelte';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
 const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
 
-/** Scout on this origin, and TMDB naming movie n `tt000000n` — except 404, which has no IMDb id. */
+const contentQuery = async (request: { kind: string; title?: { id: number } }) => ({
+  kind: 'title.external-id' as const,
+  imdbId:
+    request.title?.id === 404
+      ? ({ state: 'absent' } as const)
+      : ({ state: 'ready', value: `tt${String(request.title?.id).padStart(7, '0')}` } as const),
+});
+const content = {
+  query: contentQuery,
+  onStatus: () => () => {},
+} as unknown as ContentServiceClientPort;
+
+/** Scout on this origin. IMDb identifiers come through the semantic content port above. */
 function fake(verdicts: () => Record<string, string>) {
   const calls: { url: string; body?: string }[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -12,8 +25,6 @@ function fake(verdicts: () => Record<string, string>) {
     calls.push({ url, body: init?.body as string | undefined });
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
     if (url === '/scout/sealed-cfg/availability') return json({ availability: verdicts() });
-    const movie = /\/movie\/(\d+)\/external_ids/.exec(url)?.[1];
-    if (movie) return json({ imdb_id: movie === '404' ? null : `tt${movie.padStart(7, '0')}` });
     return new Response('{}', { status: 404 });
   };
   return { calls, fetchImpl };
@@ -30,8 +41,8 @@ describe('Availability', () => {
       tt0000002: second,
       tt0000003: 'available',
     }));
-    const availability = new Availability(fetchImpl);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
     for (const id of [1, 2, 3, 404]) availability.want({ type: 'movie', id });
     availability.want({ type: 'tv', id: 5 });
     await vi.advanceTimersByTimeAsync(100);
@@ -60,8 +71,8 @@ describe('Availability', () => {
         ? (calls.push({ url: String(input) }),
           new Response('{"error":"busy"}', { status: 429, headers: { 'retry-after': '60' } }))
         : answers(input, init);
-    const availability = new Availability(fetchImpl);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
     availability.want({ type: 'movie', id: 1 });
     const asked = () => calls.filter((c) => c.url.endsWith('/availability')).length;
     await vi.advanceTimersByTimeAsync(100);
@@ -86,11 +97,11 @@ describe('Availability', () => {
       JSON.stringify({ 1: ['unavailable', now - 1000], 2: ['unavailable', now - KEPT_MS - 1] }),
     );
     const { calls, fetchImpl } = fake(() => ({ tt0000001: 'available', tt0000002: 'available' }));
-    const availability = new Availability(fetchImpl, storage, () => now);
+    const availability = new Availability(storage, () => now);
     expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
     expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(false);
 
-    availability.connect(SCOUT, 'key', fetchImpl);
+    availability.connect(SCOUT, content, fetchImpl);
     availability.want({ type: 'movie', id: 1 });
     availability.want({ type: 'movie', id: 2 });
     await vi.advanceTimersByTimeAsync(100);
@@ -102,24 +113,30 @@ describe('Availability', () => {
     });
   });
 
-  it('asks TMDB nothing about a movie that already knows its IMDb id', async () => {
+  it('asks the content service nothing about a movie that already knows its IMDb id', async () => {
     const { calls, fetchImpl } = fake(() => ({ tt7654321: 'unavailable' }));
-    const availability = new Availability(fetchImpl, undefined);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    const query = vi.fn(contentQuery);
+    const watchedContent = {
+      query,
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const availability = new Availability();
+    availability.connect(SCOUT, watchedContent, fetchImpl);
     availability.want({ type: 'movie', id: 9, imdbId: 'tt7654321' });
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.map((c) => c.url)).toEqual(['/scout/sealed-cfg/availability']);
+    expect(query).not.toHaveBeenCalled();
     expect(availability.unavailable({ type: 'movie', id: 9 })).toBe(true);
   });
 
   it('asks nothing until there is a scout to ask', async () => {
     const { calls, fetchImpl } = fake(() => ({}));
-    const availability = new Availability(fetchImpl);
+    const availability = new Availability();
     availability.want({ type: 'movie', id: 1 });
-    availability.connect(null, 'key', fetchImpl);
+    availability.connect(null, null, fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual([]);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    availability.connect(SCOUT, content, fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.some((c) => c.url === '/scout/sealed-cfg/availability')).toBe(true);
   });
@@ -132,8 +149,8 @@ describe('Availability', () => {
       calls.push(String(input));
       return answer;
     };
-    const availability = new Availability(undefined, undefined);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
@@ -152,8 +169,8 @@ describe('Availability', () => {
 
   it('does not let a remount bypass an unknown verdict retry delay', async () => {
     const { calls, fetchImpl } = fake(() => ({ tt7654321: 'unknown' }));
-    const availability = new Availability(undefined, undefined);
-    availability.connect(SCOUT, 'key', fetchImpl);
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
@@ -179,15 +196,15 @@ describe('Availability', () => {
       calls.push(`new ${String(input)}`);
       return Response.json({ availability: { tt7654321: 'available' } });
     };
-    const availability = new Availability(undefined, undefined);
+    const availability = new Availability();
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
-    availability.connect(SCOUT, 'key', oldFetch);
+    availability.connect(SCOUT, content, oldFetch);
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
 
-    availability.connect(null, '');
+    availability.connect(null, null);
     await vi.advanceTimersByTimeAsync(100);
-    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    availability.connect({ ...SCOUT, base: '/scout/new' }, content, newFetch);
     await vi.advanceTimersByTimeAsync(100);
     releaseOld(Response.json({ availability: { tt7654321: 'unavailable' } }));
     await vi.runAllTimersAsync();
@@ -206,13 +223,13 @@ describe('Availability', () => {
       calls.push(`new ${String(input)}`);
       return Response.json({ availability: { tt7654321: 'available' } });
     };
-    const availability = new Availability(undefined, undefined);
+    const availability = new Availability();
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
-    availability.connect(SCOUT, 'key', oldFetch);
+    availability.connect(SCOUT, content, oldFetch);
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
 
-    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    availability.connect({ ...SCOUT, base: '/scout/new' }, content, newFetch);
     await vi.advanceTimersByTimeAsync(RETRY_MS + 100);
     expect(calls).toEqual(['old /scout/sealed-cfg/availability', 'new /scout/new/availability']);
   });
@@ -230,26 +247,20 @@ describe('Availability', () => {
       calls.push(`new ${String(input)}`);
       return Response.json({ availability: { tt7654321: 'available' } });
     };
-    const availability = new Availability(undefined, undefined);
+    const availability = new Availability();
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
-    availability.connect(SCOUT, 'key', oldFetch);
+    availability.connect(SCOUT, content, oldFetch);
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
 
-    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    availability.connect({ ...SCOUT, base: '/scout/new' }, content, newFetch);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual(['old /scout/sealed-cfg/availability', 'new /scout/new/availability']);
   });
 
   /**
-   * The fetch this class is CONSTRUCTED with is TMDB's. Scout is asked under this origin, where
-   * den-edge relays it, and the relay wants the household's membership — so the default has to be
-   * `relayFetch`, and the tests above pass their own only to watch what was asked.
-   *
-   * It was the constructor's fetch, and so every availability request a paired browser made on the
-   * public name arrived unclaimed and met the `/scout/` gate: 404, instantly, in silence. Asserted
-   * through the DEFAULT on purpose. A test that hands in its own fetch cannot see this at all, which
-   * is exactly why the four above did not.
+   * Scout is asked under this origin, where den-edge relays it, and the relay wants the household's
+   * membership. Assert the default relay fetch path rather than a test fetch.
    */
   it('asks scout with the household’s membership, not with TMDB’s fetch', async () => {
     const sent: (string | null)[] = [];
@@ -262,8 +273,8 @@ describe('Availability', () => {
     });
     useLibraryCredential({ id: 'lib', member: 'tok' });
     try {
-      const availability = new Availability(fake(() => ({})).fetchImpl, undefined);
-      availability.connect(SCOUT, 'key');
+      const availability = new Availability();
+      availability.connect(SCOUT, content);
       availability.want({ type: 'movie', id: 9, imdbId: 'tt7654321' });
       await vi.advanceTimersByTimeAsync(100);
     } finally {

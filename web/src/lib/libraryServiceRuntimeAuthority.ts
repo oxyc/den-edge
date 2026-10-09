@@ -1,6 +1,6 @@
 import { openClockStore } from './clockStore';
 import type { ContentCredentialSource } from './contentAuthority';
-import { DownloadServiceRuntime } from './downloadServiceRuntime';
+import { DownloadServiceRuntime, type DownloadContent } from './downloadServiceRuntime';
 import { LibraryLogAuthority } from './libraryLogAuthority';
 import { DurableOperationAuthority } from './libraryOperationAuthority';
 import type { LibraryServiceHello } from './libraryServiceProtocol';
@@ -60,9 +60,11 @@ class CredentialBoundLibraryAuthority implements LibraryServiceAuthority {
  */
 export async function openLibraryServiceAuthority(
   request: LibraryServiceHello,
-  vault: Vault | null = libraryVault,
-  contentCredentials?: LibraryContentCredentialSink,
+  providedVault: Vault | null | undefined,
+  contentCredentials: LibraryContentCredentialSink | undefined,
+  content: DownloadContent,
 ): Promise<LibraryServiceAuthority | null> {
+  const vault = providedVault === undefined ? libraryVault : providedVault;
   if (!vault) return null;
 
   // Seed the durable clock before opening the log so a failed clock cannot leave an opened log behind. Durable
@@ -73,7 +75,7 @@ export async function openLibraryServiceAuthority(
       ? await LibraryLog.openLocal(request.libraryKey, vault)
       : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
   if (!log) return null;
-  const downloads = new DownloadServiceRuntime(log, clock, () => {});
+  const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
   const logAuthority = new LibraryLogAuthority(log, clock, {
     mode: request.mode,
     downloads: downloads.coordinator,

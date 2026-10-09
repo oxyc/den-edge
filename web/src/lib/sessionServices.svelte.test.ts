@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { availability } from './availability.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 import { SessionServices } from './sessionServices.svelte';
 
 let discoveries = 0;
@@ -29,12 +30,15 @@ vi.mock('./grants.svelte', () => ({
   guestGrants: { refresh: async () => undefined, pluginUrls: () => [] },
 }));
 
-const runtime = (tmdbKey: string, pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
+const runtime = (pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
   kind: 'runtime',
-  tmdbKey,
   pluginManifestUrls,
   privateRemuxUrl: null,
 });
+const content = {
+  query: vi.fn(async () => ({ kind: 'sources.configure' })),
+  onStatus: () => () => {},
+} as unknown as ContentServiceClientPort;
 
 const fakeModel = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -60,10 +64,9 @@ describe('SessionServices', () => {
       [`routes-${++asked}`]: [{ url: `/route-${asked}` }],
     }));
 
-    services.configure(runtime('first', ['https://first.test/manifest.json']));
-    expect(services.tmdbKey).toBe('first');
+    services.configure(runtime(['https://first.test/manifest.json']));
     await Promise.resolve();
-    services.configure(runtime('second', ['https://second.test/manifest.json']));
+    services.configure(runtime(['https://second.test/manifest.json']));
     await Promise.resolve();
     await vi.runAllTimersAsync();
 
@@ -77,14 +80,14 @@ describe('SessionServices', () => {
   it('holds availability until the foreground signal', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), async () => ({}));
-    services.configure(runtime('tmdb'));
+    const services = new SessionServices(fakeModel(), async () => ({}), content);
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
-    expect(connect).not.toHaveBeenCalledWith(services.scout, 'tmdb');
+    expect(connect).not.toHaveBeenCalledWith(services.scout, content);
 
     connect.mockClear();
     services.foregroundReady();
-    expect(connect).toHaveBeenCalledWith(services.scout, 'tmdb');
+    expect(connect).toHaveBeenCalledWith(services.scout, content);
     services.stop();
   });
 
@@ -103,7 +106,7 @@ describe('SessionServices', () => {
       }),
     });
     const services = new SessionServices(model, () => routes);
-    services.configure(runtime('tmdb'));
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
     release({ live: [{ url: '/live' }] });
     await vi.waitFor(() => expect(services.atlas).not.toBe('/retained-atlas'));
@@ -115,7 +118,7 @@ describe('SessionServices', () => {
     reaches = 'https://den-remux.tail.test';
     const rememberPrivateRemux = vi.fn().mockResolvedValue(undefined);
     const services = new SessionServices(fakeModel({ rememberPrivateRemux }), async () => ({}));
-    services.configure(runtime('tmdb'));
+    services.configure(runtime());
     await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
     services.stop();
     reaches = undefined;
@@ -130,10 +133,10 @@ describe('SessionServices', () => {
       scout: [{ url: '/scout' }],
     }));
 
-    services.configure(runtime('first'));
+    services.configure(runtime(['first']));
     for (let turn = 0; turn < 10; turn++) await Promise.resolve();
     expect(services.atlas).toBe('/atlas-1');
-    services.configure(runtime('second'));
+    services.configure(runtime(['second']));
     for (let turn = 0; turn < 10; turn++) await Promise.resolve();
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -151,7 +154,7 @@ describe('SessionServices', () => {
       fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
       async () => ({}),
     );
-    services.configure(runtime('tmdb'));
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.atlasReady).toBe(true));
     expect(services.atlas).toBeTruthy();
     services.stop();

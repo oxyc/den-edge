@@ -1078,10 +1078,8 @@ export class LibraryLogAuthority {
 
   #runtime(): Extract<LibrarySelectionValue, { kind: 'runtime' }> {
     const remux = readPrivateAddresses(this.#log.settings(ADDRESSES)).remux;
-    const keys = this.#log.settings('keys');
     return {
       kind: 'runtime',
-      tmdbKey: tmdbKeyOf(keys),
       pluginManifestUrls: readPlugins(this.#log.settings('plugins'))
         .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
         .slice(0, 10_000),
@@ -1396,7 +1394,7 @@ export class LibraryLogAuthority {
     return this.#patchSettings(
       'keys',
       { [this.#keyName(service)]: value === null ? null : { string: value } },
-      [{ kind: 'connections' }, ...(service === 'tmdb' ? ([{ kind: 'runtime' }] as const) : [])],
+      [{ kind: 'connections' }],
     );
   }
 

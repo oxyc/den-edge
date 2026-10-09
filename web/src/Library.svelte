@@ -49,10 +49,10 @@
   import { contentServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
+  import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
-  import { fetchTitle } from './lib/tmdb';
   import {
     billboardScope,
     displayableKept,
@@ -132,7 +132,6 @@
    * whole tree by its library, so the session is fixed for its life.
    */
   const discovered = untrack(() => session.services);
-  const tmdbKey = $derived(discovered.tmdbKey);
   /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */
   const plugins = $derived(discovered.plugins);
   const scout = $derived(discovered.scout);
@@ -551,7 +550,7 @@
           busy = true;
           failure = null;
           const blocked = await playGuard(title, {
-            tmdbKey,
+            content: session.content!,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
           });
@@ -585,10 +584,10 @@
    * no episode named picks up where Continue Watching would, or starts at the beginning.
    */
   const playHere = $derived(
-    scout && tmdbKey && remux !== null
+    scout && remux !== null
       ? async (title: Title, season?: number, episode?: number, filename?: string) => {
           const blocked = await playGuard(title, {
-            tmdbKey,
+            content: session.content!,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
           });
@@ -611,6 +610,7 @@
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `LibrarySession.notify` already shows for other library news.
   setToastContext((message, undo) => session.notify(message, { undo }));
+  setContentServiceContext(untrack(() => session.content!));
   function menuToast(
     ok: boolean | undefined,
     success: string,
@@ -1091,7 +1091,7 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const type = facet;
-    if (!model || !tmdbKey) return;
+    if (!model) return;
     const scope: RetainedBillboardScope = memberPost
       ? { kind: 'personal', facet: type, fresh }
       : { kind: 'shared', facet: type, fresh };
@@ -1139,7 +1139,6 @@
       return;
     const here = atlas;
     const named = shelvesReady;
-    if (!tmdbKey) return;
     // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
     // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
@@ -1148,6 +1147,11 @@
     }
     if (model === null || (libraryOpen && named)) untrack(() => buildRecommended(here));
   });
+
+  async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
+    const answer = await session.content!.query({ kind: 'titles', titles: [ref] });
+    return answer.titles[0] ?? null;
+  }
 
   /**
    * Everyone starts with atlas's one cacheable ranking for this surface and UTC day, less what the library holds.
@@ -1161,10 +1165,9 @@
    */
   function buildRecommended(here: string) {
     const type = facet;
-    const key = tmdbKey;
     const run = ++billboardRun;
     stagedFeatured = null;
-    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const lookup = lookupTitle;
     const ranked =
       model && overview && memberPost
         ? recommend(
@@ -1225,7 +1228,6 @@
   /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
   async function paintShared(here: string, run: number) {
     const type = facet;
-    const key = tmdbKey;
     const shared = (await recommendForEveryone(here, billboardScope(type), fresh))?.filter(
       (slide) => !seeds.owned.has(`${slide.type}:${slide.id}`),
     );
@@ -1234,7 +1236,7 @@
       buildTrending(run);
       return;
     }
-    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const lookup = lookupTitle;
     const first = await nameSlides(shared.slice(0, 1), new Map(), lookup, 1);
     if (run !== billboardRun) return;
     // A member's kept billboard stays up while the rest is named. A guest's generic fallback gives way at once.
@@ -1346,16 +1348,6 @@
       {retryingLibrary ? 'Trying again…' : 'Try again'}
     </button>
   </section>
-{:else if route.page !== 'library' && !tmdbKey}
-  <p class="note">
-    {#if link}
-      This page needs your TMDB key: your TV shares it, or add it in <a href="/settings">Settings</a
-      >.
-    {:else}
-      Title pages need a TMDB key, which arrives with a paired Apple TV.
-      <a href="/settings">Pair one</a> to see them.
-    {/if}
-  </p>
 {:else if page && !DetailScreen.current}
   <ScreenLoading screen={DetailScreen} />
 {:else if page}
@@ -1389,7 +1381,7 @@
     onplay={play}
     onplayhere={playHere}
     {remux}
-    away={remuxAway && !!scout && !!tmdbKey}
+    away={remuxAway && !!scout}
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}
     onepisode={markEpisodeSeen}
@@ -1627,7 +1619,7 @@
       season={target.season}
       episode={target.episode}
       filename={target.filename}
-      {tmdbKey}
+      content={session.content!}
       {scout}
       {remux}
       subtitles={installsOf(plugins, routes, 'subs').filter(

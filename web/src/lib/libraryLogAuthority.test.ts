@@ -95,7 +95,7 @@ describe('LibraryLogAuthority', () => {
     await expect(
       authority.command({ kind: 'api-key.set', service: 'tmdb', value: 'tmdb-secret' }, 'tmdb'),
     ).resolves.toMatchObject({
-      affected: [{ kind: 'connections' }, { kind: 'runtime' }],
+      affected: [{ kind: 'connections' }],
     });
     await authority.command(
       { kind: 'plugin.install', manifestUrl: 'https://plugins.example/scout/manifest.json' },
@@ -108,7 +108,6 @@ describe('LibraryLogAuthority', () => {
     const runtime = await authority.select({ kind: 'runtime' });
     expect(runtime).toEqual({
       kind: 'runtime',
-      tmdbKey: 'tmdb-secret',
       pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
       privateRemuxUrl: 'https://remux.tailnet.ts.net',
     });
@@ -849,9 +848,7 @@ describe('LibraryLogAuthority', () => {
       ],
       [{ kind: 'device.heartbeat', name: 'MacBook' }, 'heartbeat'],
     ] as const) {
-      const affectsRuntime =
-        (command.kind === 'api-key.set' && command.service === 'tmdb') ||
-        command.kind === 'plugin.install';
+      const affectsRuntime = command.kind === 'plugin.install';
       await expect(authority.command(command, operation)).resolves.toMatchObject({
         outcome: 'applied',
         delivery: 'local',

@@ -275,6 +275,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             'tmdb',
           ),
         };
+      case 'prefetch.detail':
+        await this.#wait(this.detail(request.title, request.region), signal);
+        return { kind: 'prefetch.detail' };
       case 'title.external-id': {
         const result = await this.#wait(this.identifiers(request.title), signal);
         return {

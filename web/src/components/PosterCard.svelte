@@ -20,7 +20,8 @@
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { ROW_NEAR } from './PosterRow.svelte';
-  import { notePressed, warmDetail } from '../lib/detail';
+  import { notePressed } from '../lib/detail';
+  import { contentServiceContext } from '../lib/contentContext';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
@@ -81,6 +82,7 @@
   } = $props();
 
   const titleActions = titleActionsContext();
+  const content = contentServiceContext();
   const notify = toastContext();
   let actionMenu = $state<ActionMenu>();
   const hasMenu = $derived(menu && !!href);
@@ -153,7 +155,9 @@
     if (!href || (event.type === 'pointerenter' && event.pointerType !== 'mouse')) return;
     if (event.type === 'pointerdown') notePressed(title, art);
     clearTimeout(warming);
-    warming = setTimeout(() => warmDetail(title), ms);
+    warming = setTimeout(() => {
+      void content?.query({ kind: 'prefetch.detail', title, region: 'US' }).catch(() => undefined);
+    }, ms);
   }
   function drop(event: PointerEvent) {
     if (event.type === 'pointerleave' && event.pointerType !== 'mouse') return;
