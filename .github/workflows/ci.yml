@@ -1,24 +1,27 @@
 name: ci
 
-# Tests, lints and the formatting check on every push and PR; docker-publish.yml calls this as its gate, so a
-# tag cannot publish an image CI would reject.
+# Every exact main commit produces scanned, immutable candidate images while its checks run. A release tag only
+# promotes those already-tested digests; it never recompiles or reruns this workflow.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
-  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR revisions are disposable. A main SHA is a potential release and its candidate must finish even
+  # when another merge follows it, otherwise a tag could name a commit whose exact image was cancelled midway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/${{ github.repository_owner }}/den-edge
+  CAST_IMAGE: ghcr.io/${{ github.repository_owner }}/den-cast
 
 jobs:
   test:
@@ -30,26 +33,49 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
       - name: Tests
         run: cargo test --locked
-
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-
       - name: Formatting
         run: cargo fmt --all --check
 
-  # The Den web app den-edge serves: type-checked, tested and built, as the image's web stage builds it.
-  web:
+  # Checks which need Node but not a browser run once. Keeping them out of the Playwright shards avoids paying
+  # for lint, unit tests, and production builds twice.
+  web-checks:
     runs-on: ubuntu-latest
-    # Keep this tag and the assertion below equal to web/package-lock.json's @playwright/test version.
-    # The official image supplies that release's exact browsers and Linux dependencies, avoiding a
-    # network/apt install on every run. Chromium recommends host IPC in containers to avoid OOM crashes.
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run audit
+      - run: npm run lint
+      - run: npm test
+      - run: node test/sync-policy-browser.mjs
+      - run: npm run build
+      - run: npm run test:worker-build
+      - run: npm run build:cast
+
+  # Playwright already uses all four CPUs on one hosted runner. File sharding supplies two runners without changing
+  # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server.
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    name: e2e (${{ matrix.shard }}/2)
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble
-      # The app and fixtures are repository-controlled; the image's default root user also keeps checkout/setup-node
-      # compatible with GitHub's mounted workspace. Playwright documents root as suitable for trusted E2E tests.
       options: --ipc=host
     defaults:
       run:
@@ -57,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: true # spec/: den-spec's vectors, which the wire tests load
+          submodules: true
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -72,49 +98,185 @@ jobs:
             exit 1
           }
           node --input-type=module -e "import { chromium, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"
-      # A known high or critical advisory in any web dependency fails the build, as it would ship in
-      # the image — except one on scripts/audit.mjs's time-boxed allowlist (dev-tooling-only advisories
-      # with no fix upstream, re-reviewed on expiry).
-      - run: npm run audit
-      - run: npm run lint
-      - run: npm test
-      - run: node test/sync-policy-browser.mjs
-      # Real-time player switching soaks run weekly/on demand in player-switch-soak.yml.
-      - run: npm run test:e2e
-      - run: npm run build
-      - run: npm run test:worker-build
-      - run: npm run build:cast
+      - name: Browser behavior
+        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/2
 
-  # The image is what ships, and it builds differently from `cargo build` (musl, scratch). Caught on the PR
-  # rather than at tag time, for amd64 — the only arch the box runs. The two images build side by side; each
-  # keeps the cache scope docker-publish.yml uses for it, so a release still starts from the PR's layers.
+  # Preserve the stable `web` check name while making it represent both the once-only checks and every shard.
+  web:
+    if: always()
+    needs: [web-checks, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every web check
+        env:
+          CHECKS: ${{ needs.web-checks.result }}
+          E2E: ${{ needs.e2e.result }}
+        run: test "$CHECKS" = success && test "$E2E" = success
+
+  # A PR proves the same shared build graph that main will publish. It reads main's cache but deliberately does not
+  # publish an image or overwrite the durable release cache with an unmerged revision.
   build-pr:
-    needs: test
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - image: den-edge
-            file: Dockerfile
-            scope: ""
-          - image: den-cast
-            file: Dockerfile.cast
-            scope: ",scope=cast"
-    name: build-pr (${{ matrix.image }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read release metadata
+        id: source
+        run: |
+          version=$(cat VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - name: Build both runtime targets
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
-          context: .
-          file: ${{ matrix.file }}
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha${{ matrix.scope }}
-          cache-to: type=gha,mode=max${{ matrix.scope }}
+          source: .
+          files: docker-bake.hcl
+          set: |
+            *.args.DEN_VERSION=${{ steps.source.outputs.version }}
+            *.args.GIT_REVISION=${{ github.sha }}
+            *.args.PREVIOUS_IMAGE=scratch
+            *.output=type=cacheonly
+
+  # Main builds and scans immutable candidates while the test jobs run. They are intentionally unsigned and never
+  # receive :latest here; docker-publish promotes them only after this exact workflow has succeeded.
+  candidate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read release metadata
+        id: source
+        run: |
+          set -euo pipefail
+          version=$(cat VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION is not X.Y.Z: $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Resolve the previous release
+        id: previous
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            echo "image=$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=scratch" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push both candidates
+        id: bake
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          source: .
+          files: docker-bake.hcl
+          push: true
+          set: |
+            *.args.DEN_VERSION=${{ steps.source.outputs.version }}
+            *.args.GIT_REVISION=${{ github.sha }}
+            *.args.PREVIOUS_IMAGE=${{ steps.previous.outputs.image }}
+            edge.tags=${{ env.IMAGE }}:candidate-${{ github.sha }}
+            cast.tags=${{ env.CAST_IMAGE }}:candidate-${{ github.sha }}
+            edge.cache-to=type=gha,mode=max,scope=release-images
+      - name: Record candidate digests
+        id: images
+        env:
+          METADATA: ${{ steps.bake.outputs.metadata }}
+        run: |
+          set -euo pipefail
+          edge=$(jq -r '.edge["containerimage.digest"] // empty' <<<"$METADATA")
+          cast=$(jq -r '.cast["containerimage.digest"] // empty' <<<"$METADATA")
+          test -n "$edge" && test -n "$cast"
+          echo "edge=$edge" >> "$GITHUB_OUTPUT"
+          echo "cast=$cast" >> "$GITHUB_OUTPUT"
+      - name: Prove the image reports its release version
+        env:
+          DIGEST: ${{ steps.images.outputs.edge }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE@$DIGEST" >/dev/null
+          id=$(docker run --rm -d -p 127.0.0.1:18080:8080 "$IMAGE@$DIGEST")
+          trap 'docker rm -f "$id" >/dev/null 2>&1 || true' EXIT
+          body=""
+          for _ in $(seq 1 20); do
+            body=$(curl -fsS http://127.0.0.1:18080/version 2>/dev/null) && break
+            sleep 1
+          done
+          got=$(jq -r .version <<<"$body")
+          test "$got" = "$VERSION" || { echo "::error::image /version is $got, expected $VERSION"; exit 1; }
+      - name: Scan edge image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.images.outputs.edge }}
+          version: v0.74.0
+          format: json
+          output: trivy.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Scan Cast image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.CAST_IMAGE }}@${{ steps.images.outputs.cast }}
+          version: v0.74.0
+          format: json
+          output: trivy-cast.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Gate on fixable critical findings
+        run: |
+          trivy convert --severity CRITICAL --exit-code 1 --format table trivy.json
+          trivy convert --severity CRITICAL --exit-code 1 --format table trivy-cast.json
+      - name: Bind this CI run to its candidate digests
+        env:
+          EDGE_DIGEST: ${{ steps.images.outputs.edge }}
+          CAST_DIGEST: ${{ steps.images.outputs.cast }}
+        run: |
+          jq -n --arg edge "$EDGE_DIGEST" --arg cast "$CAST_DIGEST" \
+            '{edge: $edge, cast: $cast}' > candidate-digests.json
+      - name: Save candidate identity for release promotion
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: candidate-digests.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Report edge scan
+        continue-on-error: true
+        run: trivy convert --format sarif --output trivy.sarif trivy.json
+      - name: Upload edge scan
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        continue-on-error: true
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-image
+      - name: Report Cast scan
+        continue-on-error: true
+        run: trivy convert --format sarif --output trivy-cast.sarif trivy-cast.json
+      - name: Upload Cast scan
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        continue-on-error: true
+        with:
+          sarif_file: trivy-cast.sarif
+          category: trivy-cast-image

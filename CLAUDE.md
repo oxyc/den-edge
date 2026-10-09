@@ -53,9 +53,10 @@ say so in the comment.
 
 ## Releases
 
-- The version in `Cargo.toml` **and** `Cargo.lock`, then a `vX.Y.Z` tag. A red CI leaves a tag that
-  builds no image, and `den-update` installs the newest signed image for a unit — so a newer tag whose
-  image exists will silently shadow an older one you meant to deploy.
-- Run `npm run lint`, `npm test` and `npm run test:e2e` in `web/` locally before tagging. CI runs them
-  too, but a failure found after the tag is a wasted release.
+- Use `scripts/release.sh X.Y.Z`. It changes only `VERSION`, pushes that commit, and waits for its exact
+  main CI before creating `vX.Y.Z`. Do not bump Cargo.toml: the image supplies `DEN_VERSION` at runtime so
+  a web-only release can reuse the Rust build.
+- Main CI is the release gate and artifact producer: it tests, builds, probes, scans, and records immutable
+  edge/cast candidate digests. A tag only verifies and promotes those digests; it must never rebuild a
+  subtly different artifact. A failed main run creates no tag and cannot move `:latest`.
 - This checkout is shared with other Claude sessions. Commit with an explicit pathspec, never `-a`.

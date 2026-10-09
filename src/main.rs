@@ -33,7 +33,7 @@ mod warnings;
 mod web;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct AppState {
@@ -252,6 +252,21 @@ pub struct AppState {
     /// The authorization server for Den's MCP connector (`oauth.rs`; env `OAUTH_ISSUER`, `OAUTH_SIGNING_KEY`).
     /// `None` turns `/oauth/…` and `/mcp` off.
     pub oauth: Option<oauth::OAuth>,
+}
+
+/// The release carried by the runtime image. Keeping it out of Cargo.toml means a web-only release does not
+/// invalidate the expensive Rust build layer merely to change its tag. Developer builds and tests have no image
+/// metadata, so they retain the package version as a useful fallback.
+pub(crate) fn release_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            std::env::var("DEN_VERSION")
+                .ok()
+                .filter(|version| !version.is_empty())
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+        })
+        .as_str()
 }
 
 impl AppState {
@@ -484,7 +499,7 @@ async fn main() {
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
          web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
          oauth={}",
-        env!("CARGO_PKG_VERSION"),
+        release_version(),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
         on(state.log_requests),
