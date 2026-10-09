@@ -146,6 +146,45 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     return this.#beginConnection(true);
   }
 
+  /**
+   * Replace a shared transport that another logical channel found unusable.
+   *
+   * Content and library live on one physical Worker. Once the library has claimed that Worker, only this
+   * supervisor may advance its generation: it must reopen the encrypted authority and restore subscriptions before
+   * content can use the replacement. This is automatic recovery, so it observes the same restart budget as a
+   * failure reported by the library channel itself.
+   */
+  async recoverSharedTransport(): Promise<LibraryVersion> {
+    this.#assertNotClosed();
+    if (!this.#openOptions)
+      throw new LibraryServiceError({
+        code: 'not-ready',
+        message: 'library service supervisor has not been opened',
+        retryable: false,
+      });
+    if (this.#connecting) return this.#connecting;
+    if (this.#phase !== 'ready' || !this.#active) {
+      if (this.#failure) throw new LibraryServiceError(this.#failure);
+      throw new LibraryServiceError({
+        code: 'not-ready',
+        message: 'library service is not ready',
+        retryable: true,
+      });
+    }
+    if (this.#automaticRestartsLeft === 0) {
+      const failure: LibraryServiceFailure = {
+        code: 'unavailable',
+        message: 'shared Worker transport is unavailable',
+        retryable: true,
+      };
+      this.#setFailed(failure);
+      throw new LibraryServiceError(failure);
+    }
+    this.#automaticRestartsLeft--;
+    this.#disposeActive();
+    return this.#beginConnection(true);
+  }
+
   async command(
     command: LibraryCommand,
     operationId: string = crypto.randomUUID(),
