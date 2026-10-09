@@ -3,6 +3,7 @@
 <script lang="ts" generics="T">
   import { onDestroy, tick, type Snippet } from 'svelte';
   import { cardMaterializationOrder, cardWindow, posterCardWidth } from '../lib/cardWindow';
+  import { keyboardInput } from '../lib/inputModality';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import PosterRow from './PosterRow.svelte';
@@ -124,9 +125,16 @@
       if (movedForward) requestMore();
     };
     const press = (event: PointerEvent) => {
-      const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
+      const target = event.target as Element;
+      // Keep a mounted card alive until its click lands if an intersection update retires the shelf mid-press.
+      // A vacant slot's transparent proxy is already the real title link. Materializing that slot on pointerdown
+      // would replace the proxy between down and up, so mobile browsers correctly cancel its click. This can happen
+      // when content-visibility still paints the prior card for the frame in which an observer reports `false`.
+      if (!target.closest('.card')) return;
+      const slot = target.closest<HTMLElement>('[data-card-index]');
       const index = Number(slot?.dataset.cardIndex);
-      if (Number.isInteger(index) && items[index]) focusedKey = itemKey(items[index]);
+      if (!Number.isInteger(index) || !items[index]) return;
+      focusedKey = itemKey(items[index]);
     };
     // Observer delivery must not read layout-sensitive element geometry or synchronously mount cards. Record only
     // the browser-supplied size, then update in the next frame after the current layout/observer cycle is complete.
@@ -172,11 +180,23 @@
   }
 
   function enterProxy(event: FocusEvent, item: T) {
-    const slot = (event.currentTarget as HTMLElement).parentElement;
+    // Pointer focus is followed by a native link click. Replacing that link here cancels the first tap on mobile.
+    const proxy = event.currentTarget as HTMLElement;
+    // Keyboard and browser-designated visible focus need the full card so the shelf remains visually and
+    // sequentially reachable. The latter also covers accessibility/programmatic focus without guessing its source.
+    if (!keyboardInput() && !proxy.matches(':focus-visible')) return;
+    const slot = proxy.parentElement;
     focusedKey = itemKey(item);
     void tick().then(() =>
       slot?.querySelector<HTMLElement>('.card')?.focus({ preventScroll: true }),
     );
+  }
+
+  function focusWithin(event: FocusEvent, item: T, index: number) {
+    // The proxy's own focus handler distinguishes keyboard traversal from pointer activation. Do not independently
+    // materialize it here or a touch would replace the link between pointerup and click.
+    if ((event.target as Element).classList.contains('proxy')) return;
+    remember(item, index);
   }
 </script>
 
@@ -189,7 +209,7 @@
         class:vacant={!mounted(item, index)}
         data-card-index={index}
         data-route-focus-key={itemKey(item)}
-        onfocusin={() => remember(item, index)}
+        onfocusin={(event) => focusWithin(event, item, index)}
         onfocusout={releaseFocus}
       >
         {#if mounted(item, index)}
