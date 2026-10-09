@@ -33,18 +33,25 @@ import { ContentAuthority } from './contentAuthority';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
 
+let contentAuthorityId = 0;
 const contentForPages = (
   pageSource: Pages,
   atlasFetch?: typeof fetch,
 ): ContentServiceClientPort => {
+  const atlas = atlasFetch ? `/atlas-test-${++contentAuthorityId}` : undefined;
   const authority = new ContentAuthority(
     {
       tmdb: () => undefined,
       omdb: () => undefined,
       contentWarnings: () => undefined,
-      atlas: () => (atlasFetch ? '/atlas' : undefined),
+      atlas: () => atlas,
     },
-    { providerFetch: atlasFetch },
+    {
+      providerFetch:
+        atlasFetch && atlas
+          ? (input, init) => atlasFetch(String(input).replace(atlas, '/atlas'), init)
+          : undefined,
+    },
   );
   return {
     async query(request: { kind: string; [key: string]: unknown }) {
@@ -65,7 +72,7 @@ const contentForPages = (
           };
       }
       if (request.kind === 'titles') return { kind: 'titles', titles: [], retryable: [] };
-      if (request.kind === 'atlas.query' || request.kind === 'atlas.related')
+      if (request.kind.startsWith('atlas.'))
         return authority.query(request as never, new AbortController().signal);
       throw new Error(`unexpected content request ${request.kind}`);
     },
@@ -859,6 +866,7 @@ describe('Explore feeds', () => {
       const row = exploreFeed(['mood-cozy'], 'movie', {
         ...sources(),
         atlas: '/atlas',
+        content: contentForPages(pages, globalThis.fetch),
         title: async (ref) => {
           looked.push(ref.id);
           return ref.id === 2 ? { ...film(2), posterPath: '/b.jpg' } : null;
