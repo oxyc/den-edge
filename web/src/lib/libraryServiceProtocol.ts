@@ -5,7 +5,7 @@
  * implementation that projects them are private to the service.
  */
 
-export const LIBRARY_SERVICE_PROTOCOL = 2 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 3 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -18,6 +18,7 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   retainedTitles: 64,
   routeServices: 64,
   routeEntries: 32,
+  libraryMetadataTitles: 512,
 } as const;
 
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
@@ -31,6 +32,32 @@ export type MediaServerKind = 'jellyfin' | 'plex';
 export interface TitleRef {
   type: MediaType;
   id: number;
+}
+
+/** TMDB display fields returned only for the library's bounded naming pass. */
+export interface LibraryMetadataTitle extends TitleRef {
+  title: string;
+  posterPath?: string;
+  backdropPath?: string;
+  year?: number;
+  releaseDate?: string;
+  rating?: number;
+  ratingSource?: 'tmdb';
+  votes?: number;
+  popularity?: number;
+  countries?: string[];
+  people?: number[];
+  collectionId?: number;
+  genreIds?: number[];
+  originalLanguage?: string;
+  adult?: boolean;
+  imdbId?: string;
+}
+
+export interface LibraryMetadataShape {
+  title: TitleRef & { type: 'tv' };
+  seasons: Array<{ season: number; episodes: number }>;
+  lastAired?: { season: number; episode: number };
 }
 
 export interface EpisodeRef extends TitleRef {
@@ -558,7 +585,8 @@ export type LibraryQuery =
   | { kind: 'download.artwork'; target: DownloadTarget }
   | { kind: 'retained.services.get' }
   | { kind: 'retained.home-continue.get' }
-  | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope };
+  | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope }
+  | { kind: 'library.metadata'; titles: TitleRef[] };
 
 export type LibraryQueryResult =
   | {
@@ -566,6 +594,13 @@ export type LibraryQueryResult =
       action: 'start' | 'resume' | 'next';
       target: (TitleRef & { type: 'movie' }) | EpisodeRef;
       resume: { fraction: number; seconds?: number } | null;
+    }
+  | {
+      kind: 'library.metadata';
+      titles: LibraryMetadataTitle[];
+      shapes: LibraryMetadataShape[];
+      /** Questions that failed transiently and are safe for the page to ask again. */
+      retryable: TitleRef[];
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
   | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }

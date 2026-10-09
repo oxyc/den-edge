@@ -12,6 +12,8 @@ import type {
   LibraryApiKeyService,
   LibraryCommand,
   LibraryObservation,
+  LibraryMetadataTitle,
+  LibraryMetadataShape,
   LibraryOverviewView,
   LibraryPreferencesPatch,
   LibraryQueryResult,
@@ -253,7 +255,7 @@ export class LibraryModel {
     if (!source) {
       source = new SharedSelection<TitleView>(
         this.service,
-        { kind: 'title', title: structuredClone(title) },
+        { kind: 'title', title: wireTitleRef(title) },
         () => this.#titles.delete(key),
       );
       this.#titles.set(key, source);
@@ -269,7 +271,7 @@ export class LibraryModel {
     if (!source) {
       source = new SharedSelection<PresenceView>(
         this.service,
-        { kind: 'presence', titles: structuredClone(titles) as TitleRef[] },
+        { kind: 'presence', titles: titles.map(wireTitleRef) },
         () => this.#presences.delete(key),
       );
       this.#presences.set(key, source);
@@ -298,11 +300,11 @@ export class LibraryModel {
   }
 
   addToWatchlist(title: TitleRef, operationId?: string): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'watchlist.add', title }, operationId);
+    return this.#command({ kind: 'watchlist.add', title: wireTitleRef(title) }, operationId);
   }
 
   removeFromLibrary(title: TitleRef, operationId?: string): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'library.remove', title }, operationId);
+    return this.#command({ kind: 'library.remove', title: wireTitleRef(title) }, operationId);
   }
 
   setWatched(
@@ -310,7 +312,7 @@ export class LibraryModel {
     watched: boolean,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'watched.set', title, watched }, operationId);
+    return this.#command({ kind: 'watched.set', title: wireTitleRef(title), watched }, operationId);
   }
 
   setReaction(
@@ -318,7 +320,10 @@ export class LibraryModel {
     reaction: Reaction | null,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'reaction.set', title, reaction }, operationId);
+    return this.#command(
+      { kind: 'reaction.set', title: wireTitleRef(title), reaction },
+      operationId,
+    );
   }
 
   setEpisodeWatched(
@@ -326,7 +331,10 @@ export class LibraryModel {
     watched: boolean,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'episode-watched.set', episode, watched }, operationId);
+    return this.#command(
+      { kind: 'episode-watched.set', episode: wireEpisodeRef(episode), watched },
+      operationId,
+    );
   }
 
   setSeasonWatched(
@@ -337,7 +345,13 @@ export class LibraryModel {
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
     return this.#command(
-      { kind: 'season-watched.set', title, season, episodes: [...episodes], watched },
+      {
+        kind: 'season-watched.set',
+        title: { type: 'tv', id: title.id },
+        season,
+        episodes: [...episodes],
+        watched,
+      },
       operationId,
     );
   }
@@ -347,14 +361,25 @@ export class LibraryModel {
     dismissed: boolean,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'continue-dismissed.set', title, dismissed }, operationId);
+    return this.#command(
+      { kind: 'continue-dismissed.set', title: wireTitleRef(title), dismissed },
+      operationId,
+    );
   }
 
   recordProgress(
     progress: Omit<Command<'progress.record'>, 'kind'>,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'progress.record', ...progress }, operationId);
+    return this.#command(
+      {
+        kind: 'progress.record',
+        ...progress,
+        title: wireTitleRef(progress.title),
+        ...(progress.episode ? { episode: wireEpisodeRef(progress.episode) } : {}),
+      },
+      operationId,
+    );
   }
 
   patchPreferences(
@@ -500,7 +525,7 @@ export class LibraryModel {
     return this.#command(
       {
         kind: 'download.enqueue',
-        title,
+        title: wireDownloadTitle(title),
         release: {
           identity: release.identity,
           label: release.label,
@@ -517,7 +542,10 @@ export class LibraryModel {
     target: DownloadTarget,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'download.remove', target }, operationId);
+    return this.#command(
+      { kind: 'download.remove', target: wireDownloadTarget(target) },
+      operationId,
+    );
   }
 
   tryDownloadRelease(
@@ -525,22 +553,51 @@ export class LibraryModel {
     identity: string,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'download.release.try', target, identity }, operationId);
+    return this.#command(
+      { kind: 'download.release.try', target: wireDownloadTarget(target), identity },
+      operationId,
+    );
   }
 
   refreshDownloads(target?: DownloadTarget) {
     this.#assertOpen();
-    return this.service.query({ kind: 'download.refresh', ...(target ? { target } : {}) });
+    return this.service.query({
+      kind: 'download.refresh',
+      ...(target ? { target: wireDownloadTarget(target) } : {}),
+    });
+  }
+
+  async libraryMetadata(titles: readonly TitleRef[]): Promise<{
+    titles: LibraryMetadataTitle[];
+    shapes: LibraryMetadataShape[];
+    retryable: TitleRef[];
+  }> {
+    this.#assertOpen();
+    const refs = [
+      ...new Map(
+        titles.map((title) => {
+          const ref = wireTitleRef(title);
+          return [titleKey(ref), ref] as const;
+        }),
+      ).values(),
+    ];
+    const { result } = await this.service.query({ kind: 'library.metadata', titles: refs });
+    if (result.kind !== 'library.metadata') throw wrongQueryResult('library.metadata');
+    return { titles: result.titles, shapes: result.shapes, retryable: result.retryable };
   }
 
   downloadSources(title: DownloadTitleDescriptor, refresh = false) {
     this.#assertOpen();
-    return this.service.query({ kind: 'download.sources', title, ...(refresh ? { refresh } : {}) });
+    return this.service.query({
+      kind: 'download.sources',
+      title: wireDownloadTitle(title),
+      ...(refresh ? { refresh } : {}),
+    });
   }
 
   downloadArtwork(target: DownloadTarget) {
     this.#assertOpen();
-    return this.service.query({ kind: 'download.artwork', target });
+    return this.service.query({ kind: 'download.artwork', target: wireDownloadTarget(target) });
   }
 
   task(
@@ -623,12 +680,20 @@ export class LibraryModel {
     episode?: EpisodeRef,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     this.#assertOpen();
-    return this.service.query({ kind: 'playback.prepare', title, ...(episode ? { episode } : {}) });
+    return this.service.query({
+      kind: 'playback.prepare',
+      title: wireTitleRef(title),
+      ...(episode ? { episode: wireEpisodeRef(episode) } : {}),
+    });
   }
 
   observeTitleShape(shape: Omit<Observation<'title-shape'>, 'kind'>): Promise<LibraryVersion> {
     this.#assertOpen();
-    return this.service.observe({ kind: 'title-shape', ...shape });
+    return this.service.observe({
+      kind: 'title-shape',
+      ...shape,
+      title: { type: 'tv', id: shape.title.id },
+    });
   }
 
   observeLifecycle(lifecycle: Omit<Observation<'lifecycle'>, 'kind'>): Promise<LibraryVersion> {
@@ -843,4 +908,33 @@ function wrongQueryResult(wanted: string): LibraryServiceError {
 
 function titleKey(title: TitleRef): string {
   return `${title.type}:${title.id}`;
+}
+
+/** TypeScript permits richer display objects here; the strict service wire deliberately does not. */
+function wireTitleRef(title: TitleRef): TitleRef {
+  return { type: title.type, id: title.id };
+}
+
+function wireEpisodeRef(episode: EpisodeRef): EpisodeRef {
+  return {
+    type: 'tv',
+    id: episode.id,
+    season: episode.season,
+    episode: episode.episode,
+  };
+}
+
+function wireDownloadTarget(target: DownloadTarget): DownloadTarget {
+  return target.type === 'movie' ? { type: 'movie', id: target.id } : wireEpisodeRef(target);
+}
+
+function wireDownloadTitle(title: DownloadTitleDescriptor): DownloadTitleDescriptor {
+  return {
+    target: wireDownloadTarget(title.target),
+    name: title.name,
+    ...(title.imdbId !== undefined ? { imdbId: title.imdbId } : {}),
+    ...(title.posterPath !== undefined ? { posterPath: title.posterPath } : {}),
+    ...(title.stillPath !== undefined ? { stillPath: title.stillPath } : {}),
+    ...(title.originalLanguage !== undefined ? { originalLanguage: title.originalLanguage } : {}),
+  };
 }

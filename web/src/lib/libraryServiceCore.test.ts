@@ -164,6 +164,79 @@ describe('LibraryServiceCore', () => {
     expect(held.operations).toEqual(['operation-1', 'operation-2']);
   });
 
+  it('does not hold the command actor lane while library metadata waits on the provider', async () => {
+    let release!: () => void;
+    const provider = new Promise<void>((resolve) => (release = resolve));
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery) {
+        if (query.kind !== 'library.metadata') throw new Error('unsupported query');
+        await provider;
+        return { kind: 'library.metadata' as const, titles: [], shapes: [], retryable: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+
+    const metadata = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'metadata-1',
+      query: { kind: 'library.metadata', titles: [title] },
+    });
+    await Promise.resolve();
+    const command = core.dispatch({
+      type: 'command',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'command-during-metadata',
+      operationId: 'operation-during-metadata',
+      command: { kind: 'watchlist.add', title },
+    });
+
+    await expect(command).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+    release();
+    await expect(metadata).resolves.toEqual([
+      expect.objectContaining({
+        type: 'query-result',
+        result: expect.objectContaining({ kind: 'library.metadata' }),
+      }),
+    ]);
+  });
+
+  it('drains detached metadata work before closing its authority', async () => {
+    let release!: () => void;
+    const provider = new Promise<void>((resolve) => (release = resolve));
+    const closed = vi.fn();
+    const held = {
+      ...authority(),
+      close: closed,
+      async query(query: LibraryQuery) {
+        if (query.kind !== 'library.metadata') throw new Error('unsupported query');
+        await provider;
+        return { kind: 'library.metadata' as const, titles: [], shapes: [], retryable: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const metadata = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'metadata-before-close',
+      query: { kind: 'library.metadata', titles: [title] },
+    });
+    await Promise.resolve();
+
+    const closing = core.close();
+    await Promise.resolve();
+    expect(closed).not.toHaveBeenCalled();
+    release();
+    await metadata;
+    await closing;
+    expect(closed).toHaveBeenCalledOnce();
+  });
+
   it('rejects an operation ID reused for different intent', async () => {
     const core = new LibraryServiceCore(async () => authority(), 'instance-1');
     await core.dispatch(hello);

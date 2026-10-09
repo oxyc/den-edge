@@ -41,29 +41,44 @@ export interface Details {
   shape?: Shape;
 }
 
+export type DetailsResult =
+  { kind: 'found'; details: Details } | { kind: 'missing' } | { kind: 'retryable' };
+
+/** Distinguish an absent title from a relay/provider failure so library hydration can retry the latter. */
+export async function fetchDetailsResult(
+  ref: { type: MediaType; id: number },
+  key: string,
+  fetchImpl: typeof fetch = tmdbFetch,
+): Promise<DetailsResult> {
+  let details: Record<string, unknown>;
+  try {
+    const append = ref.type === 'tv' ? 'credits,external_ids' : 'credits';
+    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${append}`;
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
+    if (res.status === 404) return { kind: 'missing' };
+    if (!res.ok) return { kind: 'retryable' };
+    details = (await res.json()) as Record<string, unknown>;
+  } catch {
+    return { kind: 'retryable' };
+  }
+  const title = toTitle(ref, details);
+  if (!title) return { kind: 'missing' };
+  return {
+    kind: 'found',
+    details: ref.type === 'tv' ? { title, shape: seriesShape(details) } : { title },
+  };
+}
+
 export async function fetchDetails(
   ref: { type: MediaType; id: number },
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<Details | null> {
-  let details: Record<string, unknown>;
-  try {
-    // Credits ride along with the display: naming a title is the one fetch made for everything in the library,
-    // and who made it is wanted by the billboard's taste. Only the head of the billing is read, so a series takes
-    // its latest season's credits: every season's (`aggregate_credits`, which the detail page shows) runs to every
-    // guest actor, about 13 KB a series compressed. A film's details carry its IMDb id already; a series' come in
-    // `external_ids`, asked for here so a poster's availability needs no lookup of its own.
-    const append = ref.type === 'tv' ? 'credits,external_ids' : 'credits';
-    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${append}`;
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) return null;
-    details = (await res.json()) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  const title = toTitle(ref, details);
-  if (!title) return null;
-  return ref.type === 'tv' ? { title, shape: seriesShape(details) } : { title };
+  // Credits ride along with the display: naming a title is the one fetch made for everything in the library,
+  // and who made it is wanted by the billboard's taste. Only the head of the billing is read, so a series takes
+  // its latest season's credits. A film's details carry its IMDb id already; a series' come in `external_ids`.
+  const result = await fetchDetailsResult(ref, key, fetchImpl);
+  return result.kind === 'found' ? result.details : null;
 }
 
 export async function fetchTitle(

@@ -126,6 +126,16 @@ class FakeService {
         },
         version: version(6),
       };
+    if (query.kind === 'library.metadata')
+      return {
+        result: {
+          kind: 'library.metadata',
+          titles: query.titles.map((title) => ({ ...title, title: `#${title.id}` })),
+          shapes: [],
+          retryable: [],
+        },
+        version: version(6),
+      };
     if (query.kind !== 'playback.prepare') throw new Error('unsupported query in fake service');
     return {
       result: {
@@ -539,6 +549,63 @@ it('forwards semantic commands, playback queries, and observations without UI po
     { kind: 'lifecycle', visible: true, online: true, playbackActive: false },
     { kind: 'foreground-ready' },
   ]);
+  model.close();
+});
+
+it('narrows rich display titles to the strict service wire references', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const title = { type: 'tv' as const, id: 11, title: 'Rich title', year: 2026 };
+  const episode = { ...title, season: 2, episode: 3, name: 'Rich episode' };
+
+  const lease = model.title(title);
+  const presence = model.presence([title]);
+  await model.setContinueDismissed(title, true, 'dismiss-rich-title');
+  await model.setReaction(title, 'love', 'react-rich-title');
+  await model.setEpisodeWatched(episode, true, 'watch-rich-episode');
+  await model.preparePlayback(title, episode);
+  await expect(model.libraryMetadata([title, title])).resolves.toEqual({
+    titles: [{ type: 'tv', id: 11, title: '#11' }],
+    shapes: [],
+    retryable: [],
+  });
+  await model.observeTitleShape({
+    title,
+    seasons: [{ season: 2, episodes: 8 }],
+  });
+
+  const ref = { type: 'tv' as const, id: 11 };
+  const episodeRef = { ...ref, season: 2, episode: 3 };
+  expect(service.subscriptions.slice(-2).map(({ selection }) => selection)).toEqual([
+    { kind: 'title', title: ref },
+    { kind: 'presence', titles: [ref] },
+  ]);
+  expect(service.commands.slice(-3)).toEqual([
+    {
+      command: { kind: 'continue-dismissed.set', title: ref, dismissed: true },
+      operationId: 'dismiss-rich-title',
+    },
+    {
+      command: { kind: 'reaction.set', title: ref, reaction: 'love' },
+      operationId: 'react-rich-title',
+    },
+    {
+      command: { kind: 'episode-watched.set', episode: episodeRef, watched: true },
+      operationId: 'watch-rich-episode',
+    },
+  ]);
+  expect(service.queries.at(-1)).toEqual({
+    kind: 'library.metadata',
+    titles: [ref],
+  });
+  expect(service.observations.at(-1)).toEqual({
+    kind: 'title-shape',
+    title: ref,
+    seasons: [{ season: 2, episodes: 8 }],
+  });
+  lease.release();
+  presence.release();
   model.close();
 });
 

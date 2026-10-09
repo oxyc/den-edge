@@ -199,7 +199,9 @@
       }
 
       [data-den-early-actions] {
-        height: 48px;
+        /* The live controls may occupy a second 48px row. Reserve both rows before hydration so adding the
+             library actions cannot lift the retained title and overview by one control row. */
+        height: 106px;
         margin-top: 4px;
       }
 
@@ -259,7 +261,7 @@
          before the module graph: the image request then overlaps the app download instead of starting after it.
          The CSP permits only this script's hash; changing these bytes also requires changing src/web.rs. -->
     <script data-den-early-hero>
-      void (async () => {
+      void (() => {
         try {
           const fragment = location.hash.replace(/^#/, '');
           const [legacyPage, ...legacyRest] = fragment.split('/');
@@ -323,12 +325,27 @@
             (localStorage.getItem('den.browsing') === '1'
               ? localStorage.getItem('den.localLibrary')
               : null);
-          if (!identity || !crypto.subtle) return;
-          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
-          const id = Array.from(new Uint8Array(digest), (byte) =>
-            byte.toString(16).padStart(2, '0'),
-          ).join('');
-          const key = `den.hero-lead.v1.${id}.${fresh ? 'fresh.' : ''}${facet}`;
+          if (!identity) return;
+          const suffix = `${fresh ? 'fresh.' : ''}${facet}`;
+          const pointerName = `den.hero-lead.current.v1.${suffix}`;
+          let pointer;
+          try {
+            pointer = JSON.parse(localStorage.getItem(pointerName) ?? 'null');
+          } catch {
+            localStorage.removeItem(pointerName);
+            return;
+          }
+          if (
+            !pointer ||
+            pointer.identity !== identity ||
+            typeof pointer.key !== 'string' ||
+            !/^den\.hero-lead\.v1\.[0-9a-f]{64}\.(?:fresh\.)?(?:all|movie|tv)$/.test(pointer.key) ||
+            !pointer.key.endsWith(`.${suffix}`)
+          ) {
+            localStorage.removeItem(pointerName);
+            return;
+          }
+          const key = pointer.key;
           const raw = localStorage.getItem(key);
           const kept = raw ? JSON.parse(raw) : null;
           const age = Date.now() - (kept?.at ?? NaN);
@@ -339,6 +356,7 @@
             !(age >= 0 && age < 7 * 86_400_000)
           ) {
             if (raw) localStorage.removeItem(key);
+            localStorage.removeItem(pointerName);
             return;
           }
           const bounded = (value, max) =>

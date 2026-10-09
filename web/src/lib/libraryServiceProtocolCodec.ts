@@ -13,6 +13,8 @@ import {
   type LibraryPreferencesPatch,
   type LibraryQuery,
   type LibraryQueryResult,
+  type LibraryMetadataShape,
+  type LibraryMetadataTitle,
   type LibrarySelection,
   type LibrarySelectionValue,
   type LibrarySessionStatus,
@@ -74,6 +76,94 @@ function titleRef(value: unknown): value is TitleRef {
     integer(value.id) &&
     value.id > 0
   );
+}
+
+export function isLibraryMetadataTitle(value: unknown): value is LibraryMetadataTitle {
+  return (
+    record(value) &&
+    exact(value, [
+      'type',
+      'id',
+      'title',
+      'posterPath',
+      'backdropPath',
+      'year',
+      'releaseDate',
+      'rating',
+      'ratingSource',
+      'votes',
+      'popularity',
+      'countries',
+      'people',
+      'collectionId',
+      'genreIds',
+      'originalLanguage',
+      'adult',
+      'imdbId',
+    ]) &&
+    titleRef({ type: value.type, id: value.id }) &&
+    boundedText(value.title, 1_024) &&
+    optional(value.posterPath, smallText) &&
+    optional(value.backdropPath, smallText) &&
+    optional(value.year, integer) &&
+    optional(
+      value.releaseDate,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(candidate),
+    ) &&
+    optional(value.rating, finite) &&
+    optional(value.ratingSource, (candidate): candidate is 'tmdb' => candidate === 'tmdb') &&
+    optional(value.votes, integer) &&
+    optional(value.popularity, finite) &&
+    optional(
+      value.countries,
+      (candidate): candidate is string[] => list(candidate, countryCode, 32) && unique(candidate),
+    ) &&
+    optional(value.people, (candidate): candidate is number[] => positiveIntegerList(candidate)) &&
+    optional(value.collectionId, positiveInteger) &&
+    optional(value.genreIds, (candidate): candidate is number[] =>
+      positiveIntegerList(candidate),
+    ) &&
+    optional(value.originalLanguage, languageCode) &&
+    optional(value.adult, bool) &&
+    optional(
+      value.imdbId,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && /^tt\d+$/.test(candidate),
+    )
+  );
+}
+
+function libraryMetadataShape(value: unknown): value is LibraryMetadataShape {
+  if (
+    !record(value) ||
+    !exact(value, ['title', 'seasons', 'lastAired']) ||
+    !titleRef(value.title) ||
+    value.title.type !== 'tv' ||
+    !list(
+      value.seasons,
+      (candidate): candidate is { season: number; episodes: number } =>
+        record(candidate) &&
+        exact(candidate, ['season', 'episodes']) &&
+        integer(candidate.season) &&
+        integer(candidate.episodes),
+      LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons,
+    ) ||
+    !unique(value.seasons, ({ season }) => String(season)) ||
+    !optional(
+      value.lastAired,
+      (candidate): candidate is { season: number; episode: number } =>
+        record(candidate) &&
+        exact(candidate, ['season', 'episode']) &&
+        positiveInteger(candidate.season) &&
+        positiveInteger(candidate.episode),
+    )
+  )
+    return false;
+  const lastAired = value.lastAired as { season: number; episode: number } | undefined;
+  if (!lastAired) return true;
+  const episodes = value.seasons.find(({ season }) => season === lastAired.season)?.episodes;
+  return episodes !== undefined && lastAired.episode <= episodes;
 }
 
 function episodeRef(value: unknown): value is TitleRef & {
@@ -668,6 +758,12 @@ function query(value: unknown): value is LibraryQuery {
     return exact(value, ['kind']);
   if (value.kind === 'retained.billboard.get')
     return exact(value, ['kind', 'scope']) && retainedBillboardScope(value.scope);
+  if (value.kind === 'library.metadata')
+    return (
+      exact(value, ['kind', 'titles']) &&
+      list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
+      unique(value.titles, (title) => `${title.type}:${title.id}`)
+    );
   return (
     value.kind === 'playback.prepare' &&
     exact(value, ['kind', 'title', 'episode']) &&
@@ -1353,6 +1449,20 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify')
     return exact(value, ['kind', 'matches']) && bool(value.matches);
+  if (value.kind === 'library.metadata')
+    return (
+      exact(value, ['kind', 'titles', 'shapes', 'retryable']) &&
+      list(
+        value.titles,
+        isLibraryMetadataTitle,
+        LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles,
+      ) &&
+      unique(value.titles, (title) => `${title.type}:${title.id}`) &&
+      list(value.shapes, libraryMetadataShape, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
+      unique(value.shapes, (shape) => `${shape.title.type}:${shape.title.id}`) &&
+      list(value.retryable, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
+      unique(value.retryable, (title) => `${title.type}:${title.id}`)
+    );
   if (value.kind === 'relay.membership') {
     const capability = value.capability;
     return (

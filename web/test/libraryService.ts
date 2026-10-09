@@ -8,7 +8,7 @@ import { LibraryLogAuthority } from '../src/lib/libraryLogAuthority';
 import { LibraryModel } from '../src/lib/libraryModel.svelte';
 import { LibrarySession } from '../src/lib/librarySession.svelte';
 import { LibraryServiceError } from '../src/lib/libraryServiceClient';
-import type { LibrarySelectionScope } from '../src/lib/libraryServiceCore';
+import type { LibraryAuthorityEvent, LibrarySelectionScope } from '../src/lib/libraryServiceCore';
 import type {
   DownloadTarget,
   LibraryCommand,
@@ -35,6 +35,7 @@ class FixtureService {
   #nextSubscription = 0;
   #revision = 0;
   #ready = false;
+  readonly #stopAuthority: () => void;
 
   constructor(
     readonly authority: LibraryLogAuthority,
@@ -42,7 +43,9 @@ class FixtureService {
     private failOpenOnce = false,
     private openGate?: Promise<void>,
     private readonly openFailureMessage = 'fixture library service did not start',
-  ) {}
+  ) {
+    this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
+  }
 
   get version(): LibraryVersion {
     return { instance: 'fixture', generation: this.authority.generation, revision: this.#revision };
@@ -145,7 +148,14 @@ class FixtureService {
     this.#ready = false;
     this.#subscriptions.clear();
     this.#statusListeners.clear();
+    this.#stopAuthority();
     this.authority.close();
+  }
+
+  #forwardAuthorityEvent(event: LibraryAuthorityEvent) {
+    if (event.kind !== 'changed') return;
+    this.#revision++;
+    void this.publish(event.affected);
   }
 
   async #publishOne(

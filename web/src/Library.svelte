@@ -52,7 +52,7 @@
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
-  import { fetchDetails, fetchTitle } from './lib/tmdb';
+  import { fetchTitle } from './lib/tmdb';
   import {
     billboardScope,
     displayableKept,
@@ -218,8 +218,7 @@
   $effect(() => {
     const view = overview;
     const continued = continueView;
-    const key = tmdbKey;
-    if (!model || !view || !continued || !key) {
+    if (!model || !view || !continued) {
       shelvesReady = model === null;
       shelfPlan = null;
       return;
@@ -235,7 +234,7 @@
       ...view.seeds.watched,
       ...view.seeds.watchlisted,
     ];
-    void nameLibraryTitles(session, refs as TitleRef[], key).finally(() => {
+    void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
       shelvesReady = true;
       void model.retainHomeContinue(continued.items.length > 0).catch(warnKeep);
@@ -267,12 +266,11 @@
   $effect(() => {
     const history = historyLease?.snapshot.value;
     const view = overview;
-    if (!active || route.page !== 'watchlist' || !view || !history || !tmdbKey) return;
-    void nameLibraryTitles(
-      session,
-      [...view.watchlist, ...history.items.map(({ title }) => title)] as TitleRef[],
-      tmdbKey,
-    );
+    if (!active || route.page !== 'watchlist' || !view || !history) return;
+    void nameLibraryTitles(session, [
+      ...view.watchlist,
+      ...history.items.map(({ title }) => title),
+    ] as TitleRef[]);
   });
 
   const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
@@ -339,8 +337,7 @@
   // request when an idle slot got there first.
   $effect(() => {
     const opening = page;
-    const key = tmdbKey;
-    if (active && opening && key) void promoteLibraryTitle(session, opening, key);
+    if (active && opening && model) void promoteLibraryTitle(session, opening);
   });
 
   // A screen Home doesn't draw loads when this page is it (`screens.svelte.ts`).
@@ -452,19 +449,12 @@
     if (!model) return;
     try {
       if (title.type === 'tv') {
-        const tv = { type: 'tv' as const, id: title.id };
-        const shape =
-          session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
+        if (!session.shapes.has(titleKey(title))) await promoteLibraryTitle(session, title);
+        const shape = session.shapes.get(titleKey(title));
         if (!shape) {
           failure = 'Couldn’t load the episodes. Nothing was marked Seen.';
           return false;
         }
-        session.publishLibraryMetadata([], [[titleKey(title), shape]]);
-        await model.observeTitleShape({
-          title: tv,
-          seasons: [...shape.counts].map(([season, episodes]) => ({ season, episodes })),
-          ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
-        });
       }
       return await runCommand(() => model.setWatched(title, seen), title);
     } catch {
@@ -645,9 +635,9 @@
     if (!target || target.season === undefined || target.episode === undefined) return;
     const at = { season: target.season, episode: target.episode };
     void (async () => {
-      const shape =
-        session.shapes.get(titleKey(target.title)) ??
-        (await fetchDetails(target.title, tmdbKey))?.shape;
+      if (!session.shapes.has(titleKey(target.title)))
+        await promoteLibraryTitle(session, target.title);
+      const shape = session.shapes.get(titleKey(target.title));
       const next = shape && episodeAfter(at, shape);
       if (playing === target && next && isAired(next, shape.lastAired))
         following = { title: target.title, ...next };
@@ -702,7 +692,7 @@
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
     // Promote a watched-history title at pointer intent, before navigation mounts its detail route. The naming
     // run owns de-duplication, so the route effect and an already-running idle request join this same key.
-    if (tmdbKey) void promoteLibraryTitle(session, title, tmdbKey);
+    if (model) void promoteLibraryTitle(session, title);
     // The page itself, before its trailer. `preloadScreens` fetches this chunk once Home is idle, so
     // it is usually resident already — but a press within the first second of a visit landed on the
     // route-level spinner while it downloaded. Idempotent: a second call joins the first.
@@ -937,13 +927,15 @@
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
   const servicePicks = $derived(prefs.servicesConfigured ? prefs.services : GUEST_PICKS);
+  /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
+  let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
   let directories = $state<Record<string, Service[]>>({});
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
-    if (!tmdbKey) return;
+    if (!tmdbKey || !serviceDirectoriesAdmitted) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
@@ -954,9 +946,8 @@
             directories = { ...directories, [country]: listed };
           },
           () => {
-            // No directory, no tiles — but the country is put back, so the next visit to Home asks again rather
-            // than leaving the row empty for the rest of the session over one failed request.
-            delete askedFor[country];
+            // One request per country per visit includes failures. Leaving it admitted lets `naming` settle to the
+            // reserved unavailable row; a later visit gets a fresh page and asks again.
           },
         )
         .finally(() => naming--);
@@ -1499,7 +1490,19 @@
       <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}
-      <ServicesRow {services} pending={naming ? servicePicks.length : 0} onintent={primeService} />
+      <ServicesRow
+        {services}
+        pending={serviceDirectoriesAdmitted
+          ? naming
+            ? servicePicks.length
+            : 0
+          : servicePicks.length}
+        empty={serviceDirectoriesAdmitted && !naming && !services.length
+          ? 'Services unavailable'
+          : undefined}
+        onvisible={() => (serviceDirectoriesAdmitted = true)}
+        onintent={primeService}
+      />
     {/if}
     <Browse {rows} shown={browseShown} />
   {/if}

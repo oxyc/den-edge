@@ -3,6 +3,7 @@
 // TV moves the library into the TV's and drops this one.
 
 import { forgetLibrary } from './localVault';
+import { forgetHeroLeadPointers } from './heroLeadPointer';
 
 const STORAGE_KEY = 'den.localLibrary';
 const PENDING_MERGES_KEY = 'den.localLibraryMerges';
@@ -48,6 +49,7 @@ export async function dropLocalLibrary(
   } catch {
     return false;
   }
+  forgetHeroLeadPointers(expectedKey, storage);
   // The semantic merge already forgot this source. This is a best-effort cleanup for an absent/empty source.
   await forgetLibrary(expectedKey).catch(() => {});
   return true;

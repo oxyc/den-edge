@@ -1349,7 +1349,9 @@
   .actions {
     display: flex;
     flex-wrap: wrap;
+    align-content: flex-end;
     gap: 10px;
+    min-height: 106px;
     margin-top: 4px;
   }
 

@@ -4,6 +4,7 @@
 // and that answer takes every slide after the one on screen and is kept for the next visit's first paint.
 
 import type { MediaType, Title } from './library';
+import { keepHeroLeadPointer, pointedHeroLeadKey, removeHeroLeadPointer } from './heroLeadPointer';
 import type { Prefs } from './prefs';
 import { relayFetch } from './relayFetch';
 import { ATLAS } from './scout';
@@ -462,11 +463,15 @@ export async function keepPersonalBackdrop(
   try {
     const key = await leadKey(identity, facet, fresh);
     if (!key || !storage) return;
-    if (!backdropPath(path)) return storage.removeItem(key);
+    if (!backdropPath(path)) {
+      removeHeroLeadPointer(identity, facet, fresh, key, storage);
+      return storage.removeItem(key);
+    }
     storage.setItem(
       key,
       JSON.stringify({ at, path, ...(copy ? { copy } : {}) } satisfies KeptLead),
     );
+    keepHeroLeadPointer(identity, facet, fresh, key, storage);
   } catch {
     // Storage and Web Crypto may be unavailable in a private or constrained browser; normal billboard loading wins.
   }
@@ -582,7 +587,11 @@ async function clearPersonalBackdrop(
 ): Promise<boolean> {
   try {
     const key = await leadKey(identity, facet, fresh);
-    if (key && storage) storage.removeItem(key);
+    if (key && storage) {
+      // The public pointer goes first: interruption may cost a preload, but cannot name the old ranking.
+      removeHeroLeadPointer(identity, facet, fresh, key, storage);
+      storage.removeItem(key);
+    }
     return true;
   } catch {
     return false;
@@ -678,13 +687,16 @@ export async function preloadPersonalBackdrop(
   const facet = facetAt(page);
   if (!enabled || !identity || facet === undefined) return null;
   try {
-    const key = await leadKey(identity, facet, fresh);
+    const key = pointedHeroLeadKey(identity, facet, fresh, storage);
     const raw = key && storage?.getItem(key);
     const kept: unknown = raw ? JSON.parse(raw) : null;
     const record = kept as Partial<KeptLead> | null;
     const age = now - (record?.at ?? NaN);
     if (!key || !record || !backdropPath(record.path) || !(age >= 0 && age < KEPT_DISPLAY_MS)) {
-      if (key && raw) storage?.removeItem(key);
+      if (key) {
+        removeHeroLeadPointer(identity, facet, fresh, key, storage);
+        if (raw) storage?.removeItem(key);
+      }
       return null;
     }
     const url = billboardBackdropURL(record.path);

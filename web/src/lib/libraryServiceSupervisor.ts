@@ -53,8 +53,12 @@ interface Subscription {
   selection: LibrarySelection;
   listener: (snapshot: LibrarySelectionSnapshot) => void;
   snapshot: LibrarySelectionSnapshot;
+  /** Registered before open: the model's roots must all replace before the connection is ready. */
+  required: boolean;
+  staged?: { token: number; snapshot: LibrarySelectionSnapshot };
   stopClient?: () => void;
   seenToken?: number;
+  attemptedToken?: number;
 }
 
 type Phase = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'failed' | 'closed';
@@ -190,6 +194,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     const subscription: Subscription = {
       selection: structuredClone(selection),
       listener,
+      required: this.#openOptions === undefined,
       snapshot: {
         selection: structuredClone(selection),
         connection,
@@ -306,11 +311,26 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         );
     }
 
-    await Promise.all(
-      [...this.#subscriptions].map(([id, subscription]) =>
-        this.#bindSubscription(id, subscription, active),
-      ),
-    );
+    // A retained route can acquire another selection while the initial Worker replies are still arriving. Drain
+    // every subscription added during that wait before publishing ready; once a pass finds none, JavaScript cannot
+    // interleave another subscriber before the synchronous phase change below.
+    for (;;) {
+      const unbound = [...this.#subscriptions].filter(
+        ([, subscription]) => subscription.attemptedToken !== active.token,
+      );
+      if (!unbound.length) break;
+      await Promise.all(
+        unbound.map(async ([id, subscription]) => {
+          try {
+            await this.#bindSubscription(id, subscription, active);
+          } catch (error) {
+            if (subscription.required) throw error;
+            if (this.#active !== active || this.#subscriptions.get(id) !== subscription) return;
+            this.#replaceSnapshot(subscription, 'failed', failureFrom(error));
+          }
+        }),
+      );
+    }
     if (this.#active !== active || active.failure)
       throw new LibraryServiceError(
         active.failure ?? {
@@ -325,6 +345,14 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     this.#version = readyVersion;
     this.#failure = undefined;
     this.#automaticRestartsLeft = this.#maxAutomaticRestarts;
+    // Initial Worker replies can arrive in separate page tasks. Keep their complete replacement snapshots private
+    // until every subscription is bound, then expose the connection in one synchronous publication turn.
+    for (const subscription of this.#subscriptions.values()) {
+      if (subscription.staged?.token !== active.token) continue;
+      subscription.snapshot = subscription.staged.snapshot;
+      subscription.staged = undefined;
+      this.#notifySubscription(subscription);
+    }
     this.#emitStatus({ kind: 'ready', version: readyVersion });
     return readyVersion;
   }
@@ -337,18 +365,22 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     subscription.stopClient?.();
     subscription.stopClient = undefined;
     subscription.seenToken = undefined;
+    subscription.attemptedToken = active.token;
     const stop = await active.client.subscribe(subscription.selection, (value, version) => {
       if (this.#active !== active || this.#subscriptions.get(id) !== subscription) return;
       subscription.seenToken = active.token;
       active.version = newerVersion(active.version, version);
       this.#version = newerVersion(this.#version, version);
-      subscription.snapshot = {
+      const snapshot: LibrarySelectionSnapshot = {
         selection: subscription.selection,
         connection: 'ready',
         value,
         version,
       };
-      this.#notifySubscription(subscription);
+      if (this.#phase === 'ready') {
+        subscription.snapshot = snapshot;
+        this.#notifySubscription(subscription);
+      } else subscription.staged = { token: active.token, snapshot };
     });
     if (this.#active !== active || this.#subscriptions.get(id) !== subscription) {
       stop();
@@ -398,6 +430,8 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     for (const subscription of this.#subscriptions.values()) {
       subscription.stopClient = undefined;
       subscription.seenToken = undefined;
+      subscription.attemptedToken = undefined;
+      if (subscription.staged?.token === active.token) subscription.staged = undefined;
     }
   }
 

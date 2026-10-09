@@ -316,11 +316,22 @@ describe('personal backdrop preload', () => {
     return { made, start: (url: string) => made.push(url) };
   };
 
-  it('warms only the exact fresh mode, facet and library, without storing the library key', async () => {
+  it('warms only the exact fresh mode, facet and library named by the synchronous pointer', async () => {
     const { values, storage } = memory();
     await keepPersonalBackdrop('library-secret', null, true, '/personal-lead.jpg', now, storage);
     expect([...values.keys()].join()).not.toContain('library-secret');
-    expect([...values.values()]).toEqual([JSON.stringify({ at: now, path: '/personal-lead.jpg' })]);
+    expect([...values.entries()]).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining([
+          expect.stringMatching(/^den\.hero-lead\.v1\.[0-9a-f]{64}\.fresh\.all$/),
+          JSON.stringify({ at: now, path: '/personal-lead.jpg' }),
+        ]),
+        expect.arrayContaining([
+          'den.hero-lead.current.v1.fresh.all',
+          expect.stringContaining('"identity":"library-secret"'),
+        ]),
+      ]),
+    );
 
     for (const [page, identity, fresh, enabled] of [
       ['/', 'another-library', true, true],
@@ -431,7 +442,11 @@ describe('personal backdrop preload', () => {
       now + 2,
       storage,
     );
-    expect([...values.values()].map((value) => JSON.parse(value))).toEqual([
+    expect(
+      [...values]
+        .filter(([key]) => key.startsWith('den.hero-lead.v1.'))
+        .map(([, value]) => JSON.parse(value)),
+    ).toEqual([
       {
         at: now + 2,
         path: '/new.jpg',
@@ -462,7 +477,11 @@ describe('personal backdrop preload', () => {
       now + 86_400_000,
       storage,
     );
-    expect([...values.values()].map((value) => JSON.parse(value))).toEqual([
+    expect(
+      [...values]
+        .filter(([key]) => key.startsWith('den.hero-lead.v1.'))
+        .map(([, value]) => JSON.parse(value)),
+    ).toEqual([
       {
         at: now,
         path: '/lead.jpg',

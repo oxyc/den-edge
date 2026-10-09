@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { blankTitle } from './actions';
 import { openClockStore, type ClockStore } from './clockStore';
 import { DownloadCoordinator } from './downloadCoordinator';
@@ -47,6 +47,7 @@ function authority(
   clock: ClockStore,
   mode: 'online' | 'local',
   fetchImpl?: typeof fetch,
+  tmdbFetchImpl?: typeof fetch,
 ) {
   const downloads = new DownloadCoordinator(log, clock, {
     prepare: async () => ({ state: 'preparing', progress: 0 }),
@@ -79,7 +80,7 @@ function authority(
     }),
     ticket: (url) => (url.startsWith('/scout/') ? url : null),
   });
-  return new LibraryLogAuthority(log, clock, { mode, downloads, fetchImpl });
+  return new LibraryLogAuthority(log, clock, { mode, downloads, fetchImpl, tmdbFetchImpl });
 }
 
 describe('LibraryLogAuthority', () => {
@@ -169,6 +170,114 @@ describe('LibraryLogAuthority', () => {
       kind: 'retained.billboard',
       scope: sharedScope,
       value: { kind: 'shared', titles: sharedTitles },
+    });
+  });
+
+  it('fetches a bounded library metadata batch with its private TMDB key and owns TV shapes', async () => {
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'metadata-authority-test-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const asked: string[] = [];
+    const tmdbFetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      asked.push(url);
+      return new Response(
+        JSON.stringify(
+          url.includes('/tv/')
+            ? {
+                id: 11,
+                name: 'Eleven',
+                first_air_date: '2020-01-02',
+                seasons: [{ season_number: 1, episode_count: 8 }],
+                last_episode_to_air: { season_number: 1, episode_number: 7 },
+              }
+            : { id: 7, title: 'Seven', release_date: '' },
+        ),
+        { status: 200 },
+      );
+    };
+    const service = authority(log, clock, 'local', undefined, tmdbFetchImpl);
+    await service.command({ kind: 'api-key.set', service: 'tmdb', value: 'worker-secret' }, 'key');
+    const events: unknown[] = [];
+    service.listen((event) => events.push(event));
+
+    await expect(
+      service.query({ kind: 'library.metadata', titles: [movie, series] }),
+    ).resolves.toEqual({
+      kind: 'library.metadata',
+      titles: [
+        { ...movie, title: 'Seven' },
+        { ...series, title: 'Eleven', year: 2020, releaseDate: '2020-01-02' },
+      ],
+      shapes: [
+        {
+          title: series,
+          seasons: [{ season: 1, episodes: 8 }],
+          lastAired: { season: 1, episode: 7 },
+        },
+      ],
+      retryable: [],
+    });
+    expect(asked).toHaveLength(2);
+    expect(asked.every((url) => url.includes('api_key=worker-secret'))).toBe(true);
+    expect(events).toEqual([
+      {
+        kind: 'changed',
+        affected: [{ kind: 'title', title: series }, { kind: 'continue' }],
+      },
+    ]);
+
+    events.length = 0;
+    await service.query({ kind: 'library.metadata', titles: [series] });
+    expect(events).toEqual([]);
+  });
+
+  it('joins overlapping metadata flights and reports transient provider failures for retry', async () => {
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'metadata-flight-test-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let requests = 0;
+    const tmdbFetchImpl: typeof fetch = async (input) => {
+      requests++;
+      if (String(input).includes('/movie/8?')) return new Response('{}', { status: 503 });
+      await gate;
+      return new Response(JSON.stringify({ id: 7, title: 'Seven' }), { status: 200 });
+    };
+    const service = authority(log, clock, 'local', undefined, tmdbFetchImpl);
+
+    const first = service.query({ kind: 'library.metadata', titles: [movie] });
+    const overlapping = service.query({ kind: 'library.metadata', titles: [movie] });
+    await vi.waitFor(() => expect(requests).toBe(1));
+    release();
+    await expect(Promise.all([first, overlapping])).resolves.toEqual([
+      {
+        kind: 'library.metadata',
+        titles: [{ ...movie, title: 'Seven' }],
+        shapes: [],
+        retryable: [],
+      },
+      {
+        kind: 'library.metadata',
+        titles: [{ ...movie, title: 'Seven' }],
+        shapes: [],
+        retryable: [],
+      },
+    ]);
+
+    const failed = { type: 'movie' as const, id: 8 };
+    await expect(service.query({ kind: 'library.metadata', titles: [failed] })).resolves.toEqual({
+      kind: 'library.metadata',
+      titles: [],
+      shapes: [],
+      retryable: [failed],
     });
   });
 

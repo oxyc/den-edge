@@ -1,5 +1,11 @@
 import type { Shape, Title } from './library';
 import type { LibraryModel } from './libraryModel.svelte';
+import type {
+  LibraryMetadataShape,
+  LibraryMetadataTitle,
+  TitleRef,
+} from './libraryServiceProtocol';
+import { cancelLibraryTitleNaming } from './libraryNaming';
 import { SessionServices } from './sessionServices.svelte';
 
 const TOAST_MS = 6_000;
@@ -57,20 +63,17 @@ export class LibrarySession {
     const next = new Map(this.shapes);
     for (const [key, shape] of shapes) {
       next.set(key, shape);
-      const match = /^(movie|tv):(\d+)$/.exec(key);
-      if (match?.[1] !== 'tv') continue;
-      const id = Number(match[2]);
-      if (!Number.isSafeInteger(id) || id <= 0) continue;
-      void this.model
-        ?.observeTitleShape({
-          title: { type: 'tv', id },
-          seasons: [...shape.counts].map(([season, episodes]) => ({ season, episodes })),
-          ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
-        })
-        .catch(() => {});
     }
     this.shapes = next;
     this.shapeRevision++;
+  }
+
+  async libraryMetadata(refs: readonly TitleRef[]): Promise<{
+    titles: LibraryMetadataTitle[];
+    shapes: LibraryMetadataShape[];
+    retryable: TitleRef[];
+  }> {
+    return this.model?.libraryMetadata(refs) ?? { titles: [], shapes: [], retryable: [] };
   }
 
   rememberTitle(title: Title): void {
@@ -114,6 +117,7 @@ export class LibrarySession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    cancelLibraryTitleNaming(this);
     clearTimeout(this.#toastTimer);
     this.services.stop();
     this.model?.close();

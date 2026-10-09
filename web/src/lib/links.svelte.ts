@@ -1,6 +1,7 @@
 // The TVs this browser is paired with (den-spec pairing v1), in localStorage.
 
 import { forgetLibrary } from './localVault';
+import { forgetHeroLeadPointers } from './heroLeadPointer';
 
 export interface Link {
   /** The link's credential at den-edge, derived from `linkKey`. */
@@ -428,10 +429,12 @@ export class Links {
     this.settle();
     this.saveLinks();
     // What this browser kept of the library goes with the last link that reaches it.
-    if (gone && !this.list.some((l) => l.libraryKey === gone.libraryKey))
+    if (gone && !this.list.some((l) => l.libraryKey === gone.libraryKey)) {
+      forgetHeroLeadPointers(gone.libraryKey);
       void forgetLibrary(gone.libraryKey).catch((error: unknown) =>
         console.warn('den: the kept library could not be dropped', error),
       );
+    }
   }
 
   /**
@@ -461,6 +464,7 @@ export class Links {
     this.saveLinks();
     this.saveShared();
     writePendingReset(null);
+    forgetHeroLeadPointers(from);
     void forgetLibrary(from).catch((error: unknown) =>
       console.warn('den: the kept library could not be dropped', error),
     );

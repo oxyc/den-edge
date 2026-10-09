@@ -251,6 +251,67 @@ it('correlates connection replacements and non-playback query results without ti
   client.close();
 });
 
+it('correlates retained-value queries with their intentionally shorter result kinds', async () => {
+  const { client, transport } = await opened();
+  const cases = [
+    [{ kind: 'retained.services.get' }, { kind: 'retained.services', value: null }],
+    [{ kind: 'retained.home-continue.get' }, { kind: 'retained.home-continue', present: true }],
+    [
+      { kind: 'retained.billboard.get', scope: { kind: 'shared', facet: null, fresh: false } },
+      {
+        kind: 'retained.billboard',
+        scope: { kind: 'shared', facet: null, fresh: false },
+        value: null,
+      },
+    ],
+  ] as const;
+
+  for (const [query, result] of cases) {
+    const querying = client.query(query);
+    const request = transport.sent.at(-1)!;
+    if (request.type !== 'query') throw new Error('expected query');
+    transport.emit({
+      type: 'query-result',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: request.requestId,
+      version: version(1),
+      result,
+    });
+    await expect(querying).resolves.toMatchObject({ result });
+  }
+  client.close();
+});
+
+it('rejects a retained billboard reply for a different scope', async () => {
+  const { client, transport } = await opened();
+  const querying = client.query({
+    kind: 'retained.billboard.get',
+    scope: { kind: 'shared', facet: 'movie', fresh: false },
+  });
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'query') throw new Error('expected query');
+
+  transport.emit({
+    type: 'query-result',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    version: version(1),
+    result: {
+      kind: 'retained.billboard',
+      scope: { kind: 'personal', facet: 'movie', fresh: false },
+      value: null,
+    },
+  });
+
+  await expect(querying).rejects.toMatchObject({
+    failure: {
+      code: 'invalid-request',
+      message: 'library service reply did not match its request',
+    },
+  });
+  client.close();
+});
+
 it('correlates typed administrative task results', async () => {
   const { client, transport } = await opened();
   const running = client.task({

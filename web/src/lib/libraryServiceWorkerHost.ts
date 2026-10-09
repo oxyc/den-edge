@@ -43,7 +43,7 @@ function errorMessage(
  * the worker entry point that knows how to construct the one library authority.
  */
 export class LibraryServiceWorkerHost {
-  #requests: Promise<void> = Promise.resolve();
+  readonly #work = new Set<Promise<void>>();
   #closed = false;
   readonly #stopListening: () => void;
 
@@ -58,37 +58,43 @@ export class LibraryServiceWorkerHost {
   readonly #receive = (event: MessageEvent<unknown>): void => {
     if (this.#closed) return;
     const input = event.data;
-    this.#requests = this.#requests.then(async () => {
-      if (this.#closed) return;
-      try {
-        const request = decodeLibraryServiceClientMessage(input);
-        if (!request.ok) {
-          this.#post([errorMessage(request.error, requestIdOf(input))]);
-          return;
-        }
-
-        this.#publish(await this.dispatcher.dispatch(request.value), request.value.requestId);
-      } catch (error) {
-        this.#post([
-          errorMessage(
-            {
-              code: 'internal',
-              message: error instanceof Error ? error.message : 'library service dispatch failed',
-              retryable: true,
-            },
-            requestIdOf(input),
-          ),
-        ]);
-      }
-    });
+    // The dispatcher owns authority ordering. Admit every message to it in event order, but do not hold later
+    // messages behind a remote provider promise: Core deliberately lets commands run while metadata is in flight.
+    const work = this.#dispatch(input);
+    this.#work.add(work);
+    void work.finally(() => this.#work.delete(work));
   };
+
+  async #dispatch(input: unknown): Promise<void> {
+    if (this.#closed) return;
+    try {
+      const request = decodeLibraryServiceClientMessage(input);
+      if (!request.ok) {
+        this.#post([errorMessage(request.error, requestIdOf(input))]);
+        return;
+      }
+
+      this.#publish(await this.dispatcher.dispatch(request.value), request.value.requestId);
+    } catch (error) {
+      this.#post([
+        errorMessage(
+          {
+            code: 'internal',
+            message: error instanceof Error ? error.message : 'library service dispatch failed',
+            retryable: true,
+          },
+          requestIdOf(input),
+        ),
+      ]);
+    }
+  }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
     this.scope.removeEventListener('message', this.#receive);
     this.#stopListening();
-    await this.#requests;
+    await Promise.allSettled([...this.#work]);
     await this.dispatcher.close();
   }
 

@@ -52,6 +52,8 @@ import {
   type DownloadTitleDescriptor,
   type DownloadTarget,
   type LibraryCommand,
+  type LibraryMetadataShape,
+  type LibraryMetadataTitle,
   type LibraryObservation,
   type LibraryQuery,
   type LibraryQueryResult,
@@ -68,6 +70,7 @@ import {
 import {
   LibraryServiceAuthorityError,
   type LibraryAuthorityCommandResult,
+  type LibraryAuthorityEvent,
   type LibraryAuthorityObservationResult,
   type LibraryAuthorityTaskResult,
   type LibrarySelectionScope,
@@ -85,7 +88,14 @@ import {
 } from './simklDelivery';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
 import { tmdbKeyOf } from './tmdb';
-import { isRetainedBillboard, isRetainedServices } from './libraryServiceProtocolCodec';
+import { fetchDetailsResult } from './tmdb';
+import { tmdbFetch } from './tmdbCache';
+import { useLibraryRelayMembership } from './relayFetch';
+import {
+  isLibraryMetadataTitle,
+  isRetainedBillboard,
+  isRetainedServices,
+} from './libraryServiceProtocolCodec';
 import {
   change as preferenceChange,
   forgetDevice,
@@ -159,6 +169,8 @@ export interface LibraryLogAuthorityOptions {
   libraryKey?: string;
   vault?: Vault;
   fetchImpl?: typeof fetch;
+  /** Test seam for the Worker-owned TMDB cache/fetch path. */
+  tmdbFetchImpl?: typeof fetch;
   destination?: (key: string) => Promise<LibraryLog>;
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
   downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
@@ -330,6 +342,12 @@ export class LibraryLogAuthority {
   readonly #options: LibraryLogAuthorityOptions;
   readonly #downloadsCoordinator: DownloadCoordinator;
   readonly #fetch: typeof fetch;
+  readonly #tmdbFetch: typeof fetch;
+  readonly #metadataFlights = new Map<
+    string,
+    Promise<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape } | 'retryable' | null>
+  >();
+  readonly #listeners = new Set<(event: LibraryAuthorityEvent) => void>();
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
   readonly #admin?: LibraryAdminAuthority;
   #projection?: { rows: Row[]; home: HomeLibraryView };
@@ -340,6 +358,7 @@ export class LibraryLogAuthority {
     this.#options = options;
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
+    this.#tmdbFetch = options.tmdbFetchImpl ?? tmdbFetch;
     if (options.libraryKey && options.vault)
       this.#admin = new LibraryAdminAuthority(log, clock, {
         mode: options.mode,
@@ -355,8 +374,14 @@ export class LibraryLogAuthority {
   }
 
   close(): void {
+    this.#listeners.clear();
     this.#admin?.close();
     this.#log.close();
+  }
+
+  listen(listener: (event: LibraryAuthorityEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
 
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
@@ -494,6 +519,8 @@ export class LibraryLogAuthority {
         return this.#administration().pairingHandover(query.handoverKey, query.host, query.linkKey);
       case 'history.export':
         return this.#administration().historyExport();
+      case 'library.metadata':
+        return this.#libraryMetadata(query.titles);
       case 'download.refresh':
         return {
           kind: 'download.refresh',
@@ -609,6 +636,126 @@ export class LibraryLogAuthority {
     return {
       outcome: 'applied',
       affected: [{ kind: 'title', title: observation.title }, { kind: 'continue' }],
+    };
+  }
+
+  async #libraryMetadata(
+    titles: TitleRef[],
+  ): Promise<Extract<LibraryQueryResult, { kind: 'library.metadata' }>> {
+    // This runs in the service Worker, whose relay state is deliberately separate from the page's. Await member
+    // registration here before a cold library spends the anonymous allowance; the Worker owns one library for life.
+    const membership = await this.#log.relayMembership();
+    if (membership) useLibraryRelayMembership(membership);
+    const key = tmdbKeyOf(this.#log.settings('keys'));
+    const found: Array<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape }> = [];
+    const retryable: TitleRef[] = [];
+    let next = 0;
+    const lookup = async () => {
+      for (let ref = titles[next++]; ref; ref = titles[next++]) {
+        const result = await this.#metadataFor(ref, key);
+        if (result === 'retryable') retryable.push(ref);
+        else if (result) found.push(result);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, titles.length) }, lookup));
+    found.sort(
+      (left, right) =>
+        titles.findIndex((ref) => sameTitle(ref, left.title)) -
+        titles.findIndex((ref) => sameTitle(ref, right.title)),
+    );
+    retryable.sort(
+      (left, right) =>
+        titles.findIndex((ref) => sameTitle(ref, left)) -
+        titles.findIndex((ref) => sameTitle(ref, right)),
+    );
+
+    const affected: LibrarySelectionScope[] = [];
+    for (const { shape } of found) {
+      if (!shape) continue;
+      const observation: Extract<LibraryObservation, { kind: 'title-shape' }> = {
+        kind: 'title-shape',
+        ...shape,
+      };
+      const changed = await this.observe(observation);
+      affected.push(...changed.affected);
+    }
+    if (affected.length) {
+      const event: LibraryAuthorityEvent = { kind: 'changed', affected };
+      for (const listener of this.#listeners) listener(event);
+    }
+    return {
+      kind: 'library.metadata',
+      titles: found.map(({ title }) => title),
+      shapes: found.flatMap(({ shape }) => (shape ? [shape] : [])),
+      retryable,
+    };
+  }
+
+  /** Join overlapping route, pointer and shelf questions at the Worker boundary. */
+  #metadataFor(
+    ref: TitleRef,
+    key: string,
+  ): Promise<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape } | 'retryable' | null> {
+    const flightKey = `${ref.type}:${ref.id}`;
+    const existing = this.#metadataFlights.get(flightKey);
+    if (existing) return existing;
+    const flight = (async () => {
+      const result = await fetchDetailsResult(ref, key, this.#tmdbFetch);
+      if (result.kind === 'retryable') return 'retryable' as const;
+      if (result.kind === 'missing') return null;
+      const title = this.#metadataTitle(result.details.title);
+      if (!title) return null;
+      const shape = result.details.shape && this.#metadataShape(ref, result.details.shape);
+      return { title, ...(shape ? { shape } : {}) };
+    })();
+    this.#metadataFlights.set(flightKey, flight);
+    void flight.finally(() => {
+      if (this.#metadataFlights.get(flightKey) === flight) this.#metadataFlights.delete(flightKey);
+    });
+    return flight;
+  }
+
+  #metadataTitle(title: Title): LibraryMetadataTitle | undefined {
+    const candidate = { ...title };
+    // TMDB uses empty strings for unknown optional text on otherwise valid records. They mean absence on this wire,
+    // not a reason to lose the title's name and poster altogether.
+    if (!candidate.posterPath) delete candidate.posterPath;
+    if (!candidate.backdropPath) delete candidate.backdropPath;
+    if (!candidate.releaseDate) delete candidate.releaseDate;
+    if (!candidate.originalLanguage) delete candidate.originalLanguage;
+    return isLibraryMetadataTitle(candidate) ? candidate : undefined;
+  }
+
+  #metadataShape(ref: TitleRef, shape: Shape): LibraryMetadataShape | undefined {
+    if (ref.type !== 'tv' || shape.counts.size > LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons)
+      return undefined;
+    const seasons = [...shape.counts].map(([season, episodes]) => ({ season, episodes }));
+    if (
+      seasons.some(
+        ({ season, episodes }) =>
+          !Number.isSafeInteger(season) ||
+          season < 0 ||
+          !Number.isSafeInteger(episodes) ||
+          episodes < 0,
+      )
+    )
+      return undefined;
+    if (shape.lastAired) {
+      const episodes = shape.counts.get(shape.lastAired.season);
+      if (
+        !Number.isSafeInteger(shape.lastAired.season) ||
+        shape.lastAired.season <= 0 ||
+        !Number.isSafeInteger(shape.lastAired.episode) ||
+        shape.lastAired.episode <= 0 ||
+        episodes === undefined ||
+        shape.lastAired.episode > episodes
+      )
+        return undefined;
+    }
+    return {
+      title: { type: 'tv', id: ref.id },
+      seasons,
+      ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
     };
   }
 

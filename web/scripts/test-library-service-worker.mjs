@@ -94,7 +94,7 @@ try {
       return { worker, send, updates };
     };
     let request = 0;
-    const message = (body) => ({ protocol: 2, requestId: `request-${++request}`, ...body });
+    const message = (body) => ({ protocol: 3, requestId: `request-${++request}`, ...body });
     const first = open();
     await first.send(
       message({ type: 'hello', clientId: 'seed', libraryKey, mode: 'local' }),
@@ -112,6 +112,18 @@ try {
       fraction: 0.4,
       seconds: 240,
       observedAt: 5_000,
+    });
+    await command('dismiss-continue', {
+      kind: 'continue-dismissed.set',
+      title: { type: 'movie', id: 550 },
+      dismissed: true,
+    });
+    await command('visible-progress', {
+      kind: 'progress.record',
+      title: { type: 'movie', id: 551 },
+      fraction: 0.3,
+      seconds: 180,
+      observedAt: 6_000,
     });
     await command('watched', {
       kind: 'watched.set',
@@ -143,8 +155,12 @@ try {
   assert.deepEqual(local['subscription-overview'].watchlist, [{ type: 'movie', id: 617126 }]);
   assert.deepEqual(local['subscription-continue'].items[0]?.title, {
     type: 'movie',
-    id: 550,
+    id: 551,
   });
+  assert.equal(
+    local['subscription-continue'].items.some(({ title }) => title.id === 550),
+    false,
+  );
   assert.equal(local['subscription-settings'].preferences.hideAnime, true);
   assert.deepEqual(local['subscription-history'].items[0]?.title, {
     type: 'movie',

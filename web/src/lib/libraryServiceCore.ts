@@ -152,6 +152,7 @@ export class LibraryServiceCore {
   #revision = 0;
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
+  readonly #providerWork = new Set<Promise<LibraryServiceServerMessage[]>>();
 
   constructor(
     private readonly openAuthority: LibraryAuthorityOpener,
@@ -162,6 +163,15 @@ export class LibraryServiceCore {
 
   /** Requests are processed in arrival order, including their selection replacements. */
   dispatch(input: unknown): Promise<LibraryServiceServerMessage[]> {
+    // Metadata is remote provider work, not authority coordination. Start it after everything already admitted to
+    // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
+    if (isLibraryMetadataRequest(input)) {
+      const admitted = this.#requests;
+      const work = admitted.then(() => this.#dispatch(input));
+      this.#providerWork.add(work);
+      void work.finally(() => this.#providerWork.delete(work));
+      return work;
+    }
     let resolve!: (messages: LibraryServiceServerMessage[]) => void;
     const result = new Promise<LibraryServiceServerMessage[]>((done) => (resolve = done));
     this.#requests = this.#requests
@@ -192,6 +202,9 @@ export class LibraryServiceCore {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    await this.#requests;
+    await Promise.allSettled([...this.#providerWork]);
+    // A completed metadata query may have queued its shape replacement just before it observed `#closed`.
     await this.#requests;
     this.#subscriptions.clear();
     this.#operations.clear();
@@ -537,6 +550,14 @@ export class LibraryServiceCore {
 
 function sameTitle(a: TitleRef, b: TitleRef): boolean {
   return a.type === b.type && a.id === b.id;
+}
+
+function isLibraryMetadataRequest(
+  input: unknown,
+): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const request = input as { type?: unknown; query?: { kind?: unknown } };
+  return request.type === 'query' && request.query?.kind === 'library.metadata';
 }
 
 function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {
