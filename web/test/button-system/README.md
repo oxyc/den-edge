@@ -3,14 +3,19 @@
 This is an isolated design fixture, not a production migration. Open
 `/test/button-system.html` in the Vite dev server.
 
-The in-page switch preserves **Alternative A** (solid, restrained surfaces) and adds **Alternative B**
-(Apple-like translucent material). The glass alternative is also directly addressable as
-`/test/button-system.html?material=glass`.
+The in-page switch offers three independently addressable directions:
 
-| Alternative | Desktop                                               | Mobile                                              |
-| ----------- | ----------------------------------------------------- | --------------------------------------------------- |
-| A · Solid   | [Full desktop capture](screenshots/desktop.png)       | [Full mobile capture](screenshots/mobile.png)       |
-| B · Glass   | [Full desktop capture](screenshots/glass-desktop.png) | [Full mobile capture](screenshots/glass-mobile.png) |
+- **Alternative A · Solid** keeps the existing restrained surfaces and is the default.
+- **Alternative B · Glass** preserves the first translucent/frosted exploration exactly.
+- **Alternative C · Liquid Glass** adds curved specular edges, context tint, and lens-like feedback.
+
+Use `?material=glass` or `?material=liquid` for direct links; omit the query for Solid.
+
+| Alternative      | Desktop                                                | Mobile                                               |
+| ---------------- | ------------------------------------------------------ | ---------------------------------------------------- |
+| A · Solid        | [Full desktop capture](screenshots/desktop.png)        | [Full mobile capture](screenshots/mobile.png)        |
+| B · Glass        | [Full desktop capture](screenshots/glass-desktop.png)  | [Full mobile capture](screenshots/glass-mobile.png)  |
+| C · Liquid Glass | [Full desktop capture](screenshots/liquid-desktop.png) | [Full mobile capture](screenshots/liquid-mobile.png) |
 
 ## Inventory
 

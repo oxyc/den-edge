@@ -1,9 +1,10 @@
 <script lang="ts">
   import DenButton from './button-system/DenButton.svelte';
 
-  type Material = 'solid' | 'glass';
+  type Material = 'solid' | 'glass' | 'liquid';
+  const requestedMaterial = new URLSearchParams(location.search).get('material');
   let material = $state<Material>(
-    new URLSearchParams(location.search).get('material') === 'glass' ? 'glass' : 'solid',
+    requestedMaterial === 'glass' || requestedMaterial === 'liquid' ? requestedMaterial : 'solid',
   );
   let watchlisted = $state(false);
   let seen = $state(true);
@@ -26,15 +27,15 @@
   function chooseMaterial(next: Material) {
     material = next;
     const url = new URL(location.href);
-    if (next === 'glass') url.searchParams.set('material', 'glass');
-    else url.searchParams.delete('material');
+    if (next === 'solid') url.searchParams.delete('material');
+    else url.searchParams.set('material', next);
     history.replaceState(null, '', url);
   }
 </script>
 
 <svelte:head><title>Den button system demo</title></svelte:head>
 
-<main class:material-glass={material === 'glass'}>
+<main class:material-glass={material === 'glass'} class:material-liquid={material === 'liquid'}>
   <header class="intro">
     <div class="demo-toolbar">
       <p class="eyebrow">Design demo · no production integration</p>
@@ -50,6 +51,12 @@
           label="B · Glass"
           pressed={material === 'glass'}
           onclick={() => chooseMaterial('glass')}
+        />
+        <DenButton
+          size="compact"
+          label="C · Liquid Glass"
+          pressed={material === 'liquid'}
+          onclick={() => chooseMaterial('liquid')}
         />
       </div>
     </div>
@@ -471,11 +478,57 @@
       0 24px 60px rgb(0 0 0 / 0.38);
   }
 
+  /* Alternative C adds lens-like edge light and context-colour refraction. Like B, blur stays bounded to
+     the small demo surfaces; the page and scrolling regions never become backdrop-filter layers. */
+  .material-liquid {
+    --material-edge: rgb(255 255 255 / 0.26);
+    --material-fill: rgb(36 38 48 / 0.5);
+    --material-shadow: 0 18px 55px rgb(0 0 0 / 0.34);
+  }
+
+  .material-liquid .material-picker,
+  .material-liquid .spec-grid article,
+  .material-liquid .menu-card,
+  .material-liquid .menu {
+    border-color: var(--material-edge);
+    background:
+      radial-gradient(120% 90% at 8% -18%, rgb(255 255 255 / 0.12), transparent 52%),
+      radial-gradient(85% 120% at 106% 112%, rgb(91 140 255 / 0.09), transparent 58%),
+      var(--material-fill);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.16),
+      inset 1px 0 0 rgb(255 255 255 / 0.06),
+      var(--material-shadow);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(150%);
+  }
+
+  .material-liquid .detail-stage {
+    border-color: var(--material-edge);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.14),
+      0 28px 80px rgb(0 0 0 / 0.38);
+  }
+
+  .material-liquid .player-card {
+    border-color: rgb(255 255 255 / 0.28);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.18),
+      0 24px 60px rgb(0 0 0 / 0.4);
+  }
+
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .material-glass .material-picker,
     .material-glass .spec-grid article,
     .material-glass .menu-card,
     .material-glass .menu {
+      background: #242630;
+    }
+
+    .material-liquid .material-picker,
+    .material-liquid .spec-grid article,
+    .material-liquid .menu-card,
+    .material-liquid .menu {
       background: #242630;
     }
   }
@@ -485,6 +538,15 @@
     .material-glass .spec-grid article,
     .material-glass .menu-card,
     .material-glass .menu {
+      background: #242630;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
+    .material-liquid .material-picker,
+    .material-liquid .spec-grid article,
+    .material-liquid .menu-card,
+    .material-liquid .menu {
       background: #242630;
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
