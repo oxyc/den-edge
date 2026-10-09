@@ -10,10 +10,23 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
   try {
     const page = await browser.newPage({ viewport: { width: 820, height: 900 } });
     await guardNetwork(page);
+    const pageOwned = [];
+    await page.addInitScript(() => {
+      const pageFetch = window.fetch.bind(window);
+      window.fetch = (input, init = {}) => {
+        const headers = new Headers(init.headers);
+        headers.set('x-den-test-fetch-realm', 'page');
+        return pageFetch(input, { ...init, headers });
+      };
+    });
     await page.route('**/routes', (route) => route.fulfill({ json: {} }));
     await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
     await page.route('**/config', (route) => route.fulfill({ json: {} }));
-    await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+    await routeTmdb(page, (route) => {
+      if (route.request().headers()['x-den-test-fetch-realm'])
+        pageOwned.push(route.request().url());
+      return route.fulfill({ status: 404, json: {} });
+    });
     await page.goto(`${E2E_ORIGIN}/test/settings.html`);
 
     await page.getByRole('button', { name: /Download watch history/ }).click();
@@ -63,6 +76,10 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
       }),
       expect.objectContaining({ type: 'movie', tmdbId: 603, status: 'watchlist', plays: [] }),
     ]);
+    expect(
+      pageOwned.filter((url) => !new URL(url).pathname.endsWith('/configuration')),
+      'export title naming must stay inside the content Worker',
+    ).toEqual([]);
   } finally {
     await browser.close();
   }

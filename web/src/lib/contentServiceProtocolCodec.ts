@@ -196,12 +196,20 @@ function importLookup(value: unknown): value is ContentImportLookup {
       (value.page === undefined || integer(value.page, 1))
     );
   if (value.kind === 'translations')
-    return exact(value, ['id', 'kind', 'title']) && titleRef(value.title);
-  return (
-    value.kind === 'series-shape' &&
-    exact(value, ['id', 'kind', 'title']) &&
-    titleRef(value.title, true)
-  );
+    return (
+      exact(value, ['id', 'kind', 'title', 'field']) &&
+      titleRef(value.title) &&
+      (value.field === 'title' || value.field === 'overview')
+    );
+  if (value.kind === 'series-shape')
+    return exact(value, ['id', 'kind', 'title']) && titleRef(value.title, true);
+  if (value.kind === 'episodes')
+    return (
+      exact(value, ['id', 'kind', 'title', 'season']) &&
+      titleRef(value.title, true) &&
+      integer(value.season)
+    );
+  return value.kind === 'runtime' && exact(value, ['id', 'kind', 'title']) && titleRef(value.title);
 }
 
 function request(value: unknown): value is ContentRequest {

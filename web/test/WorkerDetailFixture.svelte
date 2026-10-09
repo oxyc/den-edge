@@ -25,7 +25,7 @@
       ? { page: 'search', query: initialQuery }
       : params.has('person')
         ? { page: 'person', id: initialId }
-      : { page: 'title', type: initialType, id: initialId },
+        : { page: 'title', type: initialType, id: initialId },
   );
   let seeded = $state(false);
   let seedFailure = $state<string | null>(null);

@@ -34,6 +34,7 @@ import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
 import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
+import { ContentImportAuthority } from './contentImportAuthority';
 import {
   countriesFrom,
   mergeServices,
@@ -219,6 +220,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
   readonly #flights = new Map<string, Promise<unknown>>();
+  readonly #imports: ContentImportAuthority;
 
   constructor(
     private readonly credentials: ContentCredentialSource,
@@ -227,6 +229,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     this.#tmdbFetch = options.tmdbFetch ?? tmdbFetch;
     this.#providerFetch = options.providerFetch ?? relayFetch;
     this.#now = options.now ?? Date.now;
+    this.#imports = new ContentImportAuthority(() => this.#tmdbKey(), this.#tmdbFetch, this.#now);
   }
 
   async query(request: ContentRequest, signal: AbortSignal): Promise<ServiceContentResult> {
@@ -320,10 +323,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         };
       }
       case 'person': {
-        const body = await this.#wait(
-          this.#tmdb(`/person/${request.id}`, this.#tmdbKey()),
-          signal,
-        );
+        const body = await this.#wait(this.#tmdb(`/person/${request.id}`, this.#tmdbKey()), signal);
         const person = body.kind === 'found' ? parsePerson(request.id, body.value) : null;
         return {
           kind: 'person',
@@ -392,6 +392,11 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           complete: available.length === answers.length,
         };
       }
+      case 'import.resolve':
+        return {
+          kind: 'import.resolve',
+          results: await this.#imports.resolve(request.lookups, signal),
+        };
       default:
         throw new ContentServiceFault({
           code: 'not-ready',

@@ -276,7 +276,7 @@
       <PlaybackSection {prefs} {disabled} save={savePrefs} />
       <ImportSection
         {ready}
-        {tmdbKey}
+        {content}
         watched={model.overview.value?.watched ?? []}
         {importHistory}
         {exportHistory}

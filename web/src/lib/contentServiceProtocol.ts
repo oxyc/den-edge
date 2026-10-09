@@ -60,8 +60,28 @@ export interface ContentAtlasFilterSpec {
 
 export type ContentImportLookup =
   | { id: string; kind: 'search'; query: string; media?: MediaType; page?: number }
-  | { id: string; kind: 'translations'; title: ContentTitleRef }
-  | { id: string; kind: 'series-shape'; title: ContentTitleRef & { type: 'tv' } };
+  | {
+      id: string;
+      kind: 'translations';
+      title: ContentTitleRef;
+      field: 'title' | 'overview';
+    }
+  | { id: string; kind: 'series-shape'; title: ContentTitleRef & { type: 'tv' } }
+  | {
+      id: string;
+      kind: 'episodes';
+      title: ContentTitleRef & { type: 'tv' };
+      season: number;
+    }
+  | { id: string; kind: 'runtime'; title: ContentTitleRef };
+
+export interface ContentImportSearchHit {
+  type: MediaType;
+  id: number;
+  name: string;
+  originalName?: string;
+  year?: number;
+}
 
 export type ContentRequest =
   | { kind: 'sources.configure'; atlas: string | null }
@@ -126,13 +146,15 @@ export interface ContentServiceDirectoryEntry {
 export interface ContentImportLookupResult {
   id: string;
   value:
-    | { kind: 'search'; titles: Title[] }
-    | { kind: 'translations'; names: string[] }
+    | { kind: 'search'; hits: ContentImportSearchHit[] }
+    | { kind: 'translations'; values: string[] }
     | {
         kind: 'series-shape';
         seasons: Array<{ season: number; episodes: number; name?: string }>;
         lastAired?: { season: number; episode: number };
       }
+    | { kind: 'episodes'; episodes: Episode[] }
+    | { kind: 'runtime'; minutes: number | null }
     | { kind: 'missing' };
 }
 

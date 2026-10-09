@@ -6,7 +6,7 @@
 
   type State =
     | { step: 'idle' }
-    | { step: 'matching'; done: number; total: number; paused?: boolean }
+    | { step: 'matching'; done: number; total: number }
     | { step: 'preview'; plan: Plan; writes: PlannedHistoryImport[] }
     | { step: 'writing' }
     | { step: 'done'; written: number }
@@ -23,7 +23,8 @@
   import HistoryExportRow from './HistoryExportRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
-  import { viewingImportLookups } from '../lib/viewingImportLookups';
+  import { contentImportLookups } from '../lib/contentImportLookups';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
   import { historyImportItems } from './historyImport';
   import type {
     HistoryImportItem,
@@ -35,13 +36,13 @@
 
   let {
     ready,
-    tmdbKey,
+    content,
     watched,
     importHistory,
     exportHistory,
   }: {
     ready: boolean;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     watched: readonly TitleRef[];
     importHistory: (
       items: readonly HistoryImportItem[],
@@ -62,9 +63,7 @@
       // What the library already has as seen is found, and left: its episodes aren't looked up at all.
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
-      const lookups = viewingImportLookups(tmdbKey, undefined, (ms) => {
-        if (state.step === 'matching') state = { ...state, paused: ms > 0 };
-      });
+      const lookups = contentImportLookups(content);
       const result = await plan(
         viewings,
         lookups,
@@ -132,9 +131,6 @@
       <p class="status" role="status">
         Finding your titles{state.total ? ` — ${state.done} of ${state.total}` : '…'}
       </p>
-      {#if state.paused}
-        <p class="foot">Pausing for den-edge’s per-minute limit — carrying on shortly.</p>
-      {/if}
     {:else if state.step === 'preview'}
       {@const all = previewLines(state.plan.marks)}
       {@const chosen = state.writes.filter((w) => !excluded.has(w.key))}
@@ -210,8 +206,8 @@
       <p class="status bad" role="alert">{state.message}</p>
     {/if}
   </SettingRow>
-  <PrimeImportRow {ready} {tmdbKey} {watched} {importHistory} />
-  <HistoryExportRow {ready} {tmdbKey} load={exportHistory} />
+  <PrimeImportRow {ready} {content} {watched} {importHistory} />
+  <HistoryExportRow {ready} {content} load={exportHistory} />
 </SettingsSection>
 
 <style>
