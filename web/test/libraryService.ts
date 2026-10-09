@@ -41,6 +41,7 @@ class FixtureService {
     readonly refreshDownloadSources = false,
     private failOpenOnce = false,
     private openGate?: Promise<void>,
+    private readonly openFailureMessage = 'fixture library service did not start',
   ) {}
 
   get version(): LibraryVersion {
@@ -52,7 +53,7 @@ class FixtureService {
       this.failOpenOnce = false;
       throw new LibraryServiceError({
         code: 'unavailable',
-        message: 'fixture library service did not start',
+        message: this.openFailureMessage,
         retryable: true,
       });
     }
@@ -186,6 +187,8 @@ export interface FixtureLibraryServiceOptions {
   downloadArtwork?: (target: DownloadTarget) => Promise<string | null>;
   /** Page fixture only: expose one startup failure, then let its Retry action recover normally. */
   failOpenOnce?: boolean;
+  /** Page fixture only: the production failure text whose visible handoff the page should exercise. */
+  openFailureMessage?: string;
   /** Page fixture only: hold startup so progressive loading behavior can be observed. */
   openGate?: Promise<void>;
 }
@@ -203,6 +206,7 @@ export function fixtureLibraryService({
   refreshDownloadSources,
   downloadArtwork,
   failOpenOnce,
+  openFailureMessage,
   openGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
@@ -262,6 +266,7 @@ export function fixtureLibraryService({
     refreshDownloadSources,
     failOpenOnce,
     openGate,
+    openFailureMessage,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
