@@ -1257,10 +1257,20 @@
       ),
     );
   });
+  const savedCounts = $derived.by(() => {
+    const counts = { all: 0, movie: 0, tv: 0 };
+    for (const ref of overview?.watchlist ?? []) {
+      if (seenOfSeries.get(titleKey(ref))?.length) continue;
+      counts.all++;
+      counts[ref.type]++;
+    }
+    return counts;
+  });
   const savedTitles = $derived(
-    (overview?.watchlist ?? [])
-      .slice(0, watchlistNameLimit)
-      .flatMap((ref) => session.displayTitle(ref) ?? []),
+    (route.page === 'watchlist'
+      ? (overview?.watchlist ?? [])
+      : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
+    ).flatMap((ref) => session.displayTitle(ref) ?? []),
   );
 
   function caption(entry: ContinueEntry): string | undefined {
@@ -1422,6 +1432,7 @@
     <WatchlistScreen.current
       resume={continueEntries}
       saved={savedTitles}
+      {savedCounts}
       {history}
       year={watchedYear}
       onyear={(year) => navigate(watchlistHref(year))}

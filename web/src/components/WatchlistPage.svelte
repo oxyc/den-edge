@@ -21,6 +21,7 @@
   let {
     resume,
     saved,
+    savedCounts,
     history,
     year,
     onyear,
@@ -33,6 +34,8 @@
   }: {
     resume: ContinueEntry[];
     saved: Title[];
+    /** Library-owned counts stay truthful while metadata for individual cards is still arriving or absent. */
+    savedCounts: { all: number; movie: number; tv: number };
     history: WatchedEntry[];
     /** The year Watched shows (`watchedYear`), or undefined for every year. */
     year?: string;
@@ -284,10 +287,12 @@
   </PosterRow>
 {/if}
 
-{#if listed.length}
+{#if savedCounts.all}
   <section aria-label="Watchlist">
     <div class="heading">
-      <h2>Watchlist <span class="count">{savedShown.length}</span></h2>
+      <h2>
+        Watchlist <span class="count">{savedKind ? savedCounts[savedKind] : savedCounts.all}</span>
+      </h2>
       <TypeFilter
         value={savedKind}
         onchange={(value) => (savedKind = value)}
