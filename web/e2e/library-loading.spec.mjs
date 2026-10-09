@@ -2,6 +2,24 @@ import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
+for (const local of [false, true]) {
+  test(`${local ? 'local' : 'linked'} library startup failure is visible and Retry recovers`, async ({
+    page,
+  }) => {
+    await guardNetwork(page);
+    await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+    await routeTmdb(page, (route) => route.fulfill({ json: { page: 1, results: [] } }));
+
+    await page.goto(`${E2E_ORIGIN}/test/library.html?open-failure${local ? '&local' : ''}`);
+
+    await expect(page.getByRole('heading', { name: 'Couldn’t open your library' })).toBeVisible();
+    await page.getByRole('button', { name: 'Try again' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Couldn’t open your library' })).toHaveCount(0);
+    await expect(page.getByText('Loading your library', { exact: true })).toHaveCount(0);
+  });
+}
+
 for (const [width, failed] of [
   [393, false],
   [1280, false],

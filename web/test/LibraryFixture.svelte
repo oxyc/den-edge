@@ -184,7 +184,7 @@
   } as unknown as LibraryLog;
 
   let publish = () => {};
-  const library = fixtureLibraryService({ log });
+  const library = fixtureLibraryService({ log, failOpenOnce: params.has('open-failure') });
   publish = () => library.publish();
   const session: LibrarySession = library.session;
   if (!unnamedMany) {
@@ -204,6 +204,7 @@
     libraryKey: 'fixture',
     linkKey: 'fixture',
   };
+  const shownLink = params.has('local') ? null : link;
 
   // Test-only seam for den-edge#235's Playwright spec: stands in for "a library pull landed a fresh position",
   // since this fixture's library never actually pulls over the network. `at` defaults to now, so a test can pass
@@ -229,7 +230,7 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
   <Library
-    {link}
+    link={shownLink}
     {session}
     {route}
     active={true}

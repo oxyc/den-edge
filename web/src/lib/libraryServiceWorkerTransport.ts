@@ -11,7 +11,7 @@ import {
 
 type MessageListener = (message: unknown) => void;
 
-/** A DedicatedWorker transport. Worker failure is terminal; choosing an inline authority belongs to bootstrap. */
+/** A DedicatedWorker transport. Failure closes this attempt so the supervisor can start a fresh Worker. */
 export class WorkerLibraryServiceTransport {
   readonly #listeners = new Set<MessageListener>();
   #closed = false;
