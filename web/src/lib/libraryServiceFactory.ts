@@ -43,11 +43,7 @@ export interface WorkerServiceSession {
   close(): void;
 }
 
-/**
- * One Worker and one multiplexed transport for public content plus optional encrypted library state. Keeping this
- * constructor separate from `createLibraryService` lets the staged cutover retain its supervisor unchanged; the
- * final session factory will supervise this whole connection rather than create a second content Worker.
- */
+/** One Worker and one multiplexed transport for public content plus optional encrypted library state. */
 export function createWorkerServiceConnection(
   createWorker: () => Worker = productionWorker,
   startupTimeoutMs?: number,
@@ -105,38 +101,46 @@ class SessionContentService implements ContentServiceClientPort {
         message: 'Worker service session is closed',
         retryable: false,
       });
-    if (this.#bootstrap) await this.#waitForBootstrap(signal);
     if (request.kind === 'sources.configure') {
       this.#atlas = request.atlas;
       this.#configuredClient = undefined;
       this.#configuring = undefined;
     }
-    const client = this.current();
     const requiresAtlas = request.kind.startsWith('atlas.');
-    try {
-      if (this.#atlas !== undefined || requiresAtlas)
-        await this.#ensureConfiguration(client, requiresAtlas);
-      if (request.kind === 'sources.configure')
-        return { kind: 'sources.configure' } as ContentResultFor<Request>;
-      return await client.query(request, signal);
-    } catch (error) {
-      if (
-        signal?.aborted ||
-        !(error instanceof ContentServiceError) ||
-        error.failure.code !== 'unavailable' ||
-        error.failure.provider !== undefined ||
-        !error.failure.retryable ||
-        this.#closed
-      )
-        throw error;
-      const replacement = this.replace(client);
-      this.#bind(replacement);
-      if (this.#atlas !== undefined || requiresAtlas)
-        await this.#ensureConfiguration(replacement, requiresAtlas);
-      if (request.kind === 'sources.configure')
-        return { kind: 'sources.configure' } as ContentResultFor<Request>;
-      return replacement.query(request, signal);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // A replacement Worker belongs to the paired library handshake first. Re-read this barrier on every attempt:
+      // the first transport can fail while the request is in flight and install a different opening promise.
+      if (this.#bootstrap) await this.#waitForBootstrap(signal);
+      const client = this.current();
+      try {
+        if (this.#atlas !== undefined || requiresAtlas)
+          await this.#ensureConfiguration(client, requiresAtlas);
+        if (request.kind === 'sources.configure')
+          return { kind: 'sources.configure' } as ContentResultFor<Request>;
+        return await client.query(request, signal);
+      } catch (error) {
+        const replacedWhilePending = this.current() !== client;
+        const cancelledByReplacement =
+          replacedWhilePending &&
+          error instanceof ContentServiceError &&
+          error.failure.code === 'cancelled';
+        const retryableTransportFailure =
+          error instanceof ContentServiceError &&
+          error.failure.code === 'unavailable' &&
+          error.failure.provider === undefined &&
+          error.failure.retryable;
+        if (
+          attempt > 0 ||
+          signal?.aborted ||
+          (!cancelledByReplacement && !retryableTransportFailure) ||
+          this.#closed
+        )
+          throw error;
+        const replacement = replacedWhilePending ? this.current() : this.replace(client);
+        if (replacement !== client) this.#bind(replacement);
+      }
     }
+    throw new Error('unreachable content retry state');
   }
 
   onStatus(listener: (status: ContentServiceStatusValue) => void): () => void {
@@ -219,7 +223,23 @@ class SessionContentService implements ContentServiceClientPort {
         message: 'content request was cancelled',
         retryable: false,
       });
-    await this.#bootstrap;
+    if (!signal) return this.#bootstrap;
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        signal.removeEventListener('abort', abort);
+        reject(
+          new ContentServiceError({
+            code: 'cancelled',
+            message: 'content request was cancelled',
+            retryable: false,
+          }),
+        );
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      void this.#bootstrap!.then(resolve, reject).finally(() =>
+        signal.removeEventListener('abort', abort),
+      );
+    });
   }
 }
 
@@ -279,24 +299,4 @@ export function createWorkerServiceSession(
       active.connection.close();
     },
   };
-}
-
-/**
- * Create the supervised DedicatedWorker service. Construction and runtime failures stay visible through the
- * supervisor's normal unavailable/retry surface; the page never takes ownership of the library authority.
- */
-export function createLibraryService(
-  options: LibraryServiceFactoryOptions = {},
-): LibraryServiceSupervisor {
-  const createWorker = options.createWorker ?? productionWorker;
-  return new LibraryServiceSupervisor(
-    () =>
-      new LibraryServiceClient(
-        new WorkerLibraryServiceTransport(createWorker()),
-        undefined,
-        options.startupTimeoutMs,
-        (membership) => (membership ? useLibraryRelayMembership(membership) : undefined),
-      ),
-    options.supervisor,
-  );
 }

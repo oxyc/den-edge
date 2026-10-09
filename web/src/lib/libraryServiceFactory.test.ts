@@ -1,9 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import {
-  createLibraryService,
-  createWorkerServiceConnection,
-  createWorkerServiceSession,
-} from './libraryServiceFactory';
+import { createWorkerServiceConnection, createWorkerServiceSession } from './libraryServiceFactory';
 import {
   LIBRARY_SERVICE_PROTOCOL,
   type LibraryServiceClientMessage,
@@ -62,12 +58,12 @@ const openOptions = {
 it('opens the library through its DedicatedWorker', async () => {
   const worker = new FakeWorker();
   const createWorker = vi.fn(() => worker as unknown as Worker);
-  const service = createLibraryService({
+  const services = createWorkerServiceSession({
     createWorker,
     supervisor: { maxAutomaticRestarts: 0 },
   });
 
-  const opening = service.open(openOptions);
+  const opening = services.library.open(openOptions);
   await expect.poll(() => worker.posted.length).toBe(1);
   const request = worker.posted[0] as LibraryServiceClientMessage;
   expect(request).toMatchObject({ type: 'hello', ...openOptions });
@@ -83,22 +79,44 @@ it('opens the library through its DedicatedWorker', async () => {
 
   await expect(opening).resolves.toEqual(version);
   expect(createWorker).toHaveBeenCalledOnce();
-  service.close();
+  services.close();
   expect(worker.terminate).toHaveBeenCalledOnce();
 });
 
-it('surfaces DedicatedWorker construction failure through the library status', async () => {
-  const service = createLibraryService({
-    createWorker: () => {
+it('surfaces replacement Worker construction failure through the shared library status', async () => {
+  const worker = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(worker as unknown as Worker)
+    .mockImplementationOnce(() => {
       throw new Error('worker construction failed');
-    },
-    supervisor: { maxAutomaticRestarts: 0 },
-  });
+    });
+  const services = createWorkerServiceSession({ createWorker });
+  const statuses: unknown[] = [];
+  services.library.onStatus((status) => statuses.push(status));
 
-  await expect(service.open(openOptions)).rejects.toMatchObject({
-    failure: { code: 'unavailable', message: 'worker construction failed', retryable: true },
-  });
-  service.close();
+  const opening = services.library.open(openOptions);
+  const hello = worker.posted[0];
+  if (hello?.type !== 'hello') throw new Error('library hello was not sent');
+  worker.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: hello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+  worker.fail();
+
+  await expect
+    .poll(() => statuses.at(-1))
+    .toMatchObject({
+      kind: 'failed',
+      error: { code: 'unavailable', message: 'worker construction failed', retryable: true },
+    });
+  services.close();
 });
 
 it('bounds a silent startup and Retry replaces the expired Worker', async () => {
@@ -109,13 +127,13 @@ it('bounds a silent startup and Retry replaces the expired Worker', async () => 
     .fn<() => Worker>()
     .mockReturnValueOnce(first as unknown as Worker)
     .mockReturnValueOnce(replacement as unknown as Worker);
-  const service = createLibraryService({
+  const services = createWorkerServiceSession({
     createWorker,
     startupTimeoutMs: 20,
     supervisor: { maxAutomaticRestarts: 0 },
   });
 
-  const opening = service.open(openOptions);
+  const opening = services.library.open(openOptions);
   const failed = expect(opening).rejects.toMatchObject({
     failure: {
       code: 'unavailable',
@@ -125,9 +143,10 @@ it('bounds a silent startup and Retry replaces the expired Worker', async () => 
   });
   await vi.advanceTimersByTimeAsync(20);
   await failed;
-  expect(first.terminate).toHaveBeenCalledOnce();
+  expect(first.terminate).not.toHaveBeenCalled();
 
-  const retrying = service.retry();
+  const retrying = services.library.retry();
+  expect(first.terminate).toHaveBeenCalledOnce();
   const request = replacement.posted[0] as LibraryServiceClientMessage;
   replacement.emit([
     {
@@ -140,7 +159,7 @@ it('bounds a silent startup and Retry replaces the expired Worker', async () => 
   ]);
   await expect(retrying).resolves.toMatchObject({ instance: 'worker-2' });
   expect(createWorker).toHaveBeenCalledTimes(2);
-  service.close();
+  services.close();
   expect(replacement.terminate).toHaveBeenCalledOnce();
   vi.useRealTimers();
 });
@@ -270,6 +289,101 @@ it('restores the bootstrap barrier when a paired Worker is replaced', async () =
     },
   ]);
   await expect(loading).resolves.toMatchObject({ kind: 'service.regions' });
+  services.close();
+});
+
+it('retries paired in-flight content only after replacement bootstrap and source replay', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const firstHello = first.posted[0];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  first.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: firstHello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+
+  const configuring = services.content.query({ kind: 'sources.configure', atlas: '/atlas' });
+  await expect.poll(() => first.posted.length).toBe(2);
+  const initialConfiguration = first.posted[1];
+  if (initialConfiguration?.type !== 'content-query')
+    throw new Error('initial source configuration was not sent');
+  first.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: initialConfiguration.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+  await configuring;
+
+  const loading = services.content.query({ kind: 'atlas.service.catalogs' });
+  await expect.poll(() => first.posted.length).toBe(3);
+  first.fail();
+
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello')
+    throw new Error('replacement must begin with the paired hello');
+  // Let the rejected content request reach its retry turn: neither replay nor retry may pass the hello barrier.
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(replacement.posted).toEqual([replacementHello]);
+
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await expect.poll(() => replacement.posted.length).toBe(2);
+  const replay = replacement.posted[1];
+  expect(replay).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'sources.configure', atlas: '/atlas' },
+  });
+  if (replay?.type !== 'content-query') throw new Error('source configuration was not replayed');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: replay.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+
+  await expect.poll(() => replacement.posted.length).toBe(3);
+  const retried = replacement.posted[2];
+  expect(retried).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'atlas.service.catalogs' },
+  });
+  if (retried?.type !== 'content-query') throw new Error('content query was not retried');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: retried.requestId,
+      result: { kind: 'atlas.service.catalogs', catalogs: { state: 'ready', value: [] } },
+    },
+  ]);
+  await expect(loading).resolves.toMatchObject({ kind: 'atlas.service.catalogs' });
   services.close();
 });
 
