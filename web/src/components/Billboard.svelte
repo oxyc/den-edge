@@ -1027,8 +1027,8 @@
                   row={rowOf(title)}
                   busy={pressed === keyOf(title)}
                   failure={unsaved === keyOf(title) ? 'Couldn’t save that. Nothing changed.' : null}
-                  onwatchlist={(on) => void press(title, 'watchlist', on)}
-                  onseen={(on) => void press(title, 'seen', on)}
+                  onwatchlist={(on) => press(title, 'watchlist', on)}
+                  onseen={(on) => press(title, 'seen', on)}
                 />
               {/if}
             </div>
@@ -1391,6 +1391,12 @@
     gap: 10px;
     min-height: 106px;
     margin-top: 4px;
+  }
+
+  /* More ends the title-level choices; the personal toggles after it are their own compact group. Give that
+     relationship more air than the two related glyphs have between themselves. */
+  .actions > :global(.compact) {
+    margin-left: 8px;
   }
 
   /* Held over the rail, in the page's own column, so it stays put while the slides pass under it. */

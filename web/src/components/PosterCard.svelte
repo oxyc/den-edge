@@ -618,6 +618,10 @@
     opacity: 1;
   }
 
+  :global(.holder .action[aria-expanded='true']) {
+    opacity: 1;
+  }
+
   .holder:hover :global(.action) {
     opacity: 1;
   }

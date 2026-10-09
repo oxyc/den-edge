@@ -13,6 +13,9 @@
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
+  --section-heading-size: 20px;
+  --section-heading-line-height: 1.4;
+  --section-heading-weight: 700;
 
   /* The page column. A full-bleed hero paints past it, but anything READABLE inside one has to line
      up with it — a hero column wider than this hangs its own gutter outside the page's clip, and the
@@ -180,9 +183,11 @@ input {
   cursor: progress;
 }
 
-.den-button:hover:not(:disabled, [aria-disabled='true']) {
-  border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
-  background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+@media (hover: hover) and (pointer: fine) {
+  .den-button:hover:not(:disabled, [aria-disabled='true']) {
+    border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
+    background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+  }
 }
 
 .den-button:active:not(:disabled, [aria-disabled='true']) {

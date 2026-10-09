@@ -1,4 +1,4 @@
-import { test, expect, chromium } from '@playwright/test';
+import { test, expect, chromium, webkit } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
@@ -41,13 +41,12 @@ test('Trailer opens as a button, moves focus to Close, and Escape returns it', a
     await expect(trailer).toBeVisible();
     await trailer.focus();
     await trailer.press('Enter');
-    const close = page.getByRole('button', { name: 'Close' });
+    const close = page.getByRole('button', { name: 'Close trailer' });
     await expect(close).toBeFocused();
     // The dialog's own escape from a refused embed: a new-tab link to the real thing.
-    await expect(page.getByRole('link', { name: 'YouTube, in a new tab' })).toHaveAttribute(
-      'href',
-      'https://www.youtube.com/watch?v=yt1',
-    );
+    await expect(
+      page.getByRole('link', { name: 'Open trailer on YouTube in a new tab' }),
+    ).toHaveAttribute('href', 'https://www.youtube.com/watch?v=yt1');
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(trailer).toBeFocused();
@@ -81,6 +80,30 @@ test('Watchlist keeps keyboard focus, and does not run again, while a save is in
   }
 });
 
+test('Sources is a keyboard disclosure', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
+    const disclosure = page.getByRole('button', { name: /^Sources/ });
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    await disclosure.focus();
+    await disclosure.press('Enter');
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    const panelId = await disclosure.getAttribute('aria-controls');
+    const panel = page.locator(`#${panelId}`);
+    await expect(panel).toBeVisible();
+    await disclosure.press('Space');
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    await expect(panel).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('the opinion group is named, and its phone select has no stray text-selection callout', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -92,9 +115,8 @@ test('the opinion group is named, and its phone select has no stray text-selecti
     });
     await mock(page);
     await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
-    // The owner kept the select on phones: `DetailReactions`'s own `role="group"` exists (it is still what the
-    // page uses ≥ 760px) but is hidden here, so it carries no accessible role at this width — the select is
-    // the one actually offered, and it needs its own name since nothing wraps it in a group here.
+    // The owner kept the select on phones: the segmented desktop group is hidden here, so it carries no
+    // accessible role at this width. The select is the one actually offered and needs its own name.
     await expect(page.getByRole('group', { name: 'Your opinion' })).toHaveCount(0);
     const pick = page.locator('.hero .pick');
     await expect(pick.locator('select')).toHaveAccessibleName('Your opinion');
@@ -106,7 +128,58 @@ test('the opinion group is named, and its phone select has no stray text-selecti
   }
 });
 
-test('phone Detail keeps one primary playback surface and quiet personal actions', async () => {
+test('library mutations serialize without flashing, then Seen and opinion remain independent', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?hold-save`);
+    const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+    const seen = page.getByRole('button', { name: 'Seen', exact: true });
+    const like = page.getByRole('button', { name: 'Like', exact: true });
+    const love = page.getByRole('button', { name: 'Love', exact: true });
+    const stableOpacity = await Promise.all(
+      [seen, like].map((control) => control.evaluate((node) => getComputedStyle(node).opacity)),
+    );
+
+    await watchlist.click();
+    await expect(watchlist).toHaveAttribute('aria-busy', 'true');
+    await expect(seen).toHaveAttribute('aria-disabled', 'true');
+    await expect(like).toHaveAttribute('aria-disabled', 'true');
+    await watchlist.dispatchEvent('click');
+    await seen.dispatchEvent('click');
+    await like.dispatchEvent('click');
+    expect(await page.evaluate(() => window.fixture.watchlistCalls())).toBe(1);
+    expect(await page.evaluate(() => window.fixture.seenCalls())).toBe(0);
+    expect(await page.evaluate(() => window.fixture.reactionCalls())).toBe(0);
+    expect(
+      await Promise.all(
+        [seen, like].map((control) => control.evaluate((node) => getComputedStyle(node).opacity)),
+      ),
+    ).toEqual(stableOpacity);
+
+    await page.evaluate(() => window.fixture.finishWatchlist());
+    await expect(watchlist).not.toHaveAttribute('aria-busy', 'true');
+    await expect(seen).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(like).not.toHaveAttribute('aria-disabled', 'true');
+    await seen.click();
+    await like.click();
+    await expect(seen).toHaveAttribute('aria-pressed', 'true');
+    await expect(like).toHaveAttribute('aria-pressed', 'true');
+    await love.click();
+    await expect(like).toHaveAttribute('aria-pressed', 'false');
+    await expect(love).toHaveAttribute('aria-pressed', 'true');
+    await love.click();
+    await expect(love).toHaveAttribute('aria-pressed', 'false');
+    await expect(seen).toHaveAttribute('aria-pressed', 'true');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('phone Detail keeps playback and personal actions usable at narrow widths', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -117,52 +190,25 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
       await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions`);
 
       const actions = page.locator('.hero-actions .actions');
-      const split = actions.locator('.split-button');
-      const utilitiesGroup = actions.locator('.utilities');
-      const play = page.getByRole('button', { name: 'Play', exact: true });
       const disclosure = page.getByRole('button', { name: 'More ways to play' });
-      const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
-      const utilities = [
+      const controls = [
+        page.getByRole('button', { name: 'Play', exact: true }),
+        disclosure,
+        page.getByRole('button', { name: 'Trailer', exact: true }),
         page.getByRole('button', { name: 'Watchlist', exact: true }),
         page.getByRole('button', { name: 'Seen', exact: true }),
         page.getByRole('button', { name: 'Share', exact: true }),
         page.getByRole('combobox', { name: 'Your opinion' }),
       ];
 
-      const [
-        actionBox,
-        splitBox,
-        playBox,
-        disclosureBox,
-        trailerBox,
-        utilitiesBox,
-        ...utilityBoxes
-      ] = await Promise.all([
-        actions.boundingBox(),
-        split.boundingBox(),
-        play.boundingBox(),
-        disclosure.boundingBox(),
-        trailer.boundingBox(),
-        utilitiesGroup.boundingBox(),
-        ...utilities.map((control) => control.boundingBox()),
-      ]);
-      expect(actionBox).not.toBeNull();
-      expect(playBox).not.toBeNull();
-      expect(trailerBox).not.toBeNull();
-      expect(Math.abs(splitBox.width - actionBox.width)).toBeLessThanOrEqual(1);
-      expect(disclosureBox.width).toBeGreaterThanOrEqual(44);
-      expect(disclosureBox.height).toBeGreaterThanOrEqual(44);
-      expect(await trailer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-      expect(utilityBoxes.every((box) => box.width === 44 && box.height >= 44)).toBe(true);
-      expect(Math.max(...utilityBoxes.map((box) => box.y))).toBeLessThanOrEqual(
-        Math.min(...utilityBoxes.map((box) => box.y)) + 1,
+      await expect(actions).toBeVisible();
+      const boxes = await Promise.all(
+        controls.map(async (control) => {
+          await expect(control).toBeVisible();
+          return control.boundingBox();
+        }),
       );
-      expect(Math.abs(utilityBoxes[0].x - utilitiesBox.x)).toBeLessThanOrEqual(1);
-      expect(
-        Math.abs(
-          utilityBoxes.at(-1).x + utilityBoxes.at(-1).width - (utilitiesBox.x + utilitiesBox.width),
-        ),
-      ).toBeLessThanOrEqual(1);
+      expect(boxes.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
       );
@@ -170,18 +216,12 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
       await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toHaveCount(0);
       await disclosure.click();
       const playOnTV = page.getByRole('menuitem', { name: 'Play on TV' });
-      await expect(playOnTV).toBeFocused();
+      await expect(playOnTV).toBeVisible();
       await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
       await page.keyboard.press('Escape');
       await expect(playOnTV).toHaveCount(0);
       await expect(disclosure).toBeFocused();
       await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
-
-      for (const control of utilities.slice(0, 3)) {
-        expect(await control.evaluate((node) => getComputedStyle(node).borderTopColor)).toBe(
-          'rgba(0, 0, 0, 0)',
-        );
-      }
       await page.close();
     }
   } finally {
@@ -189,7 +229,80 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
   }
 });
 
-test('without playback, Trailer and the intact utility group share or wrap as a unit', async () => {
+test('a second touch closes the split Play menu in WebKit', async () => {
+  const browser = await webkit.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions`);
+    const disclosure = page.getByRole('button', { name: 'More ways to play' });
+    await disclosure.tap();
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toBeVisible();
+    await disclosure.tap();
+    await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toHaveCount(0);
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    await expect(disclosure).not.toBeFocused();
+
+    const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+    const restingBackground = await watchlist.evaluate(
+      (node) => getComputedStyle(node).backgroundColor,
+    );
+    await watchlist.tap();
+    await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
+    await expect(watchlist).not.toHaveAttribute('aria-busy', 'true');
+    await watchlist.tap();
+    await expect(watchlist).toHaveAttribute('aria-pressed', 'false');
+    await expect(watchlist.locator('svg')).not.toHaveClass(/filled/);
+    await expect
+      .poll(() => watchlist.evaluate((node) => getComputedStyle(node).backgroundColor))
+      .toBe(restingBackground);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('desktop split destination preserves pointer-to-keyboard focus and menu behavior', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions`);
+    const play = page.getByRole('button', { name: 'Play', exact: true });
+    const disclosure = page.getByRole('button', { name: 'More ways to play' });
+    const surface = page.locator('.split-surface');
+
+    await disclosure.click();
+    await page.keyboard.press('Shift+Tab');
+    await expect(play).toBeFocused();
+    expect(await surface.evaluate((node) => getComputedStyle(node).outlineStyle)).not.toBe('none');
+    await page.keyboard.press('Escape');
+    await expect(disclosure).toBeFocused();
+
+    await disclosure.press('ArrowDown');
+    const destination = page.getByRole('menuitem', { name: 'Play on TV' });
+    await expect(destination).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(disclosure).toBeFocused();
+    await disclosure.press('Enter');
+    await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toBeFocused();
+    await page.evaluate(() => window.fixture.setBusy(true));
+    await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test('phone Detail without playback keeps the remaining action group intact', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -208,55 +321,25 @@ test('without playback, Trailer and the intact utility group share or wrap as a 
         page.getByRole('button', { name: 'Share', exact: true }),
         page.getByRole('combobox', { name: 'Your opinion' }),
       ];
-      const [actionBox, trailerBox, groupBox, ...boxes] = await Promise.all([
-        actions.boundingBox(),
+      await expect(trailer).toBeVisible();
+      await expect(utilitiesGroup).toBeVisible();
+      const [trailerBox, groupBox, ...boxes] = await Promise.all([
         trailer.boundingBox(),
         utilitiesGroup.boundingBox(),
-        ...utilities.map((control) => control.boundingBox()),
+        ...utilities.map(async (control) => {
+          await expect(control).toBeVisible();
+          return control.boundingBox();
+        }),
       ]);
 
-      expect(boxes.every((box) => box.width === 44 && box.height >= 44)).toBe(true);
-      expect(
-        Math.max(...boxes.map((box) => box.y)) - Math.min(...boxes.map((box) => box.y)),
-      ).toBeLessThanOrEqual(1);
-      if (width === 390) {
-        expect(
-          Math.abs(trailerBox.y + trailerBox.height / 2 - (groupBox.y + groupBox.height / 2)),
-        ).toBeLessThanOrEqual(1);
-        expect(Math.abs(trailerBox.x - actionBox.x)).toBeLessThanOrEqual(1);
-        expect(
-          Math.abs(groupBox.x + groupBox.width - (actionBox.x + actionBox.width)),
-        ).toBeLessThanOrEqual(1);
-      } else {
-        expect(groupBox.y).toBeGreaterThan(trailerBox.y + 1);
-        expect(Math.abs(groupBox.x - actionBox.x)).toBeLessThanOrEqual(1);
-        expect(Math.abs(groupBox.width - actionBox.width)).toBeLessThanOrEqual(1);
-      }
+      expect(boxes.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
+      expect(trailerBox.y).toBeLessThan(groupBox.y + groupBox.height);
+      expect(groupBox.y).toBeLessThan(trailerBox.y + trailerBox.height);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
       );
       await page.close();
     }
-  } finally {
-    await browser.close();
-  }
-});
-
-test('Seen fills only the eye pupil', async () => {
-  const browser = await chromium.launch({
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  });
-  try {
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
-    await mock(page);
-    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?seen`);
-    const seen = page.getByRole('button', { name: 'Seen', exact: true });
-    await expect(seen).toHaveAttribute('aria-pressed', 'true');
-    const icon = seen.locator('svg');
-    expect(await icon.locator('path').evaluate((node) => getComputedStyle(node).fill)).toBe('none');
-    expect(await icon.locator('circle').evaluate((node) => getComputedStyle(node).fill)).not.toBe(
-      'none',
-    );
   } finally {
     await browser.close();
   }

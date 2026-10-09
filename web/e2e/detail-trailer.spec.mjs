@@ -474,10 +474,17 @@ for (const width of [320, 1280])
           );
           await expect(page).toHaveURL(/detail-trailer\.html\?browser-play$/);
           // And the way out of an embed that refuses to play is offered inside it.
-          await expect(page.getByRole('link', { name: 'YouTube, in a new tab' })).toHaveAttribute(
-            'href',
-            url,
-          );
+          const youtube = page.getByRole('link', {
+            name: 'Open trailer on YouTube in a new tab',
+          });
+          const close = page.getByRole('button', { name: 'Close trailer' });
+          await expect(youtube).toHaveAttribute('href', url);
+          await expect(close).toBeFocused();
+          for (const control of [youtube, close]) {
+            const box = await control.boundingBox();
+            expect(box.width).toBeGreaterThanOrEqual(44);
+            expect(box.height).toBeGreaterThanOrEqual(44);
+          }
         } else if (width < 760) {
           await expect(trailer).not.toHaveAttribute('target');
           await trailer.click();

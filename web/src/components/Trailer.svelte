@@ -2,11 +2,13 @@
      the one the TV falls back to when it can't reach den-reel. -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import Button from './Button.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
 
   let { key, title, onclose }: { key: string; title: string; onclose: () => void } = $props();
 
-  let out: HTMLAnchorElement;
-  let close: HTMLButtonElement;
+  let out = $state<HTMLAnchorElement>();
+  let close = $state<HTMLButtonElement>();
   /** Whatever had focus when this opened — the Trailer button, almost always — so it gets focus back on close,
       whatever closes it: the Close button, Escape, or the page unmounting this some other way. */
   let opener: HTMLElement | null = null;
@@ -56,16 +58,23 @@
          YouTube" here, and nothing in the page can be told that happened. On a phone the link opens the app. -->
     <a
       bind:this={out}
-      class="out"
+      class="den-button den-button-player den-button-regular out"
       href={`https://www.youtube.com/watch?v=${encodeURIComponent(key)}`}
       target="_blank"
       rel="noopener noreferrer"
+      aria-label="Open trailer on YouTube in a new tab"
     >
-      {@render outIcon()}<span class="label">YouTube, in a new tab</span>
+      <ButtonIcon name="external" /><span class="den-button-label out-label">YouTube</span>
     </a>
-    <button bind:this={close} class="close" onclick={onclose}>
-      {@render cross()}<span class="label">Close</span>
-    </button>
+    <Button
+      bind:element={close}
+      variant="player"
+      size="icon"
+      class="close"
+      icon="close"
+      ariaLabel="Close trailer"
+      onclick={onclose}
+    />
   </header>
   <!-- The page sends no referrer, and YouTube's embed refuses to play without one: this frame sends its origin. -->
   <iframe
@@ -76,20 +85,6 @@
     referrerpolicy="strict-origin-when-cross-origin"
   ></iframe>
 </div>
-
-{#snippet outIcon()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M14 4.5h5.5V10" />
-    <path d="M19.5 4.5 12 12" />
-    <path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5" />
-  </svg>
-{/snippet}
-
-{#snippet cross()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
-    ><path d="m6 6 12 12M18 6 6 18" /></svg
-  >
-{/snippet}
 
 <style>
   .trailer {
@@ -124,33 +119,22 @@
     white-space: nowrap;
   }
 
-  .out,
-  .close {
-    display: flex;
+  .out {
     flex: 0 0 auto;
-    gap: 8px;
-    align-items: center;
-    justify-content: center;
-    min-height: 44px;
-    padding: 0 14px;
-    border: 1px solid rgb(255 255 255 / 0.4);
-    border-radius: 999px;
-    background: none;
-    color: #fff;
-    font: inherit;
-    text-decoration: none;
-    cursor: pointer;
   }
 
   /* Closing is one glyph, as it is in the player, and it stands beside the title rather than among controls. */
-  .close {
-    width: 44px;
-    padding: 0;
-    border-color: transparent;
+  :global(.den-button.close) {
+    --button-bg: transparent;
+    --button-border: transparent;
+
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   /* Read out at every width, drawn only where the title can spare it. */
-  .label {
+  .out-label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -160,30 +144,12 @@
   }
 
   @media (width >= 560px) {
-    .out .label {
+    .out-label {
       position: static;
       width: auto;
       height: auto;
       clip-path: none;
     }
-  }
-
-  .icon {
-    flex: 0 0 auto;
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentcolor;
-    stroke-width: 1.7;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .out:focus-visible,
-  .close:focus-visible {
-    border-color: var(--accent);
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
   }
 
   iframe {

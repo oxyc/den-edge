@@ -57,7 +57,12 @@
   }: ButtonProps = $props();
 
   function activate(event: MouseEvent) {
-    if (busy || disabled) {
+    if (
+      busy ||
+      disabled ||
+      attributes['aria-disabled'] === true ||
+      attributes['aria-disabled'] === 'true'
+    ) {
       event.preventDefault();
       return;
     }

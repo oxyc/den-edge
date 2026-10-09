@@ -7,7 +7,9 @@
     | 'close'
     | 'download'
     | 'eye'
+    | 'external'
     | 'fullscreen'
+    | 'heart'
     | 'more'
     | 'mute'
     | 'pause'
@@ -17,6 +19,8 @@
     | 'sources'
     | 'trailer'
     | 'trash'
+    | 'thumb-down'
+    | 'thumb-up'
     | 'tv'
     | 'volume';
 </script>
@@ -31,6 +35,7 @@
   focusable="false"
   class:filled
   class:eye={name === 'eye'}
+  data-icon={name}
 >
   {#if name === 'play'}
     <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
@@ -52,6 +57,17 @@
   {:else if name === 'eye'}
     <path d="M2.5 12S6 6.6 12 6.6 21.5 12 21.5 12 18 17.4 12 17.4 2.5 12 2.5 12Z" />
     <circle cx="12" cy="12" r="2.9" />
+  {:else if name === 'heart'}
+    <path
+      d="M12 19.6S4.4 15.1 4.4 10a3.9 3.9 0 0 1 7.6-1.4A3.9 3.9 0 0 1 19.6 10c0 5.1-7.6 9.6-7.6 9.6Z"
+    />
+  {:else if name === 'thumb-up' || name === 'thumb-down'}
+    <g transform={name === 'thumb-down' ? 'rotate(180 12 12)' : undefined}>
+      <path
+        d="M8.6 20.2v-9.8l3.6-6.1a1.3 1.3 0 0 1 2.4.9l-.8 4.3h4.6a2 2 0 0 1 2 2.4l-1.2 6a2 2 0 0 1-2 1.6H8.6Z"
+      />
+      <path d="M8.6 20.2H5.9a1.4 1.4 0 0 1-1.4-1.4v-7a1.4 1.4 0 0 1 1.4-1.4h2.7" />
+    </g>
   {:else if name === 'share'}
     <path
       d="M12 3.6v11.2m-4.1-7.1L12 3.6l4.1 4.1M5.6 12.8v5.6a2 2 0 0 0 2 2h8.8a2 2 0 0 0 2-2v-5.6"
@@ -60,6 +76,9 @@
     <path d="M5.5 7.5h13M9 7.5V5h6v2.5m2 0-.7 12H7.7L7 7.5m3.2 3v6m3.6-6v6" />
   {:else if name === 'download'}
     <path d="M12 3.5v11m-4-4 4 4 4-4M5 19.5h14" />
+  {:else if name === 'external'}
+    <path d="M14 4.5h5.5V10M19.5 4.5 12 12" />
+    <path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5" />
   {:else if name === 'sources'}
     <rect x="3" y="4" width="18" height="5" rx="1.5" />
     <rect x="3" y="15" width="18" height="5" rx="1.5" />

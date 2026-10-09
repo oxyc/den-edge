@@ -97,8 +97,9 @@
   h2 {
     min-width: 0;
     margin: 0;
-    font-size: 20px;
-    line-height: 1.4;
+    font-size: var(--section-heading-size);
+    font-weight: var(--section-heading-weight);
+    line-height: var(--section-heading-line-height);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

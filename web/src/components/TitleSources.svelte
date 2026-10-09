@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Loading from './Loading.svelte';
   import Button from './Button.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
   import DownloadStatus from './DownloadStatus.svelte';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type {
@@ -150,37 +151,23 @@
   const size = (bytes?: number) => (bytes ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : '');
 </script>
 
-<div class="source-controls">
+<div class="source-accordion" class:open>
   <Button
-    variant="secondary"
+    variant="tertiary"
+    class="sources-disclosure"
     icon="sources"
-    label={`Sources${sources ? ` (${sources.length})` : ''}`}
+    label="Sources"
+    ariaLabel={`Sources${sources ? `, ${sources.length} available` : ''}`}
     aria-expanded={open}
     aria-controls={panelId}
     onclick={() => (open = !open)}
-  />
-  {#if title && best && best.cached === false && best.seeders !== 0}
-    {@const state = stateOf(best)}
-    <Button
-      variant="secondary"
-      icon="download"
-      label={state === 'ready'
-        ? 'Ready to play'
-        : state === 'fetching'
-          ? 'Downloading'
-          : state === 'starting' || state === 'paused'
-            ? 'Checking download'
-            : 'Download'}
-      disabled={inFlight(state ?? null) || state === 'ready'}
-      onclick={() => void download(best!)}
-    />
-  {/if}
+  >
+    {#if sources}<span class="source-count">{sources.length}</span>{/if}
+    <span class="disclosure-chevron" class:open aria-hidden="true"
+      ><ButtonIcon name="chevron" /></span
+    >
+  </Button>
 </div>
-{#if best?.cached === false && !jobOf(best)}<p class="readiness">
-    This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
-  </p>{/if}
-{#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
-{#if message}<p class="readiness" role="status">{message}</p>{/if}
 {#if open}
   <div id={panelId} bind:this={panel} class="source-panel">
     {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
@@ -278,8 +265,94 @@
     {/if}
   </div>
 {/if}
+{#if title && best && best.cached === false && best.seeders !== 0}
+  {@const state = stateOf(best)}
+  <div class="source-controls">
+    <Button
+      variant="secondary"
+      icon="download"
+      label={state === 'ready'
+        ? 'Ready to play'
+        : state === 'fetching'
+          ? 'Downloading'
+          : state === 'starting' || state === 'paused'
+            ? 'Checking download'
+            : 'Download'}
+      disabled={inFlight(state ?? null) || state === 'ready'}
+      onclick={() => void download(best!)}
+    />
+  </div>
+{/if}
+{#if best?.cached === false && !jobOf(best)}<p class="readiness">
+    This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
+  </p>{/if}
+{#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
+{#if message}<p class="readiness" role="status">{message}</p>{/if}
 
 <style>
+  .source-accordion {
+    max-width: 1100px;
+    margin-bottom: 20px;
+  }
+
+  .source-accordion.open {
+    margin-bottom: 0;
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure) {
+    --button-bg: transparent;
+    --button-border: transparent;
+    --button-fg: var(--fg);
+
+    width: auto;
+    max-width: 100%;
+    min-height: 44px;
+    justify-content: flex-start;
+    padding-inline: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: var(--section-heading-size);
+    font-weight: var(--section-heading-weight);
+    line-height: var(--section-heading-line-height);
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure:hover:not([aria-disabled='true'])) {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .source-accordion :global(.den-button.sources-disclosure:active:not([aria-disabled='true'])) {
+    transform: none;
+  }
+
+  .source-count {
+    color: var(--muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+
+  .disclosure-chevron {
+    --button-icon-size: 16px;
+
+    display: grid;
+    flex: 0 0 20px;
+    width: 20px;
+    height: 44px;
+    place-items: center;
+    opacity: 0.65;
+  }
+
+  .disclosure-chevron :global(svg) {
+    transform: rotate(-90deg);
+    transition: transform 110ms ease-out;
+  }
+
+  .disclosure-chevron.open :global(svg) {
+    transform: rotate(0);
+  }
+
   .source-controls {
     display: flex;
     flex-wrap: wrap;
@@ -289,7 +362,11 @@
 
   .source-panel {
     max-width: 1100px;
-    margin: 16px 0 24px;
+    margin: 4px 0 24px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgb(255 255 255 / 0.025);
     scroll-margin-top: var(--bar-space);
   }
 
@@ -420,6 +497,12 @@
     /* Narrow: the size chip alone, not the pack it came from. */
     .pack {
       display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .disclosure-chevron :global(svg) {
+      transition: none;
     }
   }
 </style>
