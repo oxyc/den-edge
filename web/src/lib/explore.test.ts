@@ -28,8 +28,34 @@ import {
 } from './explore';
 import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
+
+const contentForPages = (pageSource: Pages): ContentServiceClientPort =>
+  ({
+    async query(request: { kind: string; [key: string]: unknown }) {
+      if (request.kind === 'catalog.page') {
+        const catalog = request.catalog as {
+          kind: string;
+          title?: { type: MediaType; id: number };
+        };
+        if (catalog.kind === 'recommendations' && catalog.title)
+          return {
+            kind: 'catalog.page',
+            titles: await pageSource(
+              `/${catalog.title.type}/${catalog.title.id}/recommendations`,
+              catalog.title.type,
+              {},
+              request.page as number,
+            ),
+          };
+      }
+      if (request.kind === 'titles') return { kind: 'titles', titles: [], retryable: [] };
+      throw new Error(`unexpected content request ${request.kind}`);
+    },
+    onStatus: () => () => {},
+  }) as ContentServiceClientPort;
 
 describe('Explore chips', () => {
   it('run For You, moods, recipes, then genres, each strongest first', () => {
@@ -637,6 +663,7 @@ describe('Explore feeds', () => {
     atlas: null,
     seeds,
     owned: new Set(['movie:50']),
+    content: contentForPages(pages),
   });
 
   it('browses a genre as its primary-genre shelf, retargeted for the type', async () => {
@@ -833,10 +860,10 @@ describe('Explore feeds', () => {
       return new Response('', { status: 404 });
     }) as typeof fetch;
     try {
+      calls.length = 0;
       const row = exploreFeed(['like-movie-949', 'genre-80', 'rating-7'], 'movie', {
         ...sources(),
         atlas: '/atlas',
-        key: 'k',
       });
       expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
       await row.load(1);
@@ -844,7 +871,7 @@ describe('Explore feeds', () => {
       expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:80,like:949,rating:7');
       expect(asked[1]).toBe('/atlas/index/similar/movie/949.json?limit=200');
       // atlas has nothing for it: TMDB's recommendations, from their first page.
-      expect(asked.some((url) => url.includes('/movie/949/recommendations'))).toBe(true);
+      expect(calls.some(({ path }) => path === '/movie/949/recommendations')).toBe(true);
       const title = { ...film(1), genreIds: [80, 18], rating: 7.6, votes: 4000 };
       expect(row.filter?.(title)).toBe(true);
       expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
@@ -871,7 +898,6 @@ describe('Explore feeds', () => {
       const row = exploreFeed(['fans-movie-949', 'genre-80'], 'all', {
         ...sources(),
         atlas: '/atlas',
-        key: 'k',
       });
       expect(await row.load(1)).toEqual([]);
       expect(asked[0]).toBe('/atlas/index/filter/all/titles.json?sel=fans:movie-949,genre:80');
@@ -1097,7 +1123,7 @@ describe('All: films and series together', () => {
     }) as typeof fetch;
   const pages: Pages = async (path, type, _params, page) =>
     path.includes('recommendations') ? [] : [film(page * 100, type)];
-  const base = { pages, seeds: [], owned: new Set<string>() };
+  const base = { pages, seeds: [], owned: new Set<string>(), content: contentForPages(pages) };
 
   it('asks atlas for both types at once, a series card staying a series', async () => {
     const asked: string[] = [];
@@ -1163,7 +1189,6 @@ describe('All: films and series together', () => {
       const row = exploreFeed(['like-movie-949', 'genre-28'], 'all', {
         ...base,
         atlas: '/atlas',
-        key: 'k',
         fetchImpl: globalThis.fetch,
       });
       await row.load(1);

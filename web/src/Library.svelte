@@ -21,7 +21,7 @@
     ServiceScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
-  import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
+  import { browseRows, contentPages, homeRows, interleave, personalRows } from './lib/catalog';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
@@ -871,7 +871,7 @@
     }));
   });
   /** The browse screens' rows, headers now and posters as each nears the screen. */
-  const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
+  const pages = $derived(session.content ? contentPages(session.content) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
   const seeds = $derived.by(() => {
     const namedSeeds = (refs: readonly TitleRef[]) =>
@@ -929,9 +929,12 @@
     }
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
-    const key = tmdbKey;
     const filter = atlas
-      ? { base: atlas, title: (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key) }
+      ? {
+          base: atlas,
+          title: async (ref: { type: 'movie' | 'tv'; id: number }) =>
+            (await session.content?.query({ kind: 'titles', titles: [ref] }))?.titles[0] ?? null,
+        }
       : undefined;
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
@@ -1364,7 +1367,6 @@
     content={session.content!}
     active={active && !playing}
     ref={page}
-    {tmdbKey}
     warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
     ratingSources={[...detailPrefs.ratingSources]}
@@ -1417,7 +1419,7 @@
   <SearchScreen.current
     {query}
     {explore}
-    {tmdbKey}
+    content={session.content!}
     {atlas}
     {prefs}
     shown={browseShown}

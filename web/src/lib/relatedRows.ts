@@ -1,17 +1,15 @@
 // The rows under a title (You might also like, the franchise, More from / Starring), each a `RowDef` so `BrowseRow`
 // loads it a page at a time as the viewer scrolls: the more they slide, the more appears. None is a fixed slice.
 
-import { tmdbPages, type RowDef } from './catalog';
+import type { RowDef } from './catalog';
 import { titlesOf } from './atlasRows';
-import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
+import { groupFilmography, type TitleDetail } from './detail';
 import { filterTitles, likeValue } from './filterRoutes';
 import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import { fansId, likeId, personHref, searchHref } from './route';
 import type { Browsable, TitleFacts } from './titleFacts';
-import { fetchTitle } from './tmdb';
-import { tmdbFetch } from './tmdbCache';
-import { withSharedTitleMetadata } from './titleMetadata';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 /** Titles a page adds: a screenful and a bit, the size TMDB's own pages come in. */
 const CHUNK = 20;
@@ -30,28 +28,20 @@ type Ref = { type: MediaType; id: number };
 async function drawRefs(
   refs: Ref[],
   cards: Title[],
-  key: string,
-  fetchImpl: typeof fetch,
+  content: ContentServiceClientPort,
 ): Promise<Title[]> {
   const byKey = new Map(cards.map((t) => [keyOf(t), t]));
-  const shared = await withSharedTitleMetadata(
-    refs.flatMap((ref) => byKey.get(keyOf(ref)) ?? []),
-    fetchImpl,
-  );
-  const drawn = new Map(shared.map((t) => [keyOf(t), t]));
-  const titles = await Promise.all(
-    refs.map((ref) => {
-      const card = drawn.get(keyOf(ref));
-      if (card?.posterPath) return card;
-      return fetchTitle(ref, key, fetchImpl).then((full) => full ?? card ?? null);
-    }),
-  );
-  return titles.filter((t): t is Title => t !== null);
+  const missing = refs.filter((ref) => !byKey.get(keyOf(ref))?.posterPath);
+  const normalized = missing.length
+    ? (await content.query({ kind: 'titles', titles: missing })).titles
+    : [];
+  const drawn = new Map(normalized.map((title) => [keyOf(title), title]));
+  return refs.flatMap((ref) => drawn.get(keyOf(ref)) ?? byKey.get(keyOf(ref)) ?? []);
 }
 
 export interface RelatedOptions {
-  /** TMDB's key, or the empty string where den-edge lends its own (`/tmdb`). */
-  key: string;
+  /** Worker-owned normalized content; provider keys and response shapes remain behind it. */
+  content: ContentServiceClientPort;
   fetchImpl?: typeof fetch;
   /**
    * How many of atlas's closest titles to ask for at once. Its first screenful (20) is what a detail page's row
@@ -95,8 +85,8 @@ export function moreLikeThisRow(
   detail: Pick<TitleDetail, 'title'> & { more?: Title[] },
   atlas: string | null,
   {
-    key,
-    fetchImpl = tmdbFetch,
+    content,
+    fetchImpl = fetch,
     similarLimit,
     mixed = false,
     affinity = false,
@@ -107,7 +97,6 @@ export function moreLikeThisRow(
   const self = detail.title;
   const kind = self.type === 'tv' ? 'series' : 'movie';
   seen.add(keyOf(self));
-  const recommendations = tmdbPages(key, fetchImpl);
 
   const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
   const suggestPath = '/index/suggest.json';
@@ -195,7 +184,7 @@ export function moreLikeThisRow(
     if (refs.length === 0) return undefined;
     cardsSkip += refs.length;
     const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
-    return drawRefs(wanted, titlesOf(body), key, fetchImpl);
+    return drawRefs(wanted, titlesOf(body), content);
   }
 
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
@@ -205,8 +194,7 @@ export function moreLikeThisRow(
     const last = wanted[wanted.length - 1];
     queue = last ? queue.slice(queue.indexOf(last) + 1) : [];
     if (wanted.length === 0) return undefined;
-    const drawn = await Promise.all(wanted.map((ref) => fetchTitle(ref, key, fetchImpl)));
-    return drawn.filter((t): t is Title => t !== null);
+    return (await content.query({ kind: 'titles', titles: wanted })).titles;
   }
 
   /** Where the row goes once atlas's own answer for it has run out: the wider sources, or nowhere. */
@@ -252,12 +240,13 @@ export function moreLikeThisRow(
         return detail.more;
       }
       try {
-        const page = await recommendations(
-          `/${self.type}/${self.id}/recommendations`,
-          self.type,
-          {},
-          recommendedPage++,
-        );
+        const page = (
+          await content.query({
+            kind: 'catalog.page',
+            catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
+            page: recommendedPage++,
+          })
+        ).titles;
         if (page.length > 0) return page;
       } catch {
         // TMDB has nothing deeper, or isn't answering: the row is as long as it gets.
@@ -324,19 +313,17 @@ export async function firstScreen(
  * already seen, and a title page hides a card without one — which left "More from Telecinco Cinema" 2 of its 33. What
  * neither has is asked of TMDB, one title at a time, as the franchise row does (`drawRefs`).
  */
-export function withPosters(row: RowDef, { key, fetchImpl = tmdbFetch }: RelatedOptions): RowDef {
+export function withPosters(row: RowDef, { content }: RelatedOptions): RowDef {
   return {
     ...row,
-    load: async (page) =>
-      Promise.all(
-        (await row.load(page)).map((title) =>
-          title.posterPath || title.posterUrl
-            ? title
-            : fetchTitle(title, key, fetchImpl).then((full) =>
-                full ? { ...title, ...full } : title,
-              ),
-        ),
-      ),
+    load: async (page) => {
+      const loaded = await row.load(page);
+      const missing = loaded.filter((title) => !title.posterPath && !title.posterUrl);
+      if (!missing.length) return loaded;
+      const normalized = (await content.query({ kind: 'titles', titles: missing })).titles;
+      const byKey = new Map(normalized.map((title) => [keyOf(title), title]));
+      return loaded.map((title) => ({ ...title, ...byKey.get(keyOf(title)) }));
+    },
   };
 }
 
@@ -688,13 +675,14 @@ export function moodRow(
 export function collectionRow(
   collection: { id: number; name: string },
   self: Title,
-  { key, fetchImpl = tmdbFetch }: RelatedOptions,
+  { content }: RelatedOptions,
 ): RowDef {
   return {
     id: `collection-${collection.id}`,
     title: collection.name,
     filter: (t) => keyOf(t) !== keyOf(self),
-    load: async (page) => (page === 1 ? await fetchCollection(collection.id, key, fetchImpl) : []),
+    load: async (page) =>
+      page === 1 ? (await content.query({ kind: 'collection', id: collection.id })).titles : [],
   };
 }
 
@@ -714,7 +702,7 @@ export async function franchiseRow(
 ): Promise<RowDef | null> {
   if (atlas) {
     const kind = self.type === 'tv' ? 'series' : 'movie';
-    const fetchImpl = options.fetchImpl ?? tmdbFetch;
+    const fetchImpl = options.fetchImpl ?? fetch;
     try {
       const res = await fetchImpl(`${atlas}/index/franchise/${kind}/${self.id}.json`);
       if (res.ok) {
@@ -735,7 +723,7 @@ export async function franchiseRow(
             title: franchise.name,
             filter: (title) => keyOf(title) !== keyOf(self),
             load: async (page) =>
-              page === 1 ? await (members ??= drawRefs(refs, cards, options.key, fetchImpl)) : [],
+              page === 1 ? await (members ??= drawRefs(refs, cards, options.content)) : [],
           };
         }
       }
@@ -759,7 +747,7 @@ export async function versionsRow(
   self: Title,
   atlas: string | null,
   franchise: Promise<RowDef | null>,
-  { key, fetchImpl = tmdbFetch }: RelatedOptions,
+  { content, fetchImpl = fetch }: RelatedOptions,
 ): Promise<RowDef | null> {
   if (!atlas) return null;
   const kind = self.type === 'tv' ? 'series' : 'movie';
@@ -790,7 +778,7 @@ export async function versionsRow(
   elsewhere.add(keyOf(self));
   const wanted = refs.filter((ref) => !elsewhere.has(keyOf(ref)));
   if (wanted.length === 0) return null;
-  const titles = await drawRefs(wanted, titlesOf({ titles: listed }), key, fetchImpl);
+  const titles = await drawRefs(wanted, titlesOf({ titles: listed }), content);
   if (titles.length === 0) return null;
   return {
     id: 'other-versions',
@@ -845,7 +833,7 @@ export function personRow(
   person: { id: number; name: string },
   department: Department,
   self: Title,
-  { key, fetchImpl = tmdbFetch }: RelatedOptions,
+  { content }: RelatedOptions,
   before = department === 'Directing'
     ? 'More from '
     : department === 'Writing'
@@ -864,9 +852,9 @@ export function personRow(
     },
     filter: (t) => keyOf(t) !== keyOf(self),
     load: async (page) => {
-      films ??= fetchFilmography(person.id, key, fetchImpl).then(
-        (credits) =>
-          groupFilmography(credits ?? [])
+      films ??= content.query({ kind: 'person.filmography', id: person.id }).then(
+        ({ credits }) =>
+          groupFilmography(credits.state === 'ready' ? credits.value : [])
             .find((g) => g.department === department)
             ?.films.map((c) => c.title) ?? [],
       );

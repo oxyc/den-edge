@@ -14,7 +14,14 @@ import type {
   ContentResult as ServiceContentResult,
   OptionalContent,
 } from './contentServiceProtocol';
-import { parseDetail, parseSeason, type Episode, type TitleDetail } from './detail';
+import {
+  parseCollection,
+  parseDetail,
+  parseFilmography,
+  parseSeason,
+  type Episode,
+  type TitleDetail,
+} from './detail';
 import { parseRatings, type Ratings } from './detailPresentation';
 import { parseIconicStudios, type IconicStudio } from './iconicStudios';
 import type { MediaType } from './library';
@@ -23,6 +30,9 @@ import { retryAfterMs } from './retryAfter';
 import { seriesShape, toTitle, type Details } from './tmdb';
 import { parseTitleFacts, type TitleFacts } from './titleFacts';
 import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
+import { discoverParams } from './catalog';
+import { searchStream, type Hit } from './search';
+import { searchSources } from './searchSources';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -264,6 +274,44 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         };
       case 'title.extras':
         return this.#queryExtras(request.title, request.warningCategories, signal);
+      case 'catalog.page':
+        return {
+          kind: 'catalog.page',
+          titles: await this.#wait(this.#catalog(request.catalog, request.page), signal),
+        };
+      case 'search': {
+        let hits: Hit[] = [];
+        const sources = searchSources(
+          this.#tmdbKey(),
+          (input, init) => this.#contentFetch(input, { ...init, signal }),
+          this.credentials.atlas?.() ?? null,
+        );
+        for await (const batch of searchStream(request.query, sources, signal)) hits = batch;
+        return { kind: 'search', hits };
+      }
+      case 'collection': {
+        const body = await this.#wait(
+          this.#tmdb(`/collection/${request.id}`, this.#tmdbKey()),
+          signal,
+        );
+        return {
+          kind: 'collection',
+          titles: body.kind === 'found' ? parseCollection(body.value) : [],
+        };
+      }
+      case 'person.filmography': {
+        const body = await this.#wait(
+          this.#tmdb(`/person/${request.id}/combined_credits`, this.#tmdbKey()),
+          signal,
+        );
+        return {
+          kind: 'person.filmography',
+          credits:
+            body.kind === 'found'
+              ? { state: 'ready', value: parseFilmography(body.value) }
+              : optional(body, 'tmdb'),
+        };
+      }
       default:
         throw new ContentServiceFault({
           code: 'not-ready',
@@ -386,6 +434,68 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   #tmdbKey(): string {
     return this.credentials.tmdb()?.trim() || TMDB_PROXY_KEY;
+  }
+
+  async #catalog(
+    catalog: Extract<ContentRequest, { kind: 'catalog.page' }>['catalog'],
+    page: number,
+  ): Promise<import('./library').Title[]> {
+    if (!Number.isSafeInteger(page) || page < 1 || page > 500) return [];
+    let path: string;
+    let type: MediaType;
+    let params: Record<string, string> = {};
+    switch (catalog.kind) {
+      case 'discover':
+        type = catalog.query.mediaType;
+        path = `/discover/${type}`;
+        params = discoverParams(catalog.query);
+        break;
+      case 'trending':
+        type = catalog.media;
+        path = `/trending/${type}/${catalog.window}`;
+        break;
+      case 'popular':
+        type = catalog.media;
+        path = `/${type}/popular`;
+        break;
+      case 'top-rated':
+        type = catalog.media;
+        path = `/${type}/top_rated`;
+        break;
+      case 'upcoming':
+        type = 'movie';
+        path = '/movie/upcoming';
+        break;
+      case 'recommendations':
+        type = catalog.title.type;
+        path = `/${type}/${catalog.title.id}/recommendations`;
+        break;
+    }
+    const body = await this.#tmdb(path, this.#tmdbKey(), { ...params, page: String(page) });
+    if (body.kind === 'missing') return [];
+    if (body.kind !== 'found')
+      throw new ContentServiceFault({
+        code: body.kind === 'not-configured' ? 'not-configured' : 'unavailable',
+        message: 'catalog provider unavailable',
+        retryable: body.kind !== 'not-configured',
+        provider: 'tmdb',
+        ...(body.kind === 'unavailable' && body.retryAfterMs !== undefined
+          ? { retryAfterMs: body.retryAfterMs }
+          : {}),
+      });
+    return Array.isArray(body.value.results)
+      ? body.value.results.flatMap((raw) => {
+          const value = object(raw);
+          const id = value?.id;
+          const title = typeof id === 'number' && value ? toTitle({ type, id }, value) : null;
+          return title ? [title] : [];
+        })
+      : [];
+  }
+
+  #contentFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    return url.startsWith(TMDB) ? this.#tmdbFetch(input, init) : this.#providerFetch(input, init);
   }
 
   #facts(ref: ContentRef): Promise<ProviderResult<TitleFacts>> {

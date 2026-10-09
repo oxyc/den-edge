@@ -33,7 +33,6 @@
     active={true}
     {content}
     ref={{ type: 'movie', id: 42 }}
-    tmdbKey="fixture-key"
     reel={null}
     {row}
     episodes={new Map()}

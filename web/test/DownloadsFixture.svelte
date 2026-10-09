@@ -183,7 +183,6 @@
     <Detail
       {content}
       ref={{ type: 'movie', id: 42 }}
-      tmdbKey="fixture-key"
       scout={{ install: 'http://scout.invalid/cfg', base: '/scout/cfg' }}
       routes={{ scout: [{ url: 'http://scout.invalid' }] }}
       row={undefined}

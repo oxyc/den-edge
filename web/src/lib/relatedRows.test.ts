@@ -3,26 +3,88 @@ import type { Title } from './library';
 import type { RowDef } from './catalog';
 import {
   authorRow,
-  collectionRow,
+  collectionRow as collectionRowImpl,
   countryRow,
   firstScreen,
-  franchiseRow,
+  franchiseRow as franchiseRowImpl,
   homeCountry,
   languageRow,
   moodRow,
-  moreLikeThisRow,
-  personRow,
+  moreLikeThisRow as moreLikeThisRowImpl,
+  personRow as personRowImpl,
   personRows,
   producerRows,
   studioRow,
   themeRows,
-  versionsRow,
-  withPosters,
+  versionsRow as versionsRowImpl,
+  withPosters as withPostersImpl,
+  type RelatedOptions,
 } from './relatedRows';
 import { NO_FACTS } from './titleFacts';
+import { ContentAuthority } from './contentAuthority';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });
+
+const fixtureContentPort = (
+  key = '',
+  fetchImpl: typeof fetch = fetch,
+): ContentServiceClientPort => {
+  const authority = new ContentAuthority(
+    {
+      tmdb: () => key,
+      omdb: () => undefined,
+      contentWarnings: () => undefined,
+      atlas: () => undefined,
+    },
+    { tmdbFetch: fetchImpl, providerFetch: fetchImpl },
+  );
+  return {
+    query: (request, signal) =>
+      authority.query(request, signal ?? new AbortController().signal) as never,
+    onStatus: () => () => {},
+  };
+};
+
+type FixtureOptions = Omit<RelatedOptions, 'content'> & { key?: string };
+
+const fixtureOptions = (value: FixtureOptions = {}): RelatedOptions => {
+  const { key, ...options } = value;
+  return { ...options, content: fixtureContentPort(key, options.fetchImpl) };
+};
+
+const moreLikeThisRow = (
+  detail: Parameters<typeof moreLikeThisRowImpl>[0],
+  atlas: Parameters<typeof moreLikeThisRowImpl>[1],
+  options: FixtureOptions,
+) => moreLikeThisRowImpl(detail, atlas, fixtureOptions(options));
+const collectionRow = (
+  collection: Parameters<typeof collectionRowImpl>[0],
+  title: Parameters<typeof collectionRowImpl>[1],
+  options: FixtureOptions,
+) => collectionRowImpl(collection, title, fixtureOptions(options));
+const franchiseRow = (
+  collection: Parameters<typeof franchiseRowImpl>[0],
+  title: Parameters<typeof franchiseRowImpl>[1],
+  atlas: Parameters<typeof franchiseRowImpl>[2],
+  options: FixtureOptions,
+) => franchiseRowImpl(collection, title, atlas, fixtureOptions(options));
+const versionsRow = (
+  title: Parameters<typeof versionsRowImpl>[0],
+  atlas: Parameters<typeof versionsRowImpl>[1],
+  franchise: Parameters<typeof versionsRowImpl>[2],
+  options: FixtureOptions,
+) => versionsRowImpl(title, atlas, franchise, fixtureOptions(options));
+const personRow = (
+  person: Parameters<typeof personRowImpl>[0],
+  department: Parameters<typeof personRowImpl>[1],
+  title: Parameters<typeof personRowImpl>[2],
+  options: FixtureOptions,
+  before?: Parameters<typeof personRowImpl>[4],
+) => personRowImpl(person, department, title, fixtureOptions(options), before);
+const withPosters = (row: RowDef, options: FixtureOptions) =>
+  withPostersImpl(row, fixtureOptions(options));
 
 /** A TMDB and atlas that answer from a table keyed by the request path, recording what was asked. */
 function answering(table: Record<string, unknown>, asked: string[] = []) {
@@ -597,14 +659,8 @@ describe('franchiseRow', () => {
             { type: 'movie', id: 1930, title: 'The Amazing', year: 2012, posterPath: null },
           ],
         },
-        '/metadata/title/query': {
-          entries: [558, 225914].map((id) => ({
-            source: 'tmdb',
-            type: 'movie',
-            id,
-            fields: { posterPath: { observedAt: Date.now(), value: `/p${id}.jpg` } },
-          })),
-        },
+        '/3/movie/558': { id: 558, title: 'Spider-Man 2', poster_path: '/p558.jpg' },
+        '/3/movie/225914': { id: 225914, title: 'Spider-Man', poster_path: '/p225914.jpg' },
         '/3/movie/1930': { id: 1930, title: 'The Amazing', poster_path: '/p1930.jpg' },
       },
       asked,
@@ -618,8 +674,12 @@ describe('franchiseRow', () => {
     const titles = await shown!.load(1);
     expect(titles.map((t) => t.id)).toEqual([558, 225914, 1930]);
     expect(titles.every(withPoster)).toBe(true);
-    // Only the member den-edge has no poster for is asked of TMDB.
-    expect(asked.filter((path) => path.startsWith('/3/'))).toEqual(['/3/movie/1930']);
+    // The Worker normalizes every poster-less atlas card in one typed batch.
+    expect(asked.filter((path) => path.startsWith('/3/'))).toEqual([
+      '/3/movie/558',
+      '/3/movie/225914',
+      '/3/movie/1930',
+    ]);
   });
 
   it('uses TMDB only when atlas has no curated primary', async () => {

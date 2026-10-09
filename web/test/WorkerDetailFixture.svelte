@@ -19,7 +19,12 @@
   const session = new LibrarySession(model, true, services.content, () => services.close());
   const initialType = params.get('type') === 'movie' ? 'movie' : 'tv';
   const initialId = Number(params.get('id') ?? 308727);
-  let route = $state<Route>({ page: 'title', type: initialType, id: initialId });
+  const initialQuery = params.get('q') ?? '';
+  let route = $state<Route>(
+    params.has('search')
+      ? { page: 'search', query: initialQuery }
+      : { page: 'title', type: initialType, id: initialId },
+  );
   let seeded = $state(false);
   let seedFailure = $state<string | null>(null);
   let content = $state<string | null>(null);
@@ -45,14 +50,19 @@
       .then(async () => {
         const client = session.content!;
         const title = { type: 'tv' as const, id: initialId };
-        const [titles, detail, extras, externalId, season] = await Promise.all([
+        const [titles, detail, extras, externalId, season, catalog] = await Promise.all([
           client.query({ kind: 'titles', titles: [title, { type: 'movie', id: 9001 }] }),
           client.query({ kind: 'title.detail', title, region: 'FI' }),
           client.query({ kind: 'title.extras', title, warningCategories: ['Violence'] }),
           client.query({ kind: 'title.external-id', title }),
           client.query({ kind: 'season', title, season: 1 }),
+          client.query({
+            kind: 'catalog.page',
+            catalog: { kind: 'recommendations', title },
+            page: 2,
+          }),
         ]);
-        content = JSON.stringify({ titles, detail, extras, externalId, season });
+        content = JSON.stringify({ titles, detail, extras, externalId, season, catalog });
       })
       .catch((error: unknown) => {
         seedFailure = error instanceof Error ? error.message : String(error);
@@ -86,6 +96,7 @@
       libraryIdentity={libraryKey}
       {session}
       {route}
+      query={initialQuery}
       active={true}
       watchedYear={undefined}
     />

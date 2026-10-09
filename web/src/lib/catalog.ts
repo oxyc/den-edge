@@ -8,6 +8,8 @@ import { titleHref } from './route';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
+import type { ContentCatalogSpec } from './contentServiceProtocol';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -849,6 +851,27 @@ export type Pages = (
   page: number,
 ) => Promise<Title[]>;
 
+type WorkerPages = Pages & {
+  catalog?: (catalog: ContentCatalogSpec, page: number) => Promise<Title[]>;
+};
+
+/** Domain-catalog adapter for row definitions; provider URLs and credentials remain inside the content Worker. */
+export function contentPages(content: ContentServiceClientPort): Pages {
+  const pages: WorkerPages = async () => {
+    throw new Error('content catalog rows must use a typed catalog request');
+  };
+  pages.catalog = async (catalog, page) =>
+    (await content.query({ kind: 'catalog.page', catalog, page })).titles;
+  return pages;
+}
+
+export const catalogPage = (
+  pages: Pages,
+  catalog: ContentCatalogSpec,
+  providerRequest: [path: string, type: MediaType, params: Record<string, string>],
+  page: number,
+) => (pages as WorkerPages).catalog?.(catalog, page) ?? pages(...providerRequest, page);
+
 export function tmdbPages(key: string, fetchImpl: typeof fetch = tmdbFetch): Pages {
   return async (path, type, params, page) => {
     if (page > 500) return []; // TMDB serves no deeper
@@ -870,16 +893,24 @@ export const discoverRow = (
   id: string,
   title: string,
   query: DiscoverQuery,
-): RowDef => ({
-  id,
-  title,
-  filter:
-    query.primaryGenre === undefined
-      ? undefined
-      : (item) => matchesPrimaryGenre(item, query.primaryGenre!),
-  load: (page) =>
-    pages(`/discover/${query.mediaType}`, query.mediaType, discoverParams(query), page),
-});
+): RowDef => {
+  const { primaryGenre: _primaryGenre, ...contentQuery } = query;
+  return {
+    id,
+    title,
+    filter:
+      query.primaryGenre === undefined
+        ? undefined
+        : (item) => matchesPrimaryGenre(item, query.primaryGenre!),
+    load: (page) =>
+      catalogPage(
+        pages,
+        { kind: 'discover', query: contentQuery },
+        [`/discover/${query.mediaType}`, query.mediaType, discoverParams(query)],
+        page,
+      ),
+  };
+};
 
 /** Where a browse row asks atlas's filter first: its address, and how a card with no poster is drawn. */
 export interface AtlasFilterSource {
@@ -1008,7 +1039,13 @@ export function homeRows(
     {
       id: 'trending',
       title: 'Trending This Week',
-      load: (page) => pages('/trending/movie/week', 'movie', {}, page),
+      load: (page) =>
+        catalogPage(
+          pages,
+          { kind: 'trending', media: 'movie', window: 'week' },
+          ['/trending/movie/week', 'movie', {}],
+          page,
+        ),
     },
     discoverRow(pages, 'new-releases', 'New Releases', {
       mediaType: 'movie',
@@ -1020,12 +1057,14 @@ export function homeRows(
     {
       id: 'top-series',
       title: 'Top Rated Series',
-      load: (page) => pages('/tv/top_rated', 'tv', {}, page),
+      load: (page) =>
+        catalogPage(pages, { kind: 'top-rated', media: 'tv' }, ['/tv/top_rated', 'tv', {}], page),
     },
     {
       id: 'upcoming',
       title: 'Upcoming',
-      load: (page) => pages('/movie/upcoming', 'movie', {}, page),
+      load: (page) =>
+        catalogPage(pages, { kind: 'upcoming' }, ['/movie/upcoming', 'movie', {}], page),
     },
   ];
   const recipes = HOME_RECIPES.flatMap((slug) => RECIPES.find((r) => r.id === slug) ?? [])
@@ -1068,9 +1107,14 @@ export function personalRows(
     mobileHeadingLines: 2,
     headingLink: { before, label: seed.title, after, href: titleHref(seed) },
     load: async (page) =>
-      (await pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, page)).filter(
-        (t) => !owned.has(`${t.type}:${t.id}`),
-      ),
+      (
+        await catalogPage(
+          pages,
+          { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
+          [`/${seed.type}/${seed.id}/recommendations`, seed.type, {}],
+          page,
+        )
+      ).filter((t) => !owned.has(`${t.type}:${t.id}`)),
   });
   return [
     ...watched.map((seed) => row('byw', 'Because you watched ', '', seed)),
@@ -1098,7 +1142,8 @@ export function browseRows(
   const popular: RowDef = {
     id: 'popular',
     title: 'Popular on TMDB',
-    load: (page) => pages(`/${type}/popular`, type, {}, page),
+    load: (page) =>
+      catalogPage(pages, { kind: 'popular', media: type }, [`/${type}/popular`, type, {}], page),
   };
   const genreRows = curated.map((id) =>
     categoryRow(

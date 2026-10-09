@@ -8,6 +8,7 @@
 // other type alone (`perType`).
 
 import {
+  catalogPage,
   appendUniqueTitles,
   categories,
   COUNTRIES,
@@ -41,6 +42,7 @@ import {
 } from './filterRoutes';
 import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 import { FACET, fansOf, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
@@ -1119,8 +1121,8 @@ export interface FeedSources {
   minYear?: number;
   /** A title as TMDB draws it (`SearchSources.title`), for an atlas title with no poster. */
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
-  /** TMDB's key, or the empty string where den-edge lends its own: a "Like" draws its titles with it. */
-  key?: string;
+  /** Worker-owned normalized content used by recommendations and missing-card hydration. */
+  content: ContentServiceClientPort;
   /** How atlas's filter is asked (den-edge's relay by default). */
   fetchImpl?: typeof fetch;
 }
@@ -1148,17 +1150,20 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
         .filter((seed) => seed.type === type)
         .slice(0, SEEDS)
         .map((seed) =>
-          pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, 1).catch(
-            (error: unknown): Title[] => {
-              console.warn(
-                'explore: For You has no recommendations for',
-                `${seed.type}:${seed.id}`,
-                error,
-              );
-              failed = true;
-              return [];
-            },
-          ),
+          catalogPage(
+            pages,
+            { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
+            [`/${seed.type}/${seed.id}/recommendations`, seed.type, {}],
+            1,
+          ).catch((error: unknown): Title[] => {
+            console.warn(
+              'explore: For You has no recommendations for',
+              `${seed.type}:${seed.id}`,
+              error,
+            );
+            failed = true;
+            return [];
+          }),
         ),
     ).then((lists) => {
       if (failed && personal === asked) personal = undefined;
@@ -1171,8 +1176,13 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
   };
   const tail = (page: number) =>
     type === 'tv'
-      ? pages('/tv/top_rated', 'tv', {}, page)
-      : pages('/movie/popular', 'movie', {}, page);
+      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, ['/tv/top_rated', 'tv', {}], page)
+      : catalogPage(
+          pages,
+          { kind: 'popular', media: 'movie' },
+          ['/movie/popular', 'movie', {}],
+          page,
+        );
   /** Whether this run of the feed's first page was the recommendations, which shifts the tail a page on. */
   let led = false;
   return {
@@ -1388,7 +1398,7 @@ function localFeed(
   const like = set.map(likeOf).find((ref) => ref !== undefined);
   if (like) {
     const row = moreLikeThisRow({ title: { ...like, title: '' } }, sources.atlas, {
-      key: sources.key ?? '',
+      content: sources.content,
       similarLimit: LIKE_DEPTH,
       mixed: type === 'all',
     });
@@ -1398,7 +1408,7 @@ function localFeed(
   const fans = set.map(fansOf).find((ref) => ref !== undefined);
   if (fans) {
     const row = moreLikeThisRow({ title: { ...fans, title: '' } }, sources.atlas, {
-      key: sources.key ?? '',
+      content: sources.content,
       similarLimit: LIKE_DEPTH,
       mixed: type === 'all',
       affinity: true,

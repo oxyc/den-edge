@@ -29,13 +29,14 @@
   import { observeNearViewport } from '../lib/nearViewport';
   import { SvelteSet } from 'svelte/reactivity';
   import { yieldTask } from '../lib/taskYield';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
 
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
   import BrowseRow from './BrowseRow.svelte';
 
   let {
     detail,
-    tmdbKey,
+    content,
     atlas = null,
     studios,
     facts,
@@ -44,7 +45,7 @@
     shown,
   }: {
     detail: TitleDetail;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     /** Where this page reaches atlas, for the titles its index finds closest; null where it can't. */
     atlas?: string | null;
     /**
@@ -114,7 +115,7 @@
     if (atlas && (!curated || !asked)) return;
     const known = asked ?? NO_FACTS;
     const credited = curated ?? [];
-    const options = { key: tmdbKey };
+    const options = { content };
     const self = detail.title;
     const key = titleKey(self);
     const rebuild = key === rowsFor;

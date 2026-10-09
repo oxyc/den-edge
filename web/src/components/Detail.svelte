@@ -57,7 +57,6 @@
     routes = {},
     atlas = null,
     content,
-    tmdbKey,
     warningCategories = [],
     region = 'US',
     autoplay = true,
@@ -92,7 +91,6 @@
     atlas?: string | null;
     /** The Worker-owned, normalized content boundary. Provider keys never enter this component. */
     content: ContentServiceClientPort;
-    tmdbKey: string;
     warningCategories?: string[];
     region?: string;
     ratingSources?: string[];
@@ -891,7 +889,7 @@
       {/if}
       <RelatedTitles
         detail={d}
-        {tmdbKey}
+        {content}
         {atlas}
         studios={iconicStudios}
         facts={titleFacts}

@@ -10,7 +10,7 @@
   import Picks from './Picks.svelte';
   import SearchResults from './SearchResults.svelte';
   import TypeFilter from './TypeFilter.svelte';
-  import { equivalentGenre, tmdbPages } from '../lib/catalog';
+  import { contentPages, equivalentGenre } from '../lib/catalog';
   import {
     applyPick,
     chipsOf,
@@ -46,14 +46,14 @@
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
   import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
-  import { awaitingPicture, searchStream, type Hit } from '../lib/search';
-  import { searchSources } from '../lib/searchSources';
+  import { awaitingPicture, type Hit } from '../lib/search';
   import { rememberSearch } from '../lib/recentSearches';
+  import type { ContentServiceClientPort } from '../lib/libraryServiceFactory';
 
   let {
     query,
     explore = {},
-    tmdbKey,
+    content,
     atlas,
     prefs,
     shown = () => true,
@@ -64,7 +64,7 @@
     query: string;
     /** What Explore is browsing, from the address. */
     explore?: Explore;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     atlas: string | null;
     prefs: Prefs;
     /** What the browse rows hide — the grid is one of them. Typed results keep their own, looser rule. */
@@ -77,7 +77,8 @@
     active?: boolean;
   } = $props();
 
-  const sources = $derived(searchSources(tmdbKey, undefined, atlas));
+  const title = async (ref: { type: MediaType; id: number }) =>
+    (await content.query({ kind: 'titles', titles: [ref] })).titles[0] ?? null;
   const rulesKey = $derived(
     JSON.stringify([
       [...prefs.excludedGenres].sort(),
@@ -113,8 +114,7 @@
     for (const id of [like, fans]) {
       const ref = id && (likeOf(id) ?? fansOf(id));
       if (!id || !ref || untrack(() => likeNames[id])) continue;
-      sources
-        .title(ref)
+      title(ref)
         .then((title) => {
           if (current && title) likeNames[id] = title.title;
         })
@@ -201,18 +201,18 @@
       .join(' ');
   });
 
-  // The selection's feed. Only the selection, and what reaches TMDB and atlas, start it again: a new seed or a write
+  // The selection's feed. Only the selection, and what reaches content and atlas, start it again: a new seed or a write
   // elsewhere must not empty a grid someone is scrolling. It waits while a query is typed, and is still where it
   // was once the query is cleared.
   const feed = $derived.by(() => {
     const row = exploreFeed(selectionKey ? selectionKey.split(',') : [], exploreType, {
-      pages: tmdbPages(tmdbKey),
+      pages: contentPages(content),
       atlas,
       seeds: untrack(() => seeds),
       owned: untrack(() => owned),
       minYear,
-      title: sources.title,
-      key: tmdbKey,
+      title,
+      content,
     });
     const admitted = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
     return { pager: new Pager(row.load, admitted), admitted };
@@ -241,7 +241,6 @@
 
   $effect(() => {
     const text = query.trim();
-    const available = sources;
     void rulesKey;
     const rules = untrack(() => prefs);
     let current = true;
@@ -258,25 +257,21 @@
     // is told it has been typed past, so it asks TMDB nothing more.
     const typedPast = new AbortController();
     const timer = setTimeout(async () => {
-      let answered = false;
       try {
-        for await (const batch of searchStream(text, available, typedPast.signal)) {
-          if (!current) return;
-          answered = true;
-          hits = batch.filter(
-            (hit) =>
-              hit.kind === 'person' ||
-              !isHidden(hit.title, rules, {
-                ignoringYearFloor: true,
-                requirePoster: !awaitingPicture(hit.title),
-                // Typing a name is an explicit request: a direct match still shows past the hidden-language and
-                // hidden-genre filters (never past the adult flag or the parental ceiling, enforced elsewhere).
-                query: text,
-              }),
-          );
-          pending = false;
-        }
-        if (current && !answered) hits = [];
+        const result = await content.query({ kind: 'search', query: text }, typedPast.signal);
+        if (!current) return;
+        hits = result.hits.filter(
+          (hit) =>
+            hit.kind === 'person' ||
+            !isHidden(hit.title, rules, {
+              ignoringYearFloor: true,
+              requirePoster: !awaitingPicture(hit.title),
+              // Typing a name is an explicit request: a direct match still shows past the hidden-language and
+              // hidden-genre filters (never past the adult flag or the parental ceiling, enforced elsewhere).
+              query: text,
+            }),
+        );
+        pending = false;
       } catch {
         if (current) {
           failed = true;

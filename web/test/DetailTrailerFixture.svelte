@@ -50,7 +50,6 @@
       {active}
       {content}
       {ref}
-      tmdbKey="fixture-key"
       {reel}
       {routes}
       region={detailPrefs.region}

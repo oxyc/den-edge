@@ -20,7 +20,6 @@
     ref={{ type: series ? 'tv' : 'movie', id: 42 }}
     {active}
     {content}
-    tmdbKey="fixture-key"
     row={undefined}
     episodes={new Map()}
     busy={false}

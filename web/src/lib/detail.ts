@@ -495,13 +495,8 @@ export async function fetchFilmography(
   return body && parseFilmography(body);
 }
 
-export async function fetchCollection(
-  id: number,
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-): Promise<Title[]> {
-  const body = await tmdb(`/collection/${id}`, key, {}, fetchImpl);
-  return list(body?.parts)
+export function parseCollection(body: Json): Title[] {
+  return list(body.parts)
     .flatMap((r) => {
       const title =
         num(r.id) === undefined ? null : toTitle({ type: 'movie', id: Number(r.id) }, r);
@@ -509,4 +504,13 @@ export async function fetchCollection(
     })
     .sort((a, b) => compareTitleDates(a, b, 1))
     .filter((t, i, all) => all.findIndex((other) => other.id === t.id) === i);
+}
+
+export async function fetchCollection(
+  id: number,
+  key: string,
+  fetchImpl: typeof fetch = tmdbFetch,
+): Promise<Title[]> {
+  const body = await tmdb(`/collection/${id}`, key, {}, fetchImpl);
+  return body ? parseCollection(body) : [];
 }

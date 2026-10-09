@@ -86,11 +86,8 @@ async function arrange(page, { tmdb, ratings, warnings }) {
 }
 
 function expectWorkerOwned(requests) {
-  // Related-title pagination remains a catalog concern for the next cutover. This suite proves the detail,
-  // identifier, season, ratings and warning boundary without claiming that adjacent catalog row yet.
-  const boundaryRequests = requests.filter(({ url }) => !url.includes('/recommendations'));
-  expect(boundaryRequests.length).toBeGreaterThan(0);
-  const pageOwned = boundaryRequests.filter(
+  expect(requests.length).toBeGreaterThan(0);
+  const pageOwned = requests.filter(
     ({ headers }) => headers['x-den-test-fetch-realm'] !== undefined,
   );
   expect(pageOwned, `provider requests escaped the Worker: ${JSON.stringify(pageOwned)}`).toEqual(
@@ -98,7 +95,7 @@ function expectWorkerOwned(requests) {
   );
 }
 
-test('the shared Worker owns normalized title, detail, extras, identifier and season reads', async ({
+test('the shared Worker owns normalized title, catalog, detail, extras, identifier and season reads', async ({
   page,
 }) => {
   await seed(page);
@@ -106,6 +103,19 @@ test('the shared Worker owns normalized title, detail, extras, identifier and se
     tmdb: async (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith('/external_ids')) return route.fulfill({ json: { imdb_id: 'tt101' } });
+      if (path.endsWith('/recommendations'))
+        return route.fulfill({
+          json: {
+            results: [
+              {
+                id: 303,
+                name: 'Worker Recommendation',
+                first_air_date: '2023-01-01',
+                poster_path: '/recommendation.jpg',
+              },
+            ],
+          },
+        });
       if (path.endsWith('/season/1'))
         return route.fulfill({
           json: {
@@ -159,6 +169,10 @@ test('the shared Worker owns normalized title, detail, extras, identifier and se
     kind: 'title.detail',
     detail: { state: 'ready', value: { title: { id: 101 }, imdbId: 'tt101' } },
   });
+  expect(result.catalog).toEqual({
+    kind: 'catalog.page',
+    titles: [expect.objectContaining({ type: 'tv', id: 303, title: 'Worker Recommendation' })],
+  });
   expect(result.externalId).toEqual({
     kind: 'title.external-id',
     imdbId: { state: 'ready', value: 'tt101' },
@@ -189,8 +203,37 @@ test('the shared Worker owns normalized title, detail, extras, identifier and se
   expectWorkerOwned(requests);
 });
 
-// The suite is unskipped with Detail's ContentService cutover. Keeping it beside the boundary while that work is in
-// flight makes the acceptance criteria executable without coupling it to protocol message shapes or callbacks.
+test('typed search keeps TMDB aggregation inside the shared Worker', async ({ page }) => {
+  await seed(page);
+  const requests = await arrange(page, {
+    tmdb: async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith('/search/multi'))
+        return route.fulfill({
+          json: {
+            results: [
+              {
+                id: 707,
+                media_type: 'movie',
+                title: 'Worker Search Result',
+                release_date: '2025-01-01',
+                poster_path: '/worker-search.jpg',
+                genre_ids: [18],
+                vote_average: 8,
+                vote_count: 100,
+              },
+            ],
+          },
+        });
+      return route.fulfill({ json: { results: [] } });
+    },
+  });
+
+  await page.goto(`${FIXTURE}?search&q=worker`);
+  await expect(page.getByRole('link', { name: 'Worker Search Result 2025' })).toBeVisible();
+  expectWorkerOwned(requests);
+});
+
 test.describe('Worker-owned detail metadata boundary', () => {
   test('base detail paints before independent extras, and season/extras stay Worker-owned', async ({
     page,

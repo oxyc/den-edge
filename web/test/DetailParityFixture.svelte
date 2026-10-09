@@ -99,7 +99,6 @@
           ref={{ type: route.type, id: route.id }}
           {active}
           {content}
-          tmdbKey="fixture-key"
           atlas="/atlas"
           region="FI"
           {scout}
