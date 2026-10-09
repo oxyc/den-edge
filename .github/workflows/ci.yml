@@ -44,6 +44,10 @@ jobs:
   # for lint, unit tests, and production builds twice.
   web-checks:
     runs-on: ubuntu-latest
+    # GitHub's runner already ships Chrome. The built-worker behavior check uses it directly, without downloading
+    # Playwright's browser or OS packages into this once-only job.
+    env:
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
     defaults:
       run:
         working-directory: web
@@ -61,6 +65,8 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: Verify the runner browser used by the built-worker check
+        run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
       - run: npm run test:worker-build
       - run: npm run build:cast
 
