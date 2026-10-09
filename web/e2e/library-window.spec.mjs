@@ -96,9 +96,7 @@ test('Home keeps admitting Watchlist titles as the viewer scrolls', async ({ pag
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
     }),
   );
-  await page.goto(
-    `${E2E_ORIGIN}/test/library.html?populated&many=40&many-watchlist&unnamed-many`,
-  );
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=40&many-watchlist&unnamed-many`);
 
   const row = page.getByRole('region', { name: 'Watchlist', exact: true });
   const slots = row.locator('[data-card-index]');
