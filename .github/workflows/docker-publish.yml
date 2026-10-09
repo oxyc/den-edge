@@ -139,6 +139,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -283,8 +284,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PATCH" = true ]; then
-            jq '.Results |= map(select(.Class == "os-pkgs"))' trivy.json > gate.json
-            jq '.Results |= map(select(.Class == "os-pkgs"))' trivy-cast.json > gate-cast.json
+            jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy.json > gate.json
+            jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy-cast.json > gate-cast.json
           else
             cp trivy.json gate.json
             cp trivy-cast.json gate-cast.json
