@@ -1,13 +1,7 @@
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
-  import { fetchWarnings, type Warning } from '../lib/contentWarnings';
-  import type { TitleDetail } from '../lib/detail';
-  let {
-    detail,
-    apiKey,
-    categories,
-  }: { detail: TitleDetail; apiKey: string; categories: string[] } = $props();
-  let content = $state<{ id: number; warnings: Warning[] } | null>(null);
+  import type { Warning } from '../lib/contentWarnings';
+  let { warnings = undefined }: { warnings?: Warning[] } = $props();
   /**
    * Whether the panel is open, tracked so it can be closed by something other than the mark that opened it.
    *
@@ -56,23 +50,15 @@
     const speed = travelled / Math.max(event.timeStamp - start.at, 1);
     if (travelled > DISMISS_PX || speed > FLICK_PX_PER_MS) open = false;
   }
-  $effect(() => {
-    const controller = new AbortController();
-    content = null;
-    void fetchWarnings(detail, apiKey, categories, controller.signal).then((loaded) => {
-      if (!controller.signal.aborted) content = loaded;
-    });
-    return () => controller.abort();
-  });
 </script>
 
-{#if content?.warnings.length}
+{#if warnings?.length}
   <details bind:open>
     <!-- Beside the age certificate, carrying the same border and size: what a title contains belongs in
          the row where what it is rated is already read. This one answers to hover and focus, which the
          certificate never does, and the label carries the count for anyone who cannot see the mark. -->
-    <summary class="chip" aria-label="Content warnings: {content.warnings.length}"
-      ><DetailIcon name="warning" />{content.warnings.length}</summary
+    <summary class="chip" aria-label="Content warnings: {warnings.length}"
+      ><DetailIcon name="warning" />{warnings.length}</summary
     >
     <!-- The sheet's own way out, and the larger of the two: a press anywhere behind it. Drawn on a phone
          only, where the panel covers the page rather than hanging off the mark. -->
@@ -105,7 +91,7 @@
         </button>
       </div>
       <ul>
-        {#each content.warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
+        {#each warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
       </ul>
       <!-- The wording doesthedogdie's API terms require wherever their data shows (§6), word for word. -->
       <a href="https://www.doesthedogdie.com" target="_blank" rel="noopener noreferrer"

@@ -322,7 +322,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     return this.#join(`identifiers\0${ref.type}:${ref.id}\0${key}`, async () => {
       const body = await this.#tmdb(`/${ref.type}/${ref.id}/external_ids`, key);
       if (body.kind !== 'found') return body;
-      const value = body.value.imdb_id;
+      // `/external_ids` normally answers at the top level. Accept an appended-detail shape too: relay and test
+      // caches may satisfy this normalized operation from a detail document that already carried the same field.
+      const value = body.value.imdb_id ?? object(body.value.external_ids)?.imdb_id;
       if (value === null || value === undefined || value === '')
         return { kind: 'found', value: { imdbId: null } };
       return typeof value === 'string' && /^tt\d+$/.test(value)

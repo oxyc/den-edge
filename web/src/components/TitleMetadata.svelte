@@ -1,5 +1,6 @@
 <script lang="ts">
   import ContentWarnings from './ContentWarnings.svelte';
+  import type { Warning } from '../lib/contentWarnings';
   import type { TitleDetail } from '../lib/detail';
   import { titleFacts, type Ratings } from '../lib/detailPresentation';
   import { searchHref, serviceHref } from '../lib/route';
@@ -8,16 +9,14 @@
     ratings = null,
     enabled = ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
     pending = false,
-    warningKey = '',
-    warningCategories = [],
+    warnings = undefined,
     region = 'US',
   }: {
     detail: TitleDetail;
     ratings?: Ratings | null;
     enabled?: string[];
     pending?: boolean;
-    warningKey?: string;
-    warningCategories?: string[];
+    warnings?: Warning[];
     region?: string;
   } = $props();
   const imdb = $derived(enabled.includes('imdb') ? ratings?.imdb : undefined);
@@ -79,7 +78,7 @@
       >{/if}{#if factHref(fact, i)}<a class="filter-link" href={factHref(fact, i)}>{fact}</a
       >{:else}<span>{fact}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
-  <ContentWarnings detail={d} apiKey={warningKey} categories={warningCategories} />
+  <ContentWarnings {warnings} />
   {#if d.providers.length}
     <span
       class="providers"

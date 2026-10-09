@@ -12,6 +12,7 @@
   import { syncPolicy } from '../src/lib/syncCore';
   import { rowName, type Row, type SettingsRow, type Stamp } from '../src/lib/wire';
   import { fixtureLibraryService } from './libraryService';
+  import { fixtureContentService } from './contentService';
 
   const params = new URLSearchParams(location.search);
   const requestedPage = params.get('page');
@@ -19,6 +20,7 @@
     requestedPage === 'downloads' || requestedPage === 'artwork' ? requestedPage : 'title';
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
+  const content = fixtureContentService();
   const source = (filename: string, url: string, label: string) => ({
     filename,
     url,
@@ -179,6 +181,7 @@
     <DownloadsPage model={library.model} />
   {:else if ready}
     <Detail
+      {content}
       ref={{ type: 'movie', id: 42 }}
       tmdbKey="fixture-key"
       scout={{ install: 'http://scout.invalid/cfg', base: '/scout/cfg' }}

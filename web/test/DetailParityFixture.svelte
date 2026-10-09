@@ -9,9 +9,15 @@
   import { testLog } from '../src/lib/downloadTestLog';
   import { fetchSourceList } from '../src/lib/titleSources';
   import { fixtureLibraryService } from './libraryService';
+  import { fixtureContentService } from './contentService';
 
   const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
   const routes = { scout: [{ url: 'http://scout.internal' }] };
+  const content = fixtureContentService({
+    tmdb: 'fixture-key',
+    omdb: 'fixture-omdb',
+    atlas: '/atlas',
+  });
   // A download is a service command over a library held in memory; the component never sees its rows.
   const library = fixtureLibraryService({
     log: testLog().log,
@@ -92,9 +98,9 @@
         <Detail
           ref={{ type: route.type, id: route.id }}
           {active}
+          {content}
           tmdbKey="fixture-key"
           atlas="/atlas"
-          omdbKey="fixture-omdb"
           region="FI"
           {scout}
           {routes}
