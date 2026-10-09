@@ -24,6 +24,7 @@
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
+  import Button from './components/Button.svelte';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -46,7 +47,7 @@
     onadoptheld?: () => Promise<void>;
   } = $props();
 
-  const connectionsLease = untrack(() => model.connections());
+  let connectionsLease = $state.raw(untrack(() => model.connections()));
   const simklLease = untrack(() => model.simkl());
   const recoveryLease = untrack(() => model.recovery());
   onDestroy(() => {
@@ -61,6 +62,8 @@
     recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
   );
   const ready = $derived(!!settings && !!connections);
+  const loadError = $derived(model.settings.error ?? connectionsLease.snapshot.error);
+  let retrying = $state(false);
   let failure = $state<string | null>(null);
   let saving = $state(false);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
@@ -75,8 +78,9 @@
     .catch(() => undefined);
 
   const prefs = $derived(settings ? structuredClone(settings.preferences) : undefined);
-  const plugins = $derived(connections ? structuredClone(connections.plugins) : []);
-  const pluginUrls = $derived(plugins.map((plugin) => plugin.manifestUrl));
+  // Undefined means the encrypted Settings view is still opening. It is never presented as an empty plugin list.
+  const plugins = $derived(connections ? structuredClone(connections.plugins) : undefined);
+  const pluginUrls = $derived(plugins?.map((plugin) => plugin.manifestUrl) ?? []);
   const disabled = $derived(!ready || saving);
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
 
@@ -105,6 +109,7 @@
   // its rows and the billboard show that data regardless.
   let addonCredits = $state<Credit[][]>([[...ATLAS_FALLBACK]]);
   $effect(() => {
+    if (!ready) return;
     const installed = pluginUrls;
     const table = routes;
     let gone = false;
@@ -127,6 +132,22 @@
       gone = true;
     };
   });
+
+  async function retryLoad() {
+    if (retrying) return;
+    retrying = true;
+    try {
+      if (model.connection === 'failed') await model.retry();
+      else if (connectionsLease.snapshot.error) {
+        connectionsLease.release();
+        connectionsLease = model.connections();
+      }
+    } catch {
+      // The model snapshots keep the exact retryable failure and this surface stays available for another try.
+    } finally {
+      retrying = false;
+    }
+  }
 
   async function saveSimkl(token: string | null): Promise<boolean> {
     return run(() => (token ? model.connectSimkl(token) : model.disconnectSimkl()));
@@ -219,57 +240,70 @@
       <ExpandAll label="Settings" />
     </div>
     <SettingsNav variant="bar" />
-    {#if !settings || !connections}
-      <p class="banner" role="status">Loading your settings…</p>
-    {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
-
-    <ConnectionsSection
-      {link}
-      {content}
-      onjoin={local ? onjoin : undefined}
-      onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? onresetkey : undefined}
-      {hasRecoveryCode}
-      {heldReset}
-      {onadoptheld}
-      apiKeys={connections?.apiKeys ?? {}}
-      simklConnected={!!simkl?.connected}
-      {saveSimkl}
-      heldRemovals={namedRemovals}
-      {approveRemovals}
-      {plugins}
-      {routes}
-      servers={connections ? structuredClone(connections.servers) : []}
-      devices={connections ? structuredClone(connections.devices) : []}
-      {selfId}
-      {disabled}
-      setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
-      installPlugin={(url) => run(() => model.installPlugin(url))}
-      removePlugin={(url) => run(() => model.removePlugin(url))}
-      setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
-      removeServer={(server) => run(() => model.patchServer(server, null))}
-      {sealHandover}
-      removeDevice={removeLibraryDevice}
-      recovery={link && !local ? recovery : undefined}
-    />
-    {#snippet recovery()}
-      <RecoveryCode
-        view={recoveryView}
-        {ready}
-        seal={sealRecovery}
-        begin={(locator, sealed, createdAt) =>
-          recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
-        confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
-        abandon={async (locator) => {
-          await model.abandonRecovery(locator);
-        }}
-        disable={async () => run(() => model.disableRecovery())}
+    {#if !ready}
+      <div
+        class:bad={!!loadError}
+        class="banner settings-load"
+        role={loadError ? 'alert' : 'status'}
+      >
+        <p>{loadError ? 'Couldn’t load your settings.' : 'Loading your settings…'}</p>
+        {#if loadError}
+          <Button
+            variant="secondary"
+            icon="retry"
+            label={retrying ? 'Trying again…' : 'Try again'}
+            disabled={retrying}
+            onclick={() => void retryLoad()}
+          />
+        {/if}
+      </div>
+    {:else}
+      <ConnectionsSection
+        {link}
+        {content}
+        onjoin={local ? onjoin : undefined}
+        onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? onresetkey : undefined}
+        {hasRecoveryCode}
+        {heldReset}
+        {onadoptheld}
+        apiKeys={connections!.apiKeys}
+        simklConnected={!!simkl?.connected}
+        {saveSimkl}
+        heldRemovals={namedRemovals}
+        {approveRemovals}
+        plugins={plugins!}
+        {routes}
+        servers={structuredClone(connections!.servers)}
+        devices={structuredClone(connections!.devices)}
+        {selfId}
+        {disabled}
+        setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
+        installPlugin={(url) => run(() => model.installPlugin(url))}
+        removePlugin={(url) => run(() => model.removePlugin(url))}
+        setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
+        removeServer={(server) => run(() => model.patchServer(server, null))}
+        {sealHandover}
+        removeDevice={removeLibraryDevice}
+        recovery={link && !local ? recovery : undefined}
       />
-    {/snippet}
-    <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
-    <AssistantsSection />
-    {#if prefs}
-      <PlaybackSection {prefs} {disabled} save={savePrefs} />
+      {#snippet recovery()}
+        <RecoveryCode
+          view={recoveryView}
+          {ready}
+          seal={sealRecovery}
+          begin={(locator, sealed, createdAt) =>
+            recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
+          confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
+          abandon={async (locator) => {
+            await model.abandonRecovery(locator);
+          }}
+          disable={async () => run(() => model.disableRecovery())}
+        />
+      {/snippet}
+      <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
+      <AssistantsSection />
+      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
       <ImportSection
         {ready}
         {content}
@@ -278,7 +312,7 @@
         {exportHistory}
       />
       <ContentSection
-        {prefs}
+        prefs={prefs!}
         {content}
         pinConfigured={connections?.parentalPinConfigured ?? false}
         {disabled}
@@ -335,6 +369,17 @@
 
   .banner.bad {
     color: var(--danger);
+  }
+
+  .settings-load {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .settings-load p {
+    margin: 0;
   }
 
   @media (width < 1100px) {

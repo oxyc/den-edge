@@ -113,6 +113,58 @@ describe('SessionServices', () => {
     services.stop();
   });
 
+  it('does not publish Atlas until the content Worker acknowledges its configuration', async () => {
+    discoveries = 0;
+    let acknowledge!: () => void;
+    const configured = new Promise<void>((resolve) => (acknowledge = resolve));
+    const heldContent = {
+      query: vi.fn(async () => {
+        await configured;
+        return { kind: 'sources.configure' as const };
+      }),
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const services = new SessionServices(fakeModel(), heldContent, async () => ({}));
+
+    services.configure(runtime());
+    await vi.waitFor(() => expect(heldContent.query).toHaveBeenCalledOnce());
+    expect(services.atlas).toBeNull();
+    expect(services.atlasReady).toBe(false);
+
+    acknowledge();
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-1'));
+    expect(services.atlasReady).toBe(true);
+    services.stop();
+  });
+
+  it('does not let a stale Atlas acknowledgement replace a newer discovery run', async () => {
+    discoveries = 0;
+    const acknowledgements = new Map<string | null, () => void>();
+    const heldContent = {
+      query: vi.fn(
+        (request: { kind: string; atlas: string | null }) =>
+          new Promise<{ kind: 'sources.configure' }>((resolve) =>
+            acknowledgements.set(request.atlas, () => resolve({ kind: 'sources.configure' })),
+          ),
+      ),
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const services = new SessionServices(fakeModel(), heldContent, async () => ({}));
+
+    services.configure(runtime(['first']));
+    await vi.waitFor(() => expect(acknowledgements.has('/atlas-1')).toBe(true));
+    services.configure(runtime(['second']));
+    await vi.waitFor(() => expect(acknowledgements.has('/atlas-2')).toBe(true));
+
+    acknowledgements.get('/atlas-2')!();
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-2'));
+    acknowledgements.get('/atlas-1')!();
+    await Promise.resolve();
+    expect(services.atlas).toBe('/atlas-2');
+    expect(services.atlasReady).toBe(true);
+    services.stop();
+  });
+
   it('reports discovered private remux through the semantic model command', async () => {
     discoveries = 0;
     reaches = 'https://den-remux.tail.test';

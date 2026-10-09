@@ -34,6 +34,7 @@ export class SessionServices {
   #keep?: ReturnType<typeof setTimeout>;
   #grants = false;
   #foregroundReady = false;
+  #atlasGeneration = 0;
 
   constructor(
     private readonly model: LibraryModel | null,
@@ -41,10 +42,32 @@ export class SessionServices {
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
   ) {}
 
-  #configureAtlas(base: string | null): void {
-    void this.content
-      .query({ kind: 'sources.configure', atlas: base })
-      .catch((error: unknown) => console.warn('den: content source configuration failed', error));
+  /**
+   * Publish an Atlas address only after this exact discovery generation is usable by the content Worker. An older
+   * retained hint or stopped discovery run can finish later, but can never replace the current answer.
+   */
+  #configureAtlas(base: string | null, current: () => boolean): void {
+    if (this.atlasReady && this.atlas === base) {
+      this.#settled();
+      return;
+    }
+    const generation = ++this.#atlasGeneration;
+    this.atlas = null;
+    this.atlasReady = false;
+    void this.content.query({ kind: 'sources.configure', atlas: base }).then(
+      () => {
+        if (!current() || generation !== this.#atlasGeneration) return;
+        // These assignments publish in one Svelte update: no consumer can observe an address the Worker has not
+        // acknowledged, nor a ready flag paired with a stale address.
+        this.atlas = base;
+        this.atlasReady = true;
+        this.#settled();
+      },
+      (error: unknown) => {
+        if (!current() || generation !== this.#atlasGeneration) return;
+        console.warn('den: content source configuration failed', error);
+      },
+    );
   }
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
@@ -75,6 +98,10 @@ export class SessionServices {
     this.#stop?.();
     if (JSON.stringify(this.plugins) !== JSON.stringify(plugins)) this.plugins = plugins;
     let current = true;
+    // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish.
+    this.#atlasGeneration++;
+    this.atlas = null;
+    this.atlasReady = false;
     this.#stop = () => {
       current = false;
     };
@@ -92,8 +119,7 @@ export class SessionServices {
             ]),
           );
           this.scout = saved.scout ? { ...saved.scout } : null;
-          this.atlas = saved.atlas;
-          this.#configureAtlas(saved.atlas);
+          this.#configureAtlas(saved.atlas, () => current);
           this.reel = saved.reel;
           this.remux = saved.remux;
           if (this.#foregroundReady) availability.connect(this.scout, this.content);
@@ -135,10 +161,7 @@ export class SessionServices {
             }
           : {}),
         atlas: (found) => {
-          this.atlas = found?.base ?? null;
-          this.#configureAtlas(this.atlas);
-          this.atlasReady = true;
-          this.#settled();
+          this.#configureAtlas(found?.base ?? null, () => current);
         },
         reel: (found) => {
           this.reel = found?.base ?? null;
@@ -162,6 +185,7 @@ export class SessionServices {
 
   stop(): void {
     this.#stop?.();
+    this.#atlasGeneration++;
     clearTimeout(this.#keep);
   }
 

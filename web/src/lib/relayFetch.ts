@@ -51,6 +51,12 @@ let credential: string | null = null;
 let libraryId: string | null = null;
 /** Counts every change of the credential, so a refusal of one can be told from the next (`credentialVersion`). */
 let version = 0;
+/**
+ * A paired library hello which has started but has not installed its bounded membership yet. Page-owned relay
+ * consumers share this barrier with the Worker bootstrap: none may escape as an anonymous visitor merely because
+ * its component mounted before the encrypted library finished opening.
+ */
+let membershipOpening: { ready: Promise<void>; token: symbol } | null = null;
 /** The secrets of the grants this browser holds, by grant id. Never leaves this module except in the header. */
 const grantSecrets = new Map<string, string>();
 let grantEnded: ((gid: string) => void) | null = null;
@@ -103,6 +109,29 @@ export function useLibraryRelayMembership(membership: LibraryRelayMembership): (
   };
 }
 
+/**
+ * Hold page-owned member-sensitive relay traffic behind one library hello.
+ *
+ * The returned release is tokenized: closing a replaced connection cannot clear the newer connection's barrier.
+ * A failed hello deliberately leaves a rejected barrier in place until replacement or close, so Den never retries
+ * paired traffic anonymously after its library failed to open.
+ */
+export function holdLibraryRelayMembership(opening: Promise<unknown>): () => void {
+  const token = Symbol('library relay bootstrap');
+  const ready = opening.then(() => undefined);
+  membershipOpening = { ready, token };
+  void ready.catch(() => undefined);
+  void ready.then(
+    () => {
+      if (membershipOpening?.token === token) membershipOpening = null;
+    },
+    () => undefined,
+  );
+  return () => {
+    if (membershipOpening?.token === token) membershipOpening = null;
+  };
+}
+
 /** Forget it — an unlinked browser is a visitor again, and must stop claiming otherwise. */
 export function forgetLibraryCredential(): void {
   credential = null;
@@ -144,6 +173,16 @@ function relayed(href: string): boolean {
       REMUX_CONTROL.has(url.pathname) ||
       OAUTH.test(url.pathname) ||
       (libraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === libraryId))
+  );
+}
+
+/** A same-origin route whose authorization changes once a paired library hello finishes. */
+function membershipSensitive(url: URL): boolean {
+  return (
+    RELAYED.some((path) => url.pathname.startsWith(path)) ||
+    REMUX_CONTROL.has(url.pathname) ||
+    OAUTH.test(url.pathname) ||
+    HOST_GRANTS.test(url.pathname)
   );
 }
 
@@ -209,10 +248,12 @@ async function guestFetch(
  *
  * Safe as a default everywhere: with no library open, or for any other host, it is exactly `fetch`.
  */
-export const relayFetch: typeof fetch = (input, init) => {
+export const relayFetch: typeof fetch = async (input, init) => {
   const href =
     typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
   const url = ours(href);
+  const opening = url && membershipSensitive(url) ? membershipOpening?.ready : undefined;
+  if (opening) await opening;
   const gid = url && grantOf(url, init);
   if (gid) return guestFetch(gid, input, init);
   if (!credential || !relayed(href)) return fetch(input, init);
