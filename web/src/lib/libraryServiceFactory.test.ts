@@ -81,3 +81,46 @@ it('surfaces DedicatedWorker construction failure through the library status', a
   });
   service.close();
 });
+
+it('bounds a silent startup and Retry replaces the expired Worker', async () => {
+  vi.useFakeTimers();
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const service = createLibraryService({
+    createWorker,
+    startupTimeoutMs: 20,
+    supervisor: { maxAutomaticRestarts: 0 },
+  });
+
+  const opening = service.open(openOptions);
+  const failed = expect(opening).rejects.toMatchObject({
+    failure: {
+      code: 'unavailable',
+      message: 'Library service startup timed out while opening browser storage',
+      retryable: true,
+    },
+  });
+  await vi.advanceTimersByTimeAsync(20);
+  await failed;
+  expect(first.terminate).toHaveBeenCalledOnce();
+
+  const retrying = service.retry();
+  const request = replacement.posted[0]!;
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: request.requestId,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await expect(retrying).resolves.toMatchObject({ instance: 'worker-2' });
+  expect(createWorker).toHaveBeenCalledTimes(2);
+  service.close();
+  expect(replacement.terminate).toHaveBeenCalledOnce();
+  vi.useRealTimers();
+});

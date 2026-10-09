@@ -1249,7 +1249,7 @@
 {:else if serviceFailed}
   <section class="library-failure" role="alert">
     <h1>Couldn’t open your library</h1>
-    <p class="note">Den couldn’t start the library service.</p>
+    <p class="note">{model?.openFailure?.message ?? 'Den couldn’t start the library service.'}</p>
     <button type="button" class="retry" disabled={retryingLibrary} onclick={retryLibrary}>
       {retryingLibrary ? 'Trying again…' : 'Try again'}
     </button>

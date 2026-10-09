@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { indexedVault, transactions } from './localVault';
+import { indexedVault, StorageTimeoutError, transactions } from './localVault';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 /**
  * Just enough of IndexedDB for `transactions`: each `open` makes a connection (or fails, while `failing`), each
@@ -10,7 +13,9 @@ afterEach(() => vi.unstubAllGlobals());
 function fakeIndexedDB() {
   const data = new Map<string, unknown>();
   const connections: (IDBDatabase & { closed: boolean })[] = [];
+  const madeTransactions: IDBTransaction[] = [];
   let failing = false;
+  let stallingTransactions = false;
   const factory = {
     open: () => {
       const req = {} as IDBOpenDBRequest & { result: IDBDatabase; error: DOMException | null };
@@ -31,7 +36,7 @@ function fakeIndexedDB() {
             let pending = 0;
             let completionQueued = false;
             const complete = () => {
-              if (pending || completionQueued) return;
+              if (pending || completionQueued || stallingTransactions) return;
               completionQueued = true;
               queueMicrotask(() => {
                 completionQueued = false;
@@ -70,7 +75,8 @@ function fakeIndexedDB() {
                 return request(undefined);
               },
             };
-            Object.assign(tx, { objectStore: () => store });
+            Object.assign(tx, { objectStore: () => store, abort: vi.fn() });
+            madeTransactions.push(tx);
             return tx;
           },
         } as unknown as IDBDatabase & { closed: boolean };
@@ -84,8 +90,10 @@ function fakeIndexedDB() {
   return {
     data,
     connections,
+    transactions: madeTransactions,
     factory,
     fail: (value: boolean) => (failing = value),
+    stallTransactions: (value: boolean) => (stallingTransactions = value),
   };
 }
 
@@ -139,6 +147,69 @@ describe('transactions', () => {
         };
       }),
     ).rejects.toThrow('unreadable result');
+  });
+
+  it('bounds an IndexedDB open that never answers and opens afresh on the next call', async () => {
+    vi.useFakeTimers();
+    const requests: IDBOpenDBRequest[] = [];
+    const factory = {
+      open: vi.fn(() => {
+        const request = {} as IDBOpenDBRequest;
+        requests.push(request);
+        return request;
+      }),
+    } as unknown as IDBFactory;
+    const run = transactions(factory, 'test', 1, () => undefined, 'kept', {
+      openMs: 20,
+      transactionMs: 20,
+    });
+
+    const first = run('readonly', () => undefined);
+    const failed = expect(first).rejects.toMatchObject({
+      name: 'StorageTimeoutError',
+      phase: 'open',
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    await failed;
+
+    const lateDatabase = { close: vi.fn() } as unknown as IDBDatabase;
+    Object.defineProperty(requests[0], 'result', { value: lateDatabase });
+    requests[0]!.onsuccess?.(new Event('success'));
+    expect(lateDatabase.close).toHaveBeenCalledOnce();
+
+    const second = run('readonly', () => undefined);
+    expect(factory.open).toHaveBeenCalledTimes(2);
+    const secondFailed = expect(second).rejects.toMatchObject({ phase: 'open' });
+    await vi.advanceTimersByTimeAsync(20);
+    await secondFailed;
+  });
+
+  it('bounds a stalled transaction, closes its connection, and reports the transaction phase', async () => {
+    vi.useFakeTimers();
+    const idb = fakeIndexedDB();
+    idb.stallTransactions(true);
+    const run = transactions(idb.factory, 'test', 1, () => undefined, 'kept', {
+      openMs: 20,
+      transactionMs: 20,
+    });
+
+    const reading = run('readonly', (kept) => kept.get('a'));
+    let resolved = false;
+    const outcome = reading.then(
+      () => {
+        resolved = true;
+      },
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(outcome).resolves.toEqual(new StorageTimeoutError('transaction'));
+    expect(idb.connections[0]!.closed).toBe(true);
+    expect(idb.transactions[0]!.abort).toHaveBeenCalledOnce();
+
+    // A late browser completion cannot turn the already-failed operation into success.
+    idb.transactions[0]!.oncomplete?.(new Event('complete'));
+    await Promise.resolve();
+    expect(resolved).toBe(false);
   });
 });
 

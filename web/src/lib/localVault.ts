@@ -26,6 +26,27 @@ export type Transact = <T>(
   work: (store: IDBObjectStore) => IDBRequest<T> | (() => T) | void,
 ) => Promise<T | undefined>;
 
+export type StoragePhase = 'open' | 'transaction';
+
+/** A browser storage operation that never completed. The phase survives the Worker boundary in its message. */
+export class StorageTimeoutError extends Error {
+  constructor(readonly phase: StoragePhase) {
+    super(
+      phase === 'open'
+        ? 'Library storage timed out while opening IndexedDB'
+        : 'Library storage timed out while completing an IndexedDB transaction',
+    );
+    this.name = 'StorageTimeoutError';
+  }
+}
+
+export interface TransactionDeadlines {
+  openMs?: number;
+  transactionMs?: number;
+}
+
+const STORAGE_DEADLINE_MS = 8_000;
+
 /**
  * Transactions on the object store `store` of the database `name`, over one connection opened on first use and
  * opened again when it is lost. A connection that failed to open, that the browser closed (`close`), or that another
@@ -38,15 +59,30 @@ export function transactions(
   version: number,
   upgrade: (database: IDBDatabase) => void,
   store: string,
+  deadlines: TransactionDeadlines = {},
 ): Transact {
+  const openMs = deadlines.openMs ?? STORAGE_DEADLINE_MS;
+  const transactionMs = deadlines.transactionMs ?? STORAGE_DEADLINE_MS;
   let db: Promise<IDBDatabase> | undefined;
   const connect = () => {
     if (db) return db;
     const opening = new Promise<IDBDatabase>((resolve, reject) => {
       const req = factory.open(name, version);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new StorageTimeoutError('open'));
+      }, openMs);
       req.onupgradeneeded = () => upgrade(req.result);
       req.onsuccess = () => {
         const database = req.result;
+        if (settled) {
+          database.close();
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
         database.onclose = () => {
           if (db === opening) db = undefined;
         };
@@ -56,7 +92,12 @@ export function transactions(
         };
         resolve(database);
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(req.error);
+      };
     });
     db = opening;
     opening.catch(() => {
@@ -71,16 +112,49 @@ export function transactions(
   ) =>
     new Promise<T | undefined>((resolve, reject) => {
       const tx = database.transaction(store, mode);
-      const result = work(tx.objectStore(store));
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          tx.abort();
+        } catch {
+          // A browser may already have stopped the transaction; the deadline is still the useful failure.
+        }
+        reject(new StorageTimeoutError('transaction'));
+      }, transactionMs);
+      let result: IDBRequest<T> | (() => T) | void;
+      try {
+        result = work(tx.objectStore(store));
+      } catch (error) {
+        settled = true;
+        clearTimeout(timer);
+        try {
+          tx.abort();
+        } catch {
+          // Preserve the original adapter failure.
+        }
+        reject(error);
+        return;
+      }
       tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         try {
           resolve(typeof result === 'function' ? result() : result ? result.result : undefined);
         } catch (error) {
           reject(error);
         }
       };
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
+      const failed = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(tx.error);
+      };
+      tx.onerror = failed;
+      tx.onabort = failed;
     });
   return async (mode, work) => {
     const opening = connect();
@@ -88,6 +162,11 @@ export function transactions(
     try {
       return await once(database, mode, work);
     } catch (error) {
+      if (error instanceof StorageTimeoutError) {
+        database.close();
+        if (db === opening) db = undefined;
+        throw error;
+      }
       // A connection closed under it without saying so: opened again, and tried once more.
       if (!(error instanceof DOMException && error.name === 'InvalidStateError')) throw error;
       if (db === opening) db = undefined;

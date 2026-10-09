@@ -194,6 +194,9 @@
   const library = fixtureLibraryService({
     log,
     failOpenOnce: params.has('open-failure'),
+    openFailureMessage: params.has('storage-timeout')
+      ? 'Library storage timed out while opening IndexedDB'
+      : undefined,
     openGate,
   });
   publish = () => library.publish();

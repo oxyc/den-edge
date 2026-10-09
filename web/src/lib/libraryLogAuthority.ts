@@ -681,7 +681,7 @@ export class LibraryLogAuthority {
       items: this.#continueProjector
         .project(library)
         .map(({ ref, fraction, episode, seconds, at }) => ({
-          title: ref,
+          title: { type: ref.type, id: ref.id },
           fraction,
           ...(episode ? { episode } : {}),
           ...(seconds !== undefined ? { seconds } : {}),

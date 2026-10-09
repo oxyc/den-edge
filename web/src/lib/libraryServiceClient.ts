@@ -33,6 +33,7 @@ type Pending = {
   request: LibraryServiceClientMessage;
   resolve: (message: LibraryServiceServerMessage) => void;
   reject: (error: LibraryServiceError) => void;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 type Subscription = {
@@ -62,19 +63,23 @@ export class LibraryServiceClient {
   constructor(
     private readonly transport: LibraryServiceTransport,
     private readonly clientId: string = crypto.randomUUID(),
+    private readonly startupTimeoutMs = 10_000,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
 
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     const requestId = this.#requestId();
-    const reply = await this.#request({
-      type: 'hello',
-      protocol: LIBRARY_SERVICE_PROTOCOL,
-      requestId,
-      clientId: this.clientId,
-      ...options,
-    });
+    const reply = await this.#request(
+      {
+        type: 'hello',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        clientId: this.clientId,
+        ...options,
+      },
+      this.startupTimeoutMs,
+    );
     if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
     this.#instance = reply.version.instance;
     return reply.version;
@@ -190,20 +195,40 @@ export class LibraryServiceClient {
       message: 'library service client is closed',
       retryable: false,
     });
-    for (const pending of this.#pending.values()) pending.reject(error);
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.#pending.clear();
     this.#subscriptions.clear();
     this.#statusListeners.clear();
   }
 
-  #request(message: LibraryServiceClientMessage): Promise<LibraryServiceServerMessage> {
+  #request(
+    message: LibraryServiceClientMessage,
+    timeoutMs?: number,
+  ): Promise<LibraryServiceServerMessage> {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
-      this.#pending.set(message.requestId, { request: message, resolve, reject });
+      const pending: Pending = { request: message, resolve, reject };
+      if (timeoutMs !== undefined)
+        pending.timer = setTimeout(() => {
+          if (this.#pending.get(message.requestId) !== pending) return;
+          this.#pending.delete(message.requestId);
+          reject(
+            new LibraryServiceError({
+              code: 'unavailable',
+              message: 'Library service startup timed out while opening browser storage',
+              retryable: true,
+            }),
+          );
+        }, timeoutMs);
+      this.#pending.set(message.requestId, pending);
       try {
         this.transport.send(message);
       } catch (error) {
         this.#pending.delete(message.requestId);
+        clearTimeout(pending.timer);
         reject(error);
       }
     });
@@ -254,6 +279,7 @@ export class LibraryServiceClient {
       const pending = this.#pending.get(message.requestId);
       if (!pending) return;
       this.#pending.delete(message.requestId);
+      clearTimeout(pending.timer);
       pending.reject(new LibraryServiceError(message.error));
       return;
     }
@@ -266,6 +292,7 @@ export class LibraryServiceClient {
     if (!pending) return;
     if (!replyMatches(pending.request, message, this.#instance)) {
       this.#pending.delete(message.requestId);
+      clearTimeout(pending.timer);
       const failure: LibraryServiceFailure = {
         code: 'invalid-request',
         message: 'library service reply did not match its request',
@@ -276,12 +303,16 @@ export class LibraryServiceClient {
       return;
     }
     this.#pending.delete(message.requestId);
+    clearTimeout(pending.timer);
     pending.resolve(message);
   }
 
   #failAll(failure: LibraryServiceFailure): void {
     const error = new LibraryServiceError(failure);
-    for (const pending of this.#pending.values()) pending.reject(error);
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.#pending.clear();
     for (const listener of this.#statusListeners)
       try {

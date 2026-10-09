@@ -21,9 +21,19 @@ for (const local of [false, true]) {
     await page.route('**/routes', (route) => route.fulfill({ json: {} }));
     await routeTmdb(page, (route) => route.fulfill({ json: { page: 1, results: [] } }));
 
-    await page.goto(`${E2E_ORIGIN}/test/library.html?open-failure${local ? '&local' : ''}`);
+    await page.goto(
+      `${E2E_ORIGIN}/test/library.html?open-failure${local ? '&local&storage-timeout' : ''}`,
+    );
 
     await expect(page.getByRole('heading', { name: 'Couldn’t open your library' })).toBeVisible();
+    await expect(
+      page.getByText(
+        local
+          ? 'Library storage timed out while opening IndexedDB'
+          : 'fixture library service did not start',
+        { exact: true },
+      ),
+    ).toBeVisible();
     await page.getByRole('button', { name: 'Try again' }).click();
 
     await expect(page.getByRole('heading', { name: 'Couldn’t open your library' })).toHaveCount(0);

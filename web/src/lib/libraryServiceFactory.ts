@@ -9,6 +9,8 @@ export interface LibraryServiceFactoryOptions {
   supervisor?: LibraryServiceSupervisorOptions;
   /** Test/platform seam; production always uses the service's module Worker. */
   createWorker?: () => Worker;
+  /** Test seam for the bounded hello; production waits long enough for the storage-specific deadline to answer. */
+  startupTimeoutMs?: number;
 }
 
 const productionWorker = () =>
@@ -23,7 +25,12 @@ export function createLibraryService(
 ): LibraryServiceSupervisor {
   const createWorker = options.createWorker ?? productionWorker;
   return new LibraryServiceSupervisor(
-    () => new LibraryServiceClient(new WorkerLibraryServiceTransport(createWorker())),
+    () =>
+      new LibraryServiceClient(
+        new WorkerLibraryServiceTransport(createWorker()),
+        undefined,
+        options.startupTimeoutMs,
+      ),
     options.supervisor,
   );
 }
