@@ -1048,10 +1048,11 @@
     return () => clearTimeout(timer);
   });
   $effect(() => {
-    // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be
-    // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
-    // read without being watched. Those tick over continuously while the library is named, and watching them
-    // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
+    // What the billboard is rebuilt FOR: which page this is, where atlas answers, whether TMDB can be asked, and
+    // whether the first bounded shelf tranche has been named. Everything else it reads — the rows, the library's
+    // shape, the hide rules, the taste — is read without being watched. Those tick over continuously while the
+    // library is named, and watching them had the whole pool rebuilt on every tick: hundreds of repeat requests to
+    // atlas for one page load. The one readiness edge matters: ranking before it permanently sent unnamed history.
     if (
       route.page === 'title' ||
       route.page === 'person' ||
@@ -1063,14 +1064,15 @@
     )
       return;
     const here = atlas;
+    const named = shelvesReady;
     if (!tmdbKey) return;
-    // The shared pool needs no profile read: ask as soon as discovery and TMDB naming are available. `null` is a
-    // A guest can use the shared pool immediately; a library waits for its compact overview.
+    // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
+    // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    if (model === null || libraryOpen) untrack(() => buildRecommended(here));
+    if (model === null || (libraryOpen && named)) untrack(() => buildRecommended(here));
   });
 
   /**

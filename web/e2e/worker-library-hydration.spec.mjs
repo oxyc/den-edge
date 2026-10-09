@@ -102,7 +102,7 @@ async function routes(page, metadata) {
       return route.fulfill({ status: 503, headers: { 'retry-after': '1' }, body: '{}' });
     if (metadata.missing.has(ref))
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
-    if (id === 1227) {
+    if (id === metadata.holdId) {
       metadata.held();
       await metadata.release;
     }
@@ -158,6 +158,7 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
       'movie:1009',
       'movie:1010',
     ]),
+    holdId: 1227,
   };
 
   // Mark only window.fetch. A request without this marker was made in the DedicatedWorker's separate realm.
@@ -218,4 +219,60 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   const invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
   await expect(invited).toBeVisible();
   await expect(invited).toContainText('Not used yet');
+});
+
+test('personalized billboard waits for staged names without replacing its retained first paint', async ({
+  page,
+}) => {
+  let releaseRanking;
+  const rankingReleased = new Promise((resolve) => (releaseRanking = resolve));
+  const recommendations = [];
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+
+  await routes(page, metadata);
+  await page.route('**/atlas/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.atlas' } }),
+  );
+  await page.route('**/scout/fixture-install/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.scout' } }),
+  );
+  await page.route('**/atlas/index/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas/recommend/**', (route) =>
+    route.fulfill({
+      json: {
+        slides: [{ type: 'movie', id: 901, score: 1, why: { reason: 'Popular today' } }],
+      },
+    }),
+  );
+  await page.route('**/atlas/recommend', async (route) => {
+    recommendations.push(route.request().postDataJSON());
+    await rankingReleased;
+    await route.fulfill({
+      json: {
+        slides: [{ type: 'movie', id: 902, score: 1, why: { reason: 'For this library' } }],
+      },
+    });
+  });
+
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+
+  await page.goto(`${FIXTURE}?view=home&online`);
+  await expect.poll(() => recommendations.length).toBeGreaterThan(0);
+  await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
+
+  const [ranking] = recommendations;
+  expect(ranking.library.length).toBeGreaterThan(100);
+  expect(ranking.library.find(({ id }) => id === 1002)?.hint?.title).toBe('Movie 1002');
+  releaseRanking();
+  await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
 });
