@@ -64,7 +64,6 @@
     recommendBody,
     recommendForEveryone,
     replacePersonalBillboard,
-    swapAfter,
     type RecommendedTitle,
   } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
@@ -1050,6 +1049,39 @@
   const fresh = freshOn();
   /** The title on the billboard's screen, which a new ranking leaves in place. */
   let slideShown = $state<Title>();
+  /**
+   * A newly named atlas ranking already sitting behind the retained lead. The first move into it removes that
+   * stale lead and rebases the title the viewer just reached to slide zero, without changing what is visible.
+   */
+  let stagedFeatured = $state<RecommendedTitle[] | null>(null);
+
+  function sameTitle(left: Pick<Title, 'type' | 'id'>, right: Pick<Title, 'type' | 'id'>) {
+    return left.type === right.type && left.id === right.id;
+  }
+
+  function stageFeatured(next: RecommendedTitle[]) {
+    const shown = slideShown;
+    const visible = shown ? featured.find((title) => sameTitle(title, shown)) : featured[0];
+    const first = next[0];
+    if (!visible || !first || sameTitle(visible, first)) {
+      stagedFeatured = null;
+      featured = next;
+      return;
+    }
+    stagedFeatured = next;
+    featured = [visible, ...next.filter((title) => !sameTitle(title, visible))];
+  }
+
+  /** True tells Billboard that this transition rebased its newly visible title to slide zero. */
+  function acceptStagedFeatured(title: RecommendedTitle): boolean {
+    const staged = stagedFeatured;
+    if (!staged) return false;
+    const at = staged.findIndex((candidate) => sameTitle(candidate, title));
+    if (at < 0) return false;
+    featured = [...staged.slice(at), ...staged.slice(0, at)];
+    stagedFeatured = null;
+    return true;
+  }
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for atlas and TMDB, and the page shouldn't. With the member switch on, only atlas's ranking for this library
   // opens it for up to seven days. After its first day it is stale-while-revalidate: it still paints immediately,
@@ -1128,6 +1160,7 @@
     const type = facet;
     const key = tmdbKey;
     const run = ++billboardRun;
+    stagedFeatured = null;
     const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
     const ranked =
       model && overview && memberPost
@@ -1166,7 +1199,7 @@
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
-        featured = swapAfter(featured, slideShown, picked);
+        stageFeatured(picked);
         if (model) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
@@ -1462,6 +1495,7 @@
       active={active && !playing}
       titles={featured.filter(featuredShown)}
       bind:showing={slideShown}
+      onadvance={acceptStagedFeatured}
       {tmdbKey}
       {reel}
       {routes}

@@ -267,7 +267,7 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   await expect(invited).toContainText('Not used yet');
 });
 
-test('personalized billboard waits for staged names without replacing its retained first paint', async ({
+test('personalized billboard keeps its retained paint until the first transition rebases the fresh ranking', async ({
   page,
 }) => {
   let releaseRanking;
@@ -322,7 +322,19 @@ test('personalized billboard waits for staged names without replacing its retain
   expect(ranking.library.length).toBeGreaterThan(100);
   expect(ranking.library.find(({ id }) => id === 1012)?.hint?.title).toBe('Movie 1012');
   releaseRanking();
-  await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
+  const hero = page.locator('.billboard');
+  const visible = hero.locator('.slide[aria-hidden="false"]');
+  await expect(hero.locator('.slide')).toHaveCount(2);
+  await expect(visible.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
+
+  // The first user or timer-driven move reaches the fresh ranking normally. Once it has arrived, the retained
+  // lead is removed and that same title becomes slide zero without leaving the rail parked at the old offset.
+  await hero.locator('.dot').nth(1).click();
+  await expect(visible.getByRole('heading', { name: 'Movie 902' })).toBeVisible();
+  await expect(hero.locator('.slide')).toHaveCount(1);
+  await expect(hero.getByText('Retained personal pick')).toHaveCount(0);
+  await expect.poll(() => hero.locator('.rail').evaluate((rail) => rail.scrollLeft)).toBe(0);
+  await expect(visible).toHaveAttribute('aria-label', 'Movie 902');
 });
 
 test('a hidden paired library suspends background retries and resumes without a Recovery spin', async ({

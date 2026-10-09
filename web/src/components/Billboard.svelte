@@ -46,6 +46,7 @@
     onplay,
     onready,
     onretained,
+    onadvance,
     reel,
     routes,
     // eslint-disable-next-line no-useless-assignment -- An output binding: written below, read by the parent.
@@ -77,6 +78,11 @@
     onready?: () => void;
     /** Preserve bounded static copy for this retained lead's next parser-time paint. */
     onretained?: (title: RecommendedTitle, detail: TitleDetail) => void;
+    /**
+     * Called when the rail reaches another title. Return true after replacing `titles` with that title at index
+     * zero; Billboard then snaps the rebased rail to zero without exposing another slide between the two lists.
+     */
+    onadvance?: (title: RecommendedTitle) => boolean;
     /** Where this page asks den-reel (`/reel/<config>`); without it a slide keeps its still picture. */
     reel?: string | null;
     /** The routes table, for the address the trailer's video is loaded from. */
@@ -638,6 +644,8 @@
   let rail = $state<HTMLDivElement>();
   /** While this stands, a scroll is the billboard's own doing and not the viewer's. */
   let driving = 0;
+  /** Holds duplicate scroll/intersection notifications while the parent rebases a staged ranking. */
+  let rebasing = false;
 
   /** Scroll to slide `n`. Instant where the viewer asked for less movement, or where the jump is the loop back. */
   function goTo(n: number, smooth = true) {
@@ -648,6 +656,21 @@
       left: n === 0 ? 0 : n * box.clientWidth,
       behavior: smooth && !still() ? 'smooth' : 'auto',
     });
+  }
+
+  function arrive(at: number) {
+    if (rebasing || at === index || at < 0 || at >= shown.length) return;
+    const title = shown[at];
+    if (title && onadvance?.(title)) {
+      rebasing = true;
+      index = 0;
+      void tick().then(() => {
+        goTo(0, false);
+        rebasing = false;
+      });
+      return;
+    }
+    index = at;
   }
 
   /**
@@ -668,7 +691,7 @@
         for (const entry of entries) {
           const at = slides.indexOf(entry.target as HTMLElement);
           // Discard queued intersections from before a retained rail's scroll position was restored.
-          if (entry.isIntersecting && at === visible && at >= 0 && at !== index) index = at;
+          if (entry.isIntersecting && at === visible) arrive(at);
         }
       },
       { root: box, threshold: 0.6 },
@@ -689,7 +712,7 @@
     const box = rail;
     if (!active || !box || box.clientWidth === 0) return;
     const at = Math.round(box.scrollLeft / box.clientWidth);
-    if (at !== index && at >= 0 && at < shown.length) index = at;
+    arrive(at);
     // A scroll of its own making is still rotation; a scroll of the viewer's ends it. Smooth scrolling keeps
     // firing for a while after it is asked for, so a moment's grace before the next one counts as theirs.
     if (Date.now() - driving > 1200) paging = true;

@@ -17,7 +17,6 @@ import {
   preloadPersonalBackdrop,
   replacePersonalBillboard,
   startBillboard,
-  swapAfter,
   type KeptBillboard,
 } from './recommend';
 
@@ -675,28 +674,6 @@ describe('personal backdrop preload', () => {
     const preload = preloads();
     await preloadPersonalBackdrop('/', 'library', true, true, now + 1, storage, preload.start);
     expect(preload.made).toEqual(['https://image.tmdb.org/t/p/w1280/new.jpg']);
-  });
-});
-
-describe('swapAfter', () => {
-  const slides = (...ids: number[]) => ids.map((id) => film(id));
-  const ids = (titles: Title[]) => titles.map((t) => t.id);
-
-  it('never replaces the slide on screen or those before it', () => {
-    const shown = slides(1, 2, 3, 4);
-    expect(ids(swapAfter(shown, shown[1], slides(9, 2, 8, 1, 7)))).toEqual([1, 2, 9, 8, 7]);
-    expect(ids(swapAfter(shown, shown[0], slides(9, 8)))).toEqual([1, 9, 8]);
-    expect(ids(swapAfter(shown, shown[3], slides(9)))).toEqual([1, 2, 3, 4, 9]);
-  });
-
-  it('is the new ranking whole with nothing on screen', () => {
-    expect(ids(swapAfter([], undefined, slides(9, 8)))).toEqual([9, 8]);
-  });
-
-  it('matches the slide by type and id, not by the object', () => {
-    const shown = slides(1, 2, 3);
-    expect(ids(swapAfter(shown, { type: 'movie', id: 2 }, slides(5)))).toEqual([1, 2, 5]);
-    expect(ids(swapAfter(shown, { type: 'tv', id: 2 }, slides(5)))).toEqual([5]);
   });
 });
 
