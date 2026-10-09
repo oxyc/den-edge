@@ -16,7 +16,7 @@ import {
   type AtlasServiceRow,
 } from './services';
 import type { Service } from '../settings/services';
-import type { Pages, RowDef } from './catalog';
+import { discoverParams, type Pages, type RowDef } from './catalog';
 import type { Title } from './library';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 import { forgetReused } from './reuse';
@@ -717,7 +717,10 @@ describe('fillPosters', () => {
 describe('serviceRows', () => {
   /** Records what each row would ask TMDB for, without asking. */
   const asked: { path: string; params: Record<string, string> }[] = [];
-  const pages: Pages = async (path, _type, params) => {
+  const pages: Pages = async (catalog) => {
+    if (catalog.kind !== 'discover') throw new Error('service rows only use discover catalogs');
+    const path = `/discover/${catalog.query.mediaType}`;
+    const params = discoverParams(catalog.query);
     asked.push({ path, params });
     return [] as Title[];
   };

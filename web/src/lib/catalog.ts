@@ -839,34 +839,17 @@ export async function runBounded<T>(
   if (failure) throw failure.error;
 }
 
-/** One page of a TMDB list as titles. Rejects when TMDB doesn't answer; an empty page is the end. */
-export type Pages = (
-  path: string,
-  type: MediaType,
-  params: Record<string, string>,
-  page: number,
-) => Promise<Title[]>;
-
-type WorkerPages = Pages & {
-  catalog?: (catalog: ContentCatalogSpec, page: number) => Promise<Title[]>;
-};
+/** One semantic catalog page. Provider routes, parameters and fallback behavior stay inside ContentService. */
+export type Pages = (catalog: ContentCatalogSpec, page: number) => Promise<Title[]>;
 
 /** Domain-catalog adapter for row definitions; provider URLs and credentials remain inside the content Worker. */
 export function contentPages(content: ContentServiceClientPort): Pages {
-  const pages: WorkerPages = async () => {
-    throw new Error('content catalog rows must use a typed catalog request');
-  };
-  pages.catalog = async (catalog, page) =>
+  return async (catalog, page) =>
     (await content.query({ kind: 'catalog.page', catalog, page })).titles;
-  return pages;
 }
 
-export const catalogPage = (
-  pages: Pages,
-  catalog: ContentCatalogSpec,
-  providerRequest: [path: string, type: MediaType, params: Record<string, string>],
-  page: number,
-) => (pages as WorkerPages).catalog?.(catalog, page) ?? pages(...providerRequest, page);
+export const catalogPage = (pages: Pages, catalog: ContentCatalogSpec, page: number) =>
+  pages(catalog, page);
 
 export const discoverRow = (
   pages: Pages,
@@ -882,13 +865,7 @@ export const discoverRow = (
       query.primaryGenre === undefined
         ? undefined
         : (item) => matchesPrimaryGenre(item, query.primaryGenre!),
-    load: (page) =>
-      catalogPage(
-        pages,
-        { kind: 'discover', query: contentQuery },
-        [`/discover/${query.mediaType}`, query.mediaType, discoverParams(query)],
-        page,
-      ),
+    load: (page) => catalogPage(pages, { kind: 'discover', query: contentQuery }, page),
   };
 };
 
@@ -1019,12 +996,7 @@ export function homeRows(
       id: 'trending',
       title: 'Trending This Week',
       load: (page) =>
-        catalogPage(
-          pages,
-          { kind: 'trending', media: 'movie', window: 'week' },
-          ['/trending/movie/week', 'movie', {}],
-          page,
-        ),
+        catalogPage(pages, { kind: 'trending', media: 'movie', window: 'week' }, page),
     },
     discoverRow(pages, 'new-releases', 'New Releases', {
       mediaType: 'movie',
@@ -1036,14 +1008,12 @@ export function homeRows(
     {
       id: 'top-series',
       title: 'Top Rated Series',
-      load: (page) =>
-        catalogPage(pages, { kind: 'top-rated', media: 'tv' }, ['/tv/top_rated', 'tv', {}], page),
+      load: (page) => catalogPage(pages, { kind: 'top-rated', media: 'tv' }, page),
     },
     {
       id: 'upcoming',
       title: 'Upcoming',
-      load: (page) =>
-        catalogPage(pages, { kind: 'upcoming' }, ['/movie/upcoming', 'movie', {}], page),
+      load: (page) => catalogPage(pages, { kind: 'upcoming' }, page),
     },
   ];
   const recipes = HOME_RECIPES.flatMap((slug) => RECIPES.find((r) => r.id === slug) ?? [])
@@ -1090,7 +1060,6 @@ export function personalRows(
         await catalogPage(
           pages,
           { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
-          [`/${seed.type}/${seed.id}/recommendations`, seed.type, {}],
           page,
         )
       ).filter((t) => !owned.has(`${t.type}:${t.id}`)),
@@ -1121,8 +1090,7 @@ export function browseRows(
   const popular: RowDef = {
     id: 'popular',
     title: 'Popular on TMDB',
-    load: (page) =>
-      catalogPage(pages, { kind: 'popular', media: type }, [`/${type}/popular`, type, {}], page),
+    load: (page) => catalogPage(pages, { kind: 'popular', media: type }, page),
   };
   const genreRows = curated.map((id) =>
     categoryRow(

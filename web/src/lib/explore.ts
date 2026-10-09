@@ -1146,7 +1146,6 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
           catalogPage(
             pages,
             { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
-            [`/${seed.type}/${seed.id}/recommendations`, seed.type, {}],
             1,
           ).catch((error: unknown): Title[] => {
             console.warn(
@@ -1169,13 +1168,8 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
   };
   const tail = (page: number) =>
     type === 'tv'
-      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, ['/tv/top_rated', 'tv', {}], page)
-      : catalogPage(
-          pages,
-          { kind: 'popular', media: 'movie' },
-          ['/movie/popular', 'movie', {}],
-          page,
-        );
+      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, page)
+      : catalogPage(pages, { kind: 'popular', media: 'movie' }, page);
   /** Whether this run of the feed's first page was the recommendations, which shifts the tail a page on. */
   let led = false;
   return {

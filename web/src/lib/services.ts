@@ -9,7 +9,6 @@ import {
   catalogPage,
   categories,
   contentPages,
-  discoverParams,
   interleave,
   matchesPrimaryGenre,
   type DiscoverQuery,
@@ -667,13 +666,7 @@ function rowsFor(
       // one would let a reused surface keep the other's posters.
       id: `service-tmdb-${service.id}-${country}-${id}-${type}`,
       title: `${title} ${NOUN[type]}`,
-      load: (page: number) =>
-        catalogPage(
-          pages,
-          { kind: 'discover', query },
-          [`/discover/${type}`, type, discoverParams(query)],
-          page,
-        ),
+      load: (page: number) => catalogPage(pages, { kind: 'discover', query }, page),
     };
   });
 }
@@ -749,12 +742,7 @@ export function serviceRows(
     load: (page: number) => {
       const query = scoped(c.query);
       const { primaryGenre: _primaryGenre, ...contentQuery } = query;
-      return catalogPage(
-        pages,
-        { kind: 'discover', query: contentQuery },
-        [`/discover/${c.query.mediaType}`, c.query.mediaType, discoverParams(query)],
-        page,
-      );
+      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page);
     },
   }));
   return [...lead, ...feed];

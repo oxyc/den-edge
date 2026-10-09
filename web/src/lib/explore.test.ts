@@ -30,6 +30,7 @@ import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
 import type { ContentServiceClientPort } from './libraryServiceFactory';
 import { ContentAuthority } from './contentAuthority';
+import type { ContentCatalogSpec } from './contentServiceProtocol';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
 
@@ -56,20 +57,10 @@ const contentForPages = (
   return {
     async query(request: { kind: string; [key: string]: unknown }) {
       if (request.kind === 'catalog.page') {
-        const catalog = request.catalog as {
-          kind: string;
-          title?: { type: MediaType; id: number };
+        return {
+          kind: 'catalog.page',
+          titles: await pageSource(request.catalog as ContentCatalogSpec, request.page as number),
         };
-        if (catalog.kind === 'recommendations' && catalog.title)
-          return {
-            kind: 'catalog.page',
-            titles: await pageSource(
-              `/${catalog.title.type}/${catalog.title.id}/recommendations`,
-              catalog.title.type,
-              {},
-              request.page as number,
-            ),
-          };
       }
       if (request.kind === 'titles') return { kind: 'titles', titles: [], retryable: [] };
       if (request.kind.startsWith('atlas.'))
@@ -676,7 +667,28 @@ describe('the kinds only atlas’s filter knows', () => {
 
 describe('Explore feeds', () => {
   const calls: { path: string; params: Record<string, string>; page: number }[] = [];
-  const pages: Pages = async (path, type, params, page) => {
+  const pages: Pages = async (catalog, page) => {
+    const type =
+      catalog.kind === 'discover'
+        ? catalog.query.mediaType
+        : catalog.kind === 'upcoming'
+          ? 'movie'
+          : catalog.kind === 'recommendations'
+            ? catalog.title.type
+            : catalog.media;
+    const path =
+      catalog.kind === 'discover'
+        ? `/discover/${type}`
+        : catalog.kind === 'recommendations'
+          ? `/${type}/${catalog.title.id}/recommendations`
+          : catalog.kind === 'top-rated'
+            ? `/${type}/top_rated`
+            : catalog.kind === 'upcoming'
+              ? '/movie/upcoming'
+              : catalog.kind === 'trending'
+                ? `/trending/${type}/${catalog.window}`
+                : `/${type}/popular`;
+    const params = catalog.kind === 'discover' ? discoverParams(catalog.query) : {};
     calls.push({ path, params, page });
     if (path.endsWith('/recommendations')) return [film(1000 + page, type), film(50, type)];
     return [film(page * 100, type)];
@@ -739,9 +751,9 @@ describe('Explore feeds', () => {
 
   it('asks a seed that failed again when For You starts over, and leads with it then', async () => {
     let down = true;
-    const flaky: Pages = async (path, type, params, page) => {
-      if (down && path.endsWith('/recommendations')) throw new Error('offline');
-      return pages(path, type, params, page);
+    const flaky: Pages = async (catalog, page) => {
+      if (down && catalog.kind === 'recommendations') throw new Error('offline');
+      return pages(catalog, page);
     };
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -1151,8 +1163,16 @@ describe('All: films and series together', () => {
         ? new Response('', { status: 404 })
         : new Response(JSON.stringify(answer));
     }) as typeof fetch;
-  const pages: Pages = async (path, type, _params, page) =>
-    path.includes('recommendations') ? [] : [film(page * 100, type)];
+  const pages: Pages = async (catalog, page) => {
+    if (catalog.kind === 'recommendations') return [];
+    const type =
+      catalog.kind === 'discover'
+        ? catalog.query.mediaType
+        : catalog.kind === 'upcoming'
+          ? 'movie'
+          : catalog.media;
+    return [film(page * 100, type)];
+  };
   const base = { pages, seeds: [], owned: new Set<string>(), content: contentForPages(pages) };
 
   it('asks atlas for both types at once, a series card staying a series', async () => {
@@ -1180,9 +1200,12 @@ describe('All: films and series together', () => {
     const atlasFetch = answering(asked, () => undefined);
     const row = exploreFeed(['genre-28'], 'all', {
       ...base,
-      pages: async (path, type, params, page) => {
-        discovered.push(`${path}?${params.with_genres}`);
-        return pages(path, type, params, page);
+      pages: async (catalog, page) => {
+        if (catalog.kind === 'discover')
+          discovered.push(
+            `/discover/${catalog.query.mediaType}?${discoverParams(catalog.query).with_genres}`,
+          );
+        return pages(catalog, page);
       },
       atlas: '/atlas',
       content: contentForPages(pages, atlasFetch),

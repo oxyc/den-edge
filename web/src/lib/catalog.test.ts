@@ -198,8 +198,9 @@ describe('the screens', () => {
 
   it("Home's personal rows: TMDB's recommendations for your latest titles, less what you already have", async () => {
     const asked: string[] = [];
-    const recs: Pages = async (path) => {
-      asked.push(path);
+    const recs: Pages = async (catalog) => {
+      if (catalog.kind === 'recommendations')
+        asked.push(`/${catalog.title.type}/${catalog.title.id}/recommendations`);
       return [
         { type: 'movie', id: 1, title: 'Owned' },
         { type: 'movie', id: 2, title: 'New to you' },
@@ -324,7 +325,28 @@ describe('rows atlas’s filter answers', () => {
   /** TMDB's pages, recording each path and page asked. */
   function tmdbFake() {
     const asked: string[] = [];
-    const pages: Pages = async (path, type, params, page) => {
+    const pages: Pages = async (catalog, page) => {
+      const type =
+        catalog.kind === 'discover'
+          ? catalog.query.mediaType
+          : catalog.kind === 'upcoming'
+            ? 'movie'
+            : catalog.kind === 'recommendations'
+              ? catalog.title.type
+              : catalog.media;
+      const path =
+        catalog.kind === 'discover'
+          ? `/discover/${type}`
+          : catalog.kind === 'recommendations'
+            ? `/${type}/${catalog.title.id}/recommendations`
+            : catalog.kind === 'trending'
+              ? `/trending/${type}/${catalog.window}`
+              : catalog.kind === 'top-rated'
+                ? `/${type}/top_rated`
+                : catalog.kind === 'upcoming'
+                  ? '/movie/upcoming'
+                  : `/${type}/popular`;
+      const params = catalog.kind === 'discover' ? discoverParams(catalog.query) : {};
       asked.push(`${path}?${params.with_genres ?? params.with_origin_country ?? ''}#${page}`);
       return [{ type, id: 9000 + page, title: `TMDB ${page}`, posterPath: '/t.jpg' }];
     };
