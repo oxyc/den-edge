@@ -17,6 +17,7 @@ import {
   type LibraryVersion,
 } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
+import { isContentServiceServerMessage } from './contentServiceProtocol';
 
 export interface LibraryServiceTransport {
   send(message: LibraryServiceClientMessage): void;
@@ -243,7 +244,7 @@ export class LibraryServiceClient {
   }
 
   #receive(input: unknown): void {
-    if (this.#closed) return;
+    if (this.#closed || isContentServiceServerMessage(input)) return;
     const decoded = decodeLibraryServiceServerMessage(input);
     if (!decoded.ok) {
       this.#failAll(decoded.error);

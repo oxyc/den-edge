@@ -1,4 +1,5 @@
 import { LibraryServiceClient } from './libraryServiceClient';
+import { ContentServiceClient } from './contentServiceClient';
 import {
   LibraryServiceSupervisor,
   type LibraryServiceSupervisorOptions,
@@ -16,6 +17,40 @@ export interface LibraryServiceFactoryOptions {
 
 const productionWorker = () =>
   new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), { type: 'module' });
+
+export interface WorkerServiceConnection {
+  /** Available immediately, including for a public visitor who never opens encrypted library state. */
+  content: ContentServiceClient;
+  /** Open only when this browser has a local or paired library key. */
+  library: LibraryServiceClient;
+  close(): void;
+}
+
+/**
+ * One Worker and one multiplexed transport for public content plus optional encrypted library state. Keeping this
+ * constructor separate from `createLibraryService` lets the staged cutover retain its supervisor unchanged; the
+ * final session factory will supervise this whole connection rather than create a second content Worker.
+ */
+export function createWorkerServiceConnection(
+  createWorker: () => Worker = productionWorker,
+  startupTimeoutMs?: number,
+): WorkerServiceConnection {
+  const transport = new WorkerLibraryServiceTransport(createWorker());
+  const content = new ContentServiceClient(transport.contentTransport());
+  const library = new LibraryServiceClient(transport, undefined, startupTimeoutMs);
+  let closed = false;
+  return {
+    content,
+    library,
+    close() {
+      if (closed) return;
+      closed = true;
+      // Both clients share the idempotent transport close. Reject each client's own pending requests.
+      content.close();
+      library.close();
+    },
+  };
+}
 
 /**
  * Create the supervised DedicatedWorker service. Construction and runtime failures stay visible through the

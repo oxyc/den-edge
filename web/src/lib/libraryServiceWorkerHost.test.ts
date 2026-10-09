@@ -5,10 +5,17 @@ import {
   type LibraryServiceServerMessage,
 } from './libraryServiceProtocol';
 import { LibraryServiceWorkerHost } from './libraryServiceWorkerHost';
+import {
+  CONTENT_SERVICE_PROTOCOL,
+  type ContentServiceClientMessage,
+  type ContentServiceServerMessage,
+} from './contentServiceProtocol';
+
+type WorkerServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
 
 class FakeScope {
   listener?: (event: MessageEvent<unknown>) => void;
-  posted: LibraryServiceServerMessage[][] = [];
+  posted: WorkerServerMessage[][] = [];
 
   addEventListener(_type: 'message', listener: (event: MessageEvent<unknown>) => void): void {
     this.listener = listener;
@@ -18,7 +25,7 @@ class FakeScope {
     if (this.listener === listener) this.listener = undefined;
   }
 
-  postMessage(messages: LibraryServiceServerMessage[]): void {
+  postMessage(messages: WorkerServerMessage[]): void {
     this.posted.push(messages);
   }
 
@@ -34,6 +41,58 @@ const hello = (requestId: string): LibraryServiceClientMessage => ({
   clientId: 'tab-1',
   libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   mode: 'online' as const,
+});
+
+it('routes content beside library work without adding a library version', async () => {
+  const scope = new FakeScope();
+  const libraryDispatch = vi.fn(async (input: unknown) => [
+    ready((input as LibraryServiceClientMessage).requestId),
+  ]);
+  const contentDispatch = vi.fn(async (input: ContentServiceClientMessage) => {
+    if (input.type !== 'content-query') return [];
+    return [
+      {
+        type: 'content-result' as const,
+        protocol: CONTENT_SERVICE_PROTOCOL,
+        requestId: input.requestId,
+        result: { kind: 'service.regions' as const, regions: [] },
+      },
+    ];
+  });
+  const host = new LibraryServiceWorkerHost(
+    scope,
+    {
+      dispatch: libraryDispatch,
+      listen: () => () => {},
+      close() {},
+    },
+    {
+      dispatch: contentDispatch,
+      listen: () => () => {},
+      close() {},
+    },
+  );
+
+  scope.emit({
+    type: 'content-query',
+    protocol: CONTENT_SERVICE_PROTOCOL,
+    requestId: 'content',
+    request: { kind: 'service.regions' },
+  });
+  scope.emit(hello('library'));
+  await expect.poll(() => scope.posted.length).toBe(2);
+
+  expect(contentDispatch).toHaveBeenCalledOnce();
+  expect(libraryDispatch).toHaveBeenCalledOnce();
+  const content = scope.posted.flat().find((message) => message.type === 'content-result');
+  expect(content).toEqual({
+    type: 'content-result',
+    protocol: CONTENT_SERVICE_PROTOCOL,
+    requestId: 'content',
+    result: { kind: 'service.regions', regions: [] },
+  });
+  expect(content).not.toHaveProperty('version');
+  await host.close();
 });
 
 const ready = (requestId: string): LibraryServiceServerMessage => ({
