@@ -147,6 +147,7 @@ export class LibraryServiceCore {
   readonly #operations = new Map<string, CompletedOperation>();
   readonly #listeners = new Set<(messages: LibraryServiceServerMessage[]) => void>();
   #authority?: LibraryServiceAuthority;
+  #relayMembership: { libraryId: string; memberToken: string } | null = null;
   #stopAuthority?: () => void;
   #client?: { id: string; libraryKey: string; mode: LibraryServiceHello['mode'] };
   #revision = 0;
@@ -311,6 +312,7 @@ export class LibraryServiceCore {
           type: 'ready',
           protocol: LIBRARY_SERVICE_PROTOCOL,
           requestId: request.requestId,
+          relayMembership: this.#relayMembership,
           version: this.#version(),
         },
       ];
@@ -325,11 +327,15 @@ export class LibraryServiceCore {
       this.#authority = authority;
       this.#client = { id: request.clientId, libraryKey: request.libraryKey, mode: request.mode };
       this.#stopAuthority = authority.listen?.((event) => this.#enqueueAuthorityEvent(event));
+      const membership = await authority.query({ kind: 'relay.membership' }).catch(() => null);
+      this.#relayMembership =
+        membership?.kind === 'relay.membership' ? membership.capability : null;
       return [
         {
           type: 'ready',
           protocol: LIBRARY_SERVICE_PROTOCOL,
           requestId: request.requestId,
+          relayMembership: this.#relayMembership,
           version: this.#version(),
         },
       ];

@@ -9,18 +9,15 @@
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import { LibrarySession } from '../src/lib/librarySession.svelte';
   import type { Link } from '../src/lib/links.svelte';
-  import { useLibraryCredential } from '../src/lib/relayFetch';
   import type { Route } from '../src/lib/route';
   import '../src/app.css';
 
   const params = new URLSearchParams(location.search);
   const seed = params.has('seed');
-  const settings = params.get('view') === 'settings';
+  let view = $state(params.get('view') === 'settings' ? 'settings' : 'library');
   const online = params.has('online');
   const lifecycle = params.has('lifecycle');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
-  const libraryId = '50724b489a92805f23be6bba897393c7';
-  const memberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const service = createLibraryService();
   const model = new LibraryModel(service, { libraryKey, mode: online ? 'online' : 'local' });
   const session = new LibrarySession(model, false);
@@ -33,9 +30,6 @@
   };
   const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
 
-  // The local Worker keeps this fixture independent of a den-edge process. This is the same bounded relay
-  // credential that an online Worker's membership query installs before Settings asks the host grants route.
-  useLibraryCredential({ id: libraryId, member: memberToken });
   $effect(() => session.configureServices());
 
   let seeded = $state(false);
@@ -163,7 +157,11 @@
     {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
     {#if seeded}<p role="status">Worker library seeded</p>{/if}
   {:else}
-    {#if settings}
+    <nav aria-label="Fixture pages">
+      <button type="button" onclick={() => (view = 'library')}>Open Home</button>
+      <button type="button" onclick={() => (view = 'settings')}>Open Settings</button>
+    </nav>
+    {#if view === 'settings'}
       <Settings {link} {model} />
     {:else}
       <Library

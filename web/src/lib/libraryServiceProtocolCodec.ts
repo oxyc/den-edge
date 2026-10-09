@@ -1465,20 +1465,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       optional(value.retryAfterMs, positiveInteger)
     );
   if (value.kind === 'relay.membership') {
-    const capability = value.capability;
-    return (
-      exact(value, ['kind', 'capability']) &&
-      nullable(
-        capability,
-        (candidate): candidate is { libraryId: string; memberToken: string } =>
-          record(candidate) &&
-          exact(candidate, ['libraryId', 'memberToken']) &&
-          typeof candidate.libraryId === 'string' &&
-          /^[0-9a-f]{32}$/.test(candidate.libraryId) &&
-          typeof candidate.memberToken === 'string' &&
-          /^[0-9a-f]{64}$/.test(candidate.memberToken),
-      )
-    );
+    return exact(value, ['kind', 'capability']) && relayMembership(value.capability);
   }
   if (value.kind === 'key-reset.prepare')
     return (
@@ -1643,6 +1630,21 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         optional(candidate.seconds, finite) &&
         candidate.updatedAt === undefined,
     )
+  );
+}
+
+function relayMembership(
+  value: unknown,
+): value is { libraryId: string; memberToken: string } | null {
+  return nullable(
+    value,
+    (candidate): candidate is { libraryId: string; memberToken: string } =>
+      record(candidate) &&
+      exact(candidate, ['libraryId', 'memberToken']) &&
+      typeof candidate.libraryId === 'string' &&
+      /^[0-9a-f]{32}$/.test(candidate.libraryId) &&
+      typeof candidate.memberToken === 'string' &&
+      /^[0-9a-f]{64}$/.test(candidate.memberToken),
   );
 }
 
@@ -1864,8 +1866,9 @@ export function decodeLibraryServiceServerMessage(
   switch (input.type) {
     case 'ready':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'version']) ||
+        !exact(input, ['type', 'protocol', 'requestId', 'relayMembership', 'version']) ||
         !text(input.requestId) ||
+        !relayMembership(input.relayMembership) ||
         !version(input.version)
       )
         return invalid('ready reply is invalid');

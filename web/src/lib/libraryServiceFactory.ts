@@ -4,6 +4,7 @@ import {
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
+import { useLibraryRelayMembership } from './relayFetch';
 
 export interface LibraryServiceFactoryOptions {
   supervisor?: LibraryServiceSupervisorOptions;
@@ -30,6 +31,7 @@ export function createLibraryService(
         new WorkerLibraryServiceTransport(createWorker()),
         undefined,
         options.startupTimeoutMs,
+        (membership) => (membership ? useLibraryRelayMembership(membership) : undefined),
       ),
     options.supervisor,
   );

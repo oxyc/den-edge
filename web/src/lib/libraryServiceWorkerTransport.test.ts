@@ -44,6 +44,7 @@ const ready = (requestId: string): LibraryServiceServerMessage => ({
   type: 'ready',
   protocol: LIBRARY_SERVICE_PROTOCOL,
   requestId,
+  relayMembership: null,
   version: { instance: 'worker-1', generation: null, revision: 0 },
 });
 

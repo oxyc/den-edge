@@ -623,6 +623,7 @@ describe('library service server protocol', () => {
         type: 'ready',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'request-1',
+        relayMembership: null,
         version,
       }),
     ).toMatchObject({ ok: true, value: { version } });

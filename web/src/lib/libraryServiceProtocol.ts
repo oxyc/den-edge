@@ -5,7 +5,7 @@
  * implementation that projects them are private to the service.
  */
 
-export const LIBRARY_SERVICE_PROTOCOL = 4 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 5 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -757,6 +757,8 @@ interface ServerMessage {
 export interface LibraryServiceReady extends ServerMessage {
   type: 'ready';
   requestId: string;
+  /** Installed by the page transport before any library snapshot becomes observable. */
+  relayMembership: { libraryId: string; memberToken: string } | null;
   version: LibraryVersion;
 }
 

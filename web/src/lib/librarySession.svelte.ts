@@ -46,6 +46,10 @@ export class LibrarySession {
   }
 
   configureServices(): void {
+    // A library's relay membership is installed by the service hello before it publishes ready. Do not let the
+    // page's first provider discovery run as an anonymous visitor while that one bootstrap is still connecting.
+    // Guests have no library capability to wait for and configure immediately.
+    if (this.model && this.model.connection !== 'ready') return;
     this.services.configure(this.model?.runtime.value);
   }
 

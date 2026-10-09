@@ -101,6 +101,7 @@ describe('LibraryServiceCore', () => {
         type: 'ready',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'hello-1',
+        relayMembership: null,
         version: { instance: 'instance-1', generation: 'generation-1', revision: 0 },
       },
     ]);
