@@ -1,8 +1,44 @@
 import { test, expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
 const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
+const trailerBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
+const trailerCapability = `m/s/${'substance'.padEnd(40, '_')}?s=${'93'.repeat(12)}`;
+const trailerPlanUrl = `${E2E_ORIGIN}/reel/sources/substance.json?v=2`;
+const substance = {
+  id: 933260,
+  imdb_id: 'tt17526714',
+  title: 'The Substance',
+  media_type: 'movie',
+  poster_path: '/substance-poster.jpg',
+  backdrop_path: '/substance-backdrop.jpg',
+  release_date: '2024-09-18',
+  overview: 'A fading celebrity takes a black-market drug.',
+  vote_average: 7.1,
+  vote_count: 5_000,
+  popularity: 100,
+  genres: [{ id: 27, name: 'Horror' }],
+  credits: { cast: [], crew: [] },
+  recommendations: { results: [] },
+  videos: { results: [] },
+  external_ids: { imdb_id: 'tt17526714' },
+};
+const substancePlan = {
+  v: 2,
+  expires: 2_000_000_000,
+  crop: null,
+  sources: [
+    {
+      kind: 'mp4',
+      audio: true,
+      width: 1280,
+      height: 720,
+      delivery: { type: 'reel', capability: trailerCapability },
+    },
+  ],
+};
 const guest = {
   gid: 'feedcafe',
   name: 'Taylor',
@@ -237,6 +273,235 @@ async function routes(page, metadata) {
     }),
   );
 }
+
+/**
+ * The exact retained route that exposed the shared-Worker generation race: SVT's ambient billboard is already
+ * playing, its press warms The Substance's audible Reel plan, then `title.detail` loses its first Worker reply.
+ */
+async function routeSvtSubstance(page, reelRequests, tmdbRequests) {
+  await page.route('**/routes', (route) =>
+    route.fulfill({ json: { reel: [{ url: E2E_ORIGIN }] } }),
+  );
+  await routeTmdb(page, (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    tmdbRequests.push(url.href);
+    const path = url.pathname.replace(/^\/(tmdb\/)?3\//, '/');
+    if (path === '/watch/providers/movie')
+      return route.fulfill({
+        json: {
+          results: [
+            {
+              provider_id: 493,
+              provider_name: 'SVT',
+              logo_path: '/svt.jpg',
+              display_priority: 1,
+            },
+          ],
+        },
+      });
+    if (path === '/watch/providers/tv') return route.fulfill({ json: { results: [] } });
+    if (path === '/discover/movie')
+      return route.fulfill({
+        json: { page: 1, total_pages: 1, total_results: 1, results: [substance] },
+      });
+    if (path === '/movie/933260') return route.fulfill({ json: substance });
+    if (path === '/movie/933260/external_ids')
+      return route.fulfill({ json: { id: 933260, imdb_id: substance.imdb_id } });
+    return route.fulfill({ json: { page: 1, total_pages: 1, total_results: 0, results: [] } });
+  });
+  await page.route('**/reel/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.reel' } }),
+  );
+  await page.route('**/reel/prepare/**', (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    reelRequests.push({
+      path: `${url.pathname}${url.search}`,
+      member: request.headers()['x-den-library-member'],
+    });
+    const warm = url.searchParams.get('intent') === 'warm';
+    return route.fulfill({
+      json: {
+        v: 2,
+        meta: { links: [{ planUrl: trailerPlanUrl }] },
+        primary: { id: 'substance', planUrl: trailerPlanUrl },
+        ...(warm ? {} : { primaryPlan: substancePlan }),
+      },
+    });
+  });
+  await page.route('**/reel/sources/substance.json**', (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    reelRequests.push({
+      path: `${url.pathname}${url.search}`,
+      member: request.headers()['x-den-library-member'],
+    });
+    return route.fulfill({ json: substancePlan });
+  });
+  await page.route('**/reel/transport', (route) => {
+    const request = route.request();
+    reelRequests.push({
+      path: '/reel/transport',
+      member: request.headers()['x-den-library-member'],
+    });
+    return route.fulfill({
+      json: {
+        v: 2,
+        capability: trailerCapability,
+        attempts: [{ type: 'relay', url: `/reel/${trailerCapability}` }],
+      },
+    });
+  });
+  await page.route('**/scout/fixture-install/stream/movie/tt17526714.json', (route) =>
+    route.fulfill({ json: { streams: [] } }),
+  );
+  await page.route(
+    (url) => `${url.pathname}${url.search}` === `/reel/${trailerCapability}`,
+    (route) => {
+      const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range ?? '');
+      const start = range ? Number(range[1]) : 0;
+      const end = range?.[2] ? Number(range[2]) : trailerBytes.length - 1;
+      return route.fulfill({
+        status: range ? 206 : 200,
+        contentType: 'video/webm',
+        body: trailerBytes.subarray(start, end + 1),
+        headers: {
+          'accept-ranges': 'bytes',
+          ...(range ? { 'content-range': `bytes ${start}-${end}/${trailerBytes.length}` } : {}),
+        },
+      });
+    },
+  );
+}
+
+test('SVT billboard navigation keeps its warmed detail trailer on the paired Worker generation', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    let nextWorker = 0;
+    let failNextDetail = false;
+    let failedDetail = false;
+    window.fixtureWorkerMessages = [];
+    window.fixtureFailNextDetail = () => (failNextDetail = true);
+    window.Worker = class extends NativeWorker {
+      fixtureId = ++nextWorker;
+
+      constructor(url, options) {
+        super(url, options);
+        window.fixtureWorkerCount = nextWorker;
+      }
+
+      postMessage(message, ...rest) {
+        window.fixtureWorkerMessages.push({
+          worker: this.fixtureId,
+          type: message?.type,
+          kind: message?.request?.kind,
+        });
+        // A request-scoped transport loss leaves the library channel apparently ready. This is the ordering that
+        // used to let ContentService install an anonymous Worker before the library supervisor could replace it.
+        if (
+          failNextDetail &&
+          !failedDetail &&
+          message?.type === 'content-query' &&
+          message.request?.kind === 'title.detail'
+        ) {
+          failedDetail = true;
+          queueMicrotask(() =>
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: [
+                  {
+                    type: 'content-error',
+                    protocol: 4,
+                    requestId: message.requestId,
+                    error: {
+                      code: 'unavailable',
+                      message: 'fixture content transport was replaced',
+                      retryable: true,
+                    },
+                  },
+                ],
+              }),
+            ),
+          );
+          return;
+        }
+        return super.postMessage(message, ...rest);
+      }
+    };
+  });
+
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  const reelRequests = [];
+  const tmdbRequests = [];
+  await routes(page, metadata);
+  await routeSvtSubstance(page, reelRequests, tmdbRequests);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  reelRequests.length = 0;
+  tmdbRequests.length = 0;
+  await page.goto(`${FIXTURE}?routed&online`);
+  await page.evaluate(() =>
+    document.dispatchEvent(
+      new CustomEvent('den:navigate', { detail: { path: '/service/493-se' } }),
+    ),
+  );
+  const active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'SVT' })).toBeVisible();
+  const billboard = active.locator('.billboard');
+  await expect(billboard.getByRole('heading', { name: 'The Substance' })).toBeVisible();
+  await expect(billboard.locator('video.ambient')).toHaveClass(/\bplaying\b/, { timeout: 15_000 });
+
+  await page.evaluate(() => window.fixtureFailNextDetail());
+  await billboard.locator('.slide-link').click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/movie/933260-the-substance');
+  const detail = page.locator('[data-route-page][data-active="true"]');
+  await expect(detail.getByRole('heading', { name: 'The Substance' })).toBeVisible();
+  await expect(detail.locator('[data-detail-media] video')).toHaveClass(/\bplaying\b/, {
+    timeout: 15_000,
+  });
+
+  const worker = await page.evaluate(() => ({
+    count: window.fixtureWorkerCount,
+    messages: window.fixtureWorkerMessages,
+  }));
+  expect(worker.count).toBe(2);
+  expect(worker.messages.filter(({ worker }) => worker === 2)[0]).toMatchObject({
+    type: 'hello',
+  });
+  expect(
+    worker.messages.filter(
+      ({ worker, type, kind }) =>
+        worker === 2 && type === 'content-query' && kind === 'title.detail',
+    ),
+  ).toHaveLength(1);
+
+  const warmed = reelRequests.find(
+    ({ path }) => path.includes('/prepare/movie/tmdb:933260.json') && path.includes('intent=warm'),
+  );
+  expect(
+    warmed,
+    'the billboard press warmed the audible detail plan before navigation',
+  ).toBeTruthy();
+  expect(reelRequests.filter(({ member }) => !member)).toEqual([]);
+  expect(tmdbRequests.length).toBeGreaterThan(0);
+  expect(tmdbRequests.every((href) => new URL(href).pathname.startsWith('/tmdb/'))).toBe(true);
+});
 
 test('a large paired library cold-loads every lazy view through the Worker', async ({ page }) => {
   let releaseMetadata;
