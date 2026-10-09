@@ -30,11 +30,12 @@
     linkKey: 'fixture',
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
-  const route: Route = { page: 'watchlist' };
+  const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
 
   // The local Worker keeps this fixture independent of a den-edge process. This is the same bounded relay
   // credential that an online Worker's membership query installs before Settings asks the host grants route.
   useLibraryCredential({ id: libraryId, member: memberToken });
+  $effect(() => session.configureServices());
 
   let seeded = $state(false);
   let seedFailure = $state<string | null>(null);
@@ -48,7 +49,8 @@
           'seed-plugin',
         );
         await model.heartbeatDevice('Paired browser', 'seed-device');
-        await model.addToWatchlist({ type: 'movie', id: 1002 }, 'seed-watchlist');
+        for (const id of [1002, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012])
+          await model.addToWatchlist({ type: 'movie', id }, `seed-watchlist-${id}`);
         await model.recordProgress(
           {
             title: { type: 'movie', id: 1001 },
@@ -75,6 +77,26 @@
           })),
           'seed-history',
         );
+        await model.retainBillboard(
+          { kind: 'personal', facet: null, fresh: true },
+          {
+            kind: 'personal',
+            at: now,
+            titles: [
+              {
+                type: 'movie',
+                id: 900,
+                title: 'Retained personal pick',
+                year: 2025,
+                posterPath: '/poster.jpg',
+                backdropPath: '/backdrop.jpg',
+              },
+            ],
+          },
+          'seed-billboard',
+        );
+        if (!(await model.retainedBillboard({ kind: 'personal', facet: null, fresh: true })))
+          throw new Error('retained billboard was not saved');
         seeded = true;
       })
       .catch((error: unknown) => {

@@ -7,14 +7,18 @@ type Ref = { type: MediaType; id: number };
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
+  /** A provider-confirmed absence is settled metadata, not another lookup to make. */
+  displayMissing?: (ref: Ref) => boolean;
   libraryMetadata(refs: readonly Ref[]): Promise<{
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
     retryable: Ref[];
+    retryAfterMs?: number;
   }>;
   publishLibraryMetadata?: (
     titles: Title[],
     shapes: ReadonlyArray<readonly [string, Shape]>,
+    missing?: readonly Ref[],
   ) => void;
 }
 
@@ -33,6 +37,7 @@ interface RetryState {
   attempts: Map<string, number>;
   timer?: ReturnType<typeof setTimeout>;
   running: boolean;
+  retryAfterMs: number;
 }
 
 const retryStates = new WeakMap<NamedLibrary, RetryState>();
@@ -52,61 +57,74 @@ export async function nameLibraryTitles(session: NamedLibrary, refs: Ref[]): Pro
       ...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values(),
     ].filter(
       (ref) =>
-        !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+        !session.displayMissing?.(ref) &&
+        (!known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref)))),
     );
     return { known, wanted };
   });
   const retry = await nameBatches(session, wanted, known);
   // Readiness is the first bounded pass, not the provider's backoff. Successful neighbours are already visible;
   // retry transient holes in the background without holding Home's shelves behind them.
-  queueLibraryTitleRetries(session, retry);
+  queueLibraryTitleRetries(session, retry.refs, retry.retryAfterMs);
 }
 
-async function nameBatches(session: NamedLibrary, refs: Ref[], known: Set<string>): Promise<Ref[]> {
+async function nameBatches(
+  session: NamedLibrary,
+  refs: Ref[],
+  known: Set<string>,
+): Promise<{ refs: Ref[]; retryAfterMs: number }> {
   const retry: Ref[] = [];
+  let retryAfterMs = 0;
   for (let at = 0; at < refs.length; at += LIBRARY_METADATA_BATCH) {
-    if (closedSessions.has(session)) return [];
+    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0 };
     const batch = refs.slice(at, at + LIBRARY_METADATA_BATCH);
     const found = await session.libraryMetadata(batch).catch(() => null);
-    if (closedSessions.has(session)) return [];
+    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0 };
     if (!found) {
       retry.push(...batch);
       continue;
     }
+    retryAfterMs = Math.max(retryAfterMs, found.retryAfterMs ?? 0);
     const titles = found.titles.filter((title) => !known.has(titleKey(title)));
     for (const title of found.titles) known.add(titleKey(title));
+    const answered = new Set([...found.titles.map(titleKey), ...found.retryable.map(titleKey)]);
+    const absent = batch.filter((ref) => !answered.has(titleKey(ref)));
     const shapes = found.shapes.map(
       (shape) => [titleKey(shape.title), shapeFromWire(shape)] as const,
     );
     if (titles.length || shapes.length) {
-      if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes);
+      if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes, absent);
       else {
         if (titles.length) session.displays = [...session.displays, ...titles];
         if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
       }
-    }
+    } else if (absent.length && session.publishLibraryMetadata)
+      session.publishLibraryMetadata([], [], absent);
     retry.push(...found.retryable);
   }
-  return missing(session, retry, known);
+  return { refs: missing(session, retry, known), retryAfterMs };
 }
 
-function queueLibraryTitleRetries(session: NamedLibrary, refs: Ref[]): void {
+function queueLibraryTitleRetries(session: NamedLibrary, refs: Ref[], retryAfterMs = 0): void {
   if (!refs.length || closedSessions.has(session)) return;
   let state = retryStates.get(session);
   if (!state) {
-    state = { pending: new Map(), attempts: new Map(), running: false };
+    state = { pending: new Map(), attempts: new Map(), running: false, retryAfterMs: 0 };
     retryStates.set(session, state);
   }
   for (const ref of refs) state.pending.set(titleKey(ref), ref);
+  state.retryAfterMs = Math.max(state.retryAfterMs, retryAfterMs);
   scheduleLibraryTitleRetries(session, state);
 }
 
 function scheduleLibraryTitleRetries(session: NamedLibrary, state: RetryState): void {
   if (state.timer || state.running || !state.pending.size || closedSessions.has(session)) return;
+  const delay = Math.max(RETRY_DELAY_MS, state.retryAfterMs);
+  state.retryAfterMs = 0;
   state.timer = setTimeout(() => {
     state.timer = undefined;
     void runLibraryTitleRetries(session, state);
-  }, RETRY_DELAY_MS);
+  }, delay);
 }
 
 async function runLibraryTitleRetries(session: NamedLibrary, state: RetryState): Promise<void> {
@@ -124,7 +142,7 @@ async function runLibraryTitleRetries(session: NamedLibrary, state: RetryState):
   }
   const retry = await nameBatches(session, due, known);
   if (closedSessions.has(session)) return;
-  const retryKeys = new Set(retry.map(titleKey));
+  const retryKeys = new Set(retry.refs.map(titleKey));
   const exhausted: Ref[] = [];
   for (const ref of due) {
     const key = titleKey(ref);
@@ -142,6 +160,7 @@ async function runLibraryTitleRetries(session: NamedLibrary, state: RetryState):
       `den: ${exhausted.length} library title${exhausted.length === 1 ? '' : 's'} could not be named`,
     );
   state.running = false;
+  state.retryAfterMs = Math.max(state.retryAfterMs, retry.retryAfterMs);
   scheduleLibraryTitleRetries(session, state);
 }
 
@@ -161,7 +180,8 @@ const missing = (session: NamedLibrary, refs: Ref[], known: Set<string>): Ref[] 
     refs
       .filter(
         (ref) =>
-          !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+          !session.displayMissing?.(ref) &&
+          (!known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref)))),
       )
       .map((ref) => [titleKey(ref), ref]),
   ).values(),

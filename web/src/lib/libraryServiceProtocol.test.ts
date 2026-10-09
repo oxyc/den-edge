@@ -1009,7 +1009,8 @@ describe('library service server protocol', () => {
             lastAired: { season: 1, episode: 7 },
           },
         ],
-        retryable: [],
+        retryable: [{ type: 'movie', id: 12 }],
+        retryAfterMs: 60_000,
       }),
     ).toMatchObject({ ok: true });
     expect(

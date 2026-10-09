@@ -5,7 +5,7 @@
  * implementation that projects them are private to the service.
  */
 
-export const LIBRARY_SERVICE_PROTOCOL = 3 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 4 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -601,6 +601,8 @@ export type LibraryQueryResult =
       shapes: LibraryMetadataShape[];
       /** Questions that failed transiently and are safe for the page to ask again. */
       retryable: TitleRef[];
+      /** Longest provider-requested pause among `retryable`; absent for ordinary transient failures. */
+      retryAfterMs?: number;
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
   | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }

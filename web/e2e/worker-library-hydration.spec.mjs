@@ -80,6 +80,9 @@ async function routes(page, metadata) {
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'worker-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await page.route('**/scout/fixture-install/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.scout' } }),
+  );
   await routeLibrary(page, metadata);
   await routeTmdb(page, async (route) => {
     const request = route.request();
@@ -96,7 +99,13 @@ async function routes(page, metadata) {
       member: headers['x-den-library-member'],
       realm: headers['x-den-test-fetch-realm'],
     });
-    if (id === 1227) {
+    const attempt = (metadata.attempts.get(ref) ?? 0) + 1;
+    metadata.attempts.set(ref, attempt);
+    if (metadata.refuseOnce.has(ref) && attempt === 1)
+      return route.fulfill({ status: 503, headers: { 'retry-after': '1' }, body: '{}' });
+    if (metadata.missing.has(ref))
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    if (id === metadata.holdId) {
       metadata.held();
       await metadata.release;
     }
@@ -136,7 +145,24 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   let metadataHeld;
   const held = new Promise((resolve) => (metadataHeld = resolve));
   const release = new Promise((resolve) => (releaseMetadata = resolve));
-  const metadata = { requests: [], members: new Set(), held: metadataHeld, release };
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: metadataHeld,
+    release,
+    refuseOnce: new Set(['movie:1002']),
+    missing: new Set([
+      'movie:1004',
+      'movie:1005',
+      'movie:1006',
+      'movie:1007',
+      'movie:1008',
+      'movie:1009',
+      'movie:1010',
+    ]),
+    holdId: 1227,
+  };
 
   // Mark only window.fetch. A request without this marker was made in the DedicatedWorker's separate realm.
   await page.addInitScript(() => {
@@ -162,6 +188,10 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   await expect(series).toBeVisible();
   await expect(series).toContainText('S1 · E2');
   await expect(watchlist.getByText('Movie 1002')).toBeVisible();
+  // Seven confirmed-absent records cannot strand the shelf at its first eight refs: naming scans forward until
+  // the row has real cards, while the temporarily refused first title returns only after its requested pause.
+  await expect(watchlist.getByText('Movie 1011')).toBeVisible();
+  await expect(watchlist.getByText('Movie 1012')).toBeVisible();
   await expect(watched.getByText('Movie 1100')).toBeVisible();
   await held;
 
@@ -182,7 +212,8 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   expect(workerRequests.every(({ member }) => member === membership)).toBe(true);
   const counts = new Map();
   for (const { ref } of workerRequests) counts.set(ref, (counts.get(ref) ?? 0) + 1);
-  expect([...counts.values()].every((count) => count === 1)).toBe(true);
+  expect(counts.get('movie:1002')).toBe(2);
+  expect([...counts].every(([ref, count]) => count === (ref === 'movie:1002' ? 2 : 1))).toBe(true);
 
   // A second cold Worker opens under the already-mounted Settings screen. Its lazy Connections replacement is what
   // lets Sharing list the already-invited guest.
@@ -191,4 +222,60 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   const invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
   await expect(invited).toBeVisible();
   await expect(invited).toContainText('Not used yet');
+});
+
+test('personalized billboard waits for staged names without replacing its retained first paint', async ({
+  page,
+}) => {
+  let releaseRanking;
+  const rankingReleased = new Promise((resolve) => (releaseRanking = resolve));
+  const recommendations = [];
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+
+  await routes(page, metadata);
+  await page.route('**/atlas/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.atlas' } }),
+  );
+  await page.route('**/scout/fixture-install/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.scout' } }),
+  );
+  await page.route('**/atlas/index/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas/recommend/**', (route) =>
+    route.fulfill({
+      json: {
+        slides: [{ type: 'movie', id: 901, score: 1, why: { reason: 'Popular today' } }],
+      },
+    }),
+  );
+  await page.route('**/atlas/recommend', async (route) => {
+    recommendations.push(route.request().postDataJSON());
+    await rankingReleased;
+    await route.fulfill({
+      json: {
+        slides: [{ type: 'movie', id: 902, score: 1, why: { reason: 'For this library' } }],
+      },
+    });
+  });
+
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+
+  await page.goto(`${FIXTURE}?view=home&online`);
+  await expect.poll(() => recommendations.length).toBeGreaterThan(0);
+  await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
+
+  const [ranking] = recommendations;
+  expect(ranking.library.length).toBeGreaterThan(100);
+  expect(ranking.library.find(({ id }) => id === 1012)?.hint?.title).toBe('Movie 1012');
+  releaseRanking();
+  await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
 });

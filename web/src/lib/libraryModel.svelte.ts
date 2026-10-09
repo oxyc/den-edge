@@ -571,6 +571,7 @@ export class LibraryModel {
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
     retryable: TitleRef[];
+    retryAfterMs?: number;
   }> {
     this.#assertOpen();
     const refs = [
@@ -583,7 +584,12 @@ export class LibraryModel {
     ];
     const { result } = await this.service.query({ kind: 'library.metadata', titles: refs });
     if (result.kind !== 'library.metadata') throw wrongQueryResult('library.metadata');
-    return { titles: result.titles, shapes: result.shapes, retryable: result.retryable };
+    return {
+      titles: result.titles,
+      shapes: result.shapes,
+      retryable: result.retryable,
+      ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }),
+    };
   }
 
   downloadSources(title: DownloadTitleDescriptor, refresh = false) {

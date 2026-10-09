@@ -121,6 +121,9 @@
   let retainedContinue = $state(false);
   let continueNames = $state(SHELF_TRANCHE);
   let watchlistNames = $state(SHELF_TRANCHE);
+  let continueCachedPrefix = $state(0);
+  let watchlistCachedPrefix = $state(0);
+  let shelfBaselinesCaptured = false;
   let busy = $state(false);
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
@@ -145,15 +148,41 @@
   const overview = $derived(model?.overview.value);
   const continueView = $derived(model?.continueWatching.value);
   const settings = $derived(model?.settings.value);
-  const namedPrefix = (refs: readonly TitleRef[]) => {
-    const missing = refs.findIndex((ref) => !session.displayTitle(ref));
-    return missing < 0 ? refs.length : missing;
+  /**
+   * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
+   * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains
+   * unanswered, so it cannot make us spend the rate limit on the whole tail.
+   */
+  const metadataLimit = (refs: readonly TitleRef[], wanted: number, cachedPrefix: number) => {
+    const visibleTarget = Math.max(SHELF_TRANCHE, cachedPrefix) + wanted - SHELF_TRANCHE;
+    let shown = 0;
+    let unanswered = 0;
+    let limit = 0;
+    for (const ref of refs) {
+      if (session.displayTitle(ref)) {
+        limit++;
+        shown++;
+        continue;
+      }
+      if (session.displayMissing(ref)) {
+        limit++;
+        continue;
+      }
+      if (shown >= visibleTarget) break;
+      limit++;
+      if (++unanswered >= SHELF_TRANCHE) break;
+    }
+    return limit;
   };
   const continueNameLimit = $derived(
-    Math.max(continueNames, namedPrefix((continueView?.items ?? []).map(({ title }) => title))),
+    metadataLimit(
+      (continueView?.items ?? []).map(({ title }) => title),
+      continueNames,
+      continueCachedPrefix,
+    ),
   );
   const watchlistNameLimit = $derived(
-    Math.max(watchlistNames, namedPrefix(overview?.watchlist ?? [])),
+    metadataLimit(overview?.watchlist ?? [], watchlistNames, watchlistCachedPrefix),
   );
   const libraryOpen = $derived(model === null || overview !== undefined);
   const serviceFailed = $derived(
@@ -225,7 +254,22 @@
     }
     let disposed = false;
     const initial = untrack(() => shelfPlan === null);
-    if (initial) shelvesReady = false;
+    if (initial) {
+      shelvesReady = false;
+      if (!shelfBaselinesCaptured) {
+        const cachedPrefix = (refs: readonly TitleRef[]) => {
+          let count = 0;
+          for (const ref of refs) {
+            if (!session.displayTitle(ref)) break;
+            count++;
+          }
+          return count;
+        };
+        continueCachedPrefix = cachedPrefix(continued.items.map(({ title }) => title));
+        watchlistCachedPrefix = cachedPrefix(view.watchlist);
+        shelfBaselinesCaptured = true;
+      }
+    }
     shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
     const refs = [
       ...continued.needsShapes,
@@ -259,8 +303,8 @@
 
   // A dense cached prefix appears at once. A sparse cached tail stays behind its unnamed predecessors, preserving
   // shelf and keyboard order without turning one old cached title into a large burst of TMDB requests.
-  const admitContinueNames = () => (continueNames = continueNameLimit + SHELF_TRANCHE);
-  const admitWatchlistNames = () => (watchlistNames = watchlistNameLimit + SHELF_TRANCHE);
+  const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
+  const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
 
   // The Watchlist screen is the only owner of the potentially large history naming tail.
   $effect(() => {
@@ -1034,10 +1078,11 @@
     return () => clearTimeout(timer);
   });
   $effect(() => {
-    // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be
-    // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
-    // read without being watched. Those tick over continuously while the library is named, and watching them
-    // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
+    // What the billboard is rebuilt FOR: which page this is, where atlas answers, whether TMDB can be asked, and
+    // whether the first bounded shelf tranche has been named. Everything else it reads — the rows, the library's
+    // shape, the hide rules, the taste — is read without being watched. Those tick over continuously while the
+    // library is named, and watching them had the whole pool rebuilt on every tick: hundreds of repeat requests to
+    // atlas for one page load. The one readiness edge matters: ranking before it permanently sent unnamed history.
     if (
       route.page === 'title' ||
       route.page === 'person' ||
@@ -1049,14 +1094,15 @@
     )
       return;
     const here = atlas;
+    const named = shelvesReady;
     if (!tmdbKey) return;
-    // The shared pool needs no profile read: ask as soon as discovery and TMDB naming are available. `null` is a
-    // A guest can use the shared pool immediately; a library waits for its compact overview.
+    // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
+    // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    if (model === null || libraryOpen) untrack(() => buildRecommended(here));
+    if (model === null || (libraryOpen && named)) untrack(() => buildRecommended(here));
   });
 
   /**

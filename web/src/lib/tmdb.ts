@@ -3,6 +3,7 @@
 
 import type { MediaType, Shape, Title } from './library';
 import { readApiKey } from './prefs';
+import { retryAfterMs } from './retryAfter';
 import { TMDB_PROXY_KEY, tmdbFetch } from './tmdbCache';
 import type { SettingsRow } from './wire';
 
@@ -42,7 +43,9 @@ export interface Details {
 }
 
 export type DetailsResult =
-  { kind: 'found'; details: Details } | { kind: 'missing' } | { kind: 'retryable' };
+  | { kind: 'found'; details: Details }
+  | { kind: 'missing' }
+  | { kind: 'retryable'; retryAfterMs?: number };
 
 /** Distinguish an absent title from a relay/provider failure so library hydration can retry the latter. */
 export async function fetchDetailsResult(
@@ -56,13 +59,19 @@ export async function fetchDetailsResult(
     const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${append}`;
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
     if (res.status === 404) return { kind: 'missing' };
-    if (!res.ok) return { kind: 'retryable' };
+    if (!res.ok)
+      return {
+        kind: 'retryable',
+        ...(res.headers.has('retry-after') ? { retryAfterMs: retryAfterMs(res, 60_000) } : {}),
+      };
     details = (await res.json()) as Record<string, unknown>;
   } catch {
     return { kind: 'retryable' };
   }
   const title = toTitle(ref, details);
-  if (!title) return { kind: 'missing' };
+  // Only den-edge's explicit 404 proves absence. A malformed/partial success may recover and must not become a
+  // sticky session-level missing record that permanently skips the title.
+  if (!title) return { kind: 'retryable' };
   return {
     kind: 'found',
     details: ref.type === 'tv' ? { title, shape: seriesShape(details) } : { title },

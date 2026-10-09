@@ -345,7 +345,11 @@ export class LibraryLogAuthority {
   readonly #tmdbFetch: typeof fetch;
   readonly #metadataFlights = new Map<
     string,
-    Promise<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape } | 'retryable' | null>
+    Promise<
+      | { kind: 'found'; title: LibraryMetadataTitle; shape?: LibraryMetadataShape }
+      | { kind: 'retryable'; retryAfterMs?: number }
+      | null
+    >
   >();
   readonly #listeners = new Set<(event: LibraryAuthorityEvent) => void>();
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
@@ -649,12 +653,15 @@ export class LibraryLogAuthority {
     const key = tmdbKeyOf(this.#log.settings('keys'));
     const found: Array<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape }> = [];
     const retryable: TitleRef[] = [];
+    let retryAfterMs = 0;
     let next = 0;
     const lookup = async () => {
       for (let ref = titles[next++]; ref; ref = titles[next++]) {
         const result = await this.#metadataFor(ref, key);
-        if (result === 'retryable') retryable.push(ref);
-        else if (result) found.push(result);
+        if (result?.kind === 'retryable') {
+          retryable.push(ref);
+          retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs ?? 0);
+        } else if (result) found.push(result);
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, titles.length) }, lookup));
@@ -688,6 +695,7 @@ export class LibraryLogAuthority {
       titles: found.map(({ title }) => title),
       shapes: found.flatMap(({ shape }) => (shape ? [shape] : [])),
       retryable,
+      ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
     };
   }
 
@@ -695,18 +703,22 @@ export class LibraryLogAuthority {
   #metadataFor(
     ref: TitleRef,
     key: string,
-  ): Promise<{ title: LibraryMetadataTitle; shape?: LibraryMetadataShape } | 'retryable' | null> {
+  ): Promise<
+    | { kind: 'found'; title: LibraryMetadataTitle; shape?: LibraryMetadataShape }
+    | { kind: 'retryable'; retryAfterMs?: number }
+    | null
+  > {
     const flightKey = `${ref.type}:${ref.id}`;
     const existing = this.#metadataFlights.get(flightKey);
     if (existing) return existing;
     const flight = (async () => {
       const result = await fetchDetailsResult(ref, key, this.#tmdbFetch);
-      if (result.kind === 'retryable') return 'retryable' as const;
+      if (result.kind === 'retryable') return result;
       if (result.kind === 'missing') return null;
       const title = this.#metadataTitle(result.details.title);
       if (!title) return null;
       const shape = result.details.shape && this.#metadataShape(ref, result.details.shape);
-      return { title, ...(shape ? { shape } : {}) };
+      return { kind: 'found' as const, title, ...(shape ? { shape } : {}) };
     })();
     this.#metadataFlights.set(flightKey, flight);
     void flight.finally(() => {
