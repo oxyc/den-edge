@@ -58,6 +58,7 @@ it('opens the library through its DedicatedWorker', async () => {
       type: 'ready',
       protocol: LIBRARY_SERVICE_PROTOCOL,
       requestId: request.requestId,
+      relayMembership: null,
       version,
     },
   ]);
@@ -115,6 +116,7 @@ it('bounds a silent startup and Retry replaces the expired Worker', async () => 
       type: 'ready',
       protocol: LIBRARY_SERVICE_PROTOCOL,
       requestId: request.requestId,
+      relayMembership: null,
       version: { ...version, instance: 'worker-2' },
     },
   ]);

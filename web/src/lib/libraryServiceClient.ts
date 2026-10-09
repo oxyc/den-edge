@@ -58,12 +58,16 @@ export class LibraryServiceClient {
   #nextRequest = 0;
   #nextSubscription = 0;
   #instance?: string;
+  #stopRelayMembership?: () => void;
   #closed = false;
 
   constructor(
     private readonly transport: LibraryServiceTransport,
     private readonly clientId: string = crypto.randomUUID(),
     private readonly startupTimeoutMs = 10_000,
+    private readonly installRelayMembership?: (
+      membership: { libraryId: string; memberToken: string } | null,
+    ) => (() => void) | void,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
@@ -81,6 +85,8 @@ export class LibraryServiceClient {
       this.startupTimeoutMs,
     );
     if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
+    this.#stopRelayMembership?.();
+    this.#stopRelayMembership = this.installRelayMembership?.(reply.relayMembership) ?? undefined;
     this.#instance = reply.version.instance;
     return reply.version;
   }
@@ -188,6 +194,8 @@ export class LibraryServiceClient {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#stopRelayMembership?.();
+    this.#stopRelayMembership = undefined;
     this.#stopListening();
     this.transport.close();
     const error = new LibraryServiceError({
@@ -267,6 +275,10 @@ export class LibraryServiceClient {
       return;
     }
     if (message.type === 'status') {
+      if (message.status.kind === 'moved') {
+        this.#stopRelayMembership?.();
+        this.#stopRelayMembership = undefined;
+      }
       for (const listener of this.#statusListeners)
         try {
           listener(message.status);

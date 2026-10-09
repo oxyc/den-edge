@@ -18,7 +18,6 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import type { LibrarySelectionSnapshot } from './libraryServiceSupervisor';
-import { hasLibraryCredential } from './relayFetch';
 
 type Subscription = {
   selection: LibrarySelection;
@@ -48,7 +47,6 @@ class FakeService {
   readonly close = vi.fn();
   readonly retry = vi.fn(async () => version(9));
   openFailure?: LibraryServiceFailure;
-  relayFailure = false;
   subscriptionsSeenAtOpen: LibrarySelection[] = [];
 
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
@@ -83,16 +81,6 @@ class FakeService {
     query: LibraryQuery,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     this.queries.push(query);
-    if (query.kind === 'relay.membership') {
-      if (this.relayFailure) throw new Error('relay membership unavailable');
-      return {
-        result: {
-          kind: 'relay.membership',
-          capability: { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) },
-        },
-        version: version(6),
-      };
-    }
     if (query.kind === 'parental-pin.verify')
       return {
         result: { kind: 'parental-pin.verify', matches: query.pin === '1234' },
@@ -286,8 +274,6 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     { kind: 'runtime' },
   ]);
   await expect(model.ready).resolves.toEqual(version(4));
-  expect(service.queries[0]).toEqual({ kind: 'relay.membership' });
-  await vi.waitFor(() => expect(hasLibraryCredential()).toBe(true));
 
   expect(model.connection).toBe('ready');
   expect(model.status).toEqual({ kind: 'ready', version: version(4) });
@@ -346,7 +332,6 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   service.publish({ kind: 'continue' }, continueValue(), 5);
   expect(model.continueWatching).not.toBe(before);
   model.close();
-  expect(hasLibraryCredential()).toBe(false);
 });
 
 it('exposes named discovery and retained-Home operations without a generic cache surface', async () => {
@@ -629,16 +614,4 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   expect(model.overview.connection).toBe('closed');
   expect(lease.snapshot.connection).toBe('closed');
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
-});
-
-it('keeps an opened model ready when relay membership is temporarily unavailable', async () => {
-  const service = new FakeService();
-  service.relayFailure = true;
-  const model = new LibraryModel(service, options);
-
-  await expect(model.ready).resolves.toEqual(version(4));
-  await vi.waitFor(() => expect(service.queries).toContainEqual({ kind: 'relay.membership' }));
-  expect(model.connection).toBe('ready');
-  expect(hasLibraryCredential()).toBe(false);
-  model.close();
 });

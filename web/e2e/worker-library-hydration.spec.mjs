@@ -34,6 +34,8 @@ async function routeLibrary(page, metadata) {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname.endsWith('/grants')) {
+      metadata.grantMembers ??= new Set();
+      metadata.grantMembers.add(request.headers()['x-den-library-member']);
       return route.fulfill({
         headers,
         json:
@@ -94,9 +96,15 @@ async function routes(page, metadata) {
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'worker-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));
-  await page.route('**/scout/fixture-install/manifest.json', (route) =>
-    route.fulfill({ json: { id: 'com.den.scout' } }),
-  );
+  await page.route('**/scout/fixture-install/manifest.json', (route) => {
+    const headers = route.request().headers();
+    metadata.providerRequests ??= [];
+    metadata.providerRequests.push({
+      member: headers['x-den-library-member'],
+      realm: headers['x-den-test-fetch-realm'],
+    });
+    return route.fulfill({ json: { id: 'com.den.scout' } });
+  });
   await page.route('**/scout/fixture-install/stream/movie/tt1200.json', (route) =>
     route.fulfill({
       json: {
@@ -202,6 +210,8 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
       'movie:1010',
     ]),
     holdId: 1227,
+    grantMembers: new Set(),
+    providerRequests: [],
   };
 
   // Mark only window.fetch. A request without this marker was made in the DedicatedWorker's separate realm.
@@ -258,13 +268,39 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   expect(counts.get('movie:1002')).toBe(2);
   expect([...counts].every(([ref, count]) => count === (ref === 'movie:1002' ? 2 : 1))).toBe(true);
 
-  // A second cold Worker opens under the already-mounted Settings screen. Its lazy Connections replacement is what
-  // lets Sharing list the already-invited guest.
+  // A direct Settings document, its hard refresh, and Home's client-side transition must all observe the same
+  // bootstrapped membership. The host grants call and page-owned provider discovery are never sent as a visitor.
+  metadata.grantMembers.clear();
+  metadata.providerRequests.length = 0;
   await page.goto(`${FIXTURE}?view=settings&online`);
-  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
-  const invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
-  await expect(invited).toBeVisible();
-  await expect(invited).toContainText('Not used yet');
+  const openGuests = async () => {
+    await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+    const invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
+    await expect(invited).toBeVisible();
+    await expect(invited).toContainText('Not used yet');
+  };
+  const pageProviderMembers = () =>
+    metadata.providerRequests.filter(({ realm }) => realm === 'page').map(({ member }) => member);
+
+  await openGuests();
+  await expect.poll(() => [...metadata.grantMembers]).toEqual([membership]);
+  await expect.poll(pageProviderMembers).toContain(membership);
+
+  metadata.grantMembers.clear();
+  await page.reload();
+  await openGuests();
+  await expect.poll(() => [...metadata.grantMembers]).toEqual([membership]);
+
+  metadata.grantMembers.clear();
+  metadata.providerRequests.length = 0;
+  await page.goto(`${FIXTURE}?view=home&online`);
+  await expect(page.getByRole('region', { name: 'Continue Watching', exact: true })).toBeVisible();
+  await expect.poll(pageProviderMembers).toContain(membership);
+  const openSettings = page.getByRole('button', { name: 'Open Settings' });
+  await openSettings.focus();
+  await openSettings.press('Enter');
+  await openGuests();
+  await expect.poll(() => [...metadata.grantMembers]).toEqual([membership]);
 });
 
 test('personalized billboard keeps its retained paint until the first transition rebases the fresh ranking', async ({

@@ -41,7 +41,6 @@ import type {
   LibrarySelectionSnapshot,
   LibraryServiceSupervisor,
 } from './libraryServiceSupervisor';
-import { useLibraryRelayMembership } from './relayFetch';
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 
@@ -122,9 +121,6 @@ export class LibraryModel {
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
   #closed = false;
-  #forgetRelayMembership?: () => void;
-  #installingRelayMembership?: Promise<void>;
-  #relayMembershipAllowed = true;
 
   /** Settles only after the service and all four Home-critical root replacements are ready. */
   readonly ready: Promise<LibraryVersion>;
@@ -148,21 +144,15 @@ export class LibraryModel {
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
-    this.ready = service
-      .open(options)
-      .then((version) => {
-        void this.#installRelayMembership();
-        return version;
-      })
-      .catch((error: unknown) => {
-        const failure = failureFrom(error);
-        if (!this.#closed) {
-          this.#openFailure = failure;
-          this.#connection = 'failed';
-          this.#status = Object.freeze({ kind: 'failed', error: failure });
-        }
-        throw error;
-      });
+    this.ready = service.open(options).catch((error: unknown) => {
+      const failure = failureFrom(error);
+      if (!this.#closed) {
+        this.#openFailure = failure;
+        this.#connection = 'failed';
+        this.#status = Object.freeze({ kind: 'failed', error: failure });
+      }
+      throw error;
+    });
   }
 
   get overview(): LibraryModelSnapshot<LibraryOverviewView> {
@@ -285,9 +275,7 @@ export class LibraryModel {
     this.#connection = 'reconnecting';
     this.#status = Object.freeze({ kind: 'reconnecting', version: null });
     try {
-      const version = await this.service.retry();
-      void this.#installRelayMembership();
-      return version;
+      return await this.service.retry();
     } catch (error) {
       const failure = failureFrom(error);
       if (!this.#closed) {
@@ -720,7 +708,6 @@ export class LibraryModel {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#relayMembershipAllowed = false;
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();
@@ -741,8 +728,6 @@ export class LibraryModel {
     this.#recovery = undefined;
     this.#settings = closedSnapshot(this.#settings);
     this.#runtime = closedSnapshot(this.#runtime);
-    this.#forgetRelayMembership?.();
-    this.#forgetRelayMembership = undefined;
     this.#connection = 'closed';
     this.#status = Object.freeze({ kind: 'closed' });
     this.service.close();
@@ -755,40 +740,14 @@ export class LibraryModel {
       : this.service.command(command, operationId);
   }
 
-  #installRelayMembership(): Promise<void> {
-    if (this.#installingRelayMembership) return this.#installingRelayMembership;
-    const installing = (async () => {
-      try {
-        const { result } = await this.service.query({ kind: 'relay.membership' });
-        if (!this.#relayMembershipAllowed || result.kind !== 'relay.membership') return;
-        this.#forgetRelayMembership?.();
-        this.#forgetRelayMembership = result.capability
-          ? useLibraryRelayMembership(result.capability)
-          : undefined;
-      } catch {
-        // Membership only raises same-origin relay allowance. The library and direct providers remain usable as guest.
-      }
-    })();
-    this.#installingRelayMembership = installing;
-    void installing.finally(() => {
-      if (this.#installingRelayMembership === installing)
-        this.#installingRelayMembership = undefined;
-    });
-    return installing;
-  }
-
   #receiveStatus(status: LibrarySessionStatus): void {
     if (this.#closed) return;
     this.#status = Object.freeze(status) as Immutable<LibrarySessionStatus>;
     if (status.kind === 'ready') {
       this.#connection = 'ready';
       this.#openFailure = undefined;
-      void this.#installRelayMembership();
     } else if (status.kind === 'reconnecting') this.#connection = 'reconnecting';
     else if (status.kind === 'moved') {
-      this.#relayMembershipAllowed = false;
-      this.#forgetRelayMembership?.();
-      this.#forgetRelayMembership = undefined;
       this.#connection = 'failed';
     } else if (status.kind === 'failed') this.#connection = 'failed';
   }

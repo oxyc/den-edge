@@ -50,11 +50,35 @@ async function opened() {
     type: 'ready',
     protocol: LIBRARY_SERVICE_PROTOCOL,
     requestId: hello.requestId,
+    relayMembership: null,
     version: version(0),
   });
   await opening;
   return { client, transport };
 }
+
+it('installs the relay membership before open resolves and releases it on close', async () => {
+  const transport = new FakeTransport();
+  const stop = vi.fn();
+  const install = vi.fn(() => stop);
+  const client = new LibraryServiceClient(transport, 'client-1', 10_000, install);
+  const opening = client.open({ libraryKey: 'library-key', mode: 'online' });
+  const hello = transport.sent[0]!;
+  const relayMembership = { libraryId: 'a'.repeat(32), memberToken: 'b'.repeat(64) };
+
+  transport.emit({
+    type: 'ready',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: hello.requestId,
+    relayMembership,
+    version: version(0),
+  });
+
+  await expect(opening).resolves.toEqual(version(0));
+  expect(install).toHaveBeenCalledWith(relayMembership);
+  client.close();
+  expect(stop).toHaveBeenCalledOnce();
+});
 
 it('installs only newer replacements from the opened service instance', async () => {
   const { client, transport } = await opened();
