@@ -128,7 +128,7 @@ export interface ContentCredentialSource {
 /** Mutable only inside the Worker: an anonymous session starts keyless, then a library authority may bind keys. */
 export class WorkerContentCredentials implements ContentCredentialSource {
   #source?: ContentCredentialSource;
-  #atlas: string | null = '/atlas';
+  #atlas: string | null | undefined;
 
   bind(source: ContentCredentialSource): () => void {
     this.#source = source;

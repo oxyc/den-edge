@@ -1,5 +1,9 @@
 import { expect, it, vi } from 'vitest';
-import { createLibraryService, createWorkerServiceSession } from './libraryServiceFactory';
+import {
+  createLibraryService,
+  createWorkerServiceConnection,
+  createWorkerServiceSession,
+} from './libraryServiceFactory';
 import {
   LIBRARY_SERVICE_PROTOCOL,
   type LibraryServiceClientMessage,
@@ -37,6 +41,11 @@ class FakeWorker {
   emit(messages: WorkerServerMessage[]): void {
     for (const listener of this.listeners.get('message') ?? [])
       listener({ data: messages } as MessageEvent<unknown>);
+  }
+
+  fail(message = 'worker failed'): void {
+    for (const listener of this.listeners.get('error') ?? [])
+      listener({ message, preventDefault: () => {} } as unknown as ErrorEvent);
   }
 }
 
@@ -160,6 +169,111 @@ it('starts public ContentService without opening encrypted library state', async
   services.close();
   services.close();
   expect(worker.terminate).toHaveBeenCalledOnce();
+});
+
+it('lets the physical connection exclusively own its shared Worker lifetime', () => {
+  const worker = new FakeWorker();
+  const connection = createWorkerServiceConnection(() => worker as unknown as Worker);
+
+  connection.content.close();
+  connection.library.close();
+  expect(worker.terminate).not.toHaveBeenCalled();
+  connection.close();
+  connection.close();
+  expect(worker.terminate).toHaveBeenCalledOnce();
+});
+
+it('holds paired content traffic behind the library bootstrap barrier', async () => {
+  const worker = new FakeWorker();
+  const services = createWorkerServiceSession({
+    createWorker: () => worker as unknown as Worker,
+    supervisor: { maxAutomaticRestarts: 0 },
+  });
+
+  const opening = services.library.open(openOptions);
+  const loading = services.content.query({ kind: 'service.regions' });
+  expect(worker.posted).toHaveLength(1);
+  const hello = worker.posted[0];
+  if (hello?.type !== 'hello') throw new Error('library hello was not sent first');
+  worker.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: hello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+  await expect.poll(() => worker.posted.length).toBe(2);
+  const query = worker.posted[1];
+  if (query?.type !== 'content-query') throw new Error('content query did not follow bootstrap');
+  worker.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: query.requestId,
+      result: { kind: 'service.regions', regions: [] },
+    },
+  ]);
+  await expect(loading).resolves.toMatchObject({ kind: 'service.regions' });
+  services.close();
+});
+
+it('replays authoritative source configuration before retrying on a replacement Worker', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const configuring = services.content.query({ kind: 'sources.configure', atlas: '/atlas/custom' });
+  const configure = first.posted[0];
+  if (configure?.type !== 'content-query') throw new Error('source configuration was not sent');
+  first.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: configure.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+  await configuring;
+  first.fail();
+
+  const loading = services.content.query({
+    kind: 'atlas.service.catalogs',
+  });
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replay = replacement.posted[0];
+  expect(replay).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'sources.configure', atlas: '/atlas/custom' },
+  });
+  if (replay?.type !== 'content-query') throw new Error('source configuration was not replayed');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: replay.requestId,
+      result: { kind: 'sources.configure' },
+    },
+  ]);
+  await expect.poll(() => replacement.posted.length).toBe(2);
+  const query = replacement.posted[1];
+  if (query?.type !== 'content-query') throw new Error('Atlas query was not retried');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: query.requestId,
+      result: { kind: 'atlas.service.catalogs', catalogs: { state: 'ready', value: [] } },
+    },
+  ]);
+  await expect(loading).resolves.toMatchObject({ kind: 'atlas.service.catalogs' });
+  services.close();
 });
 
 it('opens a paired library on the public content Worker instead of creating a second one', async () => {

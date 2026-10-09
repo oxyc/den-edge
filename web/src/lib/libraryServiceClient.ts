@@ -69,6 +69,7 @@ export class LibraryServiceClient {
     private readonly installRelayMembership?: (
       membership: { libraryId: string; memberToken: string } | null,
     ) => (() => void) | void,
+    private readonly ownsTransport = true,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
@@ -198,7 +199,7 @@ export class LibraryServiceClient {
     this.#stopRelayMembership?.();
     this.#stopRelayMembership = undefined;
     this.#stopListening();
-    this.transport.close();
+    if (this.ownsTransport) this.transport.close();
     const error = new LibraryServiceError({
       code: 'cancelled',
       message: 'library service client is closed',

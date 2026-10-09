@@ -159,7 +159,15 @@ describe('ContentAuthority', () => {
     const request = authority.query(
       {
         kind: 'atlas.recommend.personal',
-        body: { history: [], candidates: [], owned: [] },
+        body: {
+          version: 1,
+          surface: 'home',
+          now: '2026-10-09T00:00:00.000Z',
+          services: [],
+          library: [],
+          owned: [],
+          hide: { minYear: 1900, genres: [], languages: [], anime: false },
+        },
       },
       controller.signal,
     );

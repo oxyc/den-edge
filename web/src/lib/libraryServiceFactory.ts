@@ -7,6 +7,7 @@ import type {
 } from './contentServiceProtocol';
 import {
   LibraryServiceSupervisor,
+  type LibraryServiceClientFactory,
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
@@ -57,9 +58,13 @@ export function createWorkerServiceConnection(
   startupTimeoutMs?: number,
 ): WorkerServiceConnection {
   const transport = new WorkerLibraryServiceTransport(createWorker());
-  const content = new ContentServiceClient(transport.contentTransport());
-  const library = new LibraryServiceClient(transport, undefined, startupTimeoutMs, (membership) =>
-    membership ? useLibraryRelayMembership(membership) : undefined,
+  const content = new ContentServiceClient(transport.contentTransport(), undefined, false);
+  const library = new LibraryServiceClient(
+    transport,
+    undefined,
+    startupTimeoutMs,
+    (membership) => (membership ? useLibraryRelayMembership(membership) : undefined),
+    false,
   );
   let closed = false;
   return {
@@ -68,9 +73,10 @@ export function createWorkerServiceConnection(
     close() {
       if (closed) return;
       closed = true;
-      // Both clients share the idempotent transport close. Reject each client's own pending requests.
+      // The connection owns the physical Worker. Closing either logical channel must not tear down its sibling.
       content.close();
       library.close();
+      transport.close();
     },
   };
 }
@@ -79,6 +85,10 @@ export function createWorkerServiceConnection(
 class SessionContentService implements ContentServiceClientPort {
   readonly #listeners = new Set<(status: ContentServiceStatusValue) => void>();
   #stopStatus: () => void = () => {};
+  #atlas: string | null | undefined;
+  #configuredClient?: ContentServiceClient;
+  #configuring?: Promise<void>;
+  #bootstrap?: Promise<void>;
   #closed = false;
 
   constructor(
@@ -98,8 +108,19 @@ class SessionContentService implements ContentServiceClientPort {
         message: 'Worker service session is closed',
         retryable: false,
       });
+    if (this.#bootstrap) await this.#waitForBootstrap(signal);
+    if (request.kind === 'sources.configure') {
+      this.#atlas = request.atlas;
+      this.#configuredClient = undefined;
+      this.#configuring = undefined;
+    }
     const client = this.current();
+    const requiresAtlas = request.kind.startsWith('atlas.');
     try {
+      if (this.#atlas !== undefined || requiresAtlas)
+        await this.#ensureConfiguration(client, requiresAtlas);
+      if (request.kind === 'sources.configure')
+        return { kind: 'sources.configure' } as ContentResultFor<Request>;
       return await client.query(request, signal);
     } catch (error) {
       if (
@@ -113,6 +134,10 @@ class SessionContentService implements ContentServiceClientPort {
         throw error;
       const replacement = this.replace(client);
       this.#bind(replacement);
+      if (this.#atlas !== undefined || requiresAtlas)
+        await this.#ensureConfiguration(replacement, requiresAtlas);
+      if (request.kind === 'sources.configure')
+        return { kind: 'sources.configure' } as ContentResultFor<Request>;
       return replacement.query(request, signal);
     }
   }
@@ -124,7 +149,26 @@ class SessionContentService implements ContentServiceClientPort {
   }
 
   replaced(client: ContentServiceClient): void {
-    if (!this.#closed) this.#bind(client);
+    if (!this.#closed) {
+      this.#configuredClient = undefined;
+      this.#configuring = undefined;
+      this.#bind(client);
+    }
+  }
+
+  bootstrap(opening: Promise<unknown>): void {
+    const barrier = opening.then(
+      () => undefined,
+      (error: unknown) => {
+        throw new ContentServiceError({
+          code: 'unavailable',
+          message: error instanceof Error ? error.message : 'library bootstrap failed',
+          retryable: true,
+        });
+      },
+    );
+    this.#bootstrap = barrier;
+    void barrier.catch(() => undefined);
   }
 
   close(): void {
@@ -144,6 +188,59 @@ class SessionContentService implements ContentServiceClientPort {
           console.error('den: a session content status listener failed', error);
         }
     });
+  }
+
+  async #ensureConfiguration(client: ContentServiceClient, required: boolean): Promise<void> {
+    if (this.#atlas === undefined) {
+      if (required)
+        throw new ContentServiceError({
+          code: 'not-ready',
+          message: 'content sources have not been resolved',
+          retryable: true,
+          provider: 'atlas',
+        });
+      return;
+    }
+    if (this.#configuredClient === client) return;
+    if (!this.#configuring) {
+      const work = client.query({ kind: 'sources.configure', atlas: this.#atlas }).then(() => {
+        if (this.current() === client) this.#configuredClient = client;
+      });
+      const settled = work.finally(() => {
+        if (this.#configuring === settled) this.#configuring = undefined;
+      });
+      this.#configuring = settled;
+    }
+    await this.#configuring;
+  }
+
+  async #waitForBootstrap(signal?: AbortSignal): Promise<void> {
+    if (!this.#bootstrap) return;
+    if (signal?.aborted)
+      throw new ContentServiceError({
+        code: 'cancelled',
+        message: 'content request was cancelled',
+        retryable: false,
+      });
+    await this.#bootstrap;
+  }
+}
+
+class SessionLibraryService extends LibraryServiceSupervisor {
+  constructor(
+    createClient: LibraryServiceClientFactory,
+    options: LibraryServiceSupervisorOptions,
+    private readonly onOpen: (opening: Promise<unknown>) => void,
+  ) {
+    super(createClient, options);
+  }
+
+  override open(
+    options: Parameters<LibraryServiceSupervisor['open']>[0],
+  ): ReturnType<LibraryServiceSupervisor['open']> {
+    const opening = super.open(options);
+    this.onOpen(opening);
+    return opening;
   }
 }
 
@@ -178,13 +275,17 @@ export function createWorkerServiceSession(
       active.connection.content === expected ? activate(false).content : active.connection.content,
   );
 
-  const library = new LibraryServiceSupervisor(() => {
-    if (closed) throw new Error('Worker service session is closed');
-    if (active.libraryClaimed) return activate(true).library;
-    active.libraryClaimed = true;
-    content.replaced(active.connection.content);
-    return active.connection.library;
-  }, options.supervisor);
+  const library = new SessionLibraryService(
+    () => {
+      if (closed) throw new Error('Worker service session is closed');
+      if (active.libraryClaimed) return activate(true).library;
+      active.libraryClaimed = true;
+      content.replaced(active.connection.content);
+      return active.connection.library;
+    },
+    options.supervisor ?? {},
+    (opening) => content.bootstrap(opening),
+  );
 
   return {
     content,

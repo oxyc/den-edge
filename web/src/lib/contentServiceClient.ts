@@ -49,6 +49,7 @@ export class ContentServiceClient {
   constructor(
     private readonly transport: ContentServiceTransport,
     private readonly clientId: string = crypto.randomUUID(),
+    private readonly ownsTransport = true,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
@@ -120,7 +121,7 @@ export class ContentServiceClient {
     if (this.#closed) return;
     this.#closed = true;
     this.#stopListening();
-    this.transport.close();
+    if (this.ownsTransport) this.transport.close();
     const error = cancelled();
     for (const pending of this.#pending.values()) {
       pending.stopAbort?.();
