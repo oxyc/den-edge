@@ -189,6 +189,66 @@
     cursor: progress;
   }
 
+  /* Alternative B lives behind the demo's material switch. Blur is bounded to actual control surfaces; menu rows
+     and quiet utilities remain flat so a list never creates a stack of compositor-backed panes. */
+  :global(.material-glass) .den-button:not(.tertiary, .menu) {
+    --button-bg: rgb(48 51 63 / 0.55);
+    --button-border: rgb(255 255 255 / 0.22);
+    --button-fg: #f7f7fb;
+
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.16),
+      inset 0 -1px 0 rgb(0 0 0 / 0.12),
+      0 10px 26px rgb(0 0 0 / 0.25);
+    -webkit-backdrop-filter: blur(18px) saturate(155%);
+    backdrop-filter: blur(18px) saturate(155%);
+  }
+
+  :global(.material-glass) .den-button.primary {
+    --button-bg: rgb(248 248 252 / 0.9);
+    --button-border: rgb(255 255 255 / 0.84);
+    --button-fg: #111217;
+  }
+
+  :global(.material-glass) .den-button.device {
+    --button-bg: rgb(47 104 255 / 0.62);
+    --button-border: rgb(141 177 255 / 0.76);
+    --button-fg: #fff;
+
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.24),
+      inset 0 -1px 0 rgb(0 25 88 / 0.25),
+      0 10px 28px rgb(30 75 190 / 0.3);
+  }
+
+  :global(.material-glass) .den-button.destructive {
+    --button-bg: rgb(120 32 42 / 0.46);
+    --button-border: rgb(255 125 136 / 0.54);
+    --button-fg: #ffd8dc;
+  }
+
+  :global(.material-glass) .pressed:not(.tertiary, .menu) {
+    --button-bg: rgb(248 248 252 / 0.94);
+    --button-border: #fff;
+    --button-fg: #101116;
+
+    box-shadow:
+      inset 0 1px 0 #fff,
+      inset 0 -1px 0 rgb(0 0 0 / 0.16),
+      0 8px 22px rgb(0 0 0 / 0.24);
+  }
+
+  :global(.material-glass) .tertiary,
+  :global(.material-glass) .menu {
+    --button-border: transparent;
+    --button-fg: #e8e8ee;
+  }
+
+  :global(.material-glass) .menu.pressed,
+  :global(.material-glass) .tertiary.pressed {
+    --button-bg: rgb(255 255 255 / 0.13);
+  }
+
   .den-button:hover:not(:disabled, [aria-disabled='true']) {
     border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
     background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
@@ -238,6 +298,40 @@
       background: rgb(28 28 34);
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
+    }
+
+    :global(.material-glass) .den-button:not(.tertiary, .menu) {
+      --button-bg: #30333f;
+
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
+    :global(.material-glass) .den-button.primary,
+    :global(.material-glass) .pressed:not(.tertiary, .menu) {
+      --button-bg: #f2f2f6;
+    }
+
+    :global(.material-glass) .den-button.device {
+      --button-bg: #376fe1;
+    }
+  }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    :global(.material-glass) .den-button:not(.tertiary, .menu) {
+      --button-bg: #30333f;
+
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
+    :global(.material-glass) .den-button.primary,
+    :global(.material-glass) .pressed:not(.tertiary, .menu) {
+      --button-bg: #f2f2f6;
+    }
+
+    :global(.material-glass) .den-button.device {
+      --button-bg: #376fe1;
     }
   }
 </style>

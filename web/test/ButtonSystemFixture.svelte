@@ -1,6 +1,10 @@
 <script lang="ts">
   import DenButton from './button-system/DenButton.svelte';
 
+  type Material = 'solid' | 'glass';
+  let material = $state<Material>(
+    new URLSearchParams(location.search).get('material') === 'glass' ? 'glass' : 'solid',
+  );
   let watchlisted = $state(false);
   let seen = $state(true);
   let busy = $state(false);
@@ -18,13 +22,37 @@
       notice = 'Saved';
     }, 900);
   }
+
+  function chooseMaterial(next: Material) {
+    material = next;
+    const url = new URL(location.href);
+    if (next === 'glass') url.searchParams.set('material', 'glass');
+    else url.searchParams.delete('material');
+    history.replaceState(null, '', url);
+  }
 </script>
 
 <svelte:head><title>Den button system demo</title></svelte:head>
 
-<main>
+<main class:material-glass={material === 'glass'}>
   <header class="intro">
-    <p class="eyebrow">Design demo · no production integration</p>
+    <div class="demo-toolbar">
+      <p class="eyebrow">Design demo · no production integration</p>
+      <div class="material-picker" role="group" aria-label="Button material alternative">
+        <DenButton
+          size="compact"
+          label="A · Solid"
+          pressed={material === 'solid'}
+          onclick={() => chooseMaterial('solid')}
+        />
+        <DenButton
+          size="compact"
+          label="B · Glass"
+          pressed={material === 'glass'}
+          onclick={() => chooseMaterial('glass')}
+        />
+      </div>
+    </div>
     <h1>One button language for Den</h1>
     <p class="lede">
       A small hierarchy for every action surface: detail pages, settings, menus, failures, and the
@@ -245,6 +273,24 @@
     font-size: 18px;
   }
 
+  .demo-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .material-picker {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: rgb(255 255 255 / 0.025);
+  }
+
   .eyebrow {
     margin-bottom: 8px;
     color: #aac2ff;
@@ -252,6 +298,10 @@
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  .demo-toolbar .eyebrow {
+    margin-bottom: 0;
   }
 
   .detail-stage {
@@ -384,6 +434,61 @@
     color: rgb(255 255 255 / 0.72);
     font-size: 13px;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Alternative B: material belongs to bounded surfaces and controls, never the page or scrolling content.
+     These panels provide depth around every family in the system; DenButton owns each control's material. */
+  .material-glass {
+    --material-edge: rgb(255 255 255 / 0.2);
+    --material-fill: rgb(36 38 48 / 0.54);
+    --material-shadow: 0 18px 55px rgb(0 0 0 / 0.32);
+  }
+
+  .material-glass .material-picker,
+  .material-glass .spec-grid article,
+  .material-glass .menu-card,
+  .material-glass .menu {
+    border-color: var(--material-edge);
+    background: var(--material-fill);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.11),
+      var(--material-shadow);
+    -webkit-backdrop-filter: blur(20px) saturate(145%);
+    backdrop-filter: blur(20px) saturate(145%);
+  }
+
+  .material-glass .detail-stage {
+    border-color: var(--material-edge);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.1),
+      0 28px 80px rgb(0 0 0 / 0.36);
+  }
+
+  .material-glass .player-card {
+    border-color: rgb(255 255 255 / 0.24);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.14),
+      0 24px 60px rgb(0 0 0 / 0.38);
+  }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .material-glass .material-picker,
+    .material-glass .spec-grid article,
+    .material-glass .menu-card,
+    .material-glass .menu {
+      background: #242630;
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .material-glass .material-picker,
+    .material-glass .spec-grid article,
+    .material-glass .menu-card,
+    .material-glass .menu {
+      background: #242630;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
   }
 
   @media (width <= 720px) {

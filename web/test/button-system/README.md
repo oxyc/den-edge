@@ -3,9 +3,14 @@
 This is an isolated design fixture, not a production migration. Open
 `/test/button-system.html` in the Vite dev server.
 
-| Desktop | Mobile |
-| --- | --- |
-| [Full desktop capture](screenshots/desktop.png) | [Full mobile capture](screenshots/mobile.png) |
+The in-page switch preserves **Alternative A** (solid, restrained surfaces) and adds **Alternative B**
+(Apple-like translucent material). The glass alternative is also directly addressable as
+`/test/button-system.html?material=glass`.
+
+| Alternative | Desktop                                               | Mobile                                              |
+| ----------- | ----------------------------------------------------- | --------------------------------------------------- |
+| A · Solid   | [Full desktop capture](screenshots/desktop.png)       | [Full mobile capture](screenshots/mobile.png)       |
+| B · Glass   | [Full desktop capture](screenshots/glass-desktop.png) | [Full mobile capture](screenshots/glass-mobile.png) |
 
 ## Inventory
 
