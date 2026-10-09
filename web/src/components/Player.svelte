@@ -117,6 +117,7 @@
     type CastStage,
     type SwitchReason,
   } from '../lib/diagnosticsReport';
+  import Button from './Button.svelte';
 
   let {
     title,
@@ -2252,26 +2253,25 @@
   <header>
     <b>{heading}</b>
     {#if castable && session && !session.castOrigin && route !== RELAY}
-      <button
-        class="close cast"
-        aria-label="Cast to a TV"
+      <Button
+        variant="player"
+        size="icon"
+        class="player-header-action cast"
+        icon="cast"
+        ariaLabel="Cast to a TV"
         title="Cast to a TV"
         disabled={castOffer === 'looking'}
         onclick={offerCast}
-      >
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
-          <path d="M2 12a9 9 0 0 1 8 8" />
-          <path d="M2 16a5 5 0 0 1 4 4" />
-          <path d="M2 20h.01" />
-        </svg>
-      </button>
+      />
     {/if}
-    <button class="close" aria-label="Close" onclick={close}>
-      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="m6 6 12 12M18 6 6 18" />
-      </svg>
-    </button>
+    <Button
+      variant="player"
+      size="icon"
+      class="player-header-action"
+      icon="close"
+      ariaLabel="Close"
+      onclick={close}
+    />
   </header>
   <!-- What playback says as it goes, above the video and apart from what is playing below it: banners that fade
        on their own (`fades`) unless they offer something to do, and the buffering line, which clears itself the
@@ -2326,7 +2326,12 @@
           autocomplete="current-password"
           aria-label="Browser key"
         />
-        <button class="primary" disabled={!key.trim()}>Let this browser in</button>
+        <Button
+          type="submit"
+          variant="primary"
+          label="Let this browser in"
+          disabled={!key.trim()}
+        />
         {#if badKey}<p class="error" role="alert">
             That isn’t one of the homelab’s browser keys.
           </p>{/if}
@@ -2336,7 +2341,7 @@
     {:else if failure === 'lost'}
       <div class="lost" role="alert">
         <p>The connection was gone too long for this to carry on.</p>
-        <button class="primary" onclick={resumeLost}>Resume from {clockTime(lostAt)}</button>
+        <Button variant="primary" label={`Resume from ${clockTime(lostAt)}`} onclick={resumeLost} />
       </div>
     {:else if failure === 'ended'}
       <p class="error" role="alert">
@@ -2345,14 +2350,17 @@
     {:else if failure}
       <p class="error" role="alert">{messages[failure]}</p>
       {#if failure === 'playback' && session}
-        <button class="primary" disabled={switching} onclick={tryAfterRefusal}
-          >Try another release</button
-        >
+        <Button
+          variant="primary"
+          label="Try another release"
+          disabled={switching}
+          onclick={tryAfterRefusal}
+        />
       {/if}
       {#if failure === 'engine'}
         <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
              with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
-        <button class="primary" onclick={() => location.reload()}>Reload</button>
+        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
       {/if}
     {:else if !session}
       {#if notice}
@@ -2526,22 +2534,22 @@
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
         {#if active}
-          <button class="primary" onclick={skipActive}>{SKIP_LABEL[active.kind]}</button>
+          <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
         {#if onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
-            <button
-              class="primary"
+            <Button
+              variant="primary"
               aria-label="Next: {next}"
               onclick={() => {
                 stay();
                 onnext();
-              }}>Next: {next} <span aria-hidden="true">({upNext})</span></button
+              }}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
             >
-            <button onclick={stay}>Stay</button>
+            <Button label="Stay" onclick={stay} />
           {:else}
-            <button onclick={onnext}>Next: {next}</button>
+            <Button label={`Next: ${next}`} onclick={onnext} />
           {/if}
         {/if}
       </div>
@@ -2571,13 +2579,22 @@
 {#snippet banner(text: string, dismiss?: () => void, action?: { label: string; run: () => void })}
   <p class="notice" role="status">
     <span>{text}</span>
-    {#if action}<button class="act" onclick={action.run}>{action.label}</button>{/if}
+    {#if action}<Button
+        variant="tertiary"
+        size="compact"
+        class="notice-action"
+        label={action.label}
+        onclick={action.run}
+      />{/if}
     {#if dismiss}
-      <button class="dismiss" aria-label="Dismiss" onclick={dismiss}>
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="m6 6 12 12M18 6 6 18" />
-        </svg>
-      </button>
+      <Button
+        variant="tertiary"
+        size="icon"
+        class="notice-dismiss"
+        icon="close"
+        ariaLabel="Dismiss"
+        onclick={dismiss}
+      />
     {/if}
   </p>
 {/snippet}
@@ -2627,52 +2644,23 @@
     white-space: nowrap;
   }
 
-  button,
-  .pick {
-    flex: 0 0 auto;
-    border: 1px solid rgb(255 255 255 / 0.4);
-    border-radius: 999px;
-    background: none;
-    color: #fff;
-    font: inherit;
-  }
-
-  /* A finger's worth, as every control here is. */
-  button {
-    min-height: 44px;
-    padding: 8px 18px;
-    cursor: pointer;
-  }
-
   /* The title takes the width; closing is one glyph, as it is on the pickers. No ring around it: it sits beside
      the title rather than among the controls, and a bordered circle reads heavier than what it does. */
-  .close {
-    display: grid;
-    place-items: center;
-    width: 44px;
-    padding: 0;
+  :global(.player-header-action) {
+    --button-icon-size: 22px;
+
     border-color: transparent;
+    box-shadow: none;
   }
 
   /* Beside Close, at the right: the two are one group, so the title keeps the width. */
-  .cast {
+  :global(.player-header-action.cast) {
     margin-left: auto;
   }
 
   /* Where the browser draws the open menu itself, on its own ground. */
   select option {
     color: initial;
-  }
-
-  .primary {
-    border-color: var(--accent);
-    background: var(--accent);
-    font-weight: 600;
-  }
-
-  .primary:disabled {
-    opacity: 0.4;
-    cursor: default;
   }
 
   .stage {
@@ -2816,21 +2804,18 @@
   }
 
   /* The offer a notice makes: the accent's text, as LibraryStatus's Undo. */
-  .act {
+  :global(.notice-action) {
     min-height: 36px;
     padding: 4px 8px;
-    border: 0;
     color: var(--accent);
-    font-weight: 600;
   }
 
   /* A glyph, not a pill: closing a note is the least it asks. */
-  .dismiss {
-    display: grid;
-    place-items: center;
+  :global(.notice-dismiss) {
+    --button-icon-size: 18px;
+
     width: 36px;
     min-height: 36px;
-    padding: 0;
     border-color: transparent;
   }
 
@@ -2856,6 +2841,11 @@
     max-width: 18rem;
     min-height: 44px;
     padding: 0 14px;
+    border: 1px solid rgb(255 255 255 / 0.4);
+    border-radius: 999px;
+    background: none;
+    color: #fff;
+    font: inherit;
   }
 
   /* One picker on a phone gets the row to itself, filling it: at 18rem it sat just short of the width, pushed
@@ -2904,17 +2894,6 @@
     stroke-linejoin: round;
   }
 
-  .close .icon {
-    width: 22px;
-    height: 22px;
-    opacity: 0.85;
-  }
-
-  .dismiss .icon {
-    width: 18px;
-    height: 18px;
-  }
-
   /* The control itself fills the pill — never hidden, which would stop a phone opening it. */
   .pick select {
     position: absolute;
@@ -2928,8 +2907,7 @@
   }
 
   /* The focused element is the select inside, so the pill lights up with it. */
-  .pick:focus-within,
-  button:focus-visible {
+  .pick:focus-within {
     border-color: var(--accent);
     outline: 2px solid var(--accent);
     outline-offset: 2px;

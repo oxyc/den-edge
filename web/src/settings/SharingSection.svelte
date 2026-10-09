@@ -4,6 +4,7 @@
      holds lives in this browser (`grants.svelte.ts`), never in the library. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import Button from '../components/Button.svelte';
   import CheckGrid from './CheckGrid.svelte';
   import Confirm from './Confirm.svelte';
   import Select from './Select.svelte';
@@ -313,9 +314,11 @@
               value={address}
               bind:this={linkField}
             />
-            <button type="button" class="quiet" onclick={() => void copyLink(address)}
-              >{copied === address ? 'Copied' : 'Copy link'}</button
-            >
+            <Button
+              variant="secondary"
+              label={copied === address ? 'Copied' : 'Copy link'}
+              onclick={() => void copyLink(address)}
+            />
           </span>
           {#if manualLink}<p class="status" role="status">Select and copy the link.</p>{/if}
           <span class="copy">
@@ -326,12 +329,14 @@
               value={code}
               bind:this={codeField}
             />
-            <button type="button" class="quiet" onclick={() => void copyCode(code)}
-              >{copied === code ? 'Copied' : 'Copy code'}</button
-            >
+            <Button
+              variant="secondary"
+              label={copied === code ? 'Copied' : 'Copy code'}
+              onclick={() => void copyCode(code)}
+            />
           </span>
           {#if manualCode}<p class="status" role="status">Select and copy the code.</p>{/if}
-          <button type="button" class="quiet" onclick={() => (created = null)}>Done</button>
+          <Button variant="secondary" label="Done" onclick={() => (created = null)} />
         </div>
       {/if}
 
@@ -400,9 +405,12 @@
           >Devices
           <input class="field" type="number" min="1" max="5" bind:value={devices} />
         </label>
-        <button class="primary" disabled={!ready || working || !name.trim() || !chosen.length}
-          >Create invite</button
-        >
+        <Button
+          type="submit"
+          variant="primary"
+          label="Create invite"
+          disabled={!ready || working || !name.trim() || !chosen.length}
+        />
       </form>
       {#if !offered.length}
         <p class="status">
@@ -435,13 +443,12 @@
                 <span class="actions guest">
                   {#if code}
                     {@const address = inviteLink(location.origin, code)}
-                    <button
-                      type="button"
-                      class="quiet"
-                      aria-label="Copy {grant.name}’s invite link"
+                    <Button
+                      variant="secondary"
+                      label={copied === address ? 'Copied' : 'Copy link'}
+                      ariaLabel="Copy {grant.name}’s invite link"
                       onclick={() => void copy(address)}
-                      >{copied === address ? 'Copied' : 'Copy link'}</button
-                    >
+                    />
                   {/if}
                   {#if !(grant.status === 'active' && grant.expiresAt === null)}
                     <!-- Re-keyed on every change, so the picker returns to its prompt once the extension lands. -->
@@ -474,12 +481,12 @@
                       }}
                     />
                   </span>
-                  <button
-                    type="button"
-                    class="quiet"
-                    aria-label="Rename {grant.name}"
-                    onclick={() => (renaming = { gid: grant.gid, name: grant.name })}>Rename</button
-                  >
+                  <Button
+                    variant="secondary"
+                    label="Rename"
+                    ariaLabel="Rename {grant.name}"
+                    onclick={() => (renaming = { gid: grant.gid, name: grant.name })}
+                  />
                   <Confirm
                     label="Revoke"
                     ariaLabel="Revoke {grant.name}"
@@ -504,10 +511,13 @@
                     aria-label="New name for {grant.name}"
                     bind:value={edit.name}
                   />
-                  <button class="primary" disabled={working || !edit.name.trim()}>Save</button>
-                  <button type="button" class="quiet" onclick={() => (renaming = null)}
-                    >Cancel</button
-                  >
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    label="Save"
+                    disabled={working || !edit.name.trim()}
+                  />
+                  <Button variant="secondary" label="Cancel" onclick={() => (renaming = null)} />
                 </form>
               {/if}
             </li>
@@ -541,9 +551,12 @@
         aria-label="Invite code or link"
         bind:value={pasted}
       />
-      <button class="primary" disabled={redeeming || !pasted.trim()}
-        >{redeeming ? 'Checking…' : 'Use invite'}</button
-      >
+      <Button
+        type="submit"
+        variant="primary"
+        label={redeeming ? 'Checking…' : 'Use invite'}
+        disabled={redeeming || !pasted.trim()}
+      />
     </form>
     {#if redeemNote}<p class="status" class:bad={redeemNote.bad} role="status">
         {redeemNote.text}
@@ -600,7 +613,7 @@
     color: var(--fg);
   }
 
-  .made > button {
+  .made > :global(.den-button) {
     align-self: flex-start;
   }
 
@@ -629,9 +642,8 @@
     gap: 6px;
   }
 
-  .guest > button,
   .guest :global(select),
-  .guest :global(button) {
+  .guest > :global(.den-button) {
     min-height: 34px;
     padding-inline: 12px;
     font-size: 14px;

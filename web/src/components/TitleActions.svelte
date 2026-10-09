@@ -5,6 +5,9 @@
      are read out rather than drawn until there is room for them. The opinion is one picker, as the player's are:
      the browser opens its own menu, and "No rating" clears it — which pressing the active button twice never said. -->
 <script lang="ts">
+  import Button from './Button.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
+  import SplitButton from './SplitButton.svelte';
   import type { TitleRow } from '../lib/wire';
   import { shareOrCopy } from '../lib/share';
   import { titleState, type Reaction } from '../lib/titleState';
@@ -124,86 +127,128 @@
       {@render lock()}<span>Blocked by parental controls</span>
     </p>
   {:else if onplayhere}
-    <button class="primary" aria-disabled={busy} onclick={() => !busy && onplayhere()}
-      >{@render play()}<span>{playLabel}</span></button
-    >
+    {#if onplay}
+      <SplitButton
+        icon="play"
+        label={playLabel}
+        onclick={onplayhere}
+        alternateIcon="tv"
+        alternateLabel={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
+        onalternate={onplay}
+        menuId="play-destinations"
+        {busy}
+      />
+    {:else}
+      <Button
+        variant="primary"
+        size="large"
+        class="main-action"
+        icon="play"
+        label={playLabel}
+        {busy}
+        onclick={onplayhere}
+      />
+    {/if}
   {:else if onplay}
-    <button class="primary" aria-disabled={busy} onclick={() => !busy && onplay()}
-      >{@render tv()}<span>{playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}</span
-      ></button
-    >
+    <Button
+      variant="primary"
+      size="large"
+      class="main-action"
+      icon="tv"
+      label={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
+      {busy}
+      onclick={onplay}
+    />
   {/if}
 
   <div class="pills">
-    {#if trailerHref && !restricted && ontrailer}
-      <!-- A real button: the plain click always opens the in-page dialog, so it must be announced as
-           something that acts in place rather than as a link that leaves the page. -->
-      <button type="button" class="pill trailer" aria-label="Trailer" onclick={ontrailer}>
-        {@render clapper()}<span>Trailer</span>
-      </button>
-    {:else if trailerHref && !restricted}
-      <!-- No trailer id to play in a dialog: a normal link, which really does leave for YouTube. A normal
-           link also lets iOS hand off to its app, with the website as its fallback. Avoid a new mobile tab
-           that can be left blank after the app handoff. -->
-      <a
-        class="pill trailer"
-        href={trailerHref}
-        target={viewportWidth < 760 ? undefined : '_blank'}
-        rel="noopener noreferrer"
-        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a
-      >
-    {/if}
-    {#if onplayhere && onplay && !restricted}
-      <button class="pill" aria-disabled={busy} onclick={() => !busy && onplay()}
-        >{@render tv()}<span class="label">Play on TV</span></button
-      >
-    {/if}
-    <!-- Compact, the name says what a press does and the fill says the state: a pressed toggle whose name
-         changed with it would be read out as the opposite of what it is. -->
-    <button
-      class="pill"
-      class:on={listed}
-      aria-pressed={compact ? undefined : listed}
-      aria-label={compact ? (listed ? 'Remove from watchlist' : 'Add to watchlist') : undefined}
-      aria-disabled={busy}
-      onclick={() => !busy && onwatchlist(!listed)}
-    >
-      {@render bookmark()}{#if !compact}<span class="label">Watchlist</span>{/if}
-    </button>
-    <button
-      class="pill"
-      class:on={seen}
-      aria-pressed={compact ? undefined : seen}
-      aria-label={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : undefined}
-      aria-disabled={busy}
-      onclick={() => !busy && onseen(!seen)}
-    >
-      {@render eye()}{#if !compact}<span class="label">Seen</span>{/if}
-    </button>
-    {#if share}
-      <button class="pill" aria-disabled={busy} onclick={() => !busy && void shareTitle()}>
-        {@render send()}<span class="label">{copied ? 'Link copied' : 'Share'}</span>
-      </button>
-    {/if}
-
-    <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet on a
-         phone — and a screen reader reads a pop-up button. -->
-    {#if onreact}
-      <div class="pick" class:on={reaction !== null}>
-        {@render opinion(reaction)}
-        <span class="value" aria-hidden="true">{rated}</span>
-        {@render chevron()}
-        <select
-          aria-label="Your opinion"
-          value={reaction ?? ''}
-          disabled={busy}
-          onchange={(event) => onreact((event.currentTarget.value || null) as Reaction | null)}
+    <div class="promoted">
+      {#if trailerHref && !restricted && ontrailer}
+        <!-- A real button: the plain click always opens the in-page dialog, so it must be announced as
+             something that acts in place rather than as a link that leaves the page. -->
+        <Button
+          variant="secondary"
+          size="large"
+          class="pill trailer"
+          icon="trailer"
+          label="Trailer"
+          ariaLabel="Trailer"
+          onclick={ontrailer}
+        />
+      {:else if trailerHref && !restricted}
+        <!-- No trailer id to play in a dialog: a normal link, which really does leave for YouTube. A normal
+             link also lets iOS hand off to its app, with the website as its fallback. Avoid a new mobile tab
+             that can be left blank after the app handoff. -->
+        <a
+          class="den-button den-button-secondary den-button-large pill trailer"
+          href={trailerHref}
+          target={viewportWidth < 760 ? undefined : '_blank'}
+          rel="noopener noreferrer"
+          aria-label="Trailer on YouTube"
+          ><ButtonIcon name="trailer" /><span class="den-button-label">Trailer</span></a
         >
-          <option value="">No rating</option>
-          {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}
-        </select>
-      </div>
-    {/if}
+      {/if}
+    </div>
+
+    <div class="utilities">
+      <!-- Compact, the name says what a press does and the fill says the state: a pressed toggle whose name
+           changed with it would be read out as the opposite of what it is. -->
+      <Button
+        variant="stateful"
+        class={listed ? 'pill on' : 'pill'}
+        icon="bookmark"
+        iconFilled={listed}
+        label={compact ? undefined : 'Watchlist'}
+        pressed={compact ? undefined : listed}
+        ariaLabel={compact ? (listed ? 'Remove from watchlist' : 'Add to watchlist') : 'Watchlist'}
+        {busy}
+        onclick={() => onwatchlist(!listed)}
+      />
+      <Button
+        variant="stateful"
+        class={seen ? 'pill on' : 'pill'}
+        icon="eye"
+        iconFilled={seen}
+        label={compact ? undefined : 'Seen'}
+        pressed={compact ? undefined : seen}
+        ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
+        {busy}
+        onclick={() => onseen(!seen)}
+      />
+      {#if share}
+        <Button
+          variant="tertiary"
+          class="pill share"
+          icon="share"
+          label={copied ? 'Link copied' : 'Share'}
+          ariaLabel={copied ? 'Link copied' : 'Share'}
+          {busy}
+          onclick={() => void shareTitle()}
+        />
+      {/if}
+
+      <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet on a
+           phone — and a screen reader reads a pop-up button. -->
+      {#if onreact}
+        <div
+          class="den-button den-button-secondary den-button-regular pick"
+          class:on={reaction !== null}
+        >
+          {@render opinion(reaction)}
+          <span class="value" aria-hidden="true">{rated}</span>
+          <span class="chevron"><ButtonIcon name="chevron" /></span>
+          <select
+            aria-label="Your opinion"
+            value={reaction ?? ''}
+            disabled={busy}
+            onchange={(event) => onreact((event.currentTarget.value || null) as Reaction | null)}
+          >
+            <option value="">No rating</option>
+            {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}
+          </select>
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 {#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
@@ -224,49 +269,6 @@
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <rect x="5" y="10.4" width="14" height="9.6" rx="2.2" />
     <path d="M8.2 10.4V7.9a3.8 3.8 0 0 1 7.6 0v2.5" />
-  </svg>
-{/snippet}
-
-{#snippet tv()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <rect x="2.8" y="4.5" width="18.4" height="12.5" rx="2.5" />
-    <path d="M8.5 20.5h7" />
-    <path d="M10.6 9.4 14.8 11.8l-4.2 2.4V9.4Z" />
-  </svg>
-{/snippet}
-
-{#snippet play()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
-  </svg>
-{/snippet}
-
-{#snippet clapper()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M3.5 9.6h17v8.4a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V9.6Z" />
-    <path d="m3.7 9.6.6-3.2a1 1 0 0 1 1.2-.8l13.2 2.5a1 1 0 0 1 .8 1.2l-.1.3" />
-    <path d="m8.6 6.4-.8 3.2M13.2 7.3l-.8 3.2" />
-  </svg>
-{/snippet}
-
-{#snippet bookmark()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.7-6 3.7v-14a1 1 0 0 1 1-1Z" />
-  </svg>
-{/snippet}
-
-{#snippet send()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M12 3.6v11.2" />
-    <path d="m7.9 7.7 4.1-4.1 4.1 4.1" />
-    <path d="M5.6 12.8v5.6a2 2 0 0 0 2 2h8.8a2 2 0 0 0 2-2v-5.6" />
-  </svg>
-{/snippet}
-
-{#snippet eye()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M2.5 12S6 6.6 12 6.6 21.5 12 21.5 12 18 17.4 12 17.4 2.5 12 2.5 12Z" />
-    <circle cx="12" cy="12" r="2.9" />
   </svg>
 {/snippet}
 
@@ -296,63 +298,53 @@
   {/if}
 {/snippet}
 
-{#snippet chevron()}
-  <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
-    ><path d="m6 9.5 6 6 6-6" /></svg
-  >
-{/snippet}
-
 <style>
   .actions {
     display: grid;
     gap: 10px;
     margin-bottom: 16px;
-
-    /* No grey flash, and no wait for a double-tap before a tap is passed on, as in the player. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
   }
 
   .pills {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
     gap: 10px;
   }
 
-  /* One height for all of them: a row of capsules at 52, 48 and 44 reads as a mistake rather than a hierarchy,
-     which the fill and the width already carry. A finger's worth, either way. */
-  .primary,
-  .pill,
-  .pick {
-    display: flex;
-    min-height: 48px;
-    gap: 8px;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: none;
-    color: var(--fg);
-    font: inherit;
-    cursor: pointer;
-    text-decoration: none;
+  /* Availability must not determine the phone's row geometry. Playback choices are words in a two-column row;
+     personal utilities are a separate equal-width glyph row whose accessible names never depend on those words. */
+  .promoted,
+  .utilities {
+    display: grid;
+    gap: 10px;
   }
 
-  /* The one thing this page is for: the page's width on a phone. */
-  .primary {
-    padding: 0 24px;
-    border-color: var(--accent);
-    background: var(--accent);
-    color: #fff;
-    font-weight: 600;
+  .promoted {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  /* Under a full-width Play, glyphs of five different widths look like what was left over; they divide the row
-     instead, and take their own width once their words are drawn. */
-  .pill,
+  .promoted:empty {
+    display: none;
+  }
+
+  .promoted > :only-child {
+    grid-column: 1 / -1;
+  }
+
+  .utilities {
+    grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+  }
+
+  .actions > :global(.main-action),
+  .promoted > :global(.pill),
+  .utilities > :global(.pill),
   .pick {
-    flex: 1 1 0;
-    padding: 0 12px;
+    width: 100%;
+  }
+
+  .promoted :global(.den-button-label) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .pick {
@@ -365,57 +357,51 @@
     user-select: none;
   }
 
-  .trailer {
-    flex: 0 0 auto;
-  }
-
-  .on {
+  .pick.on {
     border-color: var(--fg);
     background: var(--fg);
     color: var(--bg);
   }
 
-  .detail-page .primary {
-    background: var(--fg);
-    border-color: var(--fg);
-    color: var(--bg);
+  /* Four quiet, equal tap targets on a phone: state belongs to the glyph and a restrained tint, not a row of
+     permanent cards. Focus remains the shared high-contrast ring, while hover/press briefly reveals the target. */
+  @media (width < 760px) {
+    .utilities > :global(.pill),
+    .utilities > .pick {
+      --button-bg: transparent;
+      --button-border: transparent;
+      --button-fg: var(--muted);
+    }
+
+    .utilities > :global(.pill[aria-pressed='true']),
+    .utilities > .pick.on {
+      --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
+      --button-border: transparent;
+      --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
+
+      background: var(--button-bg);
+      color: var(--button-fg);
+    }
   }
 
-  .detail-page .pill,
-  .detail-page .pick {
-    background: rgb(255 255 255 / 0.09);
-    border-color: rgb(255 255 255 / 0.13);
-  }
-
-  .detail-page .pill.on,
-  .detail-page .pick.on {
-    background: var(--fg);
-    color: var(--bg);
-  }
-
-  /* The focused element in the picker is the select inside, so the pill lights up with it. */
-  .primary:focus-visible,
-  .pill:focus-visible,
+  /* The focused element in the picker is the select inside, so its shell lights up with it. */
   .pick:focus-within {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
+    outline-offset: 3px;
   }
 
-  /* `aria-disabled`, not `disabled`: the native attribute drops focus to `<body>` the moment a keyboard press
-     disables the very button that was focused (Chrome, Safari), losing a screen reader's place mid-save. The
-     select stays a real `disabled`, which does not have that problem. */
-  .primary[aria-disabled='true'],
-  .pill[aria-disabled='true'],
+  /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */
   .pick:has(select:disabled) {
-    opacity: 0.6;
+    opacity: 0.45;
     cursor: progress;
   }
 
   /* The control itself fills the pill — never hidden, which would stop a phone opening it. */
   .pick select {
     position: absolute;
-    inset: 0;
-    width: 100%;
+    inset: -1px;
+    width: calc(100% + 2px);
+    height: calc(100% + 2px);
     padding: 0;
     border: 0;
     opacity: 0;
@@ -429,7 +415,7 @@
   }
 
   /* Read out at every width, drawn only where there is room: the glyph carries these on a phone. */
-  .label {
+  .utilities :global(.den-button-label) {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -445,24 +431,20 @@
   .icon {
     width: 20px;
     height: 20px;
-  }
-
-  /* Drawn beside the word it opens; beside a bare glyph it only makes one control wider than its neighbours. */
-  .chevron {
-    display: none;
-    width: 14px;
-    height: 14px;
-    opacity: 0.6;
-  }
-
-  .icon,
-  .chevron {
     flex: 0 0 auto;
     fill: none;
     stroke: currentcolor;
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  /* Drawn beside the word it opens; beside a bare glyph it only makes one control wider than its neighbours. */
+  .chevron {
+    --button-icon-size: 14px;
+
+    display: none;
+    opacity: 0.6;
   }
 
   .icon.filled {
@@ -483,8 +465,18 @@
     margin-bottom: 0;
   }
 
-  .compact .pill,
-  .compact .pill.on {
+  .compact .pills,
+  .compact .utilities {
+    display: flex;
+    gap: 2px;
+  }
+
+  .compact .promoted {
+    display: none;
+  }
+
+  .compact :global(.pill),
+  .compact :global(.pill.on) {
     flex: 0 0 auto;
     width: 48px;
     padding: 0;
@@ -495,17 +487,13 @@
     transition: background-color 0.15s ease;
   }
 
-  .compact .pill.on .icon {
-    fill: currentcolor;
-  }
-
-  .compact .pill:focus-visible,
-  .compact .pill:hover:not([aria-disabled='true']) {
+  .compact :global(.pill:focus-visible),
+  .compact :global(.pill:hover:not([aria-disabled='true'])) {
     background: rgb(255 255 255 / 0.16);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .compact .pill {
+    .compact :global(.pill) {
       transition: none;
     }
   }
@@ -532,19 +520,20 @@
   }
 
   @media (width <= 359px) {
-    .pills {
+    .pills,
+    .promoted,
+    .utilities {
       gap: 6px;
     }
 
-    .pill,
-    .pick {
-      min-width: 44px;
-      padding: 0 6px;
-    }
-
-    .trailer {
-      gap: 6px;
+    .promoted > :global(.pill) {
+      padding-inline: 10px;
       font-size: 14px;
+    }
+
+    .utilities > :global(.pill),
+    .pick {
+      padding-inline: 6px;
     }
   }
 
@@ -555,16 +544,32 @@
       align-items: center;
     }
 
-    .pill,
+    .pills,
+    .promoted,
+    .utilities {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .actions > :global(.main-action),
+    .promoted > :global(.pill),
+    .utilities > :global(.pill),
     .pick {
-      flex: 0 0 auto;
+      width: auto;
+    }
+
+    .utilities > :global(.share) {
+      --button-bg: transparent;
+      --button-border: transparent;
+      --button-fg: var(--muted);
     }
 
     .chevron {
       display: block;
     }
 
-    .label {
+    .utilities :global(.den-button-label) {
       position: static;
       width: auto;
       height: auto;
@@ -579,7 +584,9 @@
       gap: 16px;
     }
 
-    .detail-page .pills {
+    .detail-page .pills,
+    .detail-page .promoted,
+    .detail-page .utilities {
       gap: 16px;
     }
 
@@ -587,8 +594,8 @@
       display: none;
     }
 
-    .detail-page .primary,
-    .detail-page .pill {
+    .detail-page :global(.main-action),
+    .detail-page :global(.pill) {
       padding-inline: 20px;
       border-radius: 12px;
     }

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Loading from './Loading.svelte';
-  import DetailIcon from './DetailIcon.svelte';
+  import Button from './Button.svelte';
   import DownloadStatus from './DownloadStatus.svelte';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type {
@@ -151,28 +151,29 @@
 </script>
 
 <div class="source-controls">
-  <button
-    class="control"
+  <Button
+    variant="secondary"
+    icon="sources"
+    label={`Sources${sources ? ` (${sources.length})` : ''}`}
     aria-expanded={open}
     aria-controls={panelId}
     onclick={() => (open = !open)}
-    ><DetailIcon name="sources" />Sources{sources ? ` (${sources.length})` : ''}</button
-  >
+  />
   {#if title && best && best.cached === false && best.seeders !== 0}
     {@const state = stateOf(best)}
-    <button
-      class="control"
-      disabled={inFlight(state ?? null) || state === 'ready'}
-      onclick={() => void download(best!)}
-    >
-      <DetailIcon name="download" />{state === 'ready'
+    <Button
+      variant="secondary"
+      icon="download"
+      label={state === 'ready'
         ? 'Ready to play'
         : state === 'fetching'
           ? 'Downloading'
           : state === 'starting' || state === 'paused'
             ? 'Checking download'
             : 'Download'}
-    </button>
+      disabled={inFlight(state ?? null) || state === 'ready'}
+      onclick={() => void download(best!)}
+    />
   {/if}
 </div>
 {#if best?.cached === false && !jobOf(best)}<p class="readiness">
@@ -191,11 +192,11 @@
       </p>
     {:else if sources === undefined}<Loading label="Loading sources" />
     {:else if sources === null}<p class="note">Couldn’t reach the source service.</p>
-      <button class="control" onclick={() => retry++}>Try again</button>
+      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
     {:else if sources.length === 0 && answer?.kind === 'unknown'}<p class="note">
         Your sources didn’t answer, so there may be releases this couldn’t see.
       </p>
-      <button class="control" onclick={() => retry++}>Try again</button>
+      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
     {:else if sources.length === 0}<p class="note">
         No sources found for this {season === undefined ? 'movie' : 'episode'}.
       </p>
@@ -249,24 +250,27 @@
               {/if}
             </div>
             <div class="source-actions">
-              {#if ready && onplay}<button class="control" onclick={() => onplay(source.filename)}
-                  ><DetailIcon name="play" />Play</button
-                >
-              {:else if !ready && title}<button
-                  class="control"
+              {#if ready && onplay}<Button
+                  variant="secondary"
+                  icon="play"
+                  label="Play"
+                  onclick={() => onplay(source.filename)}
+                />
+              {:else if !ready && title}<Button
+                  variant="secondary"
+                  icon="download"
+                  label={source.seeders === 0 ? 'Download anyway' : 'Download'}
                   disabled={inFlight(state ?? null)}
                   onclick={() => void download(source)}
-                  ><DetailIcon name="download" />{source.seeders === 0
-                    ? 'Download anyway'
-                    : 'Download'}</button
-                >{/if}
+                />{/if}
 
-              {#if job && (state === 'unreachable' || state === 'not-started')}<button
-                  class="text-button"
+              {#if job && (state === 'unreachable' || state === 'not-started')}<Button
+                  variant="tertiary"
+                  size="compact"
+                  label="Check status"
                   onclick={() =>
                     void model?.refreshDownloads(descriptor?.target).catch(() => undefined)}
-                  >Check status</button
-                >{/if}
+                />{/if}
             </div>
           </li>
         {/each}
@@ -281,25 +285,6 @@
     flex-wrap: wrap;
     gap: 12px;
     min-height: 48px;
-  }
-
-  .control {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    min-height: 44px;
-    padding: 8px 18px;
-    border: 1px solid #ffffff24;
-    border-radius: 12px;
-    background: #ffffff15;
-    color: var(--fg);
-    cursor: pointer;
-  }
-
-  .control:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   .source-panel {
@@ -414,20 +399,6 @@
     flex: none;
   }
 
-  .text-button {
-    min-height: 36px;
-    border: 0;
-    background: none;
-    color: var(--muted);
-    cursor: pointer;
-  }
-
-  .control:focus-visible,
-  .text-button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
-  }
-
   progress {
     margin-top: 10px;
     width: 200px;
@@ -444,12 +415,6 @@
 
     .source-actions {
       flex-flow: row wrap;
-    }
-
-    .control {
-      font-size: 14px;
-      border-radius: 999px;
-      padding-inline: 14px;
     }
 
     /* Narrow: the size chip alone, not the pack it came from. */

@@ -3,6 +3,7 @@
      modal. -->
 <script lang="ts">
   import { tick } from 'svelte';
+  import Button from '../components/Button.svelte';
 
   let {
     label,
@@ -60,26 +61,34 @@
       {detail ?? ''}
     </p>
     <span class="actions">
-      <button
-        type="button"
-        class={tone}
+      <Button
+        variant={tone}
+        size="compact"
+        label={confirmLabel}
         onclick={() => {
           asking = false;
           onconfirm();
-        }}>{confirmLabel}</button
-      >
-      <button type="button" class="quiet" bind:this={cancel} onclick={dismiss}>Cancel</button>
+        }}
+      />
+      <Button
+        variant="secondary"
+        size="compact"
+        label="Cancel"
+        bind:element={cancel}
+        onclick={dismiss}
+      />
     </span>
   </div>
 {:else}
-  <button
-    type="button"
-    class={tone}
+  <Button
+    variant={tone}
+    size="compact"
+    {label}
     {disabled}
-    aria-label={ariaLabel}
-    bind:this={trigger}
-    onclick={ask}>{label}</button
-  >
+    {ariaLabel}
+    bind:element={trigger}
+    onclick={ask}
+  />
 {/if}
 
 <style>
@@ -109,42 +118,5 @@
   .actions {
     display: flex;
     gap: 8px;
-  }
-
-  button {
-    min-height: 40px;
-    padding: 0 18px;
-    border-radius: 999px;
-    font-size: 15px;
-    font-weight: 600;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .primary {
-    border: 0;
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .destructive,
-  .quiet {
-    border: 1px solid var(--line);
-    background: none;
-    color: var(--fg);
-  }
-
-  .destructive {
-    color: var(--danger);
-  }
-
-  .destructive:hover,
-  .quiet:hover {
-    background: rgb(255 255 255 / 0.06);
-  }
-
-  button:disabled {
-    opacity: 0.4;
-    cursor: default;
   }
 </style>

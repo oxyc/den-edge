@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte';
-  import DetailIcon from './DetailIcon.svelte';
+  import Button from './Button.svelte';
   import type Hls from 'hls.js';
   import { loadHls } from '../lib/hlsLoader';
   import {
@@ -711,24 +711,26 @@
        native controls that replace it (they only show up after the same gesture this grants), so a keyboard or
        switch user otherwise has no way to hear this at all. -->
   {#if !!source && !failed && !ended}
-    <button
-      class="control expand glass"
+    <Button
+      variant="player"
+      size="icon"
+      class="control expand"
+      icon="fullscreen"
       onpointerdown={press}
       onclick={expand}
-      aria-label="Play trailer full screen with sound"
-    >
-      <DetailIcon name="expand" />
-    </button>
+      ariaLabel="Play trailer full screen with sound"
+    />
   {/if}
   {#if (!mobile || !touched) && !!source && !failed && !ended}
-    <button
-      class="control sound glass"
+    <Button
+      variant="player"
+      size="icon"
+      class="control sound"
+      icon={sound ? 'volume' : 'mute'}
       onpointerdown={press}
       onclick={mobile ? tap : toggleSound}
-      aria-label={sound ? 'Mute trailer' : 'Play trailer with sound'}
-    >
-      <DetailIcon name={sound ? 'sound' : 'mute'} />
-    </button>
+      ariaLabel={sound ? 'Mute trailer' : 'Play trailer with sound'}
+    />
   {/if}
 </div>
 
@@ -804,7 +806,7 @@
       linear-gradient(to right, rgb(0 0 0 / 0.45), transparent 80%);
   }
 
-  .control {
+  .media :global(.control) {
     position: absolute;
     right: var(--gutter);
     z-index: 1;
@@ -820,31 +822,31 @@
     transition: opacity 0.2s ease;
   }
 
-  .expand {
+  .media :global(.expand) {
     top: calc(var(--bar-space) + 12px);
   }
 
   /* Directly under the one above, a circle and a gap down. Sound is the lesser ask of the two, so it
      takes the lesser position. */
-  .sound {
+  .media :global(.sound) {
     top: calc(var(--bar-space) + 64px);
   }
 
   /* Before the hover rule, which is the more specific of the two: a control reached by keyboard has
      to show itself without waiting for a pointer that may never arrive. */
-  .control:focus-visible {
+  .media :global(.control:focus-visible) {
     opacity: 1;
     outline: 2px solid var(--accent);
     outline-offset: 3px;
   }
 
   /* Otherwise they appear with the picture they belong to. */
-  .media:hover .control {
+  .media:hover :global(.control) {
     opacity: 1;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .control {
+    .media :global(.control) {
       transition: none;
     }
   }
@@ -865,7 +867,7 @@
 
     /* Nothing to hover on a phone. Both explicit media actions must be visible before the native controls exist;
        after the first tap the sound action gives way to those controls and Expand keeps its place. */
-    .control {
+    .media :global(.control) {
       opacity: 1;
     }
   }

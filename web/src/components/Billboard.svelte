@@ -12,7 +12,7 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import DetailIcon from './DetailIcon.svelte';
+  import Button from './Button.svelte';
   import TitleActions from './TitleActions.svelte';
   import { leavesBillboard, nextSlide, type SlideAction } from '../lib/billboardActions';
   import type { TitleRow } from '../lib/wire';
@@ -1007,18 +1007,20 @@
             <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
               {#if onplay}
-                <button
-                  class="primary"
+                <Button
+                  variant="primary"
+                  size="large"
+                  icon="play"
+                  label="Play"
                   tabindex={n === index ? 0 : -1}
                   onclick={() => onplay(title)}
-                >
-                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                    <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
-                  </svg>
-                  Play
-                </button>
+                />
               {/if}
-              <a class="more" href={titleHref(title)} tabindex={n === index ? 0 : -1}>More</a>
+              <a
+                class="den-button den-button-secondary den-button-large more"
+                href={titleHref(title)}
+                tabindex={n === index ? 0 : -1}>More</a
+              >
               {#if rowOf && onwatchlist && onseen}
                 <TitleActions
                   compact
@@ -1039,9 +1041,14 @@
   <!-- Only once a trailer is actually running: a button offering full screen over a still photograph would
        have nothing to show. Desktop only, in CSS — a phone reaches the video's own controls with a tap. -->
   {#if playing}
-    <button class="expand glass" onclick={expand} aria-label="Play trailer full screen with sound">
-      <DetailIcon name="expand" />
-    </button>
+    <Button
+      variant="player"
+      size="icon"
+      class="expand"
+      icon="fullscreen"
+      onclick={expand}
+      ariaLabel="Play trailer full screen with sound"
+    />
   {/if}
 
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
@@ -1114,7 +1121,7 @@
   }
 
   /* Glass, because this is a control over media — the one place that look is for. */
-  .expand {
+  .billboard :global(.expand) {
     position: absolute;
     top: calc(var(--bar-space) + 12px);
     right: var(--gutter);
@@ -1133,24 +1140,24 @@
 
   /* Before the hover rule, which is the more specific of the two: a control reached by keyboard has to show
      itself without waiting for a pointer that may never arrive. */
-  .expand:focus-visible {
+  .billboard :global(.expand:focus-visible) {
     opacity: 1;
     outline: 2px solid var(--accent);
     outline-offset: 3px;
   }
 
-  .billboard:hover .expand {
+  .billboard:hover :global(.expand) {
     opacity: 1;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .expand {
+    .billboard :global(.expand) {
       transition: none;
     }
   }
 
   @media (width <= 759px) {
-    .expand {
+    .billboard :global(.expand) {
       display: none;
     }
   }
@@ -1386,41 +1393,6 @@
     margin-top: 4px;
   }
 
-  .primary,
-  .more {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    justify-content: center;
-    min-height: 48px;
-    padding: 0 20px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: none;
-    color: var(--fg);
-    font: inherit;
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .primary {
-    border-color: var(--accent);
-    background: var(--accent);
-    color: #fff;
-    font-weight: 600;
-  }
-
-  .icon {
-    flex: 0 0 auto;
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentcolor;
-    stroke-width: 1.7;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
   /* Held over the rail, in the page's own column, so it stays put while the slides pass under it. */
   .pager {
     position: absolute;
@@ -1479,8 +1451,6 @@
     background: var(--fg);
   }
 
-  .primary:focus-visible,
-  .more:focus-visible,
   .dot:focus-visible,
   h2 a:focus-visible {
     outline: 2px solid var(--accent);

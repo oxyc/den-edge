@@ -2,6 +2,7 @@
      year floor, which warnings and ratings show, the player's subtitle list, and the parental limit. Each of the
      TV's pushed screens opens in place here. -->
 <script lang="ts">
+  import Button from '../components/Button.svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import CheckGrid from './CheckGrid.svelte';
   import { rows } from './rows.svelte';
@@ -561,7 +562,7 @@
           aria-label="Parental PIN"
           bind:value={pinEntry}
         />
-        <button class="primary" disabled={pinEntry.length < 4}>Unlock</button>
+        <Button type="submit" variant="primary" label="Unlock" disabled={pinEntry.length < 4} />
       </form>
       {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
       <p class="foot">A PIN protects the maturity ceiling. Enter it to change the ceiling.</p>
@@ -585,9 +586,12 @@
           aria-label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
           bind:value={newPin}
         />
-        <button class="primary" disabled={disabled || !/^\d{4}$/.test(newPin)}
-          >{pinConfigured ? 'Change PIN' : 'Set PIN'}</button
-        >
+        <Button
+          type="submit"
+          variant="primary"
+          label={pinConfigured ? 'Change PIN' : 'Set PIN'}
+          disabled={disabled || !/^\d{4}$/.test(newPin)}
+        />
         {#if pinConfigured}
           <Confirm
             label="Remove PIN"

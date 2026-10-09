@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { onDestroy, tick } from 'svelte';
+  import Button from './Button.svelte';
   import type { MenuItem } from '../lib/titleActions';
 
   let {
@@ -358,8 +359,10 @@
   >
     {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
     {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}
-      <button
-        type="button"
+      <Button
+        variant="menu"
+        size="regular"
+        label={item.label}
         role={item.kind === 'item'
           ? 'menuitem'
           : item.kind === 'checkbox'
@@ -369,9 +372,7 @@
         aria-disabled={item.disabled || undefined}
         class="item"
         onclick={() => run(item)}
-      >
-        {item.label}
-      </button>
+      />
     {/each}
   </div>
 {/if}
@@ -403,36 +404,27 @@
     box-shadow: 0 12px 40px #0008;
   }
 
-  .item {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    min-height: 44px;
-    border: 0;
+  .menu :global(.item) {
     border-radius: 8px;
     padding: 8px 12px;
-    background: none;
-    color: var(--fg);
-    font: inherit;
     text-align: left;
-    cursor: pointer;
   }
 
-  .item:hover,
-  .item:focus-visible {
+  .menu :global(.item:hover),
+  .menu :global(.item:focus-visible) {
     background: #fff2;
   }
 
-  .item:focus-visible {
+  .menu :global(.item:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 
-  .item[aria-checked='true'] {
+  .menu :global(.item[aria-checked='true']) {
     font-weight: 600;
   }
 
-  .item[aria-disabled='true'] {
+  .menu :global(.item[aria-disabled='true']) {
     color: var(--muted);
     cursor: default;
   }
@@ -457,7 +449,7 @@
     font-weight: 600;
   }
 
-  .sheet .item {
+  .sheet :global(.item) {
     min-height: 48px;
   }
 </style>

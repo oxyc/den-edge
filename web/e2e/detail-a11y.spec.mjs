@@ -105,3 +105,71 @@ test('the opinion group is named, and its phone select has no stray text-selecti
     await browser.close();
   }
 });
+
+test('phone Detail keeps one primary playback surface and quiet personal actions', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    for (const width of [320, 390]) {
+      const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: true });
+      await mock(page);
+      await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions`);
+
+      const actions = page.locator('.hero-actions .actions');
+      const split = actions.locator('.split-button');
+      const play = page.getByRole('button', { name: 'Play', exact: true });
+      const disclosure = page.getByRole('button', { name: 'More ways to play' });
+      const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
+      const utilities = [
+        page.getByRole('button', { name: 'Watchlist', exact: true }),
+        page.getByRole('button', { name: 'Seen', exact: true }),
+        page.getByRole('button', { name: 'Share', exact: true }),
+        page.getByRole('combobox', { name: 'Your opinion' }),
+      ];
+
+      const [actionBox, splitBox, playBox, disclosureBox, trailerBox, ...utilityBoxes] =
+        await Promise.all([
+          actions.boundingBox(),
+          split.boundingBox(),
+          play.boundingBox(),
+          disclosure.boundingBox(),
+          trailer.boundingBox(),
+          ...utilities.map((control) => control.boundingBox()),
+        ]);
+      expect(actionBox).not.toBeNull();
+      expect(playBox).not.toBeNull();
+      expect(trailerBox).not.toBeNull();
+      expect(Math.abs(splitBox.width - actionBox.width)).toBeLessThanOrEqual(1);
+      expect(disclosureBox.width).toBeGreaterThanOrEqual(44);
+      expect(disclosureBox.height).toBeGreaterThanOrEqual(44);
+      expect(await trailer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(utilityBoxes.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
+      expect(Math.max(...utilityBoxes.map((box) => box.y))).toBeLessThanOrEqual(
+        Math.min(...utilityBoxes.map((box) => box.y)) + 1,
+      );
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+
+      await expect(page.getByRole('menuitem', { name: 'Play on TV' })).toHaveCount(0);
+      await disclosure.click();
+      const playOnTV = page.getByRole('menuitem', { name: 'Play on TV' });
+      await expect(playOnTV).toBeFocused();
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+      await page.keyboard.press('Escape');
+      await expect(playOnTV).toHaveCount(0);
+      await expect(disclosure).toBeFocused();
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+
+      for (const control of utilities.slice(0, 3)) {
+        expect(await control.evaluate((node) => getComputedStyle(node).borderTopColor)).toBe(
+          'rgba(0, 0, 0, 0)',
+        );
+      }
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});

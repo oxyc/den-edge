@@ -3,6 +3,7 @@
      one thing a guest has no use for. -->
 <script lang="ts">
   import { guestGrants, type RedeemFailure } from '../lib/grants.svelte';
+  import Button from './Button.svelte';
 
   const failures: Record<RedeemFailure, string> = {
     malformed: 'That link doesn’t carry a whole invite. Ask for it again.',
@@ -48,10 +49,13 @@
   {#if failure}
     <p role="status" class="bad">{failure}</p>
     <div class="actions">
-      <button type="button" class="primary" disabled={working} onclick={() => void accept()}
-        >{working ? 'Checking…' : 'Try again'}</button
-      >
-      <button type="button" class="quiet" onclick={close}>Close</button>
+      <Button
+        variant="primary"
+        label={working ? 'Checking…' : 'Try again'}
+        busy={working}
+        onclick={() => void accept()}
+      />
+      <Button label="Close" onclick={close} />
     </div>
   {:else}
     <p>
@@ -59,10 +63,13 @@
       play things. You can leave it any time under Settings › Sharing.
     </p>
     <div class="actions">
-      <button type="button" class="primary" disabled={working} onclick={() => void accept()}
-        >{working ? 'Checking…' : 'Accept'}</button
-      >
-      <button type="button" class="quiet" disabled={working} onclick={close}>Not now</button>
+      <Button
+        variant="primary"
+        label={working ? 'Checking…' : 'Accept'}
+        busy={working}
+        onclick={() => void accept()}
+      />
+      <Button label="Not now" disabled={working} onclick={close} />
     </div>
   {/if}
 </dialog>
@@ -100,35 +107,5 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-  }
-
-  button {
-    min-height: 44px;
-    padding: 0 20px;
-    border-radius: 999px;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary {
-    border: 0;
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .quiet {
-    border: 1px solid var(--line);
-    background: none;
-    color: var(--fg);
-  }
-
-  .quiet:hover {
-    background: rgb(255 255 255 / 0.06);
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 </style>
