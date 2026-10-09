@@ -544,16 +544,16 @@ export function filterTitles(
   type: ExploreType,
   items: FilterItem[],
   { fetchImpl = relayFetch }: { fetchImpl?: typeof fetch } = {},
-): (page: number) => Promise<Title[]> {
+): (page: number, signal?: AbortSignal) => Promise<Title[]> {
   let order: string | undefined;
   let offset = 0;
   let last = 0;
   const given = new Set<string>();
   const picked = new Set(items.map((item) => item.kind.toLowerCase()));
-  async function read(skip: number) {
+  async function read(skip: number, signal?: AbortSignal) {
     const url = filterUrl(base, type, 'titles', { items, skip });
     if (!url) throw new FilterUnavailable('atlas refuses this selection');
-    const res = await fetchImpl(url);
+    const res = await fetchImpl(url, { signal });
     if (res.status === 404) throw new FilterUnavailable('atlas has no filter routes', false);
     if (!res.ok) throw new Error(`atlas answered ${res.status}`);
     const body = (await res.json()) as Record<string, unknown>;
@@ -566,14 +566,15 @@ export function filterTitles(
     return { titles: titlesOf(body), order: typeof body.order === 'string' ? body.order : '' };
   }
   // An empty page ends a row, so a page of titles already given (after a restart) reads on instead.
-  return async (page) => {
+  return async (page, signal) => {
+    const requestFetch: typeof fetch = (input, init) => fetchImpl(input, { ...init, signal });
     if (page !== last + 1) offset = (page - 1) * TITLES_PAGE;
     last = page;
     for (;;) {
-      let answer = await read(offset);
+      let answer = await read(offset, signal);
       if (order !== undefined && answer.order !== order) {
         offset = 0;
-        answer = await read(0);
+        answer = await read(0, signal);
       }
       order = answer.order;
       offset += TITLES_PAGE;
@@ -583,7 +584,8 @@ export function filterTitles(
         given.add(key);
         return true;
       });
-      if (fresh.length || !answer.titles.length) return withSharedTitleMetadata(fresh, fetchImpl);
+      if (fresh.length || !answer.titles.length)
+        return withSharedTitleMetadata(fresh, requestFetch);
     }
   };
 }

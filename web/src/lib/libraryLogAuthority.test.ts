@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { blankTitle } from './actions';
+import { ContentAuthority, type ContentReader } from './contentAuthority';
 import { openClockStore, type ClockStore } from './clockStore';
 import { DownloadCoordinator } from './downloadCoordinator';
 import { source } from './downloadTestLog';
@@ -11,10 +12,15 @@ import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import { ensureSyncPolicy } from './syncLoader';
 import type { TitleSource } from './titleSources';
+import { readApiKey } from './prefs';
+import { TMDB_PROXY_KEY } from './tmdbCache';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
 const series = { type: 'tv' as const, id: 11 };
+const missingContent = {
+  title: async () => ({ kind: 'missing' as const }),
+} satisfies Pick<ContentReader, 'title'>;
 
 function memoryVault(): Vault {
   const data = new Map<string, Uint8Array>();
@@ -80,7 +86,17 @@ function authority(
     }),
     ticket: (url) => (url.startsWith('/scout/') ? url : null),
   });
-  return new LibraryLogAuthority(log, clock, { mode, downloads, fetchImpl, tmdbFetchImpl });
+  const content = tmdbFetchImpl
+    ? new ContentAuthority(
+        {
+          tmdb: () => readApiKey(log.settings('keys'), 'tmdb') ?? TMDB_PROXY_KEY,
+          omdb: () => undefined,
+          contentWarnings: () => undefined,
+        },
+        { tmdbFetch: tmdbFetchImpl },
+      )
+    : missingContent;
+  return new LibraryLogAuthority(log, clock, { mode, downloads, content, fetchImpl });
 }
 
 describe('LibraryLogAuthority', () => {
@@ -95,7 +111,7 @@ describe('LibraryLogAuthority', () => {
     await expect(
       authority.command({ kind: 'api-key.set', service: 'tmdb', value: 'tmdb-secret' }, 'tmdb'),
     ).resolves.toMatchObject({
-      affected: [{ kind: 'connections' }, { kind: 'runtime' }],
+      affected: [{ kind: 'connections' }],
     });
     await authority.command(
       { kind: 'plugin.install', manifestUrl: 'https://plugins.example/scout/manifest.json' },
@@ -108,8 +124,6 @@ describe('LibraryLogAuthority', () => {
     const runtime = await authority.select({ kind: 'runtime' });
     expect(runtime).toEqual({
       kind: 'runtime',
-      tmdbKey: 'tmdb-secret',
-      providerKeys: { tmdb: 'tmdb-secret' },
       pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
       privateRemuxUrl: 'https://remux.tailnet.ts.net',
     });
@@ -278,6 +292,7 @@ describe('LibraryLogAuthority', () => {
       titles: [],
       shapes: [],
       retryable: [failed],
+      retryAfterMs: 60_000,
     });
   });
 
@@ -850,9 +865,7 @@ describe('LibraryLogAuthority', () => {
       ],
       [{ kind: 'device.heartbeat', name: 'MacBook' }, 'heartbeat'],
     ] as const) {
-      const affectsRuntime =
-        (command.kind === 'api-key.set' && command.service === 'tmdb') ||
-        command.kind === 'plugin.install';
+      const affectsRuntime = command.kind === 'plugin.install';
       await expect(authority.command(command, operation)).resolves.toMatchObject({
         outcome: 'applied',
         delivery: 'local',
@@ -1095,7 +1108,11 @@ describe('LibraryLogAuthority', () => {
       }),
       ticket: (url) => (url.startsWith('/scout/') ? url : null),
     });
-    const service = new LibraryLogAuthority(log, clock, { mode: 'local', downloads });
+    const service = new LibraryLogAuthority(log, clock, {
+      mode: 'local',
+      downloads,
+      content: missingContent,
+    });
     const title = { target: movie, name: 'Seven' };
     const alternatives = await service.query({ kind: 'download.sources', title });
     expect(alternatives.kind).toBe('download.sources');

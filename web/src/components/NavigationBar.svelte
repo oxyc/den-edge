@@ -20,7 +20,6 @@
     RECENT_SEARCHES_CHANGED,
     rememberSearch,
   } from '../lib/recentSearches';
-  import { warmTmdb } from '../lib/tmdb';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   /**
    * On People the field finds people and facets there: what is typed stays in People's address (`q=`) instead of
@@ -256,10 +255,8 @@
       role="search"
       id="nav-search"
       onsubmit={submitted}
-      onpointerenter={warmTmdb}
       onfocusin={() => {
         searchFocused = true;
-        warmTmdb();
       }}
       onfocusout={(event) => {
         const next = event.relatedTarget;
@@ -365,7 +362,6 @@
       aria-expanded={expanded}
       aria-controls="nav-search"
       onclick={openSearch}
-      onpointerdown={warmTmdb}
       bind:this={toggle}
     >
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"

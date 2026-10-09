@@ -10,9 +10,20 @@ const FIXTURE = `${E2E_ORIGIN}/test/service-page.html`;
  */
 async function serveNetflix(page, { chart = async () => {} } = {}) {
   const asked = [];
+  const pageOwned = [];
+  await page.addInitScript(() => {
+    const pageFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set('x-den-test-fetch-realm', 'page');
+      return pageFetch(input, { ...init, headers });
+    };
+  });
   await routeTmdb(page, (route) => {
     const url = new URL(route.request().url());
     asked.push(`${url.pathname}${url.search}`);
+    if (route.request().headers()['x-den-test-fetch-realm'])
+      pageOwned.push(`${url.pathname}${url.search}`);
     const path = url.pathname.replace(/^\/(tmdb\/)?3\//, '/');
     if (path.startsWith('/watch/providers/'))
       return route.fulfill({
@@ -77,7 +88,7 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
     });
   });
   await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
-  return asked;
+  return { asked, pageOwned };
 }
 
 function requestCount(asked, pathname, params = {}) {
@@ -157,7 +168,7 @@ test('the service billboard shows a loading state, then its titles with their pi
   await guardNetwork(page);
   let release;
   const held = new Promise((resolve) => (release = resolve));
-  await serveNetflix(page, { chart: () => held });
+  const { pageOwned } = await serveNetflix(page, { chart: () => held });
   await page.goto(`${FIXTURE}?page`);
 
   const hero = page.locator('.hero');
@@ -175,12 +186,13 @@ test('the service billboard shows a loading state, then its titles with their pi
     'src',
     /backdrop-102\.jpg$/,
   );
+  expect(pageOwned, 'TMDB provider requests must stay inside the content Worker').toEqual([]);
 });
 
 test('resting on a service tile starts loading its page before the press', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
-  const asked = await serveNetflix(page);
+  const { asked, pageOwned } = await serveNetflix(page);
   await page.goto(FIXTURE);
 
   const tile = page.getByRole('link', { name: 'Netflix' });
@@ -192,6 +204,7 @@ test('resting on a service tile starts loading its page before the press', async
   // The hover primes the complete first screen: the Atlas row, its hero art, and the next two rows. Waiting for that
   // semantic boundary avoids mistaking a request still belonging to this first gesture for work from the next one.
   await expect.poll(() => firstScreenRequests(asked)).toEqual(COMPLETE_FIRST_SCREEN);
+  expect(pageOwned, 'hover priming must keep TMDB inside the content Worker').toEqual([]);
 
   // A second gesture within the reuse window asks none of those questions again. A frame lets the pointer event and
   // any fetch it starts become observable without an elapsed-time guess.
@@ -204,7 +217,7 @@ test('resting on a service tile starts loading its page before the press', async
 test('settings re-read with nothing changed leave the page as it is', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
-  const asked = await serveNetflix(page);
+  const { asked } = await serveNetflix(page);
   await page.goto(`${FIXTURE}?page`);
 
   const cards = page.locator('a[href^="/movie/10"]:not(.billboard *)');

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openClockStore } from './clockStore';
+import type { ContentReader } from './contentAuthority';
+import type { DownloadContent } from './downloadServiceRuntime';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import { openLibraryServiceAuthority } from './libraryServiceRuntimeAuthority';
 import type { Vault } from './localVault';
@@ -10,6 +12,11 @@ import { unseal } from './recovery';
 import { toBase64url } from './wire';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
+const content = {
+  identifiers: async () => ({ kind: 'missing' as const }),
+  season: async () => ({ kind: 'missing' as const }),
+  title: async () => ({ kind: 'missing' as const }),
+} satisfies DownloadContent & Pick<ContentReader, 'title'>;
 
 function memoryVault(): Vault {
   const data = new Map<string, Uint8Array>();
@@ -48,6 +55,8 @@ describe('openLibraryServiceAuthority', () => {
     const authority = await openLibraryServiceAuthority(
       hello({ device: '0123456789abcdef', last: [4_000, 2, 'fedcba9876543210'] }),
       vault,
+      undefined,
+      content,
     );
 
     expect(authority).not.toBeNull();
@@ -65,7 +74,9 @@ describe('openLibraryServiceAuthority', () => {
   });
 
   it('does not create a non-durable authority when IndexedDB is unavailable', async () => {
-    await expect(openLibraryServiceAuthority(hello(), null)).resolves.toBeNull();
+    await expect(
+      openLibraryServiceAuthority(hello(), null, undefined, content),
+    ).resolves.toBeNull();
   });
 
   it('keeps recovery, pairing, import, and export material behind typed service calls', async () => {
@@ -80,6 +91,8 @@ describe('openLibraryServiceAuthority', () => {
     const authority = await openLibraryServiceAuthority(
       hello({ device: '0123456789abcdef' }),
       vault,
+      undefined,
+      content,
     );
     expect(authority).not.toBeNull();
 
@@ -151,6 +164,8 @@ describe('openLibraryServiceAuthority', () => {
     const source = await openLibraryServiceAuthority(
       { ...hello(), requestId: 'source', clientId: 'source', libraryKey: sourceKey },
       vault,
+      undefined,
+      content,
     );
     await source!.command(
       { kind: 'watchlist.add', title: { type: 'movie', id: 88 } },

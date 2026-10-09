@@ -11,21 +11,14 @@ import { localNetworkRefused } from './remuxRoute';
 import { fetchRoutes, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
-import { TMDB_PROXY_KEY } from './tmdb';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
 
-const inputs = (
-  library: boolean,
-  tmdbKey: string,
-  providerKeys: Runtime['providerKeys'],
-  plugins: readonly string[],
-  remux: string | null,
-) => JSON.stringify([library, tmdbKey, providerKeys, plugins, remux]);
+const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
+  JSON.stringify([library, plugins, remux]);
 
 export class SessionServices {
-  tmdbKey = $state(TMDB_PROXY_KEY);
-  providerKeys = $state.raw<Partial<Record<keyof Runtime['providerKeys'], string>>>({});
   plugins = $state.raw<string[]>([]);
   scout = $state.raw<Addon | null>(null);
   atlas = $state<string | null>(null);
@@ -44,28 +37,27 @@ export class SessionServices {
 
   constructor(
     private readonly model: LibraryModel | null,
+    private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
   ) {}
+
+  #configureAtlas(base: string | null): void {
+    void this.content
+      .query({ kind: 'sources.configure', atlas: base })
+      .catch((error: unknown) => console.warn('den: content source configuration failed', error));
+  }
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
     this.#configure(
       this.model !== null,
-      runtime?.tmdbKey ?? TMDB_PROXY_KEY,
-      runtime?.providerKeys ?? {},
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
     );
   }
 
-  #configure(
-    library: boolean,
-    tmdbKey: string,
-    providerKeys: Runtime['providerKeys'],
-    libraryPlugins: readonly string[],
-    remux: string | null,
-  ): void {
-    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, '');
+  #configure(library: boolean, libraryPlugins: readonly string[], remux: string | null): void {
+    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
     if (!this.#grants) {
       this.#grants = true;
       void guestGrants.refresh();
@@ -74,15 +66,13 @@ export class SessionServices {
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
-    const wanted = inputs(library, tmdbKey, providerKeys, plugins, remux);
+    const wanted = inputs(library, plugins, remux);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
     this.#for = wanted;
     clearTimeout(this.#keep);
     this.#keep = undefined;
     this.#stop?.();
-    this.tmdbKey = tmdbKey;
-    this.providerKeys = { ...providerKeys };
     if (JSON.stringify(this.plugins) !== JSON.stringify(plugins)) this.plugins = plugins;
     let current = true;
     this.#stop = () => {
@@ -103,9 +93,10 @@ export class SessionServices {
           );
           this.scout = saved.scout ? { ...saved.scout } : null;
           this.atlas = saved.atlas;
+          this.#configureAtlas(saved.atlas);
           this.reel = saved.reel;
           this.remux = saved.remux;
-          if (this.#foregroundReady) availability.connect(this.scout, tmdbKey);
+          if (this.#foregroundReady) availability.connect(this.scout, this.content);
         })
         .catch(() => {
           // Retained discovery is only a first-paint hint; live discovery below remains authoritative.
@@ -124,7 +115,7 @@ export class SessionServices {
           ? {
               scout: (found: Addon | null) => {
                 this.scout = found;
-                if (this.#foregroundReady) availability.connect(found, tmdbKey);
+                if (this.#foregroundReady) availability.connect(found, this.content);
                 this.#settled();
               },
               remux: (found: string | null) => {
@@ -145,6 +136,7 @@ export class SessionServices {
           : {}),
         atlas: (found) => {
           this.atlas = found?.base ?? null;
+          this.#configureAtlas(this.atlas);
           this.atlasReady = true;
           this.#settled();
         },
@@ -165,7 +157,7 @@ export class SessionServices {
   foregroundReady(): void {
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
-    availability.connect(this.scout, this.tmdbKey);
+    availability.connect(this.scout, this.content);
   }
 
   stop(): void {

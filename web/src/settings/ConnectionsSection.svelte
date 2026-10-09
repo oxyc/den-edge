@@ -29,7 +29,6 @@
   import type { Routes } from '../lib/routes';
   import { routePath } from '../lib/route';
   import { denAddonOf } from '../lib/scout';
-  import { clearTmdbCache } from '../lib/tmdbCache';
   import type {
     ConnectionsView,
     KeyResetOutcome,
@@ -38,11 +37,12 @@
     LibraryPluginView,
   } from '../lib/libraryServiceProtocol';
   import type { Immutable } from '../lib/libraryModel.svelte';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     link,
+    content,
     apiKeys,
-    rawApiKeys,
     simklConnected,
     saveSimkl,
     heldRemovals = [],
@@ -69,8 +69,8 @@
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
+    content: ContentServiceClientPort;
     apiKeys: ConnectionsView['apiKeys'];
-    rawApiKeys: Partial<Record<LibraryApiKeyService, string>>;
     simklConnected: boolean;
     saveSimkl: (token: string | null) => Promise<boolean>;
     /** SIMKL watchlist removals held back until someone approves them (more than 20 at once). */
@@ -121,6 +121,18 @@
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
     name === 'doesthedogdie' ? 'content-warnings' : name;
+  const checkKey = async (service: KeyService, candidate?: string): Promise<KeyCheck> => {
+    try {
+      const answer = await content.query({
+        kind: 'provider-key.check',
+        service: apiService(service.name),
+        candidate,
+      });
+      return answer.outcome === 'unavailable' ? 'unreachable' : answer.outcome;
+    } catch {
+      return 'unreachable';
+    }
+  };
 
   /**
    * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
@@ -159,10 +171,9 @@
     if (checkedOnOpen || disabled) return;
     checkedOnOpen = true;
     for (const service of KEY_SERVICES) {
-      const key = rawApiKeys[apiService(service.name)];
-      if (!key) continue;
+      if (!apiKeys[apiService(service.name)]) continue;
       checks.set(service.name, 'checking');
-      void service.check(key).then((result) => checks.set(service.name, result));
+      void checkKey(service).then((result) => checks.set(service.name, result));
     }
   });
 
@@ -172,7 +183,7 @@
     const before = checks.get(service.name);
     checks.set(service.name, 'checking');
     notes[service.name] = { text: `Checking with ${serviceName[service.name]}…`, bad: false };
-    const result = await service.check(key);
+    const result = await checkKey(service, key);
     if (result !== 'accepted') {
       if (before) checks.set(service.name, before);
       else checks.delete(service.name);
@@ -201,7 +212,8 @@
     checks.delete(service.name);
     delete notes[service.name];
     // TMDB's terms: cached content goes when the key it was fetched with does.
-    if (service.name === 'tmdb') await clearTmdbCache();
+    if (service.name === 'tmdb')
+      await content.query({ kind: 'provider-cache.clear', service: 'tmdb' });
   }
 
   // Addons another library shares with this browser (`grants.svelte.ts`): listed, never editable, and not the library's.

@@ -6,10 +6,7 @@
 
 import type { RowDef } from './catalog';
 import type { ExploreType, MediaType, Title } from './library';
-import { relayFetch } from './relayFetch';
-import { withSharedTitleMetadata } from './titleMetadata';
-
-const PAGE = 24;
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 type Where = Record<string, string>;
 interface AtlasRow {
@@ -174,25 +171,25 @@ export const atlasWhere = (type: ExploreType, id: string): Where | undefined =>
     ? (atlasWhere('movie', id) ?? atlasWhere('tv', id))
     : (type === 'tv' ? SERIES_ROWS : FILM_ROWS).find((row) => row.id === id)?.where;
 
+/** Stable presentation labels for Explore chips; asking provider data still requires `atlasRows`. */
+export const atlasRowLabels = (type: MediaType): Array<Pick<AtlasRow, 'id' | 'title'>> =>
+  (type === 'tv' ? SERIES_ROWS : FILM_ROWS).map(({ id, title }) => ({ id, title }));
+
 /** atlas's rows for a browse screen of `type`, from atlas at `base`. */
-export function atlasRows(
-  base: string,
-  type: MediaType,
-  fetchImpl: typeof fetch = relayFetch,
-): RowDef[] {
-  const path = type === 'tv' ? 'series' : 'movie';
+export function atlasRows(content: ContentServiceClientPort, type: MediaType): RowDef[] {
   return (type === 'tv' ? SERIES_ROWS : FILM_ROWS).map(({ id, title, where }) => ({
     id: `atlas-${id}-${type}`,
     title,
     load: async (page) => {
-      const query = new URLSearchParams({
-        ...where,
-        skip: String((page - 1) * PAGE),
-        limit: String(PAGE),
+      const result = await content.query({
+        kind: 'atlas.row',
+        type,
+        where,
+        page,
       });
-      const res = await fetchImpl(`${base}/index/row/${path}.json?${query}`);
-      if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-      return withSharedTitleMetadata(titlesOf(await res.json()), fetchImpl);
+      if (result.titles.state === 'ready') return result.titles.value;
+      if (result.titles.state === 'absent' || result.titles.state === 'not-configured') return [];
+      throw new Error('atlas browse row is unavailable');
     },
   }));
 }

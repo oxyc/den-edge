@@ -95,9 +95,19 @@ test('availability waits for its narrower lookahead after poster art starts', as
   await guardNetwork(page);
   await routePosterArt(page);
   const lookups = [];
+  const pageOwned = [];
+  await page.addInitScript(() => {
+    const pageFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set('x-den-test-fetch-realm', 'page');
+      return pageFetch(input, { ...init, headers });
+    };
+  });
   await page.route('**/tmdb/3/movie/*/external_ids', (route) => {
     const id = /\/movie\/(\d+)\//.exec(route.request().url())?.[1];
     lookups.push(Number(id));
+    if (route.request().headers()['x-den-test-fetch-realm']) pageOwned.push(Number(id));
     return route.fulfill({ json: { imdb_id: `tt${id.padStart(7, '0')}` } });
   });
   await page.route('**/scout/availability', (route) =>
@@ -113,6 +123,7 @@ test('availability waits for its narrower lookahead after poster art starts', as
 
   await far.evaluate((node) => scrollTo(0, node.offsetTop - innerHeight - 200));
   await expect.poll(() => lookups.length).toBeGreaterThan(0);
+  expect(pageOwned, 'IMDb identifier resolution stays in the content Worker').toEqual([]);
   await page.close();
 });
 

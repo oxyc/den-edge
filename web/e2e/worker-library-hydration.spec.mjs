@@ -144,6 +144,7 @@ async function routes(page, metadata) {
     const headers = request.headers();
     metadata.requests.push({
       ref,
+      url: `${url.pathname}${url.search}`,
       member: headers['x-den-library-member'],
       realm: headers['x-den-test-fetch-realm'],
     });
@@ -264,9 +265,11 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   expect(membership).toMatch(/^[a-f0-9]{32}:[a-f0-9]{64}$/);
   expect(workerRequests.every(({ member }) => member === membership)).toBe(true);
   const counts = new Map();
-  for (const { ref } of workerRequests) counts.set(ref, (counts.get(ref) ?? 0) + 1);
-  expect(counts.get('movie:1002')).toBe(2);
-  expect([...counts].every(([ref, count]) => count === (ref === 'movie:1002' ? 2 : 1))).toBe(true);
+  for (const { url } of workerRequests) counts.set(url, (counts.get(url) ?? 0) + 1);
+  const repeated = [...counts].filter(([, count]) => count > 1);
+  expect(repeated).toHaveLength(1);
+  expect(repeated[0]?.[0]).toContain('/movie/1002?');
+  expect(repeated[0]?.[1]).toBe(2);
 
   // A direct Settings document, its hard refresh, and Home's client-side transition must all observe the same
   // bootstrapped membership. The host grants call and page-owned provider discovery are never sent as a visitor.

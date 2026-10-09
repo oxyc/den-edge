@@ -5,37 +5,39 @@
   import SettingRow from './SettingRow.svelte';
   import { historyCsv, letterboxdCsv, type HistoryExport } from '../lib/historyExport';
   import { titleKey, type Title } from '../lib/library';
-  import { fetchTitle } from '../lib/tmdb';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { LibraryQueryResult } from '../lib/libraryServiceProtocol';
 
   type SemanticExport = Extract<LibraryQueryResult, { kind: 'history.export' }>;
 
   let {
     ready,
-    tmdbKey,
+    content,
     load,
-  }: { ready: boolean; tmdbKey: string; load: () => Promise<SemanticExport> } = $props();
+  }: {
+    ready: boolean;
+    content: ContentServiceClientPort;
+    load: () => Promise<SemanticExport>;
+  } = $props();
 
   type State =
     { step: 'idle' } | { step: 'naming'; done: number; total: number } | { step: 'failed' };
   let state = $state<State>({ step: 'idle' });
 
-  /** Every title's TMDB name and IMDb id: what the page already named, the rest asked for, six at a time. */
+  /** Every title's TMDB name and IMDb id, normalized in bounded batches by the content Worker. */
   async function names(refs: { type: 'movie' | 'tv'; id: number }[]): Promise<Map<string, Title>> {
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one export; nothing renders from it.
     const found = new Map<string, Title>();
-    const queue = [...refs];
-    const total = queue.length;
+    const total = refs.length;
     let done = 0;
     state = { step: 'naming', done, total };
-    const worker = async () => {
-      for (let ref = queue.shift(); ref; ref = queue.shift()) {
-        const title = await fetchTitle(ref, tmdbKey);
-        if (title) found.set(titleKey(ref), title);
-        state = { step: 'naming', done: ++done, total };
-      }
-    };
-    await Promise.all(Array.from({ length: 6 }, worker));
+    for (let at = 0; at < refs.length; at += 128) {
+      const batch = refs.slice(at, at + 128);
+      const answer = await content.query({ kind: 'titles', titles: batch });
+      for (const title of answer.titles) found.set(titleKey(title), title);
+      done += batch.length;
+      state = { step: 'naming', done, total };
+    }
     return found;
   }
 

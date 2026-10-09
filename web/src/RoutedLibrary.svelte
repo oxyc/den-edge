@@ -5,7 +5,7 @@
   import LibraryStatus from './components/LibraryStatus.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { LibrarySession } from './lib/librarySession.svelte';
-  import { createLibraryService } from './lib/libraryServiceFactory';
+  import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryModel } from './lib/libraryModel.svelte';
   import {
     links,
@@ -67,17 +67,19 @@
   }
 
   const open = (key: string | null, local: boolean) => {
-    if (!key) return new LibrarySession(null, false);
-    const service = createLibraryService();
+    // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
+    // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
+    const services = createWorkerServiceSession();
+    if (!key) return new LibrarySession(null, false, services.content, () => services.close());
     const clock = legacyClock();
-    const model = new LibraryModel(service, {
+    const model = new LibraryModel(services.library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
       ...(clock ? { legacyClock: clock } : {}),
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
     void model.ready.catch(() => {});
-    return new LibrarySession(model, local);
+    return new LibrarySession(model, local, services.content, () => services.close());
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
@@ -394,6 +396,7 @@
             <SettingsScreen.current
               {link}
               model={session.model!}
+              content={session.content}
               local={session.local}
               onjoin={joinLibrary}
               onresetkey={resetLibraryKey}

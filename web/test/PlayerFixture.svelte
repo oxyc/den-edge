@@ -2,8 +2,10 @@
      `?remux=/remux` plays through the relay instead, as a browser away from home does. Closing it unmounts it, as the
      app does. -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Player from '../src/components/Player.svelte';
   import type { Title } from '../src/lib/library';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { tabName } from '../src/lib/tabName.svelte';
 
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
@@ -11,7 +13,10 @@
   const remux = query.get('remux') ?? `${location.origin}/direct`;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
+  const services = createWorkerServiceSession();
+  const content = services.content;
   let open = $state(true);
+  onDestroy(() => services.close());
   // As App does: the name a page offers, else the address's.
   $effect(() => {
     document.title = tabName() ?? 'Den';
@@ -21,7 +26,7 @@
 {#if open}
   <Player
     {title}
-    tmdbKey="fixture"
+    {content}
     scout={{ install: 'http://scout.test/config', base: '/scout/config' }}
     {remux}
     subtitles={[]}

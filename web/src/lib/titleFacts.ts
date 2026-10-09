@@ -2,9 +2,6 @@
 // subjects, places and source authors, each with the id Search selects it by and how many titles carry it; and its
 // moods, as atlas's labels name them.
 
-import type { MediaType } from './library';
-import { relayFetch } from './relayFetch';
-
 /** A value Search can select: `company-<id>`, `network-<id>`, …; `titles` is how many titles carry it. */
 export interface Browsable {
   id: string;
@@ -60,24 +57,6 @@ export function parseTitleFacts(body: unknown): TitleFacts {
       ? at.countries.filter((id): id is string => typeof id === 'string' && /^[A-Z]{2}$/.test(id))
       : [],
   };
-}
-
-/** An atlas without these fields, or none at all, answers `NO_FACTS`: the page shows what TMDB names, unlinked. */
-export async function fetchTitleFacts(
-  atlas: string | null | undefined,
-  ref: { type: MediaType; id: number },
-  signal?: AbortSignal,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<TitleFacts> {
-  if (!atlas) return NO_FACTS;
-  const base = atlas.replace(/\/$/, '');
-  const type = ref.type === 'tv' ? 'series' : 'movie';
-  try {
-    const response = await fetchImpl(`${base}/index/title/${type}/${ref.id}.json`, { signal });
-    return response.ok ? parseTitleFacts(await response.json()) : NO_FACTS;
-  } catch {
-    return NO_FACTS;
-  }
 }
 
 const folded = (name: string) =>

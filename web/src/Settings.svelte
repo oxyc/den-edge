@@ -21,14 +21,15 @@
   import { fetchRoutes, type Routes } from './lib/routes';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { fetchTitle } from './lib/tmdb';
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
+  import type { ContentServiceClientPort } from './lib/contentServiceClient';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
     link,
     model,
+    content,
     local = false,
     onjoin,
     onresetkey,
@@ -37,6 +38,7 @@
   }: {
     link: Link | null;
     model: LibraryModel;
+    content: ContentServiceClientPort;
     local?: boolean;
     onjoin?: (libraryKey: string) => Promise<boolean>;
     onresetkey?: () => Promise<KeyResetOutcome | null>;
@@ -76,7 +78,6 @@
   const plugins = $derived(connections ? structuredClone(connections.plugins) : []);
   const pluginUrls = $derived(plugins.map((plugin) => plugin.manifestUrl));
   const disabled = $derived(!ready || saving);
-  const tmdbKey = $derived(model.runtime.value?.tmdbKey ?? '');
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
@@ -139,21 +140,19 @@
    */
   const heldNames = new SvelteMap<string, string>();
   $effect(() => {
-    const key = tmdbKey;
     const held = heldRemovals;
     // The names untracked: one arriving must not re-run this and drop the lookups still on their way.
     const wanted = untrack(() => held.filter((ref) => !heldNames.has(`${ref.type}:${ref.id}`)));
-    if (!key || !wanted.length) return;
-    let gone = false;
-    void Promise.all(
-      wanted.map(async (ref) => {
-        const found = await fetchTitle(ref, key);
-        if (!gone && found?.title) heldNames.set(`${ref.type}:${ref.id}`, found.title);
-      }),
-    );
-    return () => {
-      gone = true;
-    };
+    if (!wanted.length) return;
+    const ask = new AbortController();
+    void content
+      .query({ kind: 'titles', titles: wanted }, ask.signal)
+      .then((answer) => {
+        if (ask.signal.aborted) return;
+        for (const found of answer.titles) heldNames.set(`${found.type}:${found.id}`, found.title);
+      })
+      .catch(() => undefined);
+    return () => ask.abort();
   });
   const namedRemovals = $derived(
     heldRemovals.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
@@ -227,13 +226,13 @@
 
     <ConnectionsSection
       {link}
+      {content}
       onjoin={local ? onjoin : undefined}
       onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? onresetkey : undefined}
       {hasRecoveryCode}
       {heldReset}
       {onadoptheld}
       apiKeys={connections?.apiKeys ?? {}}
-      rawApiKeys={model.runtime.value?.providerKeys ?? {}}
       simklConnected={!!simkl?.connected}
       {saveSimkl}
       heldRemovals={namedRemovals}
@@ -273,14 +272,14 @@
       <PlaybackSection {prefs} {disabled} save={savePrefs} />
       <ImportSection
         {ready}
-        {tmdbKey}
+        {content}
         watched={model.overview.value?.watched ?? []}
         {importHistory}
         {exportHistory}
       />
       <ContentSection
         {prefs}
-        {tmdbKey}
+        {content}
         pinConfigured={connections?.parentalPinConfigured ?? false}
         {disabled}
         save={savePrefs}

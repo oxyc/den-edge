@@ -26,7 +26,7 @@ describe('downloadStill', () => {
       { number: 4, name: 'Four', stillPath: '/four.jpg' },
     ]);
     await expect(downloadStill(episode(), load)).resolves.toBe('/four.jpg');
-    expect(load).toHaveBeenCalledWith(1399, 2, 'den-proxy');
+    expect(load).toHaveBeenCalledWith(1399, 2);
   });
 
   it('shares an in-flight recovery and its answer across windowed-card remounts', async () => {

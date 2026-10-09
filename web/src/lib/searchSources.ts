@@ -4,8 +4,9 @@
 import type { MediaType, Title } from './library';
 import type { FacetAnswer, Hit, Person, Ref, SearchSources } from './search';
 import { withSharedTitleMetadata } from './titleMetadata';
-import { fetchTitle, toTitle } from './tmdb';
+import { toTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
+import { fetchDetailsResult } from './workerTmdbProvider';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -221,7 +222,9 @@ export function searchSources(
       const key = `${ref.type}-${ref.id}`;
       let pending = cache.get(key);
       if (!pending) {
-        const asked = fetchTitle(ref, tmdbKey, fetchImpl);
+        const asked = fetchDetailsResult(ref, tmdbKey, fetchImpl).then((result) =>
+          result.kind === 'found' ? result.details.title : null,
+        );
         pending = asked;
         cache.set(key, asked);
         void asked.then((title) => {

@@ -1,6 +1,3 @@
-import type { MediaType } from './library';
-import { relayFetch } from './relayFetch';
-
 export interface IconicStudio {
   id: string;
   name: string;
@@ -21,21 +18,4 @@ export function parseIconicStudios(body: unknown): IconicStudio[] {
     seen.add(id);
     return [{ id, name: clean }];
   });
-}
-
-export async function fetchIconicStudios(
-  atlas: string | null | undefined,
-  ref: { type: MediaType; id: number },
-  signal?: AbortSignal,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<IconicStudio[]> {
-  if (!atlas) return [];
-  const base = atlas.replace(/\/$/, '');
-  const type = ref.type === 'tv' ? 'series' : 'movie';
-  try {
-    const response = await fetchImpl(`${base}/index/studios/${type}/${ref.id}.json`, { signal });
-    return response.ok ? parseIconicStudios(await response.json()) : [];
-  } catch {
-    return [];
-  }
 }

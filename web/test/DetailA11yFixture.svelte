@@ -3,6 +3,7 @@
      library session. -->
 <script lang="ts">
   import Detail from '../src/components/Detail.svelte';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   import type { TitleRow } from '../src/lib/wire';
 
@@ -10,6 +11,7 @@
   let row = $state<TitleRow | undefined>(undefined);
   let watchlistCalls = $state(0);
   let seenCalls = $state(0);
+  const content = fixtureContentServiceContext();
 
   (
     window as unknown as {
@@ -29,8 +31,8 @@
 <main style="padding:var(--bar-space) var(--gutter) 32px;max-width:1400px;margin:auto">
   <Detail
     active={true}
+    {content}
     ref={{ type: 'movie', id: 42 }}
-    tmdbKey="fixture-key"
     reel={null}
     {row}
     episodes={new Map()}

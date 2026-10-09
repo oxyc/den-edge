@@ -17,6 +17,7 @@ import {
   type LibraryVersion,
 } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
+import { isContentServiceServerMessage } from './contentServiceProtocol';
 
 export interface LibraryServiceTransport {
   send(message: LibraryServiceClientMessage): void;
@@ -68,11 +69,19 @@ export class LibraryServiceClient {
     private readonly installRelayMembership?: (
       membership: { libraryId: string; memberToken: string } | null,
     ) => (() => void) | void,
+    private readonly ownsTransport = true,
+    private readonly onOpening?: (opening: Promise<LibraryVersion>) => void,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
 
-  async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+  open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+    const opening = this.#open(options);
+    this.onOpening?.(opening);
+    return opening;
+  }
+
+  async #open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     const requestId = this.#requestId();
     const reply = await this.#request(
       {
@@ -197,7 +206,7 @@ export class LibraryServiceClient {
     this.#stopRelayMembership?.();
     this.#stopRelayMembership = undefined;
     this.#stopListening();
-    this.transport.close();
+    if (this.ownsTransport) this.transport.close();
     const error = new LibraryServiceError({
       code: 'cancelled',
       message: 'library service client is closed',
@@ -243,7 +252,7 @@ export class LibraryServiceClient {
   }
 
   #receive(input: unknown): void {
-    if (this.#closed) return;
+    if (this.#closed || isContentServiceServerMessage(input)) return;
     const decoded = decodeLibraryServiceServerMessage(input);
     if (!decoded.ok) {
       this.#failAll(decoded.error);

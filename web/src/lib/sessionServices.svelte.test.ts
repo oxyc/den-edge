@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { availability } from './availability.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { SessionServices } from './sessionServices.svelte';
 
 let discoveries = 0;
@@ -29,13 +30,15 @@ vi.mock('./grants.svelte', () => ({
   guestGrants: { refresh: async () => undefined, pluginUrls: () => [] },
 }));
 
-const runtime = (tmdbKey: string, pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
+const runtime = (pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
   kind: 'runtime',
-  tmdbKey,
-  providerKeys: { tmdb: tmdbKey },
   pluginManifestUrls,
   privateRemuxUrl: null,
 });
+const content = {
+  query: vi.fn(async () => ({ kind: 'sources.configure' })),
+  onStatus: () => () => {},
+} as unknown as ContentServiceClientPort;
 
 const fakeModel = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -57,14 +60,13 @@ describe('SessionServices', () => {
     vi.useFakeTimers();
     discoveries = 0;
     let asked = 0;
-    const services = new SessionServices(fakeModel(), async () => ({
+    const services = new SessionServices(fakeModel(), content, async () => ({
       [`routes-${++asked}`]: [{ url: `/route-${asked}` }],
     }));
 
-    services.configure(runtime('first', ['https://first.test/manifest.json']));
-    expect(services.tmdbKey).toBe('first');
+    services.configure(runtime(['https://first.test/manifest.json']));
     await Promise.resolve();
-    services.configure(runtime('second', ['https://second.test/manifest.json']));
+    services.configure(runtime(['https://second.test/manifest.json']));
     await Promise.resolve();
     await vi.runAllTimersAsync();
 
@@ -78,14 +80,14 @@ describe('SessionServices', () => {
   it('holds availability until the foreground signal', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), async () => ({}));
-    services.configure(runtime('tmdb'));
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
-    expect(connect).not.toHaveBeenCalledWith(services.scout, 'tmdb');
+    expect(connect).not.toHaveBeenCalledWith(services.scout, content);
 
     connect.mockClear();
     services.foregroundReady();
-    expect(connect).toHaveBeenCalledWith(services.scout, 'tmdb');
+    expect(connect).toHaveBeenCalledWith(services.scout, content);
     services.stop();
   });
 
@@ -103,8 +105,8 @@ describe('SessionServices', () => {
         remux: null,
       }),
     });
-    const services = new SessionServices(model, () => routes);
-    services.configure(runtime('tmdb'));
+    const services = new SessionServices(model, content, () => routes);
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
     release({ live: [{ url: '/live' }] });
     await vi.waitFor(() => expect(services.atlas).not.toBe('/retained-atlas'));
@@ -115,8 +117,12 @@ describe('SessionServices', () => {
     discoveries = 0;
     reaches = 'https://den-remux.tail.test';
     const rememberPrivateRemux = vi.fn().mockResolvedValue(undefined);
-    const services = new SessionServices(fakeModel({ rememberPrivateRemux }), async () => ({}));
-    services.configure(runtime('tmdb'));
+    const services = new SessionServices(
+      fakeModel({ rememberPrivateRemux }),
+      content,
+      async () => ({}),
+    );
+    services.configure(runtime());
     await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
     services.stop();
     reaches = undefined;
@@ -127,14 +133,14 @@ describe('SessionServices', () => {
     vi.stubGlobal('scheduler', { yield: () => Promise.resolve() });
     discoveries = 0;
     const retainServices = vi.fn().mockResolvedValue(undefined);
-    const services = new SessionServices(fakeModel({ retainServices }), async () => ({
+    const services = new SessionServices(fakeModel({ retainServices }), content, async () => ({
       scout: [{ url: '/scout' }],
     }));
 
-    services.configure(runtime('first'));
+    services.configure(runtime(['first']));
     for (let turn = 0; turn < 10; turn++) await Promise.resolve();
     expect(services.atlas).toBe('/atlas-1');
-    services.configure(runtime('second'));
+    services.configure(runtime(['second']));
     for (let turn = 0; turn < 10; turn++) await Promise.resolve();
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -150,9 +156,10 @@ describe('SessionServices', () => {
   it('treats a rejected retained hint as a cache miss', async () => {
     const services = new SessionServices(
       fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
+      content,
       async () => ({}),
     );
-    services.configure(runtime('tmdb'));
+    services.configure(runtime());
     await vi.waitFor(() => expect(services.atlasReady).toBe(true));
     expect(services.atlas).toBeTruthy();
     services.stop();

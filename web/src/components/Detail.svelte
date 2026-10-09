@@ -4,16 +4,9 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import type { Routes } from '../lib/routes';
   import Loading from './Loading.svelte';
-  import {
-    fetchDetail,
-    fetchSeason,
-    type Credit,
-    type Episode,
-    type TitleDetail,
-  } from '../lib/detail';
+  import { type Credit, type Episode, type TitleDetail } from '../lib/detail';
   import {
     episodeProgress,
-    fetchRatings,
     markableEpisodes,
     seriesPresentation,
     seriesSeenOverride,
@@ -45,14 +38,16 @@
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref } from '../lib/route';
-  import { fetchIconicStudios, type IconicStudio } from '../lib/iconicStudios';
-  import { fetchTitleFacts, NO_FACTS, type TitleFacts } from '../lib/titleFacts';
+  import type { IconicStudio } from '../lib/iconicStudios';
+  import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
   import { toastContext } from '../lib/toast';
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
   import { yieldTask } from '../lib/taskYield';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type { DownloadsView } from '../lib/libraryServiceProtocol';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { Warning } from '../lib/contentWarnings';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -61,9 +56,7 @@
     reel = null,
     routes = {},
     atlas = null,
-    tmdbKey,
-    omdbKey = '',
-    warningKey = '',
+    content,
     warningCategories = [],
     region = 'US',
     autoplay = true,
@@ -96,9 +89,8 @@
     routes?: Routes;
     /** Where this page reaches atlas, whose index names the titles closest to this one; null where it can't. */
     atlas?: string | null;
-    tmdbKey: string;
-    omdbKey?: string;
-    warningKey?: string;
+    /** The Worker-owned, normalized content boundary. Provider keys never enter this component. */
+    content: ContentServiceClientPort;
     warningCategories?: string[];
     region?: string;
     ratingSources?: string[];
@@ -287,22 +279,19 @@
   let retry = $state(0),
     seasonRetry = $state(0);
   let ratings = $state.raw<Ratings | null>(null);
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise memoization must not become a dependency of the season-loading effect.
-  const seasonCache = new Map<string, Promise<Episode[] | null>>();
+  let warnings = $state.raw<Warning[] | undefined>();
 
   // Props arrive through one component input object. Publishing an unrelated one (for example fresh library rows
-  // after a provider sync) can therefore make expressions that read `ref`, the key or the region run again even
-  // when all three values are unchanged. Keep the request behind a primitive identity: re-evaluating this derived
+  // after a provider sync) can therefore make expressions that read `ref` or the region run again even when both
+  // values are unchanged. Keep the request behind a primitive identity: re-evaluating this derived
   // to the same string does not tear down the loaded detail — and its playing `DetailMedia` — just because another
   // prop changed.
-  const detailRequest = $derived(`${ref.type}:${ref.id}\u0000${tmdbKey}\u0000${region}`);
+  const detailRequest = $derived(`${ref.type}:${ref.id}\u0000${region}`);
   $effect(() => {
     void detailRequest;
-    const [current, key, country] = untrack(
-      () => [{ type: ref.type, id: ref.id }, tmdbKey, region] as const,
-    );
+    const [current, country] = untrack(() => [{ type: ref.type, id: ref.id }, region] as const);
     void retry;
-    let live = true;
+    const controller = new AbortController();
     detail = undefined;
     season = null;
     seasonEpisodes = undefined;
@@ -310,14 +299,17 @@
     castShown = CAST_PAGE;
     castMounted = 0;
     tailStarted = false;
-    void fetchDetail(current, key, undefined, country).then((loaded) => {
-      if (!live) return;
-      detail = loaded;
-      season = loaded ? seriesPresentation(loaded, episodes, row).initialSeason : null;
-    });
-    return () => {
-      live = false;
-    };
+    void content
+      .query({ kind: 'title.detail', title: current, region: country }, controller.signal)
+      .then(({ detail: loaded }) => {
+        if (controller.signal.aborted) return;
+        detail = loaded.state === 'ready' ? loaded.value : null;
+        season = detail ? seriesPresentation(detail, episodes, row).initialSeason : null;
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) detail = null;
+      });
+    return () => controller.abort();
   });
 
   // A different season starts with its first screenful. Fixed slots below it keep later sections and saved scroll
@@ -353,69 +345,74 @@
     };
   });
 
-  // Forgotten only for another title or another atlas, and asked for while the page is in front and lacks them.
-  // Resetting them as the page was left as well handed the rows a new answer on every return, and the rows below
-  // the cast were rebuilt from nothing each time the viewer came back to the title.
+  const extrasRequest = $derived(
+    `${ref.type}:${ref.id}\u0000${warningCategories.slice().sort().join('\u0001')}`,
+  );
   $effect(() => {
-    void [atlas, ref.type, ref.id];
-    iconicStudios = atlas ? undefined : [];
-    titleFacts = atlas ? undefined : NO_FACTS;
+    void extrasRequest;
+    ratings = null;
+    warnings = undefined;
+    iconicStudios = undefined;
+    titleFacts = undefined;
   });
 
+  // Optional providers are one independent Worker question. They may finish after base detail and seasons, and a
+  // retained hidden route does no provider work until it is visible again.
   $effect(() => {
-    const [base, type, id] = [atlas, ref.type, ref.id];
-    if (!active || !base || iconicStudios !== undefined) return;
+    void extrasRequest;
+    const [visible, loaded] = [active, detail];
+    if (!visible || !loaded) return;
+    const title = untrack(() => ({ type: ref.type, id: ref.id }));
+    const categories = untrack(() => [...warningCategories]);
     const controller = new AbortController();
-    void fetchIconicStudios(base, { type, id }, controller.signal).then((loaded) => {
-      if (!controller.signal.aborted) iconicStudios = loaded;
-    });
+    void content
+      .query(
+        {
+          kind: 'title.extras' as const,
+          title,
+          warningCategories: categories,
+        },
+        controller.signal,
+      )
+      .then(({ extras }) => {
+        if (controller.signal.aborted) return;
+        ratings = extras.ratings.state === 'ready' ? extras.ratings.value : null;
+        warnings = extras.warnings.state === 'ready' ? extras.warnings.value : [];
+        iconicStudios = extras.iconicStudios.state === 'ready' ? extras.iconicStudios.value : [];
+        titleFacts = extras.facts.state === 'ready' ? extras.facts.value : NO_FACTS;
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        warnings = [];
+        iconicStudios = [];
+        titleFacts = NO_FACTS;
+      });
     return () => controller.abort();
   });
 
   $effect(() => {
-    const [base, type, id] = [atlas, ref.type, ref.id];
-    if (!active || !base || titleFacts !== undefined) return;
-    const controller = new AbortController();
-    void fetchTitleFacts(base, { type, id }, controller.signal).then((loaded) => {
-      if (!controller.signal.aborted) titleFacts = loaded;
-    });
-    return () => controller.abort();
-  });
-
-  $effect(() => {
-    const [picked, current, key] = [season, ref, tmdbKey];
+    const [picked, current] = [season, ref];
     void seasonRetry;
     if (picked === null || current.type !== 'tv') return;
-    let live = true;
-    seasonLoading = true;
-    const cacheKey = `${current.id}:${picked}:${key}`;
-    let request = seasonCache.get(cacheKey);
-    if (!request) {
-      request = fetchSeason(current.id, picked, key);
-      seasonCache.set(cacheKey, request);
-      void request.then((result) => {
-        if (result === null) seasonCache.delete(cacheKey);
-      });
-    }
-    void request.then((loaded) => {
-      if (!live) return;
-      seasonEpisodes = loaded;
-      displayedSeason = picked;
-      seasonLoading = false;
-    });
-    return () => {
-      live = false;
-    };
-  });
-
-  $effect(() => {
-    const [id, key] = [detail?.imdbId, omdbKey];
-    ratings = null;
-    if (!id) return;
     const controller = new AbortController();
-    void fetchRatings(id, key, controller.signal).then((loaded) => {
-      if (!controller.signal.aborted) ratings = loaded;
-    });
+    seasonLoading = true;
+    void content
+      .query(
+        { kind: 'season', title: { type: 'tv', id: current.id }, season: picked },
+        controller.signal,
+      )
+      .then(({ episodes: loaded }) => {
+        if (controller.signal.aborted) return;
+        seasonEpisodes = loaded.state === 'ready' ? loaded.value : null;
+        displayedSeason = picked;
+        seasonLoading = false;
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        seasonEpisodes = null;
+        displayedSeason = picked;
+        seasonLoading = false;
+      });
     return () => controller.abort();
   });
 
@@ -646,8 +643,7 @@
               {ratings}
               enabled={ratingSources}
               pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
-              {warningKey}
-              {warningCategories}
+              {warnings}
               {region}
             />
             {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
@@ -893,7 +889,7 @@
       {/if}
       <RelatedTitles
         detail={d}
-        {tmdbKey}
+        {content}
         {atlas}
         studios={iconicStudios}
         facts={titleFacts}

@@ -1,77 +1,71 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { BLOCKED_MESSAGE, playGuard } from './playGuard';
 
-const rated = (certification: string) => ({
-  title: 'A Film',
-  release_dates: { results: [{ iso_3166_1: 'US', release_dates: [{ certification }] }] },
-});
-const fetchOf = (body: unknown, status = 200) =>
-  (async () => new Response(JSON.stringify(body), { status })) as typeof fetch;
+const contentWith = (certification: string | null, rejects = false) => {
+  const query = vi.fn(async () => {
+    if (rejects) throw new Error('offline');
+    return {
+      kind: 'title.detail' as const,
+      detail:
+        certification === null
+          ? ({ state: 'absent' } as const)
+          : ({ state: 'ready', value: { certifications: { US: certification } } } as const),
+    };
+  });
+  return {
+    content: { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort,
+    query,
+  };
+};
 
 describe('playGuard, the one place every "Play" actually starts from', () => {
-  it('refuses nothing when the household has no ceiling — a guest, always', async () => {
-    expect(
-      await playGuard(
-        { type: 'movie', id: 1 },
-        { fetchImpl: fetchOf(rated('R')) /* no ceiling */ },
-      ),
-    ).toBeNull();
+  it('refuses nothing when the household has no ceiling, without asking for metadata', async () => {
+    const { content, query } = contentWith('R');
+    await expect(playGuard({ type: 'movie', id: 1 }, { content })).resolves.toBeNull();
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('allows a title at or under the ceiling', async () => {
-    expect(
-      await playGuard(
+    await expect(
+      playGuard(
         { type: 'movie', id: 1 },
-        { ceiling: 'pg13', fetchImpl: fetchOf(rated('PG-13')) },
+        { content: contentWith('PG-13').content, ceiling: 'pg13' },
       ),
-    ).toBeNull();
-    expect(
-      await playGuard({ type: 'movie', id: 1 }, { ceiling: 'r', fetchImpl: fetchOf(rated('R')) }),
-    ).toBeNull();
+    ).resolves.toBeNull();
+    await expect(
+      playGuard({ type: 'movie', id: 1 }, { content: contentWith('R').content, ceiling: 'r' }),
+    ).resolves.toBeNull();
   });
 
   it('refuses a title above the ceiling, with the same message Detail shows', async () => {
-    expect(
-      await playGuard(
-        { type: 'movie', id: 1 },
-        { ceiling: 'pg13', fetchImpl: fetchOf(rated('R')) },
-      ),
-    ).toBe(BLOCKED_MESSAGE);
-    expect(
-      await playGuard(
-        { type: 'movie', id: 1 },
-        { ceiling: 'r', fetchImpl: fetchOf(rated('NC-17')) },
-      ),
-    ).toBe(BLOCKED_MESSAGE);
+    await expect(
+      playGuard({ type: 'movie', id: 1 }, { content: contentWith('R').content, ceiling: 'pg13' }),
+    ).resolves.toBe(BLOCKED_MESSAGE);
+    await expect(
+      playGuard({ type: 'movie', id: 1 }, { content: contentWith('NC-17').content, ceiling: 'r' }),
+    ).resolves.toBe(BLOCKED_MESSAGE);
   });
 
-  it('fails closed — refuses — when a ceiling is set and the lookup fails; never looks one up with no ceiling', async () => {
-    let asked = false;
-    const down = (async () => {
-      asked = true;
-      return new Response('{}', { status: 401 });
-    }) as typeof fetch;
-    expect(await playGuard({ type: 'movie', id: 1 }, { ceiling: 'pg13', fetchImpl: down })).toBe(
-      BLOCKED_MESSAGE,
-    );
-    expect(asked).toBe(true);
-
-    asked = false;
-    expect(await playGuard({ type: 'movie', id: 1 }, { fetchImpl: down })).toBeNull();
-    expect(asked).toBe(false);
+  it('fails closed when a ceiling is set and metadata is missing or unavailable', async () => {
+    await expect(
+      playGuard({ type: 'movie', id: 1 }, { content: contentWith(null).content, ceiling: 'pg13' }),
+    ).resolves.toBe(BLOCKED_MESSAGE);
+    await expect(
+      playGuard(
+        { type: 'movie', id: 1 },
+        { content: contentWith(null, true).content, ceiling: 'pg13' },
+      ),
+    ).resolves.toBe(BLOCKED_MESSAGE);
   });
 
-  it('reads the household key where it has one, den-edge’s shared proxy key otherwise', async () => {
-    const keys: string[] = [];
-    const capture = (async (url: string) => {
-      keys.push(new URL(url).searchParams.get('api_key')!);
-      return new Response(JSON.stringify(rated('PG-13')), { status: 200 });
-    }) as typeof fetch;
-    await playGuard({ type: 'movie', id: 1 }, { ceiling: 'pg13', fetchImpl: capture });
-    await playGuard(
-      { type: 'movie', id: 1 },
-      { ceiling: 'pg13', tmdbKey: 'household-key', fetchImpl: capture },
-    );
-    expect(keys).toEqual(['den-proxy', 'household-key']);
+  it('asks the content Worker for the household region', async () => {
+    const { content, query } = contentWith('PG-13');
+    await playGuard({ type: 'movie', id: 7 }, { content, ceiling: 'pg13', region: 'FI' });
+    expect(query).toHaveBeenCalledWith({
+      kind: 'title.detail',
+      title: { type: 'movie', id: 7 },
+      region: 'FI',
+    });
   });
 });

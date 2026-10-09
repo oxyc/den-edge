@@ -17,7 +17,7 @@
   import { leavesBillboard, nextSlide, type SlideAction } from '../lib/billboardActions';
   import type { TitleRow } from '../lib/wire';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
-  import { fetchDetail, type TitleDetail } from '../lib/detail';
+  import type { TitleDetail } from '../lib/detail';
   import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
@@ -37,12 +37,13 @@
     recommendationReason,
     type RecommendedTitle,
   } from '../lib/recommend';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
   let {
     titles,
     index = $bindable(0),
     active = true,
-    tmdbKey,
+    content,
     onplay,
     onready,
     onretained,
@@ -71,7 +72,8 @@
     /** The Watchlist page's own billboard, where a title taken off the watchlist is done with (`leavesBillboard`). */
     watchlistPage?: boolean;
     active?: boolean;
-    tmdbKey: string;
+    /** Worker-owned normalized title metadata. */
+    content: ContentServiceClientPort;
     /** Play it in this browser; no button without it. */
     onplay?: (title: Title) => void;
     /** The current still is decoded and visible, so the rest of Home may begin speculative work. */
@@ -159,13 +161,18 @@
   const learning = new Set<string>();
 
   async function learn(title: Title | undefined): Promise<void> {
-    if (!title || !tmdbKey || known.has(keyOf(title)) || learning.has(keyOf(title))) return;
+    if (!title || known.has(keyOf(title)) || learning.has(keyOf(title))) return;
     const key = keyOf(title);
     learning.add(key);
     try {
-      const found = await fetchDetail({ type: title.type, id: title.id }, tmdbKey).catch(
-        () => null,
-      );
+      const answer = await content
+        .query({
+          kind: 'title.detail',
+          title: { type: title.type, id: title.id },
+          region: 'US',
+        })
+        .catch(() => null);
+      const found = answer?.detail.state === 'ready' ? answer.detail.value : null;
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Publish one completed immutable map through the existing state assignment.
       if (found) known = new Map(known).set(key, found);
     } finally {

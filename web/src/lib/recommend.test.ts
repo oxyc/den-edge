@@ -16,9 +16,10 @@ import {
   recommendForEveryone,
   preloadPersonalBackdrop,
   replacePersonalBillboard,
-  startBillboard,
   type KeptBillboard,
 } from './recommend';
+import { ContentAuthority } from './contentAuthority';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
   type: 'movie',
@@ -26,6 +27,23 @@ const film = (id: number, extra: Partial<Title> = {}): Title => ({
   title: `T${id}`,
   ...extra,
 });
+
+const content = (base: string, fetchImpl: typeof fetch): ContentServiceClientPort => {
+  const authority = new ContentAuthority(
+    {
+      tmdb: () => undefined,
+      omdb: () => undefined,
+      contentWarnings: () => undefined,
+      atlas: () => base,
+    },
+    { providerFetch: fetchImpl },
+  );
+  return {
+    query: (request, signal) =>
+      authority.query(request, signal ?? new AbortController().signal) as never,
+    onStatus: () => () => {},
+  };
+};
 
 describe('recommendForEveryone', () => {
   it('asks for the scope’s billboard for the UTC day with GET', async () => {
@@ -35,11 +53,10 @@ describe('recommendForEveryone', () => {
       return new Response(JSON.stringify({ slides: [{ type: 'series', id: 1438 }] }));
     }) as unknown as typeof fetch;
     const slides = await recommendForEveryone(
-      '/atlas',
+      content('/atlas', fetchImpl),
       billboardScope('tv'),
       false,
       new Date('2026-09-28T23:30:00-03:00'),
-      fetchImpl,
     );
     expect(slides).toEqual([{ type: 'tv', id: 1438, imdbId: undefined, why: undefined }]);
     expect(asked[0]!.url).toBe('/atlas/recommend/series.json?day=2026-09-29');
@@ -51,8 +68,12 @@ describe('recommendForEveryone', () => {
     const unavailable = (async () =>
       new Response('{}', { status: 404 })) as unknown as typeof fetch;
     const malformed = (async () => new Response('{}')) as unknown as typeof fetch;
-    expect(await recommendForEveryone('/atlas', 'home', false, new Date(), unavailable)).toBeNull();
-    expect(await recommendForEveryone('/atlas', 'home', false, new Date(), malformed)).toBeNull();
+    expect(
+      await recommendForEveryone(content('/atlas', unavailable), 'home', false, new Date()),
+    ).toBeNull();
+    expect(
+      await recommendForEveryone(content('/atlas', malformed), 'home', false, new Date()),
+    ).toBeNull();
   });
 
   it('asks for only new titles with fresh, as an address of its own', async () => {
@@ -62,45 +83,8 @@ describe('recommendForEveryone', () => {
       return new Response(JSON.stringify({ slides: [] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/', false, true, now, fetchImpl);
+    await recommendForEveryone(content('/atlas', fetchImpl), 'home', true, now);
     expect(asked).toEqual(['/atlas/recommend/home.json?day=2026-09-28&fresh=1']);
-    // The started answer is only-new-titles, so a page without fresh asks for its own.
-    await recommendForEveryone('/atlas', 'home', false, now, fetchImpl);
-    expect(asked).toHaveLength(2);
-    expect(asked[1]).toBe('/atlas/recommend/home.json?day=2026-09-28');
-    await recommendForEveryone('/atlas', 'home', true, now, fetchImpl);
-    expect(asked).toHaveLength(2);
-  });
-
-  it('takes the billboard the app started asking for once', async () => {
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(JSON.stringify({ slides: [{ type: 'movie', id: asked.length }] }));
-    }) as unknown as typeof fetch;
-    const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/movies', false, false, now, fetchImpl);
-    startBillboard('/watchlist', false, false, now, fetchImpl);
-    expect(asked).toEqual(['/atlas/recommend/movies.json?day=2026-09-28']);
-    expect((await recommendForEveryone('/atlas', 'movies', false, now, fetchImpl))?.[0]?.id).toBe(
-      1,
-    );
-    expect(asked).toHaveLength(1);
-    await recommendForEveryone('/atlas', 'movies', false, now, fetchImpl);
-    expect(asked).toHaveLength(2);
-  });
-
-  it('starts nothing for a paired browser, whose Home asks its own atlas install', async () => {
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(JSON.stringify({ slides: [{ type: 'movie', id: 1 }] }));
-    }) as unknown as typeof fetch;
-    const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/', true, false, now, fetchImpl);
-    expect(asked).toEqual([]);
-    await recommendForEveryone('/atlas/us_8', 'home', false, now, fetchImpl);
-    expect(asked).toEqual(['/atlas/us_8/recommend/home.json?day=2026-09-28']);
   });
 });
 
@@ -250,7 +234,7 @@ describe('recommend', () => {
       );
     }) as unknown as typeof fetch;
     const body = recommendBody({ facet: null, prefs, library: [], owned: new Set() });
-    expect(await recommend('/atlas/us_8', body, answering)).toEqual([
+    expect(await recommend(content('/atlas/us_8', answering), body)).toEqual([
       { type: 'tv', id: 7, imdbId: undefined, why: { reason: 'profile' } },
     ]);
     expect(asked[0]!.url).toBe('/atlas/us_8/recommend');
@@ -261,8 +245,8 @@ describe('recommend', () => {
     const unreachable = (async () => {
       throw new TypeError('offline');
     }) as unknown as typeof fetch;
-    expect(await recommend('/atlas', body, failing)).toBeNull();
-    expect(await recommend('/atlas', body, unreachable)).toBeNull();
+    expect(await recommend(content('/atlas', failing), body)).toBeNull();
+    expect(await recommend(content('/atlas', unreachable), body)).toBeNull();
   });
 });
 

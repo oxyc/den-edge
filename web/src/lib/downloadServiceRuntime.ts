@@ -1,16 +1,15 @@
 import type { ClockStore } from './clockStore';
+import type { ContentReader } from './contentAuthority';
 import { DownloadCoordinator, downloadPollDelay } from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import type { LibraryLog } from './log';
 import type { DownloadTarget } from './libraryServiceProtocol';
 import { contentKeyOf, downloadName } from './downloadRows';
 import { downloadStill, type SeasonLoader } from './downloadArtwork';
-import { fetchSeason } from './detail';
 import { readPlugins } from './prefs';
 import { relayFetch } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { findAddon, SCOUT, type Addon } from './scout';
-import { fetchImdbId } from './tmdb';
 import {
   cancelSource,
   fetchSourceList,
@@ -18,7 +17,8 @@ import {
   scoutTicket,
   type Preparation,
 } from './titleSources';
-import { tmdbKeyOf } from './tmdb';
+
+export type DownloadContent = Pick<ContentReader, 'identifiers' | 'season'>;
 
 export interface DownloadBackgroundWork {
   /** Runs only after foreground readiness while visible and online. */
@@ -43,10 +43,16 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     readonly log: LibraryLog,
     clock: ClockStore,
     changed: () => void,
+    readonly content: DownloadContent,
     readonly fetchImpl: typeof fetch = relayFetch,
-    seasonLoader: SeasonLoader = fetchSeason,
+    seasonLoader?: SeasonLoader,
   ) {
-    this.#seasonLoader = seasonLoader;
+    this.#seasonLoader =
+      seasonLoader ??
+      (async (seriesId, season) => {
+        const result = await this.content.season(seriesId, season);
+        return result.kind === 'found' ? result.value : null;
+      });
     const providers = () => this.#getProviders();
     this.coordinator = new DownloadCoordinator(
       log,
@@ -63,12 +69,16 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         resolve: async (title) => {
           const { scout, routes } = await providers();
           if (!scout) return { sources: null, failure: 'not-configured' };
+          const identifier = title.imdbId
+            ? null
+            : await this.content.identifiers({ type: title.mediaType, id: title.mediaId });
           const imdb =
             title.imdbId ??
-            (await fetchImdbId(
-              { type: title.mediaType, id: title.mediaId },
-              tmdbKeyOf(this.log.settings('keys')),
-            ));
+            (identifier?.kind === 'found'
+              ? identifier.value.imdbId
+              : identifier?.kind === 'missing'
+                ? null
+                : undefined);
           if (imdb === null) return { sources: null, failure: 'unmatched' };
           if (imdb === undefined) return { sources: null, failure: 'unreachable' };
           const found = await fetchSourceList(

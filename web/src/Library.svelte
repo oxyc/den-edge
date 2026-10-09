@@ -21,7 +21,7 @@
     ServiceScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
-  import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
+  import { browseRows, contentPages, homeRows, interleave, personalRows } from './lib/catalog';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
@@ -46,13 +46,13 @@
     resolvePicks,
     type AtlasCatalog,
   } from './lib/services';
-  import { fetchServices, type Service } from './settings/services';
+  import { contentServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
+  import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
-  import { fetchTitle } from './lib/tmdb';
   import {
     billboardScope,
     displayableKept,
@@ -117,6 +117,20 @@
   const SHELF_TRANCHE = 8;
   let shelvesReady = $state(model === null);
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
+  let tmdbLimited = $state(false);
+  $effect(() => {
+    let clear: ReturnType<typeof setTimeout> | undefined;
+    const stop = session.content.onStatus((status) => {
+      if (status.kind !== 'throttled' || status.provider !== 'tmdb') return;
+      tmdbLimited = true;
+      if (clear) clearTimeout(clear);
+      clear = setTimeout(() => (tmdbLimited = false), status.retryAfterMs);
+    });
+    return () => {
+      stop();
+      if (clear) clearTimeout(clear);
+    };
+  });
   let retainedContinue = $state(false);
   let continueNames = $state(SHELF_TRANCHE);
   let watchlistNames = $state(SHELF_TRANCHE);
@@ -132,7 +146,6 @@
    * whole tree by its library, so the session is fixed for its life.
    */
   const discovered = untrack(() => session.services);
-  const tmdbKey = $derived(discovered.tmdbKey);
   /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */
   const plugins = $derived(discovered.plugins);
   const scout = $derived(discovered.scout);
@@ -551,7 +564,7 @@
           busy = true;
           failure = null;
           const blocked = await playGuard(title, {
-            tmdbKey,
+            content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
           });
@@ -585,10 +598,10 @@
    * no episode named picks up where Continue Watching would, or starts at the beginning.
    */
   const playHere = $derived(
-    scout && tmdbKey && remux !== null
+    scout && remux !== null
       ? async (title: Title, season?: number, episode?: number, filename?: string) => {
           const blocked = await playGuard(title, {
-            tmdbKey,
+            content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
           });
@@ -611,6 +624,7 @@
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `LibrarySession.notify` already shows for other library news.
   setToastContext((message, undo) => session.notify(message, { undo }));
+  setContentServiceContext(untrack(() => session.content));
   function menuToast(
     ok: boolean | undefined,
     success: string,
@@ -822,8 +836,6 @@
       autoSkipSegments: value?.autoSkipSegments ?? false,
     };
   });
-  const warningKey = $derived(discovered.providerKeys['content-warnings'] ?? '');
-  const omdbKey = $derived(discovered.providerKeys.omdb ?? '');
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(new Set((overview?.watched ?? []).map(titleKey)));
@@ -836,8 +848,8 @@
    */
   function primeService(service: Service, country: string) {
     void ServiceScreen.load();
-    if (!tmdbKey || !atlasReady) return;
-    primeServicePage(service, country, tmdbKey, atlas, {
+    if (!atlasReady) return;
+    primeServicePage(session.content, service, country, atlas, {
       minYear: prefs.minReleaseYear,
       excludedLanguages: prefs.excludedLanguages,
       shown: browseShown,
@@ -873,7 +885,7 @@
     }));
   });
   /** The browse screens' rows, headers now and posters as each nears the screen. */
-  const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
+  const pages = $derived(contentPages(session.content));
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
   const seeds = $derived.by(() => {
     const namedSeeds = (refs: readonly TitleRef[]) =>
@@ -895,7 +907,7 @@
     const here = atlas;
     if (!here) return;
     let current = true;
-    void atlasCatalogs(here).then(
+    void atlasCatalogs(session.content).then(
       (listed) => {
         if (current) serviceCatalogs = listed;
       },
@@ -908,32 +920,25 @@
     };
   });
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
-  const radar = (only?: 'movie' | 'tv') =>
-    atlas
-      ? radarRows(atlas, serviceCatalogs, servicePicks, {
+  const radar = (only?: 'movie' | 'tv') => {
+    const content = session.content;
+    return atlas
+      ? radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
-          tmdbKey: tmdbKey ?? undefined,
+          content,
         })
       : [];
+  };
   const rows = $derived.by(() => {
-    if (!pages) {
-      // No TMDB key, so no TMDB rows — a guest, until the server-side key lands. atlas needs no key at all:
-      // its rows carry their own titles, posters and ids, and the poster images come from a CDN that asks
-      // for none. Without this a guest's home is simply blank, which is what it was.
-      if (!atlas) return [];
-      // The pooled rows need no key either — atlas's charts carry their own titles — so a visitor gets them too.
-      if (route.page === 'movies' || route.page === 'series') {
-        const type = route.page === 'movies' ? 'movie' : 'tv';
-        return [...radar(type), ...atlasRows(atlas, type)];
-      }
-      return [...radar(), ...interleave([atlasRows(atlas, 'movie'), atlasRows(atlas, 'tv')])];
-    }
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
-    const key = tmdbKey;
     const filter = atlas
-      ? { base: atlas, title: (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key) }
+      ? {
+          content: session.content,
+          title: async (ref: { type: 'movie' | 'tv'; id: number }) =>
+            (await session.content.query({ kind: 'titles', titles: [ref] })).titles[0] ?? null,
+        }
       : undefined;
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
@@ -945,7 +950,7 @@
       });
       // After Popular and the three genre rows, atlas's rows take turns with TMDB's categories and lead each
       // round, as the TV's index rows do: they say something a genre or a decade doesn't.
-      const own = atlas ? atlasRows(atlas, type) : [];
+      const own = atlas ? atlasRows(session.content, type) : [];
       return [...browse.slice(0, 4), ...radar(type), ...interleave([own, browse.slice(4)])];
     }
     // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
@@ -958,7 +963,7 @@
       excludedLanguages: prefs.excludedLanguages,
       atlas: filter,
     });
-    const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
+    const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
     const pooled = radar();
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine = arrivals
@@ -987,12 +992,12 @@
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
-    if (!tmdbKey || !serviceDirectoriesAdmitted) return;
+    if (!serviceDirectoriesAdmitted) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
       naming++;
-      void fetchServices(country, tmdbKey)
+      void contentServices(session.content, country)
         .then(
           (listed) => {
             directories = { ...directories, [country]: listed };
@@ -1088,7 +1093,7 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const type = facet;
-    if (!model || !tmdbKey) return;
+    if (!model) return;
     const scope: RetainedBillboardScope = memberPost
       ? { kind: 'personal', facet: type, fresh }
       : { kind: 'shared', facet: type, fresh };
@@ -1136,15 +1141,19 @@
       return;
     const here = atlas;
     const named = shelvesReady;
-    if (!tmdbKey) return;
     // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
     // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    if (model === null || (libraryOpen && named)) untrack(() => buildRecommended(here));
+    if (model === null || (libraryOpen && named)) untrack(buildRecommended);
   });
+
+  async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
+    const answer = await session.content.query({ kind: 'titles', titles: [ref] });
+    return answer.titles[0] ?? null;
+  }
 
   /**
    * Everyone starts with atlas's one cacheable ranking for this surface and UTC day, less what the library holds.
@@ -1156,16 +1165,15 @@
    * the shared one; after day one it is stale while this request revalidates it. The new ranking takes every slide
    * after the one on screen and is kept for the next visit.
    */
-  function buildRecommended(here: string) {
+  function buildRecommended() {
     const type = facet;
-    const key = tmdbKey;
     const run = ++billboardRun;
     stagedFeatured = null;
-    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const lookup = lookupTitle;
     const ranked =
       model && overview && memberPost
         ? recommend(
-            here,
+            session.content,
             recommendBody({
               facet: type,
               prefs,
@@ -1193,7 +1201,7 @@
         if (run !== billboardRun) return;
         if (personal) {
           if (!featured.length) featured = personal;
-        } else await paintShared(here, run);
+        } else await paintShared(run);
         const slides = await ranked;
         if (run !== billboardRun || !slides?.length) return;
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
@@ -1220,18 +1228,17 @@
   }
 
   /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
-  async function paintShared(here: string, run: number) {
+  async function paintShared(run: number) {
     const type = facet;
-    const key = tmdbKey;
-    const shared = (await recommendForEveryone(here, billboardScope(type), fresh))?.filter(
-      (slide) => !seeds.owned.has(`${slide.type}:${slide.id}`),
-    );
+    const shared = (
+      await recommendForEveryone(session.content, billboardScope(type), fresh)
+    )?.filter((slide) => !seeds.owned.has(`${slide.type}:${slide.id}`));
     if (run !== billboardRun) return;
     if (!shared?.length) {
       buildTrending(run);
       return;
     }
-    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const lookup = lookupTitle;
     const first = await nameSlides(shared.slice(0, 1), new Map(), lookup, 1);
     if (run !== billboardRun) return;
     // A member's kept billboard stays up while the rest is named. A guest's generic fallback gives way at once.
@@ -1333,6 +1340,12 @@
   }
 </script>
 
+{#if tmdbLimited}
+  <p class="tmdb-limit" role="alert">
+    TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.
+  </p>
+{/if}
+
 {#if link && model && !overview && !serviceFailed}
   <Loading label="Loading your library" page />
 {:else if serviceFailed}
@@ -1343,16 +1356,6 @@
       {retryingLibrary ? 'Trying again…' : 'Try again'}
     </button>
   </section>
-{:else if route.page !== 'library' && !tmdbKey}
-  <p class="note">
-    {#if link}
-      This page needs your TMDB key: your TV shares it, or add it in <a href="/settings">Settings</a
-      >.
-    {:else}
-      Title pages need a TMDB key, which arrives with a paired Apple TV.
-      <a href="/settings">Pair one</a> to see them.
-    {/if}
-  </p>
 {:else if page && !DetailScreen.current}
   <ScreenLoading screen={DetailScreen} />
 {:else if page}
@@ -1363,11 +1366,9 @@
     {reel}
     {routes}
     {atlas}
+    content={session.content}
     active={active && !playing}
     ref={page}
-    {tmdbKey}
-    {omdbKey}
-    {warningKey}
     warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
     ratingSources={[...detailPrefs.ratingSources]}
@@ -1388,7 +1389,7 @@
     onplay={play}
     onplayhere={playHere}
     {remux}
-    away={remuxAway && !!scout && !!tmdbKey}
+    away={remuxAway && !!scout}
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}
     onepisode={markEpisodeSeen}
@@ -1399,14 +1400,14 @@
 {:else if route.page === 'search' && !SearchScreen.current}
   <ScreenLoading screen={SearchScreen} />
 {:else if route.page === 'person'}
-  <PersonScreen.current id={route.id} {tmdbKey} {active} />
+  <PersonScreen.current id={route.id} content={session.content} {active} />
 {:else if route.page === 'service' && !ServiceScreen.current}
   <ScreenLoading screen={ServiceScreen} />
 {:else if route.page === 'service'}
   <ServiceScreen.current
     id={route.id}
     country={route.country}
-    {tmdbKey}
+    content={session.content}
     {atlas}
     {atlasReady}
     minYear={prefs.minReleaseYear}
@@ -1420,7 +1421,7 @@
   <SearchScreen.current
     {query}
     {explore}
-    {tmdbKey}
+    content={session.content}
     {atlas}
     {prefs}
     shown={browseShown}
@@ -1431,7 +1432,7 @@
 {:else if route.page === 'people' && !PeopleScreen.current}
   <ScreenLoading screen={PeopleScreen} />
 {:else if route.page === 'people'}
-  <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
+  <PeopleScreen.current view={people} content={session.content} {atlas} {atlasReady} />
 {:else if route.page === 'downloads'}
   {#if !model}
     <p class="note">
@@ -1457,11 +1458,11 @@
     <ScreenLoading screen={WatchlistScreen} />
   {:else}
     {@const slides = savedTitles.slice(0, 20)}
-    {#if tmdbKey && slides.length}
+    {#if slides.length}
       <Billboard
         active={active && !playing}
         titles={slides}
-        {tmdbKey}
+        content={session.content}
         {reel}
         {routes}
         onplay={playHere && ((title) => playHere(title))}
@@ -1490,24 +1491,22 @@
   {@const resume = continueShelfEntries.filter((e) => !facet || e.title.type === facet)}
   {@const saved = savedTitles.filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
-  {#if tmdbKey}
-    <Billboard
-      active={active && !playing}
-      titles={featured.filter(featuredShown)}
-      bind:showing={slideShown}
-      onadvance={acceptStagedFeatured}
-      {tmdbKey}
-      {reel}
-      {routes}
-      onready={() => (heroReady = true)}
-      onretained={(title, detail) =>
-        void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
-      onplay={playHere && ((title) => playHere(title))}
-      rowOf={model ? rowOf : undefined}
-      onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
-      onseen={(title, on) => fromSlide(setSeen(title, on))}
-    />
-  {/if}
+  <Billboard
+    active={active && !playing}
+    titles={featured.filter(featuredShown)}
+    bind:showing={slideShown}
+    onadvance={acceptStagedFeatured}
+    content={session.content}
+    {reel}
+    {routes}
+    onready={() => (heroReady = true)}
+    onretained={(title, detail) =>
+      void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
+    onplay={playHere && ((title) => playHere(title))}
+    rowOf={model ? rowOf : undefined}
+    onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
+    onseen={(title, on) => fromSlide(setSeen(title, on))}
+  />
   {#if !shelvesReady && (!(retainedContinue || shelfPlan?.continue) || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
@@ -1626,7 +1625,7 @@
       season={target.season}
       episode={target.episode}
       filename={target.filename}
-      {tmdbKey}
+      content={session.content}
       {scout}
       {remux}
       subtitles={installsOf(plugins, routes, 'subs').filter(
@@ -1647,6 +1646,17 @@
 {/if}
 
 <style>
+  .tmdb-limit {
+    position: relative;
+    z-index: 4;
+    margin: 0 0 18px;
+    padding: 12px 16px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    color: var(--fg);
+  }
+
   .note {
     color: var(--muted);
   }

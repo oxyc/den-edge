@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
   const noop = () => {};
   const ref = { type: 'movie' as const, id: 42 };
   const browserPlay = new URLSearchParams(location.search).has('browser-play');
+  const content = fixtureContentServiceContext();
   let active = $state(true);
   // What SessionServices.configure() would publish for `reel`/`routes`: a restored `services.v1`
   // result first, then replaced by live `/routes` discovery. `fixture:reel` lets a spec fire that
@@ -46,8 +48,8 @@
   <div data-route-page data-active={active} hidden={!active} style="display:flow-root">
     <Detail
       {active}
+      {content}
       {ref}
-      tmdbKey="fixture-key"
       {reel}
       {routes}
       region={detailPrefs.region}

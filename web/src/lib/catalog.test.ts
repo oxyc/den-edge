@@ -3,6 +3,7 @@ import {
   appendUniqueTitles,
   browseRows,
   categories,
+  contentPages,
   discoverParams,
   drawn,
   equivalentGenre,
@@ -16,10 +17,11 @@ import {
   RECIPES,
   retargeted,
   shelfGenre,
-  tmdbPages,
   type Pages,
 } from './catalog';
 import type { Title } from './library';
+import { ContentAuthority } from './contentAuthority';
+import type { ContentServiceClientPort } from './contentServiceClient';
 
 describe('discover queries, as DenKit builds them', () => {
   it('joins genres AND or OR, keywords and countries OR, and dates by the type’s own field', () => {
@@ -196,8 +198,9 @@ describe('the screens', () => {
 
   it("Home's personal rows: TMDB's recommendations for your latest titles, less what you already have", async () => {
     const asked: string[] = [];
-    const recs: Pages = async (path) => {
-      asked.push(path);
+    const recs: Pages = async (catalog) => {
+      if (catalog.kind === 'recommendations')
+        asked.push(`/${catalog.title.type}/${catalog.title.id}/recommendations`);
       return [
         { type: 'movie', id: 1, title: 'Owned' },
         { type: 'movie', id: 2, title: 'New to you' },
@@ -233,23 +236,27 @@ describe('the screens', () => {
     expect(asked).toEqual(['/movie/329865/recommendations']);
   });
 
-  it('loads a row a page at a time from TMDB, and asks for no page past 500', async () => {
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(
-        JSON.stringify({
-          results: [{ id: 550, title: 'Fight Club', poster_path: '/f.jpg' }, { id: 'x' }],
-        }),
-      );
-    }) as typeof fetch;
-    const [trending] = homeRows(tmdbPages('k', fetchImpl));
+  it('loads a row a page at a time through the semantic catalog port', async () => {
+    const asked: unknown[] = [];
+    const content = {
+      query: async (request: unknown) => {
+        asked.push(request);
+        return {
+          kind: 'catalog.page',
+          titles: [{ type: 'movie', id: 550, title: 'Fight Club', posterPath: '/f.jpg' }],
+        };
+      },
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const [trending] = homeRows(contentPages(content));
     expect(await trending!.load(2)).toMatchObject([
       { type: 'movie', id: 550, title: 'Fight Club' },
     ]);
-    const url = new URL(asked[0]!);
-    expect([url.pathname, url.searchParams.get('page')]).toEqual(['/3/trending/movie/week', '2']);
-    expect(await trending!.load(501)).toEqual([]);
+    expect(asked[0]).toEqual({
+      kind: 'catalog.page',
+      catalog: { kind: 'trending', media: 'movie', window: 'week' },
+      page: 2,
+    });
     expect(asked).toHaveLength(1);
   });
 });
@@ -318,12 +325,51 @@ describe('rows atlas’s filter answers', () => {
   /** TMDB's pages, recording each path and page asked. */
   function tmdbFake() {
     const asked: string[] = [];
-    const pages: Pages = async (path, type, params, page) => {
+    const pages: Pages = async (catalog, page) => {
+      const type =
+        catalog.kind === 'discover'
+          ? catalog.query.mediaType
+          : catalog.kind === 'upcoming'
+            ? 'movie'
+            : catalog.kind === 'recommendations'
+              ? catalog.title.type
+              : catalog.media;
+      const path =
+        catalog.kind === 'discover'
+          ? `/discover/${type}`
+          : catalog.kind === 'recommendations'
+            ? `/${type}/${catalog.title.id}/recommendations`
+            : catalog.kind === 'trending'
+              ? `/trending/${type}/${catalog.window}`
+              : catalog.kind === 'top-rated'
+                ? `/${type}/top_rated`
+                : catalog.kind === 'upcoming'
+                  ? '/movie/upcoming'
+                  : `/${type}/popular`;
+      const params = catalog.kind === 'discover' ? discoverParams(catalog.query) : {};
       asked.push(`${path}?${params.with_genres ?? params.with_origin_country ?? ''}#${page}`);
       return [{ type, id: 9000 + page, title: `TMDB ${page}`, posterPath: '/t.jpg' }];
     };
     return { asked, pages };
   }
+  const atlasSource = (fetchImpl: typeof fetch) => {
+    const authority = new ContentAuthority(
+      {
+        tmdb: () => undefined,
+        omdb: () => undefined,
+        contentWarnings: () => undefined,
+        atlas: () => '/atlas',
+      },
+      { providerFetch: fetchImpl, tmdbFetch: fetchImpl },
+    );
+    return {
+      content: {
+        query: (request, signal) =>
+          authority.query(request, signal ?? new AbortController().signal) as never,
+        onStatus: () => () => {},
+      } as ContentServiceClientPort,
+    };
+  };
 
   it('loads the Movies tab’s genre rows from atlas, and TMDB is not asked', async () => {
     const atlas = atlasFake((skip) =>
@@ -331,7 +377,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const tmdb = tmdbFake();
     const rows = browseRows('movie', tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     });
     // A row of its own to the screen, so one loaded from TMDB before atlas was found starts over.
     expect(rows.map((r) => r.id)).not.toContain('genre-28');
@@ -356,7 +402,7 @@ describe('rows atlas’s filter answers', () => {
     const atlas = atlasFake(() => json({}, 404));
     const tmdb = tmdbFake();
     const [row] = browseRows('movie', tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'genre-28-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect((await row!.load(2)).map((t) => t.id)).toEqual([9002]);
@@ -373,7 +419,7 @@ describe('rows atlas’s filter answers', () => {
     const tmdb = tmdbFake();
     const animation = categories('movie', 2026).find((c) => c.id === 'genre-16-movie')!;
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === `${animation.id}-atlas`);
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect(atlas.asked).toEqual(['/atlas/index/filter/movie/titles.json?sel=primary:Animation']);
@@ -385,7 +431,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const tmdb = tmdbFake();
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'country-KR-movie-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([1]);
     expect((await row!.load(2)).map((t) => t.id)).toEqual([9001]);
@@ -402,7 +448,7 @@ describe('rows atlas’s filter answers', () => {
     const tmdb = tmdbFake();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'decade-2020-movie-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect(warn).toHaveBeenCalledOnce();
@@ -415,8 +461,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const [row] = homeRows(tmdbFake().pages, {
       atlas: {
-        base: '/atlas',
-        fetchImpl: atlas.fetchImpl,
+        ...atlasSource(atlas.fetchImpl),
         title: async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/drawn.jpg' }),
       },
     }).filter((r) => r.id === 'recipe-romantic-comedy-atlas');
@@ -510,7 +555,7 @@ describe('rows atlas’s filter answers', () => {
   it('keeps TMDB for the spine, Nordic Noir and Critically Acclaimed, and asks atlas nothing without it', async () => {
     const atlas = atlasFake(() => json({ titles: [card(1)], order: 'o', ignored: [] }));
     const tmdb = tmdbFake();
-    const rows = homeRows(tmdb.pages, { atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl } });
+    const rows = homeRows(tmdb.pages, { atlas: atlasSource(atlas.fetchImpl) });
     for (const id of ['new-releases', 'recipe-nordic-noir', 'acclaimed-movie'])
       await rows.find((r) => r.id === id)!.load(1);
     expect(atlas.asked).toEqual([]);

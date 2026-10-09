@@ -14,12 +14,23 @@ test('Prime import requires both schemas, previews locally, and writes the playe
   try {
     const page = await browser.newPage({ viewport: { width: 820, height: 900 } });
     await guardNetwork(page);
+    const pageOwned = [];
+    await page.addInitScript(() => {
+      const pageFetch = window.fetch.bind(window);
+      window.fetch = (input, init = {}) => {
+        const headers = new Headers(init.headers);
+        headers.set('x-den-test-fetch-realm', 'page');
+        return pageFetch(input, { ...init, headers });
+      };
+    });
     await page.route('**/routes', (route) => route.fulfill({ json: {} }));
     await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
     await page.route('**/config', (route) =>
       route.fulfill({ json: { simklClientId: 'client-1' } }),
     );
     await routeTmdb(page, (route) => {
+      if (route.request().headers()['x-den-test-fetch-realm'])
+        pageOwned.push(route.request().url());
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith('/configuration')) return route.fulfill({ json: { images: {} } });
       if (path.endsWith('/watch/providers/regions'))
@@ -62,6 +73,7 @@ test('Prime import requires both schemas, previews locally, and writes the playe
     await expect(importRow.getByText('Found 1 film and 0 episodes from 0 series.')).toBeVisible();
     await importRow.getByRole('button', { name: 'Import viewing history' }).click();
     await expect(importRow.getByRole('status')).toContainText('Saved 1 change');
+    expect(pageOwned, 'provider requests must stay inside the content Worker').toEqual([]);
   } finally {
     await browser.close();
   }

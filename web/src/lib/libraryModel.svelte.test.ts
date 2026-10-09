@@ -249,8 +249,6 @@ const settingsValue = (): LibrarySelectionValue => ({
 
 const runtimeValue = (): LibrarySelectionValue => ({
   kind: 'runtime',
-  tmdbKey: 'tmdb-key',
-  providerKeys: { tmdb: 'tmdb-key' },
   pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
   privateRemuxUrl: 'https://remux.tailnet.ts.net',
 });
@@ -284,7 +282,9 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   });
   expect(model.continueWatching.value?.items[0]).toMatchObject({ fraction: 0.4 });
   expect(model.settings.value?.preferences.autoplayTrailers).toBe(true);
-  expect(model.runtime.value).toMatchObject({ tmdbKey: 'tmdb-key' });
+  expect(model.runtime.value).toMatchObject({
+    pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
+  });
   expect(Object.isFrozen(model.overview)).toBe(true);
 
   const history = model.history();

@@ -4,8 +4,6 @@
 // they answer none. den-edge looks a title up once and keeps it for every browser, so a key here only decides
 // whether a title nobody has opened yet may be looked up: this page's own key when it has one, the household's for
 // a member of the library (`relayFetch` proves membership). A visitor sees what is already kept.
-import type { TitleDetail } from './detail';
-import { relayFetch } from './relayFetch';
 
 export interface Warning {
   id: number;
@@ -42,29 +40,4 @@ export function parseWarnings(body: unknown, categories: string[]): Warning[] {
     })
     .sort((a, b) => b.votes - a.votes)
     .filter((warning) => !seen.has(warning.id) && !!seen.add(warning.id));
-}
-
-export async function fetchWarnings(
-  detail: TitleDetail,
-  key: string,
-  categories: string[],
-  signal?: AbortSignal,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<{ id: number; warnings: Warning[] } | null> {
-  if (!detail.imdbId) return null;
-  const headers: Record<string, string> = { accept: 'application/json' };
-  if (key) headers['x-api-key'] = key;
-  try {
-    const res = await fetchImpl(`/warnings/imdb/${encodeURIComponent(detail.imdbId)}`, {
-      signal,
-      headers,
-    });
-    if (!res.ok) return null;
-    const body: unknown = await res.json();
-    const id = Number((body as { id?: unknown } | null)?.id);
-    if (!Number.isInteger(id) || id < 1) return null;
-    return { id, warnings: parseWarnings(body, categories) };
-  } catch {
-    return null;
-  }
 }

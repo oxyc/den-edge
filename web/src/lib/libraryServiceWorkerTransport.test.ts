@@ -6,6 +6,7 @@ import {
 } from './libraryServiceProtocol';
 import { LibraryServiceClient } from './libraryServiceClient';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
+import { CONTENT_SERVICE_PROTOCOL } from './contentServiceProtocol';
 
 class FakeWorker {
   readonly listeners = new Map<string, Set<(event: Event) => void>>();
@@ -66,6 +67,27 @@ it('validates requests and delivers a decoded batch in order', () => {
     transport.send({ ...request, protocol: 99 } as unknown as LibraryServiceClientMessage),
   ).toThrow('protocol 99 is not supported');
   expect(worker.posted).toHaveLength(1);
+  transport.close();
+});
+
+it('multiplexes library and content replies onto separate channels', () => {
+  const worker = new FakeWorker();
+  const transport = transportFor(worker);
+  const library: unknown[] = [];
+  const content: unknown[] = [];
+  transport.listen((message) => library.push(message));
+  transport.contentTransport().listen((message) => content.push(message));
+
+  const regions = {
+    type: 'content-result' as const,
+    protocol: CONTENT_SERVICE_PROTOCOL,
+    requestId: 'regions',
+    result: { kind: 'service.regions' as const, regions: [] },
+  };
+  worker.emit('message', { data: [regions, ready('library')] } as MessageEvent<unknown>);
+
+  expect(content).toEqual([regions]);
+  expect(library).toEqual([ready('library')]);
   transport.close();
 });
 

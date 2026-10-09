@@ -8,6 +8,7 @@
 // other type alone (`perType`).
 
 import {
+  catalogPage,
   appendUniqueTitles,
   categories,
   COUNTRIES,
@@ -24,7 +25,7 @@ import {
   type Pages,
   type RowDef,
 } from './catalog';
-import { atlasRows } from './atlasRows';
+import { atlasRowLabels, atlasRows } from './atlasRows';
 import {
   countedEmpty,
   filterItems,
@@ -33,14 +34,11 @@ import {
   type FacetCounts,
   type FilterOnlyKind,
 } from './facetCounts';
-import {
-  filterTitles,
-  FilterUnavailable,
-  type FilterCounts,
-  type FilterItem,
-} from './filterRoutes';
+import { FilterUnavailable, type FilterCounts, type FilterItem } from './filterRoutes';
+import { contentFilterTitles } from './contentAtlas';
 import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
+import type { ContentServiceClientPort } from './contentServiceClient';
 import { FACET, fansOf, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
@@ -460,9 +458,8 @@ function atlasChips(type: ExploreType): Chip[] {
     const films = atlasChips('movie');
     return [...films, ...atlasChips('tv').filter((c) => !films.some((f) => f.id === c.id))];
   }
-  const suffix = `-${type}`;
-  return atlasRows('', type).map((row) => {
-    const id = row.id.slice('atlas-'.length, -suffix.length);
+  return atlasRowLabels(type).map((row) => {
+    const id = row.id;
     return {
       id,
       label: row.title.replace(/ (Movies|Series)$/, ''),
@@ -1119,10 +1116,8 @@ export interface FeedSources {
   minYear?: number;
   /** A title as TMDB draws it (`SearchSources.title`), for an atlas title with no poster. */
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
-  /** TMDB's key, or the empty string where den-edge lends its own: a "Like" draws its titles with it. */
-  key?: string;
-  /** How atlas's filter is asked (den-edge's relay by default). */
-  fetchImpl?: typeof fetch;
+  /** Worker-owned normalized content used by recommendations and missing-card hydration. */
+  content: ContentServiceClientPort;
 }
 
 /** How many of atlas's closest titles a "Like" asks for: all it keeps for one title. */
@@ -1148,17 +1143,19 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
         .filter((seed) => seed.type === type)
         .slice(0, SEEDS)
         .map((seed) =>
-          pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, 1).catch(
-            (error: unknown): Title[] => {
-              console.warn(
-                'explore: For You has no recommendations for',
-                `${seed.type}:${seed.id}`,
-                error,
-              );
-              failed = true;
-              return [];
-            },
-          ),
+          catalogPage(
+            pages,
+            { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
+            1,
+          ).catch((error: unknown): Title[] => {
+            console.warn(
+              'explore: For You has no recommendations for',
+              `${seed.type}:${seed.id}`,
+              error,
+            );
+            failed = true;
+            return [];
+          }),
         ),
     ).then((lists) => {
       if (failed && personal === asked) personal = undefined;
@@ -1171,8 +1168,8 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
   };
   const tail = (page: number) =>
     type === 'tv'
-      ? pages('/tv/top_rated', 'tv', {}, page)
-      : pages('/movie/popular', 'movie', {}, page);
+      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, page)
+      : catalogPage(pages, { kind: 'popular', media: 'movie' }, page);
   /** Whether this run of the feed's first page was the recommendations, which shifts the tail a page on. */
   let led = false;
   return {
@@ -1345,7 +1342,7 @@ function filterFirst(
     {
       id,
       title: '',
-      load: filterTitles(atlas, type, items, { fetchImpl: sources.fetchImpl }),
+      load: contentFilterTitles(sources.content, type, items),
     },
     sources.title,
   );
@@ -1388,7 +1385,7 @@ function localFeed(
   const like = set.map(likeOf).find((ref) => ref !== undefined);
   if (like) {
     const row = moreLikeThisRow({ title: { ...like, title: '' } }, sources.atlas, {
-      key: sources.key ?? '',
+      content: sources.content,
       similarLimit: LIKE_DEPTH,
       mixed: type === 'all',
     });
@@ -1398,7 +1395,7 @@ function localFeed(
   const fans = set.map(fansOf).find((ref) => ref !== undefined);
   if (fans) {
     const row = moreLikeThisRow({ title: { ...fans, title: '' } }, sources.atlas, {
-      key: sources.key ?? '',
+      content: sources.content,
       similarLimit: LIKE_DEPTH,
       mixed: type === 'all',
       affinity: true,
@@ -1410,7 +1407,7 @@ function localFeed(
   const atlasId = set.find((pick) => slotOf(pick) === 'atlas');
   if (atlasId) {
     const row = sources.atlas
-      ? atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
+      ? atlasRows(sources.content, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
       : undefined;
     if (!row) return forYou(type, sources);
     return { ...drawn(row, sources.title), id, filter: atlasFilter(set, type) };

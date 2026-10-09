@@ -8,12 +8,27 @@ import {
   decodeLibraryServiceClientMessage,
   decodeLibraryServiceServerMessage,
 } from './libraryServiceProtocolCodec';
+import {
+  CONTENT_SERVICE_PROTOCOL,
+  isContentServiceClientMessage,
+  isContentServiceServerMessage,
+  type ContentServiceClientMessage,
+  type ContentServiceServerMessage,
+} from './contentServiceProtocol';
+import {
+  decodeContentServiceClientMessage,
+  decodeContentServiceServerMessage,
+} from './contentServiceProtocolCodec';
+import type { ContentServiceTransport } from './contentServiceClient';
 
 type MessageListener = (message: unknown) => void;
+type WorkerClientMessage = LibraryServiceClientMessage | ContentServiceClientMessage;
+type WorkerServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
 
 /** A DedicatedWorker transport. Failure closes this attempt so the supervisor can start a fresh Worker. */
 export class WorkerLibraryServiceTransport {
-  readonly #listeners = new Set<MessageListener>();
+  readonly #libraryListeners = new Set<MessageListener>();
+  readonly #contentListeners = new Set<MessageListener>();
   #closed = false;
 
   constructor(private readonly worker: Worker) {
@@ -22,9 +37,11 @@ export class WorkerLibraryServiceTransport {
     worker.addEventListener('messageerror', this.#messageError);
   }
 
-  send(message: LibraryServiceClientMessage): void {
+  send(message: WorkerClientMessage): void {
     if (this.#closed) throw new Error('library service worker is unavailable');
-    const decoded = decodeLibraryServiceClientMessage(message);
+    const decoded = isContentServiceClientMessage(message)
+      ? decodeContentServiceClientMessage(message)
+      : decodeLibraryServiceClientMessage(message);
     if (!decoded.ok) throw new TypeError(decoded.error.message);
     try {
       this.worker.postMessage(decoded.value);
@@ -41,8 +58,21 @@ export class WorkerLibraryServiceTransport {
 
   listen(listener: MessageListener): () => void {
     if (this.#closed) return () => {};
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
+    this.#libraryListeners.add(listener);
+    return () => this.#libraryListeners.delete(listener);
+  }
+
+  /** The content channel shares this Worker's lifetime but receives only content replies. */
+  contentTransport(): ContentServiceTransport {
+    return {
+      send: (message) => this.send(message),
+      listen: (listener) => {
+        if (this.#closed) return () => {};
+        this.#contentListeners.add(listener);
+        return () => this.#contentListeners.delete(listener);
+      },
+      close: () => this.close(),
+    };
   }
 
   close(): void {
@@ -62,18 +92,27 @@ export class WorkerLibraryServiceTransport {
       return;
     }
 
-    const messages: LibraryServiceServerMessage[] = [];
+    const messages: WorkerServerMessage[] = [];
     for (const candidate of event.data) {
-      const decoded = decodeLibraryServiceServerMessage(candidate);
+      const decoded = isContentServiceServerMessage(candidate)
+        ? decodeContentServiceServerMessage(candidate)
+        : decodeLibraryServiceServerMessage(candidate);
       if (!decoded.ok) {
-        this.#fail(decoded.error);
+        this.#fail({
+          code: 'invalid-request',
+          message: decoded.error.message,
+          retryable: false,
+        });
         return;
       }
       messages.push(decoded.value);
     }
     for (const message of messages) {
       if (this.#closed) break;
-      for (const listener of this.#listeners)
+      const listeners = isContentServiceServerMessage(message)
+        ? this.#contentListeners
+        : this.#libraryListeners;
+      for (const listener of listeners)
         try {
           listener(message);
         } catch (error) {
@@ -102,7 +141,8 @@ export class WorkerLibraryServiceTransport {
 
   #fail(error: LibraryServiceFailure): void {
     if (this.#closed) return;
-    const listeners = [...this.#listeners];
+    const libraryListeners = [...this.#libraryListeners];
+    const contentListeners = [...this.#contentListeners];
     this.#closed = true;
     this.#dispose();
     const message: LibraryServiceServerMessage = {
@@ -110,11 +150,26 @@ export class WorkerLibraryServiceTransport {
       protocol: LIBRARY_SERVICE_PROTOCOL,
       error,
     };
-    for (const listener of listeners)
+    const contentMessage: ContentServiceServerMessage = {
+      type: 'content-error',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      error: {
+        code: 'unavailable',
+        message: error.message,
+        retryable: error.retryable,
+      },
+    };
+    for (const listener of libraryListeners)
       try {
         listener(message);
       } catch (listenerError) {
         console.error('den: a library transport listener failed', listenerError);
+      }
+    for (const listener of contentListeners)
+      try {
+        listener(contentMessage);
+      } catch (listenerError) {
+        console.error('den: a content transport listener failed', listenerError);
       }
   }
 
@@ -123,6 +178,7 @@ export class WorkerLibraryServiceTransport {
     this.worker.removeEventListener('error', this.#error);
     this.worker.removeEventListener('messageerror', this.#messageError);
     this.worker.terminate();
-    this.#listeners.clear();
+    this.#libraryListeners.clear();
+    this.#contentListeners.clear();
   }
 }

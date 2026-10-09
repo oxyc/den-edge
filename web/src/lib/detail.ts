@@ -1,14 +1,9 @@
-// A title's and a person's pages from TMDB, as the TV's Detail and Person screens load them: one detail fetch each
-// (credits and recommendations appended), and a season's episodes on demand. The parsers are pure, so the tests feed
-// them TMDB's own shapes.
+// Pure presentation models for title, person, collection and season provider answers. The Worker owns fetching;
+// page components receive only these normalized domain shapes through ContentService.
 
 import type { MediaType, Title } from './library';
 import { strictest } from './parental';
 import { toTitle } from './tmdb';
-
-import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson } from './tmdbCache';
-
-const TMDB = 'https://api.themoviedb.org/3';
 
 type Json = Record<string, unknown>;
 const obj = (v: unknown): Json =>
@@ -331,46 +326,6 @@ export function parsePerson(id: number, body: Json): PersonDetail | null {
   };
 }
 
-/** TMDB's answer, or null when it couldn't give one. */
-async function tmdb(
-  path: string,
-  key: string,
-  params: Record<string, string>,
-  fetchImpl: typeof fetch,
-): Promise<Json | null> {
-  const url = new URL(TMDB + path);
-  for (const [name, value] of Object.entries({ ...params, api_key: key }))
-    url.searchParams.set(name, value);
-  try {
-    const res = await fetchImpl(url.toString());
-    return res.ok ? obj(await tmdbJson(res)) : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function fetchDetail(
-  ref: { type: MediaType; id: number },
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-  region = 'US',
-): Promise<TitleDetail | null> {
-  const append =
-    ref.type === 'tv'
-      ? 'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers'
-      : 'credits,recommendations,videos,external_ids,release_dates,watch/providers';
-  const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
-  return body && parseDetail(ref, body, region);
-}
-
-/**
- * Ask for a title's details ahead of opening it — a finger is on its card. The page's own request, whatever key it
- * carries, joins this one in flight or reads its answer from the cache (`tmdbCache`), both keyed without the key.
- */
-export function warmDetail(ref: { type: MediaType; id: number }): void {
-  void fetchDetail({ type: ref.type, id: ref.id }, TMDB_PROXY_KEY);
-}
-
 /** The card last pressed: its title, and the picture it was showing, which this browser already holds. */
 let pressed: { title: Title; still?: string } | undefined;
 
@@ -385,26 +340,6 @@ export function pressedCard(ref: {
   id: number;
 }): { title: Title; still?: string } | undefined {
   return pressed?.title.type === ref.type && pressed.title.id === ref.id ? pressed : undefined;
-}
-
-/** A season's episodes; null when TMDB couldn't say. */
-export async function fetchSeason(
-  seriesId: number,
-  season: number,
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-): Promise<Episode[] | null> {
-  const body = await tmdb(`/tv/${seriesId}/season/${season}`, key, {}, fetchImpl);
-  return body && parseSeason(body);
-}
-
-export async function fetchPerson(
-  id: number,
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-): Promise<PersonDetail | null> {
-  const body = await tmdb(`/person/${id}`, key, {}, fetchImpl);
-  return body && parsePerson(id, body);
 }
 
 export interface FilmCredit {
@@ -486,22 +421,8 @@ function compareTitleDates(a: Title, b: Title, direction: 1 | -1): number {
   return title || type || a.id - b.id;
 }
 
-export async function fetchFilmography(
-  id: number,
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-): Promise<FilmCredit[] | null> {
-  const body = await tmdb(`/person/${id}/combined_credits`, key, {}, fetchImpl);
-  return body && parseFilmography(body);
-}
-
-export async function fetchCollection(
-  id: number,
-  key: string,
-  fetchImpl: typeof fetch = tmdbFetch,
-): Promise<Title[]> {
-  const body = await tmdb(`/collection/${id}`, key, {}, fetchImpl);
-  return list(body?.parts)
+export function parseCollection(body: Json): Title[] {
+  return list(body.parts)
     .flatMap((r) => {
       const title =
         num(r.id) === undefined ? null : toTitle({ type: 'movie', id: Number(r.id) }, r);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   // The Settings page on a library that already holds what a TV would have written into it: the household's keys,
   // the TV's hide rules, an addon, and two devices. Everything is in memory, so the page has something to show
   // without a paired TV or a den-edge behind it, and a save lands where the page reads it back from.
@@ -14,6 +15,8 @@
     type Stamp,
   } from '../src/lib/wire';
   import { fixtureLibraryService } from './libraryService';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
@@ -117,6 +120,17 @@
     libraryKey: fixtureLibraryKey,
   });
   const { model, session } = library;
+  const contentServices = createWorkerServiceSession();
+  const contentModel = new LibraryModel(contentServices.library, {
+    libraryKey: fixtureLibraryKey,
+    mode: 'local',
+  });
+  const content = contentServices.content;
+  let contentReady = $state(false);
+  void contentModel.ready
+    .then(() => contentModel.setApiKey('tmdb', 'K1', 'settings-fixture-key'))
+    .then(() => (contentReady = true));
+  onDestroy(() => contentServices.close());
   session.publishLibraryMetadata(
     [
       { type: 'movie', id: 550, title: 'Fight Club', year: 1999, imdbId: 'tt0137523' },
@@ -136,5 +150,5 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  <Settings {link} {model} onresetkey={async () => null} />
+  {#if contentReady}<Settings {link} {model} {content} onresetkey={async () => null} />{/if}
 </main>

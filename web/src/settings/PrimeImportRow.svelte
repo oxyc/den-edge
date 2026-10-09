@@ -6,7 +6,7 @@
 
   type State =
     | { step: 'idle' }
-    | { step: 'matching'; done: number; total: number; paused?: boolean }
+    | { step: 'matching'; done: number; total: number }
     | {
         step: 'preview';
         source: PrimeImportSource;
@@ -24,7 +24,8 @@
 <script lang="ts">
   import { parsePrimeFiles } from '../lib/primeImport';
   import { planPrimeImport } from '../lib/primeImportPlan';
-  import { viewingImportLookups } from '../lib/viewingImportLookups';
+  import { contentImportLookups } from '../lib/contentImportLookups';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import { viewingPreviewLines } from '../lib/viewingImport';
   import SettingRow from './SettingRow.svelte';
   import { historyImportItems } from './historyImport';
@@ -32,12 +33,12 @@
 
   let {
     ready,
-    tmdbKey,
+    content,
     watched,
     importHistory,
   }: {
     ready: boolean;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     watched: readonly TitleRef[];
     importHistory: (
       items: readonly HistoryImportItem[],
@@ -56,9 +57,7 @@
       state = { step: 'matching', done: 0, total: source.viewings.length };
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
-      const lookups = viewingImportLookups(tmdbKey, undefined, (ms) => {
-        if (state.step === 'matching') state = { ...state, paused: ms > 0 };
-      });
+      const lookups = contentImportLookups(content);
       const plan = await planPrimeImport(
         source.viewings,
         lookups,
@@ -131,7 +130,6 @@
     <p class="status" role="status">
       Finding titles — {state.done.toLocaleString()} of {state.total.toLocaleString()}
     </p>
-    {#if state.paused}<p class="foot">Pausing for den-edge’s limit — carrying on shortly.</p>{/if}
   {:else if state.step === 'preview'}
     {@const all = viewingPreviewLines(state.plan.marks)}
     {@const chosen = state.writes.filter((entry) => !excluded.has(entry.key))}

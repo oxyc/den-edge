@@ -94,7 +94,7 @@
   } from '../lib/switchPolicy';
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
-  import { fetchImdbId } from '../lib/tmdb';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import {
     activeAt,
     canAutoSkip,
@@ -123,7 +123,7 @@
     season,
     episode,
     filename,
-    tmdbKey,
+    content,
     scout,
     remux,
     subtitles,
@@ -144,7 +144,7 @@
     season?: number;
     episode?: number;
     filename?: string;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     scout: Addon;
     /** Where den-remux answers (`findRemux`): '' for this origin, else the tailnet's address. */
     remux: string;
@@ -568,7 +568,7 @@
   ): Promise<boolean | Failure> {
     clearTimeout(retry);
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
-    // shown, so a slow `fetchImdbId` or `playable()` below counts as part of the wait too. Stopped once this
+    // shown, so a slow identifier query or `playable()` below counts as part of the wait too. Stopped once this
     // attempt's first frame arrives (the `requestVideoFrameCallback`/`loadeddata` listener below) or the player
     // closes (`finish`), never by polling `played`, which a mid-film switch leaves true from the session this
     // one is replacing.
@@ -587,7 +587,15 @@
     unchanged = null;
     // Each wait below may outlast the player: once it is closed, nothing more is asked for, and no session started.
     if (!imdb) {
-      const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
+      const answer = await content
+        .query({ kind: 'title.external-id', title: { type: title.type, id: title.id } })
+        .catch(() => null);
+      const found =
+        answer?.imdbId.state === 'ready'
+          ? answer.imdbId.value
+          : answer?.imdbId.state === 'absent'
+            ? null
+            : undefined;
       if (ended) return false;
       if (!found) {
         failure = found === null ? 'imdb' : 'unreachable';

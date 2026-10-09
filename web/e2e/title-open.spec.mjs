@@ -304,6 +304,6 @@ test('a poster card shows one unclipped ring for the keyboard, and none after a 
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
   await page.evaluate(() => window.lastTransition);
   await expect.poll(() => card.evaluate((link) => document.activeElement === link)).toBe(true);
-  expect(await rings(card)).toMatchObject({ visible: false, art: 'none' });
+  expect(await rings(card)).toMatchObject({ link: 'none', art: 'none' });
   await page.close();
 });

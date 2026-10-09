@@ -6,23 +6,21 @@
 // both surfaces carry its credit.
 
 import {
+  catalogPage,
   categories,
-  discoverParams,
+  contentPages,
   interleave,
   matchesPrimaryGenre,
-  runBounded,
-  tmdbPages,
   type DiscoverQuery,
   type Pages,
   type RowDef,
 } from './catalog';
+import type { ContentServiceClientPort } from './contentServiceClient';
+import type { ContentAtlasCatalog } from './contentServiceProtocol';
 import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
-import { relayFetch } from './relayFetch';
 import { reuse } from './reuse';
-import { tmdbFetch, tmdbMissing } from './tmdbCache';
-import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
-import { fetchServices, matches, type Service } from '../settings/services';
+import { contentServices, matches, type Service } from '../settings/services';
 
 /**
  * What a visitor with no library sees: the six US services, in TMDB's own US order.
@@ -65,13 +63,7 @@ export function resolvePicks(
 }
 
 /** One of atlas's catalogs, as its manifest declares it: which service it is about, and what it is called. */
-export interface AtlasCatalog {
-  id: string;
-  name: string;
-  type: MediaType;
-  /** Every provider id the catalog covers (`denProviderIds`), including the ones TMDB folds into one service. */
-  providerIds: number[];
-}
+export type AtlasCatalog = ContentAtlasCatalog;
 
 /** The stable whole-catalog slot a chart can improve without changing the row the page already published. */
 export type ServiceRowSlot = 'new' | 'popular';
@@ -93,65 +85,10 @@ export type AtlasServiceRow = RowDef & {
  * The ids are atlas's (`jw-nfx`, `jw-nfx-new`), and which services it carries changes with its releases — so the
  * manifest is what says whether a service has rows at all, and what they are called.
  */
-export function atlasCatalogs(
-  base: string,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<AtlasCatalog[]> {
-  // Home, a tile's hover and the service page all read it; one request serves them all (`reuse`).
-  return reuse(`manifest:${base}`, () => readCatalogs(base, fetchImpl));
-}
-
-async function readCatalogs(base: string, fetchImpl: typeof fetch): Promise<AtlasCatalog[]> {
-  const res = await fetchImpl(`${base}/manifest.json`);
-  if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-  const body = (await res.json()) as { catalogs?: unknown };
-  const catalogs = Array.isArray(body.catalogs) ? body.catalogs : [];
-  return catalogs.flatMap((raw): AtlasCatalog[] => {
-    const entry = raw as Record<string, unknown>;
-    const ids = Array.isArray(entry.denProviderIds)
-      ? entry.denProviderIds.filter((id): id is number => typeof id === 'number')
-      : [];
-    const type = entry.type === 'series' ? 'tv' : entry.type === 'movie' ? 'movie' : null;
-    if (!ids.length || !type || typeof entry.id !== 'string' || typeof entry.name !== 'string')
-      return [];
-    return [{ id: entry.id, name: entry.name, type, providerIds: ids }];
-  });
-}
-
-/** One of atlas's catalog answers as titles: Stremio metas, which name TMDB's id and carry art of their own. */
-function titlesOfMetas(body: unknown): Title[] {
-  const metas = (body as { metas?: unknown } | null)?.metas;
-  if (!Array.isArray(metas)) return [];
-  return (metas as Record<string, unknown>[]).flatMap((meta): Title[] => {
-    const type = meta.type === 'series' ? 'tv' : meta.type === 'movie' ? 'movie' : null;
-    const id = meta.moviedb_id;
-    // Without TMDB's id there is no page to open and no way to match what the library holds, so the title is left out
-    // rather than drawn as a card that leads nowhere.
-    if (!type || typeof id !== 'number' || typeof meta.name !== 'string') return [];
-    const year = Number(String(meta.releaseInfo ?? '').slice(0, 4));
-    const rating = Number(meta.imdbRating);
-    return [
-      {
-        type,
-        id,
-        title: meta.name,
-        posterPath: typeof meta.posterPath === 'string' ? meta.posterPath : undefined,
-        // The chart's own art is keyed by IMDb id, and for a series that id is often the whole anthology's: TMDB
-        // splits "Monster" into one show per story, IMDb keeps one, so the Lizzie Borden story was drawn with
-        // Dahmer's poster. Wrong art is worse than none, and a film's two ids agree, so the fallback is films only.
-        posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
-        year: Number.isInteger(year) && year > 1800 ? year : undefined,
-        rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? rating : undefined,
-        ratingSource:
-          Number.isFinite(rating) && rating > 0 && rating <= 10 ? 'justwatch-imdb' : undefined,
-        imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
-        // When it lands on the service, or leaves it (atlas's `denAt`, in seconds). Only its leaving and coming
-        // charts carry one, and a chart older than atlas 0.41.0 carries none at all, so a row must still work
-        // without it.
-        arrivesAt: typeof meta.denAt === 'number' ? meta.denAt * 1000 : undefined,
-      },
-    ];
-  });
+export function atlasCatalogs(content: ContentServiceClientPort): Promise<AtlasCatalog[]> {
+  return content
+    .query({ kind: 'atlas.service.catalogs' })
+    .then(({ catalogs }) => (catalogs.state === 'ready' ? catalogs.value : []));
 }
 
 /**
@@ -162,20 +99,14 @@ function titlesOfMetas(body: unknown): Title[] {
  * is the same bargain the rows themselves make.
  */
 const FILL_HEAD = 12;
-/** At once. den-edge answers /tmdb at 120 a minute per address, and a page has its own asking to do. */
-const FILL_AT_ONCE = 4;
-
 /**
- * The art atlas could not name, asked of TMDB by the id atlas gave — never by the IMDb id, which for a split anthology
- * names something else.
- *
- * Every browser asks through den-edge (`tmdbCache`), so a title is fetched from TMDB once and answered from its cache
- * for every device and visitor after that.
+ * The art atlas could not name, normalized by the content Worker from the TMDB id atlas gave — never by IMDb id,
+ * which for a split anthology can name a different title.
  */
 export async function fillPosters(
   titles: Title[],
-  key: string,
-  { head = FILL_HEAD, atOnce = FILL_AT_ONCE, fetchImpl = tmdbFetch } = {},
+  content: ContentServiceClientPort,
+  { head = FILL_HEAD } = {},
 ): Promise<Title[]> {
   // Only TMDB's own path counts as art already named. A chart's `poster` is metahub's, and metahub answers
   // from images.metahub.space with a redirect to live.metahub.space — a host the page's own CSP does not
@@ -183,31 +114,19 @@ export async function fillPosters(
   // Libang Libu blank on Netflix's row while TMDB held a perfectly good poster for it.
   const wanted = titles.filter((title) => !title.posterPath).slice(0, head);
   if (!wanted.length) return titles;
-  const found = new Map<string, string>();
-  const missing = new Set<string>();
-  const key_ = (title: Title) => `${title.type}:${title.id}`;
-  for (let at = 0; at < wanted.length; at += atOnce) {
-    await Promise.all(
-      wanted.slice(at, at + atOnce).map(async (title) => {
-        try {
-          const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
-          const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-          if (!res.ok) {
-            if (await tmdbMissing(res)) missing.add(key_(title));
-            return;
-          }
-          const body = (await res.json()) as { poster_path?: unknown };
-          if (typeof body.poster_path === 'string') found.set(key_(title), body.poster_path);
-        } catch {
-          // No art for this one: it keeps its placeholder, and the row is not held up for it.
-        }
-      }),
-    );
-  }
+  const key_ = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
+  const answer = await content.query({
+    kind: 'titles',
+    titles: wanted.map(({ type, id }) => ({ type, id })),
+  });
+  const found = new Map(answer.titles.map((title) => [key_(title), title]));
+  const retryable = new Set(answer.retryable.map(key_));
+  const asked = new Set(wanted.map(key_));
   return titles.flatMap((title) => {
     const id = key_(title);
-    if (missing.has(id)) return [];
-    return [found.has(id) ? { ...title, posterPath: found.get(id) } : title];
+    if (!asked.has(id) || retryable.has(id)) return [title];
+    const normalized = found.get(id);
+    return normalized ? [{ ...title, ...normalized }] : [];
   });
 }
 
@@ -218,20 +137,17 @@ export async function fillPosters(
  * One request each, and one page: these are charts, not a catalogue to page through, so a second page is empty.
  */
 export function atlasServiceRows(
-  base: string,
   catalogs: readonly AtlasCatalog[],
   service: Service,
   country: string,
   {
     only,
-    tmdbKey,
-    fetchImpl = relayFetch,
+    content,
   }: {
     only?: MediaType;
-    /** With one, the head of a chart gets the art atlas could not name (`fillPosters`). */
-    tmdbKey?: string;
-    fetchImpl?: typeof fetch;
-  } = {},
+    /** Worker-owned normalization for chart art atlas could not name. */
+    content: ContentServiceClientPort;
+  },
 ): AtlasServiceRow[] {
   const ids = new Set([service.id, ...service.variants]);
   // What has just arrived leads, as it does in the TMDB rows: then what is popular, then what is about to go or
@@ -248,22 +164,15 @@ export function atlasServiceRows(
     .slice()
     .sort((a, b) => rank(a.id) - rank(b.id))
     .map((catalog) => {
-      const path = catalog.type === 'tv' ? 'series' : 'movie';
-      const chart = `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`;
-      // Shared (`reuse`), so a tile's hover, the hero and the row itself ask atlas once between them.
-      const listed = () =>
-        reuse(`chart:${chart}`, async () => {
-          const res = await fetchImpl(chart);
-          if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-          const received = titlesOfMetas(await res.json());
-          if (!keptByEdge(res)) rememberAtlasMetadata(received, fetchImpl);
-          return withSharedTitleMetadata(received, fetchImpl);
+      const listed = async () => {
+        const answer = await content.query({
+          kind: 'atlas.service.chart',
+          catalog: { id: catalog.id, type: catalog.type },
+          country,
         });
-      const filled = () =>
-        reuse(`art:${tmdbKey ? 'tmdb' : 'none'}:${chart}`, async () => {
-          const titles = await listed();
-          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
-        });
+        return answer.titles.state === 'ready' ? answer.titles.value : [];
+      };
+      const filled = () => listed().then((titles) => fillPosters(titles, content));
       return {
         id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
         title: mixed ? `${catalog.name} · ${NOUN[catalog.type]}` : catalog.name,
@@ -301,21 +210,18 @@ const POOL_AT_ONCE = 6;
  * about four services where the page shows six, and says so by simply being the titles it found.
  */
 export function radarRows(
-  base: string,
   catalogs: readonly AtlasCatalog[],
   picks: readonly ServicePick[],
   {
     only,
     names = {},
-    tmdbKey,
-    fetchImpl = relayFetch,
+    content,
   }: {
     only?: MediaType;
     /** Provider id → the service's name, for the card's caption. A visitor has no directory, and so no names. */
     names?: Record<number, string>;
-    tmdbKey?: string;
-    fetchImpl?: typeof fetch;
-  } = {},
+    content: ContentServiceClientPort;
+  },
 ): RowDef[] {
   return POOLS.flatMap((pool) => {
     const asked = new Map<string, { catalog: AtlasCatalog; country: string }>();
@@ -336,22 +242,18 @@ export function radarRows(
         caption: (title: Title) => captionOf(title, pool.soonest),
         load: async (page: number) => {
           if (page > 1) return [];
-          const unkept: Title[] = [];
           const charts = await inBatches(wanted, POOL_AT_ONCE, async ({ catalog, country }) => {
-            const path = catalog.type === 'tv' ? 'series' : 'movie';
-            const res = await fetchImpl(
-              `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`,
-            );
-            if (!res.ok) return [];
+            const answer = await content.query({
+              kind: 'atlas.service.chart',
+              catalog: { id: catalog.id, type: catalog.type },
+              country,
+            });
+            if (answer.titles.state !== 'ready') return [];
             const named = catalog.providerIds.flatMap((id) => names[id] ?? []).slice(0, 1);
-            const titles = titlesOfMetas(await res.json());
-            if (!keptByEdge(res)) unkept.push(...titles);
-            return titles.map((title) => ({ ...title, services: named }));
+            return answer.titles.value.map((title) => ({ ...title, services: named }));
           });
           const merged = mergePool(charts, pool.soonest);
-          rememberAtlasMetadata(unkept, fetchImpl);
-          const titles = await withSharedTitleMetadata(merged, fetchImpl);
-          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
+          return fillPosters(merged, content);
         },
       },
     ];
@@ -611,47 +513,33 @@ export async function serviceHero(
  */
 export async function withBackdrops(
   titles: Title[],
-  key: string,
-  {
-    head = HERO_SLIDES,
-    atOnce = FILL_AT_ONCE,
-    fetchImpl = tmdbFetch,
-  }: { head?: number; atOnce?: number; fetchImpl?: typeof fetch } = {},
+  content: ContentServiceClientPort,
+  { head = HERO_SLIDES }: { head?: number } = {},
 ): Promise<Title[]> {
   const candidates = titles.slice(0, head);
   const looked: (Title | null)[] = [...candidates];
   const missing = candidates.flatMap((title, at) => (title.backdropPath ? [] : [{ title, at }]));
   const absent = new Set<number>();
-  let stopped = false;
-  await runBounded(
-    missing,
-    atOnce,
-    async ({ title, at }) => {
-      try {
-        const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
-        const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-        // den-edge turns TMDB's 429 into a 503 with the same Retry-After. Once one job sees either form, do not
-        // dequeue more speculative art lookups during the provider's requested rest.
-        if (res.status === 429 || (res.status === 503 && res.headers.has('retry-after')))
-          stopped = true;
-        if (!res.ok) {
-          if (await tmdbMissing(res)) {
-            absent.add(at);
-            looked[at] = null;
-          }
-          return;
-        }
-        const body = (await res.json()) as { backdrop_path?: unknown };
-        looked[at] =
-          typeof body.backdrop_path === 'string'
-            ? { ...title, backdropPath: body.backdrop_path }
-            : null;
-      } catch {
-        // It may still draw its own lookup when it is visible.
+  if (missing.length) {
+    const answer = await content.query({
+      kind: 'titles',
+      titles: missing.map(({ title: { type, id } }) => ({ type, id })),
+    });
+    const key = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
+    const found = new Map(answer.titles.map((title) => [key(title), title]));
+    const retryable = new Set(answer.retryable.map(key));
+    for (const { title, at } of missing) {
+      const id = key(title);
+      if (retryable.has(id)) continue;
+      const normalized = found.get(id);
+      if (!normalized) {
+        absent.add(at);
+        looked[at] = null;
+      } else {
+        looked[at] = normalized.backdropPath ? { ...title, ...normalized } : null;
       }
-    },
-    () => stopped,
-  );
+    }
+  }
   const pictured = looked.filter((title): title is Title => title !== null);
   // Nothing with a picture at all: the words are still a better hero than an empty one.
   return pictured.length ? pictured : candidates.filter((_, at) => !absent.has(at));
@@ -671,20 +559,20 @@ export interface ServicePageOptions {
  * page mounting after a hover primed it — joins what is already on its way.
  */
 export function servicePage(
+  content: ContentServiceClientPort,
   service: Service,
   country: string,
-  tmdbKey: string,
   atlas: string | null,
   { minYear, only, excludedLanguages, shown = () => true }: ServicePageOptions = {},
 ): { rows: Promise<RowDef[]>; hero: Promise<Title[]> } {
-  const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), {
+  const tmdb = serviceRows(service, country, contentPages(content), {
     minYear,
     only,
     excludedLanguages,
   });
   const own = atlas
-    ? atlasCatalogs(atlas).then((catalogs) =>
-        atlasServiceRows(atlas, catalogs, service, country, { only, tmdbKey }),
+    ? atlasCatalogs(content).then((catalogs) =>
+        atlasServiceRows(catalogs, service, country, { only, content }),
       )
     : Promise.resolve([]);
   return {
@@ -698,7 +586,7 @@ export function servicePage(
     hero: own
       .catch((): AtlasServiceRow[] => [])
       .then((rows) => serviceHero(rows, tmdb))
-      .then((titles) => withBackdrops(titles.filter(shown), tmdbKey)),
+      .then((titles) => withBackdrops(titles.filter(shown), content)),
   };
 }
 
@@ -711,16 +599,16 @@ const PRIMED_ROWS = 3;
  * page's first screen, on a gesture towards it, and a second gesture within a few minutes asks nothing more.
  */
 export function primeServicePage(
+  content: ContentServiceClientPort,
   service: Service,
   country: string,
-  tmdbKey: string,
   atlas: string | null,
   options: ServicePageOptions = {},
 ): void {
   const key = `prime:${service.id}:${country}:${atlas ?? ''}:${options.minYear ?? ''}`;
   void reuse(key, async () => {
-    void fetchServices(country, tmdbKey).catch(() => undefined);
-    const page = servicePage(service, country, tmdbKey, atlas, options);
+    void contentServices(content, country).catch(() => undefined);
+    const page = servicePage(content, service, country, atlas, options);
     await Promise.all([
       page.hero,
       page.rows.then((rows) => Promise.all(rows.slice(0, PRIMED_ROWS).map((row) => row.load(1)))),
@@ -778,7 +666,7 @@ function rowsFor(
       // one would let a reused surface keep the other's posters.
       id: `service-tmdb-${service.id}-${country}-${id}-${type}`,
       title: `${title} ${NOUN[type]}`,
-      load: (page: number) => pages(`/discover/${type}`, type, discoverParams(query), page),
+      load: (page: number) => catalogPage(pages, { kind: 'discover', query }, page),
     };
   });
 }
@@ -851,13 +739,11 @@ export function serviceRows(
       c.query.primaryGenre === undefined
         ? undefined
         : (title: Title) => matchesPrimaryGenre(title, c.query.primaryGenre!),
-    load: (page: number) =>
-      pages(
-        `/discover/${c.query.mediaType}`,
-        c.query.mediaType,
-        discoverParams(scoped(c.query)),
-        page,
-      ),
+    load: (page: number) => {
+      const query = scoped(c.query);
+      const { primaryGenre: _primaryGenre, ...contentQuery } = query;
+      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page);
+    },
   }));
   return [...lead, ...feed];
 }

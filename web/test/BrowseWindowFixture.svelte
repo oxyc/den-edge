@@ -6,7 +6,10 @@
   import RoutePage from '../src/components/RoutePage.svelte';
   import type { RowDef } from '../src/lib/catalog';
   import type { Title } from '../src/lib/library';
+  import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
+
+  fixtureContentServiceContext();
 
   const params = new URLSearchParams(location.search);
   let active = $state(!params.has('hidden'));

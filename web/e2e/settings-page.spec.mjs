@@ -15,6 +15,17 @@ const PROVIDERS = {
   ],
 };
 
+async function markPageFetch(page) {
+  await page.addInitScript(() => {
+    const pageFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set('x-den-test-fetch-realm', 'page');
+      return pageFetch(input, { ...init, headers });
+    };
+  });
+}
+
 for (const width of [320, 390, 820, 1280]) {
   test(`Settings covers the TV's sections, opens rows in place and saves at ${width}px`, async () => {
     const browser = await chromium.launch({
@@ -65,10 +76,14 @@ for (const width of [320, 390, 820, 1280]) {
       });
       const page = await context.newPage();
       await guardNetwork(page);
+      await markPageFetch(page);
+      const pageOwnedProviders = [];
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('**/version', (r) => r.fulfill({ json: { version: '0.67.0' } }));
       await page.route('**/config', (r) => r.fulfill({ json: { simklClientId: 'client-1' } }));
       await routeTmdb(page, (route) => {
+        if (route.request().headers()['x-den-test-fetch-realm'])
+          pageOwnedProviders.push(route.request().url());
         const url = new URL(route.request().url());
         if (url.pathname.endsWith('/configuration')) return route.fulfill({ json: { images: {} } });
         if (url.pathname.endsWith('/watch/providers/regions'))
@@ -228,8 +243,40 @@ for (const width of [320, 390, 820, 1280]) {
         path: test.info().outputPath(`settings-${width}.png`),
         fullPage: true,
       });
+      expect(pageOwnedProviders, 'Settings provider reads must stay inside the Worker').toEqual([]);
     } finally {
       await browser.close();
     }
   });
 }
+
+test('saving a provider key validates it in the content Worker before storing it', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await markPageFetch(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  const checks = [];
+  await page.route('**/ratings/check', (route) => {
+    checks.push({
+      key: route.request().headers()['x-api-key'],
+      pageOwned: route.request().headers()['x-den-test-fetch-realm'] !== undefined,
+    });
+    return route.fulfill({ json: {} });
+  });
+  await routeTmdb(page, (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/configuration')) return route.fulfill({ json: { images: {} } });
+    return route.fulfill({ json: { results: [] } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/settings.html`);
+
+  await page.getByRole('button', { name: /OMDb key/ }).click();
+  const row = page.getByRole('region', { name: 'OMDb key' });
+  await row.getByLabel('OMDb key API key').fill('candidate-omdb');
+  await row.getByRole('button', { name: 'Save & validate' }).click();
+  await expect(row.getByRole('status')).toContainText('ratings are enabled');
+  expect(checks).toEqual([{ key: 'candidate-omdb', pageOwned: false }]);
+});

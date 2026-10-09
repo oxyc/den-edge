@@ -1,12 +1,7 @@
-import { fetchSeason, type Episode } from './detail';
+import type { Episode } from './detail';
 import type { DownloadTitle } from './downloadRows';
-import { TMDB_PROXY_KEY } from './tmdbCache';
 
-export type SeasonLoader = (
-  seriesId: number,
-  season: number,
-  key: string,
-) => Promise<Episode[] | null>;
+export type SeasonLoader = (seriesId: number, season: number) => Promise<Episode[] | null>;
 
 /** A failed legacy-artwork recovery may be retried after a quiet period, but a card remount cannot bypass it. */
 export const DOWNLOAD_STILL_RETRY_MS = 30_000;
@@ -53,12 +48,11 @@ function trim(cache: Map<string, RecoveredStill>): void {
  * Recover artwork for shared rows written before downloads carried `stillPath`.
  *
  * The row still identifies the exact episode, so using its series poster is unnecessary: TMDB's season answer has
- * the same still the episode card already shows. `fetchSeason` is cached and coalesced by `tmdbCache`, making this
- * cheap when several downloads from one season appear together.
+ * the same still the episode card already shows. The Worker content authority coalesces this semantic season lookup.
  */
 export async function downloadStill(
   title: DownloadTitle,
-  loadSeason: SeasonLoader = fetchSeason,
+  loadSeason: SeasonLoader,
   now: () => number = Date.now,
 ): Promise<string | undefined> {
   if (title.stillPath) return title.stillPath;
@@ -78,7 +72,7 @@ export async function downloadStill(
 
   const entry: RecoveredStill = {};
   const flight = Promise.resolve()
-    .then(() => loadSeason(mediaId, season, TMDB_PROXY_KEY))
+    .then(() => loadSeason(mediaId, season))
     .then(
       (episodes) => {
         const still = episodes?.find((candidate) => candidate.number === episode)?.stillPath;

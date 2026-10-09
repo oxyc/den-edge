@@ -1423,17 +1423,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'runtime':
       return (
-        exact(value, [
-          'kind',
-          'tmdbKey',
-          'providerKeys',
-          'pluginManifestUrls',
-          'privateRemuxUrl',
-        ]) &&
-        boundedText(value.tmdbKey, 16_384) &&
-        record(value.providerKeys) &&
-        exact(value.providerKeys, ['tmdb', 'omdb', 'content-warnings']) &&
-        Object.values(value.providerKeys).every((candidate) => boundedText(candidate, 16_384)) &&
+        exact(value, ['kind', 'pluginManifestUrls', 'privateRemuxUrl']) &&
         list(value.pluginManifestUrls, webUrl, 10_000) &&
         unique(value.pluginManifestUrls) &&
         nullable(value.privateRemuxUrl, webUrl)

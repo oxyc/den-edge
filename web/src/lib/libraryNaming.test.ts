@@ -172,7 +172,10 @@ it('cancels a pending retry when its LibrarySession closes', async () => {
     });
     const close = vi.fn();
     const model = { libraryMetadata, close } as unknown as LibraryModel;
-    const state = new LibrarySession(model);
+    const state = new LibrarySession(model, false, {
+      query: vi.fn(),
+      onStatus: vi.fn(() => () => {}),
+    });
 
     await nameLibraryTitles(state, [movie]);
     state.close();

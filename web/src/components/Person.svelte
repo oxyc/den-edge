@@ -3,24 +3,19 @@
   import DetailTabs from './DetailTabs.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
-  import {
-    fetchPerson,
-    fetchFilmography,
-    groupFilmography,
-    type FilmCredit,
-    type PersonDetail,
-  } from '../lib/detail';
+  import { groupFilmography, type FilmCredit, type PersonDetail } from '../lib/detail';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
 
   let {
     id,
-    tmdbKey,
+    content,
     active = true,
   }: {
     id: number;
-    tmdbKey: string;
+    content: ContentServiceClientPort;
     active?: boolean;
     shown?: (title: Title) => boolean;
   } = $props();
@@ -36,34 +31,41 @@
     filmsRetry = $state(0);
   $effect(() => {
     void id;
-    void tmdbKey;
     expanded = false;
     department = null;
     counts = {};
   });
   $effect(() => {
-    const [current, key] = [id, tmdbKey];
+    const current = id;
     void personRetry;
-    let live = true;
+    const ask = new AbortController();
     person = undefined;
-    void fetchPerson(current, key).then((loaded) => {
-      if (live) person = loaded;
-    });
-    return () => {
-      live = false;
-    };
+    void content
+      .query({ kind: 'person', id: current }, ask.signal)
+      .then((answer) => {
+        if (!ask.signal.aborted)
+          person = answer.person.state === 'ready' ? answer.person.value : null;
+      })
+      .catch(() => {
+        if (!ask.signal.aborted) person = null;
+      });
+    return () => ask.abort();
   });
   $effect(() => {
-    const [current, key] = [id, tmdbKey];
+    const current = id;
     void filmsRetry;
-    let live = true;
+    const ask = new AbortController();
     films = undefined;
-    void fetchFilmography(current, key).then((loaded) => {
-      if (live) films = loaded;
-    });
-    return () => {
-      live = false;
-    };
+    void content
+      .query({ kind: 'person.filmography', id: current }, ask.signal)
+      .then((answer) => {
+        if (!ask.signal.aborted)
+          films = answer.credits.state === 'ready' ? answer.credits.value : null;
+      })
+      .catch(() => {
+        if (!ask.signal.aborted) films = null;
+      });
+    return () => ask.abort();
   });
 
   // Explicit person pages include their full career, just as on TV; discovery hide rules must not erase credits.
