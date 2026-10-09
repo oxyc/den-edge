@@ -121,6 +121,9 @@
   let retainedContinue = $state(false);
   let continueNames = $state(SHELF_TRANCHE);
   let watchlistNames = $state(SHELF_TRANCHE);
+  let continueCachedPrefix = $state(0);
+  let watchlistCachedPrefix = $state(0);
+  let shelfBaselinesCaptured = false;
   let busy = $state(false);
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
@@ -150,15 +153,24 @@
    * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains
    * unanswered, so it cannot make us spend the rate limit on the whole tail.
    */
-  const metadataLimit = (refs: readonly TitleRef[], wanted: number) => {
+  const metadataLimit = (refs: readonly TitleRef[], wanted: number, cachedPrefix: number) => {
+    const visibleTarget = Math.max(SHELF_TRANCHE, cachedPrefix) + wanted - SHELF_TRANCHE;
     let shown = 0;
     let unanswered = 0;
     let limit = 0;
     for (const ref of refs) {
+      if (session.displayTitle(ref)) {
+        limit++;
+        shown++;
+        continue;
+      }
+      if (session.displayMissing(ref)) {
+        limit++;
+        continue;
+      }
+      if (shown >= visibleTarget) break;
       limit++;
-      if (session.displayTitle(ref)) shown++;
-      else if (!session.displayMissing(ref)) unanswered++;
-      if (shown >= wanted || unanswered >= SHELF_TRANCHE) break;
+      if (++unanswered >= SHELF_TRANCHE) break;
     }
     return limit;
   };
@@ -166,9 +178,12 @@
     metadataLimit(
       (continueView?.items ?? []).map(({ title }) => title),
       continueNames,
+      continueCachedPrefix,
     ),
   );
-  const watchlistNameLimit = $derived(metadataLimit(overview?.watchlist ?? [], watchlistNames));
+  const watchlistNameLimit = $derived(
+    metadataLimit(overview?.watchlist ?? [], watchlistNames, watchlistCachedPrefix),
+  );
   const libraryOpen = $derived(model === null || overview !== undefined);
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
@@ -239,7 +254,22 @@
     }
     let disposed = false;
     const initial = untrack(() => shelfPlan === null);
-    if (initial) shelvesReady = false;
+    if (initial) {
+      shelvesReady = false;
+      if (!shelfBaselinesCaptured) {
+        const cachedPrefix = (refs: readonly TitleRef[]) => {
+          let count = 0;
+          for (const ref of refs) {
+            if (!session.displayTitle(ref)) break;
+            count++;
+          }
+          return count;
+        };
+        continueCachedPrefix = cachedPrefix(continued.items.map(({ title }) => title));
+        watchlistCachedPrefix = cachedPrefix(view.watchlist);
+        shelfBaselinesCaptured = true;
+      }
+    }
     shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
     const refs = [
       ...continued.needsShapes,
