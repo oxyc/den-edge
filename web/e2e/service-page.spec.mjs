@@ -80,6 +80,76 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
   return asked;
 }
 
+function requestCount(asked, pathname, params = {}) {
+  return asked.filter((request) => {
+    const url = new URL(request, E2E_ORIGIN);
+    return (
+      url.pathname === pathname &&
+      Object.entries(params).every(([name, value]) => url.searchParams.get(name) === value)
+    );
+  }).length;
+}
+
+function baseServiceRowCount(asked, sort, votes) {
+  const expected = {
+    sort_by: sort,
+    include_adult: 'false',
+    'vote_count.gte': votes,
+    with_watch_providers: '8',
+    watch_region: 'US',
+    with_watch_monetization_types: 'flatrate',
+  };
+  return asked.filter((request) => {
+    const url = new URL(request, E2E_ORIGIN);
+    const semantic = [...url.searchParams.keys()].filter(
+      (name) => name !== 'api_key' && name !== 'page',
+    );
+    return (
+      url.pathname === '/tmdb/3/discover/movie' &&
+      semantic.length === Object.keys(expected).length &&
+      Object.entries(expected).every(([name, value]) => url.searchParams.get(name) === value)
+    );
+  }).length;
+}
+
+function servicePageRequests(asked) {
+  return {
+    manifest: requestCount(asked, '/atlas/manifest.json'),
+    movieDirectory: requestCount(asked, '/tmdb/3/watch/providers/movie', {
+      watch_region: 'US',
+    }),
+    tvDirectory: requestCount(asked, '/tmdb/3/watch/providers/tv', { watch_region: 'US' }),
+    chart: requestCount(asked, '/atlas/catalog/movie/jw-nfx-new/country=US.json'),
+    popular: baseServiceRowCount(asked, 'popularity.desc', '50'),
+    acclaimed: baseServiceRowCount(asked, 'vote_average.desc', '300'),
+  };
+}
+
+function firstScreenRequests(asked) {
+  return {
+    ...servicePageRequests(asked),
+    film101: requestCount(asked, '/tmdb/3/movie/101'),
+    film102: requestCount(asked, '/tmdb/3/movie/102'),
+    film103: requestCount(asked, '/tmdb/3/movie/103'),
+  };
+}
+
+const COMPLETE_SERVICE_PAGE = {
+  manifest: 1,
+  movieDirectory: 1,
+  tvDirectory: 1,
+  chart: 1,
+  popular: 1,
+  acclaimed: 1,
+};
+
+const COMPLETE_FIRST_SCREEN = {
+  ...COMPLETE_SERVICE_PAGE,
+  film101: 1,
+  film102: 1,
+  film103: 1,
+};
+
 test('the service billboard shows a loading state, then its titles with their picture', async ({
   browser,
 }) => {
@@ -119,43 +189,16 @@ test('resting on a service tile starts loading its page before the press', async
   expect(asked, 'nothing is fetched for a page nobody has gestured towards').toEqual([]);
 
   await tile.hover();
-  const count = (pathname, sort) =>
-    asked.filter((request) => {
-      const url = new URL(request, E2E_ORIGIN);
-      return url.pathname === pathname && (!sort || url.searchParams.get('sort_by') === sort);
-    }).length;
-  const primedRequests = () => ({
-    manifest: count('/atlas/manifest.json'),
-    movieDirectory: count('/tmdb/3/watch/providers/movie'),
-    tvDirectory: count('/tmdb/3/watch/providers/tv'),
-    chart: count('/atlas/catalog/movie/jw-nfx-new/country=US.json'),
-    film101: count('/tmdb/3/movie/101'),
-    film102: count('/tmdb/3/movie/102'),
-    film103: count('/tmdb/3/movie/103'),
-    popular: count('/tmdb/3/discover/movie', 'popularity.desc'),
-    acclaimed: count('/tmdb/3/discover/movie', 'vote_average.desc'),
-  });
   // The hover primes the complete first screen: the Atlas row, its hero art, and the next two rows. Waiting for that
   // semantic boundary avoids mistaking a request still belonging to this first gesture for work from the next one.
-  const complete = {
-    manifest: 1,
-    movieDirectory: 1,
-    tvDirectory: 1,
-    chart: 1,
-    film101: 1,
-    film102: 1,
-    film103: 1,
-    popular: 1,
-    acclaimed: 1,
-  };
-  await expect.poll(primedRequests).toEqual(complete);
+  await expect.poll(() => firstScreenRequests(asked)).toEqual(COMPLETE_FIRST_SCREEN);
 
   // A second gesture within the reuse window asks none of those questions again. A frame lets the pointer event and
   // any fetch it starts become observable without an elapsed-time guess.
   await page.mouse.move(0, 0);
   await tile.hover();
   await page.evaluate(() => new Promise(requestAnimationFrame));
-  expect(primedRequests()).toEqual(complete);
+  expect(firstScreenRequests(asked)).toEqual(COMPLETE_FIRST_SCREEN);
 });
 
 test('settings re-read with nothing changed leave the page as it is', async ({ browser }) => {
@@ -166,26 +209,16 @@ test('settings re-read with nothing changed leave the page as it is', async ({ b
 
   const cards = page.locator('a[href^="/movie/10"]:not(.billboard *)');
   await expect(cards.first()).toBeVisible();
-  // Cards paint before their rows finish hydrating, and rows below go on loading while the browser is idle
-  // (`Browse`). Wait until the page has stopped asking, so a late request is not mistaken for settings work.
-  let seen = -1;
-  await expect
-    .poll(
-      async () => {
-        const quiet = asked.length === seen;
-        seen = asked.length;
-        await page.waitForTimeout(500);
-        return quiet;
-      },
-      { timeout: 20_000 },
-    )
-    .toBe(true);
+  // Rows below may keep loading while this one is visible; wait on this screen's exact leading questions instead of
+  // sampling an unrelated global request count and guessing that 500 ms of quiet means the page is finished.
+  await expect.poll(() => servicePageRequests(asked)).toEqual(COMPLETE_SERVICE_PAGE);
   const shown = await cards.count();
   await cards.evaluateAll((all) => all.forEach((card) => (card.dataset.kept = '')));
-  const before = asked.length;
 
   await page.evaluate(() => window.reread());
-  await page.waitForTimeout(300);
   await expect(page.locator('a[data-kept]')).toHaveCount(shown);
-  expect(asked.length, 'nothing is asked again').toBe(before);
+  expect(
+    servicePageRequests(asked),
+    'nothing that defines this service page is asked again',
+  ).toEqual(COMPLETE_SERVICE_PAGE);
 });

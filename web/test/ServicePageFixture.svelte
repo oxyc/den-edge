@@ -1,5 +1,6 @@
 <script lang="ts">
   // A service page on its own (`?page`), or Home's service shelf with the prime Home wires to it.
+  import { tick } from 'svelte';
   import ServicePage from '../src/components/ServicePage.svelte';
   import ServicesRow from '../src/components/ServicesRow.svelte';
   import { primeServicePage } from '../src/lib/services';
@@ -8,7 +9,10 @@
   const page = new URLSearchParams(location.search).has('page');
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());
-  (window as unknown as { reread: () => void }).reread = () => (languages = new Set(languages));
+  (window as unknown as { reread: () => Promise<void> }).reread = async () => {
+    languages = new Set(languages);
+    await tick();
+  };
   const netflix = {
     id: 8,
     name: 'Netflix',
