@@ -83,6 +83,14 @@ describe('every device, with a key of its own or without', () => {
     ]);
     vi.unstubAllGlobals();
   });
+
+  it('still uses this origin when private or restricted storage disables the browser cache', async () => {
+    vi.stubGlobal('location', { origin: 'https://den.example' });
+    const net = network();
+    await cachingFetch(null, net.fetchImpl)(detail);
+    expect(net.asked).toEqual(['https://den.example/tmdb/3/movie/603?append_to_response=credits']);
+    vi.unstubAllGlobals();
+  });
 });
 
 describe('cachingFetch', () => {
