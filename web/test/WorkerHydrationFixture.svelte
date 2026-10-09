@@ -17,6 +17,7 @@
   let view = $state(params.get('view') === 'settings' ? 'settings' : 'library');
   const online = params.has('online');
   const lifecycle = params.has('lifecycle');
+  const source = params.has('source');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, {
@@ -37,6 +38,7 @@
 
   let seeded = $state(false);
   let seedFailure = $state<string | null>(null);
+  let sourceResult = $state<string | null>(null);
   if (seed) {
     void model.ready
       .then(async () => {
@@ -122,6 +124,22 @@
       });
   }
 
+  if (source) {
+    void model.ready
+      .then(async () => {
+        const { result } = await model.downloadSources({
+          target: { type: 'tv', id: 213344, season: 1, episode: 1 },
+          name: 'Springfloden',
+          imdbId: 'tt5194410',
+        });
+        sourceResult =
+          result.kind === 'download.sources' && result.sources?.length
+            ? 'Worker episode sources ready'
+            : 'Worker episode sources unavailable';
+      })
+      .catch(() => (sourceResult = 'Worker episode sources unavailable'));
+  }
+
   onMount(() => {
     if (!lifecycle) return;
     let stopped = false;
@@ -156,9 +174,13 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+  {#if sourceResult}<p role="status">{sourceResult}</p>{/if}
   {#if seed}
     {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
     {#if seeded}<p role="status">Worker library seeded</p>{/if}
+  {:else if source}
+    <!-- The source probe is deliberately the first provider operation after Worker bootstrap. Mounting Home here
+         would let unrelated metadata work initialize relay membership and hide the direct-IMDb regression. -->
   {:else}
     <nav aria-label="Fixture pages">
       <button type="button" onclick={() => (view = 'library')}>Open Home</button>

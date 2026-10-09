@@ -75,6 +75,13 @@ export async function openLibraryServiceAuthority(
       ? await LibraryLog.openLocal(request.libraryKey, vault)
       : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
   if (!log) return null;
+  // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
+  // before the authority can answer `ready`: a source query that already carries an IMDb id goes straight from
+  // DownloadServiceRuntime to Scout and must not depend on an unrelated TMDB/Atlas request having initialized it.
+  let releaseMembership = () => {};
+  const membershipReady = log.relayMembership().then((membership) => {
+    if (membership) releaseMembership = useLibraryRelayMembership(membership);
+  });
   const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
   const logAuthority = new LibraryLogAuthority(log, clock, {
     mode: request.mode,
@@ -91,23 +98,16 @@ export async function openLibraryServiceAuthority(
     { background: downloads },
     librarySimklDelivery(log, clock),
   );
-  if (!contentCredentials) return authority;
-  let credentialsCurrent = true;
-  let releaseMembership = () => {};
-  let membershipReady: Promise<void> | undefined;
-  const ready = () =>
-    (membershipReady ??= log.relayMembership().then((membership) => {
-      if (credentialsCurrent && membership)
-        releaseMembership = useLibraryRelayMembership(membership);
-    }));
-  const releaseCredentials = contentCredentials.bind({
-    ready,
-    tmdb: () => tmdbKeyOf(log.settings('keys')),
-    omdb: () => readApiKey(log.settings('keys'), 'omdb'),
-    contentWarnings: () => readApiKey(log.settings('keys'), 'doesthedogdie'),
-  });
+  let releaseCredentials = () => {};
+  if (contentCredentials)
+    releaseCredentials = contentCredentials.bind({
+      ready: () => membershipReady,
+      tmdb: () => tmdbKeyOf(log.settings('keys')),
+      omdb: () => readApiKey(log.settings('keys'), 'omdb'),
+      contentWarnings: () => readApiKey(log.settings('keys'), 'doesthedogdie'),
+    });
+  await membershipReady;
   return new CredentialBoundLibraryAuthority(authority, () => {
-    credentialsCurrent = false;
     releaseCredentials();
     releaseMembership();
   });
