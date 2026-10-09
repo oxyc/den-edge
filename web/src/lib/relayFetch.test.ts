@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
   forgetGrant,
   forgetLibraryCredential,
+  holdLibraryRelayMembership,
   onGrantEnded,
   relayFetch,
   rememberGrant,
@@ -58,6 +59,24 @@ test('takes the bounded membership capability returned by LibraryService', async
   dispose();
   await relayFetch('/atlas/recommend');
   expect(sent(spy)[HEADER]).toBeUndefined();
+});
+
+test('holds page-owned relay traffic for a guest until their opening library installs membership', async () => {
+  const spy = stub();
+  rememberGrant(GID, 'sekrit');
+  let opened!: () => void;
+  const opening = new Promise<void>((resolve) => (opened = resolve));
+  const release = holdLibraryRelayMembership(opening);
+  const pending = relayFetch('/oauth/connections');
+  await Promise.resolve();
+  expect(spy).not.toHaveBeenCalled();
+
+  useLibraryCredential(KEYS);
+  opened();
+  await pending;
+  expect(sent(spy)[HEADER]).toBe('abc123:def456');
+  expect(sent(spy)[GRANT]).toBeUndefined();
+  release();
 });
 
 test('an old model cannot clear the membership installed by its replacement', async () => {

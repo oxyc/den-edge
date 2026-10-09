@@ -60,6 +60,10 @@ async function routeLibrary(page, metadata) {
     }
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
       metadata.changeRequests = (metadata.changeRequests ?? 0) + 1;
+      if (metadata.holdChanges) {
+        metadata.changesStarted?.();
+        await metadata.releaseChanges;
+      }
       const since = Number(url.searchParams.get('since') ?? 0);
       const entries = [...rows.values()].filter((entry) => entry.seq > since);
       return route.fulfill({
@@ -95,7 +99,14 @@ async function routes(page, metadata) {
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'worker-test' } }));
-  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await page.route('**/config', (route) =>
+    route.fulfill({ json: metadata.mcp ? { mcpUrl: `${E2E_ORIGIN}/mcp` } : {} }),
+  );
+  await page.route('**/oauth/connections', (route) => {
+    metadata.oauthMembers ??= [];
+    metadata.oauthMembers.push(route.request().headers()['x-den-library-member']);
+    return route.fulfill({ json: { connections: [] } });
+  });
   await page.route('**/scout/fixture-install/manifest.json', (route) => {
     const headers = route.request().headers();
     metadata.providerRequests ??= [];
@@ -371,6 +382,48 @@ test('a cold paired Worker authenticates a direct-IMDb episode source request', 
   ).toBeVisible({ timeout: 15_000 });
   expect(metadata.members.size).toBe(1);
   expect(metadata.sourceMembers).toEqual([...metadata.members]);
+});
+
+test('cold Settings stays loading and sends no member traffic before library bootstrap', async ({
+  page,
+}) => {
+  let changesStarted;
+  let releaseChanges;
+  const held = new Promise((resolve) => (changesStarted = resolve));
+  const release = new Promise((resolve) => (releaseChanges = resolve));
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+    mcp: true,
+    oauthMembers: [],
+    holdChanges: false,
+    changesStarted,
+    releaseChanges: release,
+  };
+
+  metadata.holdChanges = true;
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?view=settings&online`);
+  await held;
+  await expect(page.getByRole('status').filter({ hasText: 'Loading your settings' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Plugins' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Assistants', exact: true })).toHaveCount(0);
+  expect(metadata.oauthMembers).toEqual([]);
+
+  metadata.holdChanges = false;
+  releaseChanges();
+  await page.getByRole('button', { name: 'Plugins', exact: true }).click();
+  const plugins = page.getByRole('region', { name: 'Plugins' });
+  await expect(plugins).toBeVisible({ timeout: 15_000 });
+  await expect(plugins).toContainText('No plugins yet');
+  await expect.poll(() => metadata.oauthMembers).toHaveLength(1);
+  expect(metadata.oauthMembers[0]).toMatch(/^[a-f0-9]{32}:[a-f0-9]{64}$/);
 });
 
 test('paired billboard holds the early generic fallback until retained lookup settles', async ({

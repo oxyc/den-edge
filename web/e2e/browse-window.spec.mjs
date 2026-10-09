@@ -3,6 +3,33 @@ import { E2E_ORIGIN } from './base-url.mjs';
 import { recordFrameGeometryReads } from './frame-geometry-reads.mjs';
 import { guardNetwork } from './network.mjs';
 
+test('an Atlas row waits for acknowledged Worker configuration without showing a failure', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/atlas/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.atlas' } }),
+  );
+  await page.route('**/reel/manifest.json', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+
+  await page.goto(`${E2E_ORIGIN}/test/browse-window.html?atlas-config`);
+  await expect(page.getByRole('status').filter({ hasText: 'Configuring Atlas' })).toBeVisible();
+  await expect(page.getByText('Couldn’t load these. Try again')).toHaveCount(0);
+  expect(await page.evaluate(() => window.fixture.atlasQueries())).toBe(0);
+
+  await page.evaluate(() => window.fixture.acknowledgeAtlas());
+  const row = page.getByRole('region', { name: 'Police Procedurals' });
+  await expect(row.getByRole('link', { name: 'Springfloden' })).toBeVisible();
+  expect(await page.evaluate(() => window.fixture.atlasQueries())).toBeGreaterThan(0);
+});
+
 test('a retained hidden browse page owns no viewport observers or idle expansion', async ({
   page,
 }) => {

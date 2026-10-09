@@ -14,7 +14,7 @@ import {
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
-import { useLibraryRelayMembership } from './relayFetch';
+import { holdLibraryRelayMembership, useLibraryRelayMembership } from './relayFetch';
 
 export interface LibraryServiceFactoryOptions {
   supervisor?: LibraryServiceSupervisorOptions;
@@ -47,17 +47,21 @@ export interface WorkerServiceSession {
 export function createWorkerServiceConnection(
   createWorker: () => Worker = productionWorker,
   startupTimeoutMs?: number,
-  onLibraryOpening?: (opening: Promise<unknown>) => void,
+  onLibraryOpening?: (opening: Promise<unknown>) => (() => void) | void,
 ): WorkerServiceConnection {
   const transport = new WorkerLibraryServiceTransport(createWorker());
   const content = new ContentServiceClient(transport.contentTransport(), undefined, false);
+  let releaseOpening = () => {};
   const library = new LibraryServiceClient(
     transport,
     undefined,
     startupTimeoutMs,
     (membership) => (membership ? useLibraryRelayMembership(membership) : undefined),
     false,
-    onLibraryOpening,
+    (opening) => {
+      releaseOpening();
+      releaseOpening = onLibraryOpening?.(opening) ?? (() => {});
+    },
   );
   let closed = false;
   return {
@@ -66,6 +70,7 @@ export function createWorkerServiceConnection(
     close() {
       if (closed) return;
       closed = true;
+      releaseOpening();
       // The connection owns the physical Worker. Closing either logical channel must not tear down its sibling.
       content.close();
       library.close();
@@ -269,9 +274,10 @@ export function createWorkerServiceSession(
   let closed = false;
   const contentFacade: { current?: SessionContentService } = {};
   const connection = () =>
-    createWorkerServiceConnection(createWorker, options.startupTimeoutMs, (opening) =>
-      contentFacade.current?.bootstrap(opening),
-    );
+    createWorkerServiceConnection(createWorker, options.startupTimeoutMs, (opening) => {
+      contentFacade.current?.bootstrap(opening);
+      return holdLibraryRelayMembership(opening);
+    });
   let active = {
     connection: connection(),
     libraryClaimed: false,
