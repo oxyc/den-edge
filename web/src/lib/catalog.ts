@@ -2,7 +2,8 @@
 // Movies and Series tabs (BrowseModel), and the endless tail under both (DiscoveryCatalog.categories, RecipeCatalog,
 // GenreCatalog). Pure definitions: each row fetches its own pages, once it scrolls into view.
 
-import { filterTitles, FilterUnavailable, type FilterItem } from './filterRoutes';
+import { FilterUnavailable, type FilterItem } from './filterRoutes';
+import { contentFilterTitles } from './contentAtlas';
 import type { MediaType, Title } from './library';
 import { titleHref } from './route';
 import { toTitle } from './tmdb';
@@ -914,10 +915,9 @@ export const discoverRow = (
 
 /** Where a browse row asks atlas's filter first: its address, and how a card with no poster is drawn. */
 export interface AtlasFilterSource {
-  base: string;
+  content: ContentServiceClientPort;
   /** A title as TMDB draws it, for an atlas card no browser has told den-edge a poster for yet. */
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
-  fetchImpl?: typeof fetch;
 }
 
 /**
@@ -1008,7 +1008,7 @@ export function categoryRow(
 ): RowDef {
   const tmdb = discoverRow(pages, id, title, query);
   if (!atlas || !items) return tmdb;
-  const load = filterTitles(atlas.base, query.mediaType, items, { fetchImpl: atlas.fetchImpl });
+  const load = contentFilterTitles(atlas.content, query.mediaType, items);
   return { ...atlasFirst(drawn({ id, title, load }, atlas.title), tmdb), id: `${id}-atlas` };
 }
 

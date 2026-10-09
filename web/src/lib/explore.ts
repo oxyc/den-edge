@@ -34,12 +34,8 @@ import {
   type FacetCounts,
   type FilterOnlyKind,
 } from './facetCounts';
-import {
-  filterTitles,
-  FilterUnavailable,
-  type FilterCounts,
-  type FilterItem,
-} from './filterRoutes';
+import { FilterUnavailable, type FilterCounts, type FilterItem } from './filterRoutes';
+import { contentFilterTitles } from './contentAtlas';
 import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
 import type { ContentServiceClientPort } from './libraryServiceFactory';
@@ -1123,8 +1119,6 @@ export interface FeedSources {
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
   /** Worker-owned normalized content used by recommendations and missing-card hydration. */
   content: ContentServiceClientPort;
-  /** How atlas's filter is asked (den-edge's relay by default). */
-  fetchImpl?: typeof fetch;
 }
 
 /** How many of atlas's closest titles a "Like" asks for: all it keeps for one title. */
@@ -1355,7 +1349,7 @@ function filterFirst(
     {
       id,
       title: '',
-      load: filterTitles(atlas, type, items, { fetchImpl: sources.fetchImpl }),
+      load: contentFilterTitles(sources.content, type, items),
     },
     sources.title,
   );

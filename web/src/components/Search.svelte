@@ -33,13 +33,8 @@
     type Chip,
   } from '../lib/explore';
   import { countItems, filterItems, groupKind } from '../lib/facetCounts';
-  import {
-    fetchFilterCounts,
-    filterCountSplit,
-    mergeFilterValues,
-    searchFilterValues,
-    type FilterCounts,
-  } from '../lib/filterRoutes';
+  import { filterCountSplit, mergeFilterValues, type FilterCounts } from '../lib/filterRoutes';
+  import { contentFilterCounts, contentFilterValues } from '../lib/contentAtlas';
   import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
@@ -376,7 +371,7 @@
     const ask = new AbortController();
     const signal = ask.signal;
     const timer = setTimeout(async () => {
-      const answer = await fetchFilterCounts(here, type, countItems(set, type), { signal });
+      const answer = await contentFilterCounts(content, type, countItems(set, type), signal);
       let next: typeof filterAnswer = answer ? { key, answers: [answer] } : null;
       if (!answer && type === 'all' && !signal.aborted) {
         const sides = await Promise.all(
@@ -384,9 +379,12 @@
             .filter((side) => !side.dropped.length)
             .map(async (side) => ({
               type: side.type,
-              counts: await fetchFilterCounts(here, side.type, countItems(side.set, side.type), {
+              counts: await contentFilterCounts(
+                content,
+                side.type,
+                countItems(side.set, side.type),
                 signal,
-              }),
+              ),
             })),
         );
         const answers = sides.flatMap((side) => side.counts ?? []);
@@ -432,26 +430,26 @@
     const timer = setTimeout(async () => {
       const options = { signal: ask.signal };
       const values = async (kind: string) => {
-        const answer = await searchFilterValues(
-          here,
+        const answer = await contentFilterValues(
+          content,
           type,
           kind,
           text,
           filterItems(set, type) ?? [],
-          options,
+          options.signal,
         );
         if (answer || type !== 'all') return answer ?? [];
         const sides = perType(set).filter((side) => !side.dropped.length);
         return mergeFilterValues(
           await Promise.all(
             sides.map((side) =>
-              searchFilterValues(
-                here,
+              contentFilterValues(
+                content,
                 side.type,
                 kind,
                 text,
                 filterItems(side.set, side.type) ?? [],
-                options,
+                options.signal,
               ),
             ),
           ),

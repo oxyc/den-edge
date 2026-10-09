@@ -13,6 +13,7 @@
   const params = new URLSearchParams(location.search);
   const seed = params.has('seed');
   const queryContent = params.has('content');
+  const queryAtlas = params.has('atlas-content');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, { libraryKey, mode: 'local' });
@@ -47,10 +48,36 @@
       .catch((error: unknown) => {
         seedFailure = error instanceof Error ? error.message : String(error);
       });
-  } else if (queryContent) {
+  } else if (queryContent || queryAtlas) {
     void model.ready
       .then(async () => {
         const client = session.content!;
+        if (queryAtlas) {
+          await client.query({ kind: 'sources.configure', atlas: '/atlas' });
+          const [filter, related] = await Promise.all([
+            client.query({
+              kind: 'atlas.query',
+              query: {
+                operation: 'titles',
+                type: 'movie',
+                items: [{ kind: 'mood', id: 'Cozy' }],
+                page: 1,
+              },
+            }),
+            client.query({
+              kind: 'atlas.related',
+              query: {
+                operation: 'list',
+                source: 'similar',
+                title: { type: 'movie', id: initialId },
+                mixed: true,
+                limit: 20,
+              },
+            }),
+          ]);
+          content = JSON.stringify({ filter, related });
+          return;
+        }
         const title = { type: 'tv' as const, id: initialId };
         const [titles, detail, extras, externalId, season, catalog] = await Promise.all([
           client.query({ kind: 'titles', titles: [title, { type: 'movie', id: 9001 }] }),
@@ -87,7 +114,7 @@
   {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
   {#if seed}
     {#if seeded}<p role="status">Worker detail library seeded</p>{/if}
-  {:else if queryContent}
+  {:else if queryContent || queryAtlas}
     {#if content}
       <p role="status">Worker content ready</p>
       <pre data-content>{content}</pre>

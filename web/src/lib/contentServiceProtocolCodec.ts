@@ -1,12 +1,13 @@
 import {
   CONTENT_SERVICE_PROTOCOL,
   CONTENT_SERVICE_WIRE_LIMITS,
-  type ContentAtlasFilterSpec,
+  type ContentAtlasQuery,
   type ContentCatalogSpec,
   type ContentDiscoverQuery,
   type ContentImportLookup,
   type ContentProvider,
   type ContentProviderKey,
+  type ContentRelatedQuery,
   type ContentRequest,
   type ContentResult,
   type ContentServiceClientMessage,
@@ -169,21 +170,88 @@ function catalog(value: unknown): value is ContentCatalogSpec {
   }
 }
 
-function atlasFilter(value: unknown): value is ContentAtlasFilterSpec {
-  return (
-    record(value) &&
-    exact(value, ['mediaType', 'kind', 'values']) &&
-    media(value.mediaType) &&
-    (value.kind === 'genre' ||
-      value.kind === 'recipe' ||
-      value.kind === 'service' ||
-      value.kind === 'similar') &&
-    Array.isArray(value.values) &&
-    value.values.length <= CONTENT_SERVICE_WIRE_LIMITS.filters &&
-    value.values.every((item) =>
-      typeof item === 'number' ? integer(item) : typeof item === 'string' && text(item, 256),
-    )
+const exploreType = (value: unknown): value is 'movie' | 'tv' | 'all' =>
+  value === 'movie' || value === 'tv' || value === 'all';
+
+const filterItems = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length <= CONTENT_SERVICE_WIRE_LIMITS.filters &&
+  value.every(
+    (item) =>
+      record(item) &&
+      exact(item, ['kind', 'id', 'exclude']) &&
+      text(item.kind, 64) &&
+      text(item.id, 256) &&
+      (item.exclude === undefined || typeof item.exclude === 'boolean'),
   );
+
+function atlasQuery(value: unknown): value is ContentAtlasQuery {
+  if (!record(value) || !text(value.operation, 32) || !exploreType(value.type)) return false;
+  if (!filterItems(value.items)) return false;
+  switch (value.operation) {
+    case 'titles':
+      return exact(value, ['operation', 'type', 'items', 'page']) && integer(value.page, 1);
+    case 'counts':
+      return exact(value, ['operation', 'type', 'items']);
+    case 'values':
+      return (
+        exact(value, ['operation', 'type', 'items', 'valueKind', 'query']) &&
+        text(value.valueKind, 64) &&
+        text(value.query, CONTENT_SERVICE_WIRE_LIMITS.queryText)
+      );
+    case 'people':
+      return (
+        exact(value, ['operation', 'type', 'items', 'traits', 'order', 'page']) &&
+        filterItems(value.traits) &&
+        (value.order === undefined || text(value.order, 64)) &&
+        integer(value.page, 1)
+      );
+    case 'people-counts':
+      return exact(value, ['operation', 'type', 'items', 'traits']) && filterItems(value.traits);
+    case 'trait-values':
+      return (
+        exact(value, ['operation', 'type', 'items', 'traits', 'trait', 'query']) &&
+        filterItems(value.traits) &&
+        text(value.trait, 64) &&
+        text(value.query, CONTENT_SERVICE_WIRE_LIMITS.queryText)
+      );
+    default:
+      return false;
+  }
+}
+
+function relatedQuery(value: unknown): value is ContentRelatedQuery {
+  if (!record(value) || !text(value.operation, 32) || !titleRef(value.title)) return false;
+  switch (value.operation) {
+    case 'list':
+      return (
+        exact(value, ['operation', 'source', 'title', 'mixed', 'limit']) &&
+        (value.source === 'similar' || value.source === 'neighbours') &&
+        typeof value.mixed === 'boolean' &&
+        (value.limit === undefined ||
+          (integer(value.limit, 1) && value.limit <= CONTENT_SERVICE_WIRE_LIMITS.related))
+      );
+    case 'suggest':
+      return (
+        exact(value, ['operation', 'title', 'mixed', 'limit']) &&
+        typeof value.mixed === 'boolean' &&
+        (value.limit === undefined ||
+          (integer(value.limit, 1) && value.limit <= CONTENT_SERVICE_WIRE_LIMITS.related))
+      );
+    case 'cards':
+      return (
+        exact(value, ['operation', 'title', 'skip', 'limit']) &&
+        integer(value.skip) &&
+        value.skip <= CONTENT_SERVICE_WIRE_LIMITS.related &&
+        integer(value.limit, 1) &&
+        value.limit <= CONTENT_SERVICE_WIRE_LIMITS.related
+      );
+    case 'franchise':
+    case 'versions':
+      return exact(value, ['operation', 'title']);
+    default:
+      return false;
+  }
 }
 
 function importLookup(value: unknown): value is ContentImportLookup {
@@ -262,13 +330,10 @@ function request(value: unknown): value is ContentRequest {
       return exact(value, ['kind']);
     case 'service.directory':
       return exact(value, ['kind', 'region']) && region(value.region);
-    case 'atlas.filter':
-      return (
-        exact(value, ['kind', 'filter', 'page']) &&
-        atlasFilter(value.filter) &&
-        integer(value.page, 1) &&
-        value.page <= CONTENT_SERVICE_WIRE_LIMITS.page
-      );
+    case 'atlas.query':
+      return exact(value, ['kind', 'query']) && atlasQuery(value.query);
+    case 'atlas.related':
+      return exact(value, ['kind', 'query']) && relatedQuery(value.query);
     case 'import.resolve':
       return (
         exact(value, ['kind', 'lookups']) &&
@@ -334,8 +399,11 @@ function result(value: unknown): value is ContentResult {
       return exact(value, ['kind', 'credits']) && resource(value.credits);
     case 'collection':
     case 'catalog.page':
-    case 'atlas.filter':
       return exact(value, ['kind', 'titles']) && boundedArray(value.titles);
+    case 'atlas.query':
+      return exact(value, ['kind', 'answer']) && resource(value.answer);
+    case 'atlas.related':
+      return exact(value, ['kind', 'answer']) && resource(value.answer);
     case 'search':
       return exact(value, ['kind', 'hits']) && boundedArray(value.hits);
     case 'service.regions':

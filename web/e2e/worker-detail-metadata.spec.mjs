@@ -45,7 +45,7 @@ async function seed(page) {
   ).toBeVisible();
 }
 
-async function arrange(page, { tmdb, ratings, warnings }) {
+async function arrange(page, { tmdb, ratings, warnings, atlas }) {
   const requests = [];
   await page.addInitScript(() => {
     const pageFetch = window.fetch.bind(window);
@@ -60,7 +60,22 @@ async function arrange(page, { tmdb, ratings, warnings }) {
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({ contentType: 'image/svg+xml', body: artwork }),
   );
-  await page.route('**/atlas/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas/**', async (route) => {
+    requests.push({
+      provider: 'atlas',
+      url: route.request().url(),
+      headers: route.request().headers(),
+    });
+    await (atlas ?? ((held) => held.fulfill({ status: 404, json: {} })))(route);
+  });
+  await page.route('**/metadata/title/query', (route) => {
+    requests.push({
+      provider: 'atlas',
+      url: route.request().url(),
+      headers: route.request().headers(),
+    });
+    return route.fulfill({ json: { entries: [] } });
+  });
   for (const [provider, pattern, answer] of [
     ['ratings', '**/ratings/imdb/**', ratings],
     ['warnings', '**/warnings/imdb/**', warnings],
@@ -232,6 +247,50 @@ test('typed search keeps TMDB aggregation inside the shared Worker', async ({ pa
   await page.goto(`${FIXTURE}?search&q=worker`);
   await expect(page.getByRole('link', { name: 'Worker Search Result 2025' })).toBeVisible();
   expectWorkerOwned(requests);
+});
+
+test('typed Atlas filter and related reads stay inside the shared Worker', async ({ page }) => {
+  await seed(page);
+  const requests = await arrange(page, {
+    tmdb: (route) => route.fulfill({ json: { results: [] } }),
+    atlas: async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith('/index/filter/movie/titles.json'))
+        return route.fulfill({
+          json: {
+            titles: [
+              {
+                type: 'movie',
+                id: 202,
+                title: 'Worker Filter Result',
+                posterPath: '/filter.jpg',
+              },
+            ],
+            total: 1,
+          },
+        });
+      if (url.pathname.endsWith('/index/similar/movie/101.json'))
+        return route.fulfill({ json: { mixed: [{ type: 'series', id: 303 }] } });
+      return route.fulfill({ status: 404, json: {} });
+    },
+  });
+
+  await page.goto(`${FIXTURE}?atlas-content&type=movie&id=101`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker content ready' })).toBeVisible();
+  const result = JSON.parse(await page.locator('[data-content]').innerText());
+
+  expect(result.filter).toMatchObject({
+    kind: 'atlas.query',
+    answer: { state: 'ready', value: { operation: 'titles', titles: [{ id: 202 }] } },
+  });
+  expect(result.related).toEqual({
+    kind: 'atlas.related',
+    answer: {
+      state: 'ready',
+      value: { operation: 'refs', refs: [{ type: 'tv', id: 303 }] },
+    },
+  });
+  expectWorkerOwned(requests.filter(({ provider }) => provider === 'atlas'));
 });
 
 test('a person and their filmography are normalized by the shared Worker', async ({ page }) => {

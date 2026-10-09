@@ -933,7 +933,7 @@
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
     const filter = atlas
       ? {
-          base: atlas,
+          content: session.content!,
           title: async (ref: { type: 'movie' | 'tv'; id: number }) =>
             (await session.content?.query({ kind: 'titles', titles: [ref] }))?.titles[0] ?? null,
         }

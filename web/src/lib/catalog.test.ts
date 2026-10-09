@@ -20,6 +20,8 @@ import {
   type Pages,
 } from './catalog';
 import type { Title } from './library';
+import { ContentAuthority } from './contentAuthority';
+import type { ContentServiceClientPort } from './libraryServiceFactory';
 
 describe('discover queries, as DenKit builds them', () => {
   it('joins genres AND or OR, keywords and countries OR, and dates by the type’s own field', () => {
@@ -324,6 +326,24 @@ describe('rows atlas’s filter answers', () => {
     };
     return { asked, pages };
   }
+  const atlasSource = (fetchImpl: typeof fetch) => {
+    const authority = new ContentAuthority(
+      {
+        tmdb: () => undefined,
+        omdb: () => undefined,
+        contentWarnings: () => undefined,
+        atlas: () => '/atlas',
+      },
+      { providerFetch: fetchImpl, tmdbFetch: fetchImpl },
+    );
+    return {
+      content: {
+        query: (request, signal) =>
+          authority.query(request, signal ?? new AbortController().signal) as never,
+        onStatus: () => () => {},
+      } as ContentServiceClientPort,
+    };
+  };
 
   it('loads the Movies tab’s genre rows from atlas, and TMDB is not asked', async () => {
     const atlas = atlasFake((skip) =>
@@ -331,7 +351,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const tmdb = tmdbFake();
     const rows = browseRows('movie', tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     });
     // A row of its own to the screen, so one loaded from TMDB before atlas was found starts over.
     expect(rows.map((r) => r.id)).not.toContain('genre-28');
@@ -356,7 +376,7 @@ describe('rows atlas’s filter answers', () => {
     const atlas = atlasFake(() => json({}, 404));
     const tmdb = tmdbFake();
     const [row] = browseRows('movie', tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'genre-28-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect((await row!.load(2)).map((t) => t.id)).toEqual([9002]);
@@ -373,7 +393,7 @@ describe('rows atlas’s filter answers', () => {
     const tmdb = tmdbFake();
     const animation = categories('movie', 2026).find((c) => c.id === 'genre-16-movie')!;
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === `${animation.id}-atlas`);
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect(atlas.asked).toEqual(['/atlas/index/filter/movie/titles.json?sel=primary:Animation']);
@@ -385,7 +405,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const tmdb = tmdbFake();
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'country-KR-movie-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([1]);
     expect((await row!.load(2)).map((t) => t.id)).toEqual([9001]);
@@ -402,7 +422,7 @@ describe('rows atlas’s filter answers', () => {
     const tmdb = tmdbFake();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const [row] = homeRows(tmdb.pages, {
-      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+      atlas: atlasSource(atlas.fetchImpl),
     }).filter((r) => r.id === 'decade-2020-movie-atlas');
     expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
     expect(warn).toHaveBeenCalledOnce();
@@ -415,8 +435,7 @@ describe('rows atlas’s filter answers', () => {
     );
     const [row] = homeRows(tmdbFake().pages, {
       atlas: {
-        base: '/atlas',
-        fetchImpl: atlas.fetchImpl,
+        ...atlasSource(atlas.fetchImpl),
         title: async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/drawn.jpg' }),
       },
     }).filter((r) => r.id === 'recipe-romantic-comedy-atlas');
@@ -510,7 +529,7 @@ describe('rows atlas’s filter answers', () => {
   it('keeps TMDB for the spine, Nordic Noir and Critically Acclaimed, and asks atlas nothing without it', async () => {
     const atlas = atlasFake(() => json({ titles: [card(1)], order: 'o', ignored: [] }));
     const tmdb = tmdbFake();
-    const rows = homeRows(tmdb.pages, { atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl } });
+    const rows = homeRows(tmdb.pages, { atlas: atlasSource(atlas.fetchImpl) });
     for (const id of ['new-releases', 'recipe-nordic-noir', 'acclaimed-movie'])
       await rows.find((r) => r.id === id)!.load(1);
     expect(atlas.asked).toEqual([]);

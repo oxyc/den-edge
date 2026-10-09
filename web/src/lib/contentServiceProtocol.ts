@@ -4,9 +4,16 @@ import type { Warning } from './contentWarnings';
 import type { PersonDetail, TitleDetail, Episode, FilmCredit } from './detail';
 import type { Ratings } from './detailPresentation';
 import type { TitleFacts } from './titleFacts';
+import type {
+  FilterCounts,
+  FilterItem,
+  FilterPerson,
+  FilterValue,
+  PeopleCounts,
+} from './filterRoutes';
 
 /** The read-only content protocol is versioned independently from encrypted library state. */
-export const CONTENT_SERVICE_PROTOCOL = 1 as const;
+export const CONTENT_SERVICE_PROTOCOL = 2 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -15,6 +22,7 @@ export const CONTENT_SERVICE_WIRE_LIMITS = {
   region: 2,
   page: 500,
   filters: 64,
+  related: 512,
   importLookups: 10_000,
 } as const;
 
@@ -52,11 +60,65 @@ export type ContentCatalogSpec =
   | { kind: 'upcoming' }
   | { kind: 'recommendations'; title: ContentTitleRef };
 
-export interface ContentAtlasFilterSpec {
-  mediaType: MediaType;
-  kind: 'genre' | 'recipe' | 'service' | 'similar';
-  values: Array<string | number>;
-}
+export type ContentAtlasQuery =
+  | { operation: 'titles'; type: 'movie' | 'tv' | 'all'; items: FilterItem[]; page: number }
+  | { operation: 'counts'; type: 'movie' | 'tv' | 'all'; items: FilterItem[] }
+  | {
+      operation: 'values';
+      type: 'movie' | 'tv' | 'all';
+      items: FilterItem[];
+      valueKind: string;
+      query: string;
+    }
+  | {
+      operation: 'people';
+      type: 'movie' | 'tv' | 'all';
+      items: FilterItem[];
+      traits: FilterItem[];
+      order?: string;
+      page: number;
+    }
+  | {
+      operation: 'people-counts';
+      type: 'movie' | 'tv' | 'all';
+      items: FilterItem[];
+      traits: FilterItem[];
+    }
+  | {
+      operation: 'trait-values';
+      type: 'movie' | 'tv' | 'all';
+      items: FilterItem[];
+      traits: FilterItem[];
+      trait: string;
+      query: string;
+    };
+
+export type ContentAtlasAnswer =
+  | { operation: 'titles'; titles: Title[] }
+  | { operation: 'counts'; counts: FilterCounts | null }
+  | { operation: 'values'; values: FilterValue[] | null }
+  | { operation: 'people'; people: FilterPerson[]; total: number }
+  | { operation: 'people-counts'; counts: PeopleCounts | null }
+  | { operation: 'trait-values'; values: FilterValue[] | null };
+
+export type ContentRelatedQuery =
+  | {
+      operation: 'list';
+      source: 'similar' | 'neighbours';
+      title: ContentTitleRef;
+      mixed: boolean;
+      limit?: number;
+    }
+  | { operation: 'suggest'; title: ContentTitleRef; mixed: boolean; limit?: number }
+  | { operation: 'cards'; title: ContentTitleRef; skip: number; limit: number }
+  | { operation: 'franchise'; title: ContentTitleRef }
+  | { operation: 'versions'; title: ContentTitleRef };
+
+export type ContentRelatedAnswer =
+  | { operation: 'refs'; refs: ContentTitleRef[] }
+  | { operation: 'cards'; refs: ContentTitleRef[]; titles: Title[] }
+  | { operation: 'franchise'; id: string; name: string; members: Title[] }
+  | { operation: 'versions'; versions: Array<{ title: Title; note?: string }> };
 
 export type ContentImportLookup =
   | { id: string; kind: 'search'; query: string; media?: MediaType; page?: number }
@@ -97,7 +159,8 @@ export type ContentRequest =
   | { kind: 'search'; query: string }
   | { kind: 'service.regions' }
   | { kind: 'service.directory'; region: string }
-  | { kind: 'atlas.filter'; filter: ContentAtlasFilterSpec; page: number }
+  | { kind: 'atlas.query'; query: ContentAtlasQuery }
+  | { kind: 'atlas.related'; query: ContentRelatedQuery }
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string };
@@ -176,7 +239,8 @@ export type ContentResult =
       services: ContentServiceDirectoryEntry[];
       complete: boolean;
     }
-  | { kind: 'atlas.filter'; titles: Title[] }
+  | { kind: 'atlas.query'; answer: OptionalContent<ContentAtlasAnswer> }
+  | { kind: 'atlas.related'; answer: OptionalContent<ContentRelatedAnswer> }
   | { kind: 'import.resolve'; results: ContentImportLookupResult[] }
   | { kind: 'prefetch.detail' }
   | {

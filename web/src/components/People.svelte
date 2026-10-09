@@ -26,18 +26,20 @@
   } from '../lib/explore';
   import { countedEmpty, groupKind } from '../lib/facetCounts';
   import {
-    fetchFilterCounts,
-    fetchPeopleCounts,
-    filterPeople,
     FIRST_BIRTH_YEAR,
     mergeFilterValues,
-    searchFilterValues,
-    searchTraitValues,
     type FilterCounts,
     type FilterPerson,
     type FilterValue,
     type PeopleCounts,
   } from '../lib/filterRoutes';
+  import {
+    contentFilterCounts,
+    contentFilterPeople,
+    contentFilterValues,
+    contentPeopleCounts,
+    contentTraitValues,
+  } from '../lib/contentAtlas';
   import type { ExploreType, MediaType } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import {
@@ -95,7 +97,9 @@
 
   // The people, a page at a time. Only what reaches atlas starts the list again.
   const feed = $derived(
-    atlas ? filterPeople(atlas, type, titleItems(chips, type), traitItems(traits), order) : null,
+    atlas
+      ? contentFilterPeople(content, type, titleItems(chips, type), traitItems(traits), order)
+      : null,
   );
   let people = $state<FilterPerson[]>([]);
   let total = $state<number | null>(null);
@@ -211,8 +215,8 @@
     const signal = ask.signal;
     const timer = setTimeout(async () => {
       const [byTrait, byTitle] = await Promise.all([
-        fetchPeopleCounts(here, t, items, picked, { signal }),
-        fetchFilterCounts(here, t, items, { signal }),
+        contentPeopleCounts(content, t, items, picked, signal),
+        contentFilterCounts(content, t, items, signal),
       ]);
       if (!signal.aborted) counts = { key, people: byTrait, titles: byTitle };
     });
@@ -367,18 +371,27 @@
     const timer = setTimeout(async () => {
       const kinds = ['citizenship', 'occupation'];
       const names = async () => {
-        const answer = await searchFilterValues(here, t, 'person', q, items, options);
+        const answer = await contentFilterValues(content, t, 'person', q, items, options.signal);
         if (answer || t !== 'all') return answer ?? [];
         const sides = await Promise.all(
           (['movie', 'tv'] as const).map((side) =>
-            searchFilterValues(here, side, 'person', q, titleItems(chips, side), options),
+            contentFilterValues(
+              content,
+              side,
+              'person',
+              q,
+              titleItems(chips, side),
+              options.signal,
+            ),
           ),
         );
         return mergeFilterValues(sides);
       };
       const [answers, people] = await Promise.all([
         Promise.all(
-          kinds.map((kind) => searchTraitValues(here, t, kind, q, items, picks, options)),
+          kinds.map((kind) =>
+            contentTraitValues(content, t, kind, q, items, picks, options.signal),
+          ),
         ),
         names(),
       ]);

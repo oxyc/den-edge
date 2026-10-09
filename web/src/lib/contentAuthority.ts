@@ -7,6 +7,7 @@
  */
 
 import { parseWarnings, type Warning } from './contentWarnings';
+import { titlesOf } from './atlasRows';
 import { ContentServiceFault, type ContentServiceAuthority } from './contentServiceCore';
 import type {
   ContentProvider,
@@ -35,6 +36,15 @@ import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
 import { ContentImportAuthority } from './contentImportAuthority';
+import {
+  fetchFilterCounts,
+  fetchPeopleCounts,
+  filterPeople,
+  filterTitles,
+  FilterUnavailable,
+  searchFilterValues,
+  searchTraitValues,
+} from './filterRoutes';
 import {
   countriesFrom,
   mergeServices,
@@ -147,6 +157,11 @@ export interface ContentAuthorityOptions {
   now?: () => number;
 }
 
+interface AtlasTitleLoader {
+  signal: AbortSignal;
+  load: ReturnType<typeof filterTitles>;
+}
+
 type Json = Record<string, unknown>;
 
 const object = (value: unknown): Json | null =>
@@ -216,6 +231,7 @@ function tmdbUrl(path: string, key: string, params: Record<string, string> = {})
 
 /** A single Worker-session owner for provider access and exact in-flight coalescing. */
 export class ContentAuthority implements ContentReader, ContentServiceAuthority {
+  readonly #atlasTitleLoaders = new Map<string, AtlasTitleLoader>();
   readonly #tmdbFetch: typeof fetch;
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
@@ -395,6 +411,16 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           complete: available.length === answers.length,
         };
       }
+      case 'atlas.query':
+        return {
+          kind: 'atlas.query',
+          answer: await this.#atlasQuery(request.query, signal),
+        };
+      case 'atlas.related':
+        return {
+          kind: 'atlas.related',
+          answer: await this.#atlasRelated(request.query, signal),
+        };
       case 'import.resolve':
         return {
           kind: 'import.resolve',
@@ -409,7 +435,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       default:
         throw new ContentServiceFault({
           code: 'not-ready',
-          message: `${request.kind} is not owned by ContentAuthority yet`,
+          message: 'content operation is not owned by ContentAuthority yet',
           retryable: false,
         });
     }
@@ -650,6 +676,233 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   #contentFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     return url.startsWith(TMDB) ? this.#tmdbFetch(input, init) : this.#providerFetch(input, init);
+  }
+
+  async #atlasQuery(
+    query: Extract<ContentRequest, { kind: 'atlas.query' }>['query'],
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./contentServiceProtocol').ContentAtlasAnswer>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const fetchImpl: typeof fetch = (input, init) =>
+      this.#providerFetch(input, { ...init, signal });
+    try {
+      switch (query.operation) {
+        case 'titles': {
+          const key = JSON.stringify([atlas, query.type, query.items]);
+          let loader = this.#atlasTitleLoaders.get(key);
+          if (!loader) {
+            const current: AtlasTitleLoader = {
+              signal,
+              load: filterTitles(atlas, query.type, query.items, {
+                fetchImpl: (input, init) =>
+                  this.#providerFetch(input, { ...init, signal: current.signal }),
+              }),
+            };
+            loader = current;
+            this.#atlasTitleLoaders.set(key, loader);
+          }
+          loader.signal = signal;
+          return {
+            state: 'ready',
+            value: { operation: 'titles', titles: await loader.load(query.page) },
+          };
+        }
+        case 'counts':
+          return {
+            state: 'ready',
+            value: {
+              operation: 'counts',
+              counts: await fetchFilterCounts(atlas, query.type, query.items, {
+                signal,
+                fetchImpl,
+              }),
+            },
+          };
+        case 'values':
+          return {
+            state: 'ready',
+            value: {
+              operation: 'values',
+              values: await searchFilterValues(
+                atlas,
+                query.type,
+                query.valueKind,
+                query.query,
+                query.items,
+                { signal, fetchImpl },
+              ),
+            },
+          };
+        case 'people': {
+          const answer = await filterPeople(
+            atlas,
+            query.type,
+            query.items,
+            query.traits,
+            query.order,
+            { fetchImpl },
+          )(query.page);
+          return { state: 'ready', value: { operation: 'people', ...answer } };
+        }
+        case 'people-counts':
+          return {
+            state: 'ready',
+            value: {
+              operation: 'people-counts',
+              counts: await fetchPeopleCounts(atlas, query.type, query.items, query.traits, {
+                signal,
+                fetchImpl,
+              }),
+            },
+          };
+        case 'trait-values':
+          return {
+            state: 'ready',
+            value: {
+              operation: 'trait-values',
+              values: await searchTraitValues(
+                atlas,
+                query.type,
+                query.trait,
+                query.query,
+                query.items,
+                query.traits,
+                { signal, fetchImpl },
+              ),
+            },
+          };
+      }
+    } catch (error) {
+      if (error instanceof FilterUnavailable) return { state: 'absent' };
+      if ((error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasRelated(
+    query: Extract<ContentRequest, { kind: 'atlas.related' }>['query'],
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./contentServiceProtocol').ContentRelatedAnswer>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const kind = query.title.type === 'tv' ? 'series' : 'movie';
+    const request = async (path: string, init?: RequestInit) => {
+      try {
+        const response = await this.#providerFetch(`${atlas}${path}`, { ...init, signal });
+        if (response.status === 404) return null;
+        if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+        return object(await response.json());
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') throw error;
+        throw new Error('atlas related content is unavailable', { cause: error });
+      }
+    };
+    const refsFrom = (
+      body: Json,
+      mixed: boolean,
+      requireMixed = false,
+    ): import('./contentServiceProtocol').ContentTitleRef[] | null => {
+      if (mixed && Array.isArray(body.mixed))
+        return (body.mixed as Json[]).flatMap((value) => {
+          const type = value.type === 'series' ? 'tv' : value.type === 'movie' ? 'movie' : null;
+          return type && Number.isSafeInteger(value.id) ? [{ type, id: value.id as number }] : [];
+        });
+      if (mixed && requireMixed) return null;
+      if (!Array.isArray(body.ids)) return null;
+      return body.ids.flatMap((id) =>
+        Number.isSafeInteger(id) ? [{ type: query.title.type, id: id as number }] : [],
+      );
+    };
+    try {
+      switch (query.operation) {
+        case 'list': {
+          const suffix = query.limit
+            ? `?${query.source === 'neighbours' ? 'k' : 'limit'}=${query.limit}`
+            : '';
+          const body = await request(
+            `/index/${query.source}/${kind}/${query.title.id}.json${suffix}`,
+          );
+          if (!body) return { state: 'absent' };
+          return {
+            state: 'ready',
+            value: { operation: 'refs', refs: refsFrom(body, query.mixed) ?? [] },
+          };
+        }
+        case 'suggest': {
+          const body = await request('/index/suggest.json', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              seeds: [{ type: kind, id: query.title.id }],
+              ...(query.limit ? { limit: query.limit } : {}),
+            }),
+          });
+          if (!body || !Array.isArray(body.perSeed)) return { state: 'absent' };
+          const row = (body.perSeed as Json[]).find((candidate) => {
+            const seed = object(candidate.seed);
+            return seed?.type === kind && seed.id === query.title.id;
+          });
+          const refs = row && refsFrom(row, query.mixed, true);
+          return refs
+            ? { state: 'ready', value: { operation: 'refs', refs } }
+            : { state: 'absent' };
+        }
+        case 'cards': {
+          const body = await request(
+            `/index/suggest/${kind}/${query.title.id}.json?skip=${query.skip}&limit=${query.limit}`,
+          );
+          if (!body) return { state: 'absent' };
+          const refs = refsFrom(body, true, true);
+          return refs
+            ? {
+                state: 'ready',
+                value: { operation: 'cards', refs, titles: titlesOf(body) },
+              }
+            : { state: 'absent' };
+        }
+        case 'franchise': {
+          const body = await request(`/index/franchise/${kind}/${query.title.id}.json`);
+          const franchise = body && object(body.franchise);
+          return franchise && typeof franchise.id === 'string' && typeof franchise.name === 'string'
+            ? {
+                state: 'ready',
+                value: {
+                  operation: 'franchise',
+                  id: franchise.id,
+                  name: franchise.name,
+                  members: titlesOf({ titles: body.members }),
+                },
+              }
+            : { state: 'absent' };
+        }
+        case 'versions': {
+          const body = await request(`/index/versions/${kind}/${query.title.id}.json`);
+          if (!body || !Array.isArray(body.versions)) return { state: 'absent' };
+          const versions = (body.versions as Json[]).flatMap((raw) => {
+            const type = raw.type === 'series' ? 'tv' : raw.type === 'movie' ? 'movie' : null;
+            if (!type || !Number.isSafeInteger(raw.id)) return [];
+            const title = titlesOf({ titles: [raw] })[0] ?? {
+              type,
+              id: raw.id as number,
+              title: '',
+            };
+            const group = object(raw.group);
+            const note =
+              typeof group?.label === 'string'
+                ? group.label
+                : raw.kind === 'remake'
+                  ? 'Remake'
+                  : undefined;
+            return [{ title, ...(note ? { note } : {}) }];
+          });
+          return { state: 'ready', value: { operation: 'versions', versions } };
+        }
+      }
+    } catch (error) {
+      if ((error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
   }
 
   #facts(ref: ContentRef): Promise<ProviderResult<TitleFacts>> {

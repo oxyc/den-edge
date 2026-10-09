@@ -151,11 +151,11 @@
                 { id: countryId, name: regionalCountry },
                 regionalLanguage.id,
                 self,
-                atlas,
+                content,
               ),
               options,
             )
-          : withPosters(languageRow(regionalLanguage, self, atlas), options);
+          : withPosters(languageRow(regionalLanguage, self, content), options);
     let live = true;
     // Every title the rows above You might also like have shown — the franchise, other versions and More like this —
     // so it offers none of them again.
@@ -218,7 +218,7 @@
       cancel: () => decideDiscovery(false),
     };
     discovery = pendingDiscovery;
-    const author = atlas ? authorRow(known, self, atlas) : null;
+    const author = atlas ? authorRow(known, self, content) : null;
     // Closest first: what is like this title and what its fans also love, then what else came from its source
     // author's books, the people who made it, then the same of its strongest mood, its studio, network and country or
     // language, which say less about this title in particular. atlas's filter sends no posters, so those rows draw
@@ -234,7 +234,7 @@
     let similarIn = () => {};
     const similarLoaded = new Promise<void>((resolve) => (similarIn = resolve));
     const mood = atlas
-      ? moodRow(known.moods, self, atlas, { seen: suggested, after: similarLoaded })
+      ? moodRow(known.moods, self, content, { seen: suggested, after: similarLoaded })
       : null;
     // atlas's You might also like order alone: the wider sources are More like this's. It is asked once More like
     // this has its first page, and skips every title the rows above it have shown (`onPage`, `above`).
@@ -269,9 +269,9 @@
       ...(mood ? [withPosters(mood, options)] : []),
       ...(atlas
         ? [
-            ...themeRows(known, self, atlas, regionalCountry),
-            ...credited.map((studio) => studioRow(studio, self, atlas)),
-            ...producerRows(known, credited, self, atlas),
+            ...themeRows(known, self, content, regionalCountry),
+            ...credited.map((studio) => studioRow(studio, self, content)),
+            ...producerRows(known, credited, self, content),
           ].map((row) => withPosters(row, options))
         : []),
       ...(regional ? [regional] : []),

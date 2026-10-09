@@ -29,11 +29,24 @@ import {
 import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
 import type { ContentServiceClientPort } from './libraryServiceFactory';
+import { ContentAuthority } from './contentAuthority';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
 
-const contentForPages = (pageSource: Pages): ContentServiceClientPort =>
-  ({
+const contentForPages = (
+  pageSource: Pages,
+  atlasFetch?: typeof fetch,
+): ContentServiceClientPort => {
+  const authority = new ContentAuthority(
+    {
+      tmdb: () => undefined,
+      omdb: () => undefined,
+      contentWarnings: () => undefined,
+      atlas: () => (atlasFetch ? '/atlas' : undefined),
+    },
+    { providerFetch: atlasFetch },
+  );
+  return {
     async query(request: { kind: string; [key: string]: unknown }) {
       if (request.kind === 'catalog.page') {
         const catalog = request.catalog as {
@@ -52,10 +65,13 @@ const contentForPages = (pageSource: Pages): ContentServiceClientPort =>
           };
       }
       if (request.kind === 'titles') return { kind: 'titles', titles: [], retryable: [] };
+      if (request.kind === 'atlas.query' || request.kind === 'atlas.related')
+        return authority.query(request as never, new AbortController().signal);
       throw new Error(`unexpected content request ${request.kind}`);
     },
     onStatus: () => () => {},
-  }) as ContentServiceClientPort;
+  } as ContentServiceClientPort;
+};
 
 describe('Explore chips', () => {
   it('run For You, moods, recipes, then genres, each strongest first', () => {
@@ -750,22 +766,23 @@ describe('Explore feeds', () => {
 
   it('asks atlas’s filter for the whole selection, and narrows nothing more itself', async () => {
     const asked: string[] = [];
+    const atlasFetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response(
+        JSON.stringify(
+          String(input).includes('/metadata')
+            ? { titles: [] }
+            : {
+                titles: [{ type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' }],
+                order: 'o',
+              },
+        ),
+      );
+    }) as typeof fetch;
     const row = exploreFeed(['mood-cozy', 'genre-35', 'rating-7'], 'movie', {
       ...sources(),
       atlas: '/atlas',
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        asked.push(String(input));
-        return new Response(
-          JSON.stringify(
-            String(input).includes('/metadata')
-              ? { titles: [] }
-              : {
-                  titles: [{ type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' }],
-                  order: 'o',
-                },
-          ),
-        );
-      }) as typeof fetch,
+      content: contentForPages(pages, atlasFetch),
     });
     expect((await row.load(1)).map((t) => t.id)).toEqual([5]);
     expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:35,mood:Cozy,rating:7');
@@ -775,13 +792,14 @@ describe('Explore feeds', () => {
   it('uses TMDB strict origin-country discovery even when Atlas is available', async () => {
     calls.length = 0;
     const asked: string[] = [];
+    const atlasFetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response('{}');
+    }) as typeof fetch;
     await exploreFeed(['country-SE', 'country-DK'], 'movie', {
       ...sources(),
       atlas: '/atlas',
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        asked.push(String(input));
-        return new Response('{}');
-      }) as typeof fetch,
+      content: contentForPages(pages, atlasFetch),
     }).load(1);
     expect(asked).toEqual([]);
     expect(calls[0]).toMatchObject({
@@ -791,10 +809,11 @@ describe('Explore feeds', () => {
   });
 
   it('narrows a mood by the genre, language and decade beside it, where atlas has no filter', async () => {
+    const atlasFetch = (async () => new Response('', { status: 404 })) as unknown as typeof fetch;
     const row = exploreFeed(['mood-cozy', 'genre-35', 'lang-sv', 'decade-1990'], 'movie', {
       ...sources(),
       atlas: '/atlas',
-      fetchImpl: (async () => new Response('', { status: 404 })) as unknown as typeof fetch,
+      content: contentForPages(pages, atlasFetch),
     });
     // The filter's 404 hands over to atlas's row (unreachable here too).
     await row.load(1).catch(() => {});
@@ -808,13 +827,14 @@ describe('Explore feeds', () => {
   it('keeps a recipe atlas has no form of on TMDB, asking atlas nothing', async () => {
     calls.length = 0;
     const asked: string[] = [];
+    const atlasFetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
     await exploreFeed(['recipe-nordic-noir'], 'movie', {
       ...sources(),
       atlas: '/atlas',
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        asked.push(String(input));
-        return new Response('', { status: 404 });
-      }) as typeof fetch,
+      content: contentForPages(pages, atlasFetch),
     }).load(1);
     expect(asked).toEqual([]);
     expect(calls[0]?.path).toBe('/discover/movie');
@@ -864,6 +884,7 @@ describe('Explore feeds', () => {
       const row = exploreFeed(['like-movie-949', 'genre-80', 'rating-7'], 'movie', {
         ...sources(),
         atlas: '/atlas',
+        content: contentForPages(pages, globalThis.fetch),
       });
       expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
       await row.load(1);
@@ -898,6 +919,7 @@ describe('Explore feeds', () => {
       const row = exploreFeed(['fans-movie-949', 'genre-80'], 'all', {
         ...sources(),
         atlas: '/atlas',
+        content: contentForPages(pages, globalThis.fetch),
       });
       expect(await row.load(1)).toEqual([]);
       expect(asked[0]).toBe('/atlas/index/filter/all/titles.json?sel=fans:movie-949,genre:80');
@@ -1127,17 +1149,18 @@ describe('All: films and series together', () => {
 
   it('asks atlas for both types at once, a series card staying a series', async () => {
     const asked: string[] = [];
+    const atlasFetch = answering(asked, () => ({
+      titles: [
+        { type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' },
+        { type: 'series', id: 6, title: 'Six', posterPath: '/6.jpg' },
+      ],
+      order: 'o',
+      ignored: [],
+    }));
     const row = exploreFeed(['genre-35'], 'all', {
       ...base,
       atlas: '/atlas',
-      fetchImpl: answering(asked, () => ({
-        titles: [
-          { type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' },
-          { type: 'series', id: 6, title: 'Six', posterPath: '/6.jpg' },
-        ],
-        order: 'o',
-        ignored: [],
-      })),
+      content: contentForPages(pages, atlasFetch),
     });
     expect((await row.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:5', 'tv:6']);
     expect(asked).toEqual(['/atlas/index/filter/all/titles.json?sel=genre:35']);
@@ -1146,6 +1169,7 @@ describe('All: films and series together', () => {
   it('where atlas has no `all` route, is each type’s own feed interleaved', async () => {
     const asked: string[] = [];
     const discovered: string[] = [];
+    const atlasFetch = answering(asked, () => undefined);
     const row = exploreFeed(['genre-28'], 'all', {
       ...base,
       pages: async (path, type, params, page) => {
@@ -1153,7 +1177,7 @@ describe('All: films and series together', () => {
         return pages(path, type, params, page);
       },
       atlas: '/atlas',
-      fetchImpl: answering(asked, () => undefined),
+      content: contentForPages(pages, atlasFetch),
     });
     expect((await row.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:100', 'tv:100']);
     expect(asked).toEqual([
@@ -1171,10 +1195,11 @@ describe('All: films and series together', () => {
     const forYou = exploreFeed([], 'all', { ...base, atlas: null });
     expect(forYou.id).toBe(`${FOR_YOU}-all`);
     expect((await forYou.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:100', 'tv:100']);
+    const atlasFetch = answering(asked, () => undefined);
     const horror = exploreFeed(['genre-27'], 'all', {
       ...base,
       atlas: '/atlas',
-      fetchImpl: answering(asked, () => undefined),
+      content: contentForPages(pages, atlasFetch),
     });
     expect((await horror.load(1)).map((x) => x.type)).toEqual(['movie']);
     // Not asked of both at once: atlas's `all` would count series it can't be.
@@ -1189,7 +1214,7 @@ describe('All: films and series together', () => {
       const row = exploreFeed(['like-movie-949', 'genre-28'], 'all', {
         ...base,
         atlas: '/atlas',
-        fetchImpl: globalThis.fetch,
+        content: contentForPages(pages, globalThis.fetch),
       });
       await row.load(1);
       expect(asked[0]).toBe('/atlas/index/filter/all/titles.json?sel=genre:28,like:movie-949');

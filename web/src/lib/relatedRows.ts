@@ -2,9 +2,9 @@
 // loads it a page at a time as the viewer scrolls: the more they slide, the more appears. None is a fixed slice.
 
 import type { RowDef } from './catalog';
-import { titlesOf } from './atlasRows';
 import { groupFilmography, type TitleDetail } from './detail';
-import { filterTitles, likeValue } from './filterRoutes';
+import { likeValue } from './filterRoutes';
+import { contentFilterTitles } from './contentAtlas';
 import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import { fansId, likeId, personHref, searchHref } from './route';
@@ -42,7 +42,6 @@ async function drawRefs(
 export interface RelatedOptions {
   /** Worker-owned normalized content; provider keys and response shapes remain behind it. */
   content: ContentServiceClientPort;
-  fetchImpl?: typeof fetch;
   /**
    * How many of atlas's closest titles to ask for at once. Its first screenful (20) is what a detail page's row
    * needs; a whole feed of them — Search's "Like" — asks for as many as atlas keeps (200).
@@ -86,7 +85,6 @@ export function moreLikeThisRow(
   atlas: string | null,
   {
     content,
-    fetchImpl = fetch,
     similarLimit,
     mixed = false,
     affinity = false,
@@ -95,13 +93,7 @@ export function moreLikeThisRow(
   }: RelatedOptions,
 ): RowDef {
   const self = detail.title;
-  const kind = self.type === 'tv' ? 'series' : 'movie';
   seen.add(keyOf(self));
-
-  const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
-  const suggestPath = '/index/suggest.json';
-  const cardsPath = `/index/suggest/${kind}/${self.id}.json`;
-  const neighboursPath = `/index/neighbours/${kind}/${self.id}.json?k=${NEIGHBOURS}`;
 
   /** `unknown` is atlas not yet asked; whether it has anything for this title decides which way the row goes. */
   type Source = 'unknown' | 'cards' | 'similar' | 'neighbours' | 'recommended' | 'done';
@@ -116,26 +108,21 @@ export function moreLikeThisRow(
    * The titles an atlas list names: its `ids`, of the seed's type, or — for a mixed row, where the answer has one —
    * its `mixed` list, each with its own type.
    */
-  function refsFrom(body: { ids?: unknown; mixed?: unknown }, requireMixed = false): Ref[] | null {
-    if (mixed && Array.isArray(body.mixed)) {
-      return (body.mixed as Record<string, unknown>[]).flatMap((t): Ref[] => {
-        const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
-        return type && Number.isInteger(t.id) ? [{ type, id: t.id as number }] : [];
-      });
-    }
-    if (mixed && requireMixed) return null;
-    if (!Array.isArray(body.ids)) return null;
-    return body.ids
-      .filter((id): id is number => Number.isInteger(id))
-      .map((id) => ({ type: self.type, id }));
-  }
-
-  async function idsFrom(path: string): Promise<Ref[]> {
+  async function idsFrom(source: 'similar' | 'neighbours'): Promise<Ref[]> {
     try {
-      const res = await fetchImpl(`${atlas}${path}`);
-      if (!res.ok) return [];
-      const body = (await res.json()) as { ids?: unknown; mixed?: unknown };
-      return refsFrom(body) ?? [];
+      const result = await content.query({
+        kind: 'atlas.related',
+        query: {
+          operation: 'list',
+          source,
+          title: { type: self.type, id: self.id },
+          mixed,
+          limit: source === 'neighbours' ? NEIGHBOURS : similarLimit,
+        },
+      });
+      return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
+        ? result.answer.value.refs
+        : [];
     } catch {
       return [];
     }
@@ -144,22 +131,18 @@ export function moreLikeThisRow(
   /** The one requested seed's row, or null when this Atlas does not implement the affinity contract. */
   async function suggested(): Promise<Ref[] | null> {
     try {
-      const res = await fetchImpl(`${atlas}${suggestPath}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          seeds: [{ type: kind, id: self.id }],
-          ...(similarLimit ? { limit: similarLimit } : {}),
-        }),
+      const result = await content.query({
+        kind: 'atlas.related',
+        query: {
+          operation: 'suggest',
+          title: { type: self.type, id: self.id },
+          mixed,
+          limit: similarLimit,
+        },
       });
-      if (!res.ok) return null;
-      const body = (await res.json()) as { perSeed?: unknown };
-      if (!Array.isArray(body.perSeed)) return null;
-      const row = (body.perSeed as Record<string, unknown>[]).find((candidate) => {
-        const seed = candidate.seed as Record<string, unknown> | undefined;
-        return seed?.type === kind && seed.id === self.id;
-      });
-      return row ? refsFrom(row, true) : null;
+      return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
+        ? result.answer.value.refs
+        : null;
     } catch {
       return null;
     }
@@ -170,26 +153,31 @@ export function moreLikeThisRow(
    * route (the POST's ids are read instead), `undefined` once the row has nothing left.
    */
   async function drawCards(): Promise<Title[] | null | undefined> {
-    let body: { mixed?: unknown; titles?: unknown };
     try {
-      const res = await fetchImpl(`${atlas}${cardsPath}?skip=${cardsSkip}&limit=${CHUNK}`);
-      if (!res.ok) return cardsSkip === 0 ? null : undefined;
-      body = (await res.json()) as typeof body;
+      const result = await content.query({
+        kind: 'atlas.related',
+        query: {
+          operation: 'cards',
+          title: { type: self.type, id: self.id },
+          skip: cardsSkip,
+          limit: CHUNK,
+        },
+      });
+      if (result.answer.state !== 'ready' || result.answer.value.operation !== 'cards')
+        return cardsSkip === 0 ? null : undefined;
+      const { refs, titles } = result.answer.value;
+      if (refs.length === 0) return undefined;
+      cardsSkip += refs.length;
+      const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
+      return drawRefs(wanted, titles, content);
     } catch {
       return cardsSkip === 0 ? null : undefined;
     }
-    // An answer without the mixed row is not this route's: on the first page that is an atlas without it.
-    const refs = refsFrom(body, true);
-    if (refs === null) return cardsSkip === 0 ? null : undefined;
-    if (refs.length === 0) return undefined;
-    cardsSkip += refs.length;
-    const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
-    return drawRefs(wanted, titlesOf(body), content);
   }
 
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
-  async function drawQueued(path: string): Promise<Title[] | undefined> {
-    queue ??= await idsFrom(path);
+  async function drawQueued(source: 'similar' | 'neighbours'): Promise<Title[] | undefined> {
+    queue ??= await idsFrom(source);
     const wanted = queue.filter((ref) => !seen.has(keyOf(ref))).slice(0, CHUNK);
     const last = wanted[wanted.length - 1];
     queue = last ? queue.slice(queue.indexOf(last) + 1) : [];
@@ -218,19 +206,19 @@ export function moreLikeThisRow(
     }
     if (source === 'unknown') {
       queue = affinity
-        ? ((await suggested()) ?? (fallback ? await idsFrom(similarPath) : []))
-        : await idsFrom(similarPath);
+        ? ((await suggested()) ?? (fallback ? await idsFrom('similar') : []))
+        : await idsFrom('similar');
       source = queue.length > 0 ? 'similar' : fallback ? 'recommended' : 'done';
       if (source !== 'similar') queue = undefined; // atlas has nothing for this title: TMDB alone
     }
     if (source === 'similar') {
-      const found = await drawQueued(similarPath);
+      const found = await drawQueued('similar');
       if (found) return found;
       source = after;
       queue = undefined;
     }
     if (source === 'neighbours') {
-      const found = await drawQueued(neighboursPath);
+      const found = await drawQueued('neighbours');
       if (found) return found;
       source = 'recommended'; // atlas is exhausted: TMDB pads the end
     }
@@ -331,8 +319,7 @@ export function withPosters(row: RowDef, { content }: RelatedOptions): RowDef {
 export function studioRow(
   studio: IconicStudio,
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef {
   return {
     id: `studio-${studio.id}`,
@@ -344,7 +331,7 @@ export function studioRow(
       href: searchHref('', { chips: [`studio-${studio.id}`] }),
     },
     filter: (title) => keyOf(title) !== keyOf(self),
-    load: filterTitles(atlas, 'all', [{ kind: 'studio', id: studio.id }], { fetchImpl }),
+    load: contentFilterTitles(content, 'all', [{ kind: 'studio', id: studio.id }]),
   };
 }
 
@@ -352,8 +339,7 @@ export function studioRow(
 export function languageRow(
   language: { id: string; name: string },
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef {
   const label = `in ${language.name}`;
   return {
@@ -368,7 +354,7 @@ export function languageRow(
     // Atlas's broad language facts may contain several languages; its card's single original language is the
     // stricter meaning this row promises.
     filter: (title) => keyOf(title) !== keyOf(self) && title.originalLanguage === language.id,
-    load: filterTitles(atlas, self.type, [{ kind: 'language', id: language.id }], { fetchImpl }),
+    load: contentFilterTitles(content, self.type, [{ kind: 'language', id: language.id }]),
   };
 }
 
@@ -473,8 +459,7 @@ export function countryRow(
   country: { id: string; name: string },
   language: string,
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef {
   const name = WITH_THE.has(country.id) ? `the ${country.name}` : country.name;
   return {
@@ -487,15 +472,10 @@ export function countryRow(
       href: searchHref('', { chips: [`country-${country.id}`, `lang-${language}`] }),
     },
     filter: (title) => keyOf(title) !== keyOf(self) && title.originalLanguage === language,
-    load: filterTitles(
-      atlas,
-      'all',
-      [
-        { kind: 'country', id: country.id },
-        { kind: 'language', id: language },
-      ],
-      { fetchImpl },
-    ),
+    load: contentFilterTitles(content, 'all', [
+      { kind: 'country', id: country.id },
+      { kind: 'language', id: language },
+    ]),
   };
 }
 
@@ -512,8 +492,7 @@ export function producerRows(
   facts: TitleFacts,
   studios: IconicStudio[],
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef[] {
   const taken = new Set(studios.flatMap((studio) => [studio.id, folded(studio.name)]));
   const fits = (value: Browsable) =>
@@ -524,11 +503,11 @@ export function producerRows(
   const rows: RowDef[] = [];
   const network = facts.networks.find(fits);
   if (network) {
-    rows.push(producerRow('network', network, self, atlas, fetchImpl));
+    rows.push(producerRow('network', network, self, content));
     taken.add(network.id).add(folded(network.name));
   }
   const company = facts.companies.filter(fits).sort((a, b) => b.titles - a.titles)[0];
-  if (company) rows.push(producerRow('company', company, self, atlas, fetchImpl));
+  if (company) rows.push(producerRow('company', company, self, content));
   return rows;
 }
 
@@ -536,8 +515,7 @@ function producerRow(
   kind: 'network' | 'company',
   value: Browsable,
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef {
   return {
     id: `${kind}-${value.id}`,
@@ -549,7 +527,7 @@ function producerRow(
       href: searchHref('', { chips: [`${kind}-${value.id}`] }),
     },
     filter: (title) => keyOf(title) !== keyOf(self),
-    load: filterTitles(atlas, 'all', [{ kind, id: value.id }], { fetchImpl }),
+    load: contentFilterTitles(content, 'all', [{ kind, id: value.id }]),
   };
 }
 
@@ -564,18 +542,17 @@ const THEME_TITLES = { min: 8, max: 300 };
 export function themeRows(
   facts: TitleFacts,
   self: Title,
-  atlas: string,
+  content: ContentServiceClientPort,
   countryName?: string,
-  fetchImpl?: typeof fetch,
 ): RowDef[] {
   const fits = (value: Browsable) =>
     value.titles >= THEME_TITLES.min && value.titles <= THEME_TITLES.max;
   const rows: RowDef[] = [];
   const subject = facts.subjects.find(fits);
-  if (subject) rows.push(themeRow('subject', subject, 'More about ', self, atlas, fetchImpl));
+  if (subject) rows.push(themeRow('subject', subject, 'More about ', self, content));
   const country = countryName && folded(countryName);
   const place = facts.places.find((value) => fits(value) && folded(value.name) !== country);
-  if (place) rows.push(themeRow('place', place, 'Set in ', self, atlas, fetchImpl));
+  if (place) rows.push(themeRow('place', place, 'Set in ', self, content));
   return rows;
 }
 
@@ -584,8 +561,7 @@ function themeRow(
   value: Browsable,
   before: string,
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef {
   return {
     id: `${kind}-${value.id}`,
@@ -597,7 +573,7 @@ function themeRow(
       href: searchHref('', { chips: [`${kind}-${value.id}`] }),
     },
     filter: (title) => keyOf(title) !== keyOf(self),
-    load: filterTitles(atlas, 'all', [{ kind, id: value.id }], { fetchImpl }),
+    load: contentFilterTitles(content, 'all', [{ kind, id: value.id }]),
   };
 }
 
@@ -609,11 +585,10 @@ function themeRow(
 export function authorRow(
   facts: TitleFacts,
   self: Title,
-  atlas: string,
-  fetchImpl?: typeof fetch,
+  content: ContentServiceClientPort,
 ): RowDef | null {
   const author = facts.authors.find((value) => value.titles >= 2);
-  return author ? themeRow('author', author, 'More adapted from ', self, atlas, fetchImpl) : null;
+  return author ? themeRow('author', author, 'More adapted from ', self, content) : null;
 }
 
 /** How a mood reads in "More … like this"; a mood not named here is its own label, lowercased. */
@@ -636,21 +611,16 @@ const NOT_A_FEELING = new Set(['Bingeable', 'Twist-ending']);
 export function moodRow(
   moods: string[],
   self: Title,
-  atlas: string,
-  { seen, after, fetchImpl }: { seen: Set<string>; after: Promise<void>; fetchImpl?: typeof fetch },
+  content: ContentServiceClientPort,
+  { seen, after }: { seen: Set<string>; after: Promise<void> },
 ): RowDef | null {
   const mood = moods.find((label) => !NOT_A_FEELING.has(label));
   if (!mood) return null;
   const word = MOOD_WORDS[mood] ?? mood.toLowerCase().replace(/[-/]/g, ' ');
-  const load = filterTitles(
-    atlas,
-    'all',
-    [
-      { kind: 'like', id: likeValue(self, 'all') },
-      { kind: 'mood', id: mood },
-    ],
-    { fetchImpl },
-  );
+  const load = contentFilterTitles(content, 'all', [
+    { kind: 'like', id: likeValue(self, 'all') },
+    { kind: 'mood', id: mood },
+  ]);
   let read = 0;
   return {
     id: `mood-like-${mood}`,
@@ -701,31 +671,25 @@ export async function franchiseRow(
   options: RelatedOptions,
 ): Promise<RowDef | null> {
   if (atlas) {
-    const kind = self.type === 'tv' ? 'series' : 'movie';
-    const fetchImpl = options.fetchImpl ?? fetch;
     try {
-      const res = await fetchImpl(`${atlas}/index/franchise/${kind}/${self.id}.json`);
-      if (res.ok) {
-        const body = (await res.json()) as Record<string, unknown>;
-        const franchise =
-          body.franchise && typeof body.franchise === 'object'
-            ? (body.franchise as Record<string, unknown>)
-            : null;
-        if (franchise && typeof franchise.id === 'string' && typeof franchise.name === 'string') {
-          const cards = titlesOf({ titles: body.members });
-          const refs = cards
-            .filter((card) => keyOf(card) !== keyOf(self))
-            .map(({ type, id }) => ({ type, id }));
-          if (refs.length === 0) return null;
-          let members: Promise<Title[]> | undefined;
-          return {
-            id: `franchise-${franchise.id}`,
-            title: franchise.name,
-            filter: (title) => keyOf(title) !== keyOf(self),
-            load: async (page) =>
-              page === 1 ? await (members ??= drawRefs(refs, cards, options.content)) : [],
-          };
-        }
+      const result = await options.content.query({
+        kind: 'atlas.related',
+        query: { operation: 'franchise', title: { type: self.type, id: self.id } },
+      });
+      if (result.answer.state === 'ready' && result.answer.value.operation === 'franchise') {
+        const { id, name, members: cards } = result.answer.value;
+        const refs = cards
+          .filter((card) => keyOf(card) !== keyOf(self))
+          .map(({ type, id }) => ({ type, id }));
+        if (refs.length === 0) return null;
+        let members: Promise<Title[]> | undefined;
+        return {
+          id: `franchise-${id}`,
+          title: name,
+          filter: (title) => keyOf(title) !== keyOf(self),
+          load: async (page) =>
+            page === 1 ? await (members ??= drawRefs(refs, cards, options.content)) : [],
+        };
       }
     } catch {
       // An older/unreachable atlas has no curated answer; preserve the existing TMDB collection fallback.
@@ -747,48 +711,46 @@ export async function versionsRow(
   self: Title,
   atlas: string | null,
   franchise: Promise<RowDef | null>,
-  { content, fetchImpl = fetch }: RelatedOptions,
+  { content }: RelatedOptions,
 ): Promise<RowDef | null> {
   if (!atlas) return null;
-  const kind = self.type === 'tv' ? 'series' : 'movie';
-  let listed: unknown;
   try {
-    const res = await fetchImpl(`${atlas}/index/versions/${kind}/${self.id}.json`);
-    if (!res.ok) return null;
-    listed = ((await res.json()) as Record<string, unknown> | null)?.versions;
+    const result = await content.query({
+      kind: 'atlas.related',
+      query: { operation: 'versions', title: { type: self.type, id: self.id } },
+    });
+    if (result.answer.state !== 'ready' || result.answer.value.operation !== 'versions')
+      return null;
+    const listed = result.answer.value.versions;
+    /** What each card says beside its year: its franchise's label, else "Remake" for a remake. */
+    const notes = new Map(
+      listed.flatMap(({ title, note }) => (note ? [[keyOf(title), note]] : [])),
+    );
+    const refs = listed.map(({ title }) => ({ type: title.type, id: title.id }));
+    const elsewhere = new Set<string>(
+      (await franchise.then((row) => row?.load(1)).catch(() => undefined))?.map(keyOf),
+    );
+    elsewhere.add(keyOf(self));
+    const wanted = refs.filter((ref) => !elsewhere.has(keyOf(ref)));
+    if (wanted.length === 0) return null;
+    const titles = await drawRefs(
+      wanted,
+      listed.map(({ title }) => title),
+      content,
+    );
+    if (titles.length === 0) return null;
+    return {
+      id: 'other-versions',
+      title: 'Other versions',
+      caption: (t) => {
+        const note = notes.get(keyOf(t));
+        return note ? [t.year, note].filter(Boolean).join(' · ') : undefined;
+      },
+      load: async (page) => (page === 1 ? titles : []),
+    };
   } catch {
     return null;
   }
-  if (!Array.isArray(listed)) return null;
-  /** What each card says beside its year: its franchise's label, else "Remake" for a remake. */
-  const notes = new Map<string, string>();
-  const refs = (listed as Record<string, unknown>[]).flatMap((t): Ref[] => {
-    const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
-    if (!type || !Number.isInteger(t.id)) return [];
-    const ref: Ref = { type, id: t.id as number };
-    const group = t.group as Record<string, unknown> | undefined;
-    const label = typeof group?.label === 'string' ? group.label : undefined;
-    const note = label ?? (t.kind === 'remake' ? 'Remake' : undefined);
-    if (note) notes.set(keyOf(ref), note);
-    return [ref];
-  });
-  const elsewhere = new Set<string>(
-    (await franchise.then((row) => row?.load(1)).catch(() => undefined))?.map(keyOf),
-  );
-  elsewhere.add(keyOf(self));
-  const wanted = refs.filter((ref) => !elsewhere.has(keyOf(ref)));
-  if (wanted.length === 0) return null;
-  const titles = await drawRefs(wanted, titlesOf({ titles: listed }), content);
-  if (titles.length === 0) return null;
-  return {
-    id: 'other-versions',
-    title: 'Other versions',
-    caption: (t) => {
-      const note = notes.get(keyOf(t));
-      return note ? [t.year, note].filter(Boolean).join(' · ') : undefined;
-    },
-    load: async (page) => (page === 1 ? titles : []),
-  };
 }
 
 type Department = 'Directing' | 'Writing' | 'Acting';

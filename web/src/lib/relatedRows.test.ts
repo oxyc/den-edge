@@ -2,20 +2,20 @@ import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
 import type { RowDef } from './catalog';
 import {
-  authorRow,
+  authorRow as authorRowImpl,
   collectionRow as collectionRowImpl,
-  countryRow,
+  countryRow as countryRowImpl,
   firstScreen,
   franchiseRow as franchiseRowImpl,
   homeCountry,
-  languageRow,
-  moodRow,
+  languageRow as languageRowImpl,
+  moodRow as moodRowImpl,
   moreLikeThisRow as moreLikeThisRowImpl,
   personRow as personRowImpl,
   personRows,
-  producerRows,
-  studioRow,
-  themeRows,
+  producerRows as producerRowsImpl,
+  studioRow as studioRowImpl,
+  themeRows as themeRowsImpl,
   versionsRow as versionsRowImpl,
   withPosters as withPostersImpl,
   type RelatedOptions,
@@ -36,7 +36,7 @@ const fixtureContentPort = (
       tmdb: () => key,
       omdb: () => undefined,
       contentWarnings: () => undefined,
-      atlas: () => undefined,
+      atlas: () => '/atlas',
     },
     { tmdbFetch: fetchImpl, providerFetch: fetchImpl },
   );
@@ -47,11 +47,11 @@ const fixtureContentPort = (
   };
 };
 
-type FixtureOptions = Omit<RelatedOptions, 'content'> & { key?: string };
+type FixtureOptions = Omit<RelatedOptions, 'content'> & { key?: string; fetchImpl?: typeof fetch };
 
 const fixtureOptions = (value: FixtureOptions = {}): RelatedOptions => {
-  const { key, ...options } = value;
-  return { ...options, content: fixtureContentPort(key, options.fetchImpl) };
+  const { key, fetchImpl, ...options } = value;
+  return { ...options, content: fixtureContentPort(key, fetchImpl) };
 };
 
 const moreLikeThisRow = (
@@ -85,6 +85,52 @@ const personRow = (
 ) => personRowImpl(person, department, title, fixtureOptions(options), before);
 const withPosters = (row: RowDef, options: FixtureOptions) =>
   withPostersImpl(row, fixtureOptions(options));
+const filterContent = (fetchImpl: typeof fetch = fetch) => fixtureContentPort('', fetchImpl);
+const studioRow = (
+  studio: Parameters<typeof studioRowImpl>[0],
+  title: Parameters<typeof studioRowImpl>[1],
+  _atlas: string,
+  fetchImpl?: typeof fetch,
+) => studioRowImpl(studio, title, filterContent(fetchImpl));
+const languageRow = (
+  language: Parameters<typeof languageRowImpl>[0],
+  title: Parameters<typeof languageRowImpl>[1],
+  _atlas: string,
+  fetchImpl?: typeof fetch,
+) => languageRowImpl(language, title, filterContent(fetchImpl));
+const countryRow = (
+  country: Parameters<typeof countryRowImpl>[0],
+  language: string,
+  title: Parameters<typeof countryRowImpl>[2],
+  _atlas: string,
+  fetchImpl?: typeof fetch,
+) => countryRowImpl(country, language, title, filterContent(fetchImpl));
+const producerRows = (
+  facts: Parameters<typeof producerRowsImpl>[0],
+  studios: Parameters<typeof producerRowsImpl>[1],
+  title: Parameters<typeof producerRowsImpl>[2],
+  _atlas: string,
+  fetchImpl?: typeof fetch,
+) => producerRowsImpl(facts, studios, title, filterContent(fetchImpl));
+const themeRows = (
+  facts: Parameters<typeof themeRowsImpl>[0],
+  title: Parameters<typeof themeRowsImpl>[1],
+  _atlas: string,
+  country?: string,
+  fetchImpl?: typeof fetch,
+) => themeRowsImpl(facts, title, filterContent(fetchImpl), country);
+const authorRow = (
+  facts: Parameters<typeof authorRowImpl>[0],
+  title: Parameters<typeof authorRowImpl>[1],
+  _atlas: string,
+  fetchImpl?: typeof fetch,
+) => authorRowImpl(facts, title, filterContent(fetchImpl));
+const moodRow = (
+  moods: Parameters<typeof moodRowImpl>[0],
+  title: Parameters<typeof moodRowImpl>[1],
+  _atlas: string,
+  options: Parameters<typeof moodRowImpl>[3] & { fetchImpl?: typeof fetch },
+) => moodRowImpl(moods, title, filterContent(options.fetchImpl), options);
 
 /** A TMDB and atlas that answer from a table keyed by the request path, recording what was asked. */
 function answering(table: Record<string, unknown>, asked: string[] = []) {
