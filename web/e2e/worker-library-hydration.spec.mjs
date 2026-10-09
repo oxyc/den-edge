@@ -136,7 +136,29 @@ async function routes(page, metadata) {
     const request = route.request();
     const url = new URL(request.url());
     const match = url.pathname.match(/\/(movie|tv)\/(\d+)$/);
-    if (!match) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
+    if (!match) {
+      const trending = metadata.trending && url.pathname.includes('/trending/');
+      return route.fulfill({
+        json: {
+          page: 1,
+          total_pages: 1,
+          results: trending
+            ? [
+                {
+                  id: 901,
+                  title: 'Generic trending pick',
+                  release_date: '2026-01-01',
+                  poster_path: '/poster.jpg',
+                  backdrop_path: '/backdrop.jpg',
+                  vote_average: 7.5,
+                  vote_count: 500,
+                  genre_ids: [18],
+                },
+              ]
+            : [],
+        },
+      });
+    }
 
     const [, type, rawId] = match;
     const id = Number(rawId);
@@ -306,12 +328,16 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   await expect.poll(() => [...metadata.grantMembers]).toEqual([membership]);
 });
 
-test('personalized billboard keeps its retained paint until the first transition rebases the fresh ranking', async ({
+test('paired billboard holds the early generic fallback until retained lookup settles', async ({
   page,
 }) => {
+  let holdAtlas = false;
+  let releaseAtlas;
+  const atlasReleased = new Promise((resolve) => (releaseAtlas = resolve));
   let releaseRanking;
   const rankingReleased = new Promise((resolve) => (releaseRanking = resolve));
   const recommendations = [];
+  let atlasProbes = 0;
   const metadata = {
     requests: [],
     attempts: new Map(),
@@ -321,12 +347,15 @@ test('personalized billboard keeps its retained paint until the first transition
     refuseOnce: new Set(),
     missing: new Set(),
     holdId: null,
+    trending: true,
   };
 
   await routes(page, metadata);
-  await page.route('**/atlas/manifest.json', (route) =>
-    route.fulfill({ json: { id: 'com.den.atlas' } }),
-  );
+  await page.route('**/atlas/manifest.json', async (route) => {
+    atlasProbes++;
+    if (holdAtlas) await atlasReleased;
+    await route.fulfill({ json: { id: 'com.den.atlas' } });
+  });
   await page.route('**/scout/fixture-install/manifest.json', (route) =>
     route.fulfill({ json: { id: 'com.den.scout' } }),
   );
@@ -353,7 +382,22 @@ test('personalized billboard keeps its retained paint until the first transition
     timeout: 15_000,
   });
 
+  const seededProbes = atlasProbes;
+  holdAtlas = true;
   await page.goto(`${FIXTURE}?view=home&online`);
+  // Home deliberately admits generic content while Atlas discovery is unresolved. Even after that row has loaded,
+  // its title must not enter a paired billboard before the retained lookup has had the chance to answer.
+  await expect.poll(() => atlasProbes).toBeGreaterThan(seededProbes);
+  await expect(
+    page
+      .getByRole('region', { name: 'Trending This Week' })
+      .getByRole('link', { name: 'Generic trending pick' }),
+  ).toBeVisible();
+  await expect(
+    page.locator('.billboard').getByRole('heading', { name: 'Generic trending pick' }),
+  ).toHaveCount(0);
+
+  releaseAtlas();
   await expect.poll(() => recommendations.length).toBeGreaterThan(0);
   await expect(page.getByRole('heading', { name: 'Retained personal pick' })).toBeVisible();
 
