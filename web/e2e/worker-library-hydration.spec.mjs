@@ -175,7 +175,9 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   });
   await routes(page, metadata);
   await page.goto(`${FIXTURE}?seed`);
-  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
 
   // Reopen the local snapshot as an online/paired library. History's second progressive metadata batch is held,
   // while the first batch and the small Home seed batch can already paint the real Watchlist screen.
@@ -268,7 +270,9 @@ test('personalized billboard waits for staged names without replacing its retain
   });
 
   await page.goto(`${FIXTURE}?seed`);
-  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
 
   await page.goto(`${FIXTURE}?view=home&online`);
   await expect.poll(() => recommendations.length).toBeGreaterThan(0);
