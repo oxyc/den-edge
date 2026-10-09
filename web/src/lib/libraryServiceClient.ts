@@ -70,11 +70,18 @@ export class LibraryServiceClient {
       membership: { libraryId: string; memberToken: string } | null,
     ) => (() => void) | void,
     private readonly ownsTransport = true,
+    private readonly onOpening?: (opening: Promise<LibraryVersion>) => void,
   ) {
     this.#stopListening = transport.listen((message) => this.#receive(message));
   }
 
-  async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+  open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+    const opening = this.#open(options);
+    this.onOpening?.(opening);
+    return opening;
+  }
+
+  async #open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     const requestId = this.#requestId();
     const reply = await this.#request(
       {

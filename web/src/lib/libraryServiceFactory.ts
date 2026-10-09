@@ -11,7 +11,6 @@ import type {
 } from './contentServiceProtocol';
 import {
   LibraryServiceSupervisor,
-  type LibraryServiceClientFactory,
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
@@ -52,6 +51,7 @@ export interface WorkerServiceSession {
 export function createWorkerServiceConnection(
   createWorker: () => Worker = productionWorker,
   startupTimeoutMs?: number,
+  onLibraryOpening?: (opening: Promise<unknown>) => void,
 ): WorkerServiceConnection {
   const transport = new WorkerLibraryServiceTransport(createWorker());
   const content = new ContentServiceClient(transport.contentTransport(), undefined, false);
@@ -61,6 +61,7 @@ export function createWorkerServiceConnection(
     startupTimeoutMs,
     (membership) => (membership ? useLibraryRelayMembership(membership) : undefined),
     false,
+    onLibraryOpening,
   );
   let closed = false;
   return {
@@ -222,24 +223,6 @@ class SessionContentService implements ContentServiceClientPort {
   }
 }
 
-class SessionLibraryService extends LibraryServiceSupervisor {
-  constructor(
-    createClient: LibraryServiceClientFactory,
-    options: LibraryServiceSupervisorOptions,
-    private readonly onOpen: (opening: Promise<unknown>) => void,
-  ) {
-    super(createClient, options);
-  }
-
-  override open(
-    options: Parameters<LibraryServiceSupervisor['open']>[0],
-  ): ReturnType<LibraryServiceSupervisor['open']> {
-    const opening = super.open(options);
-    this.onOpen(opening);
-    return opening;
-  }
-}
-
 /**
  * Session-level owner used by RoutedLibrary. Construction starts one Worker for public content. Opening the library
  * claims that same connection; a supervised library restart replaces the shared connection for both clients.
@@ -249,8 +232,13 @@ export function createWorkerServiceSession(
 ): WorkerServiceSession {
   const createWorker = options.createWorker ?? productionWorker;
   let closed = false;
+  const contentFacade: { current?: SessionContentService } = {};
+  const connection = () =>
+    createWorkerServiceConnection(createWorker, options.startupTimeoutMs, (opening) =>
+      contentFacade.current?.bootstrap(opening),
+    );
   let active = {
-    connection: createWorkerServiceConnection(createWorker, options.startupTimeoutMs),
+    connection: connection(),
     libraryClaimed: false,
   };
 
@@ -258,7 +246,7 @@ export function createWorkerServiceSession(
     if (closed) throw new Error('Worker service session is closed');
     const previous = active.connection;
     active = {
-      connection: createWorkerServiceConnection(createWorker, options.startupTimeoutMs),
+      connection: connection(),
       libraryClaimed,
     };
     content.replaced(active.connection.content);
@@ -270,18 +258,15 @@ export function createWorkerServiceSession(
     (expected) =>
       active.connection.content === expected ? activate(false).content : active.connection.content,
   );
+  contentFacade.current = content;
 
-  const library = new SessionLibraryService(
-    () => {
-      if (closed) throw new Error('Worker service session is closed');
-      if (active.libraryClaimed) return activate(true).library;
-      active.libraryClaimed = true;
-      content.replaced(active.connection.content);
-      return active.connection.library;
-    },
-    options.supervisor ?? {},
-    (opening) => content.bootstrap(opening),
-  );
+  const library = new LibraryServiceSupervisor(() => {
+    if (closed) throw new Error('Worker service session is closed');
+    if (active.libraryClaimed) return activate(true).library;
+    active.libraryClaimed = true;
+    content.replaced(active.connection.content);
+    return active.connection.library;
+  }, options.supervisor);
 
   return {
     content,

@@ -220,6 +220,59 @@ it('holds paired content traffic behind the library bootstrap barrier', async ()
   services.close();
 });
 
+it('restores the bootstrap barrier when a paired Worker is replaced', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const firstHello = first.posted[0];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  first.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: firstHello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+  first.fail();
+
+  const loading = services.content.query({ kind: 'service.regions' });
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello')
+    throw new Error('replacement must reopen the library before content');
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await expect.poll(() => replacement.posted.length).toBe(2);
+  const query = replacement.posted[1];
+  if (query?.type !== 'content-query') throw new Error('content did not resume after bootstrap');
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: query.requestId,
+      result: { kind: 'service.regions', regions: [] },
+    },
+  ]);
+  await expect(loading).resolves.toMatchObject({ kind: 'service.regions' });
+  services.close();
+});
+
 it('replays authoritative source configuration before retrying on a replacement Worker', async () => {
   const first = new FakeWorker();
   const replacement = new FakeWorker();
