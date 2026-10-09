@@ -7,6 +7,8 @@ type Ref = { type: MediaType; id: number };
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
+  /** A provider-confirmed absence is settled metadata, not another lookup to make. */
+  displayMissing?: (ref: Ref) => boolean;
   libraryMetadata(refs: readonly Ref[]): Promise<{
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
@@ -55,7 +57,8 @@ export async function nameLibraryTitles(session: NamedLibrary, refs: Ref[]): Pro
       ...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values(),
     ].filter(
       (ref) =>
-        !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+        !session.displayMissing?.(ref) &&
+        (!known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref)))),
     );
     return { known, wanted };
   });
@@ -177,7 +180,8 @@ const missing = (session: NamedLibrary, refs: Ref[], known: Set<string>): Ref[] 
     refs
       .filter(
         (ref) =>
-          !known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref))),
+          !session.displayMissing?.(ref) &&
+          (!known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref)))),
       )
       .map((ref) => [titleKey(ref), ref]),
   ).values(),
