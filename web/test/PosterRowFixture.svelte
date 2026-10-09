@@ -31,7 +31,7 @@
   onMount(() => {
     if (!new URLSearchParams(location.search).has('availability')) return;
     availability.connect({ install: '/scout', base: '/scout' }, content, fetch);
-    return () => availability.connect(null, null);
+    return () => availability.connect(null, content);
   });
 </script>
 

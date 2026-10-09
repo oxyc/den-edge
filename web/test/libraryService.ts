@@ -25,6 +25,7 @@ import type { LibraryLog } from '../src/lib/log';
 import type { Vault } from '../src/lib/localVault';
 import { cancelSource, prepareSource } from '../src/lib/titleSources';
 import type { Stamp } from '../src/lib/wire';
+import { fixtureContentService } from './contentService';
 
 class FixtureService {
   readonly #subscriptions = new Map<
@@ -285,7 +286,7 @@ export function fixtureLibraryService({
   });
   // RoutedLibrary owns this observation in production; fixtures render the model directly.
   void model.ready.catch(() => {});
-  const session = new LibrarySession(model);
+  const session = new LibrarySession(model, false, fixtureContentService());
   return {
     model,
     session,

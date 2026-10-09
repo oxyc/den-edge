@@ -98,11 +98,11 @@ export class Availability {
    */
   connect(
     scout: Addon | null,
-    content: ContentServiceClientPort | null,
+    content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
   ): void {
     const previous = this.scout?.base;
-    this.scout = scout && content ? { base: scout.base, content, fetch: fetchImpl } : null;
+    this.scout = scout ? { base: scout.base, content, fetch: fetchImpl } : null;
     if (previous !== undefined && this.scout?.base !== previous) {
       this.generation++;
       clearTimeout(this.timer);

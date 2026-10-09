@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { fetchCollection, fetchDetail, parseDetail, parsePerson, parseSeason } from './detail';
-import { fetchDetails } from './tmdb';
+import { parseCollection, parseDetail, parsePerson, parseSeason } from './detail';
 
 const movie = {
   title: 'Arrival',
@@ -107,55 +105,6 @@ describe('title pages', () => {
     expect(videos(yt('clip', 'Clip', true))).toBeUndefined();
     expect(parseDetail({ type: 'movie', id: 1 }, movie)!.trailer).toBeUndefined();
   });
-
-  it('asks TMDB for the credits, recommendations, videos and external ids in the same fetch', async () => {
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(JSON.stringify(series), { status: 200 });
-    }) as typeof fetch;
-    expect(await fetchDetail({ type: 'tv', id: 95396 }, 'k', fetchImpl)).not.toBeNull();
-    const url = new URL(asked[0]!);
-    expect([url.pathname, url.searchParams.get('append_to_response')]).toEqual([
-      '/3/tv/95396',
-      'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers',
-    ]);
-    const down = (async () => new Response('{}', { status: 401 })) as typeof fetch;
-    expect(await fetchDetail({ type: 'movie', id: 1 }, 'k', down)).toBeNull();
-  });
-
-  /**
-   * den-edge answers every detail question for a title from one whole-detail fetch (`src/tmdb.rs`,
-   * `MOVIE_APPENDS`/`TV_APPENDS`), but only for sub-requests on its list: one this app adds and that list
-   * lacks is asked of TMDB on its own again, a miss per title per question.
-   */
-  it("asks only for what den-edge's whole detail carries", async () => {
-    const source = readFileSync(new URL('../../../src/tmdb.rs', import.meta.url), 'utf8');
-    const carried = (name: string) =>
-      new Set(
-        [
-          ...(
-            new RegExp(`const ${name}: \\[&str; \\d+\\] =\\s*\\[([^\\]]*)\\]`).exec(source)?.[1] ??
-            ''
-          ).matchAll(/"([^"]+)"/g),
-        ].map((m) => m[1]),
-      );
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(JSON.stringify(series), { status: 200 });
-    }) as typeof fetch;
-    for (const type of ['movie', 'tv'] as const) {
-      asked.length = 0;
-      await fetchDetail({ type, id: 1 }, 'k', fetchImpl);
-      await fetchDetails({ type, id: 1 }, 'k', fetchImpl);
-      const whole = carried(type === 'movie' ? 'MOVIE_APPENDS' : 'TV_APPENDS');
-      expect(whole.size, type).toBeGreaterThan(0);
-      for (const url of asked)
-        for (const append of new URL(url).searchParams.get('append_to_response')!.split(','))
-          expect(whole.has(append), `${type}: ${append}`).toBe(true);
-    }
-  });
 });
 
 describe('seasons and people', () => {
@@ -207,24 +156,17 @@ describe('seasons and people', () => {
     expect(parsePerson(1, { biography: 'x' })).toBeNull();
   });
 
-  it('orders a collection by complete release date instead of provider order within a year', async () => {
-    const titles = await fetchCollection(
-      12,
-      'key',
-      async () =>
-        new Response(
-          JSON.stringify({
-            parts: [
-              { id: 2, title: 'Later sequel', release_date: '2026-11-01' },
-              { id: 3, title: 'Newer year only', release_date: '2027' },
-              { id: 4, title: 'No date' },
-              { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
-              { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
-              { id: 1, title: 'Earlier sequel', release_date: '2026-02-01' },
-            ],
-          }),
-        ),
-    );
+  it('orders a collection by complete release date instead of provider order within a year', () => {
+    const titles = parseCollection({
+      parts: [
+        { id: 2, title: 'Later sequel', release_date: '2026-11-01' },
+        { id: 3, title: 'Newer year only', release_date: '2027' },
+        { id: 4, title: 'No date' },
+        { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
+        { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
+        { id: 1, title: 'Earlier sequel', release_date: '2026-02-01' },
+      ],
+    });
 
     expect(titles.map((title) => title.title)).toEqual([
       'Alpha tie',

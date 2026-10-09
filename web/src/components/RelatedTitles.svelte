@@ -50,7 +50,7 @@
     atlas?: string | null;
     /**
      * Curated studios credited on this title, each with its own row, and atlas's facts about it — its moods, networks
-     * and companies (`fetchTitleFacts`). Either is undefined while it is asked for, and the rows wait for both: a row
+     * and companies. Either is undefined while it is asked for, and the rows wait for both: a row
      * they name would otherwise join mid-page.
      */
     studios: IconicStudio[] | undefined;

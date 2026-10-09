@@ -14,7 +14,7 @@ import type {
 } from './filterRoutes';
 
 /** The read-only content protocol is versioned independently from encrypted library state. */
-export const CONTENT_SERVICE_PROTOCOL = 2 as const;
+export const CONTENT_SERVICE_PROTOCOL = 3 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -178,7 +178,8 @@ export type ContentRequest =
   | { kind: 'atlas.recommend.personal'; body: ReturnType<typeof recommendBody> }
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
-  | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string };
+  | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string }
+  | { kind: 'provider-cache.clear'; service: 'tmdb' };
 
 export type OptionalContent<T> =
   | { state: 'ready'; value: T }
@@ -274,7 +275,8 @@ export type ContentResult =
       kind: 'provider-key.check';
       service: ContentProviderKey;
       outcome: 'accepted' | 'refused' | 'unavailable';
-    };
+    }
+  | { kind: 'provider-cache.clear'; service: 'tmdb' };
 
 export type ContentResultFor<Request extends ContentRequest> = Extract<
   ContentResult,

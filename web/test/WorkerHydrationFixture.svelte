@@ -5,7 +5,7 @@
   import Library from '../src/Library.svelte';
   import Settings from '../src/Settings.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
-  import { createLibraryService } from '../src/lib/libraryServiceFactory';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import { LibrarySession } from '../src/lib/librarySession.svelte';
   import type { Link } from '../src/lib/links.svelte';
@@ -18,9 +18,12 @@
   const online = params.has('online');
   const lifecycle = params.has('lifecycle');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
-  const service = createLibraryService();
-  const model = new LibraryModel(service, { libraryKey, mode: online ? 'online' : 'local' });
-  const session = new LibrarySession(model, false);
+  const services = createWorkerServiceSession();
+  const model = new LibraryModel(services.library, {
+    libraryKey,
+    mode: online ? 'online' : 'local',
+  });
+  const session = new LibrarySession(model, false, services.content, () => services.close());
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',

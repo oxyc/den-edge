@@ -60,7 +60,7 @@ describe('SessionServices', () => {
     vi.useFakeTimers();
     discoveries = 0;
     let asked = 0;
-    const services = new SessionServices(fakeModel(), async () => ({
+    const services = new SessionServices(fakeModel(), content, async () => ({
       [`routes-${++asked}`]: [{ url: `/route-${asked}` }],
     }));
 
@@ -80,7 +80,7 @@ describe('SessionServices', () => {
   it('holds availability until the foreground signal', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), async () => ({}), content);
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
     services.configure(runtime());
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
     expect(connect).not.toHaveBeenCalledWith(services.scout, content);
@@ -105,7 +105,7 @@ describe('SessionServices', () => {
         remux: null,
       }),
     });
-    const services = new SessionServices(model, () => routes);
+    const services = new SessionServices(model, content, () => routes);
     services.configure(runtime());
     await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
     release({ live: [{ url: '/live' }] });
@@ -117,7 +117,11 @@ describe('SessionServices', () => {
     discoveries = 0;
     reaches = 'https://den-remux.tail.test';
     const rememberPrivateRemux = vi.fn().mockResolvedValue(undefined);
-    const services = new SessionServices(fakeModel({ rememberPrivateRemux }), async () => ({}));
+    const services = new SessionServices(
+      fakeModel({ rememberPrivateRemux }),
+      content,
+      async () => ({}),
+    );
     services.configure(runtime());
     await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
     services.stop();
@@ -129,7 +133,7 @@ describe('SessionServices', () => {
     vi.stubGlobal('scheduler', { yield: () => Promise.resolve() });
     discoveries = 0;
     const retainServices = vi.fn().mockResolvedValue(undefined);
-    const services = new SessionServices(fakeModel({ retainServices }), async () => ({
+    const services = new SessionServices(fakeModel({ retainServices }), content, async () => ({
       scout: [{ url: '/scout' }],
     }));
 
@@ -152,6 +156,7 @@ describe('SessionServices', () => {
   it('treats a rejected retained hint as a cache miss', async () => {
     const services = new SessionServices(
       fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
+      content,
       async () => ({}),
     );
     services.configure(runtime());

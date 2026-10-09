@@ -3,6 +3,7 @@ import {
   appendUniqueTitles,
   browseRows,
   categories,
+  contentPages,
   discoverParams,
   drawn,
   equivalentGenre,
@@ -16,7 +17,6 @@ import {
   RECIPES,
   retargeted,
   shelfGenre,
-  tmdbPages,
   type Pages,
 } from './catalog';
 import type { Title } from './library';
@@ -235,23 +235,27 @@ describe('the screens', () => {
     expect(asked).toEqual(['/movie/329865/recommendations']);
   });
 
-  it('loads a row a page at a time from TMDB, and asks for no page past 500', async () => {
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      asked.push(url);
-      return new Response(
-        JSON.stringify({
-          results: [{ id: 550, title: 'Fight Club', poster_path: '/f.jpg' }, { id: 'x' }],
-        }),
-      );
-    }) as typeof fetch;
-    const [trending] = homeRows(tmdbPages('k', fetchImpl));
+  it('loads a row a page at a time through the semantic catalog port', async () => {
+    const asked: unknown[] = [];
+    const content = {
+      query: async (request: unknown) => {
+        asked.push(request);
+        return {
+          kind: 'catalog.page',
+          titles: [{ type: 'movie', id: 550, title: 'Fight Club', posterPath: '/f.jpg' }],
+        };
+      },
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const [trending] = homeRows(contentPages(content));
     expect(await trending!.load(2)).toMatchObject([
       { type: 'movie', id: 550, title: 'Fight Club' },
     ]);
-    const url = new URL(asked[0]!);
-    expect([url.pathname, url.searchParams.get('page')]).toEqual(['/3/trending/movie/week', '2']);
-    expect(await trending!.load(501)).toEqual([]);
+    expect(asked[0]).toEqual({
+      kind: 'catalog.page',
+      catalog: { kind: 'trending', media: 'movie', window: 'week' },
+      page: 2,
+    });
     expect(asked).toHaveLength(1);
   });
 });

@@ -14,7 +14,7 @@ import {
   librarySimklDelivery,
   ScheduledLibraryServiceAuthority,
 } from './libraryServiceScheduledAuthority';
-import { tmdbKeyOf } from './tmdb';
+import { tmdbKeyOf } from './workerTmdbProvider';
 
 export interface LibraryContentCredentialSink {
   bind(source: ContentCredentialSource): () => void;

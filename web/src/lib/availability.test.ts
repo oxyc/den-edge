@@ -133,7 +133,7 @@ describe('Availability', () => {
     const { calls, fetchImpl } = fake(() => ({}));
     const availability = new Availability();
     availability.want({ type: 'movie', id: 1 });
-    availability.connect(null, null, fetchImpl);
+    availability.connect(null, content, fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual([]);
     availability.connect(SCOUT, content, fetchImpl);
@@ -202,7 +202,7 @@ describe('Availability', () => {
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
 
-    availability.connect(null, null);
+    availability.connect(null, content);
     await vi.advanceTimersByTimeAsync(100);
     availability.connect({ ...SCOUT, base: '/scout/new' }, content, newFetch);
     await vi.advanceTimersByTimeAsync(100);

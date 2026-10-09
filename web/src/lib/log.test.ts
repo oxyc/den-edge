@@ -13,7 +13,7 @@ import { LibraryLog } from './log';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
 import { deliverSimkl } from './simklDelivery';
-import { fetchDetails } from './tmdb';
+import { fetchDetailsResult } from './workerTmdbProvider';
 import {
   deriveKeys,
   open,
@@ -1894,6 +1894,10 @@ describe('tmdb', () => {
     (body: unknown): typeof fetch =>
     async () =>
       new Response(JSON.stringify(body), { status: 200 });
+  const details = async (...args: Parameters<typeof fetchDetailsResult>) => {
+    const result = await fetchDetailsResult(...args);
+    return result.kind === 'found' ? result.details : null;
+  };
 
   it('names a movie and a series from their details', async () => {
     const movie = {
@@ -1902,7 +1906,7 @@ describe('tmdb', () => {
       release_date: '2016-11-11',
       vote_average: 7.6,
     };
-    expect(await fetchDetails({ type: 'movie', id: 329865 }, 'k', answer(movie))).toEqual({
+    expect(await details({ type: 'movie', id: 329865 }, 'k', answer(movie))).toEqual({
       title: {
         type: 'movie',
         id: 329865,
@@ -1914,18 +1918,14 @@ describe('tmdb', () => {
         ratingSource: 'tmdb',
       },
     });
-    const series = await fetchDetails(
+    const series = await details(
       { type: 'tv', id: 95396 },
       'k',
       answer({ name: 'Severance', first_air_date: '2022-02-17' }),
     );
     expect(series?.title).toMatchObject({ title: 'Severance', year: 2022 });
     expect(
-      await fetchDetails(
-        { type: 'tv', id: 1 },
-        'k',
-        async () => new Response('{}', { status: 401 }),
-      ),
+      await details({ type: 'tv', id: 1 }, 'k', async () => new Response('{}', { status: 401 })),
     ).toBeNull();
   });
 
@@ -1939,7 +1939,7 @@ describe('tmdb', () => {
       ],
       last_episode_to_air: { season_number: 2, episode_number: 4 },
     };
-    const found = await fetchDetails({ type: 'tv', id: 95396 }, 'k', answer(severance));
+    const found = await details({ type: 'tv', id: 95396 }, 'k', answer(severance));
     expect(found?.shape).toEqual({
       counts: new Map([
         [0, 2],

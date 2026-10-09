@@ -407,6 +407,8 @@ function request(value: unknown): value is ContentRequest {
         providerKey(value.service) &&
         (value.candidate === undefined || text(value.candidate, 16_384))
       );
+    case 'provider-cache.clear':
+      return exact(value, ['kind', 'service']) && value.service === 'tmdb';
     default:
       return false;
   }
@@ -497,6 +499,8 @@ function result(value: unknown): value is ContentResult {
           value.outcome === 'refused' ||
           value.outcome === 'unavailable')
       );
+    case 'provider-cache.clear':
+      return exact(value, ['kind', 'service']) && value.service === 'tmdb';
     default:
       return false;
   }

@@ -64,6 +64,22 @@ it('validates bounded semantic requests and unversioned content replies', () => 
     decodeContentServiceClientMessage({
       type: 'content-query',
       protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'clear-provider-cache',
+      request: { kind: 'provider-cache.clear', service: 'tmdb' },
+    }).ok,
+  ).toBe(true);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'wrong-provider-cache',
+      request: { kind: 'provider-cache.clear', service: 'omdb' },
+    }).ok,
+  ).toBe(false);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
       requestId: 'sources',
       request: { kind: 'sources.configure', atlas: 'http://atlas.test/base' },
     }).ok,

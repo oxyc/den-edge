@@ -6,13 +6,8 @@ import { FilterUnavailable, type FilterItem } from './filterRoutes';
 import { contentFilterTitles } from './contentAtlas';
 import type { MediaType, Title } from './library';
 import { titleHref } from './route';
-import { toTitle } from './tmdb';
-
-import { tmdbFetch } from './tmdbCache';
 import type { ContentCatalogSpec } from './contentServiceProtocol';
 import type { ContentServiceClientPort } from './libraryServiceFactory';
-
-const TMDB = 'https://api.themoviedb.org/3';
 
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
 export interface DiscoverQuery {
@@ -872,22 +867,6 @@ export const catalogPage = (
   providerRequest: [path: string, type: MediaType, params: Record<string, string>],
   page: number,
 ) => (pages as WorkerPages).catalog?.(catalog, page) ?? pages(...providerRequest, page);
-
-export function tmdbPages(key: string, fetchImpl: typeof fetch = tmdbFetch): Pages {
-  return async (path, type, params, page) => {
-    if (page > 500) return []; // TMDB serves no deeper
-    const url = new URL(TMDB + path);
-    for (const [name, value] of Object.entries({ ...params, page: String(page), api_key: key }))
-      url.searchParams.set(name, value);
-    const res = await fetchImpl(url.toString());
-    if (!res.ok) throw new Error(`TMDB answered ${res.status}`);
-    const body = (await res.json()) as { results?: unknown };
-    return (Array.isArray(body.results) ? body.results : []).flatMap((raw) => {
-      const r = raw as Record<string, unknown>;
-      return typeof r.id === 'number' ? (toTitle({ type, id: r.id }, r) ?? []) : [];
-    });
-  };
-}
 
 export const discoverRow = (
   pages: Pages,

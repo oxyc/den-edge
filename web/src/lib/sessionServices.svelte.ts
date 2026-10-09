@@ -37,13 +37,13 @@ export class SessionServices {
 
   constructor(
     private readonly model: LibraryModel | null,
+    private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
-    private readonly content: ContentServiceClientPort | null = null,
   ) {}
 
   #configureAtlas(base: string | null): void {
     void this.content
-      ?.query({ kind: 'sources.configure', atlas: base })
+      .query({ kind: 'sources.configure', atlas: base })
       .catch((error: unknown) => console.warn('den: content source configuration failed', error));
   }
 
@@ -57,7 +57,7 @@ export class SessionServices {
   }
 
   #configure(library: boolean, libraryPlugins: readonly string[], remux: string | null): void {
-    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, null);
+    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
     if (!this.#grants) {
       this.#grants = true;
       void guestGrants.refresh();

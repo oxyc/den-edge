@@ -8,7 +8,9 @@ export function setContentServiceContext(content: ContentServiceClientPort): voi
   setContext(CONTENT_SERVICE, content);
 }
 
-/** Isolated presentation fixtures may omit content; production route trees always provide it. */
-export function contentServiceContext(): ContentServiceClientPort | undefined {
-  return getContext(CONTENT_SERVICE);
+/** Every production and fixture route tree provides one semantic content authority. */
+export function contentServiceContext(): ContentServiceClientPort {
+  const content = getContext<ContentServiceClientPort | undefined>(CONTENT_SERVICE);
+  if (!content) throw new Error('content service context is required');
+  return content;
 }

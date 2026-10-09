@@ -13,6 +13,7 @@ import type {
   ContentProvider,
   ContentRequest,
   ContentResult as ServiceContentResult,
+  ContentServiceStatusValue,
   OptionalContent,
 } from './contentServiceProtocol';
 import {
@@ -31,7 +32,14 @@ import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
 import { seriesShape, toTitle, type Details } from './tmdb';
 import { parseTitleFacts, type TitleFacts } from './titleFacts';
-import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
+import {
+  clearTmdbCache,
+  onTmdbThrottle,
+  TMDB_PROXY_KEY,
+  tmdbFetch,
+  tmdbJson,
+  tmdbMissing,
+} from './tmdbCache';
 import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 import { reuse } from './reuse';
 import { parseRecommendationSlides } from './recommend';
@@ -240,6 +248,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #now: () => number;
   readonly #flights = new Map<string, Promise<unknown>>();
   readonly #imports: ContentImportAuthority;
+  readonly #statusListeners = new Set<(status: ContentServiceStatusValue) => void>();
+  readonly #stopThrottle: () => void;
 
   constructor(
     private readonly credentials: ContentCredentialSource,
@@ -249,6 +259,20 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     this.#providerFetch = options.providerFetch ?? relayFetch;
     this.#now = options.now ?? Date.now;
     this.#imports = new ContentImportAuthority(() => this.#tmdbKey(), this.#tmdbFetch, this.#now);
+    this.#stopThrottle = onTmdbThrottle(({ retryMs }) => {
+      for (const listener of this.#statusListeners)
+        listener({ kind: 'throttled', provider: 'tmdb', retryAfterMs: retryMs });
+    });
+  }
+
+  listen(listener: (status: ContentServiceStatusValue) => void): () => void {
+    this.#statusListeners.add(listener);
+    return () => this.#statusListeners.delete(listener);
+  }
+
+  close(): void {
+    this.#stopThrottle();
+    this.#statusListeners.clear();
   }
 
   async query(request: ContentRequest, signal: AbortSignal): Promise<ServiceContentResult> {
@@ -447,6 +471,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           service: request.service,
           outcome: await this.#checkProviderKey(request.service, request.candidate, signal),
         };
+      case 'provider-cache.clear':
+        await this.#wait(clearTmdbCache(), signal);
+        return { kind: 'provider-cache.clear', service: request.service };
       default:
         throw new ContentServiceFault({
           code: 'not-ready',

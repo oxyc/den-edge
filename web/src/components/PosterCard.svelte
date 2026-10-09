@@ -156,7 +156,7 @@
     if (event.type === 'pointerdown') notePressed(title, art);
     clearTimeout(warming);
     warming = setTimeout(() => {
-      void content?.query({ kind: 'prefetch.detail', title, region: 'US' }).catch(() => undefined);
+      void content.query({ kind: 'prefetch.detail', title, region: 'US' }).catch(() => undefined);
     }, ms);
   }
   function drop(event: PointerEvent) {

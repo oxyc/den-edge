@@ -34,11 +34,11 @@ export class LibrarySession {
 
   constructor(
     readonly model: LibraryModel | null,
-    readonly local = false,
-    readonly content: ContentServiceClientPort | null = null,
+    readonly local: boolean,
+    readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
   ) {
-    this.services = new SessionServices(model, undefined, content);
+    this.services = new SessionServices(model, content);
   }
 
   get alert(): string | null {

@@ -87,8 +87,7 @@ import {
   type HeldRemovals,
 } from './simklDelivery';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
-import { tmdbKeyOf } from './tmdb';
-import { fetchDetailsResult } from './tmdb';
+import { fetchDetailsResult, tmdbKeyOf } from './workerTmdbProvider';
 import { tmdbFetch } from './tmdbCache';
 import { useLibraryRelayMembership } from './relayFetch';
 import {

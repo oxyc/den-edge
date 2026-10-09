@@ -5,8 +5,10 @@ import { LibrarySession } from './librarySession.svelte';
 afterEach(() => vi.useRealTimers());
 
 describe('LibrarySession presentation state', () => {
+  const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
+
   it('indexes title metadata and replaces shapes without owning library rows', () => {
-    const session = new LibrarySession(null);
+    const session = new LibrarySession(null, false, content());
     const title = { type: 'tv' as const, id: 1, title: 'One' };
     session.publishLibraryMetadata(
       [title, title],
@@ -22,12 +24,12 @@ describe('LibrarySession presentation state', () => {
     const foregroundReady = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn();
     const closeWorkerServices = vi.fn();
-    const content = {
+    const contentPort = {
       query: vi.fn(),
       onStatus: vi.fn(() => () => {}),
     };
     const model = { foregroundReady, close } as unknown as LibraryModel;
-    const session = new LibrarySession(model, false, content, closeWorkerServices);
+    const session = new LibrarySession(model, false, contentPort, closeWorkerServices);
 
     session.foregroundReady();
     session.foregroundReady();
@@ -36,13 +38,13 @@ describe('LibrarySession presentation state', () => {
 
     expect(foregroundReady).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
-    expect(session.content).toBe(content);
+    expect(session.content).toBe(contentPort);
     expect(closeWorkerServices).toHaveBeenCalledOnce();
   });
 
   it('owns only transient toast and undo timing', () => {
     vi.useFakeTimers();
-    const session = new LibrarySession(null);
+    const session = new LibrarySession(null, false, content());
     const run = vi.fn();
     session.notify('Removed', { holdMs: 10, undo: { label: 'Undo', run } });
     expect(session.toast).toBe('Removed');

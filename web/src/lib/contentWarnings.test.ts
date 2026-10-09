@@ -1,6 +1,5 @@
 import { expect, it } from 'vitest';
-import { parseWarnings, fetchWarnings } from './contentWarnings';
-import { parseDetail } from './detail';
+import { parseWarnings } from './contentWarnings';
 
 it('shows confirmed non-spoiler warnings, only the picked categories when any are picked', () => {
   const warning = (id: number, yes: number, no: number, extra = {}) => ({
@@ -40,29 +39,4 @@ it('shows a repeated warning once, with its most yes votes', () => {
   expect(parseWarnings({ id: 1, warnings: [dog(33), dog(34), dog(33)] }, [])).toEqual([
     { id: 153, label: 'a dog dies', votes: 34 },
   ]);
-});
-
-it('asks den-edge once, by IMDb id, with this page’s key only when it has one', async () => {
-  const detail = parseDetail(
-    { type: 'movie', id: 1 },
-    { title: 'Movie', release_date: '2020-01-01', imdb_id: 'tt1' },
-  )!;
-  const asked: { url: string; key: string | null }[] = [];
-  const network = (async (input, init) => {
-    asked.push({ url: String(input), key: new Headers(init?.headers).get('x-api-key') });
-    return Response.json({ id: 7, warnings: [{ id: 1, name: 'a dog dies', yes: 2, no: 0 }] });
-  }) as typeof fetch;
-  expect(await fetchWarnings(detail, '', [], undefined, network)).toEqual({
-    id: 7,
-    warnings: [{ id: 1, label: 'a dog dies', votes: 2 }],
-  });
-  await fetchWarnings(detail, 'mine', [], undefined, network);
-  expect(asked).toEqual([
-    { url: '/warnings/imdb/tt1', key: null },
-    { url: '/warnings/imdb/tt1', key: 'mine' },
-  ]);
-
-  const nothingKept = (async () =>
-    Response.json({ error: 'not_cached' }, { status: 404 })) as typeof fetch;
-  expect(await fetchWarnings(detail, '', [], undefined, nothingKept)).toBeNull();
 });

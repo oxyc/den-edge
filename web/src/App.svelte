@@ -13,9 +13,6 @@
   import { tabName } from './lib/tabName.svelte';
   import { parseRoute, type Explore, type PeopleView } from './lib/route';
   import { ConnectDialogScreen, InviteDialogScreen, LinkScreen } from './lib/screens.svelte';
-  import { onTmdbThrottle } from './lib/tmdbCache';
-
-  let tmdbLimited = $state(false);
   // The invite and consent dialogs load only for a page that asks one of their questions: an invite link, or an
   // assistant's request to connect. Latched, since the invite dialog clears the code as it shows it.
   let invited = $state(false);
@@ -64,19 +61,6 @@
   }
 
   $effect(() => syncIdentities());
-
-  onMount(() => {
-    let clear: ReturnType<typeof setTimeout> | undefined;
-    const stop = onTmdbThrottle(({ retryMs }) => {
-      tmdbLimited = true;
-      if (clear) clearTimeout(clear);
-      clear = setTimeout(() => (tmdbLimited = false), retryMs);
-    });
-    return () => {
-      stop();
-      if (clear) clearTimeout(clear);
-    };
-  });
 
   onMount(() => {
     const visible = () => {
@@ -140,24 +124,12 @@
   });
 </script>
 
-<svelte:head>
-  {#if links.current}
-    <link rel="preconnect" href="https://api.themoviedb.org" crossorigin="anonymous" />
-  {/if}
-</svelte:head>
-
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
 <NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
 {#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
 {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
 
 <main>
-  {#if tmdbLimited}
-    <p class="tmdb-limit" role="alert">
-      TMDB is temporarily limiting requests. Some titles may be missing; try again after a short
-      wait.
-    </p>
-  {/if}
   {#if links.current}
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
       <RoutedLibrary
@@ -195,16 +167,5 @@
     max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) calc(32px + env(safe-area-inset-bottom));
-  }
-
-  .tmdb-limit {
-    position: relative;
-    z-index: 4;
-    margin: 0 0 18px;
-    padding: 12px 16px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
-    color: var(--fg);
   }
 </style>
