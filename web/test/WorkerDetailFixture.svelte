@@ -1,0 +1,69 @@
+<!-- A production DedicatedWorker authority behind a title route. Seed once, then reopen the encrypted local
+     library in a fresh page so detail-provider tests exercise the same Worker boundary as the application. -->
+<script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
+  import Library from '../src/Library.svelte';
+  import LibraryStatus from '../src/components/LibraryStatus.svelte';
+  import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { LibraryModel } from '../src/lib/libraryModel.svelte';
+  import { LibrarySession } from '../src/lib/librarySession.svelte';
+  import type { Route } from '../src/lib/route';
+  import '../src/app.css';
+
+  const params = new URLSearchParams(location.search);
+  const seed = params.has('seed');
+  const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
+  const services = createWorkerServiceSession();
+  const model = new LibraryModel(services.library, { libraryKey, mode: 'local' });
+  const session = new LibrarySession(model, true, services.content, () => services.close());
+  const initialType = params.get('type') === 'movie' ? 'movie' : 'tv';
+  const initialId = Number(params.get('id') ?? 308727);
+  let route = $state<Route>({ page: 'title', type: initialType, id: initialId });
+  let seeded = $state(false);
+  let seedFailure = $state<string | null>(null);
+
+  if (seed) {
+    void model.ready
+      .then(async () => {
+        await model.setApiKey('tmdb', 'worker-detail-tmdb', 'detail-key-tmdb');
+        await model.setApiKey('omdb', 'worker-detail-omdb', 'detail-key-omdb');
+        await model.setApiKey('content-warnings', 'worker-detail-warnings', 'detail-key-warnings');
+        await model.patchPreferences(
+          { watchRegion: 'FI', shownWarnings: ['Violence'] },
+          'detail-preferences',
+        );
+        await model.addToWatchlist({ type: 'movie', id: 9001 }, 'detail-watchlist');
+        seeded = true;
+      })
+      .catch((error: unknown) => {
+        seedFailure = error instanceof Error ? error.message : String(error);
+      });
+  }
+
+  onMount(() => {
+    const navigate = (event: Event) => {
+      const next = (event as CustomEvent<{ type: 'movie' | 'tv'; id: number }>).detail;
+      route = { page: 'title', type: next.type, id: next.id };
+    };
+    window.addEventListener('fixture:navigate', navigate);
+    return () => window.removeEventListener('fixture:navigate', navigate);
+  });
+  onDestroy(() => session.close());
+</script>
+
+<main>
+  <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+  {#if seed}
+    {#if seedFailure}<p role="alert">{seedFailure}</p>{/if}
+    {#if seeded}<p role="status">Worker detail library seeded</p>{/if}
+  {:else}
+    <Library
+      link={null}
+      libraryIdentity={libraryKey}
+      {session}
+      {route}
+      active={true}
+      watchedYear={undefined}
+    />
+  {/if}
+</main>
