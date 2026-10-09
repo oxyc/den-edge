@@ -41,8 +41,9 @@ const origin = `http://127.0.0.1:${address.port}`;
 const workerPath = `/assets/${workerNames[0]}`;
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-const browser = await chromium.launch(executablePath ? { executablePath } : {});
+let browser;
 try {
+  browser = await chromium.launch(executablePath ? { executablePath } : {});
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(`${origin}/blank.html`);
@@ -68,19 +69,25 @@ try {
           if (message.requestId && pending.has(message.requestId)) {
             const request = pending.get(message.requestId);
             clearTimeout(request.timer);
-            request.resolve(message);
             pending.delete(message.requestId);
+            if (message.type === request.expectedType) request.resolve(message);
+            else
+              request.reject(
+                new Error(
+                  `library service answered ${message.type}, expected ${request.expectedType}: ${JSON.stringify(message)}`,
+                ),
+              );
           }
         }
       });
-      const send = (message) => {
+      const send = (message, expectedType) => {
         if (failure) return Promise.reject(failure);
         return new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             pending.delete(message.requestId);
             reject(new Error(`library service request timed out: ${message.type}`));
           }, 10_000);
-          pending.set(message.requestId, { resolve, reject, timer });
+          pending.set(message.requestId, { resolve, reject, timer, expectedType });
           worker.postMessage(message);
         });
       };
@@ -89,9 +96,12 @@ try {
     let request = 0;
     const message = (body) => ({ protocol: 2, requestId: `request-${++request}`, ...body });
     const first = open();
-    await first.send(message({ type: 'hello', clientId: 'seed', libraryKey, mode: 'local' }));
+    await first.send(
+      message({ type: 'hello', clientId: 'seed', libraryKey, mode: 'local' }),
+      'ready',
+    );
     const command = (operationId, command) =>
-      first.send(message({ type: 'command', operationId, command }));
+      first.send(message({ type: 'command', operationId, command }), 'command-result');
     await command('watchlist', {
       kind: 'watchlist.add',
       title: { type: 'movie', id: 617126 },
@@ -115,10 +125,16 @@ try {
     first.worker.terminate();
 
     const reopened = open();
-    await reopened.send(message({ type: 'hello', clientId: 'reader', libraryKey, mode: 'local' }));
+    await reopened.send(
+      message({ type: 'hello', clientId: 'reader', libraryKey, mode: 'local' }),
+      'ready',
+    );
     for (const kind of ['overview', 'continue', 'settings', 'history']) {
       const subscriptionId = `subscription-${kind}`;
-      await reopened.send(message({ type: 'subscribe', subscriptionId, selection: { kind } }));
+      await reopened.send(
+        message({ type: 'subscribe', subscriptionId, selection: { kind } }),
+        'subscribed',
+      );
     }
     reopened.worker.terminate();
     return Object.fromEntries(reopened.updates);
@@ -136,6 +152,6 @@ try {
   });
   console.log('built library service worker: encrypted local reopen and selectors passed');
 } finally {
-  await browser.close();
+  await browser?.close();
   await new Promise((resolve) => server.close(resolve));
 }
