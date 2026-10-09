@@ -119,7 +119,13 @@
 
 <svelte:window bind:innerWidth={viewportWidth} />
 
-<div class="actions" class:detail-page={detailPage} class:compact aria-busy={busy}>
+<div
+  class="actions"
+  class:detail-page={detailPage}
+  class:compact
+  class:without-playback={!onplayhere && !onplay}
+  aria-busy={busy}
+>
   {#if restricted}
     <!-- The ceiling's own slot, where Play would be: the title is still named and rated on the page, but
          nothing here starts it. The TV says the same thing in the same place. -->
@@ -366,21 +372,58 @@
   /* Four quiet, equal tap targets on a phone: state belongs to the glyph and a restrained tint, not a row of
      permanent cards. Focus remains the shared high-contrast ring, while hover/press briefly reveals the target. */
   @media (width < 760px) {
-    .utilities > :global(.pill),
-    .utilities > .pick {
+    .detail-page .utilities {
+      display: flex;
+      flex-wrap: nowrap;
+      justify-content: space-between;
+      gap: 0;
+      width: 100%;
+    }
+
+    .detail-page .utilities > :global(.pill),
+    .detail-page .utilities > .pick {
       --button-bg: transparent;
       --button-border: transparent;
       --button-fg: var(--muted);
+
+      flex: 0 0 44px;
+      width: 44px;
+      padding: 0;
     }
 
-    .utilities > :global(.pill[aria-pressed='true']),
-    .utilities > .pick.on {
+    .detail-page .utilities > :global(.pill[aria-pressed='true']),
+    .detail-page .utilities > .pick.on {
       --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
       --button-border: transparent;
       --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
 
       background: var(--button-bg);
       color: var(--button-fg);
+    }
+
+    /* With no primary playback action, Trailer and the four personal actions are compact enough to be peers.
+       The utilities are one indivisible flex item: they share this row where they fit and move together where
+       they do not, rather than leaving a lone icon behind. */
+    .detail-page.without-playback .pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .detail-page.without-playback .promoted {
+      display: flex;
+      flex: 0 0 auto;
+    }
+
+    .detail-page.without-playback .promoted > :global(.pill) {
+      width: auto;
+    }
+
+    .detail-page.without-playback .utilities {
+      flex: 0 0 auto;
+      width: auto;
     }
   }
 
@@ -531,9 +574,9 @@
       font-size: 14px;
     }
 
-    .utilities > :global(.pill),
-    .pick {
-      padding-inline: 6px;
+    .detail-page.without-playback .utilities {
+      flex-basis: 100%;
+      width: 100%;
     }
   }
 

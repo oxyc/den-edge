@@ -25,7 +25,13 @@
   let { name, filled = false }: { name: ButtonIconName; filled?: boolean } = $props();
 </script>
 
-<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" class:filled>
+<svg
+  viewBox="0 0 24 24"
+  aria-hidden="true"
+  focusable="false"
+  class:filled
+  class:eye={name === 'eye'}
+>
   {#if name === 'play'}
     <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
   {:else if name === 'pause'}
@@ -90,7 +96,13 @@
     stroke-linejoin: round;
   }
 
-  .filled {
+  .filled:not(.eye) {
+    fill: currentcolor;
+  }
+
+  /* A filled eye becomes a heavy lozenge. Its pupil alone carries the selected state while the familiar eye
+     outline stays intact. */
+  .filled.eye circle {
     fill: currentcolor;
   }
 </style>

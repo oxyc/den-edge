@@ -16,6 +16,21 @@
   const fullActions = search.has('actions');
   const noop = () => {};
 
+  if (search.has('seen'))
+    row = {
+      kind: 'rec',
+      schema: 2,
+      title: { type: 'movie', id: 42 },
+      status: { value: 'watched', at: [1, 0, 'fixture'] },
+      resume: { value: 1, at: [1, 0, 'fixture'], viewing: 1 },
+      reaction: { value: null, at: [1, 0, 'fixture'] },
+      deleted: { value: false, at: [1, 0, 'fixture'] },
+      dismissed: { value: false, at: [1, 0, 'fixture'] },
+      episodesReset: null,
+      addedAt: 1,
+      watchedAt: 1,
+    };
+
   /* A direct-browser design preview cannot use Playwright's route fixture. Keep this entirely in the test page:
      production still has one metadata path, while a designer can open the real Detail component and its action
      hierarchy without credentials or external requests. */

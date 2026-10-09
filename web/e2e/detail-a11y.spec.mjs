@@ -118,6 +118,7 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
 
       const actions = page.locator('.hero-actions .actions');
       const split = actions.locator('.split-button');
+      const utilitiesGroup = actions.locator('.utilities');
       const play = page.getByRole('button', { name: 'Play', exact: true });
       const disclosure = page.getByRole('button', { name: 'More ways to play' });
       const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
@@ -128,15 +129,23 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
         page.getByRole('combobox', { name: 'Your opinion' }),
       ];
 
-      const [actionBox, splitBox, playBox, disclosureBox, trailerBox, ...utilityBoxes] =
-        await Promise.all([
-          actions.boundingBox(),
-          split.boundingBox(),
-          play.boundingBox(),
-          disclosure.boundingBox(),
-          trailer.boundingBox(),
-          ...utilities.map((control) => control.boundingBox()),
-        ]);
+      const [
+        actionBox,
+        splitBox,
+        playBox,
+        disclosureBox,
+        trailerBox,
+        utilitiesBox,
+        ...utilityBoxes
+      ] = await Promise.all([
+        actions.boundingBox(),
+        split.boundingBox(),
+        play.boundingBox(),
+        disclosure.boundingBox(),
+        trailer.boundingBox(),
+        utilitiesGroup.boundingBox(),
+        ...utilities.map((control) => control.boundingBox()),
+      ]);
       expect(actionBox).not.toBeNull();
       expect(playBox).not.toBeNull();
       expect(trailerBox).not.toBeNull();
@@ -144,10 +153,16 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
       expect(disclosureBox.width).toBeGreaterThanOrEqual(44);
       expect(disclosureBox.height).toBeGreaterThanOrEqual(44);
       expect(await trailer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-      expect(utilityBoxes.every((box) => box.width >= 44 && box.height >= 44)).toBe(true);
+      expect(utilityBoxes.every((box) => box.width === 44 && box.height >= 44)).toBe(true);
       expect(Math.max(...utilityBoxes.map((box) => box.y))).toBeLessThanOrEqual(
         Math.min(...utilityBoxes.map((box) => box.y)) + 1,
       );
+      expect(Math.abs(utilityBoxes[0].x - utilitiesBox.x)).toBeLessThanOrEqual(1);
+      expect(
+        Math.abs(
+          utilityBoxes.at(-1).x + utilityBoxes.at(-1).width - (utilitiesBox.x + utilitiesBox.width),
+        ),
+      ).toBeLessThanOrEqual(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
       );
@@ -169,6 +184,79 @@ test('phone Detail keeps one primary playback surface and quiet personal actions
       }
       await page.close();
     }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('without playback, Trailer and the intact utility group share or wrap as a unit', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    for (const width of [320, 390]) {
+      const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: true });
+      await mock(page);
+      await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
+
+      const actions = page.locator('.hero-actions .actions');
+      const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
+      const utilitiesGroup = actions.locator('.utilities');
+      const utilities = [
+        page.getByRole('button', { name: 'Watchlist', exact: true }),
+        page.getByRole('button', { name: 'Seen', exact: true }),
+        page.getByRole('button', { name: 'Share', exact: true }),
+        page.getByRole('combobox', { name: 'Your opinion' }),
+      ];
+      const [actionBox, trailerBox, groupBox, ...boxes] = await Promise.all([
+        actions.boundingBox(),
+        trailer.boundingBox(),
+        utilitiesGroup.boundingBox(),
+        ...utilities.map((control) => control.boundingBox()),
+      ]);
+
+      expect(boxes.every((box) => box.width === 44 && box.height >= 44)).toBe(true);
+      expect(
+        Math.max(...boxes.map((box) => box.y)) - Math.min(...boxes.map((box) => box.y)),
+      ).toBeLessThanOrEqual(1);
+      if (width === 390) {
+        expect(
+          Math.abs(trailerBox.y + trailerBox.height / 2 - (groupBox.y + groupBox.height / 2)),
+        ).toBeLessThanOrEqual(1);
+        expect(Math.abs(trailerBox.x - actionBox.x)).toBeLessThanOrEqual(1);
+        expect(
+          Math.abs(groupBox.x + groupBox.width - (actionBox.x + actionBox.width)),
+        ).toBeLessThanOrEqual(1);
+      } else {
+        expect(groupBox.y).toBeGreaterThan(trailerBox.y + 1);
+        expect(Math.abs(groupBox.x - actionBox.x)).toBeLessThanOrEqual(1);
+        expect(Math.abs(groupBox.width - actionBox.width)).toBeLessThanOrEqual(1);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Seen fills only the eye pupil', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?seen`);
+    const seen = page.getByRole('button', { name: 'Seen', exact: true });
+    await expect(seen).toHaveAttribute('aria-pressed', 'true');
+    const icon = seen.locator('svg');
+    expect(await icon.locator('path').evaluate((node) => getComputedStyle(node).fill)).toBe('none');
+    expect(await icon.locator('circle').evaluate((node) => getComputedStyle(node).fill)).not.toBe(
+      'none',
+    );
   } finally {
     await browser.close();
   }
