@@ -1148,7 +1148,7 @@
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    if (model === null || (libraryOpen && named)) untrack(() => buildRecommended(here));
+    if (model === null || (libraryOpen && named)) untrack(buildRecommended);
   });
 
   async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
@@ -1166,7 +1166,7 @@
    * the shared one; after day one it is stale while this request revalidates it. The new ranking takes every slide
    * after the one on screen and is kept for the next visit.
    */
-  function buildRecommended(here: string) {
+  function buildRecommended() {
     const type = facet;
     const run = ++billboardRun;
     stagedFeatured = null;
@@ -1174,7 +1174,7 @@
     const ranked =
       model && overview && memberPost
         ? recommend(
-            here,
+            session.content!,
             recommendBody({
               facet: type,
               prefs,
@@ -1202,7 +1202,7 @@
         if (run !== billboardRun) return;
         if (personal) {
           if (!featured.length) featured = personal;
-        } else await paintShared(here, run);
+        } else await paintShared(run);
         const slides = await ranked;
         if (run !== billboardRun || !slides?.length) return;
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
@@ -1229,11 +1229,11 @@
   }
 
   /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
-  async function paintShared(here: string, run: number) {
+  async function paintShared(run: number) {
     const type = facet;
-    const shared = (await recommendForEveryone(here, billboardScope(type), fresh))?.filter(
-      (slide) => !seeds.owned.has(`${slide.type}:${slide.id}`),
-    );
+    const shared = (
+      await recommendForEveryone(session.content!, billboardScope(type), fresh)
+    )?.filter((slide) => !seeds.owned.has(`${slide.type}:${slide.id}`));
     if (run !== billboardRun) return;
     if (!shared?.length) {
       buildTrending(run);

@@ -5,7 +5,6 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
-import { freshOn, startBillboard } from './lib/recommend';
 import { recoverChunkFailure, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
@@ -53,11 +52,6 @@ if (invited) {
   if (!links.current) links.browse();
   history.replaceState(history.state, '', location.pathname + location.search);
 }
-
-// The document head has already started an exact kept personalized lead, when one exists. Everyone else's billboard
-// is still asked here before the app has found atlas or opened the library.
-const earlyFresh = freshOn();
-startBillboard(location.pathname, !!links.current, earlyFresh);
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

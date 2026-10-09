@@ -294,6 +294,8 @@ test('typed Atlas filter and related reads stay inside the shared Worker', async
             metas: [{ type: 'movie', moviedb_id: 505, name: 'Worker Service Chart' }],
           },
         });
+      if (url.pathname.endsWith('/recommend/home.json'))
+        return route.fulfill({ json: { slides: [{ type: 'movie', id: 606 }] } });
       return route.fulfill({ status: 404, json: {} });
     },
   });
@@ -324,6 +326,13 @@ test('typed Atlas filter and related reads stay inside the shared Worker', async
   expect(result.chart).toMatchObject({
     kind: 'atlas.service.chart',
     titles: { state: 'ready', value: [{ id: 505, title: 'Worker Service Chart' }] },
+  });
+  expect(result.recommendation).toEqual({
+    kind: 'atlas.recommend.shared',
+    slides: {
+      state: 'ready',
+      value: [{ type: 'movie', id: 606 }],
+    },
   });
   expectWorkerOwned(requests.filter(({ provider }) => provider === 'atlas'));
 });

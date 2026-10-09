@@ -262,6 +262,29 @@ function atlasWhere(value: unknown): value is Record<string, string> {
   );
 }
 
+function recommendationBody(value: unknown): boolean {
+  if (
+    !record(value) ||
+    !exact(value, ['version', 'surface', 'now', 'fresh', 'services', 'library', 'owned', 'hide']) ||
+    value.version !== 1 ||
+    (value.surface !== 'home' && value.surface !== 'movies' && value.surface !== 'series') ||
+    !text(value.now, 64) ||
+    (value.fresh !== undefined && typeof value.fresh !== 'boolean') ||
+    !Array.isArray(value.services) ||
+    !Array.isArray(value.library) ||
+    !Array.isArray(value.owned) ||
+    !record(value.hide) ||
+    value.library.length > 5_000 ||
+    value.owned.length > 10_000
+  )
+    return false;
+  try {
+    return JSON.stringify(value).length <= 2_000_000;
+  } catch {
+    return false;
+  }
+}
+
 function importLookup(value: unknown): value is ContentImportLookup {
   if (!record(value) || !text(value.id, 256) || !text(value.kind, 32)) return false;
   if (value.kind === 'search')
@@ -361,6 +384,16 @@ function request(value: unknown): value is ContentRequest {
         media(value.catalog.type) &&
         region(value.country)
       );
+    case 'atlas.recommend.shared':
+      return (
+        exact(value, ['kind', 'scope', 'fresh', 'day']) &&
+        (value.scope === 'home' || value.scope === 'movies' || value.scope === 'series') &&
+        typeof value.fresh === 'boolean' &&
+        typeof value.day === 'string' &&
+        /^\d{4}-\d{2}-\d{2}$/.test(value.day)
+      );
+    case 'atlas.recommend.personal':
+      return exact(value, ['kind', 'body']) && recommendationBody(value.body);
     case 'import.resolve':
       return (
         exact(value, ['kind', 'lookups']) &&
@@ -436,6 +469,9 @@ function result(value: unknown): value is ContentResult {
       return exact(value, ['kind', 'titles']) && resource(value.titles);
     case 'atlas.service.catalogs':
       return exact(value, ['kind', 'catalogs']) && resource(value.catalogs);
+    case 'atlas.recommend.shared':
+    case 'atlas.recommend.personal':
+      return exact(value, ['kind', 'slides']) && resource(value.slides);
     case 'search':
       return exact(value, ['kind', 'hits']) && boundedArray(value.hits);
     case 'service.regions':

@@ -54,7 +54,7 @@
         const client = session.content!;
         if (queryAtlas) {
           await client.query({ kind: 'sources.configure', atlas: '/atlas' });
-          const [filter, related, row, catalogs, chart] = await Promise.all([
+          const [filter, related, row, catalogs, chart, recommendation] = await Promise.all([
             client.query({
               kind: 'atlas.query',
               query: {
@@ -81,8 +81,14 @@
               catalog: { id: 'jw-nfx-new', type: 'movie' },
               country: 'US',
             }),
+            client.query({
+              kind: 'atlas.recommend.shared',
+              scope: 'home',
+              fresh: true,
+              day: '2026-10-09',
+            }),
           ]);
-          content = JSON.stringify({ filter, related, row, catalogs, chart });
+          content = JSON.stringify({ filter, related, row, catalogs, chart, recommendation });
           return;
         }
         const title = { type: 'tv' as const, id: initialId };

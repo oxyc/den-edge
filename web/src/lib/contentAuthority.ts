@@ -34,6 +34,7 @@ import { parseTitleFacts, type TitleFacts } from './titleFacts';
 import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson, tmdbMissing } from './tmdbCache';
 import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 import { reuse } from './reuse';
+import { parseRecommendationSlides } from './recommend';
 import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
@@ -432,6 +433,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           kind: 'atlas.service.chart',
           titles: await this.#atlasServiceChart(request, signal),
         };
+      case 'atlas.recommend.shared':
+      case 'atlas.recommend.personal':
+        return { kind: request.kind, slides: await this.#atlasRecommend(request, signal) };
       case 'import.resolve':
         return {
           kind: 'import.resolve',
@@ -1041,6 +1045,50 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
   }
 
+  async #atlasRecommend(
+    request: Extract<
+      ContentRequest,
+      { kind: 'atlas.recommend.shared' | 'atlas.recommend.personal' }
+    >,
+    signal: AbortSignal,
+  ): Promise<OptionalContent<import('./recommend').Slide[]>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const shared = request.kind === 'atlas.recommend.shared';
+    const url = shared
+      ? `${atlas}/recommend/${request.scope}.json?day=${request.day}${request.fresh ? '&fresh=1' : ''}`
+      : `${atlas}/recommend`;
+    const load = async () => {
+      const response = await this.#providerFetch(
+        url,
+        shared
+          ? undefined
+          : {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(request.body),
+            },
+      );
+      if (response.status === 404) return { state: 'absent' } as const;
+      if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+      const body = object(await response.json());
+      return body && Array.isArray(body.slides)
+        ? ({ state: 'ready', value: parseRecommendationSlides(body.slides) } as const)
+        : ({ state: 'absent' } as const);
+    };
+    try {
+      return await this.#wait(
+        shared
+          ? reuse(`content:${url}`, load)
+          : this.#join(`recommend\0${JSON.stringify(request.body)}`, load),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
   #facts(ref: ContentRef): Promise<ProviderResult<TitleFacts>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return Promise.resolve({ kind: 'not-configured' });
@@ -1150,9 +1198,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     if (existing) return existing;
     const flight = start();
     this.#flights.set(key, flight);
-    void flight.finally(() => {
+    const cleanup = () => {
       if (this.#flights.get(key) === flight) this.#flights.delete(key);
-    });
+    };
+    void flight.then(cleanup, cleanup);
     return flight;
   }
 

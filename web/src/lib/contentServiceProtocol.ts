@@ -4,6 +4,7 @@ import type { Warning } from './contentWarnings';
 import type { PersonDetail, TitleDetail, Episode, FilmCredit } from './detail';
 import type { Ratings } from './detailPresentation';
 import type { TitleFacts } from './titleFacts';
+import type { recommendBody, Slide } from './recommend';
 import type {
   FilterCounts,
   FilterItem,
@@ -168,6 +169,13 @@ export type ContentRequest =
       catalog: { id: string; type: MediaType };
       country: string;
     }
+  | {
+      kind: 'atlas.recommend.shared';
+      scope: 'home' | 'movies' | 'series';
+      fresh: boolean;
+      day: string;
+    }
+  | { kind: 'atlas.recommend.personal'; body: ReturnType<typeof recommendBody> }
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string };
@@ -258,6 +266,8 @@ export type ContentResult =
   | { kind: 'atlas.row'; titles: OptionalContent<Title[]> }
   | { kind: 'atlas.service.catalogs'; catalogs: OptionalContent<ContentAtlasCatalog[]> }
   | { kind: 'atlas.service.chart'; titles: OptionalContent<Title[]> }
+  | { kind: 'atlas.recommend.shared'; slides: OptionalContent<Slide[]> }
+  | { kind: 'atlas.recommend.personal'; slides: OptionalContent<Slide[]> }
   | { kind: 'import.resolve'; results: ContentImportLookupResult[] }
   | { kind: 'prefetch.detail' }
   | {
