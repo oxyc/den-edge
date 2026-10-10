@@ -71,7 +71,7 @@
           class="qr"
           viewBox="-2 -2 {qr.size + 4} {qr.size + 4}"
           role="img"
-          aria-label="QR code for the phone link"
+          aria-label="QR code to scan with your phone"
           shape-rendering="crispEdges"
         >
           <rect x="-2" y="-2" width={qr.size + 4} height={qr.size + 4} fill="#fff" />
