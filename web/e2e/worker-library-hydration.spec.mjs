@@ -641,7 +641,8 @@ test('a retained Home Continue Watching card opens again after returning through
         phase,
         href: target?.getAttribute('href') ?? null,
         connected: target?.isConnected ?? null,
-        active: document.querySelector('[data-route-page][data-active="true"]')?.textContent ?? '',
+        active:
+          document.querySelector('[data-route-page][data-active="true"]')?.dataset.active ?? null,
         path: location.pathname,
       });
     };
@@ -650,6 +651,7 @@ test('a retained Home Continue Watching card opens again after returning through
       document.addEventListener(kind, (event) => describe(event, 'bubble'));
     }
     const NativeObserver = window.IntersectionObserver;
+    const nativeScrollTo = window.scrollTo.bind(window);
     let generation = 0;
     window.IntersectionObserver = class extends NativeObserver {
       constructor(callback, options) {
@@ -668,7 +670,41 @@ test('a retained Home Continue Watching card opens again after returning through
           }
           callback(entries, observer);
         }, options);
+        this.fixtureCallback = callback;
+        this.fixtureGeneration = id;
       }
+
+      observe(target) {
+        if (target.classList.contains('windowed')) {
+          window.fixtureRetainedTapTrace.push({
+            kind: 'observe',
+            generation: this.fixtureGeneration,
+            y: scrollY,
+            active: target.closest('[data-route-page]')?.dataset.active ?? null,
+            path: location.pathname,
+          });
+          if (window.fixtureHoldEarlyWindowedRows && scrollY !== window.fixtureRetainedHomeY) {
+            this.fixtureCallback([{ target, isIntersecting: false }], this);
+            return;
+          }
+        }
+        super.observe(target);
+      }
+    };
+    window.scrollTo = (...args) => {
+      const before = scrollY;
+      nativeScrollTo(...args);
+      window.fixtureRetainedTapTrace.push({
+        kind: 'scrollTo',
+        before,
+        after: scrollY,
+        path: location.pathname,
+      });
+    };
+    window.fixtureHoldEarlyWindowedRowsAt = (homeY) => {
+      window.fixtureRetainedHomeY = homeY;
+      window.fixtureHoldEarlyWindowedRows = true;
+      window.fixtureRetainedTapTrace.push({ kind: 'hold-reactivation', homeY });
     };
     addEventListener('DOMContentLoaded', () => {
       const mutations = new MutationObserver((records) => {
@@ -713,20 +749,31 @@ test('a retained Home Continue Watching card opens again after returning through
       .getByRole('region', { name: 'Continue Watching', exact: true })
       .getByRole('link', { name: /Series 6066/ });
   await expect(verano()).toBeVisible({ timeout: 15_000 });
+  const homeY = await page.evaluate(() => scrollY);
   await verano().tap();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/6066-series-6066');
   await expect(active().getByRole('heading', { name: 'Series 6066' })).toBeVisible();
 
+  await active().evaluate((element) => (element.style.minHeight = '5000px'));
+  await page.evaluate(() => scrollTo(0, 3000));
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(3000);
+  await page.evaluate((savedHomeY) => window.fixtureHoldEarlyWindowedRowsAt(savedHomeY), homeY);
+
   await page.getByRole('link', { name: 'Den home' }).tap();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
-  await expect(verano()).toBeVisible();
-  await verano().tap();
+  const retained = active().getByRole('region', { name: 'Continue Watching', exact: true });
+  // A retained route must not observe at the detail page's scroll and leave only its previously focused card live.
+  // Route activation owns the observer, so all three cards prove that activation followed global scroll restore.
+  await expect(retained.locator('.card')).toHaveCount(3);
+  const next = retained.getByRole('link', { name: /Series 1003/ });
+  await expect(next).toBeVisible();
+  await next.tap();
 
   await expect
     .poll(() => new URL(page.url()).pathname, {
       message: JSON.stringify(await page.evaluate(() => window.fixtureRetainedTapTrace), null, 2),
     })
-    .toBe('/tv/6066-series-6066');
+    .toBe('/tv/1003-series-1003');
 });
 
 test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({
