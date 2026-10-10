@@ -133,6 +133,14 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
         }
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
+    // Cloudflare keeps this host's HTML and JSON by a Cache Rule: a GET of `/` answered `no-cache` reports
+    // `cf-cache-status: REVALIDATED`, where HTML outside any rule reports `DYNAMIC`. Cloudflare documents that such a
+    // rule keeps an answer naming no policy for a default edge TTL (not measured here), which would hand one member's
+    // answer to whoever asks next. So every answer names one, and only a handler that means its answer to be kept
+    // says anything else.
+    if !resp.headers().contains_key(header::CACHE_CONTROL) {
+        resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     if let Some(origin) = origin {
         resp.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         resp.headers_mut().insert(
@@ -554,7 +562,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     }
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
-        "/version" => bare_json(StatusCode::OK, &json!({ "version": crate::release_version() })),
+        "/version" => revalidated(json!({ "version": crate::release_version() }).to_string(), req.headers()),
         "/config" => state.prepared_public_json.as_ref().map_or_else(
             || revalidated(config(state), req.headers()),
             |prepared| revalidated_prepared(&prepared.config, req.headers()),
@@ -908,19 +916,20 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
     with_error_code(raw_json(status, Body::from(body.to_string()), true), body)
 }
 
-/// `/config` and `/routes`: asked again every time, and a 304 while unchanged. A client reads both on every start,
-/// and a kill-switch or a moved address must reach it on the next one — but the answer is the same bytes nearly
-/// always, and a TV away from home is fetching them over the device API.
+/// `/config`, `/routes` and `/version`: asked again every time, and a 304 while unchanged. A client reads them on
+/// every start, and a kill-switch or a moved address must reach it soon after the deploy that makes it — within
+/// `cache::release_bound`'s minute at Cloudflare — but the answer is the same bytes nearly always, and a TV away
+/// from home is fetching them over the device API.
 fn revalidated(body: String, request: &HeaderMap) -> Response {
     let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
-    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::cache::release_bound(resp.headers_mut());
     crate::cache::validated(resp, body.as_bytes(), None, request)
 }
 
 fn revalidated_prepared(prepared: &PreparedJson, request: &HeaderMap) -> Response {
     // Validate an empty response first. A matching request never even clones the body Bytes into a Hyper body.
     let mut resp = raw_json(StatusCode::OK, Body::empty(), false);
-    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::cache::release_bound(resp.headers_mut());
     resp.headers_mut().insert(header::ETAG, prepared.etag.clone());
     let mut resp = crate::cache::revalidate(resp, request);
     if resp.status() == StatusCode::OK {
@@ -1347,6 +1356,8 @@ pub mod tests {
     async fn health_version_config_and_an_unknown_route() {
         let h = Harness::new();
         assert_eq!(h.call("GET", "/health", None).await, (StatusCode::OK, json!({ "status": "ok" })));
+        let health = h.send("GET", "/health", None, &[]).await;
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store", "only this process may say it is up");
         let (_, version) = h.call("GET", "/version", None).await;
         assert_eq!(version["version"], crate::release_version());
         let (status, config) = h.call("GET", "/config", None).await;
@@ -1656,20 +1667,26 @@ pub mod tests {
         assert!(without.get("castOrigin").is_none(), "unset is absent, not empty");
     }
 
-    /// Both are read on every start. Always asked again, so a kill-switch or a moved address lands at once, and
+    /// All are read on every start. The browser always asks again, Cloudflare answers that for a minute, and
     /// unchanged is a 304 carrying the same policy and tag rather than the whole table again.
     #[tokio::test]
-    async fn config_and_routes_are_revalidated_every_time() {
+    async fn config_routes_and_version_are_revalidated_every_time() {
         let mut h = split_harness();
         prepare_public_json(&mut h);
-        for path in ["/config", "/routes"] {
+        for path in ["/config", "/routes", "/version"] {
             let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
             assert_eq!(first.status(), StatusCode::OK, "{path}");
             assert_eq!(first.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
+            assert_eq!(
+                first.headers()["cdn-cache-control"],
+                "max-age=60, stale-while-revalidate=600",
+                "{path}"
+            );
             let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
             let again = h.send("GET", path, None, &[("host", "d.oxy.fi"), ("if-none-match", &etag)]).await;
             assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
             assert_eq!(again.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(again.headers()["cdn-cache-control"], "max-age=60, stale-while-revalidate=600");
             assert_eq!(again.headers()[header::ETAG], etag.as_str());
             assert!(body_text(again).await.is_empty());
         }

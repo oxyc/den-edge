@@ -4324,6 +4324,34 @@ mod tests {
         assert_eq!(super::private(&"PUBLIC,max-age=5".parse().unwrap()), "private, max-age=5");
     }
 
+    /// An addon answer that names no policy has nothing for `private` to turn private. Cloudflare's rule would keep
+    /// it for its default TTL and hand a member's answer on, so it leaves here as `no-store`.
+    #[tokio::test]
+    async fn an_answer_naming_no_policy_is_never_kept() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async { "{}" });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/scout=http://{addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        let member = format!("{LIB}:{TOKEN}");
+
+        let web = h
+            .send(
+                "GET",
+                "/scout/cfg/manifest.json",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(web.status(), StatusCode::OK);
+        assert_eq!(web.headers()["cache-control"], "no-store");
+    }
+
     /// A trailer's revalidation is the addon's 304 too, whichever validator the player holds.
     #[tokio::test]
     async fn the_media_relay_passes_on_if_modified_since() {

@@ -369,6 +369,25 @@ pub(crate) fn validated(
     revalidate(resp, request)
 }
 
+/// RFC 9213's targeted `Cache-Control`: read by a CDN, ignored by a browser.
+pub(crate) const CDN_CACHE_CONTROL: header::HeaderName = header::HeaderName::from_static("cdn-cache-control");
+
+/// The policy of an answer that names the running release: the web app's shell and service worker, `/config`,
+/// `/routes` and `/version`. The browser asks again on every load (`no-cache`), so a release shows up on the next
+/// one. Cloudflare may answer that asking itself for a minute, then hand out its copy while it fetches the next.
+///
+/// Measured before this, with curl over a warm HTTP/2 connection: `/`, a title page and `/config` with `no-cache`
+/// alone were `cf-cache-status: REVALIDATED` at 85–105 ms, every request crossing to this origin, against 20–40 ms
+/// for an answer Cloudflare kept (`HIT`).
+///
+/// A copy Cloudflare hands out was fetched from here at most eleven minutes before (`max-age` plus
+/// `stale-while-revalidate`). A shell one release old still loads: the build carries the previous release's assets
+/// forward (`web/scripts/keep-previous-assets.mjs`).
+pub(crate) fn release_bound(headers: &mut HeaderMap) {
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(CDN_CACHE_CONTROL, HeaderValue::from_static("max-age=60, stale-while-revalidate=600"));
+}
+
 /// Validators name the selected representation, so a gzip response cannot validate identity bytes.
 /// GET/HEAD use weak comparison, including a list of tags or `*` (RFC 9110 §13.1.2). `If-Modified-Since` is read
 /// only when no `If-None-Match` was sent, and only against a `Last-Modified` this answer carries (§13.1.3).

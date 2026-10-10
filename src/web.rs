@@ -1,8 +1,9 @@
 //! The Den web app's built files (`WEB_DIR`; `/web` in the image), served at `/` beside the API — one origin
 //! for the app and its sync, so no CORS and one certificate. A path with no file behind it and no extension
 //! is one of the app's own routes and gets `index.html`. Vite's hashed files under `/assets/` are cached for
-//! a year; the shell and the service worker revalidate, so a release shows up on the next load; the rest of
-//! what is unhashed (icons, the share image) is kept a day.
+//! a year; the shell and the service worker revalidate, so a release shows up on the next load, and Cloudflare
+//! answers that revalidation itself for a minute (`cache::release_bound`); the rest of what is unhashed (icons,
+//! the share image) is kept a day.
 //!
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
@@ -668,14 +669,17 @@ fn respond(
     // The shell and the service worker name every other file of a release, so they are asked again on every load.
     // What else sits unhashed beside them — the icons, the share image, the manifest — changes perhaps once a year,
     // and a day's wait for a new one is no loss.
-    let policy = if immutable {
-        "public, max-age=31536000, immutable"
+    if immutable {
+        headers
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
     } else if content_type.starts_with("text/html") || file.file_name().is_some_and(|name| name == "sw.js") {
-        "no-cache"
+        crate::cache::release_bound(headers);
     } else {
-        "public, max-age=86400, stale-while-revalidate=604800"
-    };
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=86400, stale-while-revalidate=604800"),
+        );
+    }
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
         let policy = HeaderValue::from_str(&csp(media, cast_origin))
@@ -1105,6 +1109,7 @@ mod tests {
         assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(root.headers()["cdn-cache-control"], "max-age=60, stale-while-revalidate=600");
         let link = root.headers()[header::LINK].to_str().unwrap();
         assert!(link.starts_with("</atlas/recommend/home.json?day="));
         // Without `crossorigin` the browser refuses the preload for `main.ts`'s fetch and asks twice (#192).
@@ -1114,6 +1119,10 @@ mod tests {
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
         assert_eq!(asset.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
         assert_eq!(asset.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+        assert!(
+            !asset.headers().contains_key("cdn-cache-control"),
+            "one policy for the browser and the edge"
+        );
 
         // Unhashed files beside the shell are kept a day; the service worker, like the shell, is asked every load.
         std::fs::write(h.dir.join("web/og.png"), "png").unwrap();
@@ -1123,11 +1132,16 @@ mod tests {
             og.headers()[header::CACHE_CONTROL],
             "public, max-age=86400, stale-while-revalidate=604800"
         );
-        assert_eq!(h.send("GET", "/sw.js", None, &[]).await.headers()[header::CACHE_CONTROL], "no-cache");
-        assert_eq!(
-            h.send("GET", "/index.html", None, &[]).await.headers()[header::CACHE_CONTROL],
-            "no-cache"
-        );
+        assert!(!og.headers().contains_key("cdn-cache-control"));
+        for path in ["/sw.js", "/index.html"] {
+            let resp = h.send("GET", path, None, &[]).await;
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
+            assert_eq!(
+                resp.headers()["cdn-cache-control"],
+                "max-age=60, stale-while-revalidate=600",
+                "{path}"
+            );
+        }
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");
@@ -1136,7 +1150,10 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("/recommend/movies.json?day="));
-        assert_eq!(h.send("GET", "/assets/missing.js", None, &[]).await.status(), StatusCode::NOT_FOUND);
+        // A chunk a later release may yet carry is never kept missing.
+        let missing = h.send("GET", "/assets/missing.js", None, &[]).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[tokio::test]
