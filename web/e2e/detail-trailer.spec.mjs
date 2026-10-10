@@ -135,36 +135,14 @@ for (const width of [390, 1280])
       expect(
         await page.evaluate(() => window.originalVideo === document.querySelector('video')),
       ).toBe(true);
-      // A gesture freezes the decoded frame, including each independently displayed copy.
-      const frozen = await page.evaluate(async () => {
+      // A gesture's copy of the page shows the still artwork beneath the trailer: it holds no video that could
+      // load or play unseen, and the trailer itself plays on.
+      const copied = await page.evaluate(async () => {
         const { capturePage } = await import('/src/lib/pageSnapshot.ts');
-        const source = document.querySelector('video');
-        const snapshot = capturePage();
-        const result = [];
-        for (let i = 0; i < 2; i++) {
-          const overlay = document.createElement('div');
-          overlay.style.cssText = 'position:fixed;inset:0;z-index:99';
-          overlay.append(snapshot.show());
-          document.body.append(overlay);
-          const canvas = overlay.querySelector('canvas');
-          const actual = source.getBoundingClientRect(),
-            copy = canvas.getBoundingClientRect();
-          result.push({
-            pixel: Array.from(canvas.getContext('2d').getImageData(0, 0, 1, 1).data),
-            bounds: [actual.x, actual.y, actual.width, actual.height],
-            frozen: [copy.x, copy.y, copy.width, copy.height],
-            fit: getComputedStyle(canvas).objectFit,
-          });
-          overlay.remove();
-        }
-        return result;
+        return capturePage().show().querySelectorAll('video').length;
       });
-      for (const frame of frozen) {
-        expect(frame.pixel[0]).toBeGreaterThan(240);
-        expect(frame.pixel[1]).toBeLessThan(10);
-        expect(frame.frozen).toEqual(frame.bounds);
-        expect(frame.fit).toBe(width < 760 ? 'contain' : 'cover');
-      }
+      expect(copied).toBe(0);
+      await expect(video).toHaveClass(/\bplaying\b/);
       if (width < 760) {
         // The first tap grants sound and native controls without touching playback itself. `quieten()` used to
         // make the playback effect depend on `sound`, so this one gesture called play(), pause(), play() in a
@@ -351,7 +329,7 @@ test('mobile trailer reveals without a compositor callback or a tap', async () =
   }
 });
 
-test('wide mobile trailer and its swipe snapshot have opaque letterboxing', async () => {
+test('wide mobile trailer has opaque letterboxing', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -391,22 +369,6 @@ test('wide mobile trailer and its swipe snapshot have opaque letterboxing', asyn
     expect(live[2]).toEqual([0, 0, 0, 255]);
     expect(live[1][0]).toBeGreaterThan(240);
     expect(live[1][2]).toBeLessThan(10);
-    await page.evaluate(async () => {
-      const { capturePage } = await import('/src/lib/pageSnapshot.ts');
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;inset:0;z-index:99';
-      overlay.append(capturePage().show());
-      document.body.append(overlay);
-    });
-    const frozen = await samples();
-    expect(frozen[0]).toEqual(live[0]);
-    expect(frozen[2]).toEqual(live[2]);
-    // The red fixture must remain visible and opaque. Native video and canvas color conversion
-    // need not produce byte-identical RGB; the black letterboxes above must remain exact.
-    expect(frozen[1][0]).toBeGreaterThan(240);
-    expect(frozen[1][1]).toBeLessThan(10);
-    expect(frozen[1][2]).toBeLessThan(10);
-    expect(frozen[1][3]).toBe(255);
   } finally {
     await browser.close();
   }
