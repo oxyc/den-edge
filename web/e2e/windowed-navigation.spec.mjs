@@ -123,6 +123,10 @@ test('a pointer released outside the shelf clears its interaction pin', async ({
   await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
   const card = page.getByRole('link', { name: 'Continuing series 1' });
   await expect(card).toBeVisible();
+  await card.evaluate((element) => {
+    element.draggable = false;
+    element.querySelectorAll('img').forEach((image) => (image.draggable = false));
+  });
   const point = await card.evaluate((element) => {
     const box = element.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
