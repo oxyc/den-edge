@@ -4,6 +4,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Button from '../components/Button.svelte';
+  import type { ButtonVariant } from '../components/Button.svelte';
 
   let {
     label,
@@ -13,6 +14,7 @@
     confirmLabel = label,
     disabled = false,
     tone = 'destructive',
+    triggerVariant = tone,
     onconfirm,
   }: {
     label: string;
@@ -23,6 +25,8 @@
     confirmLabel?: string;
     disabled?: boolean;
     tone?: 'destructive' | 'primary';
+    /** A quieter trigger can still open the same clearly destructive confirmation. */
+    triggerVariant?: ButtonVariant;
     onconfirm: () => void;
   } = $props();
 
@@ -81,7 +85,7 @@
   </div>
 {:else}
   <Button
-    variant={tone}
+    variant={triggerVariant}
     size="compact"
     {label}
     {disabled}

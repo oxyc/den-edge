@@ -991,6 +991,8 @@ test('an invited guest device limit is saved and survives a Settings re-read', a
   let invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
   const limit = invited.getByLabel('Device limit for Taylor');
   await expect(limit).toHaveValue('2');
+  await expect(invited.getByText('Device limit', { exact: true })).toHaveCount(0);
+  expect((await limit.boundingBox())?.width).toBeLessThan(120);
   await expect(invited).toContainText('1 of 2 devices');
   await expect
     .poll(() =>

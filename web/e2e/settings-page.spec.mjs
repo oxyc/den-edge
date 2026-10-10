@@ -184,7 +184,24 @@ for (const width of [320, 390, 820, 1280]) {
       const tv = listed.filter({ hasText: 'Living Room TV' });
       await expect(tv).toHaveCount(1);
       await expect(tv).toContainText('Apple TV · seen');
-      await expect(tv.getByRole('button', { name: 'Remove Living Room TV' })).toBeVisible();
+      const removeTv = tv.getByRole('button', { name: 'Remove Living Room TV' });
+      await expect(removeTv).toBeVisible();
+      const deviceRowGeometry = await tv.evaluate((row) => {
+        const label = row.querySelector('.label')?.getBoundingClientRect();
+        const action = row.querySelector('button')?.getBoundingClientRect();
+        return label && action
+          ? {
+              labelCenter: label.top + label.height / 2,
+              actionCenter: action.top + action.height / 2,
+              actionWidth: action.width,
+            }
+          : null;
+      });
+      expect(deviceRowGeometry).not.toBeNull();
+      expect(Math.abs(deviceRowGeometry.labelCenter - deviceRowGeometry.actionCenter)).toBeLessThan(
+        2,
+      );
+      expect(deviceRowGeometry.actionWidth).toBeLessThan(90);
       // Libraries are named by whether they're the one open here, not after the TV they came through.
       const open = listed.filter({ hasText: 'Open on this browser' });
       await expect(open).toContainText('Your library');
@@ -226,6 +243,22 @@ for (const width of [320, 390, 820, 1280]) {
         page.getByRole('region', { name: 'Content warnings' }).getByRole('group', { name: 'Body' }),
       ).toBeVisible();
       await page.getByRole('button', { name: /Hidden languages/ }).click();
+
+      // Ratings are a readable list, rather than turning into several columns on wider settings panels.
+      await page.getByRole('button', { name: /Ratings shown/ }).click();
+      const ratings = page.getByRole('region', { name: 'Ratings shown' });
+      const ratingRows = await ratings.getByRole('checkbox').evaluateAll((checkboxes) =>
+        checkboxes.map((checkbox) => {
+          const row = checkbox.closest('label')?.getBoundingClientRect();
+          return row ? { left: row.left, top: row.top } : null;
+        }),
+      );
+      expect(ratingRows.every(Boolean)).toBe(true);
+      expect(new Set(ratingRows.map((row) => Math.round(row.top))).size).toBe(ratingRows.length);
+      expect(Math.max(...ratingRows.map((row) => row.left))).toBeCloseTo(
+        Math.min(...ratingRows.map((row) => row.left)),
+        0,
+      );
 
       // A section's own toggle opens every row in it and closes them again; the page's, every row on the page.
       await page.getByRole('button', { name: 'Expand all in Advanced' }).click();
