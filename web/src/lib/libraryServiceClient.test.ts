@@ -12,14 +12,14 @@ import {
 
 class FakeTransport implements LibraryServiceTransport {
   sent: LibraryServiceClientMessage[] = [];
-  listener?: (message: unknown) => void;
+  listener?: (message: LibraryServiceServerMessage) => void;
   closed = false;
 
   send(message: LibraryServiceClientMessage): void {
     this.sent.push(message);
   }
 
-  listen(listener: (message: unknown) => void): () => void {
+  listen(listener: (message: LibraryServiceServerMessage) => void): () => void {
     this.listener = listener;
     return () => {
       if (this.listener === listener) this.listener = undefined;

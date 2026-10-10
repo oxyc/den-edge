@@ -16,12 +16,11 @@ import {
   type LibrarySessionStatus,
   type LibraryVersion,
 } from './libraryServiceProtocol';
-import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
-import { isContentServiceServerMessage } from './contentServiceProtocol';
 
+/** Delivers library replies only, already validated where they were produced (LibraryServiceWorkerHost). */
 export interface LibraryServiceTransport {
   send(message: LibraryServiceClientMessage): void;
-  listen(listener: (message: unknown) => void): () => void;
+  listen(listener: (message: LibraryServiceServerMessage) => void): () => void;
   close(): void;
 }
 
@@ -251,14 +250,8 @@ export class LibraryServiceClient {
     });
   }
 
-  #receive(input: unknown): void {
-    if (this.#closed || isContentServiceServerMessage(input)) return;
-    const decoded = decodeLibraryServiceServerMessage(input);
-    if (!decoded.ok) {
-      this.#failAll(decoded.error);
-      return;
-    }
-    const message = decoded.value;
+  #receive(message: LibraryServiceServerMessage): void {
+    if (this.#closed) return;
     if (message.type === 'update') {
       const subscription = this.#subscriptions.get(message.subscriptionId);
       if (

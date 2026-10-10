@@ -7,16 +7,20 @@ afterEach(() => vi.useRealTimers());
 describe('LibrarySession presentation state', () => {
   const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
-  it('indexes title metadata and replaces shapes without owning library rows', () => {
+  it('indexes title metadata, absences and shapes without owning library rows', () => {
     const session = new LibrarySession(null, false, content());
     const title = { type: 'tv' as const, id: 1, title: 'One' };
+    const gone = { type: 'movie' as const, id: 2 };
     session.publishLibraryMetadata(
-      [title, title],
+      [title, { ...title, title: 'Later' }],
       [['tv:1', { counts: new Map([[1, 8]]), lastAired: { season: 1, episode: 4 } }]],
+      [gone, title],
     );
 
-    expect(session.displays).toEqual([title]);
+    expect([...session.displayTitles().values()]).toEqual([title]);
     expect(session.displayTitle(title)).toBe(title);
+    expect(session.displayMissing(gone)).toBe(true);
+    expect(session.displayMissing(title)).toBe(false);
     expect(session.shapes.get('tv:1')?.counts.get(1)).toBe(8);
   });
 

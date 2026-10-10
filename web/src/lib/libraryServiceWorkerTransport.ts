@@ -5,30 +5,25 @@ import {
   type LibraryServiceServerMessage,
 } from './libraryServiceProtocol';
 import {
-  decodeLibraryServiceClientMessage,
-  decodeLibraryServiceServerMessage,
-} from './libraryServiceProtocolCodec';
-import {
   CONTENT_SERVICE_PROTOCOL,
-  isContentServiceClientMessage,
   isContentServiceServerMessage,
   type ContentServiceClientMessage,
   type ContentServiceServerMessage,
 } from './contentServiceProtocol';
-import {
-  decodeContentServiceClientMessage,
-  decodeContentServiceServerMessage,
-} from './contentServiceProtocolCodec';
 import type { ContentServiceTransport } from './contentServiceClient';
 
-type MessageListener = (message: unknown) => void;
 type WorkerClientMessage = LibraryServiceClientMessage | ContentServiceClientMessage;
 type WorkerServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
 
-/** A DedicatedWorker transport. Failure closes this attempt so the supervisor can start a fresh Worker. */
+/**
+ * A DedicatedWorker transport. Failure closes this attempt so the supervisor can start a fresh Worker.
+ *
+ * Messages are validated once, inside the Worker: LibraryServiceWorkerHost decodes every request it receives and
+ * every reply batch before posting it. This side only routes what that host posted.
+ */
 export class WorkerLibraryServiceTransport {
-  readonly #libraryListeners = new Set<MessageListener>();
-  readonly #contentListeners = new Set<MessageListener>();
+  readonly #libraryListeners = new Set<(message: LibraryServiceServerMessage) => void>();
+  readonly #contentListeners = new Set<(message: ContentServiceServerMessage) => void>();
   #closed = false;
 
   constructor(private readonly worker: Worker) {
@@ -39,17 +34,13 @@ export class WorkerLibraryServiceTransport {
 
   send(message: WorkerClientMessage): void {
     if (this.#closed) throw new Error('library service worker is unavailable');
-    const decoded = isContentServiceClientMessage(message)
-      ? decodeContentServiceClientMessage(message)
-      : decodeLibraryServiceClientMessage(message);
-    if (!decoded.ok) throw new TypeError(decoded.error.message);
     // A synchronous postMessage failure rejects only this local request. In particular, DataCloneError says
     // nothing about the Worker's health; closing the shared transport here also destroys unrelated content
     // queries and makes the supervisor replay the same bad value into every replacement Worker.
-    this.worker.postMessage(decoded.value);
+    this.worker.postMessage(message);
   }
 
-  listen(listener: MessageListener): () => void {
+  listen(listener: (message: LibraryServiceServerMessage) => void): () => void {
     if (this.#closed) return () => {};
     this.#libraryListeners.add(listener);
     return () => this.#libraryListeners.delete(listener);
@@ -74,43 +65,12 @@ export class WorkerLibraryServiceTransport {
     this.#dispose();
   }
 
-  readonly #message = (event: MessageEvent<unknown>): void => {
-    if (this.#closed) return;
-    if (!Array.isArray(event.data) || event.data.length === 0) {
-      this.#fail({
-        code: 'invalid-request',
-        message: 'library service worker reply must be a non-empty batch',
-        retryable: false,
-      });
-      return;
-    }
-
-    const messages: WorkerServerMessage[] = [];
-    for (const candidate of event.data) {
-      const decoded = isContentServiceServerMessage(candidate)
-        ? decodeContentServiceServerMessage(candidate)
-        : decodeLibraryServiceServerMessage(candidate);
-      if (!decoded.ok) {
-        this.#fail({
-          code: 'invalid-request',
-          message: decoded.error.message,
-          retryable: false,
-        });
-        return;
-      }
-      messages.push(decoded.value);
-    }
-    for (const message of messages) {
+  readonly #message = (event: MessageEvent<WorkerServerMessage[]>): void => {
+    for (const message of event.data) {
       if (this.#closed) break;
-      const listeners = isContentServiceServerMessage(message)
-        ? this.#contentListeners
-        : this.#libraryListeners;
-      for (const listener of listeners)
-        try {
-          listener(message);
-        } catch (error) {
-          console.error('den: a library transport listener failed', error);
-        }
+      if (isContentServiceServerMessage(message))
+        deliver(this.#contentListeners, message as ContentServiceServerMessage);
+      else deliver(this.#libraryListeners, message as LibraryServiceServerMessage);
     }
   };
 
@@ -174,4 +134,13 @@ export class WorkerLibraryServiceTransport {
     this.#libraryListeners.clear();
     this.#contentListeners.clear();
   }
+}
+
+function deliver<T>(listeners: ReadonlySet<(message: T) => void>, message: T): void {
+  for (const listener of listeners)
+    try {
+      listener(message);
+    } catch (error) {
+      console.error('den: a library transport listener failed', error);
+    }
 }

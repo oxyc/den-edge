@@ -816,7 +816,7 @@
   $effect(() => warmOnIntent(warmTrailer));
   /**
    * What is already known about the title being opened — its artwork, for the hero to paint while
-   * TMDB is asked. Everything on screen has been named through `session.displays`, so the row or
+   * TMDB is asked. Everything on screen has been named through `session.displayTitle`, so the row or
    * billboard the viewer just pressed is holding exactly this.
    */
   const pageSeed = $derived.by(() => {
@@ -825,7 +825,7 @@
     const here = (t: Title) => t.type === opening.type && t.id === opening.id;
     // The billboard, then anything named through the library, then the card that was pressed: a browse
     // row's titles are loaded inside the row itself, and the card says what it held (`notePressed`).
-    return featured.find(here) ?? session.displays.find(here) ?? pressedCard(opening)?.title;
+    return featured.find(here) ?? session.displayTitle(opening) ?? pressedCard(opening)?.title;
   });
   /** The pressed card's own poster, already loaded, which the hero paints at once while TMDB is asked. */
   const pageStill = $derived(page ? pressedCard(page)?.still : undefined);
