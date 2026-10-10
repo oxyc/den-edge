@@ -503,6 +503,117 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
   expect(tmdbRequests.every((href) => new URL(href).pathname.startsWith('/tmdb/'))).toBe(true);
 });
 
+test('a large paired Home reopens its direct detail from Continue Watching while naming stays live', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    if (!location.search.includes('roundtrip-detail')) return;
+    history.replaceState({}, '', `/movie/1001${location.search}`);
+    const NativeWorker = window.Worker;
+    window.fixtureDetailOutcomes = [];
+    window.fixtureWorkerCount = 0;
+    let detailFailures = 0;
+    window.fixtureFailDetails = (count) => (detailFailures = count);
+    window.Worker = class extends NativeWorker {
+      requests = new Map();
+      constructor(url, options) {
+        super(url, options);
+        window.fixtureWorkerCount += 1;
+        this.addEventListener('message', (event) => {
+          for (const message of Array.isArray(event.data) ? event.data : [event.data]) {
+            if (!message?.requestId || this.requests.get(message.requestId) !== 'title.detail')
+              continue;
+            window.fixtureDetailOutcomes.push(
+              message.type === 'content-result'
+                ? { type: 'result', state: message.result.detail.state }
+                : { type: 'error', code: message.error?.code },
+            );
+          }
+        });
+      }
+      postMessage(message, ...rest) {
+        if (message?.type === 'content-query')
+          this.requests.set(message.requestId, message.request.kind);
+        if (
+          message?.type === 'content-query' &&
+          message.request.kind === 'title.detail' &&
+          detailFailures > 0
+        ) {
+          detailFailures -= 1;
+          queueMicrotask(() =>
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: [
+                  {
+                    type: 'content-error',
+                    protocol: 4,
+                    requestId: message.requestId,
+                    error: {
+                      code: 'unavailable',
+                      message: 'fixture generation replaced',
+                      retryable: true,
+                    },
+                  },
+                ],
+              }),
+            ),
+          );
+          return;
+        }
+        return super.postMessage(message, ...rest);
+      }
+    };
+  });
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  metadata.requests.length = 0;
+  await page.goto(`${FIXTURE}?routed&online&roundtrip-detail`);
+  let active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Movie 1001' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/' } })),
+  );
+  active = page.locator('[data-route-page][data-active="true"]');
+  const continued = active.getByRole('region', { name: 'Continue Watching', exact: true });
+  const title = continued.getByRole('link', { name: /Movie 1001/ });
+  await expect(title).toBeVisible({ timeout: 15_000 });
+  await expect(active.getByRole('region', { name: 'Watchlist', exact: true })).toBeVisible();
+  await page.evaluate(() => window.fixtureFailDetails(4));
+  await title.click();
+
+  active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Movie 1001' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(active.getByText('Couldn’t load this title from TMDB.')).toHaveCount(0);
+  const outcomes = await page.evaluate(() => window.fixtureDetailOutcomes);
+  expect(outcomes.filter(({ type }) => type === 'error')).toEqual(
+    Array.from({ length: 4 }, () => ({ type: 'error', code: 'unavailable' })),
+  );
+  expect(outcomes.at(-1)).toEqual({ type: 'result', state: 'ready' });
+  expect(await page.evaluate(() => window.fixtureWorkerCount)).toBeGreaterThanOrEqual(5);
+  const titleRequests = metadata.requests.filter(({ ref }) => ref === 'movie:1001');
+  expect(titleRequests).toHaveLength(2);
+  expect(titleRequests.filter(({ url }) => url.includes('recommendations'))).toHaveLength(1);
+});
+
 test('a large paired library cold-loads every lazy view through the Worker', async ({ page }) => {
   let releaseMetadata;
   let metadataHeld;

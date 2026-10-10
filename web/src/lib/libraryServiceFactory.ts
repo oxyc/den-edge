@@ -27,6 +27,10 @@ export interface LibraryServiceFactoryOptions {
 const productionWorker = () =>
   new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), { type: 'module' });
 
+// One recovery can itself land in a generation the library supervisor is already replacing. Keep an idempotent
+// content RPC following that burst, but never turn a crashing Worker into an unbounded retry loop.
+const CONTENT_RECOVERY_MS = 15_000;
+
 export interface WorkerServiceConnection {
   /** Available immediately, including for a public visitor who never opens encrypted library state. */
   content: ContentServiceClient;
@@ -112,7 +116,8 @@ class SessionContentService implements ContentServiceClientPort {
       this.#configuring = undefined;
     }
     const requiresAtlas = request.kind.startsWith('atlas.');
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const recoverUntil = Date.now() + CONTENT_RECOVERY_MS;
+    for (;;) {
       // A replacement Worker belongs to the paired library handshake first. Re-read this barrier on every attempt:
       // the first transport can fail while the request is in flight and install a different opening promise.
       const bootstrap = this.#bootstrap;
@@ -124,7 +129,7 @@ class SessionContentService implements ContentServiceClientPort {
           // A paired startup belongs exclusively to the library supervisor. Follow a replacement it has already
           // installed, but never create an anonymous content-owned Worker when the paired startup stays failed.
           if (
-            attempt > 0 ||
+            Date.now() >= recoverUntil ||
             signal?.aborted ||
             this.#closed ||
             this.#bootstrap === bootstrap ||
@@ -151,7 +156,7 @@ class SessionContentService implements ContentServiceClientPort {
           error.failure.provider === undefined &&
           error.failure.retryable;
         if (
-          attempt > 0 ||
+          Date.now() >= recoverUntil ||
           signal?.aborted ||
           (!cancelledByReplacement && !retryableTransportFailure) ||
           this.#closed
