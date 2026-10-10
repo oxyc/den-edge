@@ -14,6 +14,14 @@ export interface ConsentRequest {
   redirectHost: string | null;
   /** Whether den-edge knows that host as an assistant's own (claude.ai, chatgpt.com) or as this computer. */
   verified: boolean;
+  /** Whether this request may also be allowed to change the library (`den:library.write`); a member decides. */
+  write: boolean;
+}
+
+/** A write approval: the grant den-edge seals into the assistant's tokens. Never stored. */
+export interface WriteApproval {
+  grant: string;
+  key: string;
 }
 
 /** A connected assistant, as Settings lists it. */
@@ -27,6 +35,8 @@ export interface Connection {
   guest: string | null;
   createdAt: number;
   usedAt: number;
+  /** The grant it was allowed to change the library with, when it was; null for searching alone. */
+  grant: string | null;
 }
 
 export type Reply<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
@@ -89,6 +99,7 @@ export async function consentRequest(
     client?: unknown;
     redirectHost?: unknown;
     verified?: unknown;
+    write?: unknown;
   } | null;
   if (typeof body?.client !== 'string') return { ok: false, status: 0, error: 'failed' };
   return {
@@ -97,21 +108,27 @@ export async function consentRequest(
       client: body.client,
       redirectHost: typeof body.redirectHost === 'string' ? body.redirectHost : null,
       verified: body.verified === true,
+      write: body.write === true,
     },
   };
 }
 
 /**
  * Say yes or no. Either way den-edge answers with where to send this browser: back to the assistant, with a code or
- * with `access_denied`. Only an https address, or http to this machine, is followed.
+ * with `access_denied`. Only an https address, or http to this machine, is followed. `write` also lets it change the
+ * library, with the grant just written into it.
  */
 export async function answer(
   id: string,
   allow: boolean,
   fetchImpl: typeof fetch = relayFetch,
+  write?: WriteApproval,
 ): Promise<Reply<string>> {
   const reply = await ask(fetchImpl, `/oauth/request/${id}/${allow ? 'approve' : 'deny'}`, {
     method: 'POST',
+    ...(allow && write
+      ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ write }) }
+      : {}),
   });
   if (!reply.ok) return reply;
   const to = (reply.value as { redirect?: unknown } | null)?.redirect;
@@ -141,6 +158,7 @@ function readConnection(raw: unknown): Connection | null {
     guest: typeof c.guest === 'string' ? c.guest : null,
     createdAt: typeof c.createdAt === 'number' ? c.createdAt : 0,
     usedAt: typeof c.usedAt === 'number' ? c.usedAt : 0,
+    grant: typeof c.grant === 'string' && /^[0-9a-f]{32}$/.test(c.grant) ? c.grant : null,
   };
 }
 

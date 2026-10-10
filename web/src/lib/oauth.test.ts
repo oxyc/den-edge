@@ -56,17 +56,19 @@ test('a request is shown by the client and the host it answers to', async () => 
   });
   expect(await consentRequest(ID, fetchImpl)).toEqual({
     ok: true,
-    value: { client: 'Claude', redirectHost: 'claude.ai', verified: true },
+    value: { client: 'Claude', redirectHost: 'claude.ai', verified: true, write: false },
   });
-  // Only den-edge's own word marks a host known; anything else, or nothing, is not.
+  // Only den-edge's own word marks a host known, or a request one that may change the library.
   const unsure = await consentRequest(
     ID,
-    reply(200, { client: 'Claude', redirectHost: 'evil.example', verified: 'yes' }),
+    reply(200, { client: 'Claude', redirectHost: 'evil.example', verified: 'yes', write: 'yes' }),
   );
   expect(unsure).toEqual({
     ok: true,
-    value: { client: 'Claude', redirectHost: 'evil.example', verified: false },
+    value: { client: 'Claude', redirectHost: 'evil.example', verified: false, write: false },
   });
+  const writable = await consentRequest(ID, reply(200, { client: 'Claude', write: true }));
+  expect(writable.ok && writable.value.write).toBe(true);
   expect(fetchImpl.mock.calls[0]?.[0]).toBe(`/oauth/request/${ID}`);
   expect(await consentRequest(ID, reply(404, { error: 'request_expired' }))).toEqual({
     ok: false,
@@ -92,6 +94,21 @@ test('an answer follows den-edge back to the assistant, and nowhere unsafe', asy
     status: 403,
     error: 'not_a_member',
   });
+  // Without a grant the approval has no body: den-search alone, as before.
+  expect(fetchImpl.mock.calls[0]?.[1]?.body).toBeUndefined();
+});
+
+test('allowing changes approves with the grant, and denying never sends one', async () => {
+  const write = { grant: 'd7047d7faa4c6f77e1919c132bb6bd9f', key: 'a-seed' };
+  const back = 'https://claude.ai/api/mcp/auth_callback?code=abc';
+  const approved = reply(200, { redirect: back });
+  expect(await answer(ID, true, approved, write)).toEqual({ ok: true, value: back });
+  const init = approved.mock.calls[0]?.[1];
+  expect(JSON.parse(init?.body as string)).toEqual({ write });
+  expect(new Headers(init?.headers).get('content-type')).toBe('application/json');
+  const denied = reply(200, { redirect: 'https://claude.ai/cb?error=access_denied' });
+  await answer(ID, false, denied, write);
+  expect(denied.mock.calls[0]?.[1]?.body).toBeUndefined();
 });
 
 test('approving carries the member’s proof, or a guest’s, and nothing for a stranger', async () => {
@@ -120,6 +137,23 @@ test('approving carries the member’s proof, or a guest’s, and nothing for a 
   // Nothing else under /oauth is given a proof: the token endpoint is the assistant's, not this browser's.
   await relayFetch('/oauth/token', { method: 'POST' });
   expect(sent()['x-den-library-member']).toBeUndefined();
+  // The assistant queue's member routes carry it; the routes den-mcp calls with its token do not.
+  for (const path of ['/assistant/dropbox', '/assistant/drain', '/assistant/ack']) {
+    await relayFetch(path, { method: 'POST' });
+    expect(sent()['x-den-library-member'], path).toBe('abc123:def456');
+  }
+  await relayFetch('/assistant/append', { method: 'POST' });
+  expect(sent()['x-den-library-member']).toBeUndefined();
+});
+
+test('a guest’s grant is never sent to the assistant queue', async () => {
+  const spy = reply(403, { error: 'not_a_member' });
+  vi.stubGlobal('fetch', spy);
+  rememberGrant('a1b2c3d4', 'sekrit');
+  await relayFetch('/assistant/drain', { method: 'POST' });
+  const sent = new Headers(spy.mock.calls.at(-1)?.[1]?.headers);
+  expect(sent.get('x-den-grant')).toBeNull();
+  expect(sent.get('x-den-library-member')).toBeNull();
 });
 
 test('connections are listed as den-edge describes them, and revoked', async () => {
@@ -134,8 +168,17 @@ test('connections are listed as den-edge describes them, and revoked', async () 
           guest: null,
           createdAt: 1,
           usedAt: 2,
+          grant: 'd7047d7faa4c6f77e1919c132bb6bd9f',
         },
-        { sid: 's2', client: 'ChatGPT', kind: 'guest', guest: 'Sam', createdAt: 3, usedAt: 4 },
+        {
+          sid: 's2',
+          client: 'ChatGPT',
+          kind: 'guest',
+          guest: 'Sam',
+          createdAt: 3,
+          usedAt: 4,
+          grant: 'not-a-grant-id',
+        },
         { nope: true },
       ],
     }),
@@ -151,6 +194,7 @@ test('connections are listed as den-edge describes them, and revoked', async () 
         guest: null,
         createdAt: 1,
         usedAt: 2,
+        grant: 'd7047d7faa4c6f77e1919c132bb6bd9f',
       },
       {
         sid: 's2',
@@ -160,6 +204,7 @@ test('connections are listed as den-edge describes them, and revoked', async () 
         guest: 'Sam',
         createdAt: 3,
         usedAt: 4,
+        grant: null,
       },
     ],
   });

@@ -46,6 +46,8 @@ const HOST_GRANTS = /^\/lib\/([0-9a-f]+)\/grants(?:\/|$)/;
  * ending them. A member proves membership; a guest, with no library of their own, proves their grant.
  */
 const OAUTH = /^\/oauth\/(?:request\/[0-9a-f]{32}\/approve|connections(?:\/[0-9a-f]{32})?)$/;
+/** Assistant writes' member routes (`assistant.rs`): the drop-box key, and draining and acknowledging the queue. */
+const ASSISTANT = /^\/assistant\/(?:dropbox|drain|ack)$/;
 
 let credential: string | null = null;
 let libraryId: string | null = null;
@@ -172,6 +174,7 @@ function relayed(href: string): boolean {
     (RELAYED.some((p) => url.pathname.startsWith(p)) ||
       REMUX_CONTROL.has(url.pathname) ||
       OAUTH.test(url.pathname) ||
+      ASSISTANT.test(url.pathname) ||
       (libraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === libraryId))
   );
 }
@@ -182,6 +185,7 @@ function membershipSensitive(url: URL): boolean {
     RELAYED.some((path) => url.pathname.startsWith(path)) ||
     REMUX_CONTROL.has(url.pathname) ||
     OAUTH.test(url.pathname) ||
+    ASSISTANT.test(url.pathname) ||
     HOST_GRANTS.test(url.pathname)
   );
 }

@@ -166,12 +166,16 @@ test('a browser with no library and no invite is offered linking, not Allow', as
  * Two browsers on one relay: one with a library that hosts a pairing from Settings, and one on the consent page
  * that joins it. `expired` makes den-edge forget the request once the page has first read it.
  */
-async function linkingContexts(browser, { expired = false } = {}) {
+async function linkingContexts(browser, { expired = false, write = false } = {}) {
   const slots = new Map();
   let sid = '';
   let opened = false;
   let reads = 0;
   const sent = [];
+  // The library's log, so a write consent's rows land, and the order the consent reached den-edge in.
+  const rows = new Map();
+  let head = 0;
+  const steps = [];
   const relay = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -188,13 +192,33 @@ async function linkingContexts(browser, { expired = false } = {}) {
       reads += 1;
       return expired && reads > 1
         ? json(404, { error: 'request_expired' })
-        : json(200, { client: 'Claude', redirectHost: 'claude.ai', verified: true });
+        : json(200, { client: 'Claude', redirectHost: 'claude.ai', verified: true, write });
     }
     if (url.pathname.startsWith(`/oauth/request/${ID}/`)) {
       const member = (await request.allHeaders())['x-den-library-member'] ?? null;
-      sent.push({ path: url.pathname, member: member !== null });
+      sent.push({
+        path: url.pathname,
+        member: member !== null,
+        ...(request.postData() ? { body: request.postDataJSON() } : {}),
+      });
+      steps.push('approve');
       if (!member) return json(403, { error: 'not_a_member' });
       return json(200, { redirect: `${CALLBACK}?code=abc&state=s` });
+    }
+    if (url.pathname === '/assistant/dropbox' && request.method() === 'PUT') {
+      steps.push('dropbox');
+      return route.fulfill({ status: 204 });
+    }
+    if (url.pathname === '/assistant/drain') return json(200, { messages: [] });
+    if (/^\/lib\/[0-9a-f]+\/batch$/.test(url.pathname) && request.method() === 'POST') {
+      const applied = [];
+      for (const w of body.writes) {
+        const entry = { k: w.k, seq: ++head, v: w.v };
+        rows.set(w.k, entry);
+        applied.push({ k: w.k, seq: entry.seq });
+      }
+      steps.push(`batch:${applied.length}`);
+      return json(200, { applied, conflicts: [] });
     }
     if (url.pathname === '/pair/new') {
       sid = body.sid;
@@ -223,8 +247,11 @@ async function linkingContexts(browser, { expired = false } = {}) {
     // OAuth. Stand in for that existing (empty) den-edge library, including its bounded member registration.
     if (/^\/lib\/[0-9a-f]+\/member$/.test(url.pathname) && request.method() === 'PUT')
       return json(200, { registered: true });
-    if (/^\/lib\/[0-9a-f]+\/changes$/.test(url.pathname))
-      return json(200, { generation: 'fixture', entries: [], head: 0, more: false });
+    if (/^\/lib\/[0-9a-f]+\/changes$/.test(url.pathname)) {
+      const since = Number(url.searchParams.get('since') ?? 0);
+      const entries = [...rows.values()].filter((entry) => entry.seq > since);
+      return json(200, { generation: 'fixture', entries, head, more: false });
+    }
     if (url.pathname === '/routes' || url.pathname === '/config') return json(200, {});
     if (url.pathname === '/version') return json(200, { version: 'test' });
     if (/^\/(?:lib|tmdb|atlas|reel|scout|subs|grant)\//.test(url.pathname)) return json(404, {});
@@ -234,7 +261,7 @@ async function linkingContexts(browser, { expired = false } = {}) {
   const joiner = await browser.newContext();
   await host.route('**/*', relay);
   await joiner.route('**/*', relay);
-  return { host, joiner, sent };
+  return { host, joiner, sent, steps };
 }
 
 /** Link the consent page's browser to the host's library through the dialog's link screen. */
@@ -274,6 +301,65 @@ test('a browser links to a library from the consent page and then allows the sam
     await dialog.getByRole('button', { name: 'Allow' }).click();
     await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
     expect(sent).toEqual([{ path: `/oauth/request/${ID}/approve`, member: true }]);
+  } finally {
+    await browser.close();
+  }
+});
+
+// A member may also let the assistant change the library: unticked by default, and ticked it writes the library's
+// drop-box key and the grant into the library, gives den-edge the public key, and only then approves with the grant.
+test('a member allows changes to the library, and the grant is in the library before den-edge hears of it', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { host, joiner, sent, steps } = await linkingContexts(browser, { write: true });
+    const hostPage = await host.newPage();
+    const page = await joiner.newPage();
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    await linkThroughDialog(hostPage, dialog);
+
+    const allow = dialog.getByRole('checkbox', { name: /Allow changes to my library/ });
+    await expect(allow).toBeVisible();
+    await expect(allow).not.toBeChecked();
+    await allow.check();
+    steps.length = 0;
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+    await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
+    const approval = sent.find((s) => s.path === `/oauth/request/${ID}/approve`);
+    expect(approval?.member).toBe(true);
+    expect(approval?.body?.write?.grant).toMatch(/^[0-9a-f]{32}$/);
+    expect(approval?.body?.write?.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // The drop-box key's row, then den-edge's copy of its public half, then the grant's row, then the approval.
+    expect(steps.filter((s) => s !== 'batch:0')).toEqual([
+      'batch:1',
+      'dropbox',
+      'batch:1',
+      'approve',
+    ]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a guest is never offered changes to the library', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { context, sent } = await consentContext(browser, {
+      grants: GUEST,
+      asking: { client: 'Claude', redirectHost: 'claude.ai', verified: true, write: true },
+    });
+    const page = await context.newPage();
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    await expect(dialog).toContainText('It calls itself “Claude”');
+    await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+    await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
+    expect(sent).toEqual([{ path: `/oauth/request/${ID}/approve`, grant: 'a1b2c3d4:sekrit' }]);
   } finally {
     await browser.close();
   }

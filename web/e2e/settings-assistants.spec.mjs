@@ -3,6 +3,7 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const MCP_URL = 'https://den.example/mcp';
+const GRANT = 'd7047d7faa4c6f77e1919c132bb6bd9f';
 
 /**
  * Settings, with den-edge's `/config` saying `config` and its `/oauth/connections` answering `connections`. Returns the
@@ -43,6 +44,8 @@ const CONNECTED = [
     guest: null,
     createdAt: Date.UTC(2026, 8, 20),
     usedAt: Date.UTC(2026, 8, 22),
+    // Allowed to change the library, with the grant SettingsFixture's library holds.
+    grant: GRANT,
   },
   {
     sid: 'b'.repeat(32),
@@ -84,7 +87,7 @@ test('Assistants gives the connector address to copy, how to add it, and what is
     await expect(panel.getByRole('heading', { name: 'Claude' })).toBeVisible();
     await expect(panel).toContainText('Add custom connector');
     await expect(panel.getByRole('heading', { name: 'ChatGPT' })).toBeVisible();
-    await expect(panel).toContainText('Discovery only');
+    await expect(panel).toContainText('it can also change your library');
     await expect(panel).toContainText('nothing from TMDB');
 
     // Who is connected, by name and the host that holds it, as a member's or a guest's.
@@ -94,12 +97,15 @@ test('Assistants gives the connector address to copy, how to add it, and what is
     const listed = page.getByRole('region', { name: 'Connected assistants' }).getByRole('listitem');
     await expect(listed).toHaveCount(2);
     await expect(listed.filter({ hasText: 'Claude' })).toContainText('claude.ai');
-    await expect(listed.filter({ hasText: 'Claude' })).toContainText('Member · connected');
-    await expect(listed.filter({ hasText: 'ChatGPT' })).toContainText('Guest · Sam');
+    await expect(listed.filter({ hasText: 'Claude' })).toContainText(
+      'Member · can change your library · connected',
+    );
+    await expect(listed.filter({ hasText: 'ChatGPT' })).toContainText('Guest · Sam · search only');
 
-    // Disconnect asks first, then ends that connection alone.
+    // Disconnect asks first, then revokes its grant in the library and ends that connection alone.
     await section.getByRole('button', { name: 'Disconnect Claude' }).click();
     const confirm = section.getByRole('group', { name: 'Disconnect Claude?' });
+    await expect(confirm).toContainText('change your library');
     await confirm.getByRole('button', { name: 'Disconnect' }).click();
     await expect(listed).toHaveCount(1);
     await expect(listed).toContainText('ChatGPT');
@@ -107,6 +113,15 @@ test('Assistants gives the connector address to copy, how to add it, and what is
       'GET /oauth/connections',
       `DELETE /oauth/connections/${'a'.repeat(32)}`,
     ]);
+    const grant = await page.evaluate(
+      (id) =>
+        JSON.parse(
+          globalThis.fixtureRows().find((row) => row.name === 'assistant-grants').values[id].value
+            .string,
+        ),
+      GRANT,
+    );
+    expect(grant.revokedAt).toEqual(expect.any(Number));
   } finally {
     await browser.close();
   }

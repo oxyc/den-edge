@@ -669,6 +669,30 @@ export class LibraryModel {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey }, operationId);
   }
 
+  /** Write a grant for an assistant into the library; its key, for den-edge's approval and nothing else. */
+  async consentAssistant(client: string): Promise<{ grant: string; key: string }> {
+    const { result } = await this.task({ kind: 'assistant.consent', client });
+    if (result.kind !== 'assistant.consent') throw wrongQueryResult('assistant consent');
+    return { grant: result.grant, key: result.key };
+  }
+
+  /** Mark an assistant's grant revoked in the library, which every device enforces. */
+  async revokeAssistant(grant: string): Promise<'revoked' | 'absent'> {
+    const { result } = await this.task({ kind: 'assistant.revoke', grant });
+    if (result.kind !== 'assistant.revoke') throw wrongQueryResult('assistant revoke');
+    return result.outcome;
+  }
+
+  /** Open, check and apply a drain of the assistant queue (`assistant.ts`). */
+  async applyAssistant(messages: ReadonlyArray<{ seq: number; sealed: string }>) {
+    const { result } = await this.task({
+      kind: 'assistant.apply',
+      messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
+    });
+    if (result.kind !== 'assistant.apply') throw wrongQueryResult('assistant apply');
+    return result;
+  }
+
   sealPairingHandover(handoverKey: string, host: string, linkKey?: string) {
     this.#assertOpen();
     return this.service.query({

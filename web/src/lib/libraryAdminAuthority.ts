@@ -219,6 +219,9 @@ export class LibraryAdminAuthority {
         return this.#settleKey(task, operationId);
       case 'key-reset.adopt':
         return this.#adoptKey(task, operationId);
+      default:
+        // Assistant tasks are the library authority's own (`LibraryAssistantAuthority`), never routed here.
+        throw new Error(`not an administrative task: ${task.kind}`);
     }
   }
 

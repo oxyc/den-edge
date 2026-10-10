@@ -77,6 +77,7 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog, type DeferredDelivery } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
+import { LibraryAssistantAuthority, randomHex } from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
@@ -350,6 +351,7 @@ export class LibraryLogAuthority {
   readonly #listeners = new Set<(event: LibraryAuthorityEvent) => void>();
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
   readonly #admin?: LibraryAdminAuthority;
+  readonly #assistant: LibraryAssistantAuthority;
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
@@ -367,6 +369,55 @@ export class LibraryLogAuthority {
         fetchImpl: options.fetchImpl,
         destination: options.destination,
       });
+    this.#assistant = new LibraryAssistantAuthority({
+      libraryId: log.libraryId,
+      settings: (name) => this.#log.settings(name),
+      refresh: async () => void (await this.#log.refresh()),
+      command: (command, operationId) => this.command(command, operationId),
+      loadShape: async (title) => {
+        if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
+        return this.#shapes.has(titleKey(title));
+      },
+      seasonEpisodes: async (title, season) => {
+        if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
+        const shape = this.#shapes.get(titleKey(title))?.shape;
+        if (!shape) return null;
+        return Array.from(
+          { length: shape.counts.get(season) ?? 0 },
+          (_, index) => index + 1,
+        ).filter((episode) => isAired({ season, episode }, shape.lastAired));
+      },
+      patch: async (name, changes) => {
+        const written = await this.#patchSettings(name, changes, []);
+        if (written.delivery === 'queued')
+          throw authorityError(
+            'unavailable',
+            'the library change has not reached den-edge yet',
+            true,
+          );
+        return written.affected;
+      },
+      replace: async (row) => void (await this.#writeRow(row, [])),
+      putDropbox: async (key) => {
+        const member = await this.#log.relayMembership();
+        if (!member) return false;
+        try {
+          const res = await this.#fetch('/assistant/dropbox', {
+            method: 'PUT',
+            headers: {
+              'content-type': 'application/json',
+              'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
+            },
+            body: JSON.stringify({ pk: key.public }),
+          });
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      now: () => Date.now(),
+      random: randomHex,
+    });
   }
 
   get generation(): string | null {
@@ -596,6 +647,7 @@ export class LibraryLogAuthority {
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
+    if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
     if (
       ((task.kind === 'key-reset.move' ||
         task.kind === 'key-reset.settle' ||
@@ -605,6 +657,32 @@ export class LibraryLogAuthority {
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
     return this.#administration().task(task, operationId);
+  }
+
+  /**
+   * Assistant writes live only in a library den-edge holds: a library kept only here has no queue to drain and no
+   * den-edge to approve a grant with. Revoking one is always possible.
+   */
+  async #assistantTask(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+    if (this.#options.mode === 'local' && task.kind !== 'assistant.revoke')
+      throw authorityError('invalid-request', 'a library kept only here takes no assistant writes');
+    switch (task.kind) {
+      case 'assistant.consent': {
+        const { grant, key } = await this.#assistant.consent(task.client);
+        return { result: { kind: 'assistant.consent', grant, key }, affected: [] };
+      }
+      case 'assistant.revoke':
+        return {
+          result: { kind: 'assistant.revoke', outcome: await this.#assistant.revoke(task.grant) },
+          affected: [],
+        };
+      case 'assistant.apply': {
+        const { results, ack, dropbox, affected } = await this.#assistant.apply(task.messages);
+        return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
+      }
+      default:
+        throw authorityError('invalid-request', 'not an assistant task');
+    }
   }
 
   #administration(): LibraryAdminAuthority {

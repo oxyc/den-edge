@@ -1,6 +1,7 @@
 import {
   LIBRARY_SERVICE_PROTOCOL,
   LIBRARY_SERVICE_WIRE_LIMITS,
+  type AssistantApplied,
   type ContinueItem,
   type ConnectionsView,
   type DownloadReleaseDescriptor,
@@ -838,9 +839,47 @@ function task(value: unknown): value is LibraryTask {
       return (
         exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
       );
+    case 'assistant.consent':
+      return exact(value, ['kind', 'client']) && boundedText(value.client, 80);
+    case 'assistant.revoke':
+      return exact(value, ['kind', 'grant']) && hexId(value.grant);
+    case 'assistant.apply':
+      return (
+        exact(value, ['kind', 'messages']) &&
+        list(
+          value.messages,
+          (message): message is { seq: number; sealed: string } =>
+            record(message) &&
+            exact(message, ['seq', 'sealed']) &&
+            integer(message.seq) &&
+            boundedText(message.sealed, 4_096),
+          ASSISTANT_DRAIN_MAX,
+        )
+      );
     default:
       return false;
   }
+}
+
+/** den-edge's queue holds at most this many requests, so one drain hands out no more. */
+const ASSISTANT_DRAIN_MAX = 200;
+const hexId = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+
+function assistantApplied(value: unknown): value is AssistantApplied {
+  if (!record(value) || !integer(value.seq)) return false;
+  if (value.outcome === 'rejected')
+    return exact(value, ['seq', 'outcome', 'reason']) && boundedText(value.reason, 64);
+  return (
+    value.outcome === 'accepted' &&
+    exact(value, ['seq', 'outcome', 'op', 'title', 'detail']) &&
+    (value.op === 'watchlist_add' ||
+      value.op === 'watchlist_remove' ||
+      value.op === 'seen' ||
+      value.op === 'rate') &&
+    titleRef(value.title) &&
+    boundedText(value.detail, 256)
+  );
 }
 
 function observation(value: unknown): value is LibraryObservation {
@@ -1709,6 +1748,29 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'unknown' ||
           value.outcome === 'update-required' ||
           value.outcome === 'unavailable')
+      );
+    case 'assistant.consent':
+      return (
+        exact(value, ['kind', 'grant', 'key']) && hexId(value.grant) && boundedText(value.key, 64)
+      );
+    case 'assistant.revoke':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'revoked' || value.outcome === 'absent')
+      );
+    case 'assistant.apply':
+      return (
+        exact(value, ['kind', 'results', 'ack', 'dropbox']) &&
+        list(value.results, assistantApplied, ASSISTANT_DRAIN_MAX) &&
+        nullable(value.ack, integer) &&
+        nullable(
+          value.dropbox,
+          (key): key is { kid: string; public: string } =>
+            record(key) &&
+            exact(key, ['kid', 'public']) &&
+            hexId(key.kid) &&
+            boundedText(key.public, 2_048),
+        )
       );
     default:
       return false;

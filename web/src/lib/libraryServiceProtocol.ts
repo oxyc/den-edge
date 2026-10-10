@@ -534,7 +534,24 @@ export type LibraryTask =
   | { kind: 'local-library.merge'; sourceLibraryKey: string }
   | { kind: 'key-reset.move'; destinationLibraryKey: string }
   | { kind: 'key-reset.settle'; destinationLibraryKey: string }
-  | { kind: 'key-reset.adopt'; destinationLibraryKey: string };
+  | { kind: 'key-reset.adopt'; destinationLibraryKey: string }
+  /** A member allows an assistant to change the library: its grant row is written, its key returned once. */
+  | { kind: 'assistant.consent'; client: string }
+  | { kind: 'assistant.revoke'; grant: string }
+  /** A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. */
+  | { kind: 'assistant.apply'; messages: Array<{ seq: number; sealed: string }> };
+
+/** One drained assistant request, as the library service handled it. */
+export type AssistantApplied =
+  | {
+      seq: number;
+      outcome: 'accepted';
+      op: 'watchlist_add' | 'watchlist_remove' | 'seen' | 'rate';
+      title: TitleRef;
+      /** What it did, in the words of the page's toast: "added to your watchlist". */
+      detail: string;
+    }
+  | { seq: number; outcome: 'rejected'; reason: string };
 
 export type KeyResetOutcome =
   | 'moved'
@@ -553,7 +570,17 @@ export type LibraryTaskResult =
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
   | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
-  | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome };
+  | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
+  | { kind: 'assistant.consent'; grant: string; key: string }
+  | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }
+  | {
+      kind: 'assistant.apply';
+      results: AssistantApplied[];
+      /** The highest `seq` den-edge may drop, or null when none of these may be. */
+      ack: number | null;
+      /** The drop-box public key den-edge should hold, or null when the library has none. */
+      dropbox: { kid: string; public: string } | null;
+    };
 
 export type LibraryQuery =
   | {
