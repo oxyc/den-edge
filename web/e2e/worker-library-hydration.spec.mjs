@@ -629,9 +629,9 @@ test('a large paired Home reopens its direct detail from Continue Watching while
 });
 
 test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
-  page,
+  browser,
 }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
   await page.addInitScript(() => {
     window.fixtureRetainedTapTrace = [];
     const describe = (event, phase) => {
