@@ -96,6 +96,85 @@ it('publishes each small service batch progressively across a tail larger than t
   expect(state.displays).toHaveLength(count);
 });
 
+it('asks each title once when a pass restarts over the same refs while the first is in flight', async () => {
+  const refs = Array.from({ length: 3 * LIBRARY_METADATA_BATCH }, (_, index) => ({
+    type: 'movie' as const,
+    id: index + 1,
+  }));
+  const answers: Array<() => void> = [];
+  const libraryMetadata = vi.fn(
+    (batch: readonly { type: 'movie' | 'tv'; id: number }[]) =>
+      new Promise<Awaited<ReturnType<MetadataLookup>>>((resolve) =>
+        answers.push(() =>
+          resolve({
+            titles: batch.map((ref) => ({ ...ref, title: `#${ref.id}` })),
+            shapes: [],
+            retryable: [],
+          }),
+        ),
+      ),
+  );
+  const state = {
+    ...session(libraryMetadata),
+    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
+      state.displays = [...state.displays, ...titles];
+      state.shapes = new Map([...state.shapes, ...shapes]);
+    },
+  };
+
+  const first = nameLibraryTitles(state, refs);
+  // Home's effect restarts as the first batch is still out, with the same shelf refs.
+  const second = nameLibraryTitles(state, refs);
+  let secondDone = false;
+  void second.then(() => (secondDone = true));
+  answers.shift()!();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(secondDone).toBe(false);
+  while (answers.length) {
+    answers.shift()!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await Promise.all([first, second]);
+
+  const asked = libraryMetadata.mock.calls.flatMap(([batch]) => batch.map((ref) => ref.id));
+  expect(asked).toHaveLength(refs.length);
+  expect(new Set(asked).size).toBe(refs.length);
+  expect(state.displays).toHaveLength(refs.length);
+});
+
+it('retries a refused title while its pass is still waiting on a later, slow batch', async () => {
+  vi.useFakeTimers();
+  try {
+    const refs = Array.from({ length: LIBRARY_METADATA_BATCH + 1 }, (_, index) => ({
+      type: 'movie' as const,
+      id: index + 1,
+    }));
+    const refused = refs[0]!;
+    let refusedOnce = false;
+    const libraryMetadata = vi.fn((batch: readonly { type: 'movie' | 'tv'; id: number }[]) => {
+      // The pass's second batch never answers, as a provider holding one request would.
+      if (batch.some((ref) => ref.id === refs.at(-1)!.id)) return new Promise<never>(() => {});
+      const refuse = !refusedOnce && batch.some((ref) => ref.id === refused.id);
+      refusedOnce ||= refuse;
+      return Promise.resolve({
+        titles: batch
+          .filter((ref) => !refuse || ref.id !== refused.id)
+          .map((ref) => ({ ...ref, title: `#${ref.id}` })),
+        shapes: [],
+        retryable: refuse ? [refused] : [],
+      });
+    });
+    const state = session(libraryMetadata);
+
+    void nameLibraryTitles(state, refs);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() => expect(state.displays.map(({ id }) => id)).toContain(refused.id));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('leaves a failed Worker question retryable', async () => {
   vi.useFakeTimers();
   try {
@@ -151,6 +230,8 @@ it('coalesces overlapping background retries for the same session and title', as
     const state = session(libraryMetadata);
 
     await Promise.all([nameLibraryTitles(state, [movie]), nameLibraryTitles(state, [movie])]);
+    expect(libraryMetadata).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(libraryMetadata).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(state.displays).toEqual([title]));
