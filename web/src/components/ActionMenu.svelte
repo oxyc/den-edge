@@ -16,7 +16,10 @@
     heading,
     glyph,
     triggerClass = '',
+    onclose,
   }: {
+    /** Called once the menu has closed and focus has gone back to the trigger. */
+    onclose?: () => void;
     /** Built only while this menu is open. An array keeps episode menus source-compatible. */
     items: MenuItem[] | (() => MenuItem[]);
     /** The trigger's accessible name ("Actions for Dune", "Options for episode 3"). */
@@ -132,6 +135,10 @@
     void show({ x, y });
   }
 
+  export function focus() {
+    trigger?.focus();
+  }
+
   export function close() {
     menu?.hidePopover();
   }
@@ -199,6 +206,7 @@
       coords = null;
       if (!suppressRefocus) trigger?.focus();
       suppressRefocus = false;
+      onclose?.();
       // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
       // calls `finishClose`; every other close can release the menu body and listeners immediately.
       if (!swallowNextClick) finishClose();
@@ -284,7 +292,12 @@
   function onMenuKeydown(event: KeyboardEvent) {
     const nav = enabledItemEls();
     const at = nav.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === 'ArrowDown') {
+    if (event.key === 'Escape') {
+      // Closes the menu and nothing else: the key must not also reach a container with its own Escape (a settings
+      // row collapsing around the menu's trigger).
+      event.preventDefault();
+      close();
+    } else if (event.key === 'ArrowDown') {
       event.preventDefault();
       nav[(at + 1 + nav.length) % nav.length]?.focus();
     } else if (event.key === 'ArrowUp') {

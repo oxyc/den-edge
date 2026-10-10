@@ -15,6 +15,9 @@
     disabled = false,
     tone = 'destructive',
     triggerVariant = tone,
+    asking = $bindable(false),
+    hideTrigger = false,
+    onclose,
     onconfirm,
   }: {
     label: string;
@@ -27,23 +30,28 @@
     tone?: 'destructive' | 'primary';
     /** A quieter trigger can still open the same clearly destructive confirmation. */
     triggerVariant?: ButtonVariant;
+    /** Open from outside, e.g. from a menu item, with `hideTrigger` so the menu is the only trigger. */
+    asking?: boolean;
+    hideTrigger?: boolean;
+    /** Where focus goes after Cancel when there is no trigger of its own to return to. */
+    onclose?: () => void;
     onconfirm: () => void;
   } = $props();
 
-  let asking = $state(false);
   let cancel = $state<HTMLButtonElement>();
   let trigger = $state<HTMLButtonElement>();
 
-  async function ask() {
-    asking = true;
-    await tick();
-    cancel?.focus();
-  }
+  // Focus lands on Cancel however the question was opened. A caller opening it from a menu sets `asking` only once
+  // that menu has closed and returned focus, so nothing competes with this.
+  $effect(() => {
+    if (asking) void tick().then(() => cancel?.focus());
+  });
 
   async function dismiss() {
     asking = false;
     await tick();
-    trigger?.focus();
+    if (trigger) trigger.focus();
+    else onclose?.();
   }
 </script>
 
@@ -83,7 +91,7 @@
       />
     </span>
   </div>
-{:else}
+{:else if !hideTrigger}
   <Button
     variant={triggerVariant}
     size="compact"
@@ -91,7 +99,7 @@
     {disabled}
     {ariaLabel}
     bind:element={trigger}
-    onclick={ask}
+    onclick={() => (asking = true)}
   />
 {/if}
 
