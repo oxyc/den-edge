@@ -25,7 +25,8 @@
   let restoring = false;
   let requestedKey = routeKey(navigation.current.route);
   let requestedPageKey = navigation.current.key;
-  let transition: ViewTransition | undefined;
+  /** The page whose arrival fades in (`RoutePage`), or none where something has already moved it. */
+  let entering = $state.raw<string | null>(null);
   let loadingSnapshot = $state.raw<PageSnapshot | null>(null);
 
   onMount(() => {
@@ -129,6 +130,9 @@
       navigator,
       () => matchMedia('(display-mode: standalone)').matches,
     );
+    // A copy is shown only by a touch swipe or a loading cover. Without touch only the cover could show one, and
+    // the capture was ~33 ms of every tap at 4x CPU on d.oxy.fi's Home; there the new page's own spinner shows.
+    const copies = navigator.maxTouchPoints > 0;
     const stopSwipe = swipes
       ? swipeHistory(document, {
           back: {
@@ -257,13 +261,11 @@
       requestedPageKey = visitKey;
       const gliding = performance.now() - scrolledAt < 100;
       const ticket = ++revision;
-      transition?.skipTransition();
       // No animation of Den's own where the browser has just animated the page itself: its swipe back on iOS
       // (`hasUAVisualTransition`), or Den's own swipe, whose preview already moved it.
       const animate = !(
         native ||
         swiping ||
-        !document.startViewTransition ||
         matchMedia('(prefers-reduced-motion: reduce)').matches ||
         document.hidden
       );
@@ -273,13 +275,14 @@
         // one a quicker navigation has overtaken, which is why that one measures it too before giving way.
         // A copy is for a swipe to show, or for a loading cover over a page opened. Going Back with no swipe of
         // Den's own, neither can follow, and the copy is skipped.
-        const captured = push || swipes ? capturePage() : null;
+        const captured = copies && (push || swipes) ? capturePage() : null;
         if (unsaved !== null) {
           if (captured) snapshots.set(unsaved, captured);
           unsaved = null;
         }
         if (ticket !== revision) return;
         const outgoing = cover ?? captured;
+        entering = animate ? visitKey : null;
         current = navigation.visit(path, visitKey);
         // Selecting a detail is a new visit; history traversal restores the saved position.
         // Top-level tabs still retain their browsing position when selected explicitly.
@@ -295,7 +298,6 @@
         window.scrollTo({ left: current.x, top: current.y, behavior: 'instant' });
         holdScroll(current.x, current.y, gliding);
         // Flush RoutePage's nested-scroll restoration before the new snapshot is captured.
-        // Rendering is paused here, so waiting for an animation frame would stall the transition.
         await tick();
         if (ticket === revision) {
           watchLoading(outgoing, ticket);
@@ -310,15 +312,7 @@
           }
         }
       };
-      if (!animate) {
-        await update();
-        return;
-      }
-      transition = document.startViewTransition(update);
-      // A rapid second navigation or a native browser transition can skip the animation.
-      // The update callback still runs, so routing never depends on animation support.
-      void transition.ready.catch(() => {});
-      void transition.finished.catch(() => {});
+      await update();
     }
     const backRequested = () => {
       writeAddress();
@@ -376,7 +370,6 @@
     return () => {
       writeAddress();
       window.removeEventListener('pagehide', writeAddress);
-      transition?.skipTransition();
       stopLoading();
       stopSwipe();
       revision++;
@@ -393,7 +386,7 @@
 </script>
 
 {#each pages as page (page.key)}
-  <RoutePage active={current.key === page.key}>
+  <RoutePage active={current.key === page.key} entering={entering === page.key}>
     <!-- One page's error stays that page's: without a boundary it reached the root and took every page down,
          including one kept out of sight. -->
     <svelte:boundary onerror={(error) => console.error('den: a page failed', error)}>
@@ -430,40 +423,5 @@
   .failed button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 3px;
-  }
-
-  /* Every page change, opening and Back alike, is one short cross-fade: the incoming page fades in over the
-     outgoing one, which stays opaque underneath so the background never shows through. Opacity alone, on
-     the browser's own snapshots: sideways and upward slides dropped frames in desktop Chrome, and so did
-     morphing a pressed poster into the title's hero, whose box is resized on the main thread. */
-  :global(::view-transition-group(root)) {
-    animation-duration: 150ms;
-  }
-
-  :global(::view-transition-old(root)) {
-    animation: none;
-    mix-blend-mode: normal;
-  }
-
-  :global(::view-transition-new(root)) {
-    animation: 150ms ease-out both den-page-reveal;
-    mix-blend-mode: normal;
-  }
-
-  @keyframes -global-den-page-reveal {
-    from {
-      opacity: 0;
-    }
-
-    to {
-      opacity: 1;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    :global(::view-transition-group(root)),
-    :global(::view-transition-new(root)) {
-      animation: none;
-    }
   }
 </style>

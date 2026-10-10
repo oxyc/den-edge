@@ -60,18 +60,6 @@ async function setup(page) {
       },
     });
   });
-  // The last View Transition, to wait for, and any it threw.
-  await page.addInitScript(() => {
-    window.transitionErrors = [];
-    const start = document.startViewTransition?.bind(document);
-    if (start)
-      document.startViewTransition = (update) => {
-        const transition = start(update);
-        transition.ready.catch((e) => window.transitionErrors.push(String(e)));
-        window.lastTransition = transition.finished.catch(() => {});
-        return transition;
-      };
-  });
   await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
   await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
@@ -208,8 +196,6 @@ test('a title’s hero never resizes or rescales as it opens and its backdrop ar
   await expect(page.locator('[data-active="false"] a.card[href^="/movie/43"]')).toHaveCount(1);
   await page.goBack();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
-  await page.evaluate(() => window.lastTransition);
-  expect(await page.evaluate(() => window.transitionErrors)).toEqual([]);
   await page.close();
 });
 
@@ -302,7 +288,6 @@ test('a poster card shows one unclipped ring for the keyboard, and none after a 
   await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
   await page.goBack();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
-  await page.evaluate(() => window.lastTransition);
   await expect.poll(() => card.evaluate((link) => document.activeElement === link)).toBe(true);
   expect(await rings(card)).toMatchObject({ link: 'none', art: 'none' });
   await page.close();

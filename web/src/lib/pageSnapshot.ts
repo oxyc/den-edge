@@ -63,7 +63,8 @@ export function capturePage(
   for (const node of [source, ...source.querySelectorAll<HTMLElement>('*')]) {
     if (node.scrollLeft || node.scrollTop)
       offsets.set(node, { x: node.scrollLeft, y: node.scrollTop });
-    if (!seen(node)) continue;
+    // The page's own opacity is its entrance (RoutePage), not its content: a copy taken mid-fade stays opaque.
+    if (node === source || !seen(node)) continue;
     const style = getComputedStyle(node);
     painted.set(
       node,
