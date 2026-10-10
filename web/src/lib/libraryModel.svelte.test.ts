@@ -383,6 +383,51 @@ it('exposes named discovery and retained-Home operations without a generic cache
   model.close();
 });
 
+it('deep-copies a retained Home billboard onto the service wire', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const title = {
+    type: 'tv' as const,
+    id: 6_066,
+    title: 'Verano azul',
+    posterPath: '/verano.jpg',
+    genreIds: [18, 10751],
+  };
+  const value = {
+    kind: 'personal' as const,
+    at: 1_000,
+    titles: [title],
+  };
+
+  await model.retainBillboard({ kind: 'personal', facet: null, fresh: true }, value);
+
+  const retained = service.commands.at(-1)?.command;
+  expect(retained).toEqual({
+    kind: 'retained.billboard.set',
+    scope: { kind: 'personal', facet: null, fresh: true },
+    value: {
+      kind: 'personal',
+      at: 1_000,
+      titles: [
+        {
+          type: 'tv',
+          id: 6_066,
+          title: 'Verano azul',
+          posterPath: '/verano.jpg',
+          genreIds: [18, 10751],
+        },
+      ],
+    },
+  });
+  if (retained?.kind !== 'retained.billboard.set') throw new Error('billboard command was not sent');
+  expect(retained.value).not.toBe(value);
+  expect(retained.value.titles[0]).not.toBe(title);
+  expect(retained.value.titles[0]?.genreIds).not.toBe(title.genreIds);
+  expect(() => structuredClone(retained)).not.toThrow();
+  model.close();
+});
+
 it('shares exact keyed title and ordered-presence subscriptions until their last lease releases', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);

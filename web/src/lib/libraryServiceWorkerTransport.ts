@@ -43,17 +43,10 @@ export class WorkerLibraryServiceTransport {
       ? decodeContentServiceClientMessage(message)
       : decodeLibraryServiceClientMessage(message);
     if (!decoded.ok) throw new TypeError(decoded.error.message);
-    try {
-      this.worker.postMessage(decoded.value);
-    } catch (error) {
-      this.#fail({
-        code: 'unavailable',
-        message:
-          error instanceof Error ? error.message : 'library service worker rejected a request',
-        retryable: true,
-      });
-      throw error;
-    }
+    // A synchronous postMessage failure rejects only this local request. In particular, DataCloneError says
+    // nothing about the Worker's health; closing the shared transport here also destroys unrelated content
+    // queries and makes the supervisor replay the same bad value into every replacement Worker.
+    this.worker.postMessage(decoded.value);
   }
 
   listen(listener: MessageListener): () => void {
