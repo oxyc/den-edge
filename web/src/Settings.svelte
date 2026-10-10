@@ -259,6 +259,16 @@
         {/if}
       </div>
     {:else}
+      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
+      <ContentSection
+        prefs={prefs!}
+        {content}
+        pinConfigured={connections?.parentalPinConfigured ?? false}
+        {disabled}
+        save={savePrefs}
+        savePin={(pin) => run(() => model.setParentalPin(pin))}
+        verifyPin={(pin) => model.verifyParentalPin(pin)}
+      />
       <ConnectionsSection
         {link}
         {content}
@@ -303,22 +313,12 @@
       {/snippet}
       <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
       <AssistantsSection />
-      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
       <ImportSection
         {ready}
         {content}
         watched={model.overview.value?.watched ?? []}
         {importHistory}
         {exportHistory}
-      />
-      <ContentSection
-        prefs={prefs!}
-        {content}
-        pinConfigured={connections?.parentalPinConfigured ?? false}
-        {disabled}
-        save={savePrefs}
-        savePin={(pin) => run(() => model.setParentalPin(pin))}
-        verifyPin={(pin) => model.verifyParentalPin(pin)}
       />
       <AdvancedSection
         remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}

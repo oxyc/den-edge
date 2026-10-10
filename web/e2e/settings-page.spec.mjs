@@ -107,6 +107,10 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
       for (const section of ['Connections', 'Playback', 'Content', 'Advanced', 'About'])
         await expect(page.getByRole('heading', { name: section, level: 2 })).toBeVisible();
+      // Playback and Content lead the page, ahead of Connections.
+      const sections = await page.getByRole('heading', { level: 2 }).allTextContents();
+      expect(sections.slice(0, 3)).toEqual(['Playback', 'Content', 'Connections']);
+      expect(sections.slice(-2)).toEqual(['Advanced', 'About']);
       await expectViewportWidth();
 
       // The seeded library, said the way the TV's rows say it.
