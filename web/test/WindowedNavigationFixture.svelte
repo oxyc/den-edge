@@ -29,12 +29,13 @@
           itemHref={(title) => `/tv/${title.id}-continuing-series-${title.id - 5999}`}
           itemLabel={(title) => title.title}
         >
-          {#snippet children(title)}
+          {#snippet children(title, onscreen)}
             <PosterCard
               {title}
               caption="S1 · E1"
               href={`/tv/${title.id}-continuing-series-${title.id - 5999}`}
               continueWatching
+              {onscreen}
             />
           {/snippet}
         </WindowedPosterRow>

@@ -4,7 +4,12 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import type { RowDef } from '../lib/catalog';
-  import { cardMaterializationOrder, cardWindow, posterCardWidth } from '../lib/cardWindow';
+  import {
+    cardMaterializationOrder,
+    cardsOnScreen,
+    cardWindow,
+    posterCardWidth,
+  } from '../lib/cardWindow';
   import { titleCaption, type Title } from '../lib/library';
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
@@ -38,6 +43,8 @@
   let placed = $state(true);
   let observed = false;
   let materialized = $state<number[]>([]);
+  /** The cards on screen (`cardsOnScreen`), which `PosterCard` would otherwise each observe for themselves. */
+  let onscreen = $state.raw({ start: 0, end: 0 });
   let focusedIndex = $state<number | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
   // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
@@ -110,6 +117,7 @@
     let frame: number | undefined;
     let materializeFrame: number | undefined;
     let viewportWidth = 0;
+    let contentWidth = 0;
     let materializeOrder: number[] = [];
 
     // A PosterCard owns its image, availability and menu trees. Admitting a whole desktop window at once made a
@@ -143,6 +151,14 @@
         14,
         0,
       );
+      const shown = cardsOnScreen(
+        visible.length,
+        cachedScrollLeft,
+        contentWidth,
+        posterCardWidth(viewportWidth),
+        14,
+      );
+      if (shown.start !== onscreen.start || shown.end !== onscreen.end) onscreen = shown;
       materialized = materialized.filter((index) => index >= window.start && index < window.end);
       materializeOrder = cardMaterializationOrder(window, viewport);
       if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
@@ -176,6 +192,7 @@
       const width = entry.borderBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       if (width === viewportWidth) return;
       viewportWidth = width;
+      contentWidth = entry.contentBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       schedule();
     });
     resize.observe(scroller, { box: 'border-box' });
@@ -266,6 +283,7 @@
             {title}
             caption={titleCaption(title, row.caption?.(title))}
             href={titleHref(title)}
+            onscreen={index >= onscreen.start && index < onscreen.end}
           />
         {:else}
           <a

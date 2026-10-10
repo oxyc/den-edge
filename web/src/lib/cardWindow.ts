@@ -32,6 +32,25 @@ export function cardWindow(
   return { start, end };
 }
 
+/**
+ * The cards inside or touching a horizontal track's content box, its gutter padding excluded. That is where each
+ * card's own viewport observer found a card visible: measured in Chromium on PosterRow's 48px-gutter track, a card 8px
+ * into the right gutter, or 1px into the left one, was reported outside, and one exactly at either edge inside.
+ */
+export function cardsOnScreen(
+  count: number,
+  scrollLeft: number,
+  contentWidth: number,
+  cardWidth: number,
+  gap: number,
+): CardWindow {
+  if (count <= 0 || contentWidth <= 0 || cardWidth <= 0) return { start: 0, end: 0 };
+  const stride = cardWidth + gap;
+  const end = Math.min(count, Math.floor((scrollLeft + contentWidth) / stride) + 1);
+  const start = Math.max(0, Math.ceil((scrollLeft - cardWidth) / stride));
+  return { start: Math.min(start, end), end };
+}
+
 /** PosterRow's responsive card width, in CSS pixels. */
 export function posterCardWidth(viewportWidth: number): number {
   return Math.min(190, Math.max(140, viewportWidth * 0.38));
