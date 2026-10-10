@@ -47,7 +47,10 @@ export interface GrantChange {
   devices?: number;
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
+export type Reply<T> =
+  | { ok: true; value: T }
+  /** `name` is the host's, which a `devices_full` answer carries so the page can say whom to ask. */
+  | { ok: false; status: number; error: string; name?: string };
 
 const utf8 = new TextEncoder();
 export const DAY = 86_400_000;
@@ -187,12 +190,13 @@ async function ask(
 ): Promise<Reply<unknown>> {
   try {
     const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(ASK_MS) });
-    const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+    const body = (await res.json().catch(() => null)) as { error?: unknown; name?: unknown } | null;
     if (res.ok) return { ok: true, value: body };
     return {
       ok: false,
       status: res.status,
       error: typeof body?.error === 'string' ? body.error : 'failed',
+      ...(res.status === 409 && typeof body?.name === 'string' ? { name: body.name } : {}),
     };
   } catch {
     return { ok: false, status: 0, error: 'unreachable' };
@@ -381,6 +385,10 @@ export async function redeem(
     headers: JSON_HEADERS,
     body: JSON.stringify({ code, secretHash: await secretHash(secret) }),
   });
+  return readRedeemed(reply);
+}
+
+function readRedeemed(reply: Reply<unknown>): Reply<Redeemed> {
   if (!reply.ok) return reply;
   const body = reply.value as Partial<Redeemed> | null;
   if (typeof body?.gid !== 'string' || typeof body.name !== 'string' || !Array.isArray(body.addons))
@@ -394,6 +402,69 @@ export async function redeem(
       expiresAt: typeof body.expiresAt === 'number' ? body.expiresAt : null,
     },
   };
+}
+
+/** A device ticket, `<gid>.<22 characters>`: the grant it admits to is the part before the dot. */
+const TICKET = /^([0-9a-f]{8})\.[A-Za-z0-9_-]{22}$/;
+
+/** The grant a ticket belongs to, or null when `ticket` isn't one. */
+export function ticketGrant(ticket: string): string | null {
+  return TICKET.exec(ticket)?.[1] ?? null;
+}
+
+/**
+ * Reserve the one library this grant may start (den-edge `POST /grant/library`). `token` is the library's write
+ * token: only it can then start `id`, so the reservation names no one who merely learns the id.
+ */
+export async function reserveLibrary(
+  gid: string,
+  secret: string,
+  library: { id: string; token: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<Reply<null>> {
+  const reply = await ask(fetchImpl, '/grant/library', {
+    method: 'POST',
+    headers: { ...JSON_HEADERS, 'x-den-grant': `${gid}:${secret}` },
+    body: JSON.stringify({ id: library.id, tokenHash: await secretHash(library.token) }),
+  });
+  return reply.ok ? { ok: true, value: null } : reply;
+}
+
+/** A single-use, ten-minute ticket that lets one more device take a slot of this grant. */
+export async function deviceTicket(
+  gid: string,
+  secret: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Reply<{ ticket: string; expiresAt: number }>> {
+  const reply = await ask(fetchImpl, '/grant/device-ticket', {
+    method: 'POST',
+    headers: { 'x-den-grant': `${gid}:${secret}` },
+  });
+  if (!reply.ok) return reply;
+  const body = reply.value as { ticket?: unknown; expiresAt?: unknown } | null;
+  return typeof body?.ticket === 'string' &&
+    ticketGrant(body.ticket) &&
+    typeof body.expiresAt === 'number'
+    ? { ok: true, value: { ticket: body.ticket, expiresAt: body.expiresAt } }
+    : { ok: false, status: 0, error: 'failed' };
+}
+
+/**
+ * Spend a ticket with a secret this device made. A grant at its device limit answers `409 devices_full` with the
+ * host's name, and keeps the ticket.
+ */
+export async function redeemTicket(
+  ticket: string,
+  secret: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Reply<Redeemed>> {
+  return readRedeemed(
+    await ask(fetchImpl, '/grant/device', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ ticket, secretHash: await secretHash(secret) }),
+    }),
+  );
 }
 
 /** The addons a grant gives now, as `/<addon>/~<gid>` paths. A 410 (`grant_expired`) says the access ended. */

@@ -7,6 +7,8 @@
   import { LibrarySession } from './lib/librarySession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryModel } from './lib/libraryModel.svelte';
+  import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
+  import { phoneLanding } from './lib/phoneLanding.svelte';
   import {
     links,
     readPendingReset,
@@ -377,6 +379,35 @@
       stop();
       clearTimeout(convergenceRetry);
     };
+  });
+
+  // A "Use Den on your phone" link this page opened: the guest's library comes in (a browser that holds a synced
+  // library keeps it), then a slot in their grant. The answer is the dialog's (`PhoneDialog`).
+  $effect(() => {
+    if (!phoneLanding.request || phoneLanding.phase !== 'idle') return;
+    if (!link && !session.local) return;
+    void untrack(() => phoneLanding.run(link ? null : joinLibrary));
+  });
+
+  // Anyone invited gets a synced library: a browser with a live grant and no synced library starts the one the grant
+  // allows, with what it saved here moved in, as when a TV is linked. A device that already holds one keeps it.
+  // A start that could not finish (offline) is tried again, with the same key.
+  const GUEST_RETRY_MS = 30_000;
+  const GUEST_RETRIES = 5;
+  let guestTries = $state(0);
+  let guestStarting = false;
+  $effect(() => {
+    void guestTries;
+    const grant = startingGrant();
+    if (!grant || !session.local || phoneLanding.request || guestStarting) return;
+    guestStarting = true;
+    void startGuestLibrary(grant, joinLibrary)
+      .then((outcome) => {
+        if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
+          setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
+      })
+      .catch((error: unknown) => console.warn('den: a guest library could not be started', error))
+      .finally(() => (guestStarting = false));
   });
 </script>
 

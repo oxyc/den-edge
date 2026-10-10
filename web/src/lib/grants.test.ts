@@ -12,11 +12,15 @@ import {
   listGrants,
   newSecret,
   parseInvite,
+  deviceTicket,
   redeem,
+  redeemTicket,
+  reserveLibrary,
   reuploadInstalls,
   revokeGrant,
   secretHash,
   sharedInstallOf,
+  ticketGrant,
   timeLeft,
   updateGrant,
   type Grant,
@@ -352,4 +356,82 @@ test('nothing breaks where browser storage is refused', async () => {
   expect(await reuploadInstalls('abc123', [GRANT], { scout: 'one', atlas: 'two' }, spy)).toEqual([
     'a1b2c3d4',
   ]);
+});
+
+test('reserving a library sends the id and the hash of its token, with the grant, never the token', async () => {
+  const spy = answering(204);
+  const reply = await reserveLibrary(
+    'a1b2c3d4',
+    'sekrit',
+    { id: 'f'.repeat(32), token: 'write-token' },
+    spy,
+  );
+  expect(reply).toEqual({ ok: true, value: null });
+  const [url, init] = spy.mock.calls[0]!;
+  expect(url).toBe('/grant/library');
+  expect(new Headers(init?.headers).get('x-den-grant')).toBe('a1b2c3d4:sekrit');
+  expect(JSON.parse(String(init?.body))).toEqual({
+    id: 'f'.repeat(32),
+    tokenHash: await secretHash('write-token'),
+  });
+  expect(String(init?.body)).not.toContain('write-token');
+  expect(
+    await reserveLibrary(
+      'a1b2c3d4',
+      'sekrit',
+      { id: 'f'.repeat(32), token: 't' },
+      answering(403, { error: 'new_libraries_closed' }),
+    ),
+  ).toMatchObject({
+    ok: false,
+    status: 403,
+    error: 'new_libraries_closed',
+  });
+});
+
+test('a device ticket is asked for with the grant and read only when it is whole', async () => {
+  const good = answering(200, { ticket: 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA', expiresAt: 5 });
+  expect(await deviceTicket('a1b2c3d4', 'sekrit', good)).toEqual({
+    ok: true,
+    value: { ticket: 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA', expiresAt: 5 },
+  });
+  expect(good.mock.calls[0]![0]).toBe('/grant/device-ticket');
+  expect(good.mock.calls[0]![1]?.method).toBe('POST');
+  expect(new Headers(good.mock.calls[0]![1]?.headers).get('x-den-grant')).toBe('a1b2c3d4:sekrit');
+  expect(
+    await deviceTicket('a1b2c3d4', 's', answering(200, { ticket: 'nope', expiresAt: 5 })),
+  ).toMatchObject({
+    ok: false,
+  });
+  expect(
+    await deviceTicket('a1b2c3d4', 's', answering(410, { error: 'grant_expired' })),
+  ).toMatchObject({
+    ok: false,
+    status: 410,
+  });
+  expect(ticketGrant('a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA')).toBe('a1b2c3d4');
+  expect(ticketGrant('a1b2c3d4')).toBeNull();
+});
+
+test('spending a ticket sends a hash of the new device’s own secret; a full grant says whose', async () => {
+  const ok = answering(200, { gid: 'a1b2c3d4', name: 'Sam', addons: ['scout'], expiresAt: null });
+  const secret = newSecret();
+  const ticket = 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA';
+  expect(await redeemTicket(ticket, secret, ok)).toEqual({
+    ok: true,
+    value: { gid: 'a1b2c3d4', name: 'Sam', addons: ['scout'], expiresAt: null },
+  });
+  const [url, init] = ok.mock.calls[0]!;
+  expect(url).toBe('/grant/device');
+  expect(JSON.parse(String(init?.body))).toEqual({ ticket, secretHash: await secretHash(secret) });
+  expect(String(init?.body)).not.toContain(secret);
+  expect(new Headers(init?.headers).get('x-den-grant'), 'a new device has no grant yet').toBeNull();
+
+  const full = answering(409, { error: 'devices_full', name: 'Sam' });
+  expect(await redeemTicket(ticket, secret, full)).toEqual({
+    ok: false,
+    status: 409,
+    error: 'devices_full',
+    name: 'Sam',
+  });
 });

@@ -9,6 +9,7 @@
   import DetailIcon from '../components/DetailIcon.svelte';
   import CheckGrid from './CheckGrid.svelte';
   import Confirm from './Confirm.svelte';
+  import PhoneLink from './PhoneLink.svelte';
   import Select from './Select.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -606,9 +607,11 @@
     <p class="foot">
       Their addons are used alongside yours and can’t be seen or changed here. Some releases can’t
       be played in a browser that lacks their video format, because shared libraries don’t convert
-      video. Your own library and watchlist stay in this browser.
+      video. Your own library and watchlist are yours alone: they sync to your other devices, never
+      to whoever lent you these.
     </p>
   </SettingRow>
+  <PhoneLink />
 </SettingsSection>
 
 {#snippet more()}

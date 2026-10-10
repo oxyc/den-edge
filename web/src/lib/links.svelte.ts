@@ -23,6 +23,11 @@ export interface Link {
    * keys are random and reach no TV, so nothing is sent through them.
    */
   recovered?: boolean;
+  /**
+   * A guest's own library (oxyc/den-edge#390): started on a guest grant's permission or joined from a "Use Den on your
+   * phone" link. Held like a recovered one, with no TV behind it; it is the guest's, whatever becomes of the grant.
+   */
+  guest?: boolean;
 }
 
 /**
@@ -334,7 +339,7 @@ export class Links {
    * Keep a library key opened with a recovery code, as a link with no TV behind it, and open it from now on. A library
    * already held is opened, not added twice.
    */
-  addRecovered(libraryKey: string): void {
+  addRecovered(libraryKey: string, as: { name?: string; guest?: boolean } = {}): void {
     this.reread();
     const held = this.list.find((link) => link.libraryKey === libraryKey);
     if (held) return this.makeCurrent(held.inboxKey);
@@ -344,11 +349,12 @@ export class Links {
       ...this.list,
       {
         inboxKey,
-        name: 'a recovery code',
+        name: as.name ?? 'a recovery code',
         linkedAt: Date.now(),
         libraryKey,
         linkKey: btoa(String.fromCharCode(...random(32))),
         recovered: true,
+        ...(as.guest ? { guest: true } : {}),
       },
     ];
     this.moved = null;

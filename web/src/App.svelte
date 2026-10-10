@@ -9,10 +9,16 @@
   import { consentRequestId } from './lib/oauth';
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
+  import { phoneLanding } from './lib/phoneLanding.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
   import { parseRoute, type Explore, type PeopleView } from './lib/route';
-  import { ConnectDialogScreen, InviteDialogScreen, LinkScreen } from './lib/screens.svelte';
+  import {
+    ConnectDialogScreen,
+    InviteDialogScreen,
+    LinkScreen,
+    PhoneDialogScreen,
+  } from './lib/screens.svelte';
   // The invite and consent dialogs load only for a page that asks one of their questions: an invite link, or an
   // assistant's request to connect. Latched, since the invite dialog clears the code as it shows it.
   let invited = $state(false);
@@ -24,6 +30,9 @@
     if (invited) void InviteDialogScreen.load();
   });
   if (consenting) void ConnectDialogScreen.load();
+  $effect(() => {
+    if (phoneLanding.request) void PhoneDialogScreen.load();
+  });
   const identityClock = browserClock();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight work must not retrigger the effect that starts it.
   const sendingIdentity = new Set<string>();
@@ -127,6 +136,7 @@
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
 <NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
 {#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
+{#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
 {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
 
 <main>
