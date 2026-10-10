@@ -973,6 +973,54 @@
     {:else}
       <p class="status">None yet: a device shows up here when it next opens your library.</p>
     {/if}
+
+    <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
+    {#if link}
+      <h3>Link another device</h3>
+      <div class="pair">
+        {#if code}
+          <p>On your phone or computer, open Den and type this code:</p>
+          <b
+            class="code"
+            role="button"
+            tabindex="0"
+            title="Copy the code"
+            data-no-swipe
+            onclick={selectCode}
+            onkeydown={(event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              selectCode(event);
+            }}>{formatCode(code).text}</b
+          >
+          <p class="status" role="status">
+            {codeCopied ? 'Copied. ' : ''}Waiting for your device…
+          </p>
+        {:else if asking}
+          <p role="alert">
+            <b>Allow “{asking}”?</b> It will see your library, and can add to your watchlist, add plugins
+            and play on your TV.
+          </p>
+          <span class="actions">
+            <Button variant="primary" label="Allow" onclick={() => answer?.(true)} />
+            <Button variant="secondary" label="Don’t Allow" onclick={() => answer?.(false)} />
+          </span>
+        {:else}
+          {#if pairNotice}<p class="status" role="status">{pairNotice}</p>{/if}
+          <Button
+            variant="primary"
+            label={pairing ? 'Waiting…' : 'Get a code'}
+            disabled={pairing}
+            onclick={linkDevice}
+          />
+        {/if}
+      </div>
+      <p class="foot">
+        Give your library to a phone, a laptop, or Den opened at another address, without going to
+        the TV.
+      </p>
+    {/if}
+
     {#if heldReset}
       <div class="pair" role="alert">
         <p>
@@ -1012,8 +1060,6 @@
         To cut a device off, reset the library key on your Apple TV under Settings › Linked devices.
       </p>
     {/if}
-
-    {@render recovery?.()}
 
     {#if links.list.length}
       <h3>Your library</h3>
@@ -1114,52 +1160,7 @@
     />
     <p class="foot">Your other devices show this name, so give it its own if two look alike.</p>
 
-    <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
-    {#if link}
-      <h3>Link another device</h3>
-      <div class="pair">
-        {#if code}
-          <p>On your phone or computer, open Den and type this code:</p>
-          <b
-            class="code"
-            role="button"
-            tabindex="0"
-            title="Copy the code"
-            data-no-swipe
-            onclick={selectCode}
-            onkeydown={(event) => {
-              if (event.key !== 'Enter' && event.key !== ' ') return;
-              event.preventDefault();
-              selectCode(event);
-            }}>{formatCode(code).text}</b
-          >
-          <p class="status" role="status">
-            {codeCopied ? 'Copied. ' : ''}Waiting for your device…
-          </p>
-        {:else if asking}
-          <p role="alert">
-            <b>Allow “{asking}”?</b> It will see your library, and can add to your watchlist, add plugins
-            and play on your TV.
-          </p>
-          <span class="actions">
-            <Button variant="primary" label="Allow" onclick={() => answer?.(true)} />
-            <Button variant="secondary" label="Don’t Allow" onclick={() => answer?.(false)} />
-          </span>
-        {:else}
-          {#if pairNotice}<p class="status" role="status">{pairNotice}</p>{/if}
-          <Button
-            variant="primary"
-            label={pairing ? 'Waiting…' : 'Get a code'}
-            disabled={pairing}
-            onclick={linkDevice}
-          />
-        {/if}
-      </div>
-      <p class="foot">
-        Give your library to a phone, a laptop, or Den opened at another address, without going to
-        the TV.
-      </p>
-    {/if}
+    {@render recovery?.()}
   </SettingRow>
 </SettingsSection>
 
