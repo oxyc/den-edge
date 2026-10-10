@@ -628,6 +628,107 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   expect(metadata.changeRequests).toBe(0);
 });
 
+test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    window.fixtureRetainedTapTrace = [];
+    const describe = (event, phase) => {
+      const target = event.target instanceof Element ? event.target.closest('a') : null;
+      window.fixtureRetainedTapTrace.push({
+        kind: event.type,
+        phase,
+        href: target?.getAttribute('href') ?? null,
+        connected: target?.isConnected ?? null,
+        active: document.querySelector('[data-route-page][data-active="true"]')?.textContent ?? '',
+        path: location.pathname,
+      });
+    };
+    for (const kind of ['pointerdown', 'pointerup', 'click']) {
+      document.addEventListener(kind, (event) => describe(event, 'capture'), true);
+      document.addEventListener(kind, (event) => describe(event, 'bubble'));
+    }
+    const NativeObserver = window.IntersectionObserver;
+    let generation = 0;
+    window.IntersectionObserver = class extends NativeObserver {
+      constructor(callback, options) {
+        const id = ++generation;
+        super((entries, observer) => {
+          for (const entry of entries) {
+            if (entry.target.classList.contains('windowed'))
+              window.fixtureRetainedTapTrace.push({
+                kind: 'intersection',
+                generation: id,
+                near: entry.isIntersecting,
+                connected: entry.target.isConnected,
+                active: entry.target.closest('[data-route-page]')?.dataset.active ?? null,
+                path: location.pathname,
+              });
+          }
+          callback(entries, observer);
+        }, options);
+      }
+    };
+    addEventListener('DOMContentLoaded', () => {
+      const mutations = new MutationObserver((records) => {
+        for (const record of records) {
+          const target = record.target;
+          if (!(target instanceof HTMLElement) || !target.matches('[data-route-page]')) continue;
+          window.fixtureRetainedTapTrace.push({
+            kind: 'route-active',
+            active: target.dataset.active ?? null,
+            connected: target.isConnected,
+            path: location.pathname,
+          });
+        }
+      });
+      mutations.observe(document.documentElement, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-active'],
+      });
+    });
+  });
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed&verano`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.goto(`${FIXTURE}?routed&online&shell`);
+  const active = () => page.locator('[data-route-page][data-active="true"]');
+  const verano = () =>
+    active()
+      .getByRole('region', { name: 'Continue Watching', exact: true })
+      .getByRole('link', { name: /Series 6066/ });
+  await expect(verano()).toBeVisible({ timeout: 15_000 });
+  await verano().tap();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/6066-series-6066');
+  await expect(active().getByRole('heading', { name: 'Series 6066' })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Den home' }).tap();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(verano()).toBeVisible();
+  await verano().tap();
+
+  await expect
+    .poll(() => new URL(page.url()).pathname, {
+      message: JSON.stringify(await page.evaluate(() => window.fixtureRetainedTapTrace), null, 2),
+    })
+    .toBe('/tv/6066-series-6066');
+});
+
 test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({
   page,
 }) => {

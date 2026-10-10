@@ -6,6 +6,7 @@
   import Router from '../src/Router.svelte';
   import Settings from '../src/Settings.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
+  import NavigationBar from '../src/components/NavigationBar.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import { LibrarySession } from '../src/lib/librarySession.svelte';
@@ -20,6 +21,7 @@
   const lifecycle = params.has('lifecycle');
   const source = params.has('source');
   const routed = params.has('routed');
+  const shell = params.has('shell');
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, {
@@ -35,6 +37,7 @@
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
   const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
+  let routedRoute = $state<Route>(route);
   const noop = () => {};
 
   $effect(() => session.configureServices());
@@ -197,6 +200,7 @@
   onDestroy(() => session.close());
 </script>
 
+{#if routed && shell}<NavigationBar route={routedRoute} />{/if}
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   {#if sourceResult}<p role="status">{sourceResult}</p>{/if}
@@ -214,7 +218,7 @@
     {#if view === 'settings'}
       <Settings {link} {model} />
     {:else if routed}
-      <Router onchange={noop}>
+      <Router onchange={(next) => (routedRoute = next)}>
         {#snippet children(route, active)}
           <Library
             {link}
