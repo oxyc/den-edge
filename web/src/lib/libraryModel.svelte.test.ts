@@ -420,7 +420,8 @@ it('deep-copies a retained Home billboard onto the service wire', async () => {
       ],
     },
   });
-  if (retained?.kind !== 'retained.billboard.set') throw new Error('billboard command was not sent');
+  if (retained?.kind !== 'retained.billboard.set')
+    throw new Error('billboard command was not sent');
   expect(retained.value).not.toBe(value);
   expect(retained.value.titles[0]).not.toBe(title);
   expect(retained.value.titles[0]?.genreIds).not.toBe(title.genreIds);
