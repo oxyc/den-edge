@@ -410,6 +410,17 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('saves a reaction on a series that is not in the library yet', async () => {
+    const { authority } = await localAuthority();
+
+    await expect(
+      authority.command({ kind: 'reaction.set', title: series, reaction: 'love' }, 'love-series'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+    await expect(authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+      reaction: 'love',
+    });
+  });
+
   it('uses observed series shape for episode commands, whole-series writes and playback', async () => {
     const { log, authority } = await localAuthority();
 
