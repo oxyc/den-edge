@@ -674,7 +674,19 @@ test('a personal billboard keep cannot kill the Worker before reopening Verano a
   await page.route('**/atlas/manifest.json', (route) =>
     route.fulfill({ json: { id: 'com.den.atlas' } }),
   );
-  await page.route('**/atlas/index/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route('**/atlas/index/**', (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/titles.json') && !url.searchParams.has('skip'))
+      return route.fulfill({
+        json: {
+          titles: [{ type: 'movie', id: 10201, title: 'Posterless atlas title' }],
+          order: 'fixture',
+          ignored: [],
+        },
+      });
+    return route.fulfill({ status: 404, json: {} });
+  });
   await page.route('**/atlas/recommend/**', (route) =>
     route.fulfill({ json: { slides: [{ type: 'movie', id: 900 }] } }),
   );
@@ -714,6 +726,11 @@ test('a personal billboard keep cannot kill the Worker before reopening Verano a
           ).length,
       ),
     )
+    .toBeGreaterThan(0);
+  // Home's atlas rows return full presentation cards. Hydrating their missing posters must send only a title ref;
+  // exact wire validation must not misclassify one bad local request as a dead shared Worker.
+  await expect
+    .poll(() => metadata.requests.filter(({ ref }) => ref === 'movie:10201').length)
     .toBeGreaterThan(0);
 
   await title.click();

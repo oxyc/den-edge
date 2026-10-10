@@ -54,6 +54,31 @@ const cancelled = (): ContentServiceError =>
     'local',
   );
 
+/** A request rejected synchronously on this side of the Worker is not evidence that the Worker died. */
+function sendFailure(error: unknown): ContentServiceError {
+  if (error instanceof ContentServiceError) return error;
+  if (
+    error instanceof TypeError ||
+    (error instanceof DOMException && error.name === 'DataCloneError')
+  )
+    return new ContentServiceError(
+      {
+        code: 'invalid-request',
+        message: error.message,
+        retryable: false,
+      },
+      'local',
+    );
+  return new ContentServiceError(
+    {
+      code: 'unavailable',
+      message: error instanceof Error ? error.message : 'content service transport failed',
+      retryable: true,
+    },
+    'transport',
+  );
+}
+
 /** Typed page facade for read-only content. Provider credentials and library versions never cross this boundary. */
 export class ContentServiceClient {
   readonly #pending = new Map<string, Pending>();
@@ -113,19 +138,7 @@ export class ContentServiceClient {
       } catch (error) {
         this.#pending.delete(requestId);
         pending.stopAbort?.();
-        reject(
-          error instanceof ContentServiceError
-            ? error
-            : new ContentServiceError(
-                {
-                  code: 'unavailable',
-                  message:
-                    error instanceof Error ? error.message : 'content service transport failed',
-                  retryable: true,
-                },
-                'transport',
-              ),
-        );
+        reject(sendFailure(error));
       }
     });
   }

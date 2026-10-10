@@ -459,13 +459,18 @@ describe('rows atlas’s filter answers', () => {
     const atlas = atlasFake(() =>
       json({ titles: [card(7, { posterPath: null, likely: true })], order: 'o', ignored: [] }),
     );
+    const asked: unknown[] = [];
     const [row] = homeRows(tmdbFake().pages, {
       atlas: {
         ...atlasSource(atlas.fetchImpl),
-        title: async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/drawn.jpg' }),
+        title: async (ref) => {
+          asked.push(ref);
+          return { ...ref, title: 'Drawn', posterPath: '/drawn.jpg' };
+        },
       },
     }).filter((r) => r.id === 'recipe-romantic-comedy-atlas');
     expect(await row!.load(1)).toMatchObject([{ id: 7, posterPath: '/drawn.jpg', likely: true }]);
+    expect(asked).toEqual([{ type: 'movie', id: 7 }]);
     expect(atlas.asked).toEqual([
       '/atlas/index/filter/movie/titles.json?sel=subgenre:Romantic%20Comedy',
     ]);
