@@ -718,6 +718,93 @@ test('a retained Home Continue Watching card opens again in WebKit', async () =>
   }
 });
 
+/**
+ * Back to Home from a card in its Watchlist shelf, with the windowed shelves above it: the page returns to the scroll
+ * it was left at, however the shelves above it are laid out while the retained page is placed again.
+ */
+async function backToWindowedHome(browser) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.goto(`${FIXTURE}?routed&online&shell`);
+  const active = () => page.locator('[data-route-page][data-active="true"]');
+  const shelf = () => active().getByRole('region', { name: 'Watchlist', exact: true });
+  await expect(shelf().getByRole('link').first()).toBeAttached({ timeout: 15_000 });
+  await shelf().evaluate((region) =>
+    region.scrollIntoView({ block: 'center', behavior: 'instant' }),
+  );
+  await page.waitForTimeout(500);
+  const left = await page.evaluate(() => Math.round(scrollY));
+  expect(left).toBeGreaterThan(200);
+
+  // Each shelf's height, which must not change while the returned page waits to be placed again.
+  const heights = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('[data-route-page][data-active="true"] .windowed')].map((el) =>
+        Math.round(el.getBoundingClientRect().height),
+      ),
+    );
+  const shelves = await heights();
+  expect(shelves.length).toBeGreaterThan(1);
+  const home = new URL(page.url()).pathname;
+  await shelf().getByRole('link').first().tap();
+  await expect.poll(() => new URL(page.url()).pathname).not.toBe(home);
+  await page.evaluate(() => {
+    window.fixtureTracks = [
+      ...document.querySelectorAll('[data-route-page][data-active="true"] .track'),
+    ];
+  });
+  // Every frame from the traversal on, not one sample: the shelves are unplaced for only a frame or two.
+  await page.evaluate(() => {
+    window.fixtureShelfHeights = new Set();
+    const sample = () => {
+      const rows = [
+        ...document.querySelectorAll('[data-route-page][data-active="true"] .windowed'),
+      ].map((el) => Math.round(el.getBoundingClientRect().height));
+      if (rows.length) window.fixtureShelfHeights.add(rows.join(','));
+      requestAnimationFrame(sample);
+    };
+    sample();
+  });
+  await page.goBack();
+  await expect.poll(() => new URL(page.url()).pathname).toBe(home);
+  await page.waitForTimeout(2500);
+  expect(await page.evaluate(() => [...window.fixtureShelfHeights])).toEqual([shelves.join(',')]);
+  // Returning replaces none of the rows it left, so none loses the place it was scrolled to.
+  expect(
+    await page.evaluate(() => window.fixtureTracks.filter((track) => !track.isConnected).length),
+  ).toBe(0);
+  const back = await page.evaluate(() => Math.round(scrollY));
+  expect(Math.abs(back - left), `scrollY ${back} vs ${left}`).toBeLessThanOrEqual(2);
+  await page.close();
+}
+
+test('Back to Home keeps its scroll with windowed shelves above in WebKit', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    await backToWindowedHome(browser);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({
   page,
 }) => {

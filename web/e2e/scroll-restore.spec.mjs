@@ -41,6 +41,22 @@ async function setup(page, start) {
   await routeTmdb(page, async (r) => {
     const path = new URL(r.request().url()).pathname;
     if (path.endsWith('/combined_credits')) return r.fulfill({ json: { cast: [], crew: [] } });
+    // The one streaming service a service page can be opened for.
+    if (path.includes('/watch/providers/'))
+      return r.fulfill({
+        json: {
+          results: path.endsWith('/movie')
+            ? [
+                {
+                  provider_id: 8,
+                  provider_name: 'Netflix',
+                  logo_path: '/n.jpg',
+                  display_priority: 1,
+                },
+              ]
+            : [],
+        },
+      });
     const id = Number(path.match(/\/(?:movie|tv)\/(\d+)$/)?.[1]);
     if (id === TITLE)
       return r.fulfill({
@@ -156,9 +172,9 @@ async function detailRestores(browser) {
   await page.close();
 }
 
-async function browseRestores(browser) {
+async function browseRestores(browser, start = '/') {
   const page = await scenario(browser);
-  await setup(page, '/');
+  await setup(page, start);
   await page.goto(`${E2E_ORIGIN}/test/title-scroll.html`);
   const rows = active(page).locator('section.row');
   await expect(rows.nth(4)).toBeAttached();
@@ -175,6 +191,10 @@ test('Back to Home restores the page and one of its rows', async ({ browser }) =
   await browseRestores(browser);
 });
 
+test('Back to a service page restores the page and one of its rows', async ({ browser }) => {
+  await browseRestores(browser, '/service/8-se');
+});
+
 const needsWebKit = () =>
   test.skip(
     !process.env.CI && !existsSync(webkit.executablePath()),
@@ -186,6 +206,16 @@ test('Back to a title restores the page and its More like this row in WebKit', a
   const browser = await webkit.launch();
   try {
     await detailRestores(browser);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Back to a service page restores the page and one of its rows in WebKit', async () => {
+  needsWebKit();
+  const browser = await webkit.launch();
+  try {
+    await browseRestores(browser, '/service/8-se');
   } finally {
     await browser.close();
   }
