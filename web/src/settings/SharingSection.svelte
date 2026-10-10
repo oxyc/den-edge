@@ -4,7 +4,9 @@
      holds lives in this browser (`grants.svelte.ts`), never in the library. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
+  import DetailIcon from '../components/DetailIcon.svelte';
   import CheckGrid from './CheckGrid.svelte';
   import Confirm from './Confirm.svelte';
   import Select from './Select.svelte';
@@ -32,6 +34,7 @@
     type Reply,
   } from '../lib/grants';
   import { guestGrants, type RedeemFailure } from '../lib/grants.svelte';
+  import type { MenuItem } from '../lib/titleActions';
   import type { Link } from '../lib/links.svelte';
   import { libraryCredentialId } from '../lib/relayFetch';
   import type { Routes } from '../lib/routes';
@@ -84,6 +87,9 @@
   let linkField = $state<HTMLInputElement>();
   let codeField = $state<HTMLInputElement>();
   let renaming = $state<{ gid: string; name: string } | null>(null);
+  /** The guest whose revoke is being asked about; the question opens from their menu. */
+  let revoking = $state<string | null>(null);
+  let menus = $state<Record<string, ActionMenu | undefined>>({});
   /** A native picker shows its choice immediately. Keep that optimistic value explicit so a refused edit rolls back. */
   let deviceLimits = $state<Record<string, number>>({});
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
@@ -228,6 +234,45 @@
       return;
     }
     grants = (grants ?? []).map((g) => (g.gid === grant.gid ? { ...g, status: 'revoked' } : g));
+  }
+
+  /** Built when a guest's menu opens, so it always reflects the grant as it stands. */
+  function guestItems(grant: Grant): MenuItem[] {
+    const items: MenuItem[] = [];
+    const code = grant.status === 'invited' ? codes[grant.gid] : undefined;
+    if (code) {
+      const address = inviteLink(location.origin, code);
+      items.push({
+        kind: 'item',
+        label: copied === address ? 'Copied' : 'Copy invite link',
+        onselect: () => void copy(address),
+      });
+    }
+    if (!(grant.status === 'active' && grant.expiresAt === null)) {
+      for (const days of [7, 30])
+        items.push({
+          kind: 'item',
+          label: `Extend by ${days} days`,
+          disabled: working,
+          onselect: () => extend(grant, days),
+        });
+    }
+    for (const { value, label } of DEVICE_LIMITS)
+      items.push({
+        kind: 'radio',
+        group: 'devices',
+        label: `Allow ${label}`,
+        checked: Number(value) === deviceLimit(grant),
+        disabled: working,
+        onselect: () => void changeDeviceLimit(grant, Number(value)),
+      });
+    items.push({
+      kind: 'item',
+      label: 'Rename',
+      onselect: () => (renaming = { gid: grant.gid, name: grant.name }),
+    });
+    items.push({ kind: 'item', label: 'Revoke access…', onselect: () => (revoking = grant.gid) });
+    return items;
   }
 
   const standing = (grant: Grant): string => {
@@ -430,7 +475,7 @@
       {#if grants?.length}
         <ul class="list">
           {#each grants as grant (grant.gid)}
-            <li class="line">
+            <li class="line guest-line">
               <span class="label"
                 >{grant.name}<small>{standing(grant)}</small><small
                   >{grant.addons.map((addon) => NAMES[addon].label).join(', ')}
@@ -439,59 +484,29 @@
                 >{#if usage(grant)}<small>{usage(grant)}</small>{/if}</span
               >
               {#if grant.status !== 'revoked'}
-                {@const code = grant.status === 'invited' ? codes[grant.gid] : undefined}
-                <span class="actions guest">
-                  {#if code}
-                    {@const address = inviteLink(location.origin, code)}
-                    <Button
-                      variant="secondary"
-                      label={copied === address ? 'Copied' : 'Copy link'}
-                      ariaLabel="Copy {grant.name}’s invite link"
-                      onclick={() => void copy(address)}
-                    />
-                  {/if}
-                  {#if !(grant.status === 'active' && grant.expiresAt === null)}
-                    <!-- Re-keyed on every change, so the picker returns to its prompt once the extension lands. -->
-                    {#key `${grant.codeExpiresAt}:${grant.expiresAt}`}
-                      <Select
-                        label="Extend {grant.name}"
-                        value=""
-                        disabled={working}
-                        options={[
-                          { value: '', label: 'Extend…' },
-                          { value: '7', label: '+7 days' },
-                          { value: '30', label: '+30 days' },
-                        ]}
-                        onchange={(days) => {
-                          if (days) extend(grant, Number(days));
-                        }}
-                      />
-                    {/key}
-                  {/if}
-                  <Select
-                    label="Device limit for {grant.name}"
-                    value={String(deviceLimit(grant))}
-                    disabled={working}
-                    options={DEVICE_LIMITS}
-                    onchange={(value) => {
-                      const limit = Number(value);
-                      if (limit !== deviceLimit(grant)) void changeDeviceLimit(grant, limit);
-                    }}
+                <!-- Every control for a guest sits behind one ⋯ at every width, so the row stays the name and
+                     where they stand. Revoke is still asked about, in place, below the row. -->
+                <div class="guest-menu">
+                  <ActionMenu
+                    bind:this={menus[grant.gid]}
+                    items={() => guestItems(grant)}
+                    label="More actions for {grant.name}"
+                    heading={grant.name}
+                    triggerClass="guest-trigger"
+                    glyph={more}
                   />
-                  <Button
-                    variant="secondary"
-                    label="Rename"
-                    ariaLabel="Rename {grant.name}"
-                    onclick={() => (renaming = { gid: grant.gid, name: grant.name })}
-                  />
-                  <Confirm
-                    label="Revoke"
-                    ariaLabel="Revoke {grant.name}"
-                    question="Revoke {grant.name}’s access?"
-                    detail="They stop being able to browse or play right away, and anything they’re watching ends."
-                    onconfirm={() => void revoke(grant)}
-                  />
-                </span>
+                </div>
+                <Confirm
+                  hideTrigger
+                  bind:asking={
+                    () => revoking === grant.gid, (asked) => (revoking = asked ? grant.gid : null)
+                  }
+                  question="Revoke {grant.name}’s access?"
+                  label="Revoke"
+                  detail="They stop being able to browse or play right away, and anything they’re watching ends."
+                  onclose={() => menus[grant.gid]?.focus()}
+                  onconfirm={() => void revoke(grant)}
+                />
               {/if}
               {#if renaming?.gid === grant.gid}
                 {@const edit = renaming}
@@ -589,6 +604,10 @@
   </SettingRow>
 </SettingsSection>
 
+{#snippet more()}
+  <DetailIcon name="more" />
+{/snippet}
+
 <style>
   .made {
     display: flex;
@@ -632,25 +651,30 @@
     font-size: 13px;
   }
 
-  /* A guest's controls as one compact group: extending is one picker rather than a button per length, and every
-     control shares the smaller height, so a row reads as the guest first and its controls second. */
-  .guest {
-    flex-wrap: wrap;
-    gap: 6px;
+  /* The name and status take the row; the ⋯ stays beside them even at 320px. */
+  .guest-line .label {
+    flex-basis: 0;
   }
 
-  .guest :global(select),
-  .guest > :global(.den-button) {
-    min-height: 34px;
-    padding-inline: 12px;
-    font-size: 14px;
+  .guest-menu {
+    position: relative;
   }
 
-  .guest :global(select) {
-    max-width: none;
-    padding-right: 28px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
+  /* The trigger renders inside `ActionMenu`, a child component, hence :global (as `EpisodeCard`'s does). */
+  .guest-menu :global(.guest-trigger) {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    color: var(--muted);
+  }
+
+  .guest-menu :global(.guest-trigger:hover),
+  .guest-menu :global(.guest-trigger[aria-expanded='true']) {
+    background: #fff2;
     color: var(--fg);
+  }
+
+  .guest-menu :global(.guest-trigger:focus-visible) {
+    outline: 2px solid var(--accent);
   }
 </style>

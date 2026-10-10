@@ -132,6 +132,10 @@
     void show({ x, y });
   }
 
+  export function focus() {
+    trigger?.focus();
+  }
+
   export function close() {
     menu?.hidePopover();
   }
@@ -284,7 +288,12 @@
   function onMenuKeydown(event: KeyboardEvent) {
     const nav = enabledItemEls();
     const at = nav.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === 'ArrowDown') {
+    if (event.key === 'Escape') {
+      // Closes the menu and nothing else: the key must not also reach a container with its own Escape (a settings
+      // row collapsing around the menu's trigger).
+      event.preventDefault();
+      close();
+    } else if (event.key === 'ArrowDown') {
       event.preventDefault();
       nav[(at + 1 + nav.length) % nav.length]?.focus();
     } else if (event.key === 'ArrowUp') {
