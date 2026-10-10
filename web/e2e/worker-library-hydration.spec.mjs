@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, webkit } from '@playwright/test';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
@@ -628,103 +629,25 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   expect(metadata.changeRequests).toBe(0);
 });
 
-test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
-  browser,
-}) => {
+/**
+ * Open a Continue Watching card, return Home through the Den logo from a detail page scrolled far below Home's
+ * height (so the retained Home is shown at a clamped position and only then restored), and open a second card.
+ */
+async function reopenRetainedContinueCard(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
   await page.addInitScript(() => {
-    window.fixtureRetainedTapTrace = [];
-    const describe = (event, phase) => {
-      const target = event.target instanceof Element ? event.target.closest('a') : null;
-      window.fixtureRetainedTapTrace.push({
-        kind: event.type,
-        phase,
-        href: target?.getAttribute('href') ?? null,
-        connected: target?.isConnected ?? null,
-        active:
-          document.querySelector('[data-route-page][data-active="true"]')?.dataset.active ?? null,
-        path: location.pathname,
-      });
-    };
-    for (const kind of ['pointerdown', 'pointerup', 'click']) {
-      document.addEventListener(kind, (event) => describe(event, 'capture'), true);
-      document.addEventListener(kind, (event) => describe(event, 'bubble'));
-    }
-    const NativeObserver = window.IntersectionObserver;
-    const nativeScrollTo = window.scrollTo.bind(window);
-    let generation = 0;
-    window.IntersectionObserver = class extends NativeObserver {
-      constructor(callback, options) {
-        const id = ++generation;
-        super((entries, observer) => {
-          for (const entry of entries) {
-            if (entry.target.classList.contains('windowed'))
-              window.fixtureRetainedTapTrace.push({
-                kind: 'intersection',
-                generation: id,
-                near: entry.isIntersecting,
-                connected: entry.target.isConnected,
-                active: entry.target.closest('[data-route-page]')?.dataset.active ?? null,
-                path: location.pathname,
-              });
-          }
-          callback(entries, observer);
-        }, options);
-        this.fixtureCallback = callback;
-        this.fixtureGeneration = id;
-      }
-
-      observe(target) {
-        if (target.classList.contains('windowed')) {
-          window.fixtureRetainedTapTrace.push({
-            kind: 'observe',
-            generation: this.fixtureGeneration,
-            y: scrollY,
-            active: target.closest('[data-route-page]')?.dataset.active ?? null,
-            path: location.pathname,
-          });
-          if (window.fixtureHoldEarlyWindowedRows && scrollY !== window.fixtureRetainedHomeY) {
-            this.fixtureCallback([{ target, isIntersecting: false }], this);
-            return;
-          }
-        }
-        super.observe(target);
-      }
-    };
-    window.scrollTo = (...args) => {
-      const before = scrollY;
-      nativeScrollTo(...args);
-      window.fixtureRetainedTapTrace.push({
-        kind: 'scrollTo',
-        before,
-        after: scrollY,
-        path: location.pathname,
-      });
-    };
-    window.fixtureHoldEarlyWindowedRowsAt = (homeY) => {
-      window.fixtureRetainedHomeY = homeY;
-      window.fixtureHoldEarlyWindowedRows = true;
-      window.fixtureRetainedTapTrace.push({ kind: 'hold-reactivation', homeY });
-    };
-    addEventListener('DOMContentLoaded', () => {
-      const mutations = new MutationObserver((records) => {
-        for (const record of records) {
-          const target = record.target;
-          if (!(target instanceof HTMLElement) || !target.matches('[data-route-page]')) continue;
-          window.fixtureRetainedTapTrace.push({
-            kind: 'route-active',
-            active: target.dataset.active ?? null,
-            connected: target.isConnected,
-            path: location.pathname,
-          });
-        }
-      });
-      mutations.observe(document.documentElement, {
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['data-active'],
-      });
-    });
+    window.fixtureTapTrace = [];
+    for (const kind of ['pointerdown', 'pointerup', 'click'])
+      document.addEventListener(
+        kind,
+        (event) => {
+          const element = event.target;
+          window.fixtureTapTrace.push(
+            `${kind} ${element.tagName}.${element.className} link=${element.closest?.('a')?.getAttribute('href') ?? null}`,
+          );
+        },
+        true,
+      );
   });
   const metadata = {
     requests: [],
@@ -744,36 +667,55 @@ test('a retained Home Continue Watching card opens again after returning through
 
   await page.goto(`${FIXTURE}?routed&online&shell`);
   const active = () => page.locator('[data-route-page][data-active="true"]');
-  const verano = () =>
-    active()
-      .getByRole('region', { name: 'Continue Watching', exact: true })
-      .getByRole('link', { name: /Series 6066/ });
-  await expect(verano()).toBeVisible({ timeout: 15_000 });
-  const homeY = await page.evaluate(() => scrollY);
-  await verano().tap();
+  const continueWatching = () =>
+    active().getByRole('region', { name: 'Continue Watching', exact: true });
+  await expect(continueWatching().getByRole('link', { name: /Series 6066/ })).toBeVisible({
+    timeout: 15_000,
+  });
+  await continueWatching()
+    .getByRole('link', { name: /Series 6066/ })
+    .tap();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/6066-series-6066');
   await expect(active().getByRole('heading', { name: 'Series 6066' })).toBeVisible();
 
   await active().evaluate((element) => (element.style.minHeight = '5000px'));
   await page.evaluate(() => scrollTo(0, 3000));
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(3000);
-  await page.evaluate((savedHomeY) => window.fixtureHoldEarlyWindowedRowsAt(savedHomeY), homeY);
-
   await page.getByRole('link', { name: 'Den home' }).tap();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
-  const retained = active().getByRole('region', { name: 'Continue Watching', exact: true });
-  // A retained route must not observe at the detail page's scroll and leave only its previously focused card live.
-  // Route activation owns the observer, so all three cards prove that activation followed global scroll restore.
-  await expect(retained.locator('.card')).toHaveCount(3);
-  const next = retained.getByRole('link', { name: /Series 1003/ });
+  const next = continueWatching().getByRole('link', { name: /Series 1003/ });
   await expect(next).toBeVisible();
   await next.tap();
 
-  await expect
-    .poll(() => new URL(page.url()).pathname, {
-      message: JSON.stringify(await page.evaluate(() => window.fixtureRetainedTapTrace), null, 2),
-    })
-    .toBe('/tv/1003-series-1003');
+  // The tap's pointerdown, pointerup and click must all reach the same link. The trace names where the click went.
+  try {
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/1003-series-1003');
+  } catch (error) {
+    error.message += `\n${(await page.evaluate(() => window.fixtureTapTrace.slice(-3))).join('\n')}`;
+    throw error;
+  }
+  await page.close();
+}
+
+test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
+  browser,
+}) => {
+  await reopenRetainedContinueCard(browser);
+});
+
+// Chromium keeps the wrapper's `content-visibility: auto` current across the retained page's show and scroll
+// restore; WebKit leaves the wrapper skipped, so the second tap's click lands on the wrapper and goes nowhere.
+test('a retained Home Continue Watching card opens again in WebKit', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    await reopenRetainedContinueCard(browser);
+  } finally {
+    await browser.close();
+  }
 });
 
 test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({

@@ -35,6 +35,8 @@
   let track = $state<HTMLDivElement>();
   const page = pageVisibility();
   let rowNear = $state(false);
+  // False from a retained page's reactivation until the first observer delivery after it. See `.windowed`.
+  let placed = $state(true);
   let materialized = $state<number[]>([]);
   let focusedKey = $state<string | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
@@ -92,6 +94,7 @@
       interactingPointer = null;
       stopReleaseListeners();
       rowNear = false;
+      if (observed) placed = false;
       return;
     }
     return observeNearViewport(
@@ -99,6 +102,7 @@
       (near) => {
         const entered = observed && near && !rowNear;
         observed = true;
+        placed = true;
         if (!near) {
           outside = true;
           scheduleRetire();
@@ -266,7 +270,7 @@
   }
 </script>
 
-<div bind:this={wrapper} class="windowed" class:landscape>
+<div bind:this={wrapper} class="windowed" class:landscape class:placed>
   <PosterRow {heading} {aside} active={rowNear} bind:track>
     {#each items as item, index (itemKey(item))}
       <span
@@ -295,9 +299,17 @@
 
 <style>
   /* PosterCard has a fixed art ratio and exactly two metadata lines. Keeping this shelf's skipped size exact lets
-     Chromium omit far-below-the-fold style/layout/paint without changing vertical scroll geometry. */
-  .windowed {
+     Chromium omit far-below-the-fold style/layout/paint without changing vertical scroll geometry.
+
+     A reactivated page waits for its first observer delivery before skipping again. A retained page is shown before
+     the router restores its scroll, and WebKit then keeps the row skipped at the position it was first laid out:
+     the row paints but a tap on it is hit-tested against the wrapper, so its click goes nowhere. The first
+     delivery is computed after that restore, so enabling `auto` here lets the browser judge the restored position. */
+  .windowed.placed {
     content-visibility: auto;
+  }
+
+  .windowed {
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
   }
 

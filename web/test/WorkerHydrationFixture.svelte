@@ -38,7 +38,6 @@
   };
   const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
   let routedRoute = $state<Route>(route);
-  const noop = () => {};
 
   $effect(() => session.configureServices());
 
