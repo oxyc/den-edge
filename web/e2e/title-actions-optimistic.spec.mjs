@@ -112,9 +112,21 @@ test('a slow write pulses its button, but only after a delay, and stops when it 
     await love.click();
     await expect(love).toHaveAttribute('aria-busy', 'true');
 
-    // Pressed a moment ago: the pulse is there, waiting out its delay, and the button has not changed.
-    expect((await pulse(love)).delay).toBe(150);
-    expect(await love.evaluate((el) => Number(getComputedStyle(el).opacity))).toBe(1);
+    // Pressed a moment ago: the pulse is there, waiting out its delay, and the button has not changed. How long
+    // after the press this runs is up to the runner, so the animation is held at its start for the reading, then
+    // let go.
+    const waiting = await love.evaluate((el) => {
+      const animation = el.getAnimations().find((a) => a.animationName === 'den-saving');
+      animation.pause();
+      animation.currentTime = 0;
+      const read = {
+        delay: animation.effect.getComputedTiming().delay,
+        opacity: Number(getComputedStyle(el).opacity),
+      };
+      animation.play();
+      return read;
+    });
+    expect(waiting).toEqual({ delay: 150, opacity: 1 });
     // Then it shows.
     await expect.poll(async () => (await pulse(love)).at, { timeout: 3000 }).toBeGreaterThan(400);
     await expect
