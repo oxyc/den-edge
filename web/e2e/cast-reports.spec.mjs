@@ -196,8 +196,11 @@ test('a session the cast page plays reports its stats and is ended when the play
     await page.getByRole('button', { name: 'Close' }).click();
     await expect(page.locator('iframe[title="Den Cast player"]')).toHaveCount(0);
     await expect.poll(() => heard.ended, { timeout: 10_000 }).toEqual([PATH]);
-    await expect.poll(() => heard.reports.length).toBe(1);
-    const [report] = heard.reports;
+    // A slow runner may stall playback, which the cast page reports on the spot (event `stall`) before the end; the
+    // end report is the one this test is about, and it is sent once.
+    const ending = () => heard.reports.filter((r) => r.stats?.event === 'end');
+    await expect.poll(() => ending().length).toBe(1);
+    const [report] = ending();
     expect(report).toMatchObject({ code: 0, message: 'playback stats (end)' });
     // hls.js, as in the player (`nativeHls`), though Chrome claims HLS of its own: only hls.js rides out a dropped
     // connection (`resumingLoader`).
@@ -205,7 +208,7 @@ test('a session the cast page plays reports its stats and is ended when the play
     // Once, from the cast page: the player's page, which may not connect there, sends neither.
     await page.waitForTimeout(1_000);
     expect(heard.ended).toHaveLength(1);
-    expect(heard.reports).toHaveLength(1);
+    expect(ending()).toHaveLength(1);
   } finally {
     await browser.close();
   }
