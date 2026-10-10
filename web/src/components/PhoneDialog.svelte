@@ -52,12 +52,20 @@
     <h2 id="phone-title">Couldn’t finish</h2>
     <p role="status" class="bad">{phoneLanding.problem}</p>
     <div class="actions">
-      <Button variant="primary" label="Try again" onclick={() => phoneLanding.retry()} />
-      <Button label="Not now" onclick={() => phoneLanding.dismiss()} />
+      {#if phoneLanding.retryable}
+        <Button variant="primary" label="Try again" onclick={() => phoneLanding.retry()} />
+      {/if}
+      <Button
+        variant={phoneLanding.retryable ? 'secondary' : 'primary'}
+        label={phoneLanding.retryable ? 'Not now' : 'Close'}
+        onclick={() => phoneLanding.dismiss()}
+      />
     </div>
   {:else}
     <h2 id="phone-title">Setting up Den on this phone</h2>
-    <p role="status">Bringing your library over…</p>
+    <p role="status">
+      Waiting for your laptop to allow this phone, then bringing your library over…
+    </p>
   {/if}
 </dialog>
 

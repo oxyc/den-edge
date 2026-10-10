@@ -46,6 +46,8 @@
     plugins,
     routes,
     ready,
+    sealHandover,
+    selfId,
   }: {
     /** Null for a browser using its own library: it proves no membership, so it has nothing to lend. */
     link: Link | null;
@@ -54,6 +56,14 @@
     routes: Routes;
     /** The library is open, and with it the membership proof the host routes need. */
     ready: boolean;
+    /** Seals the library key for a device pairing with this one ("Use Den on your phone"). */
+    sealHandover: (
+      handoverKey: string,
+      host: string,
+      linkKey: string,
+    ) => Promise<{ sealed: string; linkKey: string; inboxKey: string }>;
+    /** This browser's id in the device list. */
+    selfId: string;
   } = $props();
 
   const NAMES: Record<GrantAddon, { label: string; role: string }> = {
@@ -611,7 +621,7 @@
       to whoever lent you these.
     </p>
   </SettingRow>
-  <PhoneLink />
+  <PhoneLink {sealHandover} {selfId} />
 </SettingsSection>
 
 {#snippet more()}

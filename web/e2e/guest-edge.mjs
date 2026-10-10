@@ -21,7 +21,57 @@ export function newEdge({ devices = 2, host = 'Oskar' } = {}) {
     /** Libraries by id: the write token's hash, and the rows. */
     libraries: new Map(),
     refusedStarts: 0,
+    /** Pairing sessions by sid: the relay's four slots, as pairing v1 uses them. */
+    pairs: new Map(),
+    /** Ends every pairing session, as ten minutes do. */
+    expirePairs() {
+      for (const pair of this.pairs.values()) pair.ended = true;
+    },
   };
+}
+
+const NAMEPLATE = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/** den-edge's `/pair` relay, in memory: it holds the messages and never sees the secret half of a code. */
+async function routePairs(page, edge) {
+  await page.route(`${E2E_ORIGIN}/pair/**`, async (route) => {
+    const request = route.request();
+    const [, , first, slot] = new URL(request.url()).pathname.split('/');
+    const method = request.method();
+    if (first === 'new' && method === 'POST') {
+      const { sid } = request.postDataJSON();
+      let nameplate;
+      do {
+        nameplate = Array.from(randomBytes(4), (b) => NAMEPLATE[b & 31]).join('');
+      } while ([...edge.pairs.values()].some((p) => p.nameplate === nameplate));
+      edge.pairs.set(sid, { nameplate, claimed: false, ended: false, slots: new Map() });
+      return json(route, 200, { nameplate });
+    }
+    if (first === 'open' && method === 'POST') {
+      const { nameplate } = request.postDataJSON();
+      const found = [...edge.pairs.entries()].find(([, p]) => p.nameplate === nameplate);
+      if (!found || found[1].ended) return json(route, 410, { error: 'expired' });
+      if (found[1].claimed) return json(route, 409, { error: 'claimed' });
+      found[1].claimed = true;
+      return json(route, 200, { sid: found[0] });
+    }
+    const pair = edge.pairs.get(first);
+    if (!pair) return json(route, 410, { error: 'expired' });
+    if (!slot && method === 'DELETE') {
+      pair.ended = true;
+      return route.fulfill({ status: 204 });
+    }
+    if (pair.ended) return json(route, 410, { error: 'expired' });
+    if (method === 'PUT') {
+      pair.slots.set(slot, request.postDataJSON().m);
+      return route.fulfill({ status: 204 });
+    }
+    if (method === 'GET')
+      return pair.slots.has(slot)
+        ? json(route, 200, { m: pair.slots.get(slot) })
+        : route.fulfill({ status: 202 });
+    return json(route, 404, {});
+  });
 }
 
 const json = (route, status, body, headers = {}) => route.fulfill({ status, json: body, headers });
@@ -161,6 +211,7 @@ export async function routeGuestEdge(page, edge) {
   );
   await routeGrants(page, edge);
   await routeLibraries(page, edge);
+  await routePairs(page, edge);
   await routeTmdb(page, (route) => {
     const match = new URL(route.request().url()).pathname.match(/\/movie\/(\d+)$/);
     if (!match) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });

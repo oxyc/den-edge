@@ -1,29 +1,31 @@
 import { expect, test } from 'vitest';
 import { parsePhoneLink, phoneLink } from './phoneLink';
 
-const KEY = btoa(String.fromCharCode(...Array.from({ length: 32 }, (_, i) => i * 7 + 1)));
+const CODE = 'ABCDEFGH2345';
 const TICKET = 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA';
 
-test('a link carries the ticket and the library key in its fragment, and reads back', () => {
-  const link = phoneLink('https://den.example', { ticket: TICKET, libraryKey: KEY });
+test('a link carries the pairing code and the ticket in its fragment, and no library key', () => {
+  const link = phoneLink('https://den.example', { ticket: TICKET, code: CODE });
   const url = new URL(link);
   expect(url.pathname + url.search, 'nothing the server sees').toBe('/');
-  expect(url.hash).toMatch(/^#phone=a1b2c3d4\.AAAAAAAAAAAAAAAAAAAAAA&k=[A-Za-z0-9_-]{43}$/);
-  expect(parsePhoneLink(link)).toEqual({ ticket: TICKET, libraryKey: KEY });
-  expect(parsePhoneLink(url.hash)).toEqual({ ticket: TICKET, libraryKey: KEY });
+  expect(url.hash).toBe(`#phone=${TICKET}&code=${CODE}`);
+  expect(link).not.toMatch(/[?&#]k=/);
+  expect(parsePhoneLink(link)).toEqual({ ticket: TICKET, code: CODE });
+  expect(parsePhoneLink(url.hash)).toEqual({ ticket: TICKET, code: CODE });
 });
 
-test('a link made after the grant ended carries only the library', () => {
-  const link = phoneLink('https://den.example', { ticket: null, libraryKey: KEY });
+test('a link made after the grant ended carries only the pairing', () => {
+  const link = phoneLink('https://den.example', { ticket: null, code: CODE });
   expect(link).not.toContain('phone=');
-  expect(parsePhoneLink(link)).toEqual({ ticket: null, libraryKey: KEY });
+  expect(parsePhoneLink(link)).toEqual({ ticket: null, code: CODE });
 });
 
 test('what is not a whole link is not one', () => {
-  const good = phoneLink('https://den.example', { ticket: TICKET, libraryKey: KEY });
+  const good = phoneLink('https://den.example', { ticket: TICKET, code: CODE });
   expect(parsePhoneLink('https://den.example/')).toBeNull();
-  expect(parsePhoneLink('#phone=' + TICKET)).toBeNull();
-  expect(parsePhoneLink(good.replace(/k=.{3}/, 'k=ab'))).toBeNull();
+  expect(parsePhoneLink(`#phone=${TICKET}`)).toBeNull();
+  expect(parsePhoneLink(good.replace(CODE, 'ABCD'))).toBeNull();
+  expect(parsePhoneLink(good.replace(CODE, 'ABCDEFGHI0O1'))).toBeNull();
   expect(parsePhoneLink(good.replace('a1b2c3d4.', 'zz.'))).toBeNull();
   expect(parsePhoneLink('#invite=a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA')).toBeNull();
 });
