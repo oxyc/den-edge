@@ -20,37 +20,19 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         const errors = [];
         await page.addInitScript(() => {
-          window.transitionChecks = [];
-          window.transitionErrors = [];
-          const start = document.startViewTransition.bind(document);
-          document.startViewTransition = (update) => {
-            const transition = start(update);
-            transition.ready
-              .then(() =>
-                window.transitionChecks.push({
-                  oldAnimation: getComputedStyle(
-                    document.documentElement,
-                    '::view-transition-old(root)',
-                  ).animationName,
-                  newAnimation: getComputedStyle(
-                    document.documentElement,
-                    '::view-transition-new(root)',
-                  ).animationName,
-                  scroll: scrollY,
-                  direction: document.documentElement.dataset.denNavigation,
-                  oldOpacity: getComputedStyle(
-                    document.documentElement,
-                    '::view-transition-old(root)',
-                  ).opacity,
-                  newOpacity: getComputedStyle(
-                    document.documentElement,
-                    '::view-transition-new(root)',
-                  ).opacity,
-                }),
-              )
-              .catch((e) => window.transitionErrors.push(String(e)));
-            return transition;
-          };
+          // Every page's own entrance, as it starts.
+          window.entrances = [];
+          document.addEventListener(
+            'animationstart',
+            (event) => {
+              if (event.target instanceof HTMLElement && event.target.matches('[data-route-page]'))
+                window.entrances.push({
+                  name: event.animationName,
+                  active: event.target.dataset.active,
+                });
+            },
+            true,
+          );
         });
         page.on('pageerror', (error) => errors.push(String(error)));
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
@@ -80,6 +62,8 @@ test('navigation regressions', async () => {
         await page.goForward();
         await page.waitForFunction(() => location.pathname === '/tv/1399');
         await page.waitForTimeout(260);
+        // A swipe has already moved the page it lands on: no entrance follows it.
+        const beforeSwipes = await page.evaluate(() => window.entrances.length);
         // Touch events exercise the fallback without depending on host browser gesture settings.
         await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
@@ -149,6 +133,11 @@ test('navigation regressions', async () => {
           if (cancel) assert.equal(await active.locator('h1').innerText(), 'library');
         }
         await page.waitForFunction(() => location.pathname === '/tv/1399' && scrollY === 1100);
+        assert.equal(
+          await page.evaluate(() => window.entrances.length),
+          beforeSwipes,
+          'a page a swipe landed on must not fade in again',
+        );
         await page.goBack();
         await page.waitForFunction(
           () =>
@@ -174,23 +163,11 @@ test('navigation regressions', async () => {
         await page.getByText('Home', { exact: true }).click();
         await page.waitForFunction(() => location.pathname === '/' && scrollY > 800);
         await page.waitForTimeout(250);
-        const transitions = await page.evaluate(() => window.transitionChecks);
-
-        assert.deepEqual(
-          await page.evaluate(() => window.transitionErrors),
-          [],
-          'ordinary transitions must not time out',
-        );
-        assert.ok(transitions.length > 0, 'view transitions should run');
+        const entrances = await page.evaluate(() => window.entrances);
+        assert.ok(entrances.length > 0, 'a page opened by a tap or Back fades in');
         assert.ok(
-          transitions.every(
-            (t) =>
-              t.oldAnimation === 'none' &&
-              t.oldOpacity === '1' &&
-              t.newAnimation === 'den-page-reveal',
-          ),
-          'every page change fades the new page in over the opaque old one: ' +
-            JSON.stringify(transitions),
+          entrances.every((e) => e.name.endsWith('route-page-enter') && e.active === 'true'),
+          'only the page arriving fades in: ' + JSON.stringify(entrances),
         );
         assert.deepEqual(errors, []);
         console.log(
@@ -198,7 +175,7 @@ test('navigation regressions', async () => {
         );
         await context.close();
       }
-      for (const mode of ['reduced-motion', 'unsupported', 'rapid']) {
+      for (const mode of ['reduced-motion', 'rapid']) {
         const context = await browser.newContext({
           reducedMotion: mode === 'reduced-motion' ? 'reduce' : 'no-preference',
         });
@@ -206,8 +183,6 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         const errors = [];
         page.on('pageerror', (e) => errors.push(String(e)));
-        if (mode === 'unsupported')
-          await page.addInitScript(() => (document.startViewTransition = undefined));
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.locator('input').fill('retained');
         await page.evaluate(() => {

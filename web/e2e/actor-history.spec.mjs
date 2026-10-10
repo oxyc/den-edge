@@ -14,16 +14,6 @@ for (const scenario of [
     try {
       const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
       await guardNetwork(page);
-      await page.addInitScript(() => {
-        const start = document.startViewTransition?.bind(document);
-        window.fixtureTransition = Promise.resolve();
-        if (start)
-          document.startViewTransition = (...args) => {
-            const transition = start(...args);
-            window.fixtureTransition = transition.finished.catch(() => {});
-            return transition;
-          };
-      });
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('https://image.tmdb.org/**', (r) =>
         r.fulfill({
@@ -83,8 +73,6 @@ for (const scenario of [
         .click();
       await expect(page.locator('[data-active="true"] h1')).toHaveText('An Actor');
       await page.waitForSelector('[data-loading-snapshot]', { state: 'detached' });
-      // A visible heading does not mean the View Transition has released its frozen rendering.
-      await page.evaluate(() => window.fixtureTransition);
       if (scenario.scrolled) {
         releaseFilms();
         // The heading exists during loading. Wait for cards, then let the sentinel load the final page.
@@ -100,7 +88,6 @@ for (const scenario of [
       await expect(page.locator('[data-active="false"] .films .card')).toHaveCount(
         scenario.scrolled ? 24 : 20,
       );
-      await page.evaluate(() => window.fixtureTransition);
       await page.setViewportSize({ width: scenario.width, height: scenario.height });
       await page.waitForTimeout(300);
       await page.evaluate(() => {
@@ -171,7 +158,6 @@ for (const scenario of [
         if (cycle === 0) {
           await page.goBack();
           await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
-          await page.evaluate(() => window.fixtureTransition);
         }
       }
     } finally {

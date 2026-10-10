@@ -3,7 +3,11 @@
   import { keyboardInput, trackInputModality } from '../lib/inputModality';
   import { scrolledWithin } from '../lib/scrolled';
   import { PAGE_VISIBILITY, type PageVisibility } from '../lib/pageVisibility.svelte';
-  let { active, children }: { active: boolean; children: Snippet } = $props();
+  let {
+    active,
+    entering = false,
+    children,
+  }: { active: boolean; entering?: boolean; children: Snippet } = $props();
   // Start closed: a RoutePage first created in the retained, hidden stack must never get one frame of active
   // observers, idle preloads, or cards before the prop-sync effect runs.
   const visibility = $state<PageVisibility>({ active: false });
@@ -155,6 +159,7 @@
 
 <div
   class="route-page"
+  class:entering
   bind:this={root}
   hidden={!active}
   inert={!active}
@@ -173,5 +178,19 @@
 
   [hidden] {
     display: none !important;
+  }
+
+  /* A page arriving fades up from partly seen, on the compositor, as it is shown: an animation restarts when a
+     hidden page is displayed again. It replaced a view-transition cross-fade from fully transparent, which held
+     a tap to first frame at 118.7 ms against 56.8 ms without it (4x CPU, e2e fixture). Opacity alone, because a
+     transform here would move the page's fixed descendants (the player, loading spinners) while it ran. */
+  .entering {
+    animation: route-page-enter 150ms ease-out;
+  }
+
+  @keyframes route-page-enter {
+    from {
+      opacity: 0.6;
+    }
   }
 </style>

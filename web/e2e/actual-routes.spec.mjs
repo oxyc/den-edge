@@ -11,7 +11,11 @@ test('actual-routes regressions', async () => {
   });
   try {
     for (const width of [390, 1280]) {
-      const context = await browser.newContext({ viewport: { width, height: 800 } });
+      // Touch, because only a touch device copies the page left: its loading cover is checked below.
+      const context = await browser.newContext({
+        viewport: { width, height: 800 },
+        hasTouch: true,
+      });
       const page = await context.newPage();
       await guardNetwork(page);
       const errors = [];
