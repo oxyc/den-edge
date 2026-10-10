@@ -16,7 +16,10 @@
     heading,
     glyph,
     triggerClass = '',
+    onclose,
   }: {
+    /** Called once the menu has closed and focus has gone back to the trigger. */
+    onclose?: () => void;
     /** Built only while this menu is open. An array keeps episode menus source-compatible. */
     items: MenuItem[] | (() => MenuItem[]);
     /** The trigger's accessible name ("Actions for Dune", "Options for episode 3"). */
@@ -203,6 +206,7 @@
       coords = null;
       if (!suppressRefocus) trigger?.focus();
       suppressRefocus = false;
+      onclose?.();
       // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
       // calls `finishClose`; every other close can release the menu body and listeners immediately.
       if (!swallowNextClick) finishClose();

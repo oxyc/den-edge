@@ -1285,11 +1285,15 @@ test('an invited guest device limit is saved and survives a Settings re-read', a
   await page.goto(`${FIXTURE}?view=settings&online`);
   await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
   let invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
-  const limit = invited.getByLabel('Device limit for Taylor');
-  await expect(limit).toHaveValue('2');
-  await expect(invited.getByText('Device limit', { exact: true })).toHaveCount(0);
-  expect((await limit.boundingBox())?.width).toBeLessThan(120);
+  const more = invited.getByRole('button', { name: 'More actions for Taylor' });
+  const menu = page.getByRole('menu', { name: 'More actions for Taylor' });
+  await expect(invited.locator('select')).toHaveCount(0);
   await expect(invited).toContainText('1 of 2 devices');
+  await more.click();
+  await expect(menu.getByRole('menuitemradio', { name: 'Allow 2 devices' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
   await expect
     .poll(() =>
       page.evaluate(
@@ -1298,14 +1302,19 @@ test('an invited guest device limit is saved and survives a Settings re-read', a
     )
     .toBe(true);
 
-  await limit.selectOption('4');
+  await menu.getByRole('menuitemradio', { name: 'Allow 4 devices' }).click();
   await updateStarted;
-  await expect(limit).toBeDisabled();
   await expect(invited).toContainText('1 of 4 devices');
   releaseDeviceUpdate();
 
-  await expect(limit).toHaveValue('4');
   await expect(invited).toContainText('1 of 4 devices');
+  await more.click();
+  await expect(menu.getByRole('menuitemradio', { name: 'Allow 4 devices' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
   expect(metadata.grantUpdates.filter((change) => 'devices' in change)).toEqual([{ devices: 4 }]);
 
   // Reopening Settings asks den-edge for the grant again. The control must render the value returned by that fresh
@@ -1313,6 +1322,11 @@ test('an invited guest device limit is saved and survives a Settings re-read', a
   await page.reload();
   await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
   invited = page.getByRole('listitem').filter({ hasText: 'Taylor' });
-  await expect(invited.getByLabel('Device limit for Taylor')).toHaveValue('4');
   await expect(invited).toContainText('1 of 4 devices');
+  await invited.getByRole('button', { name: 'More actions for Taylor' }).click();
+  await expect(
+    page
+      .getByRole('menu', { name: 'More actions for Taylor' })
+      .getByRole('menuitemradio', { name: 'Allow 4 devices' }),
+  ).toHaveAttribute('aria-checked', 'true');
 });

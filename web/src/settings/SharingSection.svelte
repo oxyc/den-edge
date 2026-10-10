@@ -89,6 +89,8 @@
   let renaming = $state<{ gid: string; name: string } | null>(null);
   /** The guest whose revoke is being asked about; the question opens from their menu. */
   let revoking = $state<string | null>(null);
+  /** Chosen in a guest's menu, asked about as soon as that menu has closed. */
+  let revokeNext: string | null = null;
   let menus = $state<Record<string, ActionMenu | undefined>>({});
   /** A native picker shows its choice immediately. Keep that optimistic value explicit so a refused edit rolls back. */
   let deviceLimits = $state<Record<string, number>>({});
@@ -271,7 +273,8 @@
       label: 'Rename',
       onselect: () => (renaming = { gid: grant.gid, name: grant.name }),
     });
-    items.push({ kind: 'item', label: 'Revoke access…', onselect: () => (revoking = grant.gid) });
+    // The question opens once the menu has closed (`onclose`), so the menu's focus return can't land after it.
+    items.push({ kind: 'item', label: 'Revoke access…', onselect: () => (revokeNext = grant.gid) });
     return items;
   }
 
@@ -493,6 +496,10 @@
                     label="More actions for {grant.name}"
                     heading={grant.name}
                     triggerClass="guest-trigger"
+                    onclose={() => {
+                      if (revokeNext === grant.gid) revoking = grant.gid;
+                      revokeNext = null;
+                    }}
                     glyph={more}
                   />
                 </div>

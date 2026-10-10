@@ -41,12 +41,10 @@
   let cancel = $state<HTMLButtonElement>();
   let trigger = $state<HTMLButtonElement>();
 
-  // Focus lands on Cancel however the question was opened. A menu closing at the same moment returns focus to its
-  // own trigger, so wait a frame for that to settle first.
+  // Focus lands on Cancel however the question was opened. A caller opening it from a menu sets `asking` only once
+  // that menu has closed and returned focus, so nothing competes with this.
   $effect(() => {
-    if (!asking) return;
-    let frame = requestAnimationFrame(() => (frame = requestAnimationFrame(() => cancel?.focus())));
-    return () => cancelAnimationFrame(frame);
+    if (asking) void tick().then(() => cancel?.focus());
   });
 
   async function dismiss() {
