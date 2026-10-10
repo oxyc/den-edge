@@ -475,7 +475,17 @@ export class LibraryModel {
     value: RetainedBillboard,
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'retained.billboard.set', scope, value }, operationId);
+    // Billboard titles can come back through reactive Home state before a refreshed personal ranking reuses
+    // them. A Svelte proxy satisfies the structural protocol decoder but cannot cross postMessage; make this
+    // service boundary a real wire boundary so one cosmetic keep can never take down the shared Worker.
+    return this.#command(
+      {
+        kind: 'retained.billboard.set',
+        scope: structuredClone($state.snapshot(scope)) as RetainedBillboardScope,
+        value: structuredClone($state.snapshot(value)) as RetainedBillboard,
+      },
+      operationId,
+    );
   }
 
   async retainedServices(): Promise<Immutable<RetainedServices> | null> {

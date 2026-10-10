@@ -73,6 +73,17 @@
           },
           'seed-tv-continue',
         );
+        if (params.has('verano'))
+          await model.recordProgress(
+            {
+              title: { type: 'tv', id: 6066 },
+              episode: { type: 'tv', id: 6066, season: 1, episode: 1 },
+              fraction: 0.5,
+              seconds: 1_800,
+              observedAt: now + 1,
+            },
+            'seed-verano-continue',
+          );
         await model.importHistory(
           Array.from({ length: 128 }, (_, index) => ({
             title: { type: 'movie' as const, id: 1100 + index },
@@ -93,6 +104,7 @@
                 year: 2025,
                 posterPath: '/poster.jpg',
                 backdropPath: '/backdrop.jpg',
+                genreIds: [18, 10751],
               },
             ],
           },

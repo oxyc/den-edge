@@ -12,6 +12,7 @@ class FakeWorker {
   readonly listeners = new Map<string, Set<(event: Event) => void>>();
   readonly posted: unknown[] = [];
   readonly terminate = vi.fn();
+  postFailure?: Error;
 
   addEventListener(type: string, listener: (event: Event) => void): void {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -24,6 +25,7 @@ class FakeWorker {
   }
 
   postMessage(message: unknown): void {
+    if (this.postFailure) throw this.postFailure;
     this.posted.push(message);
   }
 
@@ -67,6 +69,26 @@ it('validates requests and delivers a decoded batch in order', () => {
     transport.send({ ...request, protocol: 99 } as unknown as LibraryServiceClientMessage),
   ).toThrow('protocol 99 is not supported');
   expect(worker.posted).toHaveLength(1);
+  transport.close();
+});
+
+it('rejects one uncloneable request without terminating the shared Worker', () => {
+  const worker = new FakeWorker();
+  const transport = transportFor(worker);
+  const received = vi.fn();
+  transport.listen(received);
+  worker.postFailure = new DOMException(
+    "Failed to execute 'postMessage' on 'Worker': object could not be cloned.",
+    'DataCloneError',
+  );
+
+  expect(() => transport.send(request)).toThrowError(/could not be cloned/);
+  expect(received).not.toHaveBeenCalled();
+  expect(worker.terminate).not.toHaveBeenCalled();
+
+  worker.postFailure = undefined;
+  transport.send({ ...request, requestId: 'after-clone-error' });
+  expect(worker.posted).toEqual([{ ...request, requestId: 'after-clone-error' }]);
   transport.close();
 });
 

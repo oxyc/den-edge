@@ -628,6 +628,108 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   expect(metadata.changeRequests).toBe(0);
 });
 
+test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    if (!location.search.includes('roundtrip-verano')) return;
+    history.replaceState({}, '', `/tv/6066-verano-azul${location.search}`);
+    const NativeWorker = window.Worker;
+    window.fixtureWorkerCount = 0;
+    window.fixtureWorkerMessages = [];
+    window.fixtureWorkerTerminations = [];
+    window.Worker = class extends NativeWorker {
+      fixtureId;
+      constructor(url, options) {
+        super(url, options);
+        this.fixtureId = ++window.fixtureWorkerCount;
+      }
+      postMessage(message, ...rest) {
+        window.fixtureWorkerMessages.push({
+          worker: this.fixtureId,
+          type: message?.type,
+          kind: message?.request?.kind,
+          commandKind: message?.command?.kind,
+          commandScope: message?.command?.scope,
+        });
+        return super.postMessage(message, ...rest);
+      }
+      terminate() {
+        window.fixtureWorkerTerminations.push(this.fixtureId);
+        return super.terminate();
+      }
+    };
+  });
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.route('**/atlas/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.atlas' } }),
+  );
+  await page.route('**/atlas/index/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas/recommend/**', (route) =>
+    route.fulfill({ json: { slides: [{ type: 'movie', id: 900 }] } }),
+  );
+  await page.route('**/atlas/recommend', (route) =>
+    route.fulfill({
+      json: {
+        slides: [{ type: 'movie', id: 900, why: { score: 1, reason: 'similar' } }],
+      },
+    }),
+  );
+
+  await page.goto(`${FIXTURE}?seed&verano`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.goto(`${FIXTURE}?routed&online&roundtrip-verano`);
+  let active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Series 6066' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/' } })),
+  );
+  active = page.locator('[data-route-page][data-active="true"]');
+  const title = active
+    .getByRole('region', { name: 'Continue Watching', exact: true })
+    .getByRole('link', { name: /Series 6066/ });
+  await expect(title).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.fixtureWorkerMessages.filter(
+            ({ commandKind, commandScope }) =>
+              commandKind === 'retained.billboard.set' && commandScope?.kind === 'personal',
+          ).length,
+      ),
+    )
+    .toBeGreaterThan(0);
+
+  await title.click();
+  active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Series 6066' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(active.getByText('Couldn’t load this title from TMDB.')).toHaveCount(0);
+  const worker = await page.evaluate(() => ({
+    count: window.fixtureWorkerCount,
+    terminations: window.fixtureWorkerTerminations,
+  }));
+  expect(worker).toEqual({ count: 1, terminations: [] });
+  expect(metadata.requests.filter(({ ref }) => ref === 'tv:6066').length).toBeGreaterThan(0);
+});
+
 test('a large paired library cold-loads every lazy view through the Worker', async ({ page }) => {
   let releaseMetadata;
   let metadataHeld;
