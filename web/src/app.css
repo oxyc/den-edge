@@ -183,6 +183,24 @@ input {
   cursor: progress;
 }
 
+/* A save under way on a control that already shows its new state (`Button`'s `saving`). It starts after the delay,
+   so a save that is over by then never flickers; with reduced motion it settles on a dimmer button instead. */
+.den-button[data-saving] {
+  animation: den-saving 0.9s ease-in-out 150ms infinite alternate;
+}
+
+@keyframes den-saving {
+  to {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .den-button[data-saving] {
+    animation: den-saving 1ms linear 150ms 1 forwards;
+  }
+}
+
 @media (hover: hover) and (pointer: fine) {
   .den-button:hover:not(:disabled, [aria-disabled='true']) {
     border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));

@@ -539,6 +539,9 @@ describe('LibraryLogAuthority', () => {
       get pendingActions() {
         return pending;
       },
+      get queuedActions() {
+        return pending;
+      },
       title: () => undefined,
       newestStamp: () => [0, 0, ''] as [number, number, string],
       writeAction: async () => {
@@ -571,6 +574,45 @@ describe('LibraryLogAuthority', () => {
         },
       }),
     );
+  });
+
+  it('tells the page how an edit answered before it was sent came to end', async () => {
+    const { log, authority } = await localAuthority();
+    const events: unknown[] = [];
+    authority.listen((event) => events.push(event));
+    const deferred = log.onDeferred!;
+
+    deferred({ outcome: 'sent', changed: false });
+    expect(events.splice(0)).toEqual([{ kind: 'changed', affected: [{ kind: 'connections' }] }]);
+
+    deferred({ outcome: 'sent', changed: true });
+    expect(events.splice(0)).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+
+    // Refused for good, it was taken back out: every view reads again, and the page says it was not kept.
+    deferred({ outcome: 'refused', changed: true });
+    expect(events.splice(0)).toEqual([
+      { kind: 'changed', affected: [{ kind: 'all' }] },
+      {
+        kind: 'status',
+        status: { kind: 'read-only', reason: 'Couldn’t save your last change. It was not kept.' },
+      },
+    ]);
+
+    deferred({ outcome: 'kept', changed: false });
+    expect(events.splice(0)).toEqual([
+      { kind: 'changed', affected: [{ kind: 'connections' }] },
+      {
+        kind: 'status',
+        status: {
+          kind: 'read-only',
+          reason:
+            'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
+        },
+      },
+    ]);
+
+    authority.close();
+    expect(log.onDeferred).toBeNull();
   });
 
   it('projects normalized overview, presence, Continue, and history views', async () => {

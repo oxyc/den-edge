@@ -163,6 +163,16 @@ const legacy = (row: Row): boolean =>
 interface Outcome {
   refused: boolean;
   applied?: boolean;
+  /** Another device had written a document first, so what was drawn of this write was derived again on theirs. */
+  merged?: boolean;
+}
+
+/** What an edit answered before it was sent came to (`LibraryLog.onDeferred`). */
+export interface DeferredDelivery {
+  /** `kept`: den-edge was out of reach, and the edit stays in this browser to be sent again. */
+  outcome: 'sent' | 'kept' | 'refused';
+  /** The rows this browser holds changed with it: a refusal taken back, or another device's edit merged in. */
+  changed: boolean;
 }
 
 /**
@@ -274,6 +284,8 @@ export class LibraryLog {
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
   private readonly flushing = new Set<string>();
+  /** Told how each edit answered before it was sent came to end; the authority turns that into what the page sees. */
+  onDeferred: ((delivery: DeferredDelivery) => void) | null = null;
   /**
    * A refresh changed what this browser holds and has not said so yet: one that read page N and failed on N+1 keeps
    * the rows of N, and the next refresh to finish reports them, where it may find nothing new of its own.
@@ -2254,7 +2266,8 @@ export class LibraryLog {
     outcome?: Outcome,
     durable = true,
   ): Promise<Row | null> {
-    if (!(await this.writeOps(opsFor(before, after), outcome, durable))) return null;
+    if (!(await this.writeOps(opsFor(before, after), outcome, durable, undefined, true)))
+      return null;
     const now =
       after.kind === 'rec'
         ? this.title(after.title)
@@ -2269,12 +2282,18 @@ export class LibraryLog {
    * way, a generation change, a library that needs a newer build — is sent again later and drawn meanwhile. True
    * when sent or kept; false when it was not saved: refused for good, or nowhere to keep it. `key` is a piece of
    * kept work already holding them.
+   *
+   * `answerFirst`, for one edit made by hand: once it is kept it answers, drawn, and is sent after. The round trip to
+   * den-edge is all of the wait, and the edit is no less safe for it — a send that does not get through is sent
+   * again, as work kept from before is. What the send comes to is told to `onDeferred`, and a refusal for good takes
+   * the edit back out.
    */
   private async writeOps(
     ops: Op[],
     outcome: Outcome = { refused: false },
     durable = true,
     key?: string,
+    answerFirst = false,
   ): Promise<boolean> {
     if (!ops.length) return true;
     let kept = key;
@@ -2282,7 +2301,33 @@ export class LibraryLog {
       kept = this.pendingPrefix + 'ops:' + crypto.randomUUID();
       if (!(await this.keepPending(kept, JSON.stringify({ ops: await this.sealKept(ops) }))))
         return false;
+      if (answerFirst) {
+        this.projectOps(ops);
+        this.flushing.add(kept);
+        void this.deliverOps(ops, outcome, kept, undefined, true)
+          .then((result) => this.settleDeferred(ops, outcome, result))
+          .catch((error: unknown) =>
+            console.error('den: a library write could not be settled', error),
+          );
+        return true;
+      }
     }
+    const result = await this.deliverOps(ops, outcome, kept, key, false);
+    // Kept: saved, for a fresh edit; still waiting, for kept work sent again.
+    return result === 'sent' || (result === 'kept' && !key);
+  }
+
+  /**
+   * Send `ops` and settle the work kept for them: `sent` and gone from this browser, `refused` for good, or `kept`
+   * because den-edge was out of reach (`lost` when there was nowhere to keep it). `drawn`: already shown.
+   */
+  private async deliverOps(
+    ops: Op[],
+    outcome: Outcome,
+    kept: string | undefined,
+    key: string | undefined,
+    drawn: boolean,
+  ): Promise<'sent' | 'refused' | 'kept' | 'lost'> {
     if (kept) this.flushing.add(kept);
     const run = this.writes.then(() => this.sendOps(ops, outcome));
     this.writes = run.catch(() => false);
@@ -2299,18 +2344,45 @@ export class LibraryLog {
         await this.discard(kept);
         this.rejected.delete(kept);
       }
-      return true;
+      return 'sent';
     }
     if (outcome.refused) {
       // A fresh edit refused for good is not kept to be refused again; one kept from before waits `RECHECK_MS`.
       if (key) this.rejected.set(key, Date.now());
       else if (kept) await this.discard(kept);
-      return false;
+      return 'refused';
     }
-    if (!kept) return false;
-    this.projectOps(ops);
-    // Kept: saved, for a fresh edit; still waiting, for kept work sent again.
-    return !key;
+    if (!kept) return 'lost';
+    if (!drawn) this.projectOps(ops);
+    return 'kept';
+  }
+
+  /**
+   * An edit answered before it was sent has been sent, or kept, or refused for good: the last takes what was drawn of
+   * it back to what den-edge holds, and draws the work still kept over that, so a row is never left showing a write
+   * that is nowhere.
+   */
+  private async settleDeferred(
+    ops: Op[],
+    outcome: Outcome,
+    result: 'sent' | 'refused' | 'kept' | 'lost',
+  ): Promise<void> {
+    if (result === 'refused') {
+      for (const name of touched(ops)) {
+        const held = this.acknowledged.get(name);
+        if (held) this.entries.set(name, held);
+        else this.entries.delete(name);
+      }
+      this.projected++;
+      await this.projectKept();
+      console.error(
+        `den: den-edge refused a library write (${this.refusal ?? 'unknown'}); it was not kept`,
+      );
+    }
+    this.onDeferred?.({
+      outcome: result === 'sent' || result === 'refused' ? result : 'kept',
+      changed: result === 'refused' || !!outcome.merged,
+    });
   }
 
   /**
@@ -2368,6 +2440,7 @@ export class LibraryLog {
         await this.registerMember();
         return true;
       }
+      outcome.merged = true;
       for (const conflict of batch.conflicts) {
         const write = writes.find(({ k }) => k === conflict.k);
         if (!write) continue;
@@ -2673,6 +2746,10 @@ export class LibraryLog {
           const event = trackerEvent(row)!;
           return opsFor(event.before, event.after);
         }),
+        undefined,
+        true,
+        undefined,
+        true,
       );
     if (this.offline) {
       await this.followKeptForm();
@@ -2976,6 +3053,13 @@ export class LibraryLog {
 
   get pendingActions(): number {
     return this.pending.size;
+  }
+
+  /** Kept work not being sent now: waiting for den-edge, as against a send under way that is expected to land. */
+  get queuedActions(): number {
+    let queued = 0;
+    for (const key of this.pending.keys()) if (!this.flushing.has(key)) queued++;
+    return queued;
   }
 
   private async restoreJournal(): Promise<LibraryLog> {

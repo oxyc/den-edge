@@ -26,6 +26,8 @@
     size?: ButtonSize;
     pressed?: boolean;
     busy?: boolean;
+    /** The save `busy` stands for is one the person is waiting on: the button pulses once the wait is long enough to notice. */
+    saving?: boolean;
     disabled?: boolean;
     ariaLabel?: string;
     class?: string;
@@ -47,6 +49,7 @@
     size = 'regular',
     pressed,
     busy = false,
+    saving = false,
     disabled = false,
     ariaLabel,
     class: className = '',
@@ -84,6 +87,7 @@
   aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
   aria-pressed={pressed ?? attributes['aria-pressed']}
   aria-busy={busy || attributes['aria-busy'] || undefined}
+  data-saving={saving || undefined}
   aria-disabled={busy || attributes['aria-disabled'] || undefined}
   {disabled}
   onclick={activate}>{@render contents()}</button

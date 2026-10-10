@@ -1220,6 +1220,143 @@ describe('SIMKL delivery on Library v4', () => {
   });
 });
 
+describe('an edit answered before it is sent', () => {
+  const ref = { type: 'movie' as const, id: 550 };
+
+  /** A log on a vault, whose sends to den-edge wait for `release`, or fail as `answer` says. */
+  async function held(answer?: (init: RequestInit) => Response | Promise<Response>) {
+    const server = await edge([filmDocument(550)]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const batches: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      if (String(input).endsWith('/batch') && init.method === 'POST') {
+        batches.push('batch');
+        await gate;
+        const refused = await answer?.(init);
+        if (refused) return refused;
+      }
+      return server.fetchImpl(input, init);
+    };
+    const { vault, data } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    const settled: Array<{ outcome: string; changed: boolean }> = [];
+    const next = () => vi.waitFor(() => expect(settled.length).toBeGreaterThan(0));
+    log.onDeferred = (delivery) => settled.push(delivery);
+    return { server, log, release, batches, settled, next, data };
+  }
+
+  it('resolves once the edit is kept and drawn, and sends it after', async () => {
+    const { server, log, release, batches, settled, next } = await held();
+    const before = log.title(ref)!;
+    const saved = await log.write(react(before, 'love', at(4000)));
+
+    // The wait for den-edge is still on, and the edit is already what this browser shows and keeps.
+    expect(saved).not.toBeNull();
+    expect(log.title(ref)?.reaction.value).toBe('love');
+    expect(log.pendingActions).toBe(1);
+    expect(log.queuedActions).toBe(0);
+    expect(document(await server.opened(), 'title:movie:550')?.reaction).toBeUndefined();
+
+    release();
+    await next();
+    expect(batches).toHaveLength(1);
+    expect(settled).toEqual([{ outcome: 'sent', changed: false }]);
+    expect(document(await server.opened(), 'title:movie:550')?.reaction).toEqual({
+      value: 'love',
+      at: at(4000),
+    });
+    expect(log.pendingActions).toBe(0);
+  });
+
+  it('builds a second edit on the first while the first is still being sent', async () => {
+    const { server, log, release, settled } = await held();
+    await log.write(react(log.title(ref)!, 'love', at(4000)));
+    await log.write({ ...log.title(ref)!, dismissed: { value: true, at: at(4001) } });
+    expect(log.title(ref)).toMatchObject({
+      reaction: { value: 'love' },
+      dismissed: { value: true },
+    });
+
+    release();
+    await vi.waitFor(() => expect(settled).toHaveLength(2));
+    const stored = document(await server.opened(), 'title:movie:550')!;
+    expect(stored.reaction).toEqual({ value: 'love', at: at(4000) });
+    expect(stored.dismissed).toEqual({ value: true, at: at(4001) });
+    expect(log.pendingActions).toBe(0);
+  });
+
+  it('keeps the edit, queued, when den-edge cannot be reached', async () => {
+    const { log, release, settled, next } = await held(() => {
+      throw new TypeError('network down');
+    });
+    expect(await log.write(react(log.title(ref)!, 'love', at(4000)))).not.toBeNull();
+
+    release();
+    await next();
+    expect(settled).toEqual([{ outcome: 'kept', changed: false }]);
+    expect(log.title(ref)?.reaction.value).toBe('love');
+    expect(log.pendingActions).toBe(1);
+    expect(log.queuedActions).toBe(1);
+  });
+
+  it('takes the edit back out, and logs why, when den-edge refuses it for good', async () => {
+    const { log, release, settled, next, data } = await held(
+      () => new Response(JSON.stringify({ error: 'invalid_batch' }), { status: 400 }),
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const keptEdits = () => [...data.keys()].filter((key) => key.includes(':ops:'));
+    expect(await log.write(react(log.title(ref)!, 'love', at(4000)))).not.toBeNull();
+    expect(log.title(ref)?.reaction.value).toBe('love');
+    expect(keptEdits()).toHaveLength(1);
+
+    release();
+    await next();
+    expect(settled).toEqual([{ outcome: 'refused', changed: true }]);
+    expect(log.title(ref)?.reaction.value).toBeNull();
+    expect(log.pendingActions).toBe(0);
+    expect(keptEdits()).toHaveLength(0);
+    expect(log.refusal).toBe('invalid_batch');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('refused a library write'));
+    error.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('says the rows changed when another device had written the document first', async () => {
+    const { server, log, release, settled, next } = await held();
+    await log.write({ ...log.title(ref)!, dismissed: { value: true, at: at(4000) } });
+    await server.append(filmDocument(550, { reaction: { value: 'like', at: at(5000) } }));
+
+    release();
+    await next();
+    expect(settled).toEqual([{ outcome: 'sent', changed: true }]);
+    const stored = document(await server.opened(), 'title:movie:550')!;
+    expect(stored.reaction).toEqual({ value: 'like', at: at(5000) });
+    expect(stored.dismissed).toEqual({ value: true, at: at(4000) });
+  });
+
+  it('still waits for den-edge when there is nowhere to keep the edit', async () => {
+    const server = await edge([filmDocument(550)]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      if (String(input).endsWith('/batch') && init.method === 'POST') await gate;
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, null))!;
+    let resolved = false;
+    const write = log.write(react(log.title(ref)!, 'love', at(4000))).then((row) => {
+      resolved = true;
+      return row;
+    });
+    await new Promise((done) => setTimeout(done, 50));
+    expect(resolved).toBe(false);
+    release();
+    expect(await write).not.toBeNull();
+  });
+});
+
 function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {
