@@ -44,6 +44,19 @@ const retryStates = new WeakMap<NamedLibrary, RetryState>();
 const closedSessions = new WeakSet<NamedLibrary>();
 
 /**
+ * What any naming pass for a session has asked for, so overlapping passes share it instead of asking again. Home
+ * restarts its pass on every Continue update, and each answered batch of TV shapes is one: on a 744-series library
+ * that asked 9,850 titles for 763 unique ones (measured on d.oxy.fi, 0.264.37).
+ */
+interface Flights {
+  /** Asked and not yet answered: a later pass waits for that answer rather than repeating the question. */
+  pending: Map<string, Promise<void>>;
+  /** Answered with a title since a pass began, which that pass's own `known` cannot have seen. */
+  named: Set<string>;
+}
+const flights = new WeakMap<NamedLibrary, Flights>();
+
+/**
  * Ask the library service to name an explicit set. A large lazy screen paints one bounded batch at a time;
  * transient Worker/provider failures are retried without discarding successful neighbours.
  */
@@ -62,31 +75,67 @@ export async function nameLibraryTitles(session: NamedLibrary, refs: Ref[]): Pro
     );
     return { known, wanted };
   });
-  const retry = await nameBatches(session, wanted, known);
   // Readiness is the first bounded pass, not the provider's backoff. Successful neighbours are already visible;
-  // retry transient holes in the background without holding Home's shelves behind them.
-  queueLibraryTitleRetries(session, retry.refs, retry.retryAfterMs);
+  // retry transient holes in the background without holding Home's shelves behind them. Each batch's holes are
+  // queued as it answers: another pass may be waiting on this batch while this pass waits behind a slow one.
+  const { shared } = await nameBatches(session, wanted, known, (refs, retryAfterMs) =>
+    queueLibraryTitleRetries(session, refs, retryAfterMs),
+  );
+  // Settled means named: what another pass was already asking counts toward this one's readiness too.
+  await Promise.all(shared);
 }
 
 async function nameBatches(
   session: NamedLibrary,
   refs: Ref[],
   known: Set<string>,
-): Promise<{ refs: Ref[]; retryAfterMs: number }> {
+  queue?: (refs: Ref[], retryAfterMs: number) => void,
+): Promise<{ refs: Ref[]; retryAfterMs: number; shared: Promise<void>[] }> {
   const retry: Ref[] = [];
   let retryAfterMs = 0;
-  for (let at = 0; at < refs.length; at += LIBRARY_METADATA_BATCH) {
-    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0 };
-    const batch = refs.slice(at, at + LIBRARY_METADATA_BATCH);
+  const refused = (batch: Ref[], after: number) => {
+    if (queue) return queue(missing(session, batch, known), after);
+    retry.push(...batch);
+    retryAfterMs = Math.max(retryAfterMs, after);
+  };
+  let shared = flights.get(session);
+  if (!shared) flights.set(session, (shared = { pending: new Map(), named: new Set() }));
+  const { pending, named } = shared;
+  const awaited = new Set<Promise<void>>();
+  let at = 0;
+  while (at < refs.length) {
+    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0, shared: [] };
+    // Started inside a route effect: the shapes read here must not become its dependency (see nameLibraryTitles).
+    const batch = untrack(() => {
+      const next: Ref[] = [];
+      for (; at < refs.length && next.length < LIBRARY_METADATA_BATCH; at++) {
+        const ref = refs[at]!;
+        const asked = pending.get(titleKey(ref));
+        if (asked) awaited.add(asked);
+        else if (due(session, ref, known, named)) next.push(ref);
+      }
+      return next;
+    });
+    if (!batch.length) break;
+    let settle!: () => void;
+    const asked = new Promise<void>((resolve) => (settle = resolve));
+    for (const ref of batch) pending.set(titleKey(ref), asked);
     const found = await session.libraryMetadata(batch).catch(() => null);
-    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0 };
+    for (const ref of batch)
+      if (pending.get(titleKey(ref)) === asked) pending.delete(titleKey(ref));
+    settle();
+    if (closedSessions.has(session)) return { refs: [], retryAfterMs: 0, shared: [] };
     if (!found) {
-      retry.push(...batch);
+      refused(batch, 0);
       continue;
     }
-    retryAfterMs = Math.max(retryAfterMs, found.retryAfterMs ?? 0);
-    const titles = found.titles.filter((title) => !known.has(titleKey(title)));
-    for (const title of found.titles) known.add(titleKey(title));
+    const titles = found.titles.filter(
+      (title) => !known.has(titleKey(title)) && !named.has(titleKey(title)),
+    );
+    for (const title of found.titles) {
+      known.add(titleKey(title));
+      named.add(titleKey(title));
+    }
     const answered = new Set([...found.titles.map(titleKey), ...found.retryable.map(titleKey)]);
     const absent = batch.filter((ref) => !answered.has(titleKey(ref)));
     const shapes = found.shapes.map(
@@ -100,9 +149,9 @@ async function nameBatches(
       }
     } else if (absent.length && session.publishLibraryMetadata)
       session.publishLibraryMetadata([], [], absent);
-    retry.push(...found.retryable);
+    refused(found.retryable, found.retryAfterMs ?? 0);
   }
-  return { refs: missing(session, retry, known), retryAfterMs };
+  return { refs: missing(session, retry, known), retryAfterMs, shared: [...awaited] };
 }
 
 function queueLibraryTitleRetries(session: NamedLibrary, refs: Ref[], retryAfterMs = 0): void {
@@ -175,15 +224,19 @@ export function cancelLibraryTitleNaming(session: NamedLibrary): void {
   retryStates.delete(session);
 }
 
+const due = (
+  session: NamedLibrary,
+  ref: Ref,
+  known: Set<string>,
+  named: ReadonlySet<string> = new Set(),
+): boolean =>
+  !session.displayMissing?.(ref) &&
+  ((!known.has(titleKey(ref)) && !named.has(titleKey(ref))) ||
+    (ref.type === 'tv' && !session.shapes.has(titleKey(ref))));
+
 const missing = (session: NamedLibrary, refs: Ref[], known: Set<string>): Ref[] => [
   ...new Map(
-    refs
-      .filter(
-        (ref) =>
-          !session.displayMissing?.(ref) &&
-          (!known.has(titleKey(ref)) || (ref.type === 'tv' && !session.shapes.has(titleKey(ref)))),
-      )
-      .map((ref) => [titleKey(ref), ref]),
+    refs.filter((ref) => due(session, ref, known)).map((ref) => [titleKey(ref), ref]),
   ).values(),
 ];
 
