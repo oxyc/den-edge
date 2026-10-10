@@ -20,6 +20,7 @@ class FakeWorker {
   readonly listeners = new Map<string, Set<(event: Event) => void>>();
   readonly posted: WorkerClientMessage[] = [];
   readonly terminate = vi.fn();
+  postFailure?: Error;
 
   addEventListener(type: string, listener: (event: Event) => void): void {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -32,6 +33,7 @@ class FakeWorker {
   }
 
   postMessage(message: WorkerClientMessage): void {
+    if (this.postFailure) throw this.postFailure;
     this.posted.push(message);
   }
 
@@ -663,6 +665,61 @@ it('does not replace a live Worker for a request-scoped provider failure', async
     failure: { code: 'unavailable', message: 'TMDB did not answer' },
     scope: 'request',
   });
+  expect(createWorker).toHaveBeenCalledOnce();
+  services.close();
+});
+
+it('does not replace a live Worker for a locally invalid content request', async () => {
+  const worker = new FakeWorker();
+  const createWorker = vi.fn(() => worker as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  await expect(
+    services.content.query({
+      kind: 'titles',
+      titles: [
+        {
+          type: 'movie',
+          id: 10201,
+          title: 'Atlas card fields do not belong on the wire',
+        },
+      ],
+    } as unknown as Parameters<typeof services.content.query>[0]),
+  ).rejects.toMatchObject({
+    failure: { code: 'invalid-request', retryable: false },
+    scope: 'local',
+  });
+  expect(createWorker).toHaveBeenCalledOnce();
+  expect(worker.terminate).not.toHaveBeenCalled();
+  services.close();
+});
+
+it('does not replace a live Worker when one content request cannot be cloned', async () => {
+  const worker = new FakeWorker();
+  const createWorker = vi.fn(() => worker as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+  worker.postFailure = new DOMException('request could not be cloned', 'DataCloneError');
+
+  await expect(services.content.query({ kind: 'service.regions' })).rejects.toMatchObject({
+    failure: { code: 'invalid-request', retryable: false },
+    scope: 'local',
+  });
+  expect(createWorker).toHaveBeenCalledOnce();
+  expect(worker.terminate).not.toHaveBeenCalled();
+
+  worker.postFailure = undefined;
+  const next = services.content.query({ kind: 'service.regions' });
+  const query = worker.posted[0];
+  if (query?.type !== 'content-query') throw new Error('content query was not sent');
+  worker.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: query.requestId,
+      result: { kind: 'service.regions', regions: [] },
+    },
+  ]);
+  await expect(next).resolves.toEqual({ kind: 'service.regions', regions: [] });
   expect(createWorker).toHaveBeenCalledOnce();
   services.close();
 });

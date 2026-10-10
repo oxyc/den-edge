@@ -997,6 +997,38 @@ describe('withPosters', () => {
     ]);
     expect(asked).toEqual(['/3/movie/2', '/3/movie/3']);
   });
+
+  it('sends exact title refs rather than Atlas presentation cards', async () => {
+    const asked: unknown[] = [];
+    const row = withPostersImpl(
+      {
+        id: 'strict-wire',
+        title: 'Strict wire',
+        load: async () => [
+          { type: 'movie', id: 2, title: 'Needs one', likely: true },
+          { type: 'tv', id: 3, title: 'Needs one too', year: 2024 },
+        ],
+      },
+      {
+        content: {
+          query: async (request) => {
+            if (request.kind !== 'titles') throw new Error('unexpected content query');
+            asked.push(request.titles);
+            return { kind: 'titles', titles: [], retryable: [] } as never;
+          },
+          onStatus: () => () => {},
+        },
+      },
+    );
+
+    await row.load(1);
+    expect(asked).toEqual([
+      [
+        { type: 'movie', id: 2 },
+        { type: 'tv', id: 3 },
+      ],
+    ]);
+  });
 });
 
 describe('homeCountry', () => {

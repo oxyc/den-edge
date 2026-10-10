@@ -308,7 +308,12 @@ export function withPosters(row: RowDef, { content }: RelatedOptions): RowDef {
       const loaded = await row.load(page);
       const missing = loaded.filter((title) => !title.posterPath && !title.posterUrl);
       if (!missing.length) return loaded;
-      const normalized = (await content.query({ kind: 'titles', titles: missing })).titles;
+      const normalized = (
+        await content.query({
+          kind: 'titles',
+          titles: missing.map(({ type, id }) => ({ type, id })),
+        })
+      ).titles;
       const byKey = new Map(normalized.map((title) => [keyOf(title), title]));
       return loaded.map((title) => ({ ...title, ...byKey.get(keyOf(title)) }));
     },

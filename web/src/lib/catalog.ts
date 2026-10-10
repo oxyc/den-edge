@@ -891,7 +891,10 @@ export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
       const missing = loaded.flatMap((title, at) => (title.posterPath ? [] : [{ title, at }]));
       await runBounded(missing, 4, async ({ title: partial, at }) => {
         try {
-          const full = await title(partial);
+          // The content wire intentionally accepts only a title reference. Atlas cards carry presentation fields
+          // too; passing the whole card made exact validation reject this local request before it reached the
+          // Worker, and a caller could mistake that programming error for a dead transport.
+          const full = await title({ type: partial.type, id: partial.id });
           if (full)
             out[at] = {
               ...full,
