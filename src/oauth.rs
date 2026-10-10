@@ -189,11 +189,17 @@ pub fn write_public_key(text: &str) -> Option<Vec<u8>> {
     Some(key)
 }
 
-/// The grant key wrapped under a refresh secret (assistant v1 §8). `secret` is the refresh token's secret as issued,
-/// the base64url of 32 random bytes; the wrap is keyed by those bytes.
-fn wrap_grant(secret: &str, sid: &str, grant: &GrantKey, nonce: &[u8; 12]) -> String {
+/// The OS random source as the CryptoRng den-assistant draws a fresh nonce or `eseed` from. A failing OS source
+/// panics, as `random_bytes` does: a guessable nonce would be worse than stopping.
+fn os_rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+    getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+}
+
+/// The grant key wrapped under a refresh secret (assistant v1 §8), with a fresh nonce. `secret` is the refresh
+/// token's secret as issued, the base64url of 32 random bytes; the wrap is keyed by those bytes.
+fn wrap_grant(secret: &str, sid: &str, grant: &GrantKey) -> String {
     let bytes = zeroize::Zeroizing::new(b64url_decode(secret).expect("a secret this server issued decodes"));
-    den_assistant::wrap(&bytes, sid, grant, nonce)
+    den_assistant::wrap_with_rng(&bytes, sid, grant, &mut os_rng())
 }
 
 /// [`wrap_grant`] undone with the refresh secret presented, or `None` when it does not unwrap.
@@ -202,9 +208,9 @@ fn unwrap_grant(secret: &str, sid: &str, wrapped: &str) -> Option<GrantKey> {
     den_assistant::unwrap(&bytes, sid, wrapped).ok()
 }
 
-/// The `dw` claim (assistant v1 §7): the grant key sealed to den-mcp's key, bound to the token's `sub`.
-fn write_claim(public: &[u8], sub: &str, grant: &GrantKey, eseed: &[u8]) -> Option<String> {
-    den_assistant::seal_claim(public, sub, grant, eseed).ok()
+/// The `dw` claim (assistant v1 §7): the grant key sealed afresh to den-mcp's key, bound to the token's `sub`.
+fn write_claim(public: &[u8], sub: &str, grant: &GrantKey) -> Option<String> {
+    den_assistant::seal_claim_with_rng(public, sub, grant, &mut os_rng()).ok()
 }
 
 /// An authorization request waiting for the consent page.
@@ -1001,7 +1007,7 @@ fn access_token(
     let header = json!({ "alg": "EdDSA", "typ": "at+jwt", "kid": oauth.kid });
     let dw = match (grant, &oauth.write_public) {
         (Some(grant), Some(public)) => {
-            write_claim(public, &session.sid, grant, &crate::random_bytes::<{ den_assistant::ESEED_LEN }>())
+            write_claim(public, &session.sid, grant)
         }
         _ => None,
     };
@@ -1126,7 +1132,7 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
     let sid = random_id();
     // The grant key leaves memory only wrapped under the first refresh secret, which is kept only as its hash.
     let wrap =
-        code.grant.as_ref().map(|grant| wrap_grant(&secret, &sid, grant, &crate::random_bytes::<12>()));
+        code.grant.as_ref().map(|grant| wrap_grant(&secret, &sid, grant));
     let session = Session {
         v: VERSION,
         sid,
@@ -1250,7 +1256,7 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
         }
     };
     let secret = b64url(&crate::random_bytes::<32>());
-    let wrap = grant.as_ref().map(|grant| wrap_grant(&secret, sid, grant, &crate::random_bytes::<12>()));
+    let wrap = grant.as_ref().map(|grant| wrap_grant(&secret, sid, grant));
     let replaced = std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes()));
     if retry {
         // The secret the lost answer carried is never valid, and the retry allowance is consumed: accepting the
@@ -2049,7 +2055,8 @@ pub(crate) mod tests {
         load(&h.state, &session_key(&sid)).await.unwrap().unwrap()
     }
 
-    /// The vectors' wrap and claim, made through the functions this server issues them with.
+    /// The vectors' wrap and claim: a refresh token's secret is read as den-spec reads it (the vector's wrap opens
+    /// under it), and what this server issues — with fresh randomness each time — opens to the grant.
     #[test]
     fn the_wrap_and_the_claim_are_the_vectors() {
         let v = vectors();
@@ -2059,16 +2066,24 @@ pub(crate) mod tests {
         let session = w["session"].as_str().unwrap();
         let (sid, secret) = w["refreshToken"].as_str().unwrap().split_once('.').unwrap();
         assert_eq!(sid, session);
-        let nonce: [u8; 12] = unhex(&w["nonce"]).try_into().unwrap();
-        let wrapped = wrap_grant(secret, session, &grant, &nonce);
-        assert_eq!(wrapped, w["wrapped"].as_str().unwrap());
+        let vector = w["wrapped"].as_str().unwrap();
+        assert_eq!(unwrap_grant(secret, session, vector).unwrap().id(), grant.id());
+        let wrapped = wrap_grant(secret, session, &grant);
+        assert_eq!(wrapped.len(), vector.len());
+        assert_ne!(wrapped, wrap_grant(secret, session, &grant), "a fresh nonce each time");
         assert_eq!(unwrap_grant(secret, session, &wrapped).unwrap().id(), grant.id());
         assert!(unwrap_grant(&b64url(&[0; 32]), session, &wrapped).is_none(), "another secret opens nothing");
+        assert!(unwrap_grant(secret, LIB, &wrapped).is_none(), "another session opens nothing");
+
         let c = &f["claim"];
+        let sub = c["sub"].as_str().unwrap();
         let public = write_public_key(f["keys"]["mcp"]["public"].as_str().unwrap()).unwrap();
-        let claim = write_claim(&public, c["sub"].as_str().unwrap(), &grant, &unhex(&c["eseed"])).unwrap();
-        assert_eq!(claim, c["claim"].as_str().unwrap());
+        let claim = write_claim(&public, sub, &grant).unwrap();
         assert_eq!(claim.len() as u64, c["claimLength"].as_u64().unwrap());
+        assert_ne!(claim, write_claim(&public, sub, &grant).unwrap(), "a fresh eseed each time");
+        let opened = den_assistant::open_claim(&seed("mcp"), sub, &claim).unwrap();
+        assert_eq!((opened.id(), opened.secret()), (grant.id(), grant.secret()));
+        assert_eq!(c["grant"], grant.id());
         assert!(write_public_key(&b64url(&[1; 32])).is_none(), "a key that is not X-Wing's is refused");
     }
 
@@ -2200,12 +2215,8 @@ pub(crate) mod tests {
 
         // A wrap that does not open under the secret presented: the session ends.
         let mut tampered = stored_session(&h, later["access_token"].as_str().unwrap()).await;
-        tampered.wrap = Some(wrap_grant(
-            &b64url(&[3; 32]),
-            &tampered.sid,
-            &GrantKey::from_secret(&seed("grant")),
-            &[0; 12],
-        ));
+        tampered.wrap =
+            Some(wrap_grant(&b64url(&[3; 32]), &tampered.sid, &GrantKey::from_secret(&seed("grant"))));
         save(&h.state, &session_key(&tampered.sid), &tampered).await.unwrap();
         let current = later["refresh_token"].as_str().unwrap().to_owned();
         assert_eq!(refresh_with(&h, &tokens, &current).await.1["error"], "invalid_grant");
