@@ -116,6 +116,39 @@ test('a genuinely distant windowed shelf still releases its card trees after the
   await expect(page.locator('.proxy')).toHaveCount(8);
 });
 
+test('a pointer released outside the shelf clears its interaction pin', async ({ page }) => {
+  await guardNetwork(page);
+  await controlWindowedRows(page);
+  await mockPosterImages(page);
+  await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
+  const card = page.getByRole('link', { name: 'Continuing series 1' });
+  await expect(card).toBeVisible();
+  await card.evaluate((element) => {
+    element.draggable = false;
+    element.querySelectorAll('img').forEach((image) => (image.draggable = false));
+  });
+  const point = await card.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  await page.evaluate(() => window.denForceWindowedRowsFar());
+  // The active press keeps the real link mounted even beyond the ordinary retirement grace.
+  await page.waitForTimeout(500);
+  await expect(card).toBeVisible();
+
+  await page.mouse.move(5, 5);
+  await page.mouse.up();
+  await page.evaluate(() =>
+    document.activeElement instanceof HTMLElement ? document.activeElement.blur() : null,
+  );
+
+  await expect(page.locator('.card')).toHaveCount(0, { timeout: 1_000 });
+  await expect(page.locator('.proxy')).toHaveCount(8);
+});
+
 test('keyboard focus still promotes a windowed proxy to its full card', async ({ page }) => {
   await guardNetwork(page);
   await controlWindowedRows(page, true);

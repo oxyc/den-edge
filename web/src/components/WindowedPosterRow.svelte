@@ -45,11 +45,12 @@
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
   let retireTimer: ReturnType<typeof setTimeout> | undefined;
   let outside = false;
-  let interacting = false;
+  let interactingPointer: number | null = null;
   const RETIRE_GRACE_MS = 400;
   onDestroy(() => {
     clearTimeout(releaseTimer);
     clearTimeout(retireTimer);
+    stopReleaseListeners();
   });
 
   /**
@@ -60,18 +61,27 @@
    */
   function scheduleRetire() {
     clearTimeout(retireTimer);
-    if (!outside || interacting || !page.active || !rowNear) return;
+    if (!outside || interactingPointer !== null || !page.active || !rowNear) return;
     retireTimer = setTimeout(() => {
       retireTimer = undefined;
-      if (!outside || interacting || track?.contains(document.activeElement)) return;
+      if (!outside || interactingPointer !== null || track?.contains(document.activeElement))
+        return;
       rowNear = false;
     }, RETIRE_GRACE_MS);
   }
 
-  function releaseInteraction() {
+  function stopReleaseListeners() {
+    if (typeof window === 'undefined') return;
+    window.removeEventListener('pointerup', releaseInteraction, true);
+    window.removeEventListener('pointercancel', releaseInteraction, true);
+  }
+
+  function releaseInteraction(event: PointerEvent) {
+    if (event.pointerId !== interactingPointer) return;
+    stopReleaseListeners();
     // `click` follows pointerup in the same dispatch. The grace keeps the link mounted after this release while a
     // waiting observer exit is retired normally.
-    interacting = false;
+    interactingPointer = null;
     scheduleRetire();
   }
 
@@ -79,7 +89,8 @@
     if (!page.active) {
       clearTimeout(retireTimer);
       outside = false;
-      interacting = false;
+      interactingPointer = null;
+      stopReleaseListeners();
       rowNear = false;
       return;
     }
@@ -174,7 +185,15 @@
       const slot = target.closest<HTMLElement>('[data-card-index]');
       const index = Number(slot?.dataset.cardIndex);
       if (!Number.isInteger(index) || !items[index]) return;
-      interacting = true;
+      stopReleaseListeners();
+      interactingPointer = event.pointerId;
+      // Mouse pointers have no implicit capture. Listen only for this interaction's release at the window so a
+      // pointerup outside the horizontal scroller still clears the pin, without retargeting the eventual click.
+      window.addEventListener('pointerup', releaseInteraction, { capture: true, passive: true });
+      window.addEventListener('pointercancel', releaseInteraction, {
+        capture: true,
+        passive: true,
+      });
       clearTimeout(retireTimer);
       focusedKey = itemKey(items[index]);
     };
@@ -190,13 +209,11 @@
     resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', scroll, { passive: true });
     scroller.addEventListener('pointerdown', press, { passive: true });
-    scroller.addEventListener('pointerup', releaseInteraction, { passive: true });
-    scroller.addEventListener('pointercancel', releaseInteraction, { passive: true });
     return () => {
       scroller.removeEventListener('scroll', scroll);
       scroller.removeEventListener('pointerdown', press);
-      scroller.removeEventListener('pointerup', releaseInteraction);
-      scroller.removeEventListener('pointercancel', releaseInteraction);
+      stopReleaseListeners();
+      interactingPointer = null;
       resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
       if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
