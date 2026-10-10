@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { ContentServiceError } from './contentServiceClient';
 import { createWorkerServiceConnection, createWorkerServiceSession } from './libraryServiceFactory';
 import {
   LIBRARY_SERVICE_PROTOCOL,
@@ -339,15 +340,18 @@ it('leaves a terminal paired hello failure owned by explicit library retry', asy
     failure: { code: 'unavailable', retryable: true },
   });
   const loading = services.content.query({ kind: 'service.regions' });
-  const failedContent = expect(loading).rejects.toMatchObject({
-    failure: { code: 'unavailable', retryable: true },
-  });
+  const failedContent = loading.catch((error: unknown) => error);
   expect(first.posted).toHaveLength(1);
   expect(first.posted[0]).toMatchObject({ type: 'hello' });
   first.fail();
 
   await failedOpen;
-  await failedContent;
+  const contentFailure = await failedContent;
+  expect(contentFailure).toBeInstanceOf(ContentServiceError);
+  expect(contentFailure).toMatchObject({
+    failure: { code: 'unavailable', retryable: true },
+    scope: 'transport',
+  });
   expect(createWorker).toHaveBeenCalledOnce();
   expect(replacement.posted).toEqual([]);
 
@@ -587,18 +591,7 @@ it('lets the library supervisor replace a paired Worker after a detail transport
   await expect.poll(() => first.posted.length).toBe(2);
   const firstDetail = first.posted[1];
   if (firstDetail?.type !== 'content-query') throw new Error('detail query was not sent');
-  first.emit([
-    {
-      type: 'content-error',
-      protocol: CONTENT_SERVICE_PROTOCOL,
-      requestId: firstDetail.requestId,
-      error: {
-        code: 'unavailable',
-        message: 'content transport failed',
-        retryable: true,
-      },
-    },
-  ]);
+  first.fail('content transport failed');
 
   await expect.poll(() => replacement.posted.length).toBe(1);
   const replacementHello = replacement.posted[0];
@@ -643,6 +636,154 @@ it('lets the library supervisor replace a paired Worker after a detail transport
   expect(createWorker).toHaveBeenCalledTimes(2);
   services.close();
   expect(replacement.terminate).toHaveBeenCalledOnce();
+});
+
+it('does not replace a live Worker for a request-scoped provider failure', async () => {
+  const worker = new FakeWorker();
+  const createWorker = vi.fn(() => worker as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const loading = services.content.query({
+    kind: 'title.detail',
+    title: { type: 'tv', id: 213344 },
+    region: 'US',
+  });
+  const detail = worker.posted[0];
+  if (detail?.type !== 'content-query') throw new Error('detail query was not sent');
+  worker.emit([
+    {
+      type: 'content-error',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: detail.requestId,
+      error: { code: 'unavailable', message: 'TMDB did not answer', retryable: true },
+    },
+  ]);
+
+  await expect(loading).rejects.toMatchObject({
+    failure: { code: 'unavailable', message: 'TMDB did not answer' },
+    scope: 'request',
+  });
+  expect(createWorker).toHaveBeenCalledOnce();
+  services.close();
+});
+
+it('stops replaying content after four transport replacements when every generation dies', async () => {
+  const workers = Array.from({ length: 6 }, () => new FakeWorker());
+  const createWorker = vi.fn<() => Worker>();
+  for (const worker of workers) createWorker.mockReturnValueOnce(worker as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const first = workers[0]!;
+  const firstHello = first.posted[0];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  first.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: firstHello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+  const loading = services.content.query({ kind: 'service.regions' });
+
+  for (let generation = 0; generation < 5; generation += 1) {
+    const current = workers[generation]!;
+    await expect
+      .poll(() =>
+        current.posted.some(
+          (message) =>
+            message.type === 'content-query' && message.request.kind === 'service.regions',
+        ),
+      )
+      .toBe(true);
+    current.fail(`worker ${generation + 1} failed`);
+    if (generation === 4) break;
+    const next = workers[generation + 1]!;
+    await expect.poll(() => next.posted.length).toBe(1);
+    const hello = next.posted[0];
+    if (hello?.type !== 'hello') throw new Error('replacement hello was not sent');
+    next.emit([
+      {
+        type: 'ready',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: hello.requestId,
+        relayMembership: null,
+        version: { ...version, instance: `worker-${generation + 2}` },
+      },
+    ]);
+  }
+
+  await expect(loading).rejects.toMatchObject({
+    failure: {
+      code: 'unavailable',
+      message: 'content transport recovery was exhausted',
+      retryable: true,
+    },
+    scope: 'transport',
+  });
+  // The library supervisor independently keeps its authority healthy, but the exhausted content operation must not
+  // follow it into a sixth generation or turn that health recovery into an unbounded query replay.
+  const sixth = workers[5]!;
+  await expect.poll(() => sixth.posted.length).toBe(1);
+  expect(createWorker).toHaveBeenCalledTimes(6);
+  expect(sixth.posted[0]).toMatchObject({ type: 'hello' });
+  expect(sixth.posted).not.toContainEqual(
+    expect.objectContaining({ type: 'content-query', request: { kind: 'service.regions' } }),
+  );
+  services.close();
+});
+
+it('cancels promptly while a transport replacement is reopening the paired library', async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+
+  const opening = services.library.open(openOptions);
+  const firstHello = first.posted[0];
+  if (firstHello?.type !== 'hello') throw new Error('initial hello was not sent');
+  first.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: firstHello.requestId,
+      relayMembership: null,
+      version,
+    },
+  ]);
+  await opening;
+  const controller = new AbortController();
+  const loading = services.content.query({ kind: 'service.regions' }, controller.signal);
+  await expect.poll(() => first.posted.length).toBe(2);
+  first.fail();
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  controller.abort();
+  await expect(loading).rejects.toMatchObject({
+    failure: { code: 'cancelled' },
+    scope: 'local',
+  });
+
+  const replacementHello = replacement.posted[0];
+  if (replacementHello?.type !== 'hello') throw new Error('replacement hello was not sent');
+  replacement.emit([
+    {
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: replacementHello.requestId,
+      relayMembership: null,
+      version: { ...version, instance: 'worker-2' },
+    },
+  ]);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(replacement.posted).toEqual([replacementHello]);
+  services.close();
 });
 
 it('replays authoritative source configuration before retrying on a replacement Worker', async () => {

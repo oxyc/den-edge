@@ -34,18 +34,25 @@ interface Pending {
 }
 
 export class ContentServiceError extends Error {
-  constructor(readonly failure: ContentServiceFailure) {
+  constructor(
+    readonly failure: ContentServiceFailure,
+    /** Local distinction only: the wire already distinguishes a request reply from a channel-wide failure. */
+    readonly scope: 'request' | 'transport' | 'local' = 'request',
+  ) {
     super(failure.message);
     this.name = 'ContentServiceError';
   }
 }
 
 const cancelled = (): ContentServiceError =>
-  new ContentServiceError({
-    code: 'cancelled',
-    message: 'content request was cancelled',
-    retryable: false,
-  });
+  new ContentServiceError(
+    {
+      code: 'cancelled',
+      message: 'content request was cancelled',
+      retryable: false,
+    },
+    'local',
+  );
 
 /** Typed page facade for read-only content. Provider credentials and library versions never cross this boundary. */
 export class ContentServiceClient {
@@ -109,12 +116,15 @@ export class ContentServiceClient {
         reject(
           error instanceof ContentServiceError
             ? error
-            : new ContentServiceError({
-                code: 'unavailable',
-                message:
-                  error instanceof Error ? error.message : 'content service transport failed',
-                retryable: true,
-              }),
+            : new ContentServiceError(
+                {
+                  code: 'unavailable',
+                  message:
+                    error instanceof Error ? error.message : 'content service transport failed',
+                  retryable: true,
+                },
+                'transport',
+              ),
         );
       }
     });
@@ -185,7 +195,7 @@ export class ContentServiceClient {
   }
 
   #failAll(failure: ContentServiceFailure): void {
-    const error = new ContentServiceError(failure);
+    const error = new ContentServiceError(failure, 'transport');
     for (const pending of this.#pending.values()) {
       pending.stopAbort?.();
       pending.reject(error);

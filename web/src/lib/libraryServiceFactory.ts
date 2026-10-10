@@ -27,9 +27,42 @@ export interface LibraryServiceFactoryOptions {
 const productionWorker = () =>
   new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), { type: 'module' });
 
-// One recovery can itself land in a generation the library supervisor is already replacing. Keep an idempotent
-// content RPC following that burst, but never turn a crashing Worker into an unbounded retry loop.
+// The production trace contained four dead generations before the fifth stayed up. Follow that bounded burst,
+// with a short pause between later generations, but never let one request manufacture Workers for 15 seconds.
 const CONTENT_RECOVERY_MS = 15_000;
+const MAX_CONTENT_RECOVERIES = 4;
+const CONTENT_RECOVERY_BACKOFF_MS = [0, 100, 250, 500] as const;
+
+const recoveryExhausted = (): ContentServiceError =>
+  new ContentServiceError(
+    {
+      code: 'unavailable',
+      message: 'content transport recovery was exhausted',
+      retryable: true,
+    },
+    'transport',
+  );
+
+const asTransportFailure = (error: unknown): ContentServiceError => {
+  if (error instanceof ContentServiceError && error.scope === 'transport') return error;
+  const candidate =
+    typeof error === 'object' && error !== null && 'failure' in error
+      ? (error as { failure?: { message?: unknown; retryable?: unknown } }).failure
+      : undefined;
+  return new ContentServiceError(
+    {
+      code: 'unavailable',
+      message:
+        typeof candidate?.message === 'string'
+          ? candidate.message
+          : error instanceof Error
+            ? error.message
+            : 'content transport replacement failed',
+      retryable: typeof candidate?.retryable === 'boolean' ? candidate.retryable : true,
+    },
+    'transport',
+  );
+};
 
 export interface WorkerServiceConnection {
   /** Available immediately, including for a public visitor who never opens encrypted library state. */
@@ -116,7 +149,9 @@ class SessionContentService implements ContentServiceClientPort {
       this.#configuring = undefined;
     }
     const requiresAtlas = request.kind.startsWith('atlas.');
-    const recoverUntil = Date.now() + CONTENT_RECOVERY_MS;
+    let recoverUntil: number | undefined;
+    let recoveryFailure: unknown;
+    let recoveries = 0;
     for (;;) {
       // A replacement Worker belongs to the paired library handshake first. Re-read this barrier on every attempt:
       // the first transport can fail while the request is in flight and install a different opening promise.
@@ -124,26 +159,31 @@ class SessionContentService implements ContentServiceClientPort {
       const client = this.current();
       if (bootstrap)
         try {
-          await this.#waitForBootstrap(bootstrap, signal);
+          await this.#wait(bootstrap, signal, recoverUntil, recoveryFailure);
         } catch (error) {
           // A paired startup belongs exclusively to the library supervisor. Follow a replacement it has already
           // installed, but never create an anonymous content-owned Worker when the paired startup stays failed.
-          if (
-            Date.now() >= recoverUntil ||
-            signal?.aborted ||
-            this.#closed ||
-            this.#bootstrap === bootstrap ||
-            this.current() === client
-          )
-            throw error;
+          if (signal?.aborted || this.#closed) throw error;
+          recoverUntil ??= performance.now() + CONTENT_RECOVERY_MS;
+          recoveryFailure ??= error;
+          if (recoveries >= MAX_CONTENT_RECOVERIES) throw recoveryFailure;
+          await this.#backoff(recoveries++, signal, recoverUntil, recoveryFailure);
+          const replacement = await this.#replace(client, signal, recoverUntil, recoveryFailure);
+          if (replacement === client) throw recoveryFailure;
+          this.#bind(replacement);
           continue;
         }
       try {
         if (this.#atlas !== undefined || requiresAtlas)
-          await this.#ensureConfiguration(client, requiresAtlas);
+          await this.#wait(
+            this.#ensureConfiguration(client, requiresAtlas),
+            signal,
+            recoverUntil,
+            recoveryFailure,
+          );
         if (request.kind === 'sources.configure')
           return { kind: 'sources.configure' } as ContentResultFor<Request>;
-        return await client.query(request, signal);
+        return await this.#query(client, request, signal, recoverUntil, recoveryFailure);
       } catch (error) {
         const replacedWhilePending = this.current() !== client;
         const cancelledByReplacement =
@@ -152,17 +192,24 @@ class SessionContentService implements ContentServiceClientPort {
           error.failure.code === 'cancelled';
         const retryableTransportFailure =
           error instanceof ContentServiceError &&
+          error.scope === 'transport' &&
           error.failure.code === 'unavailable' &&
           error.failure.provider === undefined &&
           error.failure.retryable;
         if (
-          Date.now() >= recoverUntil ||
           signal?.aborted ||
           (!cancelledByReplacement && !retryableTransportFailure) ||
           this.#closed
         )
           throw error;
-        const replacement = replacedWhilePending ? this.current() : await this.replace(client);
+        recoverUntil ??= performance.now() + CONTENT_RECOVERY_MS;
+        if (retryableTransportFailure) recoveryFailure ??= error;
+        const terminalFailure = recoveryFailure ?? recoveryExhausted();
+        if (recoveries >= MAX_CONTENT_RECOVERIES) throw terminalFailure;
+        await this.#backoff(recoveries++, signal, recoverUntil, terminalFailure);
+        const replacement = replacedWhilePending
+          ? this.current()
+          : await this.#replace(client, signal, recoverUntil, terminalFailure);
         if (replacement !== client) this.#bind(replacement);
       }
     }
@@ -187,11 +234,14 @@ class SessionContentService implements ContentServiceClientPort {
     const barrier = opening.then(
       () => undefined,
       (error: unknown) => {
-        throw new ContentServiceError({
-          code: 'unavailable',
-          message: error instanceof Error ? error.message : 'library bootstrap failed',
-          retryable: true,
-        });
+        throw new ContentServiceError(
+          {
+            code: 'unavailable',
+            message: error instanceof Error ? error.message : 'library bootstrap failed',
+            retryable: true,
+          },
+          'transport',
+        );
       },
     );
     this.#bootstrap = barrier;
@@ -241,30 +291,104 @@ class SessionContentService implements ContentServiceClientPort {
     await this.#configuring;
   }
 
-  async #waitForBootstrap(bootstrap: Promise<void>, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted)
-      throw new ContentServiceError({
-        code: 'cancelled',
-        message: 'content request was cancelled',
-        retryable: false,
-      });
-    if (!signal) return bootstrap;
-    await new Promise<void>((resolve, reject) => {
-      const abort = () => {
-        signal.removeEventListener('abort', abort);
-        reject(
-          new ContentServiceError({
-            code: 'cancelled',
-            message: 'content request was cancelled',
-            retryable: false,
-          }),
-        );
+  #cancelled(): ContentServiceError {
+    return new ContentServiceError(
+      { code: 'cancelled', message: 'content request was cancelled', retryable: false },
+      'local',
+    );
+  }
+
+  #wait<T>(
+    flight: Promise<T>,
+    signal?: AbortSignal,
+    until?: number,
+    timeoutError: unknown = new ContentServiceError(
+      { code: 'unavailable', message: 'content recovery timed out', retryable: true },
+      'transport',
+    ),
+  ): Promise<T> {
+    if (signal?.aborted) return Promise.reject(this.#cancelled());
+    const remaining = until === undefined ? undefined : until - performance.now();
+    if (remaining !== undefined && remaining <= 0) return Promise.reject(timeoutError);
+    if (!signal && remaining === undefined) return flight;
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (answer: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        if (timer) clearTimeout(timer);
+        answer();
       };
-      signal.addEventListener('abort', abort, { once: true });
-      void bootstrap
-        .then(resolve, reject)
-        .finally(() => signal.removeEventListener('abort', abort));
+      const abort = () => finish(() => reject(this.#cancelled()));
+      signal?.addEventListener('abort', abort, { once: true });
+      if (remaining !== undefined)
+        timer = setTimeout(() => finish(() => reject(timeoutError)), remaining);
+      void flight.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
     });
+  }
+
+  async #backoff(
+    recovery: number,
+    signal: AbortSignal | undefined,
+    until: number,
+    timeoutError: unknown,
+  ): Promise<void> {
+    const delay = CONTENT_RECOVERY_BACKOFF_MS[recovery] ?? CONTENT_RECOVERY_BACKOFF_MS.at(-1)!;
+    if (!delay) return;
+    await this.#wait(
+      new Promise<void>((resolve) => setTimeout(resolve, delay)),
+      signal,
+      until,
+      timeoutError,
+    );
+  }
+
+  async #replace(
+    client: ContentServiceClient,
+    signal: AbortSignal | undefined,
+    until: number,
+    timeoutError: unknown,
+  ): Promise<ContentServiceClient> {
+    try {
+      return await this.#wait(this.replace(client), signal, until, timeoutError);
+    } catch (error) {
+      if (signal?.aborted || this.#closed) throw this.#cancelled();
+      throw asTransportFailure(error);
+    }
+  }
+
+  async #query<Request extends ContentRequest>(
+    client: ContentServiceClient,
+    request: Request,
+    signal?: AbortSignal,
+    until?: number,
+    timeoutError?: unknown,
+  ): Promise<ContentResultFor<Request>> {
+    if (until === undefined) return client.query(request, signal);
+    const remaining = until - performance.now();
+    if (remaining <= 0) throw timeoutError;
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, remaining);
+    try {
+      return await client.query(request, controller.signal);
+    } catch (error) {
+      if (timedOut) throw timeoutError;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 }
 
