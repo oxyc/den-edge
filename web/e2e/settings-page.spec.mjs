@@ -165,6 +165,13 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(
         devices.getByRole('heading', { name: 'Join another library', exact: true }),
       ).toBeVisible();
+      const linkedDeviceHeadings = await devices
+        .getByRole('heading', { level: 3 })
+        .allTextContents();
+      expect(linkedDeviceHeadings.indexOf('Link another device')).toBe(
+        linkedDeviceHeadings.indexOf('Devices') + 1,
+      );
+      expect(linkedDeviceHeadings.at(-1)).toBe('Recovery code');
       // A Library v4 library is cut off from here: the reset asks first, and says what it costs.
       await devices.getByRole('button', { name: 'Reset library key…' }).click();
       await expect(devices).toContainText('must pair again with a code');
