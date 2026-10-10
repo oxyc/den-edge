@@ -2,12 +2,20 @@
      change how that TV draws and plays, so each TV keeps them and they're listed here only to say so; the away-from-home
      token is the library's, and entered here once. -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import Button from '../components/Button.svelte';
+  import RecoveryRedeem from '../components/RecoveryRedeem.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
+  import { libraryName } from './linkedDevices';
+  import { links, type Link } from '../lib/links.svelte';
+  import { navigate } from '../lib/navigation';
 
   let {
+    link,
+    onjoin,
+    recovery,
     remoteAccessConfigured,
     disabled,
     selfId,
@@ -16,6 +24,12 @@
     libraryFormat = null,
     setRemoteAccess,
   }: {
+    /** Null for a browser using its own library, with no TV linked yet. */
+    link: Link | null;
+    /** For a browser using its own library: moves what it saved into the library a recovery code opens. */
+    onjoin?: (libraryKey: string) => Promise<boolean>;
+    /** The library's recovery code; none for a browser's own library. */
+    recovery?: Snippet;
     remoteAccessConfigured: boolean;
     disabled: boolean;
     selfId: string;
@@ -28,6 +42,23 @@
       credentials: { clientId: string; clientSecret: string } | null,
     ) => Promise<boolean>;
   } = $props();
+
+  /**
+   * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
+   * first, as when it links a TV; then it opens the recovered library from now on.
+   */
+  async function openRecovered(libraryKey: string): Promise<boolean> {
+    if (onjoin && !(await onjoin(libraryKey))) return false;
+    links.addRecovered(libraryKey);
+    location.assign('/');
+    return true;
+  }
+
+  function unlink(target: Link) {
+    links.remove(target.inboxKey);
+    // The library this page was reading is gone; the app goes back to linking.
+    if (target.inboxKey === link?.inboxKey) navigate('/');
+  }
 
   let accessId = $state('');
   let accessSecret = $state('');
@@ -142,6 +173,55 @@
       the TV, under Settings › Advanced › Diagnostics.
     </p>
   </SettingRow>
+
+  <h3 class="group">This browser</h3>
+  <SettingRow id="recovery" label="Recovery code" detail="Make one, or open a library with one">
+    <h3>Open with a recovery code</h3>
+    <RecoveryRedeem
+      question={link
+        ? 'This browser switches to that library. Your current library stays saved on this browser.'
+        : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
+      onopen={openRecovered}
+    />
+    {@render recovery?.()}
+  </SettingRow>
+  {#if links.list.length}
+    <SettingRow id="sign-out" label="Sign out" detail="Libraries saved on this browser">
+      <h3>Your library</h3>
+      <ul class="list">
+        {#each links.list as linked (linked.inboxKey)}
+          {@const current = linked.inboxKey === link?.inboxKey}
+          <li class="line">
+            <span class="label"
+              >{libraryName(linked, link?.libraryKey)}<small
+                >{current
+                  ? 'Open on this browser'
+                  : `Saved on this browser${linked.name ? ` · joined through ${linked.name}` : ''}`}</small
+              ></span
+            >
+            {#if current}
+              <Confirm
+                label="Sign out on this browser"
+                question="Sign out of your library on this browser?"
+                detail="Your other devices keep it, and you can join it again with a code."
+                confirmLabel="Sign out"
+                onconfirm={() => unlink(linked)}
+              />
+            {:else}
+              <Confirm
+                label="Remove"
+                ariaLabel="Remove the library joined through {linked.name ?? 'another device'}"
+                question="Remove this library from this browser?"
+                detail="Your other devices keep it."
+                onconfirm={() => unlink(linked)}
+              />
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      <p class="foot">Signing out only affects this browser.</p>
+    </SettingRow>
+  {/if}
 </SettingsSection>
 
 <style>

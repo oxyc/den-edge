@@ -2,12 +2,12 @@
      tabs on a tablet, and the browser's own picker on a phone, where five tabs don't fit. -->
 <script lang="ts">
   const SECTIONS = [
+    { id: 'playback', label: 'Playback' },
+    { id: 'content', label: 'Content' },
     { id: 'connections', label: 'Connections' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'assistants', label: 'Assistants' },
-    { id: 'playback', label: 'Playback' },
     { id: 'import', label: 'Import' },
-    { id: 'content', label: 'Content' },
     { id: 'advanced', label: 'Advanced' },
     { id: 'about', label: 'About' },
   ] as const;

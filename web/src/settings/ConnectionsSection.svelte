@@ -3,17 +3,16 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network — says where to do it. -->
 <script lang="ts">
-  import { onMount, untrack, type Snippet } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
-  import RecoveryRedeem from '../components/RecoveryRedeem.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
   import {
     deviceStatus,
-    libraryName,
+    hasOtherDevices,
     syncedDeviceRows,
     type LinkedDeviceRow,
   } from './linkedDevices';
@@ -24,7 +23,6 @@
   import { guestGrants } from '../lib/grants.svelte';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
-  import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
@@ -66,7 +64,6 @@
     hasRecoveryCode = false,
     heldReset = false,
     onadoptheld,
-    recovery,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -116,8 +113,6 @@
     heldReset?: boolean;
     /** Use the held reset's new key: the person says this browser made it. */
     onadoptheld?: () => Promise<void>;
-    /** The library's recovery code, under Linked devices; none for a browser's own library. */
-    recovery?: Snippet;
   } = $props();
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
@@ -134,17 +129,6 @@
       return 'unreachable';
     }
   };
-
-  /**
-   * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
-   * first, as when it links a TV; then it opens the recovered library from now on.
-   */
-  async function openRecovered(libraryKey: string): Promise<boolean> {
-    if (onjoin && !(await onjoin(libraryKey))) return false;
-    links.addRecovered(libraryKey);
-    location.assign('/');
-    return true;
-  }
 
   const hostOf = (url: string) => {
     try {
@@ -426,12 +410,6 @@
     }
     pairNotice =
       'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
-  }
-
-  function unlink(target: Link) {
-    links.remove(target.inboxKey);
-    // The library this page was reading is gone; the app goes back to linking.
-    if (target.inboxKey === link?.inboxKey) navigate('/');
   }
 
   // Joining another TV's library: a browser has no library of its own to merge, so it links to that TV as it linked
@@ -952,8 +930,21 @@
         {#each listedDevices as row (row.id)}
           <li class="line device-line">
             {@render icon(deviceIcon(row))}
-            <span class="label"
-              >{row.name}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
+            <span class="label">
+              {#if row.device?.id === selfId}
+                <!-- The name other devices list this one by; clearing it falls back to the guess. -->
+                <input
+                  class="field name"
+                  value={thisDevice.chosen}
+                  placeholder={thisDevice.guess}
+                  oninput={(event) => thisDevice.rename(event.currentTarget.value)}
+                  autocomplete="off"
+                  maxlength="40"
+                  aria-label="Name of this device"
+                />
+              {:else}
+                {row.name}
+              {/if}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
             >
             <div class="device-action">
               {#if row.device?.id === selfId}
@@ -1064,106 +1055,52 @@
       </p>
     {/if}
 
-    {#if links.list.length}
-      <h3>Your library</h3>
-      <ul class="list">
-        {#each links.list as linked (linked.inboxKey)}
-          {@const current = linked.inboxKey === link?.inboxKey}
-          <li class="line">
-            <span class="label"
-              >{libraryName(linked, link?.libraryKey)}<small
-                >{current
-                  ? 'Open on this browser'
-                  : `Saved on this browser${linked.name ? ` · joined through ${linked.name}` : ''}`}</small
-              ></span
-            >
-            {#if current}
-              <Confirm
-                label="Sign out on this browser"
-                question="Sign out of your library on this browser?"
-                detail="Your other devices keep it, and you can join it again with a code."
-                confirmLabel="Sign out"
-                onconfirm={() => unlink(linked)}
-              />
-            {:else}
-              <Confirm
-                label="Remove"
-                ariaLabel="Remove the library joined through {linked.name ?? 'another device'}"
-                question="Remove this library from this browser?"
-                detail="Your other devices keep it."
-                onconfirm={() => unlink(linked)}
-              />
-            {/if}
-          </li>
-        {/each}
-      </ul>
-      <p class="foot">Signing out only affects this browser.</p>
+    <!-- A browser already in a library shared with other devices has no use for joining another one. -->
+    {#if !link || !hasOtherDevices(listedDevices, selfId, link.libraryKey)}
+      <h3 id="join-library-label">{link ? 'Join another library' : 'Link your Apple TV'}</h3>
+      <form
+        class="form"
+        onsubmit={(event) => {
+          event.preventDefault();
+        }}
+      >
+        <input
+          id="join-library-code"
+          class="field mono"
+          autocomplete="off"
+          spellcheck="false"
+          autocapitalize="characters"
+          placeholder="ABCD-EFGH-JKLM"
+          aria-labelledby="join-library-label"
+          value={joinCode}
+          oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
+        />
+        <Confirm
+          label={joining ? 'Waiting…' : link ? 'Join' : 'Link'}
+          question={link ? 'Switch this browser to that library?' : 'Link this browser to that TV?'}
+          detail={link
+            ? 'Your current library stays saved on this browser.'
+            : 'What you’ve saved here moves into that TV’s library, and this browser uses that library from then on.'}
+          confirmLabel={link ? 'Join' : 'Link'}
+          tone="primary"
+          disabled={joining || !parseCode(joinCode)}
+          onconfirm={() => void joinLibrary()}
+        />
+      </form>
+      {#if joining}<p class="status" role="status">
+          Waiting for the TV to allow this browser…
+        </p>{/if}
+      {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
+      <p class="foot">
+        {#if link}
+          Get the code on a device already in that library: in Den under Settings › Linked devices ›
+          Get a code, or on its Apple TV under Settings › Linked devices.
+        {:else}
+          To keep what’s here in your TV’s library, get a code on your Apple TV under Settings ›
+          Linked devices and type it here.
+        {/if}
+      </p>
     {/if}
-
-    <h3 id="join-library-label">{link ? 'Join another library' : 'Link your Apple TV'}</h3>
-    <form
-      class="form"
-      onsubmit={(event) => {
-        event.preventDefault();
-      }}
-    >
-      <input
-        id="join-library-code"
-        class="field mono"
-        autocomplete="off"
-        spellcheck="false"
-        autocapitalize="characters"
-        placeholder="ABCD-EFGH-JKLM"
-        aria-labelledby="join-library-label"
-        value={joinCode}
-        oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
-      />
-      <Confirm
-        label={joining ? 'Waiting…' : link ? 'Join' : 'Link'}
-        question={link ? 'Switch this browser to that library?' : 'Link this browser to that TV?'}
-        detail={link
-          ? 'Your current library stays listed under Your library.'
-          : 'What you’ve saved here moves into that TV’s library, and this browser uses that library from then on.'}
-        confirmLabel={link ? 'Join' : 'Link'}
-        tone="primary"
-        disabled={joining || !parseCode(joinCode)}
-        onconfirm={() => void joinLibrary()}
-      />
-    </form>
-    {#if joining}<p class="status" role="status">Waiting for the TV to allow this browser…</p>{/if}
-    {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
-    <p class="foot">
-      {#if link}
-        Get the code on a device already in that library: in Den under Settings › Linked devices ›
-        Get a code, or on its Apple TV under Settings › Linked devices.
-      {:else}
-        To keep what’s here in your TV’s library, get a code on your Apple TV under Settings ›
-        Linked devices and type it here.
-      {/if}
-    </p>
-
-    <h3>Open with a recovery code</h3>
-    <RecoveryRedeem
-      question={link
-        ? 'This browser switches to that library. Your current library stays listed under Your library.'
-        : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
-      onopen={openRecovered}
-    />
-
-    <h3 id="this-device-label">Name of this device</h3>
-    <input
-      id="this-device"
-      class="field"
-      value={thisDevice.chosen}
-      placeholder={thisDevice.guess}
-      oninput={(event) => thisDevice.rename(event.currentTarget.value)}
-      autocomplete="off"
-      maxlength="40"
-      aria-labelledby="this-device-label"
-    />
-    <p class="foot">Your other devices show this name, so give it its own if two look alike.</p>
-
-    {@render recovery?.()}
   </SettingRow>
 </SettingsSection>
 
@@ -1190,6 +1127,10 @@
 
   .device-action {
     grid-column: 3;
+  }
+
+  .field.name {
+    margin-bottom: 4px;
   }
 
   .device-action:has(:global(.confirm)) {

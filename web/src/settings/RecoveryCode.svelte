@@ -1,4 +1,4 @@
-<!-- Settings › Linked devices › Recovery code (den-spec recovery-code §6): make a code, show it once, have its last group
+<!-- Settings › Advanced › Recovery code (den-spec recovery-code §6): make a code, show it once, have its last group
      typed back before it goes live, and show what den-edge counts of it. The code lives in this component's memory
      only, from the moment it is made until this screen closes; leaving before confirming ends it. -->
 <script lang="ts">

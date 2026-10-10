@@ -259,6 +259,16 @@
         {/if}
       </div>
     {:else}
+      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
+      <ContentSection
+        prefs={prefs!}
+        {content}
+        pinConfigured={connections?.parentalPinConfigured ?? false}
+        {disabled}
+        save={savePrefs}
+        savePin={(pin) => run(() => model.setParentalPin(pin))}
+        verifyPin={(pin) => model.verifyParentalPin(pin)}
+      />
       <ConnectionsSection
         {link}
         {content}
@@ -285,7 +295,6 @@
         removeServer={(server) => run(() => model.patchServer(server, null))}
         {sealHandover}
         removeDevice={removeLibraryDevice}
-        recovery={link && !local ? recovery : undefined}
       />
       {#snippet recovery()}
         <RecoveryCode
@@ -303,7 +312,6 @@
       {/snippet}
       <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
       <AssistantsSection />
-      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
       <ImportSection
         {ready}
         {content}
@@ -311,16 +319,10 @@
         {importHistory}
         {exportHistory}
       />
-      <ContentSection
-        prefs={prefs!}
-        {content}
-        pinConfigured={connections?.parentalPinConfigured ?? false}
-        {disabled}
-        save={savePrefs}
-        savePin={(pin) => run(() => model.setParentalPin(pin))}
-        verifyPin={(pin) => model.verifyParentalPin(pin)}
-      />
       <AdvancedSection
+        {link}
+        onjoin={local ? onjoin : undefined}
+        recovery={link && !local ? recovery : undefined}
         remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
         {disabled}
         {selfId}
