@@ -521,6 +521,7 @@
       legend="Sources"
       options={RATING_SOURCES.map((s) => ({ value: s.id, label: s.name }))}
       checked={(id) => (prefs.ratingSources as readonly string[]).includes(id)}
+      stacked
       {disabled}
       onchange={(id, on) => save(change.ratingSources(toggled(prefs.ratingSources, id, on)))}
     />

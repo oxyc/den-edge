@@ -468,19 +468,16 @@
                       />
                     {/key}
                   {/if}
-                  <span class="device-limit">
-                    <span>Device limit</span>
-                    <Select
-                      label="Device limit for {grant.name}"
-                      value={String(deviceLimit(grant))}
-                      disabled={working}
-                      options={DEVICE_LIMITS}
-                      onchange={(value) => {
-                        const limit = Number(value);
-                        if (limit !== deviceLimit(grant)) void changeDeviceLimit(grant, limit);
-                      }}
-                    />
-                  </span>
+                  <Select
+                    label="Device limit for {grant.name}"
+                    value={String(deviceLimit(grant))}
+                    disabled={working}
+                    options={DEVICE_LIMITS}
+                    onchange={(value) => {
+                      const limit = Number(value);
+                      if (limit !== deviceLimit(grant)) void changeDeviceLimit(grant, limit);
+                    }}
+                  />
                   <Button
                     variant="secondary"
                     label="Rename"
@@ -655,18 +652,5 @@
     border: 1px solid var(--line);
     border-radius: 999px;
     color: var(--fg);
-  }
-
-  .device-limit {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--muted);
-    font-size: 14px;
-    white-space: nowrap;
-  }
-
-  .device-limit :global(select) {
-    max-width: none;
   }
 </style>

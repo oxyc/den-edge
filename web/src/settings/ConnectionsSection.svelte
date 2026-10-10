@@ -950,23 +950,26 @@
     {#if listedDevices.length}
       <ul class="list">
         {#each listedDevices as row (row.id)}
-          <li class="line">
+          <li class="line device-line">
             {@render icon(deviceIcon(row))}
             <span class="label"
               >{row.name}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
             >
-            {#if row.device?.id === selfId}
-              <Button variant="secondary" label="This device" disabled />
-            {:else}
-              <Confirm
-                label="Remove"
-                ariaLabel="Remove {row.name}"
-                question="Remove {row.name} from this list?"
-                detail="It can still use your library, and shows up again the next time it opens it."
-                disabled={!!row.device && disabled}
-                onconfirm={() => void removeRow(row)}
-              />
-            {/if}
+            <div class="device-action">
+              {#if row.device?.id === selfId}
+                <Button variant="secondary" size="compact" label="This device" disabled />
+              {:else}
+                <Confirm
+                  label="Remove"
+                  ariaLabel="Remove {row.name}"
+                  question="Remove {row.name} from this list?"
+                  detail="It can still use your library, and shows up again the next time it opens it."
+                  disabled={!!row.device && disabled}
+                  triggerVariant="tertiary"
+                  onconfirm={() => void removeRow(row)}
+                />
+              {/if}
+            </div>
           </li>
         {/each}
       </ul>
@@ -1172,6 +1175,25 @@
     stroke-width: 1.8;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  /* A device and its compact action are one row even on a narrow phone. The confirmation itself expands below the
+     row so its explanation and two safe targets still have room. */
+  li.line.device-line {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .device-line .label {
+    grid-column: 2;
+  }
+
+  .device-action {
+    grid-column: 3;
+  }
+
+  .device-action:has(:global(.confirm)) {
+    grid-column: 1 / -1;
   }
 
   .pair {
