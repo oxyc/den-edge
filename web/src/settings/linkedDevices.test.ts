@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Link, Shared } from '../lib/links.svelte';
 import type { DeviceEntry } from './values';
-import { deviceStatus, libraryName, linkedDeviceRows, syncedDeviceRows } from './linkedDevices';
+import {
+  deviceStatus,
+  hasOtherDevices,
+  libraryName,
+  linkedDeviceRows,
+  syncedDeviceRows,
+} from './linkedDevices';
 
 const device = (id: string, name: string, kind: 'tv' | 'browser', seen = 10): DeviceEntry => ({
   id,
@@ -168,6 +174,27 @@ describe('device status line', () => {
         [shared('Phone', 'current', 5), shared('Laptop', 'other', 6), shared('Old', undefined, 7)],
       ),
     ).toEqual(['added day 5', 'added to another library day 6', 'added day 7']);
+  });
+});
+
+describe('other devices in the open library', () => {
+  const others = (devices: DeviceEntry[], records: Shared[] = []) =>
+    hasOtherDevices(syncedDeviceRows(devices, [], records, 'current'), 'self', 'current');
+
+  it('is false for a library only this browser has listed itself in', () => {
+    expect(others([])).toBe(false);
+    expect(others([device('self', 'Mac', 'browser')])).toBe(false);
+  });
+
+  it('is true once another device is listed or has been handed the library', () => {
+    expect(others([device('self', 'Mac', 'browser'), device('tv-1', 'TV', 'tv')])).toBe(true);
+    expect(others([], [shared('Phone', 'current')])).toBe(true);
+  });
+
+  it('ignores devices handed some other library', () => {
+    expect(others([device('self', 'Mac', 'browser')], [shared('Laptop', 'other', 5, 'l-1')])).toBe(
+      false,
+    );
   });
 });
 

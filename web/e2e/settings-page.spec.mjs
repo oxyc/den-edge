@@ -163,19 +163,20 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(
         devices.getByRole('heading', { name: 'Linked to this browser', exact: true }),
       ).toHaveCount(0);
-      await expect(
-        devices.getByRole('heading', { name: 'Your library', exact: true }),
-      ).toBeVisible();
-      await expect(
-        devices.getByRole('heading', { name: 'Join another library', exact: true }),
-      ).toBeVisible();
+      // Linked devices and a shared library: nothing to join, and sign out and recovery live under Advanced.
+      for (const gone of [
+        'Your library',
+        'Join another library',
+        'Recovery code',
+        'Name of this device',
+      ])
+        await expect(devices.getByRole('heading', { name: gone, exact: true })).toHaveCount(0);
       const linkedDeviceHeadings = await devices
         .getByRole('heading', { level: 3 })
         .allTextContents();
       expect(linkedDeviceHeadings.indexOf('Link another device')).toBe(
         linkedDeviceHeadings.indexOf('Devices') + 1,
       );
-      expect(linkedDeviceHeadings.at(-1)).toBe('Recovery code');
       // A Library v4 library is cut off from here: the reset asks first, and says what it costs.
       await devices.getByRole('button', { name: 'Reset library key…' }).click();
       await expect(devices).toContainText('must pair again with a code');
@@ -206,15 +207,6 @@ for (const width of [320, 390, 820, 1280]) {
         2,
       );
       expect(deviceRowGeometry.actionWidth).toBeLessThan(90);
-      // Libraries are named by whether they're the one open here, not after the TV they came through.
-      const open = listed.filter({ hasText: 'Open on this browser' });
-      await expect(open).toContainText('Your library');
-      await expect(open.getByRole('button', { name: 'Sign out on this browser' })).toBeVisible();
-      const other = listed.filter({ hasText: 'Another library' });
-      await expect(other).toContainText('Saved on this browser · joined through Cabin TV');
-      await expect(
-        other.getByRole('button', { name: 'Remove the library joined through Cabin TV' }),
-      ).toBeVisible();
       const mac = listed.filter({ hasText: 'Mac' });
       await expect(mac).toHaveCount(1);
       await expect(mac).toContainText('Browser · seen');
@@ -227,6 +219,35 @@ for (const width of [320, 390, 820, 1280]) {
       const self = listed.filter({ hasText: /This browser · seen/ });
       await expect(self).toHaveCount(1);
       await expect(self.getByRole('button', { name: 'This device' })).toBeDisabled();
+      // This device's name is edited in its own row, and other rows have no field.
+      const nameField = self.getByRole('textbox', { name: 'Name of this device' });
+      await expect(nameField).toHaveValue('Test Browser');
+      await expect(listed.getByRole('textbox')).toHaveCount(1);
+      await nameField.fill('Study Browser');
+      expect(await page.evaluate(() => localStorage.getItem('den.deviceName'))).toBe(
+        'Study Browser',
+      );
+
+      // Advanced holds the recovery code and signing out. Libraries are named by whether they're the one open here,
+      // not after the TV they came through.
+      await page.getByRole('button', { name: /Recovery code/ }).click();
+      const recovery = page.getByRole('region', { name: 'Recovery code' });
+      await expect(
+        recovery.getByRole('heading', { name: 'Open with a recovery code', exact: true }),
+      ).toBeVisible();
+      await expect(
+        recovery.getByRole('heading', { name: 'Recovery code', exact: true }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: /Sign out/ }).click();
+      const signOut = page.getByRole('region', { name: 'Sign out' });
+      const open = signOut.getByRole('listitem').filter({ hasText: 'Open on this browser' });
+      await expect(open).toContainText('Your library');
+      await expect(open.getByRole('button', { name: 'Sign out on this browser' })).toBeVisible();
+      const other = signOut.getByRole('listitem').filter({ hasText: 'Another library' });
+      await expect(other).toContainText('Saved on this browser · joined through Cabin TV');
+      await expect(
+        other.getByRole('button', { name: 'Remove the library joined through Cabin TV' }),
+      ).toBeVisible();
 
       // One Remove takes the device off the library's list and drops this browser's record of giving it the library.
       await mac.getByRole('button', { name: 'Remove Mac' }).click();

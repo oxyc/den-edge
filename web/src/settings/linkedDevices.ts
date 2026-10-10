@@ -105,6 +105,18 @@ export function deviceStatus(
 export const libraryName = (linked: Link, currentLibraryKey: string | undefined): string =>
   linked.libraryKey === currentLibraryKey ? 'Your library' : 'Another library';
 
+/** Whether the open library is shared with a device other than this browser, listed in it or handed it. */
+export const hasOtherDevices = (
+  rows: readonly LinkedDeviceRow[],
+  selfId: string,
+  currentLibraryKey: string | undefined,
+): boolean =>
+  rows.some((row) =>
+    row.device
+      ? row.device.id !== selfId
+      : row.shared.some((entry) => !entry.libraryKey || entry.libraryKey === currentLibraryKey),
+  );
+
 /** Rows that represent devices known to the shared library, not this browser's local credentials for opening one. */
 export function syncedDeviceRows(
   devices: readonly DeviceEntry[],

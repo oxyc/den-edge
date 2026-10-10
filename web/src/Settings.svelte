@@ -295,7 +295,6 @@
         removeServer={(server) => run(() => model.patchServer(server, null))}
         {sealHandover}
         removeDevice={removeLibraryDevice}
-        recovery={link && !local ? recovery : undefined}
       />
       {#snippet recovery()}
         <RecoveryCode
@@ -321,6 +320,9 @@
         {exportHistory}
       />
       <AdvancedSection
+        {link}
+        onjoin={local ? onjoin : undefined}
+        recovery={link && !local ? recovery : undefined}
         remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
         {disabled}
         {selfId}
