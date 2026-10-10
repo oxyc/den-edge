@@ -44,6 +44,81 @@ async function open(page) {
   return calls;
 }
 
+const NEW_CODE = 'a1b2c3d4.BBBBBBBBBBBBBBBBBBBBBB';
+
+/** Opens the guest list with `POST …/code` answered by `reply`, and returns the code calls it saw. */
+async function openWithNewLink(page, current, reply) {
+  const posts = [];
+  await page
+    .context()
+    .grantPermissions(['clipboard-read', 'clipboard-write'], { origin: E2E_ORIGIN });
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [current] } }));
+  await page.route('**/lib/*/grants/*/code', (route) => {
+    posts.push(route.request().postDataJSON());
+    return route.fulfill(reply(current));
+  });
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  await expect(page.locator('li.guest-line')).toBeVisible();
+  return posts;
+}
+
+for (const width of [390, 1280]) {
+  test(`New link at ${width}px shows the new link, copyable, and says the old one is dead`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 });
+    const posts = await openWithNewLink(page, grant(), (g) => ({
+      json: { code: NEW_CODE, devicesRaised: false, grant: g },
+    }));
+    await page.getByRole('button', { name: 'More actions for Alex' }).click();
+    await page.getByRole('menuitem', { name: 'New link' }).click();
+
+    const panel = page.getByRole('status').filter({ hasText: 'Alex’s new link.' });
+    await expect(panel).toContainText('The previous link no longer works.');
+    await expect(panel).not.toContainText('device limit');
+    await expect(panel.getByLabel('Invite link')).toHaveValue(`${E2E_ORIGIN}/#invite=${NEW_CODE}`);
+    await expect(panel.getByLabel('Invite code')).toHaveValue(NEW_CODE);
+    await panel.getByRole('button', { name: 'Copy link' }).click();
+    await expect(panel.getByRole('button', { name: 'Copied' })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      `${E2E_ORIGIN}/#invite=${NEW_CODE}`,
+    );
+    expect(posts).toHaveLength(1);
+    expect(typeof posts[0].codeExpiresAt).toBe('number');
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  });
+
+  test(`New link at ${width}px says when the device limit went up`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await openWithNewLink(page, grant(), (g) => ({
+      json: { code: NEW_CODE, devicesRaised: true, grant: { ...g, devices: 2 } },
+    }));
+    await page.getByRole('button', { name: 'More actions for Alex' }).click();
+    await page.getByRole('menuitem', { name: 'New link' }).click();
+    const panel = page.getByRole('status').filter({ hasText: 'Alex’s new link.' });
+    await expect(panel).toContainText('The previous link no longer works.');
+    await expect(panel).toContainText('the device limit went up by one, to 2');
+    await expect(page.locator('li.guest-line')).toContainText('1 of 2 devices');
+  });
+
+  test(`New link at ${width}px explains a guest that is already at the most devices`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await openWithNewLink(page, grant({ devices: 5, deviceCount: 5 }), () => ({
+      status: 409,
+      json: { error: 'devices_full' },
+    }));
+    await page.getByRole('button', { name: 'More actions for Alex' }).click();
+    await page.getByRole('menuitem', { name: 'New link' }).click();
+    await expect(page.getByRole('alert')).toContainText('already has all 5 devices');
+    await expect(page.getByRole('status').filter({ hasText: 'new link.' })).toHaveCount(0);
+  });
+}
+
 for (const width of [320, 390, 1280]) {
   test(`guest row at ${width}px keeps its status visible and its controls in the menu`, async ({
     page,

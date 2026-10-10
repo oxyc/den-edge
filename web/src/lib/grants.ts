@@ -273,6 +273,31 @@ export async function createGrant(
     : { ok: false, status: 0, error: 'failed' };
 }
 
+/**
+ * A new invite link for a guest that already exists. The previous code stops working; `devicesRaised` says the device
+ * limit went up by one because every slot was taken. `409 devices_full` (already at the most) and `409 access_ended`
+ * come back as errors.
+ */
+export async function newGrantCode(
+  id: string,
+  gid: string,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Reply<{ code: string; grant: Grant; devicesRaised: boolean }>> {
+  const reply = await ask(fetchImpl, `/lib/${id}/grants/${gid}/code`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      codeExpiresAt: cappedCodeExpiry(Date.now(), DEFAULT_REDEEM_DAYS * DAY),
+    }),
+  });
+  if (!reply.ok) return reply;
+  const body = reply.value as { code?: unknown; grant?: unknown; devicesRaised?: unknown } | null;
+  const grant = readGrant(body?.grant);
+  return grant && typeof body?.code === 'string'
+    ? { ok: true, value: { code: body.code, grant, devicesRaised: body.devicesRaised === true } }
+    : { ok: false, status: 0, error: 'failed' };
+}
+
 export async function listGrants(
   id: string,
   fetchImpl: typeof fetch = relayFetch,

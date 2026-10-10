@@ -5,6 +5,8 @@
 //!   GET    /lib/{id}/grants          → { grants }
 //!   PUT    /lib/{id}/grants/{gid}    any of the fields above → { grant }
 //!   DELETE /lib/{id}/grants/{gid}    revokes → 204
+//!   POST   /lib/{id}/grants/{gid}/code  { codeExpiresAt? } → { code, devicesRaised, grant }: a new invite code for the
+//!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
@@ -475,20 +477,26 @@ fn gate(state: &AppState, ip: &str, what: &str, limit: u32) -> Option<Response> 
         .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
-/// `/lib/{id}/grants` or `/lib/{id}/grants/{gid}`: the id, and the gid when there is one.
-fn host_route(path: &str) -> Option<(&str, Option<&str>)> {
+/// `/lib/{id}/grants`, `/lib/{id}/grants/{gid}` or `/lib/{id}/grants/{gid}/code`: the id, the gid when there is
+/// one, and whether it is the `/code` route.
+fn host_route(path: &str) -> Option<(&str, Option<&str>, bool)> {
     let mut parts = path.strip_prefix("/lib/")?.split('/');
     let id = parts.next()?;
     if parts.next()? != "grants" {
         return None;
     }
     let gid = parts.next();
+    let code = match parts.next() {
+        None => false,
+        Some("code") if gid.is_some_and(|g| !g.is_empty()) => true,
+        Some(_) => return None,
+    };
     if parts.next().is_some() {
         return None;
     }
     match gid {
         Some("") => None,
-        gid => Some((id, gid)),
+        gid => Some((id, gid, code)),
     }
 }
 
@@ -498,8 +506,8 @@ pub fn is_host_path(path: &str) -> bool {
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let path = req.uri().path().to_owned();
-    if let Some((id, gid)) = host_route(&path) {
-        return host(state, req, id, gid).await;
+    if let Some((id, gid, code)) = host_route(&path) {
+        return host(state, req, id, gid, code).await;
     }
     match (path.as_str(), req.method().clone()) {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
@@ -563,7 +571,7 @@ async fn usage_report(state: &AppState, req: Request) -> Response {
 
 // ---- the host's side
 
-async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>) -> Response {
+async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>, code: bool) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, &ip, "grants-host", HOST_PER_WINDOW) {
         return limited;
@@ -576,6 +584,8 @@ async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>) -> Re
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
     match (req.method().clone(), gid) {
+        (Method::POST, Some(gid)) if code => new_code(state, id, gid, req).await,
+        _ if code => method_not_allowed(),
         (Method::POST, None) => create(state, id, req).await,
         (Method::GET | Method::HEAD, None) => list(state, id).await,
         (Method::PUT, Some(gid)) => update(state, id, gid, req).await,
@@ -712,7 +722,7 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
             break gid;
         }
     };
-    let code = format!("{}.{}", record.gid, b64url(&crate::random_bytes::<16>()));
+    let code = mint_code(&record.gid);
     record.code_hash = sha(code.as_bytes());
     // The record first: a crash between the two leaves a file nothing lists, never a listed grant with no file.
     if let Err(e) = save(state, &record).await {
@@ -777,6 +787,65 @@ async fn update(state: &AppState, host: &str, gid: &str, req: Request) -> Respon
     // An extension can bring an ended grant back to life; its sessions must be ended again when it next lapses.
     crate::lock(&state.grants.killed).remove(gid);
     json_reply(StatusCode::OK, &json!({ "grant": grant_json(state, &record, now) }))
+}
+
+fn mint_code(gid: &str) -> String {
+    format!("{gid}.{}", b64url(&crate::random_bytes::<16>()))
+}
+
+/// A fresh invite code for an existing grant, e.g. for the guest's phone. The old code stops working; everything
+/// else stays: name, addons, escrow, access end, usage, and the devices already redeemed (their secrets are not
+/// the code). When every device slot is taken the limit goes up by one so the new link can be used, up to the
+/// same five `apply` allows; at five full slots there is nothing to give the link to, so it is `409 devices_full`.
+/// A grant whose access has ended is `409 access_ended`: no code revives it, and extending it is the host's PUT.
+/// A code that merely lapsed is exactly what this is for, so it is renewed.
+async fn new_code(state: &AppState, host: &str, gid: &str, req: Request) -> Response {
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large")),
+    };
+    let body: Value = if bytes.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => return bad_request(),
+        }
+    };
+    let now = state.now();
+    let code_expires_at = match body.as_object().map(|m| m.get("codeExpiresAt")) {
+        None => return bad_request(),
+        Some(None) => now + CODE_DEFAULT_MS,
+        Some(Some(v)) => match v.as_u64().filter(|at| *at > now && *at <= now + CODE_MAX_MS) {
+            Some(at) => at,
+            None => return bad_request(),
+        },
+    };
+    let _lock = state.grants.lock.lock().await;
+    let mut record = match owned(state, host, gid).await {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    if end(&record).is_some_and(|at| now >= at) {
+        return json_reply(StatusCode::CONFLICT, &error("access_ended"));
+    }
+    let raised = record.devices.len() >= record.max_devices as usize;
+    if raised {
+        if record.max_devices >= 5 {
+            return json_reply(StatusCode::CONFLICT, &error("devices_full"));
+        }
+        record.max_devices += 1;
+    }
+    let code = mint_code(&record.gid);
+    record.code_hash = sha(code.as_bytes());
+    record.code_expires_at = code_expires_at;
+    if let Err(e) = save(state, &record).await {
+        return internal("grant write", e);
+    }
+    json_reply(
+        StatusCode::OK,
+        &json!({ "code": code, "devicesRaised": raised, "grant": grant_json(state, &record, now) }),
+    )
 }
 
 /// End a grant: it stops answering, its escrow and device secrets are dropped, and its remux sessions are killed.
@@ -2035,6 +2104,144 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_new_link_replaces_the_code_and_keeps_the_guest_and_the_devices_they_have() {
+        let h = harness().await;
+        let invalid = (StatusCode::NOT_FOUND, json!({ "error": "invalid_code" }));
+        let (gid, old) = invited(&h, json!({ "devices": 2, "accessDays": 30 })).await;
+        assert_eq!(redeem_with(&h, &old, SECRET).await.0, StatusCode::OK);
+        record_start(&h.state, &gid).await;
+        let before = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+
+        h.advance(1000);
+        let path = format!("/{gid}/code");
+        let (status, made) = host_call(&h, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{made}");
+        let code = made["code"].as_str().unwrap().to_owned();
+        assert_ne!(code, old);
+        assert_eq!(made["devicesRaised"], false, "a slot was free");
+        assert_eq!(made["grant"]["codeExpiresAt"], 1_000_000 + 1000 + CODE_DEFAULT_MS);
+
+        assert_eq!(redeem_with(&h, &old, SECRET2).await, invalid, "the old link is dead");
+        assert_eq!(redeem_with(&h, &old, SECRET).await, invalid, "even for a device that used it");
+        assert_eq!(redeem_with(&h, &code, SECRET2).await.0, StatusCode::OK, "the new one is a new device");
+        let first = format!("{gid}:{SECRET}");
+        assert_eq!(
+            h.send("GET", "/grant/addons", None, &grant_headers(&first)).await.status(),
+            StatusCode::OK,
+            "the device that was already in keeps working"
+        );
+
+        let after = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        for field in
+            ["gid", "name", "addons", "createdAt", "accessDays", "expiresAt", "devices", "playsTotal"]
+        {
+            assert_eq!(after[field], before[field], "{field}");
+        }
+        assert_eq!(after["deviceCount"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_new_link_for_a_full_grant_adds_one_slot_until_the_cap() {
+        let h = harness().await;
+        let (gid, code) = invited(&h, json!({})).await;
+        assert_eq!(redeem_with(&h, &code, SECRET).await.0, StatusCode::OK);
+        let path = format!("/{gid}/code");
+
+        let (_, made) = host_call(&h, "POST", &path, Some(json!({}))).await;
+        assert_eq!(
+            (made["devicesRaised"].clone(), made["grant"]["devices"].clone()),
+            (json!(true), json!(2))
+        );
+        assert_eq!(redeem_with(&h, made["code"].as_str().unwrap(), SECRET2).await.0, StatusCode::OK);
+
+        for expect in 3..=5 {
+            let (_, made) = host_call(&h, "POST", &path, None).await;
+            assert_eq!(made["grant"]["devices"], expect);
+            let secret = format!("a-device-secret-number-{expect}-of-43-chars-00000");
+            assert_eq!(redeem_with(&h, made["code"].as_str().unwrap(), &secret).await.0, StatusCode::OK);
+        }
+        let kept = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        let (status, refused) = host_call(&h, "POST", &path, None).await;
+        assert_eq!((status, refused), (StatusCode::CONFLICT, json!({ "error": "devices_full" })));
+        assert_eq!(host_call(&h, "GET", "", None).await.1["grants"][0], kept, "a refusal changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_new_link_renews_a_lapsed_code_and_takes_an_expiry_but_not_for_ended_access() {
+        let h = harness().await;
+        let (gid, lapsing) = invited(&h, json!({ "codeExpiresAt": 1_000_000 + DAY_MS })).await;
+        h.advance(DAY_MS);
+        assert_eq!(redeem_with(&h, &lapsing, SECRET).await.0, StatusCode::NOT_FOUND);
+        let path = format!("/{gid}/code");
+        let until = 1_000_000 + DAY_MS + 3 * DAY_MS;
+        let (status, made) = host_call(&h, "POST", &path, Some(json!({ "codeExpiresAt": until }))).await;
+        assert_eq!(
+            (status, made["grant"]["codeExpiresAt"].clone(), made["devicesRaised"].clone()),
+            (StatusCode::OK, json!(until), json!(false))
+        );
+        assert_eq!(made["grant"]["status"], "invited");
+        assert_eq!(redeem_with(&h, made["code"].as_str().unwrap(), SECRET).await.0, StatusCode::OK);
+
+        for bad in
+            [json!({ "codeExpiresAt": 5 }), json!({ "codeExpiresAt": 1_000_000 + 400 * DAY_MS }), json!([])]
+        {
+            assert_eq!(host_call(&h, "POST", &path, Some(bad)).await.0, StatusCode::BAD_REQUEST);
+        }
+
+        let (trial, _) = redeemed(&h, json!({ "name": "Trial", "accessDays": 1 })).await;
+        h.advance(DAY_MS);
+        assert_eq!(
+            host_call(&h, "POST", &format!("/{trial}/code"), None).await,
+            (StatusCode::CONFLICT, json!({ "error": "access_ended" })),
+            "extend the access first, as the PUT does"
+        );
+        assert_eq!(
+            host_call(&h, "PUT", &format!("/{trial}"), Some(json!({ "accessDays": 30 }))).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(host_call(&h, "POST", &format!("/{trial}/code"), None).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_new_link_is_for_the_host_of_a_live_grant_only() {
+        let h = harness().await;
+        let (gid, _) = redeemed(&h, json!({})).await;
+        let path = format!("/lib/{LIB}/grants/{gid}/code");
+        let stranger =
+            h.send("POST", &path, None, &[("x-den-library-member", &format!("{LIB}:wrong"))]).await;
+        assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+        assert_eq!(h.send("POST", &path, None, &[]).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            host_call(&h, "POST", "/deadbeef/code", None).await.0,
+            StatusCode::NOT_FOUND,
+            "not this host's grant"
+        );
+        assert_eq!(
+            host_call(&h, "GET", &format!("/{gid}/code"), None).await.0,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+
+        host_call(&h, "DELETE", &format!("/{gid}"), None).await;
+        assert_eq!(host_call(&h, "POST", &format!("/{gid}/code"), None).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_new_link_has_a_label_and_is_throttled_with_the_other_host_calls() {
+        assert_eq!(
+            crate::handler::route_label(&format!("/lib/{LIB}/grants/deadbeef/code")),
+            "/lib/:id/grants/:gid/code"
+        );
+        let h = harness().await;
+        let (gid, _) = invited(&h, json!({ "devices": 5 })).await;
+        let path = format!("/{gid}/code");
+        let mut last = StatusCode::OK;
+        for _ in 0..=HOST_PER_WINDOW {
+            last = host_call(&h, "POST", &path, None).await.0;
+        }
+        assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
