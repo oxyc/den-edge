@@ -10,6 +10,7 @@ import {
   keptCodes,
   leaveGrant,
   listGrants,
+  newGrantCode,
   newSecret,
   parseInvite,
   deviceTicket,
@@ -202,6 +203,42 @@ test('listing, changing and revoking use the grant’s route and read the answer
   const gone = answering(204);
   expect(await revokeGrant('abc123', 'a1b2c3d4', gone)).toEqual({ ok: true, value: null });
   expect(gone.mock.calls[0]![1]?.method).toBe('DELETE');
+});
+
+test('a new link posts to the grant’s code route and says whether a device slot was added', async () => {
+  const spy = answering(200, { code: CODE, devicesRaised: true, grant: { ...GRANT, devices: 2 } });
+  vi.stubGlobal('fetch', spy);
+  useLibraryCredential({ id: 'abc123', member: 'def456' });
+  const before = Date.now();
+  const reply = await newGrantCode('abc123', 'a1b2c3d4', relayFetch);
+  expect(reply).toEqual({
+    ok: true,
+    value: { code: CODE, devicesRaised: true, grant: { ...GRANT, devices: 2 } },
+  });
+  const [url, init] = spy.mock.calls[0]!;
+  expect(url).toBe('/lib/abc123/grants/a1b2c3d4/code');
+  expect(init?.method).toBe('POST');
+  expect(new Headers(init?.headers).get(MEMBER)).toBe('abc123:def456');
+  const { codeExpiresAt } = JSON.parse(String(init?.body)) as { codeExpiresAt: number };
+  expect(codeExpiresAt).toBeGreaterThanOrEqual(before + 14 * DAY);
+
+  const plain = answering(200, { code: CODE, grant: GRANT });
+  expect(await newGrantCode('abc123', 'a1b2c3d4', plain)).toMatchObject({
+    ok: true,
+    value: { devicesRaised: false },
+  });
+  for (const error of ['devices_full', 'access_ended']) {
+    expect(await newGrantCode('abc123', 'a1b2c3d4', answering(409, { error }))).toEqual({
+      ok: false,
+      status: 409,
+      error,
+    });
+  }
+  expect(await newGrantCode('abc123', 'a1b2c3d4', answering(200, { grant: GRANT }))).toEqual({
+    ok: false,
+    status: 0,
+    error: 'failed',
+  });
 });
 
 test('a grant’s plays and hours come through, and default to zero against an older den-edge', async () => {

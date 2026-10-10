@@ -3,7 +3,7 @@
      holds the owner's installs and the guest's browser only ever holds a secret of its own (`grants.ts`). What a guest
      holds lives in this browser (`grants.svelte.ts`), never in the library. -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
   import DetailIcon from '../components/DetailIcon.svelte';
@@ -25,6 +25,7 @@
     keepUploaded,
     keptCodes,
     listGrants,
+    newGrantCode,
     reuploadInstalls,
     revokeGrant,
     timeLeft,
@@ -90,7 +91,9 @@
   let customDays = $state(14);
   let redeemBy = $state(DEFAULT_REDEEM_DAYS);
   let devices = $state(1);
-  let created = $state<{ name: string; code: string } | null>(null);
+  /** The invite just made, or a guest's new link: `title` heads the panel, `notes` say what changed. */
+  let created = $state<{ name: string; code: string; title: string; notes: string[] } | null>(null);
+  let madePanel = $state<HTMLDivElement>();
   let copied = $state<string | null>(null);
   /** Set once a copy fell back all the way to "select it yourself": the field is already selected for it. */
   let manualLink = $state(false);
@@ -175,7 +178,12 @@
     await keepUploaded(reply.value.grant.gid, installs, chosen);
     keepCode(reply.value.grant.gid, reply.value.code);
     codes = { ...codes, [reply.value.grant.gid]: reply.value.code };
-    created = { name: reply.value.grant.name, code: reply.value.code };
+    created = {
+      name: reply.value.grant.name,
+      code: reply.value.code,
+      title: `${reply.value.grant.name}’s invite.`,
+      notes: ['It is shown once.'],
+    };
     copied = null;
     manualLink = false;
     manualCode = false;
@@ -214,6 +222,47 @@
     grants = (grants ?? []).map((g) => (g.gid === grant.gid ? reply.value : g));
     renaming = null;
     return true;
+  }
+
+  /** A new link for a guest who already exists (their phone, say): the previous one stops working. */
+  async function newLink(grant: Grant) {
+    const id = libraryCredentialId();
+    if (!id) return;
+    working = true;
+    problem = null;
+    const reply = await newGrantCode(id, grant.gid);
+    working = false;
+    if (!reply.ok) {
+      problem =
+        reply.error === 'devices_full'
+          ? `${grant.name} already has all 5 devices, the most a guest can have, so a new link would have nowhere to go.`
+          : reply.error === 'access_ended'
+            ? `${grant.name}’s access has ended. Extend it first, then make a new link.`
+            : said(reply);
+      return;
+    }
+    const { code, grant: next, devicesRaised } = reply.value;
+    keepCode(next.gid, code);
+    codes = { ...codes, [next.gid]: code };
+    grants = (grants ?? []).map((g) => (g.gid === next.gid ? next : g));
+    created = {
+      name: next.name,
+      code,
+      title: `${next.name}’s new link.`,
+      notes: [
+        'The previous link no longer works.',
+        ...(devicesRaised
+          ? [
+              `Every device slot was in use, so the device limit went up by one, to ${next.devices}.`,
+            ]
+          : []),
+      ],
+    };
+    copied = null;
+    manualLink = false;
+    manualCode = false;
+    await tick();
+    madePanel?.scrollIntoView({ block: 'nearest' });
   }
 
   const deviceLimit = (grant: Grant) => deviceLimits[grant.gid] ?? grant.devices;
@@ -261,6 +310,12 @@
         onselect: () => void copy(address),
       });
     }
+    items.push({
+      kind: 'item',
+      label: 'New link',
+      disabled: working,
+      onselect: () => void newLink(grant),
+    });
     if (!(grant.status === 'active' && grant.expiresAt === null)) {
       for (const days of [7, 30])
         items.push({
@@ -360,10 +415,11 @@
       {#if created}
         {@const address = inviteLink(location.origin, created.code)}
         {@const code = created.code}
-        <div class="made" role="status">
+        <div class="made" role="status" bind:this={madePanel}>
           <p>
-            <b>{created.name}’s invite.</b> Send them this link, or the code to paste under Settings ›
-            Sharing. It is shown once.
+            <b>{created.title}</b> Send them this link, or the code to paste under Settings ›
+            Sharing.
+            {created.notes.join(' ')}
           </p>
           <span class="copy">
             <input

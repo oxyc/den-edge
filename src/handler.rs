@@ -255,6 +255,7 @@ fn is_control(route: &str) -> bool {
             | "/reel/activate"
             | "/lib/:id/grants"
             | "/lib/:id/grants/:gid"
+            | "/lib/:id/grants/:gid/code"
             | "/lib/:id"
             | "/recovery"
             | "/recovery/open"
@@ -776,7 +777,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
         // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
         p if crate::grants::is_host_path(p) && p.matches('/').count() == 3 => "/lib/:id/grants",
-        p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid",
+        p if crate::grants::is_host_path(p) && p.matches('/').count() == 4 => "/lib/:id/grants/:gid",
+        p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid/code",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.ends_with("/rows") && p.contains("/rewrite/") => {
@@ -835,6 +837,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
+        "/lib/:id/grants/:gid/code" => Some(POST),
         "/grant/redeem"
         | "/reel/transport"
         | "/reel/activate"
