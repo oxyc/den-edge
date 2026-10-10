@@ -11,21 +11,31 @@ import { parseRoute, type Route } from './route';
 let release: string | undefined;
 
 /**
- * A HEAD re-fetch of this page's own path, read once, early (called from `main.ts`): den-edge stamps every shell
- * response with `x-den-release`, the shell's own digest, but a browser has no way to read a header of the
- * navigation it is already showing — only of a request it makes itself. Reading it now, rather than lazily when
- * the first report needs it, is what keeps it naming the release this page actually loaded rather than one den-
- * edge has since moved on to.
+ * Read the release of the navigation this page is actually running from its Server-Timing entry. Older servers
+ * and browsers fall back to one early HEAD of this page's own path and its `x-den-release`; doing that here,
+ * rather than lazily when the first report needs it, keeps that fallback's deployment race as small as possible.
  */
 export async function loadRelease(
   fetchImpl: typeof fetch = fetch,
   path: string = typeof location === 'undefined' ? '/' : location.pathname,
-): Promise<void> {
+  performanceImpl: Pick<Performance, 'getEntriesByType'> | undefined = globalThis.performance,
+): Promise<string | undefined> {
+  const navigation = performanceImpl?.getEntriesByType('navigation')[0] as
+    PerformanceNavigationTiming | undefined;
+  const navigated = navigation?.serverTiming.find(
+    ({ name }) => name === 'den-release',
+  )?.description;
+  if (navigated) {
+    release = navigated;
+    return release;
+  }
   try {
     const res = await fetchImpl(path, { method: 'HEAD', cache: 'no-store' });
     release = res.headers.get('x-den-release') ?? undefined;
+    return release;
   } catch {
     // Left unset: a report sent before this resolves, or one that never does, just omits `release`.
+    return undefined;
   }
 }
 

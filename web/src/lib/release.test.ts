@@ -78,6 +78,58 @@ describe('a waiting release', () => {
   });
 });
 
+describe('watching the shell release', () => {
+  it('marks another release for the next navigation without moving the current page', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'new' } }));
+    const watcher = release.watchRelease(
+      Promise.resolve('old'),
+      fetchImpl,
+      () => '/tv/6066-verano-azul',
+    );
+    const at = place();
+
+    await expect(watcher.check()).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledWith('/tv/6066-verano-azul', {
+      method: 'HEAD',
+      cache: 'no-cache',
+    });
+    expect(at.went).toEqual([]);
+    expect(release.swapOnNavigation('/tv/6066-verano-azul', at)).toBe(true);
+    expect(at.went).toEqual(['assign /tv/6066-verano-azul']);
+  });
+
+  it('coalesces probes, retries an offline check, and stops probing once a replacement is known', async () => {
+    let answer!: (response: Response) => void;
+    const first = new Promise<Response>((resolve) => (answer = resolve));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(first)
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(new Response(null, { headers: { 'x-den-release': 'new' } }));
+    const watcher = release.watchRelease(Promise.resolve('old'), fetchImpl, () => '/');
+
+    const one = watcher.check();
+    const two = watcher.check();
+    await Promise.resolve();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    answer(new Response(null, { headers: { 'x-den-release': 'old' } }));
+    await expect(Promise.all([one, two])).resolves.toEqual([false, false]);
+    await expect(watcher.check()).resolves.toBe(false);
+    await expect(watcher.check()).resolves.toBe(true);
+    await expect(watcher.check()).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not guess when the page-loaded release could not be read', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const watcher = release.watchRelease(Promise.resolve(undefined), fetchImpl);
+    await expect(watcher.check()).resolves.toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe('a chunk failing to load', () => {
   it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
     const idle = hiddenPage();

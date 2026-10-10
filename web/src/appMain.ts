@@ -5,12 +5,32 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
-import { recoverChunkFailure, swapWhileHidden } from './lib/release';
+import { recoverChunkFailure, swapWhileHidden, watchRelease } from './lib/release';
 import { legacyPath } from './lib/route';
 
 // Read once, now, rather than lazily when the first error report needs it: a page open across a deploy must
 // report the release it actually loaded, not one den-edge has since moved on to (`diagnosticsReport.ts`).
-void loadRelease();
+const release = watchRelease(loadRelease());
+
+// Learn about a replacement before this release discovers it by asking for a chunk that no longer exists. The
+// check is deliberately off the navigation path: ordinary route changes stay instant, and once a replacement is
+// found the existing safe handoff below puts it on screen while idle/hidden or on the next page the person opens.
+const RELEASE_CHECK_MS = 60_000;
+let newerRelease = false;
+const checkRelease = () => {
+  if (newerRelease) return;
+  void release.check().then((found) => {
+    if (!found) return;
+    newerRelease = true;
+    clearInterval(releaseCheckTimer);
+    window.removeEventListener('online', checkRelease);
+    if (document.hidden) swapWhileHidden();
+  });
+};
+const releaseCheckTimer = setInterval(() => {
+  if (!document.hidden) checkRelease();
+}, RELEASE_CHECK_MS);
+window.addEventListener('online', checkRelease);
 
 // den-edge's own request log sees nothing past the page load that reached it: an uncaught error or an unhandled
 // rejection anywhere in the app today just sits in the browser console, for nobody to read (den-edge#262).
@@ -78,5 +98,7 @@ window.addEventListener('vite:preloadError', () => {
 // recovering from that — applied while hidden, when nothing on screen would be lost — not a service worker's
 // doing: den no longer registers one (`public/sw.js` now only retires a browser's old registration).
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) swapWhileHidden();
+  if (document.hidden) {
+    if (!swapWhileHidden()) checkRelease();
+  } else checkRelease();
 });

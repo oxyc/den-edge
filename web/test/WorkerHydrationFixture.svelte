@@ -144,6 +144,16 @@
   }
 
   onMount(() => {
+    if (params.has('roundtrip-detail')) {
+      const fixtureWindow = window as typeof window & {
+        fixtureClearTmdbCache?: () => Promise<unknown>;
+      };
+      fixtureWindow.fixtureClearTmdbCache = () =>
+        services.content.query({ kind: 'provider-cache.clear', service: 'tmdb' });
+      return () => {
+        delete fixtureWindow.fixtureClearTmdbCache;
+      };
+    }
     if (!lifecycle) return;
     let stopped = false;
     const observe = () => {

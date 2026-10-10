@@ -243,6 +243,7 @@ async function routes(page, metadata) {
       metadata.held();
       await metadata.release;
     }
+    await metadata.beforeTitleRequest?.({ ref, url });
     const common = {
       id,
       poster_path: '/poster.jpg',
@@ -400,8 +401,8 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
           type: message?.type,
           kind: message?.request?.kind,
         });
-        // A request-scoped transport loss leaves the library channel apparently ready. This is the ordering that
-        // used to let ContentService install an anonymous Worker before the library supervisor could replace it.
+        // Let the real request enter the Worker, then fail the shared transport. The paired library supervisor must
+        // own the replacement before Content retries the warmed detail on that same generation.
         if (
           failNextDetail &&
           !failedDetail &&
@@ -409,25 +410,13 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
           message.request?.kind === 'title.detail'
         ) {
           failedDetail = true;
+          const sent = super.postMessage(message, ...rest);
           queueMicrotask(() =>
             this.dispatchEvent(
-              new MessageEvent('message', {
-                data: [
-                  {
-                    type: 'content-error',
-                    protocol: 4,
-                    requestId: message.requestId,
-                    error: {
-                      code: 'unavailable',
-                      message: 'fixture content transport was replaced',
-                      retryable: true,
-                    },
-                  },
-                ],
-              }),
+              new ErrorEvent('error', { message: 'fixture content transport was replaced' }),
             ),
           );
-          return;
+          return sent;
         }
         return super.postMessage(message, ...rest);
       }
@@ -501,6 +490,142 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
   expect(reelRequests.filter(({ member }) => !member)).toEqual([]);
   expect(tmdbRequests.length).toBeGreaterThan(0);
   expect(tmdbRequests.every((href) => new URL(href).pathname.startsWith('/tmdb/'))).toBe(true);
+});
+
+test('a large paired Home reopens its direct detail from Continue Watching while naming stays live', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    if (!location.search.includes('roundtrip-detail')) return;
+    history.replaceState({}, '', `/movie/1001${location.search}`);
+    const NativeWorker = window.Worker;
+    window.fixtureWorkerCount = 0;
+    window.fixtureWorkerMessages = [];
+    window.fixtureWorkerTerminations = [];
+    window.fixtureWorkers = [];
+    window.fixtureFailCurrentWorker = () => {
+      const worker = window.fixtureWorkers.at(-1);
+      if (!worker) throw new Error('fixture has no Worker to fail');
+      worker.dispatchEvent(
+        new ErrorEvent('error', { message: 'fixture terminated the current Worker transport' }),
+      );
+    };
+    window.Worker = class extends NativeWorker {
+      fixtureId;
+      constructor(url, options) {
+        super(url, options);
+        this.fixtureId = ++window.fixtureWorkerCount;
+        window.fixtureWorkers.push(this);
+      }
+      postMessage(message, ...rest) {
+        window.fixtureWorkerMessages.push({
+          worker: this.fixtureId,
+          type: message?.type,
+          kind: message?.request?.kind,
+        });
+        return super.postMessage(message, ...rest);
+      }
+      terminate() {
+        window.fixtureWorkerTerminations.push(this.fixtureId);
+        return super.terminate();
+      }
+    };
+  });
+  let holdWideDetails = false;
+  const wideDetails = Array.from({ length: 5 }, () => {
+    let release;
+    return {
+      release: new Promise((resolve) => (release = resolve)),
+      finish: release,
+    };
+  });
+  let wideDetail = 0;
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+    beforeTitleRequest: async ({ ref, url }) => {
+      if (
+        !holdWideDetails ||
+        ref !== 'movie:1001' ||
+        !url.searchParams.get('append_to_response')?.includes('recommendations')
+      )
+        return;
+      const held = wideDetails[wideDetail++];
+      if (!held) throw new Error('unexpected sixth wide detail request');
+      await held.release;
+    },
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  metadata.requests.length = 0;
+  await page.goto(`${FIXTURE}?routed&online&roundtrip-detail`);
+  let active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Movie 1001' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.evaluate(() => window.fixtureClearTmdbCache());
+
+  metadata.changeRequests = 0;
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/' } })),
+  );
+  active = page.locator('[data-route-page][data-active="true"]');
+  const continued = active.getByRole('region', { name: 'Continue Watching', exact: true });
+  const title = continued.getByRole('link', { name: /Movie 1001/ });
+  await expect(title).toBeVisible({ timeout: 15_000 });
+  await expect(active.getByRole('region', { name: 'Watchlist', exact: true })).toBeVisible();
+  holdWideDetails = true;
+  await title.click();
+  for (let generation = 0; generation < 4; generation += 1) {
+    await expect
+      .poll(() => wideDetail, { message: `wide detail reached generation ${generation + 1}` })
+      .toBe(generation + 1);
+    await page.evaluate(() => window.fixtureFailCurrentWorker());
+    wideDetails[generation].finish();
+  }
+  await expect
+    .poll(() => wideDetail, { message: 'wide detail reached the fifth generation' })
+    .toBe(5);
+  wideDetails[4].finish();
+
+  active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('heading', { name: 'Movie 1001' })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(active.getByText('Couldn’t load this title from TMDB.')).toHaveCount(0);
+  const worker = await page.evaluate(() => ({
+    count: window.fixtureWorkerCount,
+    messages: window.fixtureWorkerMessages,
+    terminations: window.fixtureWorkerTerminations,
+  }));
+  expect(worker.count).toBe(5);
+  expect(worker.terminations).toEqual([1, 2, 3, 4]);
+  for (let generation = 2; generation <= 5; generation += 1) {
+    const messages = worker.messages.filter(({ worker: id }) => id === generation);
+    expect(messages[0]).toMatchObject({ type: 'hello' });
+    const configured = messages.findIndex(
+      ({ type, kind }) => type === 'content-query' && kind === 'sources.configure',
+    );
+    const detailed = messages.findIndex(
+      ({ type, kind }) => type === 'content-query' && kind === 'title.detail',
+    );
+    expect(configured).toBeGreaterThan(0);
+    expect(detailed).toBeGreaterThan(configured);
+  }
+  const titleRequests = metadata.requests.filter(({ ref }) => ref === 'movie:1001');
+  expect(titleRequests.filter(({ url }) => url.includes('recommendations'))).toHaveLength(6);
+  // Replacement reopens the already-current local snapshot; it must not manufacture a remote catch-up storm.
+  expect(metadata.changeRequests).toBe(0);
 });
 
 test('a large paired library cold-loads every lazy view through the Worker', async ({ page }) => {
