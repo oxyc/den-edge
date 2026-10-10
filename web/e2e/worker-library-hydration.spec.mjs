@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, webkit } from '@playwright/test';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
@@ -626,6 +627,95 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   expect(titleRequests.filter(({ url }) => url.includes('recommendations'))).toHaveLength(6);
   // Replacement reopens the already-current local snapshot; it must not manufacture a remote catch-up storm.
   expect(metadata.changeRequests).toBe(0);
+});
+
+/**
+ * Open a Continue Watching card, return Home through the Den logo from a detail page scrolled far below Home's
+ * height (so the retained Home is shown at a clamped position and only then restored), and open a second card.
+ */
+async function reopenRetainedContinueCard(browser) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  await page.addInitScript(() => {
+    window.fixtureTapTrace = [];
+    for (const kind of ['pointerdown', 'pointerup', 'click'])
+      document.addEventListener(
+        kind,
+        (event) => {
+          const element = event.target;
+          window.fixtureTapTrace.push(
+            `${kind} ${element.tagName}.${element.className} link=${element.closest?.('a')?.getAttribute('href') ?? null}`,
+          );
+        },
+        true,
+      );
+  });
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed&verano`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.goto(`${FIXTURE}?routed&online&shell`);
+  const active = () => page.locator('[data-route-page][data-active="true"]');
+  const continueWatching = () =>
+    active().getByRole('region', { name: 'Continue Watching', exact: true });
+  await expect(continueWatching().getByRole('link', { name: /Series 6066/ })).toBeVisible({
+    timeout: 15_000,
+  });
+  await continueWatching()
+    .getByRole('link', { name: /Series 6066/ })
+    .tap();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/6066-series-6066');
+  await expect(active().getByRole('heading', { name: 'Series 6066' })).toBeVisible();
+
+  await active().evaluate((element) => (element.style.minHeight = '5000px'));
+  await page.evaluate(() => scrollTo(0, 3000));
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(3000);
+  await page.getByRole('link', { name: 'Den home' }).tap();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  const next = continueWatching().getByRole('link', { name: /Series 1003/ });
+  await expect(next).toBeVisible();
+  await next.tap();
+
+  // The tap's pointerdown, pointerup and click must all reach the same link. The trace names where the click went.
+  try {
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/tv/1003-series-1003');
+  } catch (error) {
+    error.message += `\n${(await page.evaluate(() => window.fixtureTapTrace.slice(-3))).join('\n')}`;
+    throw error;
+  }
+  await page.close();
+}
+
+test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
+  browser,
+}) => {
+  await reopenRetainedContinueCard(browser);
+});
+
+// Chromium keeps the wrapper's `content-visibility: auto` current across the retained page's show and scroll
+// restore; WebKit leaves the wrapper skipped, so the second tap's click lands on the wrapper and goes nowhere.
+test('a retained Home Continue Watching card opens again in WebKit', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    await reopenRetainedContinueCard(browser);
+  } finally {
+    await browser.close();
+  }
 });
 
 test('a personal billboard keep cannot kill the Worker before reopening Verano azul', async ({
