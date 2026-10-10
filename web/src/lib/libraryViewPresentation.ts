@@ -83,7 +83,9 @@ function rowFromState(
   state: Pick<Immutable<TitleView>, 'listed' | 'watched' | 'standing' | 'reaction' | 'progress'>,
 ): TitleRow {
   const row = blankTitle(title, 0);
-  row.deleted = { value: !state.listed, at: DISPLAY_STAMP };
+  // A reaction survives only on a title that is still held, so a reaction means held even when nothing lists it:
+  // a series rated before it is watchlisted or watched. Marking it deleted would hide the opinion just saved.
+  row.deleted = { value: !state.listed && state.reaction === null, at: DISPLAY_STAMP };
   row.status = {
     value:
       state.watched || state.standing === 'watched'

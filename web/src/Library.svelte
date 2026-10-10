@@ -454,7 +454,8 @@
         notice =
           'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
       return true;
-    } catch {
+    } catch (error) {
+      console.error('library command failed', error);
       failure = SAVE_FAILED;
       return false;
     } finally {

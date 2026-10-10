@@ -1,7 +1,8 @@
 import { expect, it } from 'vitest';
 import type { Title } from './library';
 import type { LibraryOverviewView, Standing, TitleRef } from './libraryServiceProtocol';
-import { OverviewTitleIndex } from './libraryViewPresentation';
+import { OverviewTitleIndex, titleViewRows } from './libraryViewPresentation';
+import { titleState } from './titleState';
 
 const ref = (id: number): TitleRef => ({ type: id % 2 === 0 ? 'tv' : 'movie', id });
 const title = (id: number): Title => ({ ...ref(id), title: `Title ${id}` });
@@ -49,6 +50,21 @@ it('presents correct title state from a large overview replacement', () => {
     deleted: { value: false },
     status: { value: 'watched' },
   });
+});
+
+it('keeps a reaction on a series that is not on the watchlist', () => {
+  const { row } = titleViewRows(title(2), {
+    kind: 'title',
+    title: ref(2),
+    listed: false,
+    watched: false,
+    reaction: 'love',
+    standing: null,
+    progress: null,
+    episodes: [],
+  });
+
+  expect(titleState(row).reaction).toBe('love');
 });
 
 it('preserves the presentation meaning of each overview membership', () => {
