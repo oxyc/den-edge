@@ -2,11 +2,10 @@ import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
 
-async function controlWindowedRows(page) {
-  // A browser may invalidate a content-visibility paint and deliver a stale `false` intersection between the
-  // picture being drawn and the finger landing. Reproduce that boundary deterministically: the light proxy is
-  // still the title's real link, and pointerdown must not replace that link before its click is dispatched.
-  await page.addInitScript(() => {
+async function controlWindowedRows(page, startFar = false) {
+  // Reproduce the false intersection delivery observed at the first-touch boundary without depending on browser
+  // scheduling. Tests can deliver it after the live cards paint, or start with a legitimately dormant shelf.
+  await page.addInitScript((initiallyFar) => {
     const NativeObserver = window.IntersectionObserver;
     const rowObservers = [];
     window.IntersectionObserver = class {
@@ -14,12 +13,17 @@ async function controlWindowedRows(page) {
         this.denCallback = callback;
         this.denTargets = new Set();
         this.denNative = new NativeObserver((entries) => callback(entries, this), options);
+        this.denInitiallyFar = initiallyFar && options.rootMargin === '1250px 0px';
         if (options.rootMargin === '1250px 0px') rowObservers.push(this);
       }
 
       observe(target) {
         this.denTargets.add(target);
-        this.denNative.observe(target);
+        if (this.denInitiallyFar) {
+          this.denCallback([{ target, isIntersecting: false }], this);
+        } else {
+          this.denNative.observe(target);
+        }
       }
 
       unobserve(target) {
@@ -44,7 +48,7 @@ async function controlWindowedRows(page) {
       }
     };
     window.denForceWindowedRowsFar = () => rowObservers.forEach((observer) => observer.denFar());
-  });
+  }, startFar);
 }
 
 async function mockPosterImages(page) {
@@ -56,7 +60,9 @@ async function mockPosterImages(page) {
   );
 }
 
-test('a first touch survives a windowed Continue Watching observer race', async ({ browser }) => {
+test('a visible Continue Watching shelf stays mounted through a stale observer exit and first touch', async ({
+  browser,
+}) => {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
   await guardNetwork(page);
   await controlWindowedRows(page);
@@ -76,10 +82,14 @@ test('a first touch survives a windowed Continue Watching observer race', async 
       const box = element.getBoundingClientRect();
       return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
     });
-
-    await page.evaluate(() => window.denForceWindowedRowsFar());
-    await expect(row.locator('.card')).toHaveCount(0);
-    await expect(row.locator('.proxy')).toHaveCount(8);
+    const mountedAfterExit = await page.evaluate(async () => {
+      window.denForceWindowedRowsFar();
+      await new Promise(requestAnimationFrame);
+      return document.querySelectorAll('.windowed .card').length;
+    });
+    // The observed failure replaced these links immediately: the row vanished and the URL stayed on Home.
+    // Keep them stable through the touch/click that follows the exit.
+    expect(mountedAfterExit).toBeGreaterThan(0);
     await page.touchscreen.tap(point.x, point.y);
 
     await expect(page).toHaveURL(new RegExp(`/tv/${6000 + index}-continuing-series-${index + 1}$`));
@@ -91,12 +101,26 @@ test('a first touch survives a windowed Continue Watching observer race', async 
   await page.close();
 });
 
-test('keyboard focus still promotes a windowed proxy to its full card', async ({ page }) => {
+test('a genuinely distant windowed shelf still releases its card trees after the touch grace', async ({
+  page,
+}) => {
   await guardNetwork(page);
   await controlWindowedRows(page);
   await mockPosterImages(page);
   await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
+  await expect(page.locator('.card')).not.toHaveCount(0);
+
   await page.evaluate(() => window.denForceWindowedRowsFar());
+
+  await expect(page.locator('.card')).toHaveCount(0, { timeout: 1_000 });
+  await expect(page.locator('.proxy')).toHaveCount(8);
+});
+
+test('keyboard focus still promotes a windowed proxy to its full card', async ({ page }) => {
+  await guardNetwork(page);
+  await controlWindowedRows(page, true);
+  await mockPosterImages(page);
+  await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
   await expect(page.locator('.card')).toHaveCount(0);
 
   await page.keyboard.press('Tab');
