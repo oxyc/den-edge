@@ -6,6 +6,7 @@ import { ristretto255, ristretto255_hasher } from '@noble/curves/ed25519.js';
 import { hkdf } from './crypto';
 import { cleanLabel, deviceLabel } from './edge';
 import { linkKeys, sendToLink } from './inbox';
+import { ALPHABET, parseCode } from './pairCode';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -13,19 +14,13 @@ type Point = InstanceType<typeof ristretto255.Point>;
 type Role = 'joiner' | 'host';
 
 const utf8 = new TextEncoder();
-const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DSI = utf8.encode('CPaceRistretto255');
 const CI = utf8.encode('den/pair/v1');
 const HANDOVER = utf8.encode('den/pair/v1/handover');
 export const isStampDeviceId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{16}$/.test(value);
 
-/** A typed or scanned code: uppercased, spaces and dashes dropped, and refused unless it is 12 alphabet characters. */
-export function parseCode(input: string): { nameplate: string; secret: string } | null {
-  const code = input.toUpperCase().replace(/[\s-]/g, '');
-  if (code.length !== 12 || [...code].some((c) => !ALPHABET.includes(c))) return null;
-  return { nameplate: code.slice(0, 4), secret: code.slice(4) };
-}
+export { parseCode };
 
 /**
  * A code as it is typed: alphabet characters only, at most twelve, in the TV's groups of four. `caret` is where the

@@ -5,7 +5,8 @@
 
 import { guestGrants } from './grants.svelte';
 import { links } from './links.svelte';
-import { join as pairJoin, type JoinError } from './pair';
+// Type-only: this module is read at startup, and `pair.ts` brings @noble/curves; `run` loads it (`pairJoin.ts`) to join.
+import type { join as pairJoin, JoinError } from './pair';
 import type { PhoneLink } from './phoneLink';
 import { thisDevice } from './device.svelte';
 
@@ -131,7 +132,17 @@ export class PhoneLanding {
         this.library = 'kept';
       } else {
         if (!this.key) {
-          const joined = await (deps.join ?? pairJoin)(request.code, {
+          // The chunk can fail to load (offline, or a release removed it): a retry can help, as with `unreachable`.
+          let join = deps.join;
+          if (!join) {
+            try {
+              ({ join } = await import('./pairJoin'));
+            } catch {
+              this.fail(JOIN_PROBLEMS.unreachable.text, true);
+              return;
+            }
+          }
+          const joined = await join(request.code, {
             label: thisDevice.name,
             ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
           });
