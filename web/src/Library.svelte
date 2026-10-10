@@ -473,6 +473,16 @@
     return saved;
   }
 
+  /**
+   * A press on the title page's own actions. They show the new state at once and take it back when the write fails,
+   * so the word for it goes on the page toast, where it is seen whatever the page has scrolled to.
+   */
+  async function fromPage(write: Promise<boolean | undefined>) {
+    const saved = await write;
+    if (saved === false) session.notify(SAVE_FAILED);
+    return saved;
+  }
+
   const toggleWatchlist = (title: Title, on: boolean) =>
     runCommand(
       model ? () => (on ? model.addToWatchlist(title) : model.removeFromLibrary(title)) : undefined,
@@ -1400,10 +1410,10 @@
     {failure}
     {notice}
     {model}
-    onwatchlist={toggleWatchlist}
-    onseen={setSeen}
+    onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
+    onseen={(title, seen) => fromPage(setSeen(title, seen))}
     onseason={markSeasonSeen}
-    onreact={setReaction}
+    onreact={(title, reaction) => fromPage(setReaction(title, reaction))}
     onplay={play}
     onplayhere={playHere}
     {remux}

@@ -281,6 +281,8 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
 
   #emit(event: LibraryAuthorityEvent): void {
     if (this.#closed) return;
+    // A status the authority announced between runs is the one the next run must replace, or it stays up for good.
+    if (event.kind === 'status') this.#lastStatus = event.status;
     if (event.kind === 'status' && event.status.kind === 'moved') {
       this.#halted = true;
       this.#cancelTimer();

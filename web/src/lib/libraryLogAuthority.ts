@@ -75,7 +75,7 @@ import {
   type LibraryAuthorityTaskResult,
   type LibrarySelectionScope,
 } from './libraryServiceCore';
-import { LibraryLog } from './log';
+import { LibraryLog, type DeferredDelivery } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
@@ -358,6 +358,7 @@ export class LibraryLogAuthority {
     this.#options = options;
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
+    log.onDeferred = (delivery) => this.#deferred(delivery);
     if (options.libraryKey && options.vault)
       this.#admin = new LibraryAdminAuthority(log, clock, {
         mode: options.mode,
@@ -374,6 +375,7 @@ export class LibraryLogAuthority {
 
   close(): void {
     this.#listeners.clear();
+    this.#log.onDeferred = null;
     this.#admin?.close();
     this.#log.close();
   }
@@ -1865,11 +1867,12 @@ export class LibraryLogAuthority {
     affected: LibraryAffectedSelection[],
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;
+    const queued = this.#log.queuedActions;
     const written = await this.#log.writeAction(journal);
     if (!written) this.#writeFailed();
     return {
       outcome: 'applied',
-      delivery: this.#delivery(pending),
+      delivery: this.#editDelivery(queued),
       affected: this.#withPendingStatus(pending, affected),
     };
   }
@@ -1880,10 +1883,11 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     if (!journals.length) return this.#unchanged();
     const pending = this.#log.pendingActions;
+    const queued = this.#log.queuedActions;
     if (!(await this.#log.writeActions(journals))) this.#writeFailed();
     return {
       outcome: 'applied',
-      delivery: this.#delivery(pending),
+      delivery: this.#editDelivery(queued),
       affected: this.#withPendingStatus(pending, affected),
     };
   }
@@ -1893,10 +1897,11 @@ export class LibraryLogAuthority {
     affected: LibraryAffectedSelection[],
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;
+    const queued = this.#log.queuedActions;
     if (!(await this.#log.write(row))) this.#writeFailed();
     return {
       outcome: 'applied',
-      delivery: this.#delivery(pending),
+      delivery: this.#editDelivery(queued),
       affected: this.#withPendingStatus(pending, affected),
     };
   }
@@ -1929,6 +1934,40 @@ export class LibraryLogAuthority {
   #delivery(pendingBefore: number): Delivery {
     if (this.#options.mode === 'local') return 'local';
     return this.#log.pendingActions > pendingBefore ? 'queued' : 'synced';
+  }
+
+  /**
+   * A title or episode edit is answered once it is kept, while its send is still under way: that send is expected to
+   * land, so only work left waiting for den-edge is queued. If it does not land, `#deferred` says so.
+   */
+  #editDelivery(queuedBefore: number): Delivery {
+    if (this.#options.mode === 'local') return 'local';
+    return this.#log.queuedActions > queuedBefore ? 'queued' : 'synced';
+  }
+
+  /** How an edit answered before it was sent came to end: what the views hold may have changed, and the page is told. */
+  #deferred({ outcome, changed }: DeferredDelivery): void {
+    const announce = (event: LibraryAuthorityEvent) => {
+      for (const listener of this.#listeners) listener(event);
+    };
+    announce({
+      kind: 'changed',
+      affected: changed ? [{ kind: 'all' }] : [{ kind: 'connections' }],
+    });
+    if (outcome === 'refused')
+      announce({
+        kind: 'status',
+        status: { kind: 'read-only', reason: 'Couldn’t save your last change. It was not kept.' },
+      });
+    else if (outcome === 'kept' && !this.#log.moved)
+      announce({
+        kind: 'status',
+        status: {
+          kind: 'read-only',
+          reason:
+            'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
+        },
+      });
   }
 
   #idleDelivery(): Delivery {

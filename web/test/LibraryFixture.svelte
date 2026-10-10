@@ -49,6 +49,14 @@
       releaseOpen;
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
+  /** Actions wait until `denTestReleaseWrites()`: a write that takes as long as a slow library takes. */
+  let releaseWrites = () => {};
+  const writeGate = params.has('hold-writes')
+    ? new Promise<void>((resolve) => (releaseWrites = resolve))
+    : undefined;
+  if (writeGate)
+    (window as unknown as { denTestReleaseWrites: () => void }).denTestReleaseWrites =
+      releaseWrites;
   const withDownload = params.has('downloading');
   const fixtureClock = browserClock();
   const downloadRow = startRow(
@@ -176,6 +184,7 @@
      * A journal that isn't a tracker event is kept as the row it is, which is what the real log does with it.
      */
     writeActions: async (journals: SettingsRow[]) => {
+      await writeGate;
       if (failing) return false;
       for (const journal of journals) {
         const event = trackerEvent(journal);
@@ -185,6 +194,7 @@
     },
     /** One action, as `act` writes it (Remove, Mark watched on a movie): its journal's row, as `writeActions` keeps them. */
     writeAction: async (journal: SettingsRow) => {
+      await writeGate;
       if (failing) return null;
       const event = trackerEvent(journal);
       const row = event ? event.after : journal;

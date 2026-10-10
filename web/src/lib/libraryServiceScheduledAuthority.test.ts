@@ -129,6 +129,34 @@ describe('ScheduledLibraryServiceAuthority', () => {
     await scheduled.close();
   });
 
+  it('replaces a status the authority announced between runs at the next run', async () => {
+    vi.useFakeTimers();
+    const base = authority();
+    let announce!: (event: LibraryAuthorityEvent) => void;
+    base.port.listen = (listener) => {
+      announce = listener;
+      return () => undefined;
+    };
+    const work = maintenance();
+    const scheduled = new ScheduledLibraryServiceAuthority(base.port, work.port);
+    const events: LibraryAuthorityEvent[] = [];
+    scheduled.listen((event) => events.push(event));
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    events.length = 0;
+
+    // The run that follows finds the library ready, as it did before: without this the banner would stay up.
+    const banner = { kind: 'read-only' as const, reason: 'Couldn’t save your last change.' };
+    announce({ kind: 'status', status: banner });
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(events).toEqual([
+      { kind: 'status', status: banner },
+      { kind: 'status', status: { kind: 'ready' } },
+    ]);
+    await scheduled.close();
+  });
+
   it('honors a sooner worker-owned download cadence after foreground readiness', async () => {
     vi.useFakeTimers();
     const work = maintenance();

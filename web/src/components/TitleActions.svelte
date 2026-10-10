@@ -10,8 +10,11 @@
   import SplitButton from './SplitButton.svelte';
   import type { TitleRow } from '../lib/wire';
   import { shareOrCopy } from '../lib/share';
-  import { titleState, type Reaction } from '../lib/titleState';
+  import { PressedTitle } from '../lib/pressedTitle.svelte';
+  import type { SaveKind } from '../lib/pressedTitleState';
+  import type { Reaction } from '../lib/titleState';
   import { toastContext } from '../lib/toast';
+  import { tick } from 'svelte';
 
   let {
     row,
@@ -93,23 +96,31 @@
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
   let copied = $state(false);
   let copiedFor: ReturnType<typeof setTimeout> | undefined;
-  type SaveKind = 'watchlist' | 'seen' | 'reaction';
-  let pending = $state<SaveKind | null>(null);
   const notify = toastContext();
 
-  // Library writes share one command channel (and Watchlist/Seen share one status field), so they serialize.
-  // The initiator says busy; its peers stay visibly stable but honestly expose that they cannot be changed yet.
-  const externallyBusy = () => busy && pending === null;
-  const actionBusy = (kind: SaveKind) => pending === kind;
-  const mutationBlocked = () => busy || pending !== null;
+  // A press shows at once and is saved after. Library writes share one command channel (and Watchlist/Seen share one
+  // status field), so they serialize: the initiator says busy; its peers stay visibly stable but honestly expose that
+  // they cannot be changed yet. The press stays laid over `row` until its own save ends, so the row refreshing
+  // meanwhile never moves the button back; a save that fails is simply no longer laid over the row, which is the
+  // state it had.
+  const pressed = new PressedTitle();
+  const externallyBusy = () => busy && pressed.idle;
+  const mutationBlocked = () => busy || !pressed.idle;
 
-  async function save(kind: SaveKind, action: () => void | Promise<unknown>) {
-    if (busy || pending) return;
-    pending = kind;
+  async function save(
+    kind: SaveKind,
+    value: boolean | Reaction | null,
+    action: () => void | Promise<unknown>,
+    button?: Reaction,
+  ) {
+    if (mutationBlocked()) return;
+    pressed.begin(kind, value, button);
     try {
       await action();
     } finally {
-      pending = null;
+      // Once the row has taken what the save made of it.
+      await tick();
+      pressed.end();
     }
   }
 
@@ -125,8 +136,9 @@
     notify?.('Link copied');
   }
 
-  const { listed, seen: flagSeen, reaction } = $derived(titleState(row));
-  const seen = $derived(seenOverride ?? flagSeen);
+  const { listed, seen: flagSeen, reaction } = $derived(pressed.state(row));
+  // The series pill follows its episodes, until Seen itself is pressed: that press is what it reads as meanwhile.
+  const seen = $derived(pressed.saving('seen') ? flagSeen : (seenOverride ?? flagSeen));
   const reactions: [Reaction, string][] = [
     ['dislike', 'Not for me'],
     ['like', 'Like'],
@@ -143,8 +155,8 @@
   class="actions"
   class:detail-page={detailPage}
   class:compact
-  class:saving={pending !== null}
-  aria-busy={busy || pending !== null}
+  class:saving={!pressed.idle}
+  aria-busy={busy || !pressed.idle}
 >
   {#if restricted}
     <!-- The ceiling's own slot, where Play would be: the title is still named and rated on the page, but
@@ -227,9 +239,13 @@
         label={compact ? undefined : 'Watchlist'}
         pressed={compact ? undefined : listed}
         ariaLabel={compact ? (listed ? 'Remove from watchlist' : 'Add to watchlist') : 'Watchlist'}
-        busy={actionBusy('watchlist')}
+        busy={pressed.saving('watchlist')}
+        saving={pressed.saving('watchlist')}
         aria-disabled={mutationBlocked() || undefined}
-        onclick={() => void save('watchlist', () => onwatchlist(!listed))}
+        onclick={() => {
+          const on = !listed;
+          void save('watchlist', on, () => onwatchlist(on));
+        }}
       />
       <Button
         variant="stateful"
@@ -239,9 +255,13 @@
         label={compact ? undefined : 'Seen'}
         pressed={compact ? undefined : seen}
         ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
-        busy={actionBusy('seen')}
+        busy={pressed.saving('seen')}
+        saving={pressed.saving('seen')}
         aria-disabled={mutationBlocked() || undefined}
-        onclick={() => void save('seen', () => onseen(!seen))}
+        onclick={() => {
+          const on = !seen;
+          void save('seen', on, () => onseen(on));
+        }}
       />
       {#if onreact}
         <div class="desktop-reactions" role="group" aria-label="Your opinion">
@@ -253,10 +273,13 @@
               iconFilled={reaction === value}
               {label}
               pressed={reaction === value}
-              busy={actionBusy('reaction')}
+              busy={pressed.saving('reaction', value)}
+              saving={pressed.saving('reaction', value)}
               aria-disabled={mutationBlocked() || undefined}
-              onclick={() =>
-                void save('reaction', () => onreact(reaction === value ? null : value))}
+              onclick={() => {
+                const next = reaction === value ? null : value;
+                void save('reaction', next, () => onreact(next), value);
+              }}
             />
           {/each}
         </div>
@@ -280,6 +303,8 @@
         <div
           class="den-button den-button-secondary den-button-regular pick"
           class:on={reaction !== null}
+          aria-busy={pressed.saving('reaction') || undefined}
+          data-saving={pressed.saving('reaction') || undefined}
         >
           <ButtonIcon name={opinionIcon(reaction)} filled={reaction !== null} />
           <span class="value" aria-hidden="true">{rated}</span>
@@ -288,10 +313,10 @@
             aria-label="Your opinion"
             value={reaction ?? ''}
             disabled={mutationBlocked()}
-            onchange={(event) =>
-              void save('reaction', () =>
-                onreact((event.currentTarget.value || null) as Reaction | null),
-              )}
+            onchange={(event) => {
+              const next = (event.currentTarget.value || null) as Reaction | null;
+              void save('reaction', next, () => onreact(next));
+            }}
           >
             <option value="">No rating</option>
             {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}

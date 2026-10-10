@@ -36,7 +36,12 @@
     linkKey: 'fixture',
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
-  const route: Route = params.get('view') === 'home' ? { page: 'library' } : { page: 'watchlist' };
+  const opened = params.get('title')?.match(/^(movie|tv):(\d+)$/);
+  const route: Route = opened
+    ? { page: 'title', type: opened[1] as 'movie' | 'tv', id: Number(opened[2]) }
+    : params.get('view') === 'home'
+      ? { page: 'library' }
+      : { page: 'watchlist' };
   let routedRoute = $state<Route>(route);
 
   $effect(() => session.configureServices());
