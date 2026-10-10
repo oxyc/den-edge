@@ -34,6 +34,9 @@
   let track = $state<HTMLDivElement>();
   const page = pageVisibility();
   let rowNear = $state(false);
+  // False from a retained page's reactivation until the first observer delivery after it. See `.row-window`.
+  let placed = $state(true);
+  let observed = false;
   let materialized = $state<number[]>([]);
   let focusedIndex = $state<number | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
@@ -52,9 +55,18 @@
   $effect(() => {
     if (!page.active) {
       rowNear = false;
+      if (observed) placed = false;
       return;
     }
-    return observeNearViewport(wrapper, (near) => (rowNear = near), '800px 0px');
+    return observeNearViewport(
+      wrapper,
+      (near) => {
+        observed = true;
+        placed = true;
+        rowNear = near;
+      },
+      '800px 0px',
+    );
   });
 
   // The first page loads when the browser is next idle, so a row is usually filled before it is scrolled to, and
@@ -227,6 +239,7 @@
 <div
   bind:this={wrapper}
   class="row-window"
+  class:placed
   class:gone={done && !pager.failed && visible.length === 0}
   class:mobile-two-line-heading={row.mobileHeadingLines === 2}
 >
@@ -280,10 +293,23 @@
 
 <style>
   /* The poster, its two metadata lines, the heading and the row gaps all have fixed geometry. The automatic
-     remembered size covers any browser rounding once the row has rendered for the first time. */
+     remembered size covers any browser rounding once the row has rendered for the first time.
+
+     A reactivated page waits for its first observer delivery before skipping again (as `WindowedPosterRow`): WebKit
+     leaves the row skipped at the position it was first laid out when the router scrolls the retained page, so
+     the row paints but a tap on it goes to the wrapper and nowhere. Until then the wrapper keeps the containment
+     `auto` gives a row that is not skipped, so its height (the row's bottom margin included) does not change
+     when it is placed again and shift the page. */
   .row-window {
-    content-visibility: auto;
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+  }
+
+  .row-window.placed {
+    content-visibility: auto;
+  }
+
+  .row-window:not(.placed) {
+    contain: layout style paint;
   }
 
   @media (width <= 759px) {

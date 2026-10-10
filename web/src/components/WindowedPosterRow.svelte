@@ -317,6 +317,12 @@
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.45 * 9 / 16 + 127.2px);
   }
 
+  /* Until placed the wrapper keeps the containment `auto` gives a row that is not skipped, so its height (the row's
+     bottom margin included) does not change when it is placed again and shift the page. */
+  .windowed:not(.placed) {
+    contain: layout style paint;
+  }
+
   .slot {
     display: block;
     width: var(--card-w);

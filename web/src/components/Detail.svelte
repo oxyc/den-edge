@@ -347,8 +347,11 @@
   const extrasRequest = $derived(
     `${ref.type}:${ref.id}\u0000${warningCategories.slice().sort().join('\u0001')}`,
   );
+  /** The `extrasRequest` whose answer is already on the page: Back to a retained page keeps it rather than asking again. */
+  let extrasAnswered: string | null = null;
   $effect(() => {
     void extrasRequest;
+    extrasAnswered = null;
     ratings = null;
     warnings = undefined;
     iconicStudios = undefined;
@@ -356,11 +359,13 @@
   });
 
   // Optional providers are one independent Worker question. They may finish after base detail and seasons, and a
-  // retained hidden route does no provider work until it is visible again.
+  // retained hidden route does no provider work until it is visible again. Once answered, the answer stays: asking
+  // again on every return handed Related titles new studios and facts, which rebuilt all its rows and so replaced
+  // the rows the viewer had scrolled along.
   $effect(() => {
-    void extrasRequest;
+    const request = extrasRequest;
     const [visible, loaded] = [active, detail];
-    if (!visible || !loaded) return;
+    if (!visible || !loaded || extrasAnswered === request) return;
     const title = untrack(() => ({ type: ref.type, id: ref.id }));
     const categories = untrack(() => [...warningCategories]);
     const controller = new AbortController();
@@ -375,6 +380,7 @@
       )
       .then(({ extras }) => {
         if (controller.signal.aborted) return;
+        extrasAnswered = request;
         ratings = extras.ratings.state === 'ready' ? extras.ratings.value : null;
         warnings = extras.warnings.state === 'ready' ? extras.warnings.value : [];
         iconicStudios = extras.iconicStudios.state === 'ready' ? extras.iconicStudios.value : [];
