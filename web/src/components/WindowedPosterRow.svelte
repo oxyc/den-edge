@@ -43,21 +43,61 @@
   let observed = false;
   let intentLength = -1;
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
-  onDestroy(() => clearTimeout(releaseTimer));
+  let retireTimer: ReturnType<typeof setTimeout> | undefined;
+  let outside = false;
+  let interacting = false;
+  const RETIRE_GRACE_MS = 400;
+  onDestroy(() => {
+    clearTimeout(releaseTimer);
+    clearTimeout(retireTimer);
+  });
+
+  /**
+   * A visible Home row was observed to disappear on first tap while the URL stayed on Home, then return after a
+   * scroll. A forced observer exit reproduces the immediate replacement of all its card links with light proxies.
+   * Retiring after a short grace keeps those links stable through click dispatch while genuinely distant rows still
+   * release their card trees.
+   */
+  function scheduleRetire() {
+    clearTimeout(retireTimer);
+    if (!outside || interacting || !page.active || !rowNear) return;
+    retireTimer = setTimeout(() => {
+      retireTimer = undefined;
+      if (!outside || interacting || track?.contains(document.activeElement)) return;
+      rowNear = false;
+    }, RETIRE_GRACE_MS);
+  }
+
+  function releaseInteraction() {
+    // `click` follows pointerup in the same dispatch. The grace keeps the link mounted after this release while a
+    // waiting observer exit is retired normally.
+    interacting = false;
+    scheduleRetire();
+  }
 
   $effect(() => {
     if (!page.active) {
+      clearTimeout(retireTimer);
+      outside = false;
+      interacting = false;
       rowNear = false;
       return;
     }
     return observeNearViewport(
       wrapper,
       (near) => {
+        const entered = observed && near && !rowNear;
+        observed = true;
+        if (!near) {
+          outside = true;
+          scheduleRetire();
+          return;
+        }
+        outside = false;
+        clearTimeout(retireTimer);
         // The observer's first delivery describes initial layout, not viewer intent. A later entry is either a
         // vertical approach to this row or a retained-route return, and may admit its next title tranche.
-        const entered = observed && near && !rowNear;
-        rowNear = near;
-        observed = true;
+        rowNear = true;
         if (entered) requestMore();
       },
       '1250px 0px',
@@ -134,6 +174,8 @@
       const slot = target.closest<HTMLElement>('[data-card-index]');
       const index = Number(slot?.dataset.cardIndex);
       if (!Number.isInteger(index) || !items[index]) return;
+      interacting = true;
+      clearTimeout(retireTimer);
       focusedKey = itemKey(items[index]);
     };
     // Observer delivery must not read layout-sensitive element geometry or synchronously mount cards. Record only
@@ -148,9 +190,13 @@
     resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', scroll, { passive: true });
     scroller.addEventListener('pointerdown', press, { passive: true });
+    scroller.addEventListener('pointerup', releaseInteraction, { passive: true });
+    scroller.addEventListener('pointercancel', releaseInteraction, { passive: true });
     return () => {
       scroller.removeEventListener('scroll', scroll);
       scroller.removeEventListener('pointerdown', press);
+      scroller.removeEventListener('pointerup', releaseInteraction);
+      scroller.removeEventListener('pointercancel', releaseInteraction);
       resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
       if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
@@ -175,7 +221,10 @@
   function releaseFocus() {
     clearTimeout(releaseTimer);
     releaseTimer = setTimeout(() => {
-      if (page.active && !track?.contains(document.activeElement)) focusedKey = null;
+      if (page.active && !track?.contains(document.activeElement)) {
+        focusedKey = null;
+        scheduleRetire();
+      }
     });
   }
 
