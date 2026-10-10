@@ -962,6 +962,10 @@ async fn forget(
     if let Err(e) = crate::recovery::delete_library(state, id).await {
         return internal("library recovery delete", e);
     }
+    // So are its assistants' queue and drop-box key: requests sealed for it open under no key the moved library holds.
+    if let Err(e) = crate::assistant::delete_library(state, id).await {
+        return internal("library assistant delete", e);
+    }
     if let Err(e) = state.store.replace_file(NS, id, MOVED, successor.unwrap_or_default().as_bytes()).await {
         return internal("library retire", e);
     }
@@ -1004,6 +1008,8 @@ async fn forget(
     for gid in revoked {
         crate::grants::end_sessions(state, &gid).await;
     }
+    // Its members' assistant connections end too, write sessions included, rather than at their next call.
+    crate::oauth::end_library(state, id).await;
     json_reply(StatusCode::OK, &json!({ "deleted": true }))
 }
 

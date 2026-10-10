@@ -38,6 +38,13 @@
 //! a guest the grant too, so a revoked connection, a revoked or expired grant, and a member whose library key was
 //! reset all stop at the next call — not when the access token runs out. Ending a grant (`grants::end_sessions`)
 //! deletes its sessions as well, so they cannot be refreshed either.
+//!
+//! # Changing the library (den-spec `wire/assistant-v1.md`)
+//!
+//! With `MCP_WRITE_PUBLIC_KEY` set, a member (never a guest) may also grant `den:library.write`: Den Web makes a grant
+//! key at consent and approves with it. The key lives only in the pending and code entries until the code is
+//! exchanged, then only wrapped under the session's refresh secret (`den_assistant::wrap`), re-wrapped on every
+//! rotation; at rest it cannot be unwrapped. Every access token of such a session carries it sealed to den-mcp (`dw`).
 
 use crate::handler::{constant_time_eq, error, internal, json_reply, retry_after};
 use crate::AppState;
@@ -45,6 +52,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::Response;
+use den_assistant::GrantKey;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use http_body_util::Full;
 use serde::{Deserialize, Serialize};
@@ -59,6 +67,10 @@ const NS: &str = "oauth";
 const INDEX: &str = "index";
 const VERSION: u32 = 1;
 pub const SCOPE: &str = "den:search";
+/// Changing the library through den-mcp's sealed requests (assistant v1 §9).
+pub const WRITE_SCOPE: &str = "den:library.write";
+/// A write session's scope claim: space-separated, search first.
+const WRITE_SCOPES: &str = "den:search den:library.write";
 /// How long an access token lasts. Short, because it is checked without asking this server; the relay's check of
 /// the session is what makes revocation immediate.
 const ACCESS_TTL_S: u64 = 15 * 60;
@@ -112,6 +124,9 @@ pub struct OAuth {
     pub resource: String,
     /// Where Den Web's consent page is: the issuer's origin unless the web app is served from another name.
     pub consent_origin: String,
+    /// den-mcp's X-Wing public key (env `MCP_WRITE_PUBLIC_KEY`), which each write session's access tokens seal the
+    /// grant key to (`dw`). `None` offers no write scope.
+    pub write_public: Option<Vec<u8>>,
     key: SigningKey,
     kid: String,
     pending: Mutex<HashMap<String, Pending>>,
@@ -139,6 +154,7 @@ impl OAuth {
             issuer,
             resource,
             consent_origin,
+            write_public: None,
             key,
             kid,
             pending: Mutex::default(),
@@ -153,11 +169,42 @@ impl OAuth {
         self.key.verifying_key()
     }
 
+    /// Whether a member may grant `den:library.write` here.
+    fn writable(&self) -> bool {
+        self.write_public.is_some()
+    }
+
     /// Where the resource's metadata is, for a 401's `WWW-Authenticate`.
     fn resource_metadata(&self) -> String {
         let origin = self.resource.strip_suffix("/mcp").unwrap_or(&self.resource);
         format!("{origin}/.well-known/oauth-protected-resource/mcp")
     }
+}
+
+/// `MCP_WRITE_PUBLIC_KEY`: an X-Wing public key, 1,216 bytes of unpadded base64url, that a claim can be sealed to.
+pub fn write_public_key(text: &str) -> Option<Vec<u8>> {
+    let key = den_assistant::b64url_decode(text).filter(|k| k.len() == den_assistant::KEM_PUBLIC_LEN)?;
+    // Sealing once proves it decodes as a key; the randomness is never used for anything else.
+    den_assistant::hpke_seal(&key, b"", b"", b"", &[0; den_assistant::ESEED_LEN]).ok()?;
+    Some(key)
+}
+
+/// The grant key wrapped under a refresh secret (assistant v1 §8). `secret` is the refresh token's secret as issued,
+/// the base64url of 32 random bytes; the wrap is keyed by those bytes.
+fn wrap_grant(secret: &str, sid: &str, grant: &GrantKey, nonce: &[u8; 12]) -> String {
+    let bytes = zeroize::Zeroizing::new(b64url_decode(secret).expect("a secret this server issued decodes"));
+    den_assistant::wrap(&bytes, sid, grant, nonce)
+}
+
+/// [`wrap_grant`] undone with the refresh secret presented, or `None` when it does not unwrap.
+fn unwrap_grant(secret: &str, sid: &str, wrapped: &str) -> Option<GrantKey> {
+    let bytes = zeroize::Zeroizing::new(b64url_decode(secret)?);
+    den_assistant::unwrap(&bytes, sid, wrapped).ok()
+}
+
+/// The `dw` claim (assistant v1 §7): the grant key sealed to den-mcp's key, bound to the token's `sub`.
+fn write_claim(public: &[u8], sub: &str, grant: &GrantKey, eseed: &[u8]) -> Option<String> {
+    den_assistant::seal_claim(public, sub, grant, eseed).ok()
 }
 
 /// An authorization request waiting for the consent page.
@@ -170,6 +217,8 @@ struct Pending {
     until: u64,
     /// Arrival order, which decides the oldest when several arrived in the same millisecond.
     seq: u64,
+    /// Whether this request may be granted `den:library.write`: it asked for it, or named no scope.
+    write: bool,
 }
 
 /// A code, waiting to be exchanged.
@@ -179,6 +228,8 @@ struct Code {
     challenge: String,
     who: Who,
     until: u64,
+    /// The grant key a write approval carried. Held here, in memory, until the exchange wraps it.
+    grant: Option<GrantKey>,
 }
 
 /// Whom a connection speaks for.
@@ -242,6 +293,14 @@ struct Session {
     retired: Vec<String>,
     created_at: u64,
     used_at: u64,
+    /// A write session's grant id, and its grant key wrapped under the refresh secret now valid (`wrap`) and under
+    /// the one it replaced (`previous_wrap`), which a retry within `REFRESH_GRACE_MS` presents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_wrap: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -365,7 +424,7 @@ fn metadata(oauth: &OAuth) -> Response {
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": [SCOPE],
+            "scopes_supported": if oauth.writable() { vec![SCOPE, WRITE_SCOPE] } else { vec![SCOPE] },
             "authorization_response_iss_parameter_supported": true,
         }),
     )
@@ -677,9 +736,13 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     if get("resource").is_some_and(|r| r.trim_end_matches('/') != oauth.resource) {
         return error_page("The assistant asked to connect to something other than Den's search (/mcp).");
     }
-    if get("scope").is_some_and(|s| s.split(' ').any(|s| !s.is_empty() && s != SCOPE)) {
+    let scopes: Vec<&str> =
+        get("scope").map(|s| s.split(' ').filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+    if scopes.iter().any(|s| *s != SCOPE && !(oauth.writable() && *s == WRITE_SCOPE)) {
         return error_page("The assistant asked for more than Den gives: searching only (den:search).");
     }
+    // One that names no scope may be offered the write scope too; the person decides on the consent page.
+    let write = oauth.writable() && (scopes.is_empty() || scopes.contains(&WRITE_SCOPE));
     let now = state.now();
     let id = random_id();
     {
@@ -715,6 +778,7 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
                 state: state_param,
                 until: now + PENDING_MS,
                 seq,
+                write,
             },
         );
     }
@@ -747,7 +811,13 @@ fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Resp
             let verified = host.as_deref().is_some_and(known_host);
             json_reply(
                 StatusCode::OK,
-                &json!({ "client": p.client_name, "redirectHost": host, "verified": verified, "scope": SCOPE }),
+                &json!({
+                    "client": p.client_name,
+                    "redirectHost": host,
+                    "verified": verified,
+                    "scope": SCOPE,
+                    "write": p.write,
+                }),
             )
         }
         None => json_reply(StatusCode::NOT_FOUND, &error("request_expired")),
@@ -774,6 +844,35 @@ async fn who(state: &AppState, (member, grant): (Option<String>, Option<String>)
     Some(Who::Guest { gid: live.gid, host: live.host, name: live.name })
 }
 
+/// The grant an approval carries (`{"write": {"grant", "key"}}`), when it carries one: its id and its 32-byte seed.
+/// No body, or no `write`, is an approval of `den:search` alone, as before the write scope.
+async fn write_approval(
+    req: Request,
+) -> Result<Option<(String, zeroize::Zeroizing<[u8; 32]>)>, Box<Response>> {
+    let bad = || Box::new(json_reply(StatusCode::BAD_REQUEST, &error("invalid_grant_key")));
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else {
+        return Err(Box::new(json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))));
+    };
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let body: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("bad_request"))))?;
+    let write = match body.get("write") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(write) => write,
+    };
+    let grant = write.get("grant").and_then(Value::as_str).filter(|g| valid_id(g)).ok_or_else(bad)?;
+    let key = write
+        .get("key")
+        .and_then(Value::as_str)
+        .and_then(den_assistant::b64url_decode)
+        .map(zeroize::Zeroizing::new)
+        .ok_or_else(bad)?;
+    let seed: [u8; 32] = key.as_slice().try_into().map_err(|_| bad())?;
+    Ok(Some((grant.to_owned(), zeroize::Zeroizing::new(seed))))
+}
+
 async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approve: bool) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, format!("oauth-consent:{ip}"), CONSENT_PER_WINDOW) {
@@ -788,9 +887,40 @@ async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approv
     } else {
         None
     };
-    let Some(pending) = crate::lock(&oauth.pending).remove(id).filter(|p| p.until > now) else {
-        return json_reply(StatusCode::NOT_FOUND, &error("request_expired"));
+    let write = if approve {
+        match write_approval(req).await {
+            Ok(write) => write,
+            Err(refused) => return *refused,
+        }
+    } else {
+        None
     };
+    if write.is_some() && matches!(who, Some(Who::Guest { .. })) {
+        return json_reply(StatusCode::FORBIDDEN, &error("write_not_for_guests"));
+    }
+    let grant = {
+        let mut pending = crate::lock(&oauth.pending);
+        let Some(entry) = pending.get(id).filter(|p| p.until > now) else {
+            pending.remove(id);
+            return json_reply(StatusCode::NOT_FOUND, &error("request_expired"));
+        };
+        // Refused before the request is taken: the consent page can still approve it without the write scope.
+        let grant = match write {
+            None => None,
+            Some(_) if !entry.write || !oauth.writable() => {
+                return json_reply(StatusCode::BAD_REQUEST, &error("invalid_scope"))
+            }
+            Some((grant_id, seed)) => {
+                let key = GrantKey::from_secret(&seed);
+                if key.id() != grant_id {
+                    return json_reply(StatusCode::BAD_REQUEST, &error("invalid_grant_key"));
+                }
+                Some(key)
+            }
+        };
+        (grant, pending.remove(id).expect("checked above"))
+    };
+    let (grant, pending) = grant;
     let mut params = vec![("iss", oauth.issuer.clone())];
     if let Some(s) = &pending.state {
         params.push(("state", s.clone()));
@@ -809,6 +939,7 @@ async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approv
                         challenge: pending.challenge,
                         who,
                         until: now + CODE_MS,
+                        grant,
                     },
                 );
             }
@@ -856,28 +987,46 @@ async fn params_of(req: Request) -> Option<HashMap<String, String>> {
 }
 
 /// An access token for `session`: a compact JWS, `EdDSA`, RFC 9068's claims. A guest's never outlasts the grant.
-fn access_token(oauth: &OAuth, session: &Session, now_ms: u64, grant_end: Option<u64>) -> (String, u64) {
+/// With `grant` (a write session's key, unwrapped for this answer) and the write scope on, it carries the write scope
+/// and `dw`, sealed afresh for this token. Also the scope it carries.
+fn access_token(
+    oauth: &OAuth,
+    session: &Session,
+    now_ms: u64,
+    grant_end: Option<u64>,
+    grant: Option<&GrantKey>,
+) -> (String, u64, &'static str) {
     let now = now_ms / 1000;
     let exp = grant_end.map_or(now + ACCESS_TTL_S, |end| (now + ACCESS_TTL_S).min(end / 1000));
     let header = json!({ "alg": "EdDSA", "typ": "at+jwt", "kid": oauth.kid });
-    let claims = json!({
+    let dw = match (grant, &oauth.write_public) {
+        (Some(grant), Some(public)) => {
+            write_claim(public, &session.sid, grant, &crate::random_bytes::<{ den_assistant::ESEED_LEN }>())
+        }
+        _ => None,
+    };
+    let scope = if dw.is_some() { WRITE_SCOPES } else { SCOPE };
+    let mut claims = json!({
         "iss": oauth.issuer,
         "aud": oauth.resource,
         "sub": session.sid,
         "client_id": session.client_id,
-        "scope": SCOPE,
+        "scope": scope,
         "kind": session.who.kind(),
         "iat": now,
         "exp": exp,
         "jti": random_id(),
     });
+    if let Some(dw) = dw {
+        claims["dw"] = json!(dw);
+    }
     let signed =
         format!("{}.{}", b64url(header.to_string().as_bytes()), b64url(claims.to_string().as_bytes()));
     let signature = oauth.key.sign(signed.as_bytes()).to_bytes();
-    (format!("{signed}.{}", b64url(&signature)), exp.saturating_sub(now))
+    (format!("{signed}.{}", b64url(&signature)), exp.saturating_sub(now), scope)
 }
 
-fn token_reply(access: String, expires_in: u64, refresh: String) -> Response {
+fn token_reply(access: String, expires_in: u64, refresh: String, scope: &str) -> Response {
     let mut resp = json_reply(
         StatusCode::OK,
         &json!({
@@ -885,7 +1034,7 @@ fn token_reply(access: String, expires_in: u64, refresh: String) -> Response {
             "token_type": "Bearer",
             "expires_in": expires_in,
             "refresh_token": refresh,
-            "scope": SCOPE,
+            "scope": scope,
         }),
     );
     resp.headers_mut().insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
@@ -974,9 +1123,16 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
         Err(e) => return internal("oauth client read", e),
     };
     let secret = b64url(&crate::random_bytes::<32>());
+    let sid = random_id();
+    // The grant key leaves memory only wrapped under the first refresh secret, which is kept only as its hash.
+    let wrap =
+        code.grant.as_ref().map(|grant| wrap_grant(&secret, &sid, grant, &crate::random_bytes::<12>()));
     let session = Session {
         v: VERSION,
-        sid: random_id(),
+        sid,
+        grant: code.grant.as_ref().map(|g| g.id().to_owned()),
+        wrap,
+        previous_wrap: None,
         client_id: code.client_id,
         client_name,
         redirect_host: redirect_host(&code.redirect_uri),
@@ -1023,8 +1179,8 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
     if let Err(e) = save(state, INDEX, &index).await {
         return internal("oauth index write", e);
     }
-    let (access, expires_in) = access_token(oauth, &session, now, grant_end);
-    token_reply(access, expires_in, format!("{}.{secret}", session.sid))
+    let (access, expires_in, scope) = access_token(oauth, &session, now, grant_end, code.grant.as_ref());
+    token_reply(access, expires_in, format!("{}.{secret}", session.sid), scope)
 }
 
 async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id: Option<&str>) -> Response {
@@ -1075,16 +1231,40 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
         }
         Err(e) => return internal("oauth standing", e),
     };
+    // A write session's grant key, unwrapped with the secret presented: the current wrap, or on a retry the one kept
+    // under the secret the lost answer replaced. One that does not unwrap ends the session, as a reused token does.
+    let grant = match &session.grant {
+        None => None,
+        Some(id) => {
+            let wrapped = if retry { session.previous_wrap.as_deref() } else { session.wrap.as_deref() };
+            match wrapped.and_then(|w| unwrap_grant(secret, sid, w)).filter(|g| g.id() == id) {
+                Some(grant) => Some(grant),
+                None => {
+                    eprintln!("oauth: a session's grant key did not unwrap ({sid}) — ending the session");
+                    if let Err(e) = end_session(state, sid).await {
+                        return internal("oauth session delete", e);
+                    }
+                    return invalid("the connection has ended");
+                }
+            }
+        }
+    };
     let secret = b64url(&crate::random_bytes::<32>());
+    let wrap = grant.as_ref().map(|grant| wrap_grant(&secret, sid, grant, &crate::random_bytes::<12>()));
     let replaced = std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes()));
     if retry {
         // The secret the lost answer carried is never valid, and the retry allowance is consumed: accepting the
         // same old token repeatedly would let it retire each newly issued token throughout the grace window.
         session.retired.push(replaced);
         session.retired.extend(session.previous_hash.take());
+        // Both wraps go with their secrets: neither secret is taken again.
+        session.previous_wrap = None;
+        session.wrap = wrap;
     } else {
         session.retired.extend(session.previous_hash.replace(replaced));
         session.rotated_at = now;
+        // The wrap under the secret just replaced stays beside its hash, for a retry within the grace.
+        session.previous_wrap = std::mem::replace(&mut session.wrap, wrap);
     }
     let excess = session.retired.len().saturating_sub(RETIRED_KEPT);
     session.retired.drain(..excess);
@@ -1092,8 +1272,8 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
     if let Err(e) = save(state, &session_key(sid), &session).await {
         return internal("oauth session write", e);
     }
-    let (access, expires_in) = access_token(oauth, &session, now, grant_end);
-    token_reply(access, expires_in, format!("{sid}.{secret}"))
+    let (access, expires_in, scope) = access_token(oauth, &session, now, grant_end, grant.as_ref());
+    token_reply(access, expires_in, format!("{sid}.{secret}"), scope)
 }
 
 /// RFC 7009: the session a token was issued in ends — for its refresh token, one a refresh replaced (the client may
@@ -1168,6 +1348,7 @@ async fn connections(state: &AppState, req: Request) -> Response {
                 "guest": match &s.who { Who::Guest { name, .. } => Some(name.clone()), Who::Member { .. } => None },
                 "createdAt": s.created_at,
                 "usedAt": s.used_at,
+                "grant": s.grant,
             })),
             Ok(None) => {}
             Err(e) => return internal("oauth session read", e),
@@ -1218,6 +1399,27 @@ pub async fn end_grant(state: &AppState, gid: &str) {
     };
     if let Err(e) = result.await {
         eprintln!("oauth: ending the connections of grant {gid}: {e}");
+    }
+}
+
+/// End every connection a library's members made: the library was deleted, or its key reset. Its member token check
+/// would refuse them at their next call anyway; ending them here also stops a write session's refresh at once.
+pub async fn end_library(state: &AppState, library: &str) {
+    let Some(oauth) = state.oauth.as_ref() else { return };
+    let _lock = oauth.lock.lock().await;
+    let result = async {
+        let mut index = load_index(state).await?;
+        let mut sids = Vec::new();
+        for entry in index.sessions.iter().filter(|e| e.host == library && e.gid.is_none()) {
+            sids.push(entry.sid.clone());
+        }
+        if sids.is_empty() {
+            return Ok(());
+        }
+        drop_sessions(state, &mut index, &sids).await
+    };
+    if let Err(e) = result.await {
+        eprintln!("oauth: ending a library's connections: {e}");
     }
 }
 
@@ -1316,6 +1518,11 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
 /// The session an access token names, when its signature is this server's and it is for the MCP resource and in date.
 /// den-mcp checks it again; this is so the relay can look the session up before anything reaches den-mcp.
 fn session_of(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Option<String> {
+    token_claims(oauth, authorization, now_s).map(|(sid, _)| sid)
+}
+
+/// [`session_of`], with the token's claims.
+fn token_claims(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Option<(String, Value)> {
     // The scheme is case-insensitive (RFC 9110 §11.1).
     let (scheme, token) = authorization?.trim_start().split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("bearer") {
@@ -1343,8 +1550,59 @@ fn session_of(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Option<
     let fresh = claims.get("exp").and_then(Value::as_u64).is_some_and(|exp| now_s <= exp + 30);
     let ours = claims.get("iss").and_then(Value::as_str) == Some(oauth.issuer.as_str())
         && claims.get("aud").and_then(Value::as_str) == Some(oauth.resource.as_str());
-    let sid = claims.get("sub").and_then(Value::as_str).filter(|s| valid_id(s))?;
-    (fresh && ours).then(|| sid.to_owned())
+    let sid = claims.get("sub").and_then(Value::as_str).filter(|s| valid_id(s))?.to_owned();
+    (fresh && ours).then_some((sid, claims))
+}
+
+/// A write session a bearer route (`/assistant/…`) acts for: its id and its member's library.
+pub(crate) struct WriteSession {
+    pub sid: String,
+    pub library: String,
+}
+
+/// The `/assistant` bearer routes' check (assistant v1 §9): an access token this server issued, in date, whose
+/// session still stands — checked on every call, as the `/mcp` relay does — with the write scope.
+pub(crate) async fn write_session(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<WriteSession, Box<Response>> {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return Err(Box::new(json_reply(StatusCode::NOT_FOUND, &error("not_found"))));
+    };
+    let refused = || Box::new(invalid_token(oauth));
+    let authorization = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let (sid, claims) = token_claims(oauth, authorization, state.now() / 1000).ok_or_else(refused)?;
+    let session: Session = match load(state, &session_key(&sid)).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Err(refused()),
+        Err(e) => return Err(Box::new(internal("oauth session read", e))),
+    };
+    match still_stands(state, &session.who).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(refused()),
+        Err(e) => return Err(Box::new(internal("oauth standing", e))),
+    }
+    let scoped = claims
+        .get("scope")
+        .and_then(Value::as_str)
+        .is_some_and(|scope| scope.split(' ').any(|s| s == WRITE_SCOPE));
+    match session.who {
+        Who::Member { library, .. } if scoped && session.grant.is_some() => Ok(WriteSession { sid, library }),
+        _ => Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("insufficient_scope")))),
+    }
+}
+
+/// `401 invalid_token`, with the challenge that says where to get one.
+fn invalid_token(oauth: &OAuth) -> Response {
+    let mut resp = json_reply(StatusCode::UNAUTHORIZED, &error("invalid_token"));
+    let challenge = format!(
+        "Bearer realm=\"den\", resource_metadata=\"{}\", error=\"invalid_token\"",
+        oauth.resource_metadata()
+    );
+    if let Ok(value) = HeaderValue::from_str(&challenge) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    }
+    resp
 }
 
 fn unauthorized(oauth: &OAuth, invalid: bool) -> Response {
@@ -1561,14 +1819,14 @@ async fn relay_mcp(state: &AppState, req: Request, rid: &str) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::handler::tests::{body_json, body_text, temp_dir, Harness};
     use std::sync::Arc;
 
     const ISSUER: &str = "https://den.example";
-    const LIB: &str = "0123456789abcdef0123456789abcdef";
-    const TOKEN: &str = "the-write-token";
+    pub(crate) const LIB: &str = "0123456789abcdef0123456789abcdef";
+    pub(crate) const TOKEN: &str = "the-write-token";
     const REDIRECT: &str = "https://assistant.example/callback";
     const VERIFIER: &str = "a-pkce-code-verifier-of-at-least-forty-three-characters";
     const GUEST_SECRET: &str = "the-guests-device-secret-of-43-chars-000000";
@@ -1598,9 +1856,35 @@ mod tests {
     }
 
     async fn harness() -> Harness {
+        harness_with(None).await
+    }
+
+    /// The assistant-v1 vectors (den-spec `vectors/assistant-v1.json`).
+    pub(crate) fn vectors() -> Value {
+        serde_json::from_str(include_str!("../spec/vectors/assistant-v1.json")).unwrap()
+    }
+
+    pub(crate) fn unhex(text: &Value) -> Vec<u8> {
+        let text = text.as_str().unwrap();
+        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// A key seed from the vectors' `fixed.keys`.
+    pub(crate) fn seed(name: &str) -> [u8; 32] {
+        unhex(&vectors()["fixed"]["keys"][name]["seed"]).try_into().unwrap()
+    }
+
+    /// A harness whose connector offers the write scope, sealing claims to the vectors' den-mcp key.
+    pub(crate) async fn write_harness() -> Harness {
+        harness_with(Some(den_assistant::kem_public(&seed("mcp")))).await
+    }
+
+    async fn harness_with(write_public: Option<Vec<u8>>) -> Harness {
         let mcp = mcp().await;
         let h = Harness::in_dir_with(temp_dir(), |s| {
-            s.oauth = Some(OAuth::new(ISSUER.into(), format!("{ISSUER}/mcp"), ISSUER.into(), [9u8; 32]));
+            let mut oauth = OAuth::new(ISSUER.into(), format!("{ISSUER}/mcp"), ISSUER.into(), [9u8; 32]);
+            oauth.write_public = write_public;
+            s.oauth = Some(oauth);
             s.relays = crate::parse_relays(&format!("/mcp={mcp}"));
         });
         // The host's library, then a store closed to strangers, as guest grants require.
@@ -1613,7 +1897,7 @@ mod tests {
         h
     }
 
-    fn member() -> String {
+    pub(crate) fn member() -> String {
         format!("{LIB}:{TOKEN}")
     }
 
@@ -1696,6 +1980,236 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{tokens}");
         tokens["client_id"] = json!(client);
         tokens
+    }
+
+    async fn approve_with(h: &Harness, id: &str, proof: &[(&str, &str)], body: Value) -> (StatusCode, Value) {
+        let mut headers = proof.to_vec();
+        headers.push(("content-type", "application/json"));
+        let resp =
+            h.send("POST", &format!("/oauth/request/{id}/approve"), Some(body.to_string()), &headers).await;
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// The approval body for the grant whose seed is `seed`.
+    fn write_body(seed: &[u8; 32]) -> Value {
+        let key = GrantKey::from_secret(seed);
+        json!({ "write": { "grant": key.id(), "key": b64url(seed) } })
+    }
+
+    /// The whole flow for a member who lets the assistant change the library with the grant `seed`.
+    pub(crate) async fn connect_write(h: &Harness, seed: &[u8; 32]) -> Value {
+        let client = register(h).await;
+        let id = request(h, &client).await;
+        let claim = member();
+        let (status, approved) =
+            approve_with(h, &id, &[("x-den-library-member", &claim)], write_body(seed)).await;
+        assert_eq!(status, StatusCode::OK, "{approved}");
+        let code = query_of(approved["redirect"].as_str().unwrap())["code"].clone();
+        let (status, mut tokens) = post_form(
+            h,
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("client_id", &client),
+                ("redirect_uri", REDIRECT),
+                ("code_verifier", VERIFIER),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tokens}");
+        tokens["client_id"] = json!(client);
+        tokens
+    }
+
+    /// A member's search-only connection.
+    pub(crate) async fn connect_member(h: &Harness) -> Value {
+        let claim = member();
+        connect(h, &[("x-den-library-member", &claim)]).await
+    }
+
+    fn claims_of(access: &str) -> Value {
+        serde_json::from_slice(&b64url_decode(access.split('.').nth(1).unwrap()).unwrap()).unwrap()
+    }
+
+    async fn refresh_with(h: &Harness, tokens: &Value, token: &str) -> (StatusCode, Value) {
+        let client = tokens["client_id"].as_str().unwrap();
+        post_form(
+            h,
+            "/oauth/token",
+            &[("grant_type", "refresh_token"), ("refresh_token", token), ("client_id", client)],
+        )
+        .await
+    }
+
+    async fn stored_session(h: &Harness, access: &str) -> Session {
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let sid = session_of(oauth, Some(&format!("Bearer {access}")), h.state.now() / 1000).unwrap();
+        load(&h.state, &session_key(&sid)).await.unwrap().unwrap()
+    }
+
+    /// The vectors' wrap and claim, made through the functions this server issues them with.
+    #[test]
+    fn the_wrap_and_the_claim_are_the_vectors() {
+        let v = vectors();
+        let f = &v["fixed"];
+        let grant = GrantKey::from_secret(&seed("grant"));
+        let w = &f["wrap"];
+        let session = w["session"].as_str().unwrap();
+        let (sid, secret) = w["refreshToken"].as_str().unwrap().split_once('.').unwrap();
+        assert_eq!(sid, session);
+        let nonce: [u8; 12] = unhex(&w["nonce"]).try_into().unwrap();
+        let wrapped = wrap_grant(secret, session, &grant, &nonce);
+        assert_eq!(wrapped, w["wrapped"].as_str().unwrap());
+        assert_eq!(unwrap_grant(secret, session, &wrapped).unwrap().id(), grant.id());
+        assert!(unwrap_grant(&b64url(&[0; 32]), session, &wrapped).is_none(), "another secret opens nothing");
+        let c = &f["claim"];
+        let public = write_public_key(f["keys"]["mcp"]["public"].as_str().unwrap()).unwrap();
+        let claim = write_claim(&public, c["sub"].as_str().unwrap(), &grant, &unhex(&c["eseed"])).unwrap();
+        assert_eq!(claim, c["claim"].as_str().unwrap());
+        assert_eq!(claim.len() as u64, c["claimLength"].as_u64().unwrap());
+        assert!(write_public_key(&b64url(&[1; 32])).is_none(), "a key that is not X-Wing's is refused");
+    }
+
+    #[tokio::test]
+    async fn the_write_scope_is_offered_only_where_den_mcp_has_a_key() {
+        let off = harness().await;
+        let (_, meta) = off.call("GET", "/.well-known/oauth-authorization-server", None).await;
+        assert_eq!(meta["scopes_supported"], json!([SCOPE]));
+        let client = register(&off).await;
+        let id = request(&off, &client).await;
+        assert_eq!(off.call("GET", &format!("/oauth/request/{id}"), None).await.1["write"], false);
+        let asked = off.send("GET", &authorize_url(&client, "&scope=den%3Alibrary.write"), None, &[]).await;
+        assert_eq!(asked.status(), StatusCode::BAD_REQUEST, "no write scope to ask for");
+
+        let h = write_harness().await;
+        let (_, meta) = h.call("GET", "/.well-known/oauth-authorization-server", None).await;
+        assert_eq!(meta["scopes_supported"], json!([SCOPE, WRITE_SCOPE]));
+        let client = register(&h).await;
+        for (scope, write) in
+            [("", true), ("&scope=den%3Asearch%20den%3Alibrary.write", true), ("&scope=den%3Asearch", false)]
+        {
+            let resp = h.send("GET", &authorize_url(&client, scope), None, &[]).await;
+            assert_eq!(resp.status(), StatusCode::FOUND, "{scope}");
+            let id = location(&resp).split_once("?request=").unwrap().1.to_owned();
+            assert_eq!(
+                h.call("GET", &format!("/oauth/request/{id}"), None).await.1["write"],
+                write,
+                "{scope}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_grants_the_write_scope_and_den_mcp_opens_the_claim() {
+        let h = write_harness().await;
+        let grant = GrantKey::from_secret(&seed("grant"));
+        let tokens = connect_write(&h, &seed("grant")).await;
+        assert_eq!(tokens["scope"], WRITE_SCOPES);
+        let access = tokens["access_token"].as_str().unwrap();
+        let claims = claims_of(access);
+        assert_eq!(claims["scope"], WRITE_SCOPES);
+        let sub = claims["sub"].as_str().unwrap();
+        let opened = den_assistant::open_claim(&seed("mcp"), sub, claims["dw"].as_str().unwrap()).unwrap();
+        assert_eq!((opened.id(), opened.secret()), (grant.id(), grant.secret()));
+        assert!(den_assistant::open_claim(&seed("mcp"), LIB, claims["dw"].as_str().unwrap()).is_err());
+        // At rest: the grant id and a wrap, never the key.
+        let session = stored_session(&h, access).await;
+        assert_eq!(session.grant.as_deref(), Some(grant.id()));
+        let file = std::fs::read_to_string(
+            h.dir.join(NS).join(format!("{}.json", crate::hex(&Sha256::digest(session_key(sub).as_bytes())))),
+        )
+        .unwrap();
+        assert!(!file.contains(&b64url(grant.secret())) && file.contains(session.wrap.as_deref().unwrap()));
+        // Settings › Assistants names the grant, so Den Web can revoke it on disconnect.
+        let claim = member();
+        let (_, listed) =
+            send_json(&h, "GET", "/oauth/connections", &[("x-den-library-member", &claim)]).await;
+        assert_eq!(listed["connections"][0]["grant"], grant.id());
+        // A search-only connection carries neither.
+        let plain = connect_member(&h).await;
+        assert_eq!(plain["scope"], SCOPE);
+        assert!(claims_of(plain["access_token"].as_str().unwrap()).get("dw").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_write_approval_must_be_a_members_for_a_request_that_can_have_it() {
+        let h = write_harness().await;
+        let client = register(&h).await;
+        let body = write_body(&seed("grant"));
+        // A guest never can.
+        let (_, proof) = guest(&h, json!({})).await;
+        let id = request(&h, &client).await;
+        assert_eq!(
+            approve_with(&h, &id, &[("x-den-grant", &proof)], body.clone()).await,
+            (StatusCode::FORBIDDEN, json!({ "error": "write_not_for_guests" }))
+        );
+        // A key that is not the grant it names.
+        let claim = member();
+        let proof = [("x-den-library-member", claim.as_str())];
+        let mut wrong = write_body(&seed("grant"));
+        wrong["write"]["grant"] = json!(GrantKey::from_secret(&seed("other")).id());
+        assert_eq!(approve_with(&h, &id, &proof, wrong).await.1["error"], "invalid_grant_key");
+        let mut short = write_body(&seed("grant"));
+        short["write"]["key"] = json!(b64url(&[1; 16]));
+        assert_eq!(approve_with(&h, &id, &proof, short).await.1["error"], "invalid_grant_key");
+        // A request that asked for searching alone.
+        let resp = h.send("GET", &authorize_url(&client, "&scope=den%3Asearch"), None, &[]).await;
+        let search_only = location(&resp).split_once("?request=").unwrap().1.to_owned();
+        assert_eq!(
+            approve_with(&h, &search_only, &proof, body).await,
+            (StatusCode::BAD_REQUEST, json!({ "error": "invalid_scope" }))
+        );
+        // Each refusal left its request to be approved without the write scope.
+        for id in [id, search_only] {
+            assert_eq!(approve(&h, &id, &proof).await.0, StatusCode::OK);
+        }
+    }
+
+    /// Every refresh re-wraps the grant key under the new secret, keeping the wrap under the replaced one for a retry
+    /// within the grace; each answer's token carries a fresh claim. A wrap that does not unwrap ends the session.
+    #[tokio::test]
+    async fn a_refresh_rewraps_the_grant_key_and_a_retry_still_gets_it() {
+        let h = write_harness().await;
+        let tokens = connect_write(&h, &seed("grant")).await;
+        let first = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let before = stored_session(&h, tokens["access_token"].as_str().unwrap()).await;
+        let (status, next) = refresh_with(&h, &tokens, &first).await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["scope"], WRITE_SCOPES);
+        let after = stored_session(&h, next["access_token"].as_str().unwrap()).await;
+        assert_ne!(after.wrap, before.wrap);
+        assert_eq!(after.previous_wrap, before.wrap, "the replaced secret's wrap is kept for a retry");
+        let dw =
+            |t: &Value| claims_of(t["access_token"].as_str().unwrap())["dw"].as_str().unwrap().to_owned();
+        assert_ne!(dw(&next), dw(&tokens), "each token seals its claim afresh");
+        // The answer was lost: the replaced token again, within the grace, still gets a token with the claim.
+        h.advance(5_000);
+        let (status, retry) = refresh_with(&h, &tokens, &first).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        let sub = claims_of(retry["access_token"].as_str().unwrap())["sub"].as_str().unwrap().to_owned();
+        let opened = den_assistant::open_claim(&seed("mcp"), &sub, &dw(&retry)).unwrap();
+        assert_eq!(opened.id(), GrantKey::from_secret(&seed("grant")).id());
+        let retried = stored_session(&h, retry["access_token"].as_str().unwrap()).await;
+        assert_eq!(retried.previous_wrap, None, "the retry consumed the replaced secret and its wrap");
+        // And rotating on from there.
+        let kept = retry["refresh_token"].as_str().unwrap().to_owned();
+        let (status, later) = refresh_with(&h, &tokens, &kept).await;
+        assert_eq!(status, StatusCode::OK, "{later}");
+
+        // A wrap that does not open under the secret presented: the session ends.
+        let mut tampered = stored_session(&h, later["access_token"].as_str().unwrap()).await;
+        tampered.wrap = Some(wrap_grant(
+            &b64url(&[3; 32]),
+            &tampered.sid,
+            &GrantKey::from_secret(&seed("grant")),
+            &[0; 12],
+        ));
+        save(&h.state, &session_key(&tampered.sid), &tampered).await.unwrap();
+        let current = later["refresh_token"].as_str().unwrap().to_owned();
+        assert_eq!(refresh_with(&h, &tokens, &current).await.1["error"], "invalid_grant");
+        assert!(load::<Session>(&h.state, &session_key(&tampered.sid)).await.unwrap().is_none());
     }
 
     async fn send_json(
@@ -2449,9 +2963,12 @@ mod tests {
             retired: Vec::new(),
             created_at: 0,
             used_at: 0,
+            grant: None,
+            wrap: None,
+            previous_wrap: None,
         };
         let now = 1_800_000_000;
-        let (token, _) = access_token(&oauth, &session, now * 1000, None);
+        let (token, _, _) = access_token(&oauth, &session, now * 1000, None, None);
         for scheme in ["Bearer", "bearer", "BEARER"] {
             assert!(session_of(&oauth, Some(&format!("{scheme} {token}")), now).is_some(), "{scheme}");
         }
@@ -2561,8 +3078,11 @@ mod tests {
             retired: Vec::new(),
             created_at: 0,
             used_at: 0,
+            grant: None,
+            wrap: None,
+            previous_wrap: None,
         };
-        let (forged, _) = access_token(&other, &session, h.state.now(), None);
+        let (forged, _, _) = access_token(&other, &session, h.state.now(), None, None);
         assert_eq!(call_mcp(&h, &forged).await.status(), StatusCode::UNAUTHORIZED);
         // The resource's own metadata is den-mcp's to say.
         let (status, seen) = h.call("GET", "/.well-known/oauth-protected-resource/mcp", None).await;
@@ -2591,8 +3111,11 @@ mod tests {
             retired: Vec::new(),
             created_at: 0,
             used_at: 0,
+            grant: None,
+            wrap: None,
+            previous_wrap: None,
         };
-        let (token, expires_in) = access_token(&oauth, &session, 1_800_000_000_000, None);
+        let (token, expires_in, _) = access_token(&oauth, &session, 1_800_000_000_000, None, None);
         assert_eq!(expires_in, ACCESS_TTL_S);
         let parts: Vec<&str> = token.split('.').collect();
         let header: Value = serde_json::from_slice(&b64url_decode(parts[0]).unwrap()).unwrap();

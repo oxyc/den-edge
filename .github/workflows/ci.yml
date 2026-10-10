@@ -27,7 +27,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # The assistant tests read den-spec's vectors from the submodule.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
