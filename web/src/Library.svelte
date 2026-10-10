@@ -37,6 +37,7 @@
   import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
+  import { yieldTask } from './lib/taskYield';
   import {
     atlasCatalogs,
     GUEST_PICKS,
@@ -116,6 +117,25 @@
   const model = untrack(() => session.model);
   const SHELF_TRANCHE = 8;
   let shelvesReady = $state(model === null);
+  /**
+   * The shelves under the top one (`topShelf`) mount a task after it. The flush that readied the shelves
+   * mounted the Continue Watching, Downloading and Watchlist cards together: one 81ms task at 4x CPU on d.oxy.fi,
+   * 41ms of it layout, which the top shelf, the one seen first, had to wait out before it painted.
+   */
+  let lowerShelvesReady = $state(model === null);
+  $effect(() => {
+    if (!shelvesReady) {
+      lowerShelvesReady = false;
+      return;
+    }
+    let current = true;
+    void yieldTask().then(() => {
+      if (current) lowerShelvesReady = true;
+    });
+    return () => {
+      current = false;
+    };
+  });
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
   let tmdbLimited = $state(false);
   $effect(() => {
@@ -1349,6 +1369,20 @@
       : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
     ).flatMap((ref) => session.displayTitle(ref) ?? []),
   );
+  const continueShelf = $derived(
+    continueShelfEntries.filter((entry) => !facet || entry.title.type === facet),
+  );
+  const watchlistShelf = $derived(savedTitles.filter((title) => !facet || title.type === facet));
+  /** Home's library shelves, top to bottom as drawn, and whether each has anything to show. */
+  const shelves = $derived([
+    { id: 'continue', filled: continueShelf.length > 0 },
+    { id: 'downloading', filled: !facet && downloading.length > 0 },
+    { id: 'watchlist', filled: watchlistShelf.length > 0 },
+  ] as const);
+  type Shelf = (typeof shelves)[number]['id'];
+  /** The first shelf with anything on it: the one seen first, so the one mounted first. */
+  const topShelf = $derived(shelves.find(({ filled }) => filled)?.id);
+  const shelfMounted = (shelf: Shelf) => shelvesReady && (lowerShelvesReady || shelf === topShelf);
 
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
@@ -1516,8 +1550,6 @@
     />
   {/if}
 {:else}
-  {@const resume = continueShelfEntries.filter((e) => !facet || e.title.type === facet)}
-  {@const saved = savedTitles.filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <Billboard
     active={active && !playing}
@@ -1538,10 +1570,10 @@
   {#if !shelvesReady && (!(retainedContinue || shelfPlan?.continue) || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
-    {#if shelvesReady && resume.length}
+    {#if shelfMounted('continue') && continueShelf.length}
       <WindowedPosterRow
         heading="Continue Watching"
-        items={resume}
+        items={continueShelf}
         itemKey={(entry) => `${entry.title.type}:${entry.title.id}`}
         itemHref={(entry) => titleHref(entry.title)}
         itemLabel={(entry) => entry.title.title}
@@ -1561,7 +1593,7 @@
     {:else if !shelvesReady && !facet && (shelfPlan?.continue || retainedContinue)}
       <PendingPosterRow heading="Continue Watching" />
     {/if}
-    {#if !facet && downloading.length && shelvesReady}
+    {#if !facet && downloading.length && shelfMounted('downloading')}
       <WindowedPosterRow
         heading="Downloading"
         aside={{ label: 'All downloads', href: '/downloads' }}
@@ -1596,10 +1628,10 @@
         {/snippet}
       </WindowedPosterRow>
     {/if}
-    {#if shelvesReady && saved.length}
+    {#if shelfMounted('watchlist') && watchlistShelf.length}
       <WindowedPosterRow
         heading="Watchlist"
-        items={saved}
+        items={watchlistShelf}
         itemKey={(title) => `${title.type}:${title.id}`}
         itemHref={titleHref}
         itemLabel={(title) => title.title}
@@ -1613,7 +1645,7 @@
           />
         {/snippet}
       </WindowedPosterRow>
-    {:else if !shelvesReady && !facet && shelfPlan?.watchlist}
+    {:else if !lowerShelvesReady && !facet && shelfPlan?.watchlist}
       <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}

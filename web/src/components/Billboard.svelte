@@ -986,54 +986,61 @@
         aria-hidden={n !== index}
         inert={n !== index}
       >
-        <a
-          class="slide-link"
-          href={titleHref(title)}
-          aria-label={`Open details for ${title.title}`}
-          tabindex={n === index ? 0 : -1}
-          draggable="false"
-        ></a>
-        <div class="told">
-          <div class="text">
-            <h2>
-              <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
-                >{title.title}</a
-              ><span class="mobile-title">{title.title}</span>
-            </h2>
-            {#if reason}
-              <p class="reason">{reason}</p>
-            {/if}
-            <p class="facts">{billboardFacts(title, found)}</p>
-            <p class="overview">{found?.overview ?? ''}</p>
-            <div class="actions">
-              {#if onplay}
-                <Button
-                  variant="primary"
-                  size="large"
-                  icon="play"
-                  label="Play"
-                  tabindex={n === index ? 0 : -1}
-                  onclick={() => onplay(title)}
-                />
+        <!-- Only the slide in front and the two a swipe or the advance can bring next are filled. The rest keep their
+             place in the rail as empty boxes: on Home they were 20 slides of 26 elements, 46% of the page (measured
+             on d.oxy.fi), and the first render built every one's controls. -->
+        {#if n === index || n === index - 1 || n === nextSlide(index, shown.length)}
+          <a
+            class="slide-link"
+            href={titleHref(title)}
+            aria-label={`Open details for ${title.title}`}
+            tabindex={n === index ? 0 : -1}
+            draggable="false"
+          ></a>
+          <div class="told">
+            <div class="text">
+              <h2>
+                <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
+                  >{title.title}</a
+                ><span class="mobile-title">{title.title}</span>
+              </h2>
+              {#if reason}
+                <p class="reason">{reason}</p>
               {/if}
-              <a
-                class="den-button den-button-secondary den-button-large more"
-                href={titleHref(title)}
-                tabindex={n === index ? 0 : -1}>More</a
-              >
-              {#if rowOf && onwatchlist && onseen}
-                <TitleActions
-                  compact
-                  row={rowOf(title)}
-                  busy={pressed === keyOf(title)}
-                  failure={unsaved === keyOf(title) ? 'Couldn’t save that. Nothing changed.' : null}
-                  onwatchlist={(on) => press(title, 'watchlist', on)}
-                  onseen={(on) => press(title, 'seen', on)}
-                />
-              {/if}
+              <p class="facts">{billboardFacts(title, found)}</p>
+              <p class="overview">{found?.overview ?? ''}</p>
+              <div class="actions">
+                {#if onplay}
+                  <Button
+                    variant="primary"
+                    size="large"
+                    icon="play"
+                    label="Play"
+                    tabindex={n === index ? 0 : -1}
+                    onclick={() => onplay(title)}
+                  />
+                {/if}
+                <a
+                  class="den-button den-button-secondary den-button-large more"
+                  href={titleHref(title)}
+                  tabindex={n === index ? 0 : -1}>More</a
+                >
+                {#if rowOf && onwatchlist && onseen}
+                  <TitleActions
+                    compact
+                    row={rowOf(title)}
+                    busy={pressed === keyOf(title)}
+                    failure={unsaved === keyOf(title)
+                      ? 'Couldn’t save that. Nothing changed.'
+                      : null}
+                    onwatchlist={(on) => press(title, 'watchlist', on)}
+                    onseen={(on) => press(title, 'seen', on)}
+                  />
+                {/if}
+              </div>
             </div>
           </div>
-        </div>
+        {/if}
       </article>
     {/each}
   </div>
