@@ -5,6 +5,8 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
+import { parsePhoneLink } from './lib/phoneLink';
+import { phoneLanding } from './lib/phoneLanding.svelte';
 import { recoverChunkFailure, swapWhileHidden, watchRelease } from './lib/release';
 import { legacyPath } from './lib/route';
 
@@ -69,6 +71,15 @@ const invited = parseInvite(location.hash);
 if (invited) {
   guestGrants.invite = invited;
   // A first-time guest has no library to open, and without browsing the app shows only the pairing screen.
+  if (!links.current) links.browse();
+  history.replaceState(history.state, '', location.pathname + location.search);
+}
+
+// A "Use Den on your phone" link (`#phone=<ticket>&k=<library key>`) brings a guest's library, and a slot in their
+// grant, to this browser (`PhoneDialog`). Like the invite, it leaves the address at once: the key is the whole library.
+const phoned = parsePhoneLink(location.hash);
+if (phoned) {
+  phoneLanding.begin(phoned);
   if (!links.current) links.browse();
   history.replaceState(history.state, '', location.pathname + location.search);
 }

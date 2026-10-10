@@ -8,6 +8,17 @@
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
+//!   POST   /grant/library            (x-den-grant) { id, tokenHash } reserves the one library this grant may start → 204
+//!   POST   /grant/device-ticket      (x-den-grant) → { ticket, expiresAt }: one more device may join, once, soon
+//!   POST   /grant/device             { ticket, secretHash } → as redeem; 409 devices_full when no slot is free
+//!
+//! A guest's own library (oxyc/den-edge#390). With `NEW_LIBRARIES=members` a library starts only with proof of another
+//! one, which a guest has not got. A live grant may reserve ONE library id, bound to the SHA-256 of that library's write
+//! token, and the library's first write then starts it (`reserved_for`). From then on it is an ordinary library that
+//! only its key holders touch: the reservation is the grant's whole part, and ending the grant (revoke, expiry, leaving)
+//! never reaches the library. A device ticket lets a device that already holds the grant admit one more device without
+//! the invite code: the ticket is 128 random bits, lives ten minutes in memory, is spent by the first device that
+//! presents its own secret hash, and takes a slot only when one is free — the same limit `redeem` keeps.
 //!
 //! The host proves membership as `is_member` does (`x-den-library-member: <id>:<token>`, `<id>` being the
 //! library in the path). A guest is NOT a member: it holds a per-device secret whose SHA-256 is all that is kept,
@@ -68,6 +79,10 @@ const SEGMENT_MIN: usize = 16;
 const MAX_TOTAL: usize = 200;
 /// Redeem attempts per address per minute. A code is 128 bits, so this is about not doing work for a flood.
 const REDEEM_PER_WINDOW: u32 = 10;
+/// How long a device ticket can be spent, and how many one grant may have outstanding.
+const TICKET_MS: u64 = 10 * 60 * 1000;
+const MAX_TICKETS: usize = 3;
+const LIBRARY_PER_WINDOW: u32 = 20;
 const HOST_PER_WINDOW: u32 = 60;
 const ADDONS_PER_WINDOW: u32 = 300;
 /// Distinct addresses one grant may open the public media listener for, so rotating addresses cannot open
@@ -89,6 +104,13 @@ pub struct Grants {
     /// Ended grants whose remux sessions were already killed, so the sweep asks once rather than every tick.
     killed: Mutex<HashSet<String>>,
     kill_unconfigured: AtomicBool,
+    /// Device tickets by the SHA-256 of the ticket: a restart forgets them, and the guest asks for another.
+    tickets: Mutex<HashMap<String, Ticket>>,
+}
+
+struct Ticket {
+    gid: String,
+    expires_at: u64,
 }
 
 impl Grants {
@@ -102,6 +124,24 @@ impl Grants {
     fn forget(&self, gid: &str) {
         crate::lock(&self.sources).remove(gid);
         crate::lock(&self.last_used).remove(gid);
+        crate::lock(&self.tickets).retain(|_, t| t.gid != gid);
+    }
+
+    /// Mint a ticket for `gid`, keeping at most `MAX_TICKETS` of its own and dropping every lapsed one.
+    fn mint_ticket(&self, gid: &str, now: u64) -> (String, u64) {
+        let ticket = format!("{gid}.{}", b64url(&crate::random_bytes::<16>()));
+        let expires_at = now + TICKET_MS;
+        let mut tickets = crate::lock(&self.tickets);
+        tickets.retain(|_, t| t.expires_at > now);
+        let mut mine: Vec<(String, u64)> =
+            tickets.iter().filter(|(_, t)| t.gid == gid).map(|(k, t)| (k.clone(), t.expires_at)).collect();
+        mine.sort_by_key(|(_, at)| *at);
+        while mine.len() >= MAX_TICKETS {
+            let (oldest, _) = mine.remove(0);
+            tickets.remove(&oldest);
+        }
+        tickets.insert(sha(ticket.as_bytes()), Ticket { gid: gid.to_owned(), expires_at });
+        (ticket, expires_at)
     }
 }
 
@@ -147,11 +187,21 @@ struct Record {
     access_until: Option<u64>,
     redeemed_at: Option<u64>,
     revoked_at: Option<u64>,
+    /// The one synced library this grant reserved. Kept through revocation: the library is the guest's.
+    #[serde(default)]
+    library: Option<ReservedLibrary>,
     /// Plays and seconds watched (oxyc/den#100's follow-up): never a title, a release or an address — only
     /// counts. Kept with the record, so revoking or letting a grant end leaves them in place; they are gone
     /// only once the sweep reaps the whole record.
     #[serde(default)]
     usage: Usage,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ReservedLibrary {
+    id: String,
+    /// Hex SHA-256 of the library's `x-den-library-token`: only the holder of that key may start it.
+    token_hash: String,
 }
 
 /// How many months of a grant's playback a host can see, this one included: "this month" and eleven before it.
@@ -455,10 +505,21 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
         ("/grant/addons", Method::GET | Method::HEAD) => addons(state, req).await,
         ("/grant/usage", Method::POST) => usage_report(state, req).await,
+        ("/grant/library", Method::POST) => reserve_library(state, req).await,
+        ("/grant/device-ticket", Method::POST) => device_ticket(state, req).await,
+        ("/grant/device", Method::POST) => redeem_ticket(state, req).await,
         (p, Method::DELETE) if p.strip_prefix("/grant/").is_some_and(valid_gid) => {
             leave(state, req, &p["/grant/".len()..]).await
         }
-        ("/grant/redeem" | "/grant/addons" | "/grant/usage", _) => method_not_allowed(),
+        (
+            "/grant/redeem"
+            | "/grant/addons"
+            | "/grant/usage"
+            | "/grant/library"
+            | "/grant/device-ticket"
+            | "/grant/device",
+            _,
+        ) => method_not_allowed(),
         _ => not_found(),
     }
 }
@@ -622,6 +683,7 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
         access_until: None,
         redeemed_at: None,
         revoked_at: None,
+        library: None,
         usage: Usage::default(),
     };
     if body.as_object().and_then(|map| apply(&mut record, map, now, true)).is_none() {
@@ -913,6 +975,178 @@ async fn addons(state: &AppState, req: Request) -> Response {
     }
 }
 
+fn library_key(id: &str) -> String {
+    format!("lib:{id}")
+}
+
+/// The grant whose record claims library `id`: the pointer is only a way to find it, the record decides.
+async fn claimant(state: &AppState, id: &str) -> io::Result<Option<Record>> {
+    let Some(bytes) = state.store.get(NS, &library_key(id)).await? else { return Ok(None) };
+    let Ok(gid) = std::str::from_utf8(&bytes) else { return Ok(None) };
+    if !valid_gid(gid) {
+        return Ok(None);
+    }
+    Ok(load(state, gid).await?.filter(|r| r.library.as_ref().is_some_and(|l| l.id == id)))
+}
+
+/// May the first write of library `id`, written with a token hashing to `token_hash`, start it? Only when a grant
+/// reserved exactly that pair. Asked only while the library does not exist, and without the grants lock: the
+/// library's own lock is held by the caller. Whether the grant is still live is not asked — it was when it reserved,
+/// and a library, once the guest's, is not the host's to take back.
+pub async fn reserved_for(state: &AppState, id: &str, token_hash: &[u8; 32]) -> io::Result<bool> {
+    if !crate::library::valid_hex_id(id) {
+        return Ok(false);
+    }
+    let want = crate::hex(token_hash);
+    Ok(claimant(state, id)
+        .await?
+        .and_then(|r| r.library)
+        .is_some_and(|l| l.id == id && constant_time_eq(l.token_hash.as_bytes(), want.as_bytes())))
+}
+
+/// A live grant reserves the one library it may start. The same pair again is answered the same way, so a lost answer
+/// can be retried; any other library is refused as a library closed to strangers is: the grant has had its one.
+async fn reserve_library(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-library", LIBRARY_PER_WINDOW) {
+        return limited;
+    }
+    let gid = match authenticate(state, header_of(&req).as_deref(), None).await {
+        Ok(live) => live.gid,
+        Err(Denied::Expired(at)) => return expired_reply(at),
+        Err(Denied::NotFound) => return not_found(),
+    };
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else { return bad_request() };
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return bad_request() };
+    let id = body.get("id").and_then(Value::as_str).filter(|id| crate::library::valid_hex_id(id));
+    let token_hash = body
+        .get("tokenHash")
+        .and_then(Value::as_str)
+        .and_then(b64url_decode)
+        .filter(|h| h.len() == 32)
+        .map(|h| crate::hex(&h));
+    let (Some(id), Some(token_hash)) = (id, token_hash) else { return bad_request() };
+    let now = state.now();
+    let _lock = state.grants.lock.lock().await;
+    let mut record = match load(state, &gid).await {
+        Ok(Some(r)) if is_live(&r, now) && r.redeemed_at.is_some() => r,
+        Ok(_) => return not_found(),
+        Err(e) => return internal("grant read", e),
+    };
+    let closed = || json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed"));
+    match &record.library {
+        Some(l) if l.id == id && constant_time_eq(l.token_hash.as_bytes(), token_hash.as_bytes()) => {}
+        Some(_) => return closed(),
+        None => {
+            match claimant(state, id).await {
+                Ok(Some(other)) if other.gid != gid => return closed(),
+                Ok(_) => {}
+                Err(e) => return internal("grant library read", e),
+            }
+            record.library = Some(ReservedLibrary { id: id.to_owned(), token_hash });
+            // Synced: a reservation answered "yes" must survive a power loss, as a redeemed slot does.
+            if let Err(e) = save(state, &record).await {
+                return internal("grant write", e);
+            }
+        }
+    }
+    // The pointer after the record, and again on a retry: a crash between the two leaves a claim nothing finds.
+    if let Err(e) = state.store.put(NS, &library_key(id), gid.as_bytes()).await {
+        return internal("grant library write", e);
+    }
+    if let Err(e) = state.store.sync_dir(NS).await {
+        return internal("grant library write", e);
+    }
+    no_content()
+}
+
+/// The device a ticket spends is a new one: this answer carries no secret, only what a redeem would say.
+fn redeemed_reply(record: &Record) -> Response {
+    json_reply(
+        StatusCode::OK,
+        &json!({ "gid": record.gid, "name": record.name, "addons": record.addons, "expiresAt": end(record) }),
+    )
+}
+
+/// A device holding a live grant asks to admit one more. It takes no slot yet: that is the new device's, when it
+/// presents the ticket with a secret of its own.
+async fn device_ticket(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-library", LIBRARY_PER_WINDOW) {
+        return limited;
+    }
+    match authenticate(state, header_of(&req).as_deref(), None).await {
+        Ok(live) => {
+            let (ticket, expires_at) = state.grants.mint_ticket(&live.gid, state.now());
+            json_reply(StatusCode::OK, &json!({ "ticket": ticket, "expiresAt": expires_at }))
+        }
+        Err(Denied::Expired(at)) => expired_reply(at),
+        Err(Denied::NotFound) => not_found(),
+    }
+}
+
+/// One answer for every reason a ticket fails, so it cannot be used to tell them apart.
+fn invalid_ticket() -> Response {
+    json_reply(StatusCode::NOT_FOUND, &error("invalid_ticket"))
+}
+
+/// A new device presents a ticket and the hash of a secret it made itself. The ticket is spent only once the device
+/// is on disk; when no slot is free it is answered `devices_full` and kept, so the guest can try again after the host
+/// raises the limit, within its few minutes.
+async fn redeem_ticket(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-device", REDEEM_PER_WINDOW) {
+        return limited;
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else { return invalid_ticket() };
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return invalid_ticket() };
+    let (Some(ticket), Some(secret_hash)) =
+        (body.get("ticket").and_then(Value::as_str), body.get("secretHash").and_then(Value::as_str))
+    else {
+        return invalid_ticket();
+    };
+    let Some(device) = b64url_decode(secret_hash).filter(|h| h.len() == 32).map(|h| crate::hex(&h)) else {
+        return invalid_ticket();
+    };
+    if ticket.len() > 64 {
+        return invalid_ticket();
+    }
+    let key = sha(ticket.as_bytes());
+    let now = state.now();
+    // Held from the lookup to the spend, so two devices cannot both spend one ticket.
+    let _lock = state.grants.lock.lock().await;
+    let gid = match crate::lock(&state.grants.tickets).get(&key) {
+        Some(t) if t.expires_at > now => t.gid.clone(),
+        _ => return invalid_ticket(),
+    };
+    let mut record = match load(state, &gid).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return invalid_ticket(),
+        Err(e) => return internal("grant read", e),
+    };
+    if !is_live(&record, now) || record.redeemed_at.is_none() {
+        return invalid_ticket();
+    }
+    let known = record
+        .devices
+        .iter()
+        .fold(false, |found, d| constant_time_eq(d.as_bytes(), device.as_bytes()) | found);
+    if !known {
+        if record.devices.len() >= record.max_devices as usize {
+            return json_reply(
+                StatusCode::CONFLICT,
+                &json!({ "error": "devices_full", "name": record.name }),
+            );
+        }
+        record.devices.push(device);
+        if let Err(e) = save(state, &record).await {
+            return internal("grant write", e);
+        }
+    }
+    crate::lock(&state.grants.tickets).remove(&key);
+    redeemed_reply(&record)
+}
+
 /// The guest leaves. The simplest honest meaning of it: the grant is revoked, which drops the device's secret
 /// and the escrow and ends its sessions. The host sees it as revoked and can invite again.
 async fn leave(state: &AppState, req: Request, gid: &str) -> Response {
@@ -1137,6 +1371,12 @@ pub async fn sweep(state: &AppState) {
         match load(state, &entry.gid).await {
             Ok(Some(record)) => match ended_at(&record, now) {
                 Some(at) if now >= at + REAP_MS => {
+                    // An unused reservation goes with its grant; a started library never needed it again.
+                    if let Some(l) = &record.library {
+                        if let Err(e) = state.store.delete(NS, &library_key(&l.id)).await {
+                            eprintln!("grants sweep: {e}");
+                        }
+                    }
                     if let Err(e) = state.store.delete(NS, &key(&entry.gid)).await {
                         eprintln!("grants sweep: {e}");
                         continue;
@@ -2929,5 +3169,280 @@ mod tests {
         let raw = h.state.store.get(NS, &key(&gid)).await.unwrap().unwrap();
         let record: Record = serde_json::from_slice(&raw).unwrap();
         assert_eq!(record.usage.starts, 2);
+    }
+
+    // ---- a guest's own library, and a second device (oxyc/den-edge#390)
+
+    const GLIB: &str = "fedcba9876543210fedcba9876543210";
+    const GLIB2: &str = "00112233445566778899aabbccddeeff";
+    const GTOKEN: &str = "the-guests-write-token";
+
+    fn token_hash(token: &str) -> String {
+        b64url(&Sha256::digest(token.as_bytes()))
+    }
+
+    async fn reserve(h: &Harness, header: &str, id: &str, token: &str) -> (StatusCode, Value) {
+        let body = json!({ "id": id, "tokenHash": token_hash(token) }).to_string();
+        let resp = h
+            .send(
+                "POST",
+                "/grant/library",
+                Some(body),
+                &[(HEADER, header), ("content-type", "application/json")],
+            )
+            .await;
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A first write to library `id` with `token`: what starts it, when it is let.
+    async fn first_write(h: &Harness, id: &str, token: &str) -> (StatusCode, Value) {
+        let body = json!({ "writes": [{ "k": "bbbbbbbbbbbbbbbb", "base": 0, "v": "c1" }] }).to_string();
+        let resp =
+            h.send("POST", &format!("/lib/{id}/batch"), Some(body), &[("x-den-library-token", token)]).await;
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    async fn read_changes(h: &Harness, id: &str, token: &str) -> StatusCode {
+        h.send("GET", &format!("/lib/{id}/changes"), None, &[("x-den-library-token", token)]).await.status()
+    }
+
+    #[tokio::test]
+    async fn a_live_guest_starts_one_library_and_a_stranger_cannot() {
+        let h = harness().await;
+        let (_, header) = redeemed(&h, json!({})).await;
+        let closed = (StatusCode::FORBIDDEN, json!({ "error": "new_libraries_closed" }));
+
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await, closed, "no reservation, no library");
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            reserve(&h, &header, GLIB, GTOKEN).await.0,
+            StatusCode::NO_CONTENT,
+            "the same pair again, so a lost answer can be retried"
+        );
+        assert_eq!(first_write(&h, GLIB, "someone-elses-token").await, closed, "bound to the reserved key");
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
+        assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK);
+
+        assert_eq!(reserve(&h, &header, GLIB2, GTOKEN).await, closed, "one library per grant");
+        assert_eq!(first_write(&h, GLIB2, GTOKEN).await, closed);
+        assert_eq!(
+            reserve(&h, &header, GLIB, "another-token").await,
+            closed,
+            "nor the same library under another key"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_grant_cannot_claim_a_library_another_grant_reserved() {
+        let h = harness().await;
+        let (_, first) = redeemed(&h, json!({})).await;
+        let (second_gid, second_code) = invited(&h, json!({ "name": "Two" })).await;
+        assert_eq!(redeem_with(&h, &second_code, SECRET2).await.0, StatusCode::OK);
+        let second = format!("{second_gid}:{SECRET2}");
+        assert_eq!(reserve(&h, &first, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(reserve(&h, &second, GLIB, "mine").await.0, StatusCode::FORBIDDEN);
+        assert_eq!(first_write(&h, GLIB, "mine").await.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_expired_or_revoked_grant_cannot_reserve_a_library() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({ "accessDays": 1 })).await;
+        assert_eq!(reserve(&h, &format!("{gid}:wrong-secret"), GLIB, GTOKEN).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(reserve(&h, "deadbeef:whatever", GLIB, GTOKEN).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            h.send("POST", "/grant/library", Some("{}".into()), &[]).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        let bad = h
+            .send(
+                "POST",
+                "/grant/library",
+                Some(json!({ "id": "nope", "tokenHash": "x" }).to_string()),
+                &[(HEADER, &header)],
+            )
+            .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        h.advance(DAY_MS);
+        let (status, said) = reserve(&h, &header, GLIB, GTOKEN).await;
+        assert_eq!((status, said["error"].clone()), (StatusCode::GONE, json!("grant_expired")));
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::FORBIDDEN, "nothing was reserved");
+
+        let (revoked, header) = redeemed_second(&h).await;
+        assert_eq!(host_call(&h, "DELETE", &format!("/{revoked}"), None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoking_a_grant_leaves_the_guests_library_working() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
+
+        assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+        let gone = h.send("GET", "/grant/addons", None, &grant_headers(&header)).await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND, "the host's addons are gone");
+        assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK, "the library is still readable");
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK, "and writable");
+
+        // Not even the reaping of the grant record, a month on, touches a library that was started.
+        h.advance(REAP_MS + DAY_MS);
+        sweep(&h.state).await;
+        assert!(h.state.store.get(NS, &key(&gid)).await.unwrap().is_none());
+        assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_reservation_made_before_a_revoke_still_starts_the_library() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_reservation_is_dropped_with_an_unstarted_grants_record() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+        h.advance(REAP_MS + DAY_MS);
+        sweep(&h.state).await;
+        assert!(h.state.store.get(NS, &library_key(GLIB)).await.unwrap().is_none());
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::FORBIDDEN);
+    }
+
+    async fn ticket(h: &Harness, header: &str) -> (StatusCode, Value) {
+        let resp = h.send("POST", "/grant/device-ticket", None, &grant_headers(header)).await;
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    async fn spend(h: &Harness, ticket: &str, secret: &str) -> (StatusCode, Value) {
+        let hash = b64url(&Sha256::digest(secret.as_bytes()));
+        h.call("POST", "/grant/device", Some(json!({ "ticket": ticket, "secretHash": hash }))).await
+    }
+
+    #[tokio::test]
+    async fn a_ticket_admits_one_more_device_once() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({ "devices": 2 })).await;
+        let (status, made) = ticket(&h, &header).await;
+        assert_eq!(status, StatusCode::OK);
+        let code = made["ticket"].as_str().unwrap().to_owned();
+        assert!(!made.to_string().contains(SECRET), "no secret of the laptop's is in the answer");
+
+        let (status, admitted) = spend(&h, &code, SECRET2).await;
+        assert_eq!(status, StatusCode::OK, "{admitted}");
+        assert_eq!(admitted["gid"], json!(gid));
+        assert_eq!(admitted["addons"], json!(["scout", "atlas"]));
+        assert!(!admitted.to_string().contains(SECRET2));
+        let second = format!("{gid}:{SECRET2}");
+        let addons = h.send("GET", "/grant/addons", None, &grant_headers(&second)).await;
+        assert_eq!(addons.status(), StatusCode::OK, "the phone holds the grant on a secret of its own");
+        let listed = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        assert_eq!(listed["deviceCount"], json!(2));
+
+        let invalid = (StatusCode::NOT_FOUND, json!({ "error": "invalid_ticket" }));
+        assert_eq!(
+            spend(&h, &code, "a-third-device-secret-of-43-chars-0000000").await,
+            invalid,
+            "single use"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_needs_a_live_redeemed_grant_and_its_own_secret() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({ "devices": 3, "accessDays": 1 })).await;
+        assert_eq!(ticket(&h, &format!("{gid}:not-the-secret")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(h.send("POST", "/grant/device-ticket", None, &[]).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            h.send("GET", "/grant/device-ticket", None, &[]).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+
+        let code = ticket(&h, &header).await.1["ticket"].as_str().unwrap().to_owned();
+        let (revoked, rheader) = redeemed_second(&h).await;
+        let rcode = ticket(&h, &rheader).await.1["ticket"].as_str().unwrap().to_owned();
+        assert_eq!(host_call(&h, "DELETE", &format!("/{revoked}"), None).await.0, StatusCode::NO_CONTENT);
+        let invalid = (StatusCode::NOT_FOUND, json!({ "error": "invalid_ticket" }));
+        assert_eq!(spend(&h, &rcode, SECRET2).await, invalid, "a revoked grant admits no one");
+
+        // The laptop's own hash presented as a "new" device adds nothing: it is already one.
+        assert_eq!(spend(&h, &code, SECRET).await.0, StatusCode::OK);
+        let listed = host_call(&h, "GET", "", None).await.1;
+        let mine =
+            listed["grants"].as_array().unwrap().iter().find(|g| g["gid"] == json!(gid)).unwrap().clone();
+        assert_eq!(mine["deviceCount"], json!(1));
+
+        let (_, expiring) = ticket(&h, &header).await;
+        let expiring = expiring["ticket"].as_str().unwrap().to_owned();
+        h.advance(TICKET_MS);
+        assert_eq!(spend(&h, &expiring, SECRET2).await, invalid, "a ticket lapses");
+        h.advance(DAY_MS);
+        assert_eq!(ticket(&h, &header).await.0, StatusCode::GONE, "and an ended grant mints none");
+    }
+
+    #[tokio::test]
+    async fn a_full_grant_answers_devices_full_and_keeps_the_ticket_for_a_raised_limit() {
+        let h = harness().await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        let code = ticket(&h, &header).await.1["ticket"].as_str().unwrap().to_owned();
+        let (status, full) = spend(&h, &code, SECRET2).await;
+        assert_eq!(
+            (status, full["error"].clone(), full["name"].clone()),
+            (StatusCode::CONFLICT, json!("devices_full"), json!("Sam"))
+        );
+        let phone = format!("{gid}:{SECRET2}");
+        assert_eq!(
+            h.send("GET", "/grant/addons", None, &grant_headers(&phone)).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        assert_eq!(
+            host_call(&h, "PUT", &format!("/{gid}"), Some(json!({ "devices": 2 }))).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            spend(&h, &code, SECRET2).await.0,
+            StatusCode::OK,
+            "the host raised it, and the ticket was still good"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_keeps_a_few_tickets_and_the_oldest_makes_way() {
+        let h = harness().await;
+        let (_, header) = redeemed(&h, json!({ "devices": 5 })).await;
+        let mut codes = Vec::new();
+        for _ in 0..=MAX_TICKETS {
+            codes.push(ticket(&h, &header).await.1["ticket"].as_str().unwrap().to_owned());
+            h.advance(1000);
+        }
+        let invalid = (StatusCode::NOT_FOUND, json!({ "error": "invalid_ticket" }));
+        assert_eq!(spend(&h, &codes[0], SECRET2).await, invalid);
+        assert_eq!(spend(&h, codes.last().unwrap(), SECRET2).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_new_guest_routes_have_labels_and_methods() {
+        use crate::handler::route_label;
+        assert_eq!(route_label("/grant/library"), "/grant/library");
+        assert_eq!(route_label("/grant/device-ticket"), "/grant/device-ticket");
+        assert_eq!(route_label("/grant/device"), "/grant/device");
+        let h = harness().await;
+        for path in ["/grant/library", "/grant/device-ticket", "/grant/device"] {
+            assert_eq!(
+                h.send("GET", path, None, &[]).await.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{path}"
+            );
+        }
     }
 }

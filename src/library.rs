@@ -166,7 +166,8 @@ fn read_error(e: io::Error) -> Response {
 
 /// Who may start a library (env `NEW_LIBRARIES`). `Members`: only a device that proves it holds another library here
 /// (`MEMBER_HEADER`), which is what a TV moving its library to a new key does, so a stranger reaching the public
-/// device API can't use the relay as storage (den #8). `Open`, the default, lets any first write start one.
+/// device API can't use the relay as storage (den #8), or a live guest grant that reserved this very library once
+/// (`grants::reserved_for`, den-edge#390). `Open`, the default, lets any first write start one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewLibraries {
     #[default]
@@ -1289,10 +1290,18 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     }
     if new_library {
         if state.new_libraries == NewLibraries::Members {
-            match holds_another(state, id, member.as_deref()).await {
-                Ok(true) => {}
-                Ok(false) => return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed")),
+            // A device holding another library here may start one; so may the one library a live guest grant
+            // reserved for this very key (`grants::reserve_library`), which is the grant's only part in it.
+            let reserved = match holds_another(state, id, member.as_deref()).await {
+                Ok(true) => true,
+                Ok(false) => match crate::grants::reserved_for(state, id, &token_hash).await {
+                    Ok(reserved) => reserved,
+                    Err(e) => return read_error(e),
+                },
                 Err(e) => return read_error(e),
+            };
+            if !reserved {
+                return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed"));
             }
         }
         if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
@@ -1897,7 +1906,7 @@ fn parse_writes(body: &Value) -> Option<Vec<Write>> {
 }
 
 /// A library id or record key: hex, as HKDF and HMAC outputs are written.
-fn valid_hex_id(s: &str) -> bool {
+pub(crate) fn valid_hex_id(s: &str) -> bool {
     (16..=128).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

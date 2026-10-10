@@ -310,7 +310,7 @@
           disable={async () => run(() => model.disableRecovery())}
         />
       {/snippet}
-      <SharingSection {link} plugins={pluginUrls} {routes} {ready} />
+      <SharingSection {link} plugins={pluginUrls} {routes} {ready} {sealHandover} {selfId} />
       <AssistantsSection />
       <ImportSection
         {ready}

@@ -1,7 +1,16 @@
 // The grants this browser holds as a guest, in localStorage only. They are never written to the library log
 // (`set:plugins`), so they can't sync to a TV this browser later pairs with, and a library key reset leaves them be.
 
-import { grantAddons, leaveGrant, newSecret, parseInvite, redeem, type GrantAddon } from './grants';
+import {
+  grantAddons,
+  leaveGrant,
+  newSecret,
+  parseInvite,
+  redeem,
+  redeemTicket,
+  ticketGrant,
+  type GrantAddon,
+} from './grants';
 import { forgetGrant, onGrantEnded, rememberGrant } from './relayFetch';
 
 export interface GuestGrant {
@@ -18,6 +27,10 @@ export interface GuestGrant {
 }
 
 export type RedeemFailure = 'malformed' | 'invalid' | 'throttled' | 'unreachable';
+
+/** Why a device ticket gave this device no slot. `full` names the host to ask for another. */
+export type TicketFailure =
+  { failure: 'invalid' | 'throttled' | 'unreachable' } | { failure: 'full'; host: string };
 
 const KEY = 'den.grants';
 /**
@@ -187,6 +200,53 @@ export class GuestGrants {
     };
     this.set([...this.list.filter((g) => g.gid !== gid), grant]);
     if (this.invite === code) this.invite = null;
+    return grant;
+  }
+
+  /**
+   * Take this device's own slot in a grant from a ticket another device of it made (the "Use Den on your phone"
+   * link). A grant already held live here is left as it is: the ticket would only spend a second slot on the same
+   * device. The secret is made here and kept like a redeem's, so a retry after a lost answer sends the same hash.
+   */
+  async redeemTicket(
+    ticket: string,
+    fetchImpl: typeof fetch = fetch,
+  ): Promise<GuestGrant | TicketFailure> {
+    const gid = ticketGrant(ticket);
+    if (!gid) return { failure: 'invalid' };
+    const held = this.list.find((g) => g.gid === gid && !g.ended && g.secret);
+    if (held) return held;
+    const secret =
+      this.pending.get(ticket) ?? keptSecrets(Date.now())[ticket]?.secret ?? newSecret();
+    this.pending.set(ticket, secret);
+    keepSecret(ticket, secret);
+    const reply = await redeemTicket(ticket, secret, fetchImpl);
+    if (!reply.ok) {
+      if (reply.status === 409 && reply.error === 'devices_full') {
+        // Nothing was taken: the secret is dropped, and a try after the host raises the limit starts fresh.
+        this.pending.delete(ticket);
+        keepSecret(ticket, null);
+        return { failure: 'full', host: reply.name ?? 'the host' };
+      }
+      if (reply.status === 404) {
+        this.pending.delete(ticket);
+        keepSecret(ticket, null);
+        return { failure: 'invalid' };
+      }
+      return { failure: reply.status === 429 ? 'throttled' : 'unreachable' };
+    }
+    this.pending.delete(ticket);
+    keepSecret(ticket, null);
+    const { name, addons, expiresAt } = reply.value;
+    const grant: GuestGrant = {
+      gid: reply.value.gid,
+      name,
+      secret,
+      addons: Object.fromEntries(addons.map((addon) => [addon, `/${addon}/~${reply.value.gid}`])),
+      expiresAt,
+      ended: false,
+    };
+    this.set([...this.list.filter((g) => g.gid !== grant.gid), grant]);
     return grant;
   }
 
