@@ -28,7 +28,7 @@ const PAINTED = [
  * Measures the page now, and copies it only when the copy is first shown.
  *
  * What depends on the page being laid out on screen — where it sits, its rails' offsets, the painted values of
- * what is in view, a playing trailer's frame — is read here, while it still is. The copy itself, ~20 ms of
+ * what is in view — is read here, while it still is. The copy itself, ~20 ms of
  * `cloneNode` on Home at 4x CPU, is made from the page as it is when it is first wanted: a swipe or a loading
  * cover, which most pages left are never shown as. Leaving a page by a tap no longer pays for it.
  */
@@ -70,42 +70,6 @@ export function capturePage(
       PAINTED.map((property) => style.getPropertyValue(property)),
     );
   }
-  // cloneNode cannot copy a decoder's current frame. Paint it into an inert canvas so a swipe
-  // freezes the visible trailer instead of abruptly exposing the backdrop beneath it. Now, while the
-  // element is still decoding on screen.
-  const frames = new Map<HTMLVideoElement, HTMLCanvasElement>();
-  for (const original of source.querySelectorAll('video')) {
-    const style = getComputedStyle(original);
-    const bounds = original.getBoundingClientRect();
-    if (
-      original.readyState < 2 ||
-      !original.videoWidth ||
-      !original.videoHeight ||
-      Number(style.opacity) <= 0 ||
-      bounds.bottom <= 0 ||
-      bounds.top >= innerHeight ||
-      bounds.right <= 0 ||
-      bounds.left >= innerWidth
-    )
-      continue;
-    const canvas = document.createElement('canvas');
-    const scale = Math.min(1, 1920 / original.videoWidth);
-    canvas.width = Math.max(1, Math.round(original.videoWidth * scale));
-    canvas.height = Math.max(1, Math.round(original.videoHeight * scale));
-    // Preserve replaced-element sizing/object-fit even where the stylesheet targets `video`.
-    for (const property of style)
-      canvas.style.setProperty(property, style.getPropertyValue(property));
-    canvas.style.setProperty('animation', 'none', 'important');
-    canvas.style.setProperty('transition', 'none', 'important');
-    try {
-      const context = canvas.getContext('2d');
-      if (!context) continue;
-      context.drawImage(original, 0, 0, canvas.width, canvas.height);
-      frames.set(original, canvas);
-    } catch {
-      /* A decoder without a readable frame keeps the still artwork underneath. */
-    }
-  }
   let made:
     | {
         copy: HTMLElement;
@@ -146,11 +110,10 @@ export function capturePage(
         node.removeAttribute('src');
         node.removeAttribute('autoplay');
       }
-      const frame = frames.get(original);
-      if (!frame) return node.remove();
-      const canvas = frame.cloneNode() as HTMLCanvasElement;
-      canvas.getContext('2d')?.drawImage(frame, 0, 0);
-      node.replaceWith(canvas);
+      // The copy shows the still artwork beneath the trailer, not its frame. Painting the playing frame into a
+      // canvas was 20.7 ms of a 54 ms capture on the tap path (Home on d.oxy.fi, 4x CPU), paid by every tap for
+      // a copy most pages left are never shown as.
+      node.remove();
     });
     // A retained hidden page deliberately does not observe or fetch deferred poster art. A swipe is the first
     // moment that page is actually about to paint again: materialize its marked artwork in the inert copy only,
@@ -237,15 +200,9 @@ export function capturePage(
         'position:absolute;inset:0;overflow:hidden;background:var(--bg,#0b0b0f);';
       // Each display owns its DOM. Loading and gesture overlays can overlap without stealing
       // the saved frame from one another or mutating the cached snapshot.
-      const { copy, retained, offsets: retainedOffsets } = make();
+      const { copy, offsets: retainedOffsets } = make();
       const displayed = copy.cloneNode(true) as HTMLElement;
       const displayedNodes = [displayed, ...displayed.querySelectorAll<HTMLElement>('*')];
-      retained.forEach((node, i) => {
-        const target = displayedNodes[i];
-        if (node instanceof HTMLCanvasElement && target instanceof HTMLCanvasElement) {
-          target.getContext('2d')?.drawImage(node, 0, 0);
-        }
-      });
       displayed.style.cssText += `;position:absolute;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;margin:0;`;
       frame.append(displayed);
       // Restore once attached, since detached elements have no scrollable layout.
