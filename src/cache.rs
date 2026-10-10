@@ -372,20 +372,39 @@ pub(crate) fn validated(
 /// RFC 9213's targeted `Cache-Control`: read by a CDN, ignored by a browser.
 pub(crate) const CDN_CACHE_CONTROL: header::HeaderName = header::HeaderName::from_static("cdn-cache-control");
 
+/// What a deploy purges from Cloudflare by name. The host's `den-update` reads `Cache-Tag` off this service's
+/// `/manifest.json` once the new image answers, and purges every tag it names (`den-cloudflare-purge`, which keeps
+/// a failed purge and retries it on every later run, the daily one included). Cloudflare strips the header before
+/// a browser sees it.
+pub(crate) const CACHE_TAG: header::HeaderName = header::HeaderName::from_static("cache-tag");
+
+/// How long Cloudflare keeps an answer only a deploy changes, and how long past that it hands out its copy while it
+/// fetches the next, so an expiry never makes a visitor wait: atlas's own (`DATASET_ANSWER` in den-atlas), on the
+/// same purge. A deploy purges it; a purge that failed is retried on every later `den-update` run, the daily one
+/// included.
+pub(crate) const RELEASE_EDGE: (u64, u64) = (2_592_000, 86_400);
+
 /// The policy of an answer that names the running release: the web app's shell and service worker, `/config`,
 /// `/routes` and `/version`. The browser asks again on every load (`no-cache`), so a release shows up on the next
-/// one. Cloudflare may answer that asking itself for a minute, then hand out its copy while it fetches the next.
+/// one. Cloudflare may answer that asking itself for `max_age` seconds, then hand out its copy for `stale` more while
+/// it fetches the next, and a deploy purges it by `CACHE_TAG`. Anything such an answer is built from that changes
+/// without a deploy needs a purge of its own, or a short `max_age`: see each caller.
 ///
 /// Measured before this, with curl over a warm HTTP/2 connection: `/`, a title page and `/config` with `no-cache`
 /// alone were `cf-cache-status: REVALIDATED` at 85–105 ms, every request crossing to this origin, against 20–40 ms
 /// for an answer Cloudflare kept (`HIT`).
 ///
-/// A copy Cloudflare hands out was fetched from here at most eleven minutes before (`max-age` plus
-/// `stale-while-revalidate`). A shell one release old still loads: the build carries the previous release's assets
-/// forward (`web/scripts/keep-previous-assets.mjs`).
-pub(crate) fn release_bound(headers: &mut HeaderMap) {
+/// Until the purge lands, a few seconds after the new image answers, Cloudflare hands out the previous release's
+/// shell; it still loads, as the build carries the previous release's assets forward
+/// (`web/scripts/keep-previous-assets.mjs`).
+pub(crate) fn release_bound(headers: &mut HeaderMap, (max_age, stale): (u64, u64)) {
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    headers.insert(CDN_CACHE_CONTROL, HeaderValue::from_static("max-age=60, stale-while-revalidate=600"));
+    headers.insert(
+        CDN_CACHE_CONTROL,
+        HeaderValue::from_str(&format!("max-age={max_age}, stale-while-revalidate={stale}"))
+            .expect("digits and ASCII"),
+    );
+    headers.insert(CACHE_TAG, HeaderValue::from_static("den-edge"));
 }
 
 /// Validators name the selected representation, so a gzip response cannot validate identity bytes.
