@@ -47,7 +47,8 @@ async function open(browser, query, options = {}) {
 const slideTitle = (billboard) => billboard.locator('.slide:not([inert]) h2 .title-link');
 const slideButton = (billboard, name) =>
   billboard.locator('.slide:not([inert])').getByRole('button', { name, exact: true });
-const slideTitles = (billboard) => billboard.locator('.slide h2 .title-link').allTextContents();
+// Only the slides around the one in front are filled, so a title leaving the rail is seen in the slide count.
+const slides = (billboard) => billboard.locator('.slide');
 
 test('a billboard slide saves to the watchlist or marks seen, then moves on without it', async () => {
   const browser = await chromium.launch({
@@ -61,6 +62,7 @@ test('a billboard slide saves to the watchlist or marks seen, then moves on with
     await page.keyboard.press('ArrowRight');
     await expect(slideTitle(billboard)).toHaveText('Movie 2');
 
+    const count = await slides(billboard).count();
     await slideButton(billboard, 'Add to watchlist').click();
     await expect(slideTitle(billboard)).toHaveText('Movie 3');
     await expect(
@@ -69,7 +71,7 @@ test('a billboard slide saves to the watchlist or marks seen, then moves on with
         .getByText('Movie 2', { exact: true }),
     ).toBeVisible();
     // Once the rail has settled the saved title is gone, and paging back finds the slide before it.
-    await expect.poll(() => slideTitles(billboard)).not.toContain('Movie 2');
+    await expect(slides(billboard)).toHaveCount(count - 1);
     await expect(slideTitle(billboard)).toHaveText('Movie 3');
     await page.keyboard.press('ArrowLeft');
     await expect(slideTitle(billboard)).toHaveText('Movie 1');
@@ -78,7 +80,7 @@ test('a billboard slide saves to the watchlist or marks seen, then moves on with
     await expect(slideTitle(billboard)).toHaveText('Movie 3');
     await slideButton(billboard, 'Mark as seen').click();
     await expect(slideTitle(billboard)).toHaveText('Movie 4');
-    await expect.poll(() => slideTitles(billboard)).not.toContain('Movie 3');
+    await expect(slides(billboard)).toHaveCount(count - 2);
     await expect(slideTitle(billboard)).toHaveText('Movie 4');
     await page.keyboard.press('ArrowLeft');
     await expect(slideTitle(billboard)).toHaveText('Movie 1');
@@ -123,7 +125,7 @@ test('the Watchlist billboard offers remove and seen, and moves on from either',
     await slideButton(billboard, 'Remove from watchlist').click();
     await expect(slideTitle(billboard)).toHaveText('Movie 1002');
     await expect(watchlist.getByText('Series 2001')).toHaveCount(0);
-    expect(await slideTitles(billboard)).toEqual(['Movie 1002']);
+    await expect(slides(billboard)).toHaveCount(1);
 
     // The last slide marked seen: off the watchlist and into Watched, and the billboard goes with it.
     await slideButton(billboard, 'Mark as seen').click();
