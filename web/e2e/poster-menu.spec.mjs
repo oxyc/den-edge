@@ -1,10 +1,13 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 async function open(browser, { width = 1280, hasTouch = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch });
   await guardNetwork(page);
+  // A pointer resting on a card, or a finger pressing it, prefetches the title's details 60-100ms later
+  // (`PosterCard` `intend`), so any test that hovers or presses one asks TMDB for it.
+  await routeTmdb(page, (r) => r.fulfill({ status: 404, json: {} }));
   await page.goto(`${E2E_ORIGIN}/test/poster-menu.html`);
   return page;
 }

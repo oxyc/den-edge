@@ -446,6 +446,10 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
   reelRequests.length = 0;
   tmdbRequests.length = 0;
   await page.goto(`${FIXTURE}?routed&online`);
+  // The Router listens for `den:navigate` once mounted, and `load` does not wait for it: an event sent before that
+  // is lost, and an evaluate sent while the document is still being replaced dies with its context. A web-first
+  // wait on the routed page retries across both.
+  await expect(page.locator('[data-route-page][data-active="true"]')).toBeAttached();
   await page.evaluate(() =>
     document.dispatchEvent(
       new CustomEvent('den:navigate', { detail: { path: '/service/493-se' } }),

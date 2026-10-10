@@ -237,12 +237,16 @@ test('closing native HLS empties the retained media element', async () => {
 
     await page.getByRole('button', { name: 'Close' }).click();
 
-    expect(
-      await page.evaluate(() => ({
-        source: window.retainedPlayerVideo.getAttribute('src'),
-        network: window.retainedPlayerVideo.networkState,
-      })),
-    ).toEqual({ source: null, network: 0 });
+    // `load()` with no source leaves networkState at NETWORK_NO_SOURCE (3) until the element's next task, when
+    // resource selection settles it to NETWORK_EMPTY (0); a read in between sees the transient value.
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          source: window.retainedPlayerVideo.getAttribute('src'),
+          network: window.retainedPlayerVideo.networkState,
+        })),
+      )
+      .toEqual({ source: null, network: 0 });
   } finally {
     await browser.close();
   }
