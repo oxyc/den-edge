@@ -1,8 +1,9 @@
 //! The Den web app's built files (`WEB_DIR`; `/web` in the image), served at `/` beside the API — one origin
 //! for the app and its sync, so no CORS and one certificate. A path with no file behind it and no extension
 //! is one of the app's own routes and gets `index.html`. Vite's hashed files under `/assets/` are cached for
-//! a year; the shell and the service worker revalidate, so a release shows up on the next load; the rest of
-//! what is unhashed (icons, the share image) is kept a day.
+//! a year; the shell and the service worker revalidate, so a release shows up on the next load, and Cloudflare
+//! answers that revalidation itself until a deploy purges it (`cache::release_bound`); the rest of what is
+//! unhashed (icons, the share image) is kept a day.
 //!
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
@@ -227,6 +228,10 @@ async fn serve_file(
             if let Ok(value) = HeaderValue::from_str(&link) {
                 resp.headers_mut().insert(header::LINK, value);
             }
+            // The preload names today, so Cloudflare's copy is fresh only until the day ends. Past that one visitor
+            // still gets it at once, preloading a row `main.ts` then does not ask for, while the next is fetched.
+            let stale = crate::cache::RELEASE_EDGE.1;
+            crate::cache::release_bound(resp.headers_mut(), (until_midnight(SystemTime::now()), stale));
         }
     }
     (if shell { "shell" } else { "asset" }, resp)
@@ -668,14 +673,21 @@ fn respond(
     // The shell and the service worker name every other file of a release, so they are asked again on every load.
     // What else sits unhashed beside them — the icons, the share image, the manifest — changes perhaps once a year,
     // and a day's wait for a new one is no loss.
-    let policy = if immutable {
-        "public, max-age=31536000, immutable"
+    if immutable {
+        headers
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
     } else if content_type.starts_with("text/html") || file.file_name().is_some_and(|name| name == "sw.js") {
-        "no-cache"
+        // Kept at Cloudflare until a deploy purges it. The shell is also built from what changes with no deploy:
+        // its policy names `ROUTES`' media origins, `PUBLIC_MEDIA_BASE` and `CAST_ORIGIN`, and a title page's
+        // preview block names the title as it was when first asked. After changing any of those, or WEB_DIR by
+        // hand, run `den-cloudflare-purge den-edge` on the host, or Cloudflare serves the old shell for a month.
+        crate::cache::release_bound(headers, crate::cache::RELEASE_EDGE);
     } else {
-        "public, max-age=86400, stale-while-revalidate=604800"
-    };
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=86400, stale-while-revalidate=604800"),
+        );
+    }
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
         let policy = HeaderValue::from_str(&csp(media, cast_origin))
@@ -696,6 +708,12 @@ fn respond(
         headers.insert(ROBOTS, HeaderValue::from_static("noindex, nofollow, noarchive, noimageindex"));
     }
     resp
+}
+
+/// Seconds from `now` to the next UTC midnight, 1 to 86400: when a shell's `Link` stops naming today.
+fn until_midnight(now: SystemTime) -> u64 {
+    let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    86_400 - secs % 86_400
 }
 
 const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
@@ -739,6 +757,15 @@ mod tests {
     use axum::http::{header, StatusCode};
     use sha2::Digest;
     use std::sync::Arc;
+
+    #[test]
+    fn a_kept_shell_ends_with_the_utc_day() {
+        let at =
+            |secs: u64| super::until_midnight(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        assert_eq!(at(0), 86_400, "at midnight, a whole day");
+        assert_eq!(at(86_399), 1);
+        assert_eq!(at(86_400 * 20_000 + 3_600), 82_800);
+    }
 
     #[test]
     fn policy_allows_local_wasm_without_allowing_javascript_eval() {
@@ -1105,6 +1132,17 @@ mod tests {
         assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+        // Cloudflare keeps it fresh until the day its `Link` names ends, and a deploy purges it by tag before then.
+        let edge = root.headers()["cdn-cache-control"].to_str().unwrap();
+        let secs: u64 = edge
+            .strip_prefix("max-age=")
+            .and_then(|rest| rest.strip_suffix(", stale-while-revalidate=86400"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let left = super::until_midnight(std::time::SystemTime::now());
+        assert!(secs >= left && secs <= left + 1, "{edge} against {left}s to midnight");
+        assert_eq!(root.headers()["cache-tag"], "den-edge");
         let link = root.headers()[header::LINK].to_str().unwrap();
         assert!(link.starts_with("</atlas/recommend/home.json?day="));
         // Without `crossorigin` the browser refuses the preload for `main.ts`'s fetch and asks twice (#192).
@@ -1114,6 +1152,11 @@ mod tests {
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
         assert_eq!(asset.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
         assert_eq!(asset.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+        assert!(
+            !asset.headers().contains_key("cdn-cache-control"),
+            "one policy for the browser and the edge"
+        );
+        assert!(!asset.headers().contains_key("cache-tag"), "a hashed name is never purged");
 
         // Unhashed files beside the shell are kept a day; the service worker, like the shell, is asked every load.
         std::fs::write(h.dir.join("web/og.png"), "png").unwrap();
@@ -1123,11 +1166,23 @@ mod tests {
             og.headers()[header::CACHE_CONTROL],
             "public, max-age=86400, stale-while-revalidate=604800"
         );
-        assert_eq!(h.send("GET", "/sw.js", None, &[]).await.headers()[header::CACHE_CONTROL], "no-cache");
-        assert_eq!(
-            h.send("GET", "/index.html", None, &[]).await.headers()[header::CACHE_CONTROL],
-            "no-cache"
-        );
+        assert!(!og.headers().contains_key("cdn-cache-control"));
+        // A shell naming no day, and the service worker, are kept as long as atlas's answers, until a deploy purges.
+        for path in ["/sw.js", "/movies/603"] {
+            let resp = h.send("GET", path, None, &[]).await;
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
+            assert_eq!(
+                resp.headers()["cdn-cache-control"],
+                "max-age=2592000, stale-while-revalidate=86400",
+                "{path}"
+            );
+            assert_eq!(resp.headers()["cache-tag"], "den-edge", "{path}");
+        }
+        let index = h.send("GET", "/index.html", None, &[]).await;
+        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(index.headers()["cache-tag"], "den-edge");
+        let index_edge = index.headers()["cdn-cache-control"].to_str().unwrap();
+        assert!(!index_edge.starts_with("max-age=2592000"), "it names a day as `/` does: {index_edge}");
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");
@@ -1140,7 +1195,10 @@ mod tests {
         let retry = h.send("GET", "/movies?den-retry=abc", None, &[]).await;
         assert!(retry.headers()[header::LINK].to_str().unwrap().contains("/recommend/movies.json?day="));
         assert!(body_text(retry).await.contains("<title>Den</title>"));
-        assert_eq!(h.send("GET", "/assets/missing.js", None, &[]).await.status(), StatusCode::NOT_FOUND);
+        // A chunk a later release may yet carry is never kept missing.
+        let missing = h.send("GET", "/assets/missing.js", None, &[]).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[tokio::test]

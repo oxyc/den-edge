@@ -133,6 +133,14 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
         }
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
+    // Cloudflare keeps this host's HTML and JSON by a Cache Rule: a GET of `/` answered `no-cache` reports
+    // `cf-cache-status: REVALIDATED`, where HTML outside any rule reports `DYNAMIC`. Cloudflare documents that such a
+    // rule keeps an answer naming no policy for a default edge TTL (not measured here), which would hand one member's
+    // answer to whoever asks next. So every answer names one, and only a handler that means its answer to be kept
+    // says anything else.
+    if !resp.headers().contains_key(header::CACHE_CONTROL) {
+        resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     if let Some(origin) = origin {
         resp.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         resp.headers_mut().insert(
@@ -562,9 +570,16 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     }
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
-        "/version" => bare_json(StatusCode::OK, &json!({ "version": crate::release_version() })),
+        // `/manifest.json` is where the host's `den-update` reads a service's `Cache-Tag` after a deploy, to purge
+        // Cloudflare's copies (`cache::CACHE_TAG`). den-edge has no manifest of its own; before this it answered 404,
+        // which `den-update`'s `curl -f` reads as no tags, so nothing of den-edge's was ever purged.
+        "/version" | "/manifest.json" => revalidated(
+            json!({ "version": crate::release_version() }).to_string(),
+            req.headers(),
+            crate::cache::RELEASE_EDGE,
+        ),
         "/config" => state.prepared_public_json.as_ref().map_or_else(
-            || revalidated(config(state), req.headers()),
+            || revalidated(config(state), req.headers(), ENV_EDGE),
             |prepared| revalidated_prepared(&prepared.config, req.headers()),
         ),
         // Both public names get the public table when the deployment built one: a stranger at either has no use
@@ -593,7 +608,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
                 (Face::Web | Face::Api, Some(public)) => public,
                 _ => &state.routes,
             };
-            revalidated(crate::routes::to_json(table).to_string(), req.headers())
+            revalidated(crate::routes::to_json(table).to_string(), req.headers(), ENV_EDGE)
         }
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
@@ -928,19 +943,27 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
     with_error_code(raw_json(status, Body::from(body.to_string()), true), body)
 }
 
-/// `/config` and `/routes`: asked again every time, and a 304 while unchanged. A client reads both on every start,
-/// and a kill-switch or a moved address must reach it on the next one — but the answer is the same bytes nearly
-/// always, and a TV away from home is fetching them over the device API.
-fn revalidated(body: String, request: &HeaderMap) -> Response {
+/// How long Cloudflare keeps `/config` and `/routes`, and hands out its copy past that. They are built partly from
+/// this process's environment (`ROUTES`, `SIMKL_CLIENT_ID`, the cast and MCP origins), which a restart changes with
+/// no image deployed and so with no purge. A copy kept until a purge someone forgot would strand a TV away from home
+/// on a moved address; a minute keeps it prompt with no purge at all.
+const ENV_EDGE: (u64, u64) = (60, 600);
+
+/// `/config`, `/routes` and `/version`: asked again every time, and a 304 while unchanged. A client reads them on
+/// every start, and a kill-switch or a moved address must reach it soon after the change that makes it — at
+/// Cloudflare, by `edge` or by a deploy's purge — but the answer is the same bytes nearly always, and a TV away from
+/// home is fetching them over the device API.
+fn revalidated(body: String, request: &HeaderMap, edge: (u64, u64)) -> Response {
     let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
-    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::cache::release_bound(resp.headers_mut(), edge);
     crate::cache::validated(resp, body.as_bytes(), None, request)
 }
 
+/// `/config` and `/routes`, prepared once at startup.
 fn revalidated_prepared(prepared: &PreparedJson, request: &HeaderMap) -> Response {
     // Validate an empty response first. A matching request never even clones the body Bytes into a Hyper body.
     let mut resp = raw_json(StatusCode::OK, Body::empty(), false);
-    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::cache::release_bound(resp.headers_mut(), ENV_EDGE);
     resp.headers_mut().insert(header::ETAG, prepared.etag.clone());
     let mut resp = crate::cache::revalidate(resp, request);
     if resp.status() == StatusCode::OK {
@@ -1367,6 +1390,8 @@ pub mod tests {
     async fn health_version_config_and_an_unknown_route() {
         let h = Harness::new();
         assert_eq!(h.call("GET", "/health", None).await, (StatusCode::OK, json!({ "status": "ok" })));
+        let health = h.send("GET", "/health", None, &[]).await;
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store", "only this process may say it is up");
         let (_, version) = h.call("GET", "/version", None).await;
         assert_eq!(version["version"], crate::release_version());
         let (status, config) = h.call("GET", "/config", None).await;
@@ -1676,20 +1701,29 @@ pub mod tests {
         assert!(without.get("castOrigin").is_none(), "unset is absent, not empty");
     }
 
-    /// Both are read on every start. Always asked again, so a kill-switch or a moved address lands at once, and
+    /// All are read on every start. The browser always asks again, Cloudflare answers that for a minute, and
     /// unchanged is a 304 carrying the same policy and tag rather than the whole table again.
     #[tokio::test]
-    async fn config_and_routes_are_revalidated_every_time() {
+    async fn config_routes_and_version_are_revalidated_every_time() {
         let mut h = split_harness();
         prepare_public_json(&mut h);
-        for path in ["/config", "/routes"] {
+        // What only a deploy changes is kept until it purges; what a restart's environment changes, a minute.
+        for (path, edge) in [
+            ("/config", "max-age=60, stale-while-revalidate=600"),
+            ("/routes", "max-age=60, stale-while-revalidate=600"),
+            ("/version", "max-age=2592000, stale-while-revalidate=86400"),
+        ] {
             let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
             assert_eq!(first.status(), StatusCode::OK, "{path}");
             assert_eq!(first.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
+            assert_eq!(first.headers()["cdn-cache-control"], edge, "{path}");
+            assert_eq!(first.headers()["cache-tag"], "den-edge", "{path}");
             let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
             let again = h.send("GET", path, None, &[("host", "d.oxy.fi"), ("if-none-match", &etag)]).await;
             assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
             assert_eq!(again.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(again.headers()["cdn-cache-control"], edge);
+            assert_eq!(again.headers()["cache-tag"], "den-edge");
             assert_eq!(again.headers()[header::ETAG], etag.as_str());
             assert!(body_text(again).await.is_empty());
         }
@@ -1701,6 +1735,20 @@ pub mod tests {
         let public = h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await;
         let lan = h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await;
         assert_ne!(public.headers()[header::ETAG], lan.headers()[header::ETAG]);
+    }
+
+    /// The host's `den-update`, once a new image answers, asks its LAN face `GET /manifest.json` by IP with
+    /// `curl -f` and purges Cloudflare by the `Cache-Tag` it reads there. A 404 there was no tag at all.
+    #[tokio::test]
+    async fn den_update_reads_the_purge_tag_off_manifest_json() {
+        let h = split_harness();
+        for host in [None, Some("127.0.0.1:8094"), Some("10.0.3.17:8094")] {
+            let headers: Vec<(&str, &str)> = host.map(|h| ("host", h)).into_iter().collect();
+            let resp = h.send("GET", "/manifest.json", None, &headers).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{host:?}");
+            assert_eq!(resp.headers()["cache-tag"], "den-edge", "{host:?}");
+            assert_eq!(body_json(resp).await["version"], crate::release_version());
+        }
     }
 
     /// Addresses come from `/routes` alone now (den #16): `/config` is the kill-switch and the update gate.
