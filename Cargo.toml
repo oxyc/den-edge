@@ -49,7 +49,7 @@ redb = "4.3"
 ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
 # Assistant writes and reads (den-spec `wire/assistant-v1.md`): the grant key's wrap at rest and the `dw` and `dr`
 # token claims. The one implementation den-mcp and the clients share; nothing here composes those primitives itself.
-den-assistant = { git = "https://github.com/oxyc/den-core.git", tag = "den-assistant-v1.3" }
+den-assistant = { git = "https://github.com/oxyc/den-core.git", tag = "den-assistant-v1.6" }
 # Wipes the refresh secret's bytes once a grant key is wrapped or unwrapped under them.
 zeroize = "1"
 

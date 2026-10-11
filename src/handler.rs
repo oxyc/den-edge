@@ -279,6 +279,8 @@ fn is_control(route: &str) -> bool {
             | "/assistant/append"
             | "/assistant/drain"
             | "/assistant/ack"
+            | "/assistant/tv"
+            | "/assistant/request"
     )
 }
 
@@ -792,6 +794,8 @@ pub fn route_label(path: &str) -> &'static str {
         "/assistant/append" => "/assistant/append",
         "/assistant/drain" => "/assistant/drain",
         "/assistant/ack" => "/assistant/ack",
+        "/assistant/tv" => "/assistant/tv",
+        p if p.starts_with("/assistant/request/") => "/assistant/request",
         // A grant id never becomes a label: every projection call counts as one route.
         p if p == "/assistant/projection" || p.starts_with("/assistant/projection/") => {
             "/assistant/projection"
@@ -883,6 +887,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
         "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
         "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
+        "/assistant/tv" | "/assistant/request" => Some(GET),
         "/inbox/append"
         | "/lib/:id/batch"
         | "/lib/:id/rewrite"

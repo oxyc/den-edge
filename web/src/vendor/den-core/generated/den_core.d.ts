@@ -1,6 +1,9 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Every op but the assistant's, which `den-core-web-assistant` carries in a module of its own.
+ */
 export function evaluate(request: string): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;

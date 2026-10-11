@@ -320,7 +320,9 @@ test('a member allows changes to the library, and the grant is in the library be
     const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
     await linkThroughDialog(hostPage, dialog);
 
-    const allow = dialog.getByRole('checkbox', { name: /Allow changes to my library/ });
+    const allow = dialog.getByRole('checkbox', {
+      name: /Allow changes to my library and playing on my TV/,
+    });
     await expect(allow).toBeVisible();
     await expect(allow).not.toBeChecked();
     await allow.check();
@@ -331,10 +333,12 @@ test('a member allows changes to the library, and the grant is in the library be
     expect(approval?.member).toBe(true);
     expect(approval?.body?.write?.grant).toMatch(/^[0-9a-f]{32}$/);
     expect(approval?.body?.write?.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    // The drop-box key's row, then den-edge's copy of its public half, then the grant's row, then the approval.
+    // The drop-box key's row, then den-edge's copy of its public half, then the grant's row and its play record
+    // (§16), then the approval.
     expect(steps.filter((s) => s !== 'batch:0')).toEqual([
       'batch:1',
       'dropbox',
+      'batch:1',
       'batch:1',
       'approve',
     ]);

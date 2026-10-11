@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fixtures from '../vendor/den-core/policy-v1.json';
 import { inPolicySlices, syncPolicy } from './syncCore';
+import { assistantPolicy, ensureAssistantPolicy } from './assistantCore';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import manifest from '../vendor/den-core/SOURCE.json';
@@ -58,10 +59,21 @@ describe('shared Rust WASM sync policy', () => {
       expect(createHash('sha256').update(bytes).digest('hex')).toBe(expected);
     }
   });
+  // The assistant ops are a module of their own, which the main one refuses as `assistant_module`.
+  const assistantOp = (request: Record<string, unknown>) =>
+    String(request.op).startsWith('assistant_');
   for (const test of fixtures.cases) {
-    it(test.name, () => {
-      if ('error' in test) expect(() => syncPolicy(test.request)).toThrow(test.error);
-      else expect(syncPolicy(test.request)).toEqual(test.ok);
+    it(test.name, async () => {
+      const policy = assistantOp(test.request) ? assistantPolicy : syncPolicy;
+      if (assistantOp(test.request)) await ensureAssistantPolicy();
+      if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
+      else expect(policy(test.request)).toEqual(test.ok);
     });
   }
+
+  it('the main module refuses an assistant op, naming the module that has it', () => {
+    expect(() => syncPolicy({ op: 'assistant_grant_key', random: '00'.repeat(32) })).toThrow(
+      'assistant_module',
+    );
+  });
 });

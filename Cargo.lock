@@ -240,7 +240,7 @@ dependencies = [
 [[package]]
 name = "den-assistant"
 version = "0.1.0"
-source = "git+https://github.com/oxyc/den-core.git?tag=den-assistant-v1.3#c602f7e4f6480872e5cd4c896aee7dca67b21074"
+source = "git+https://github.com/oxyc/den-core.git?tag=den-assistant-v1.6#607ef3a6c1e81b07244db500ec396031da3ec9e8"
 dependencies = [
  "aes-gcm",
  "ed25519-dalek",
@@ -248,6 +248,7 @@ dependencies = [
  "hpke",
  "miniz_oxide",
  "rand_core",
+ "serde",
  "serde_json",
  "sha2",
  "zeroize",
