@@ -56,19 +56,40 @@ test('a request is shown by the client and the host it answers to', async () => 
   });
   expect(await consentRequest(ID, fetchImpl)).toEqual({
     ok: true,
-    value: { client: 'Claude', redirectHost: 'claude.ai', verified: true, write: false },
+    value: {
+      client: 'Claude',
+      redirectHost: 'claude.ai',
+      verified: true,
+      write: false,
+      read: false,
+    },
   });
-  // Only den-edge's own word marks a host known, or a request one that may change the library.
+  // Only den-edge's own word marks a host known, or a request one that may change or read the library.
   const unsure = await consentRequest(
     ID,
-    reply(200, { client: 'Claude', redirectHost: 'evil.example', verified: 'yes', write: 'yes' }),
+    reply(200, {
+      client: 'Claude',
+      redirectHost: 'evil.example',
+      verified: 'yes',
+      write: 'yes',
+      read: 1,
+    }),
   );
   expect(unsure).toEqual({
     ok: true,
-    value: { client: 'Claude', redirectHost: 'evil.example', verified: false, write: false },
+    value: {
+      client: 'Claude',
+      redirectHost: 'evil.example',
+      verified: false,
+      write: false,
+      read: false,
+    },
   });
-  const writable = await consentRequest(ID, reply(200, { client: 'Claude', write: true }));
-  expect(writable.ok && writable.value.write).toBe(true);
+  const writable = await consentRequest(
+    ID,
+    reply(200, { client: 'Claude', write: true, read: true }),
+  );
+  expect(writable.ok && [writable.value.write, writable.value.read]).toEqual([true, true]);
   expect(fetchImpl.mock.calls[0]?.[0]).toBe(`/oauth/request/${ID}`);
   expect(await consentRequest(ID, reply(404, { error: 'request_expired' }))).toEqual({
     ok: false,
@@ -102,13 +123,22 @@ test('allowing changes approves with the grant, and denying never sends one', as
   const write = { grant: 'd7047d7faa4c6f77e1919c132bb6bd9f', key: 'a-seed' };
   const back = 'https://claude.ai/api/mcp/auth_callback?code=abc';
   const approved = reply(200, { redirect: back });
-  expect(await answer(ID, true, approved, write)).toEqual({ ok: true, value: back });
+  expect(await answer(ID, true, approved, { write })).toEqual({ ok: true, value: back });
   const init = approved.mock.calls[0]?.[1];
   expect(JSON.parse(init?.body as string)).toEqual({ write });
   expect(new Headers(init?.headers).get('content-type')).toBe('application/json');
   const denied = reply(200, { redirect: 'https://claude.ai/cb?error=access_denied' });
-  await answer(ID, false, denied, write);
+  await answer(ID, false, denied, { write });
   expect(denied.mock.calls[0]?.[1]?.body).toBeUndefined();
+  // Reading, alone or beside writing, with the read key.
+  const read = { ...write, readKey: 'a-read-key' };
+  const reading = reply(200, { redirect: back });
+  await answer(ID, true, reading, { write, read });
+  expect(JSON.parse(reading.mock.calls[0]?.[1]?.body as string)).toEqual({ write, read });
+  // An approval that allows nothing more sends no body: searching alone.
+  const plain = reply(200, { redirect: back });
+  await answer(ID, true, plain, {});
+  expect(plain.mock.calls[0]?.[1]?.body).toBeUndefined();
 });
 
 test('approving carries the member’s proof, or a guest’s, and nothing for a stranger', async () => {
@@ -179,6 +209,16 @@ test('connections are listed as den-edge describes them, and revoked', async () 
           usedAt: 4,
           grant: 'not-a-grant-id',
         },
+        {
+          sid: 's3',
+          client: 'Claude',
+          kind: 'member',
+          createdAt: 5,
+          usedAt: 6,
+          grant: 'e7047d7faa4c6f77e1919c132bb6bd9f',
+          write: false,
+          read: true,
+        },
         { nope: true },
       ],
     }),
@@ -195,6 +235,9 @@ test('connections are listed as den-edge describes them, and revoked', async () 
         createdAt: 1,
         usedAt: 2,
         grant: 'd7047d7faa4c6f77e1919c132bb6bd9f',
+        // As a den-edge from before reads lists it: a grant that writes.
+        write: true,
+        read: false,
       },
       {
         sid: 's2',
@@ -205,6 +248,20 @@ test('connections are listed as den-edge describes them, and revoked', async () 
         createdAt: 3,
         usedAt: 4,
         grant: null,
+        write: false,
+        read: false,
+      },
+      {
+        sid: 's3',
+        client: 'Claude',
+        redirectHost: null,
+        kind: 'member',
+        guest: null,
+        createdAt: 5,
+        usedAt: 6,
+        grant: 'e7047d7faa4c6f77e1919c132bb6bd9f',
+        write: false,
+        read: true,
       },
     ],
   });

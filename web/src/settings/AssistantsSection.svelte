@@ -17,28 +17,36 @@
   }: {
     /** Marks a grant revoked in the open library; absent where no member library is open here. */
     revokeGrant?: (grant: string) => Promise<unknown>;
-    /** The grants the open library holds, whatever their state; absent where no member library is open here. */
-    listGrants?: () => Promise<AssistantGrantView[]>;
+    /**
+     * The grants and read records the open library holds, whatever their state; absent where no member library is
+     * open here.
+     */
+    listGrants?: () => Promise<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }>;
   } = $props();
 
-  /** The library's own record of who may change it: what every device enforces, whatever den-edge lists. */
+  /**
+   * The library's own record of who may change it, and who may read it (§15): what every device enforces, whatever
+   * den-edge lists.
+   */
   let grants = $state<AssistantGrantView[] | null>(null);
+  let reads = $state<AssistantGrantView[] | null>(null);
 
   async function loadGrants() {
     if (!listGrants) return;
     try {
-      grants = await listGrants();
+      ({ grants, reads } = await listGrants());
     } catch (error) {
       console.error('den: assistant grants could not be listed', error);
       grants = [];
+      reads = [];
     }
   }
   void loadGrants();
 
-  const grantState = (grant: AssistantGrantView) => {
+  const grantState = (grant: AssistantGrantView, may: string) => {
     switch (grant.state) {
       case 'active':
-        return grant.expiresAt ? `can change your library until ${day(grant.expiresAt)}` : 'active';
+        return grant.expiresAt ? `can ${may} until ${day(grant.expiresAt)}` : 'active';
       case 'expired':
         return 'expired';
       case 'revoked':
@@ -95,6 +103,16 @@
     }
   }
   void load();
+
+  /** What a connection may do beyond searching, in a word or two. */
+  const may = (connection: Connection) =>
+    connection.write && connection.read
+      ? 'can read and change your library'
+      : connection.write
+        ? 'can change your library'
+        : connection.read
+          ? 'can read your library'
+          : 'search only';
 
   async function revoke(connection: Connection) {
     if (connection.grant) {
@@ -189,7 +207,7 @@
                   >{/if}<small
                   >{connection.kind === 'guest'
                     ? `Guest${connection.guest ? ` · ${connection.guest}` : ''}`
-                    : 'Member'} · {connection.grant ? 'can change your library' : 'search only'} · connected
+                    : 'Member'} · {may(connection)} · connected
                   {day(connection.createdAt)} · last used {day(connection.usedAt)}</small
                 ></span
               >
@@ -197,9 +215,11 @@
                 label="Disconnect"
                 ariaLabel="Disconnect {connection.client}"
                 question="Disconnect {connection.client}?"
-                detail={connection.grant
+                detail={connection.write
                   ? 'It stops being able to search Den or change your library right away, and nothing it already asked for is applied. It can be connected again.'
-                  : 'It stops being able to search Den right away. It can be connected again.'}
+                  : connection.read
+                    ? 'It stops being able to search Den or read your library right away, and what it was given is deleted. It can be connected again.'
+                    : 'It stops being able to search Den right away. It can be connected again.'}
                 onconfirm={() => void revoke(connection)}
               />
             </li>
@@ -214,36 +234,61 @@
     <SettingRow id="assistant-connector" label="Connector" value={connectorValue} />
   {/if}
   {#if grants?.length}
-    {@const active = grants.filter((g) => g.state === 'active').length}
-    <SettingRow
-      id="assistant-grants"
-      label="Allowed to change your library"
-      value={active ? `${active} allowed` : 'None'}
-    >
-      <ul class="list">
-        {#each grants as grant (grant.grant)}
-          <li class="line">
-            <span class="label"
-              >{grant.client ?? 'An assistant'}<small
-                >{grantState(grant)}{#if grant.createdAt}
-                  · allowed {day(grant.createdAt)}{/if}</small
-              ></span
-            >
-            {#if grant.state !== 'revoked' && revokeGrant}
-              <Confirm
-                label="Revoke"
-                ariaLabel="Revoke {grant.client ?? 'this assistant'}"
-                question="Stop {grant.client ?? 'this assistant'} changing your library?"
-                detail="Your devices refuse anything it asks for from now on, including what is still waiting. It can be allowed again by connecting it again."
-                onconfirm={() => void revokeListed(grant)}
-              />
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    </SettingRow>
+    {@render allowed(
+      'assistant-grants',
+      'Allowed to change your library',
+      grants,
+      'change your library',
+      'changing your library',
+      'Your devices refuse anything it asks for from now on, including what is still waiting. It can be allowed again by connecting it again.',
+    )}
+  {/if}
+  {#if reads?.length}
+    {@render allowed(
+      'assistant-reads',
+      'Allowed to read your library',
+      reads,
+      'read your watchlist and history',
+      'reading your library',
+      'Your devices stop sharing your watchlist and history with it, and what it was given is deleted. Revoking also stops it changing your library. It can be allowed again by connecting it again.',
+    )}
   {/if}
 </SettingsSection>
+
+<!-- The library's grants or read records, each with Revoke. Outside the section, so it is no prop of it. -->
+{#snippet allowed(
+  id: string,
+  label: string,
+  list: AssistantGrantView[],
+  may: string,
+  question: string,
+  detail: string,
+)}
+  {@const active = list.filter((g) => g.state === 'active').length}
+  <SettingRow {id} {label} value={active ? `${active} allowed` : 'None'}>
+    <ul class="list">
+      {#each list as grant (grant.grant)}
+        <li class="line">
+          <span class="label"
+            >{grant.client ?? 'An assistant'}<small
+              >{grantState(grant, may)}{#if grant.createdAt}
+                · allowed {day(grant.createdAt)}{/if}</small
+            ></span
+          >
+          {#if grant.state !== 'revoked' && revokeGrant}
+            <Confirm
+              label="Revoke"
+              ariaLabel="Revoke {grant.client ?? 'this assistant'}"
+              question="Stop {grant.client ?? 'this assistant'} {question}?"
+              {detail}
+              onconfirm={() => void revokeListed(grant)}
+            />
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  </SettingRow>
+{/snippet}
 
 <style>
   .copy {

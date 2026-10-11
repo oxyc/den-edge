@@ -669,11 +669,28 @@ export class LibraryModel {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey }, operationId);
   }
 
-  /** Write a grant for an assistant into the library; its key, for den-edge's approval and nothing else. */
-  async consentAssistant(client: string): Promise<{ grant: string; key: string }> {
-    const { result } = await this.task({ kind: 'assistant.consent', client });
+  /**
+   * Write a grant (to write) and a read record (to read) for an assistant into the library; their keys, for
+   * den-edge's approval and nothing else.
+   */
+  async consentAssistant(
+    client: string,
+    allow: { write: boolean; read: boolean },
+  ): Promise<{ grant: string; key: string; readKey?: string }> {
+    const { result } = await this.task({ kind: 'assistant.consent', client, ...allow });
     if (result.kind !== 'assistant.consent') throw wrongQueryResult('assistant consent');
-    return { grant: result.grant, key: result.key };
+    return {
+      grant: result.grant,
+      key: result.key,
+      ...(result.readKey ? { readKey: result.readKey } : {}),
+    };
+  }
+
+  /** Publish every live read grant's projection that is due (§15). How many were sent. */
+  async publishAssistant(): Promise<number> {
+    const { result } = await this.task({ kind: 'assistant.publish' });
+    if (result.kind !== 'assistant.publish') throw wrongQueryResult('assistant publish');
+    return result.published;
   }
 
   /** Mark an assistant's grant revoked in the library, which every device enforces. */
@@ -683,12 +700,12 @@ export class LibraryModel {
     return result.outcome;
   }
 
-  /** The grants the library holds, whatever their state, for Settings › Assistants. */
+  /** The grants and read records the library holds, whatever their state, for Settings › Assistants. */
   async assistantGrants() {
     this.#assertOpen();
     const { result } = await this.service.query({ kind: 'assistant.grants' });
     if (result.kind !== 'assistant.grants') throw wrongQueryResult('assistant grants');
-    return result.grants;
+    return { grants: result.grants, reads: result.reads };
   }
 
   /** Keep the grants whose connection den-edge still lists from expiring (at most daily). */

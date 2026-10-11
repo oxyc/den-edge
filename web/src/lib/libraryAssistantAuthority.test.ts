@@ -4,6 +4,7 @@ import {
   APPLIED_ROW,
   DROPBOX_ROW,
   GRANTS_ROW,
+  READ_ROW,
   LibraryAssistantAuthority,
   resetAssistantRows,
   type AssistantPort,
@@ -36,6 +37,11 @@ function library() {
   return {
     rows,
     batches,
+    /** The library's v4 documents, what a projection is built from (§15). */
+    documents: [] as unknown[],
+    /** den-edge's projections by grant, and every PUT and DELETE it was sent, in order. */
+    projections: new Map<string, string[]>(),
+    sent: [] as string[],
     patch(name: string, changes: Record<string, ConfigValue | null>) {
       const base = rows.get(name) ?? { kind: 'set' as const, schema: 2, name, values: {} };
       const at: [number, number, string] = [fixed.now, ++tick, 'device'];
@@ -86,10 +92,24 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     },
     replace: async (row) => void shared.rows.set(row.name, row),
     putDropbox: put,
+    documents: () => shared.documents,
+    layouts: () => ({}),
+    head: () => 7,
+    putProjection: async (grant, parts) => {
+      shared.projections.set(grant, parts);
+      shared.sent.push(`put:${grant}`);
+      return true;
+    },
+    deleteProjection: async (grant) => {
+      shared.projections.delete(grant);
+      shared.sent.push(`delete:${grant}`);
+      return true;
+    },
     loadRecords: async () => records && structuredClone(records),
     saveRecords: async (next) => void (records = structuredClone(next)),
     now: () => now,
-    random: () => randoms.shift()!,
+    // A projection's randomness may run out of scripted values: then any 32 bytes do.
+    random: () => randoms.shift() ?? '11'.repeat(32),
     ...overrides,
   };
   return {
@@ -103,11 +123,12 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
 
 const seed = (name: string) => fixed.keys[name]!.seed;
 const GRANT = fixed.keys.grant!.id!;
+const WRITE = { write: true, read: false };
 
 /** A library a member has consented in: the vectors' drop-box key and grant. */
 async function consented() {
   const shared = library();
-  await device(shared, [seed('dropbox'), seed('grant')]).authority.consent('Claude');
+  await device(shared, [seed('dropbox'), seed('grant')]).authority.consent('Claude', WRITE);
   shared.batches.length = 0;
   return shared;
 }
@@ -115,7 +136,7 @@ async function consented() {
 test('consent writes the drop-box key and the grant, hands den-edge the public key, and keeps no secret', async () => {
   const shared = library();
   const { authority, put } = device(shared, [seed('dropbox'), seed('grant')]);
-  const { grant, key } = await authority.consent('Claude');
+  const { grant, key } = await authority.consent('Claude', WRITE);
   expect(grant).toBe(GRANT);
   expect(put).toHaveBeenCalledWith({
     kid: fixed.keys.dropbox!.kid,
@@ -141,7 +162,7 @@ test('consent writes the drop-box key and the grant, hands den-edge the public k
 
   // A second consent keeps the library's drop-box key.
   const second = device(shared, [seed('other')]);
-  await second.authority.consent('ChatGPT');
+  await second.authority.consent('ChatGPT', WRITE);
   expect(Object.keys(shared.rows.get(DROPBOX_ROW)!.values)).toHaveLength(1);
   expect(Object.keys(shared.rows.get(GRANTS_ROW)!.values)).toHaveLength(2);
 });
@@ -151,7 +172,7 @@ test('a drop-box key den-edge did not take stops the consent before any grant is
   const { authority } = device(shared, [seed('dropbox'), seed('grant')], {
     putDropbox: async () => false,
   });
-  await expect(authority.consent('Claude')).rejects.toThrow();
+  await expect(authority.consent('Claude', WRITE)).rejects.toThrow();
   expect(shared.rows.get(GRANTS_ROW)).toBeUndefined();
 });
 
@@ -303,32 +324,112 @@ test('renewal moves a listed grant’s expiry on, at most once a day, and never 
   later(DAY);
   await authority.renew([GRANT]);
   const listed = await authority.grants();
-  expect(listed).toEqual([expect.objectContaining({ grant: GRANT, state: 'revoked' })]);
+  expect(listed.grants).toEqual([expect.objectContaining({ grant: GRANT, state: 'revoked' })]);
 });
 
 test('Settings lists every grant from the row, and a revoked one joins this device’s set', async () => {
   const shared = await consented();
   const { authority, records } = device(shared, []);
-  expect(await authority.grants()).toEqual([
+  expect((await authority.grants()).grants).toEqual([
     expect.objectContaining({ grant: GRANT, client: 'Claude', state: 'active' }),
   ]);
   // Revoked by another device: this one learns of it by reading the row.
   await device(shared, []).authority.revoke(GRANT);
-  expect((await authority.grants())[0]?.state).toBe('revoked');
+  expect((await authority.grants()).grants[0]?.state).toBe('revoked');
   expect(records()!.revoked).toEqual([GRANT]);
 });
 
-test('a key reset carries no drop-box key and every grant revoked', async () => {
+test('a key reset carries no drop-box key, and every grant and read record revoked', async () => {
   const shared = await consented();
+  await device(shared, [seed('other'), seed('limited')]).authority.consent('Reader', {
+    write: false,
+    read: true,
+  });
   shared.patch(APPLIED_ROW, { [fixed.request.fields.id]: { string: '{}' } });
   const { rows, revoked } = resetAssistantRows([...shared.rows.values()], fixed.now + 1);
   expect(rows.map((row) => row.kind === 'set' && row.name).sort()).toEqual([
     APPLIED_ROW,
     GRANTS_ROW,
+    READ_ROW,
   ]);
-  expect(revoked).toEqual([GRANT]);
-  const grants = rows.find((row) => row.kind === 'set' && row.name === GRANTS_ROW) as SettingsRow;
-  expect(JSON.parse((grants.values[GRANT]!.value as { string: string }).string).revokedAt).toBe(
-    fixed.now + 1,
+  const reader = fixed.keys.other!.id!;
+  expect(revoked.sort()).toEqual([GRANT, reader].sort());
+  for (const [name, id] of [
+    [GRANTS_ROW, GRANT],
+    [READ_ROW, reader],
+  ] as const) {
+    const row = rows.find((r) => r.kind === 'set' && r.name === name) as SettingsRow;
+    expect(JSON.parse((row.values[id]!.value as { string: string }).string).revokedAt).toBe(
+      fixed.now + 1,
+    );
+  }
+});
+
+// ---- reads (§15)
+
+const READ_ONLY = { write: false, read: true };
+
+test('a read-only consent writes a read record and no grant, so it can never write', async () => {
+  const shared = library();
+  const { authority, put } = device(shared, [seed('other'), seed('limited')]);
+  const { grant, key, readKey } = await authority.consent('Reader', READ_ONLY);
+  expect(grant).toBe(fixed.keys.other!.id);
+  expect(key).toBeTruthy();
+  expect(readKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(shared.rows.get(GRANTS_ROW)).toBeUndefined();
+  expect(shared.rows.get(DROPBOX_ROW)).toBeUndefined();
+  expect(put).not.toHaveBeenCalled();
+  const record = JSON.parse(
+    (shared.rows.get(READ_ROW)!.values[grant]!.value as { string: string }).string,
   );
+  expect(record).toMatchObject({ client: 'Reader', key: readKey, revokedAt: null });
+  // The grant key is returned for den-edge and written nowhere.
+  expect(JSON.stringify([...shared.rows.values()])).not.toContain(key);
+  expect((await authority.grants()).reads).toEqual([
+    expect.objectContaining({ grant, client: 'Reader', state: 'active' }),
+  ]);
+});
+
+test('a read-and-write consent writes both, under one grant', async () => {
+  const shared = library();
+  const { authority } = device(shared, [seed('dropbox'), seed('grant'), seed('limited')]);
+  const { grant, readKey } = await authority.consent('Claude', { write: true, read: true });
+  expect(grant).toBe(GRANT);
+  expect(readKey).toBeTruthy();
+  expect(Object.keys(shared.rows.get(GRANTS_ROW)!.values)).toEqual([GRANT]);
+  expect(Object.keys(shared.rows.get(READ_ROW)!.values)).toEqual([GRANT]);
+  // Renewing renews both, and revoking revokes both.
+  const renewer = device(shared, []);
+  renewer.later(10 * DAY);
+  expect(await renewer.authority.renew([GRANT])).toBe(2);
+  expect(await authority.revoke(GRANT)).toBe('revoked');
+  const listed = await authority.grants();
+  expect([listed.grants[0]?.state, listed.reads[0]?.state]).toEqual(['revoked', 'revoked']);
+});
+
+test('a projection is published for a live read grant, debounced, heartbeated, and deleted once revoked', async () => {
+  const shared = library();
+  const { authority, later } = device(shared, [seed('other'), seed('limited')]);
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  expect(await authority.publish()).toEqual([grant]);
+  expect(shared.projections.get(grant)!.length).toBeGreaterThan(0);
+  // Unchanged: nothing more until the heartbeat.
+  later(60_000);
+  expect(await authority.publish()).toEqual([]);
+  later(15 * 60_000);
+  expect(await authority.publish()).toEqual([grant]);
+  // Revoked: den-edge is asked to drop it, once, and nothing is published for it.
+  await authority.revoke(grant);
+  shared.sent.length = 0;
+  expect(await authority.publish()).toEqual([]);
+  expect(await authority.publish()).toEqual([]);
+  expect(shared.sent.filter((s) => s === `delete:${grant}`).length).toBeLessThanOrEqual(1);
+  expect(shared.projections.has(grant)).toBe(false);
+});
+
+test('a library with no read records builds no projection at all', async () => {
+  const shared = await consented();
+  const { authority } = device(shared, []);
+  expect(await authority.publish()).toEqual([]);
+  expect(shared.sent).toEqual([]);
 });

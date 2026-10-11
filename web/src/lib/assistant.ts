@@ -120,6 +120,35 @@ export async function ackQueue(
   }
 }
 
+/** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */
+const PUBLISH_TICK_MS = 30_000;
+
+/**
+ * §15 *Publishing*: while the library is open, ask the library service every 30 s to send each read grant's
+ * projection that is due. One tab of this browser publishes a library at a time (a Web Lock), another taking over
+ * when it closes; another device publishing too only replaces it with the same lists.
+ */
+export function publishWhileOpen(
+  loop: {
+    libraryId: string;
+    publish: () => Promise<unknown>;
+    sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  const sleep = loop.sleep ?? pause;
+  return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
+    while (!signal.aborted) {
+      try {
+        await loop.publish();
+      } catch (error) {
+        console.warn('den: assistant projections could not be published', error);
+      }
+      await sleep(PUBLISH_TICK_MS, signal);
+    }
+  });
+}
+
 export interface DrainLoop {
   libraryId: string;
   /** Opens, checks and applies a drain's requests in the library service. */

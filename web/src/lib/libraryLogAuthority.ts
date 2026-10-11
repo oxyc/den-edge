@@ -449,9 +449,47 @@ export class LibraryLogAuthority {
           return false;
         }
       },
+      documents: () => this.#log.documents().map(({ document }) => document),
+      layouts: () =>
+        Object.fromEntries(
+          [...this.#shapes]
+            .filter(([key]) => key.startsWith('tv:'))
+            .map(([key, { shape }]) => [
+              key.slice('tv:'.length),
+              {
+                seasons: [...shape.counts]
+                  .sort(([a], [b]) => a - b)
+                  .map(([season, episodes]) => ({ season, episodes })),
+                last_aired: shape.lastAired ?? null,
+              },
+            ]),
+        ),
+      head: () => this.#log.logHead,
+      putProjection: (grant, parts) =>
+        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { parts }),
+      deleteProjection: (grant) => this.#memberSend(`/assistant/projection/${grant}`, 'DELETE'),
       now: () => Date.now(),
       random: randomHex,
     });
+  }
+
+  /** A member route of den-edge's (`/assistant/…`), with this library's proof: whether it answered success. */
+  async #memberSend(path: string, method: string, body?: unknown): Promise<boolean> {
+    const member = await this.#log.relayMembership();
+    if (!member) return false;
+    try {
+      const res = await this.#fetch(path, {
+        method,
+        headers: {
+          'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   get generation(): string | null {
@@ -608,7 +646,7 @@ export class LibraryLogAuthority {
       case 'library.metadata':
         return this.#libraryMetadata(query.titles);
       case 'assistant.grants':
-        return { kind: 'assistant.grants', grants: await this.#assistant.grants() };
+        return { kind: 'assistant.grants', ...(await this.#assistant.grants()) };
       case 'download.refresh':
         return {
           kind: 'download.refresh',
@@ -704,9 +742,17 @@ export class LibraryLogAuthority {
       throw authorityError('invalid-request', 'a library kept only here takes no assistant writes');
     switch (task.kind) {
       case 'assistant.consent': {
-        const { grant, key } = await this.#assistant.consent(task.client);
-        return { result: { kind: 'assistant.consent', grant, key }, affected: [] };
+        const keys = await this.#assistant.consent(task.client, task);
+        return { result: { kind: 'assistant.consent', ...keys }, affected: [] };
       }
+      case 'assistant.publish':
+        return {
+          result: {
+            kind: 'assistant.publish',
+            published: (await this.#assistant.publish()).length,
+          },
+          affected: [],
+        };
       case 'assistant.revoke':
         return {
           result: { kind: 'assistant.revoke', outcome: await this.#assistant.revoke(task.grant) },
