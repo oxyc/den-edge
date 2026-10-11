@@ -884,9 +884,11 @@ describe('Explore feeds', () => {
           return ref.id === 2 ? { ...film(2), posterPath: '/b.jpg' } : null;
         },
       });
-      const titles = await row.load(1);
-      expect(looked).toEqual([2, 3]);
-      expect(titles.map((t) => t.posterPath)).toEqual(['/a.jpg', '/b.jpg', undefined]);
+      // The poster atlas has shows at once; the two looked up lead the next page.
+      expect((await row.load(1)).map((t) => t.posterPath)).toEqual(['/a.jpg']);
+      const next = await row.load(2);
+      expect(looked.slice(0, 2)).toEqual([2, 3]);
+      expect(next.slice(0, 2).map((t) => t.posterPath)).toEqual(['/b.jpg', undefined]);
     } finally {
       globalThis.fetch = atlasFetch;
     }
