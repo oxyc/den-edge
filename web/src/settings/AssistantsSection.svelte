@@ -18,27 +18,33 @@
     /** Marks a grant revoked in the open library; absent where no member library is open here. */
     revokeGrant?: (grant: string) => Promise<unknown>;
     /**
-     * The grants and read records the open library holds, whatever their state; absent where no member library is
-     * open here.
+     * The grants, read and play records the open library holds, whatever their state; absent where no member library
+     * is open here.
      */
-    listGrants?: () => Promise<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }>;
+    listGrants?: () => Promise<{
+      grants: AssistantGrantView[];
+      reads: AssistantGrantView[];
+      plays: AssistantGrantView[];
+    }>;
   } = $props();
 
   /**
-   * The library's own record of who may change it, and who may read it (§15): what every device enforces, whatever
-   * den-edge lists.
+   * The library's own record of who may change it, who may read it (§15) and who may play on the TV (§16): what
+   * every device enforces, whatever den-edge lists.
    */
   let grants = $state<AssistantGrantView[] | null>(null);
   let reads = $state<AssistantGrantView[] | null>(null);
+  let plays = $state<AssistantGrantView[] | null>(null);
 
   async function loadGrants() {
     if (!listGrants) return;
     try {
-      ({ grants, reads } = await listGrants());
+      ({ grants, reads, plays } = await listGrants());
     } catch (error) {
       console.error('den: assistant grants could not be listed', error);
       grants = [];
       reads = [];
+      plays = [];
     }
   }
   void loadGrants();
@@ -183,8 +189,9 @@
       <p class="foot">
         An assistant can search Den’s titles and people, filter them and find ones like others, and
         links you to each title here. If you allow it when connecting, it can also change your
-        library: add to or remove from your watchlist, mark titles seen or unseen, and rate them. It
-        can’t see your library, watchlist or watch history either way, and gets nothing from TMDB.
+        library — add to or remove from your watchlist, mark titles seen or unseen, and rate them —
+        and play a title or its trailer on your TV while Den is open there; and, separately, read
+        your watchlist and history. It gets nothing from TMDB.
       </p>
     </SettingRow>
 
@@ -251,6 +258,16 @@
       'read your watchlist and history',
       'reading your library',
       'Your devices stop sharing your watchlist and history with it, and what it was given is deleted. Revoking also stops it changing your library. It can be allowed again by connecting it again.',
+    )}
+  {/if}
+  {#if plays?.length}
+    {@render allowed(
+      'assistant-plays',
+      'Allowed to play on your TV',
+      plays,
+      'play on your TV',
+      'playing on your TV',
+      'Your TV refuses anything it asks to play from now on. Revoking also stops it changing your library. It can be allowed again by connecting it again.',
     )}
   {/if}
 </SettingsSection>

@@ -1,6 +1,7 @@
 /* @ts-self-types="./den_core.d.ts" */
 
 /**
+ * Every op but the assistant's, which `den-core-web-assistant` carries in a module of its own.
  * @param {string} request
  * @returns {string}
  */

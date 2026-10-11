@@ -700,12 +700,12 @@ export class LibraryModel {
     return result.outcome;
   }
 
-  /** The grants and read records the library holds, whatever their state, for Settings › Assistants. */
+  /** The grants, read and play records the library holds, whatever their state, for Settings › Assistants. */
   async assistantGrants() {
     this.#assertOpen();
     const { result } = await this.service.query({ kind: 'assistant.grants' });
     if (result.kind !== 'assistant.grants') throw wrongQueryResult('assistant grants');
-    return { grants: result.grants, reads: result.reads };
+    return { grants: result.grants, reads: result.reads, plays: result.plays };
   }
 
   /** Keep the grants whose connection den-edge still lists from expiring (at most daily). */

@@ -704,7 +704,12 @@ export type LibraryQueryResult =
       scope: RetainedBillboardScope;
       value: RetainedBillboard | null;
     }
-  | { kind: 'assistant.grants'; grants: AssistantGrantView[]; reads: AssistantGrantView[] };
+  | {
+      kind: 'assistant.grants';
+      grants: AssistantGrantView[];
+      reads: AssistantGrantView[];
+      plays: AssistantGrantView[];
+    };
 
 export type LibraryObservation =
   | {

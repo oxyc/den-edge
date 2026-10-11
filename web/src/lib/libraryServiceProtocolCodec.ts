@@ -1533,9 +1533,10 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     return exact(value, ['kind', 'matches']) && bool(value.matches);
   if (value.kind === 'assistant.grants')
     return (
-      exact(value, ['kind', 'grants', 'reads']) &&
+      exact(value, ['kind', 'grants', 'reads', 'plays']) &&
       list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
-      list(value.reads, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+      list(value.reads, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
+      list(value.plays, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
     );
   if (value.kind === 'library.metadata')
     return (

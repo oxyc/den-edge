@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
+import policyCases from '../vendor/den-core/policy-v1.json';
 import { expect, test, vi } from 'vitest';
 import {
   APPLIED_ROW,
   DROPBOX_ROW,
   GRANTS_ROW,
+  PLAY_ROW,
   READ_ROW,
   LibraryAssistantAuthority,
   randomHex,
@@ -26,6 +28,13 @@ const vectors = JSON.parse(
   };
 };
 const { fixed } = vectors;
+/** den-core's case of a `play` (§16) sealed with the same keys, for the same library, at the same `now`. */
+const playSealed = () =>
+  (
+    policyCases.cases.find(
+      (c: { name: string }) => c.name === "assistant_open: a play moved into the library's queue",
+    ) as { request: { sealed: string } }
+  ).request.sealed;
 const DEVICE = '0123456789abcdef';
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -156,10 +165,22 @@ test('consent writes the drop-box key and the grant, hands den-edge the public k
   expect(Object.keys(shared.rows.get(DROPBOX_ROW)!.values)).toEqual([
     `dropbox.${fixed.keys.dropbox!.kid}`,
   ]);
-  // The drop-box key's row lands before den-edge is given its public half, and the grant after it.
+  // The drop-box key's row lands before den-edge is given its public half, and the grant after it, then its play
+  // record (§16): the one consent allows changing the library and playing on the TV.
   expect(shared.batches.map((b) => b.settings[0]?.split(':')[0])).toEqual([
     DROPBOX_ROW,
     GRANTS_ROW,
+    PLAY_ROW,
+  ]);
+  const play = shared.rows.get(PLAY_ROW)!.values[grant]!.value as { string: string };
+  expect(JSON.parse(play.string)).toMatchObject({
+    v: 1,
+    client: 'Claude',
+    revokedAt: null,
+    expiresAt: fixed.now + 30 * DAY,
+  });
+  expect((await authority.grants()).plays).toEqual([
+    expect.objectContaining({ grant, client: 'Claude', state: 'active' }),
   ]);
 
   // A second consent keeps the library's drop-box key.
@@ -316,8 +337,10 @@ test('renewal moves a listed grant’s expiry on, at most once a day, and never 
     JSON.parse((shared.rows.get(GRANTS_ROW)!.values[GRANT]!.value as { string: string }).string)
       .expiresAt as number;
   later(10 * DAY);
-  expect(await authority.renew([GRANT, '00000000000000000000000000000000'])).toBe(1);
+  // The grant and its play record (§16).
+  expect(await authority.renew([GRANT, '00000000000000000000000000000000'])).toBe(2);
   expect(expiry()).toBe(fixed.now + 40 * DAY);
+  expect((await authority.grants()).plays[0]?.expiresAt).toBe(fixed.now + 40 * DAY);
   later(DAY / 2);
   expect(await authority.renew([GRANT])).toBe(0);
   expect(expiry()).toBe(fixed.now + 40 * DAY);
@@ -327,6 +350,7 @@ test('renewal moves a listed grant’s expiry on, at most once a day, and never 
   await authority.renew([GRANT]);
   const listed = await authority.grants();
   expect(listed.grants).toEqual([expect.objectContaining({ grant: GRANT, state: 'revoked' })]);
+  expect(listed.plays).toEqual([expect.objectContaining({ grant: GRANT, state: 'revoked' })]);
 });
 
 test('Settings lists every grant from the row, and a revoked one joins this device’s set', async () => {
@@ -341,23 +365,25 @@ test('Settings lists every grant from the row, and a revoked one joins this devi
   expect(records()!.revoked).toEqual([GRANT]);
 });
 
-test('a key reset carries no drop-box key, and every grant and read record revoked', async () => {
+test('a key reset carries no drop-box key, and every grant, read and play record revoked', async () => {
   const shared = await consented();
   await device(shared, [seed('other'), seed('limited')]).authority.consent('Reader', {
     write: false,
     read: true,
   });
   shared.patch(APPLIED_ROW, { [fixed.request.fields.id]: { string: '{}' } });
-  const { rows, revoked } = resetAssistantRows([...shared.rows.values()], fixed.now + 1);
+  const { rows, revoked } = await resetAssistantRows([...shared.rows.values()], fixed.now + 1);
   expect(rows.map((row) => row.kind === 'set' && row.name).sort()).toEqual([
     APPLIED_ROW,
     GRANTS_ROW,
+    PLAY_ROW,
     READ_ROW,
   ]);
   const reader = fixed.keys.other!.id!;
   expect(revoked.sort()).toEqual([GRANT, reader].sort());
   for (const [name, id] of [
     [GRANTS_ROW, GRANT],
+    [PLAY_ROW, GRANT],
     [READ_ROW, reader],
   ] as const) {
     const row = rows.find((r) => r.kind === 'set' && r.name === name) as SettingsRow;
@@ -392,21 +418,40 @@ test('a read-only consent writes a read record and no grant, so it can never wri
   ]);
 });
 
-test('a read-and-write consent writes both, under one grant', async () => {
+test('a read-and-write consent writes all three records, under one grant', async () => {
   const shared = library();
   const { authority } = device(shared, [seed('dropbox'), seed('grant'), seed('limited')]);
   const { grant, readKey } = await authority.consent('Claude', { write: true, read: true });
   expect(grant).toBe(GRANT);
   expect(readKey).toBeTruthy();
-  expect(Object.keys(shared.rows.get(GRANTS_ROW)!.values)).toEqual([GRANT]);
-  expect(Object.keys(shared.rows.get(READ_ROW)!.values)).toEqual([GRANT]);
-  // Renewing renews both, and revoking revokes both.
+  for (const row of [GRANTS_ROW, READ_ROW, PLAY_ROW])
+    expect(Object.keys(shared.rows.get(row)!.values)).toEqual([GRANT]);
+  // Renewing renews all three, and revoking revokes all three.
   const renewer = device(shared, []);
   renewer.later(10 * DAY);
-  expect(await renewer.authority.renew([GRANT])).toBe(2);
+  expect(await renewer.authority.renew([GRANT])).toBe(3);
   expect(await authority.revoke(GRANT)).toBe('revoked');
   const listed = await authority.grants();
-  expect([listed.grants[0]?.state, listed.reads[0]?.state]).toEqual(['revoked', 'revoked']);
+  expect([listed.grants[0]?.state, listed.reads[0]?.state, listed.plays[0]?.state]).toEqual([
+    'revoked',
+    'revoked',
+    'revoked',
+  ]);
+});
+
+test('a play found in the library queue is refused there and acknowledged, never applied by Den Web', async () => {
+  const shared = await consented();
+  const { authority } = device(shared, []);
+  const outcome = await authority.apply([{ seq: 7, sealed: playSealed() }]);
+  expect(outcome.results).toEqual([{ seq: 7, outcome: 'rejected', reason: 'wrong_queue' }]);
+  expect(outcome.ack).toBe(7);
+});
+
+test('a read-only consent writes no play record: playing is part of the consent to change the library', async () => {
+  const shared = library();
+  const { authority } = device(shared, [seed('other'), seed('limited')]);
+  await authority.consent('Reader', READ_ONLY);
+  expect(shared.rows.get(PLAY_ROW)).toBeUndefined();
 });
 
 test('a projection is published for a live read grant, debounced, heartbeated, and deleted once revoked', async () => {
@@ -503,6 +548,23 @@ test('a quiet library’s publish tick builds nothing until its rows change or s
   later(60_000);
   expect(await authority.publish()).toEqual([grant]);
   expect(builds).toBe(4);
+});
+
+test('a change to the household’s hide rules is a change of the projection, sent once it has settled', async () => {
+  const shared = library();
+  let builds = 0;
+  const { authority, later } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  expect(await authority.publish()).toEqual([grant]);
+  builds = 0;
+  shared.patch('prefs', { 'den.hideAnime': { bool: true } });
+  later(1_000);
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(1);
+  later(30_000);
+  expect(await authority.publish()).toEqual([grant]);
 });
 
 test('a library with no read records builds no projection at all', async () => {

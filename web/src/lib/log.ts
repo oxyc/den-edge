@@ -1351,7 +1351,7 @@ export class LibraryLog {
       else rows.push(row);
     }
     // Assistant v1 §10: no drop-box key is carried, and every grant goes revoked.
-    const assistant = resetAssistantRows(rows, Date.now());
+    const assistant = await resetAssistantRows(rows, Date.now());
     return {
       rows: assistant.rows,
       kept,

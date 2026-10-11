@@ -54,6 +54,9 @@ pub struct AppState {
     pub assistant_holds: hold::Holds,
     /// Held across every read-modify-write of an assistant queue or drop-box key (`assistant.rs`).
     pub assistant_lock: tokio::sync::Mutex<()>,
+    /// When each library's TV queue was last drained (assistant v1 §16), ms: whether its TV is awake. Kept in memory
+    /// alone: a TV draining refreshes it within seconds of a restart.
+    pub assistant_tv_seen: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
     /// migrates none, so startup work is independent of library history length.
     pub(crate) library_v3: Arc<library::v3::StoreManager>,
@@ -295,6 +298,7 @@ impl AppState {
             inbox_holds: hold::Holds::new(inbox::MAX_HELD, inbox::MAX_HELD_PER_ADDRESS),
             assistant_holds: hold::Holds::new(assistant::MAX_HELD, assistant::MAX_HELD_PER_ADDRESS),
             assistant_lock: tokio::sync::Mutex::new(()),
+            assistant_tv_seen: std::sync::Mutex::default(),
             library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),

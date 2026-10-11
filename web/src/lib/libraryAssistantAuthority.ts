@@ -13,7 +13,7 @@ import type {
   LibraryCommand,
   TitleRef,
 } from './libraryServiceProtocol';
-import { syncPolicy } from './syncCore';
+import { assistantPolicy, ensureAssistantPolicy } from './assistantCore';
 import type { ConfigValue, Row, SettingsRow, Stamp } from './wire';
 
 export const DROPBOX_ROW = 'assistant';
@@ -21,6 +21,19 @@ export const GRANTS_ROW = 'assistant-grants';
 export const APPLIED_ROW = 'assistant-applied';
 /** Read records (§15): each connection that may read, by its grant id, with its read key. */
 export const READ_ROW = 'assistant-read';
+/** Play records (§16): each connection that may play on the TV, by its grant id. Only a TV applies a play. */
+export const PLAY_ROW = 'assistant-play';
+/** The rows a grant's id keys, renewed and revoked together. */
+const GRANT_ROWS = [GRANTS_ROW, READ_ROW, PLAY_ROW] as const;
+/** The household's preferences, whose hide rules a projection carries (§15). */
+const PREFS_ROW = 'prefs';
+
+/** `assistant_grants`' answer: the grants, read records and play records, each with its state. */
+export interface AssistantGrantList {
+  grants: AssistantGrantView[];
+  reads: AssistantGrantView[];
+  plays: AssistantGrantView[];
+}
 
 /** §15 *Publishing*: a changed projection waits this long for the library to settle; an unchanged one is sent again
  * this often, so its `at` stays fresh. */
@@ -163,16 +176,23 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
 
 /**
  * §10: what a key reset copies of the assistant rows into the new library. Not the drop-box keys — the device it
- * shuts out knew them — and every grant and read record revoked at `now`, so Settings still shows which assistants
- * were connected and none of their keys works. The applied row goes as it is. `revoked`: their grant ids, for the
- * device's own record.
+ * shuts out knew them — and every grant, read and play record revoked at `now`, so Settings still shows which
+ * assistants were connected and none of their keys works. The applied row goes as it is. `revoked`: their grant ids,
+ * for the device's own record. The assistant module is loaded only for a library that has any of them.
  */
-export function resetAssistantRows(rows: Row[], now: number): { rows: Row[]; revoked: string[] } {
+export async function resetAssistantRows(
+  rows: Row[],
+  now: number,
+): Promise<{ rows: Row[]; revoked: string[] }> {
+  const keyed = (row: Row): row is SettingsRow =>
+    row.kind === 'set' && (GRANT_ROWS as readonly string[]).includes(row.name);
+  if (rows.some((row) => keyed(row) && Object.keys(row.values).length))
+    await ensureAssistantPolicy();
   const revoked: string[] = [];
   const out: Row[] = [];
   for (const row of rows) {
     if (row.kind === 'set' && row.name === DROPBOX_ROW) continue;
-    if (row.kind !== 'set' || (row.name !== GRANTS_ROW && row.name !== READ_ROW)) {
+    if (!keyed(row)) {
       out.push(row);
       continue;
     }
@@ -180,7 +200,7 @@ export function resetAssistantRows(rows: Row[], now: number): { rows: Row[]; rev
     for (const [grant, setting] of Object.entries(row.values)) {
       revoked.push(grant);
       try {
-        const { value } = syncPolicy<{ value: ConfigValue }>({
+        const { value } = assistantPolicy<{ value: ConfigValue }>({
           op: 'assistant_revoke',
           grant,
           value: setting.value,
@@ -240,27 +260,34 @@ export class LibraryAssistantAuthority {
     return run;
   }
 
+  /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
   dropbox(): DropboxKey | null {
-    return syncPolicy<DropboxKey | null>({
+    return assistantPolicy<DropboxKey | null>({
       op: 'assistant_dropbox',
       assistant: this.#row(DROPBOX_ROW),
     });
   }
 
-  /**
-   * Every grant and read record the library's rows hold, for Settings; any shown revoked joins this device's revoked
-   * set.
-   */
-  async grants(): Promise<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }> {
-    const records = await this.#load();
-    const listed = syncPolicy<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }>({
+  #list(records: AssistantRecords): AssistantGrantList {
+    return assistantPolicy<AssistantGrantList>({
       op: 'assistant_grants',
       grants: this.#row(GRANTS_ROW),
       read: this.#row(READ_ROW),
+      play: this.#row(PLAY_ROW),
       localRevoked: records.revoked,
       now: this.port.now(),
     });
-    const revoked = [...listed.grants, ...listed.reads]
+  }
+
+  /**
+   * Every grant, read and play record the library's rows hold, for Settings; any shown revoked joins this device's
+   * revoked set.
+   */
+  async grants(): Promise<AssistantGrantList> {
+    await ensureAssistantPolicy();
+    const records = await this.#load();
+    const listed = this.#list(records);
+    const revoked = [...listed.grants, ...listed.reads, ...listed.plays]
       .filter((g) => g.state === 'revoked')
       .map((g) => g.grant);
     if (revoked.some((id) => !records.revoked.includes(id))) await this.#remember({ revoked });
@@ -268,28 +295,29 @@ export class LibraryAssistantAuthority {
   }
 
   /**
-   * §1's and §15's consent step. To write: the library's drop-box key (made, written, and given to den-edge when it
-   * has none), then a grant key and its row. To read only: a grant key with no grants row setting, so it can never
-   * write. To read: its read key, recorded in the read row. The keys are returned for den-edge's approval and are
-   * kept nowhere else.
+   * §1's, §15's and §16's consent step. To write: the library's drop-box key (made, written, and given to den-edge
+   * when it has none), then a grant key and its row, and a play record, so it may also play on the TV. To read only: a
+   * grant key with no grants row setting, so it can never write. To read: its read key, recorded in the read row. The
+   * keys are returned for den-edge's approval and are kept nowhere else.
    */
   async consent(
     client: string,
     { write, read }: { write: boolean; read: boolean },
   ): Promise<{ grant: string; key: string; readKey?: string }> {
     if (!write && !read) throw new Error('a consent allows writing, reading, or both');
+    await ensureAssistantPolicy();
     await this.port.refresh();
     const { grant, key } = write
       ? await this.#writeGrant(client)
       : (() => {
-          const made = syncPolicy<{ grant: string; secret: string }>({
+          const made = assistantPolicy<{ grant: string; secret: string }>({
             op: 'assistant_grant_key',
             random: this.port.random(),
           });
           return { grant: made.grant, key: made.secret };
         })();
     if (!read) return { grant, key };
-    const record = syncPolicy<{ key: string; setting: string; value: ConfigValue }>({
+    const record = assistantPolicy<{ key: string; setting: string; value: ConfigValue }>({
       op: 'assistant_keygen_read',
       grant,
       random: this.port.random(),
@@ -304,7 +332,7 @@ export class LibraryAssistantAuthority {
   async #writeGrant(client: string): Promise<{ grant: string; key: string }> {
     let dropbox = this.dropbox();
     if (!dropbox) {
-      const made = syncPolicy<DropboxKey & { setting: string; value: ConfigValue }>({
+      const made = assistantPolicy<DropboxKey & { setting: string; value: ConfigValue }>({
         op: 'assistant_keygen_dropbox',
         random: this.port.random(),
       });
@@ -314,7 +342,8 @@ export class LibraryAssistantAuthority {
     }
     if (!dropbox || !(await this.port.putDropbox(dropbox)))
       throw new Error('den-edge did not take the library’s drop-box key');
-    const grant = syncPolicy<{
+    const now = this.port.now();
+    const grant = assistantPolicy<{
       grant: string;
       secret: string;
       setting: string;
@@ -325,27 +354,37 @@ export class LibraryAssistantAuthority {
       client,
       ops: [...OPS],
       cap: DAILY_CAP,
-      now: this.port.now(),
+      now,
+    });
+    // §16: changing the library and playing on the TV are one consent; the play record has a row of its own, since
+    // a grant listing a TV op would be no grant to a client from before play.
+    const play = assistantPolicy<{ setting: string; value: ConfigValue }>({
+      op: 'assistant_keygen_play',
+      grant: grant.grant,
+      client,
+      now,
     });
     // Before den-edge approves: no request can reach a device before its grant.
     await this.port.patch(GRANTS_ROW, { [grant.setting]: grant.value });
+    await this.port.patch(PLAY_ROW, { [play.setting]: play.value });
     return { grant: grant.grant, key: grant.secret };
   }
 
   /**
-   * Revoke a grant and its read record, whatever their state (sticky, the earlier time kept), and add it to this
-   * device's revoked set first, so this device refuses it whether or not the rows' writes land. Absent when the
-   * library holds neither.
+   * Revoke a grant and its read and play records, whatever their state (sticky, the earlier time kept), and add it to
+   * this device's revoked set first, so this device refuses it whether or not the rows' writes land. Absent when the
+   * library holds none of them.
    */
   async revoke(grant: string): Promise<'revoked' | 'absent'> {
     await this.#remember({ revoked: [grant] });
+    await ensureAssistantPolicy();
     await this.port.refresh();
     let found = false;
-    for (const name of [GRANTS_ROW, READ_ROW]) {
+    for (const name of GRANT_ROWS) {
       const value = this.#row(name)?.values[grant]?.value;
       if (!value) continue;
       found = true;
-      const revoked = syncPolicy<{ value: ConfigValue }>({
+      const revoked = assistantPolicy<{ value: ConfigValue }>({
         op: 'assistant_revoke',
         grant,
         value,
@@ -365,17 +404,18 @@ export class LibraryAssistantAuthority {
   async renew(grants: readonly string[]): Promise<number> {
     const now = this.port.now();
     if (now - (await this.#load()).renewedAt < DAY_MS) return 0;
+    await ensureAssistantPolicy();
     await this.port.refresh();
     let renewed = 0;
-    // A grant and its read record are renewed together (§15).
-    for (const name of [GRANTS_ROW, READ_ROW]) {
+    // A grant and its read and play records are renewed together (§15, §16).
+    for (const name of GRANT_ROWS) {
       const row = this.#row(name);
       const changes: Record<string, ConfigValue> = {};
       for (const grant of grants) {
         const value = row?.values[grant]?.value;
         if (!value) continue;
         try {
-          const next = syncPolicy<{ value: ConfigValue }>({
+          const next = assistantPolicy<{ value: ConfigValue }>({
             op: 'assistant_renew',
             grant,
             value,
@@ -395,22 +435,18 @@ export class LibraryAssistantAuthority {
 
   /**
    * What an open page owes assistants: draining for a live grant to write, publishing for a live read record. A
-   * library with neither row answers at once, with no den-core call. A read record no longer live has its projection
-   * dropped at den-edge here, once by this device, so that is done even when nothing publishes any more.
+   * library with neither row answers at once, with no den-core call and no assistant module loaded. A read record no
+   * longer live has its projection dropped at den-edge here, once by this device, so that is done even when nothing
+   * publishes any more. A play record asks nothing of Den Web: only a TV plays.
    */
   async needs(): Promise<AssistantNeeds> {
     const grants = this.#row(GRANTS_ROW);
     const read = this.#row(READ_ROW);
     if (!Object.keys(grants?.values ?? {}).length && !Object.keys(read?.values ?? {}).length)
       return { write: false, read: false };
+    await ensureAssistantPolicy();
     const records = await this.#load();
-    const listed = syncPolicy<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }>({
-      op: 'assistant_grants',
-      grants,
-      read,
-      localRevoked: records.revoked,
-      now: this.port.now(),
-    });
+    const listed = this.#list(records);
     const live = (list: AssistantGrantView[]) => list.some((g) => g.state === 'active');
     const dead = listed.reads.flatMap((g) =>
       DEAD.has(g.state) && !records.dropped.includes(g.grant) ? [g.grant] : [],
@@ -451,10 +487,11 @@ export class LibraryAssistantAuthority {
     const now = this.port.now();
     const inputs = this.port.inputs();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
+    await ensureAssistantPolicy();
     const records = await this.#load();
     let built: ProjectionAnswer;
     try {
-      built = syncPolicy<ProjectionAnswer>({
+      built = assistantPolicy<ProjectionAnswer>({
         op: 'assistant_projection',
         library: this.port.libraryId,
         documents: this.port.documents(),
@@ -462,6 +499,8 @@ export class LibraryAssistantAuthority {
         head: this.port.head(),
         read,
         grants: this.#row(GRANTS_ROW),
+        // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
+        prefs: this.#row(PREFS_ROW),
         localRevoked: records.revoked,
         random: this.port.random(),
         now,
@@ -505,14 +544,17 @@ export class LibraryAssistantAuthority {
     return sent;
   }
 
+  /** Den Web drains only the library's queue: a play found there is refused (`wrong_queue`), never applied here. */
   #open(sealed: string, records: AssistantRecords): Opened {
-    return syncPolicy<Opened>({
+    return assistantPolicy<Opened>({
       op: 'assistant_open',
       library: this.port.libraryId,
       device: this.port.device,
       sealed,
+      queue: 'library',
       assistant: this.#row(DROPBOX_ROW),
       grants: this.#row(GRANTS_ROW),
+      play: this.#row(PLAY_ROW),
       applied: this.#row(APPLIED_ROW),
       localRevoked: records.revoked,
       localApplied: records.applied,
@@ -533,6 +575,7 @@ export class LibraryAssistantAuthority {
     dropbox: DropboxKey | null;
     affected: LibrarySelectionScope[];
   }> {
+    await ensureAssistantPolicy();
     await this.port.refresh();
     // Revocations in the row as read join this device's set before anything is opened against it.
     await this.grants();
@@ -660,7 +703,7 @@ export class LibraryAssistantAuthority {
     if (now < this.#pruneAt) return;
     this.#pruneAt = now + DAY_MS;
     const row = this.#row(APPLIED_ROW);
-    const { remove } = syncPolicy<{ remove: string[] }>({
+    const { remove } = assistantPolicy<{ remove: string[] }>({
       op: 'assistant_prune',
       applied: row,
       localApplied: records.applied,

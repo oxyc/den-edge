@@ -175,10 +175,10 @@
       <label class="write">
         <input type="checkbox" bind:checked={allowWrite} disabled={working} />
         <span>
-          Allow changes to my library
+          Allow changes to my library and playing on my TV
           <small
             >It can add to and remove from your watchlist, mark titles seen or unseen, and rate
-            them.{#if !allowRead}
+            them, and play a title or its trailer on your TV while Den is open there.{#if !allowRead}
               It still can’t see your library.{/if}</small
           >
         </span>

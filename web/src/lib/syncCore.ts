@@ -52,7 +52,12 @@ export async function inPolicySlices<T>(
 
 /** The same Rust policy as Apple TV. A failure is never an empty journal or an acknowledgement. */
 export function syncPolicy<T>(request: Record<string, unknown>): T {
-  const envelope = JSON.parse(evaluate(JSON.stringify(request))) as Record<string, unknown>;
+  return policyAnswer<T>(evaluate(JSON.stringify(request)));
+}
+
+/** A den-core module's versioned answer: its value, or a throw naming its error. */
+export function policyAnswer<T>(answer: string): T {
+  const envelope = JSON.parse(answer) as Record<string, unknown>;
   if (
     envelope.version !== 1 ||
     typeof envelope.error === 'string' ||
