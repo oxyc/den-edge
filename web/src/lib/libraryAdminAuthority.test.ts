@@ -12,6 +12,7 @@ const moving: Moving = {
   head: 4,
   generation: 'generation-1',
   device: '0123456789abcdef',
+  revokedGrants: [],
 };
 
 const clock: ClockStore = {

@@ -816,7 +816,7 @@
   $effect(() => warmOnIntent(warmTrailer));
   /**
    * What is already known about the title being opened — its artwork, for the hero to paint while
-   * TMDB is asked. Everything on screen has been named through `session.displays`, so the row or
+   * TMDB is asked. Everything on screen has been named through `session.displayTitle`, so the row or
    * billboard the viewer just pressed is holding exactly this.
    */
   const pageSeed = $derived.by(() => {
@@ -825,7 +825,7 @@
     const here = (t: Title) => t.type === opening.type && t.id === opening.id;
     // The billboard, then anything named through the library, then the card that was pressed: a browse
     // row's titles are loaded inside the row itself, and the card says what it held (`notePressed`).
-    return featured.find(here) ?? session.displays.find(here) ?? pressedCard(opening)?.title;
+    return featured.find(here) ?? session.displayTitle(opening) ?? pressedCard(opening)?.title;
   });
   /** The pressed card's own poster, already loaded, which the hero paints at once while TMDB is asked. */
   const pageStill = $derived(page ? pressedCard(page)?.still : undefined);
@@ -1069,14 +1069,17 @@
    * library already holds.
    */
   let featured = $state<RecommendedTitle[]>([]);
-  let heroReady = $state(false);
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
-  $effect(() => {
-    void heroKey;
-    heroReady = false;
-  });
+  /**
+   * The lead the billboard last said had painted (`onready`). A key rather than a flag reset by an effect: with a
+   * retained lead already painted, Billboard's `onready` ran in the same flush as the lead's arrival and before
+   * the reset (measured on d.oxy.fi: onready at 373ms, reset for the same key at 374ms), so readiness was cleared
+   * for good and Home never preloaded its next screens.
+   */
+  let heroReadyKey = $state<string | null>(null);
+  const heroReady = $derived(heroReadyKey === heroKey);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Discovery may settle before this encrypted first-paint answer; a generic fallback must wait for both. */
@@ -1559,7 +1562,7 @@
     content={session.content}
     {reel}
     {routes}
-    onready={() => (heroReady = true)}
+    onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
       void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
     onplay={playHere && ((title) => playHere(title))}
@@ -1579,7 +1582,7 @@
         itemLabel={(entry) => entry.title.title}
         onintent={admitContinueNames}
       >
-        {#snippet children(entry)}
+        {#snippet children(entry, onscreen)}
           <PosterCard
             title={entry.title}
             caption={caption(entry)}
@@ -1587,6 +1590,7 @@
             live={liveClock(entry)}
             href={titleHref(entry.title)}
             continueWatching
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>
@@ -1608,7 +1612,7 @@
         itemLabel={(download) => download.name}
         landscape
       >
-        {#snippet children(download)}
+        {#snippet children(download, onscreen)}
           {@const title = {
             type: download.title.type,
             id: download.title.id,
@@ -1624,6 +1628,7 @@
             caption={viewHeadline(download)}
             progress={download.status.fraction}
             href={titleHref(title)}
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>
@@ -1637,11 +1642,12 @@
         itemLabel={(title) => title.title}
         onintent={admitWatchlistNames}
       >
-        {#snippet children(title)}
+        {#snippet children(title, onscreen)}
           <PosterCard
             {title}
             caption={title.year ? String(title.year) : undefined}
             href={titleHref(title)}
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>

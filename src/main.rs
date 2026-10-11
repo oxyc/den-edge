@@ -4,6 +4,7 @@
 //!
 //! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
+mod assistant;
 mod billboard;
 mod cache;
 mod diagnostics;
@@ -49,6 +50,10 @@ pub struct AppState {
     pub library_holds: hold::Holds,
     /// `POST /inbox/drain?wait=` requests waiting for a message in one of their queues.
     pub inbox_holds: hold::Holds,
+    /// `POST /assistant/drain?wait=` requests waiting for a request in their library's queue.
+    pub assistant_holds: hold::Holds,
+    /// Held across every read-modify-write of an assistant queue or drop-box key (`assistant.rs`).
+    pub assistant_lock: tokio::sync::Mutex<()>,
     /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
     /// migrates none, so startup work is independent of library history length.
     pub(crate) library_v3: Arc<library::v3::StoreManager>,
@@ -288,6 +293,8 @@ impl AppState {
             libraries: library::Libraries::default(),
             library_holds: hold::Holds::new(library::MAX_HELD, library::MAX_HELD_PER_LIBRARY),
             inbox_holds: hold::Holds::new(inbox::MAX_HELD, inbox::MAX_HELD_PER_ADDRESS),
+            assistant_holds: hold::Holds::new(assistant::MAX_HELD, assistant::MAX_HELD_PER_ADDRESS),
+            assistant_lock: tokio::sync::Mutex::new(()),
             library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),
@@ -498,7 +505,7 @@ async fn main() {
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
          web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
-         oauth={}",
+         oauth={} assistant_writes={}",
         release_version(),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -531,6 +538,7 @@ async fn main() {
             || "off".to_owned(),
             |o| format!("on(issuer {} key {})", o.issuer, oauth::b64url(o.verifying_key().as_bytes())),
         ),
+        on(state.oauth.as_ref().is_some_and(|o| o.write_public.is_some())),
     );
     let limits = Limits { grace: DRAIN_GRACE, header_read: HEADER_READ_TIMEOUT };
     let outcome = serve_until(listener, app, Arc::clone(&state.metrics), shutdown, limits).await;
@@ -631,7 +639,15 @@ fn oauth_config() -> Option<oauth::OAuth> {
     };
     let resource = env_opt("OAUTH_RESOURCE").and_then(|v| origin(&v)).unwrap_or_else(|| issuer.clone());
     let consent = env_opt("OAUTH_CONSENT_ORIGIN").and_then(|v| origin(&v)).unwrap_or_else(|| issuer.clone());
-    Some(oauth::OAuth::new(issuer, format!("{resource}/mcp"), consent, seed))
+    let mut oauth = oauth::OAuth::new(issuer, format!("{resource}/mcp"), consent, seed);
+    // den-mcp's X-Wing public key: with it, a member may let an assistant change the library (`den:library.write`).
+    if let Some(key) = env_opt("MCP_WRITE_PUBLIC_KEY") {
+        oauth.write_public = oauth::write_public_key(key.trim());
+        if oauth.write_public.is_none() {
+            eprintln!("MCP_WRITE_PUBLIC_KEY must be an X-Wing public key, unpadded base64url — assistant writes are off");
+        }
+    }
+    Some(oauth)
 }
 
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.

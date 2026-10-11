@@ -1,6 +1,5 @@
 import {
   CONTENT_SERVICE_PROTOCOL,
-  isContentServiceServerMessage,
   type ContentRequest,
   type ContentResult,
   type ContentResultFor,
@@ -9,11 +8,11 @@ import {
   type ContentServiceServerMessage,
   type ContentServiceStatusValue,
 } from './contentServiceProtocol';
-import { decodeContentServiceServerMessage } from './contentServiceProtocolCodec';
 
+/** Delivers content replies only, already validated where they were produced (LibraryServiceWorkerHost). */
 export interface ContentServiceTransport {
   send(message: ContentServiceClientMessage): void;
-  listen(listener: (message: unknown) => void): () => void;
+  listen(listener: (message: ContentServiceServerMessage) => void): () => void;
   close(): void;
 }
 
@@ -57,10 +56,7 @@ const cancelled = (): ContentServiceError =>
 /** A request rejected synchronously on this side of the Worker is not evidence that the Worker died. */
 function sendFailure(error: unknown): ContentServiceError {
   if (error instanceof ContentServiceError) return error;
-  if (
-    error instanceof TypeError ||
-    (error instanceof DOMException && error.name === 'DataCloneError')
-  )
+  if (error instanceof DOMException && error.name === 'DataCloneError')
     return new ContentServiceError(
       {
         code: 'invalid-request',
@@ -163,14 +159,8 @@ export class ContentServiceClient {
     this.#statusListeners.clear();
   }
 
-  #receive(input: unknown): void {
-    if (this.#closed || !isContentServiceServerMessage(input)) return;
-    const decoded = decodeContentServiceServerMessage(input);
-    if (!decoded.ok) {
-      this.#failAll(decoded.error);
-      return;
-    }
-    const message: ContentServiceServerMessage = decoded.value;
+  #receive(message: ContentServiceServerMessage): void {
+    if (this.#closed) return;
     if (message.type === 'content-status') {
       for (const listener of this.#statusListeners)
         try {

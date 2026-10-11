@@ -669,31 +669,6 @@ it('does not replace a live Worker for a request-scoped provider failure', async
   services.close();
 });
 
-it('does not replace a live Worker for a locally invalid content request', async () => {
-  const worker = new FakeWorker();
-  const createWorker = vi.fn(() => worker as unknown as Worker);
-  const services = createWorkerServiceSession({ createWorker });
-
-  await expect(
-    services.content.query({
-      kind: 'titles',
-      titles: [
-        {
-          type: 'movie',
-          id: 10201,
-          title: 'Atlas card fields do not belong on the wire',
-        },
-      ],
-    } as unknown as Parameters<typeof services.content.query>[0]),
-  ).rejects.toMatchObject({
-    failure: { code: 'invalid-request', retryable: false },
-    scope: 'local',
-  });
-  expect(createWorker).toHaveBeenCalledOnce();
-  expect(worker.terminate).not.toHaveBeenCalled();
-  services.close();
-});
-
 it('does not replace a live Worker when one content request cannot be cloned', async () => {
   const worker = new FakeWorker();
   const createWorker = vi.fn(() => worker as unknown as Worker);

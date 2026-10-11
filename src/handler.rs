@@ -263,6 +263,7 @@ fn is_control(route: &str) -> bool {
             | "/reel/activate"
             | "/lib/:id/grants"
             | "/lib/:id/grants/:gid"
+            | "/lib/:id/grants/:gid/code"
             | "/lib/:id"
             | "/recovery"
             | "/recovery/open"
@@ -274,6 +275,10 @@ fn is_control(route: &str) -> bool {
             | "/oauth/connections/:sid"
             | "/oauth/request"
             | "/.well-known/oauth"
+            | "/assistant/dropbox"
+            | "/assistant/append"
+            | "/assistant/drain"
+            | "/assistant/ack"
     )
 }
 
@@ -551,6 +556,9 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if path.starts_with("/inbox") {
         return crate::inbox::handle(state, req).await;
     }
+    if crate::assistant::is_path(&path) {
+        return crate::assistant::handle(state, req).await;
+    }
     if path.starts_with("/pair/") {
         return crate::pair::handle(state, req).await;
     }
@@ -690,9 +698,12 @@ impl Face {
         let device =
             ["/link", "/inbox", "/pair/", "/sync/", "/lib/", "/grant/"].iter().any(|p| path.starts_with(p))
                 || path == "/metrics"
-                || crate::recovery::is_path(path);
-        // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`).
-        let web_app_calls = path.starts_with("/pair/")
+                || crate::recovery::is_path(path)
+                || crate::assistant::is_path(path);
+        // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`). The web app
+        // also keeps a library's assistant drop-box key here and drains its requests while it is open.
+        let web_app_calls = crate::assistant::is_path(path)
+            || path.starts_with("/pair/")
             || path.starts_with("/lib/")
             || path.starts_with("/grant/")
             || crate::recovery::is_path(path)
@@ -777,6 +788,10 @@ pub fn route_label(path: &str) -> &'static str {
         "/link" => "/link",
         "/inbox/append" => "/inbox/append",
         "/inbox/drain" => "/inbox/drain",
+        "/assistant/dropbox" => "/assistant/dropbox",
+        "/assistant/append" => "/assistant/append",
+        "/assistant/drain" => "/assistant/drain",
+        "/assistant/ack" => "/assistant/ack",
         "/pair/new" => "/pair/new",
         "/pair/open" => "/pair/open",
         p if p.starts_with("/pair/") && p.matches('/').count() == 3 => "/pair/:sid/:slot",
@@ -791,7 +806,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
         // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
         p if crate::grants::is_host_path(p) && p.matches('/').count() == 3 => "/lib/:id/grants",
-        p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid",
+        p if crate::grants::is_host_path(p) && p.matches('/').count() == 4 => "/lib/:id/grants/:gid",
+        p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid/code",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.ends_with("/rows") && p.contains("/rewrite/") => {
@@ -850,6 +866,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
+        "/lib/:id/grants/:gid/code" => Some(POST),
         "/grant/redeem"
         | "/reel/transport"
         | "/reel/activate"
@@ -859,7 +876,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/grant/device" => Some(POST),
         "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
-        "/pair/:sid/:slot" => Some(GET_PUT),
+        "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
+        "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
         "/inbox/append"
         | "/lib/:id/batch"
         | "/lib/:id/rewrite"
@@ -890,6 +908,8 @@ fn body_cap(route: &str) -> usize {
         // A dozen durations and a few short labels: a few hundred bytes, generously.
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
+        "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
+        "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
 }

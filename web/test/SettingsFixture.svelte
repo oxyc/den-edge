@@ -39,6 +39,21 @@
       'den.maturityCeiling': { string: 'pg13' },
     }),
     row('plugins', { 'https://addon.example/manifest.json': { bool: true } }),
+    // An assistant allowed to change the library: den-spec's assistant-v1 vectors' `grant` key.
+    row('assistant-grants', {
+      d7047d7faa4c6f77e1919c132bb6bd9f: {
+        string: JSON.stringify({
+          cap: 100,
+          client: 'Claude',
+          createdAt: 1_789_000_000_000,
+          expiresAt: 4_102_444_800_000,
+          ops: ['rate', 'seen', 'watchlist_add', 'watchlist_remove'],
+          pk: 'jftOjtUEDF6Jm8aGfb7qQZsWQBTKy8ED5zIpdrgtmk0',
+          revokedAt: null,
+          v: 1,
+        }),
+      },
+    }),
     row('devices', {
       'aaaa000000000001.name': { string: 'Living Room TV' },
       'aaaa000000000001.kind': { string: 'tv' },
@@ -52,6 +67,8 @@
   const put = (next: Row) => {
     stored = [...stored.filter((held) => rowName(held) !== rowName(next)), next];
   };
+  // What the library holds now, for a spec to read back what a press wrote.
+  (globalThis as { fixtureRows?: () => Row[] }).fixtureRows = () => stored;
   const log = {
     readOnly: false,
     wireMinimum: 4,

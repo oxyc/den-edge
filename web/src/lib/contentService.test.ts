@@ -15,13 +15,13 @@ import {
 
 class FakeTransport implements ContentServiceTransport {
   sent: ContentServiceClientMessage[] = [];
-  listener?: (message: unknown) => void;
+  listener?: (message: ContentServiceServerMessage) => void;
 
   send(message: ContentServiceClientMessage): void {
     this.sent.push(message);
   }
 
-  listen(listener: (message: unknown) => void): () => void {
+  listen(listener: (message: ContentServiceServerMessage) => void): () => void {
     this.listener = listener;
     return () => {
       if (this.listener === listener) this.listener = undefined;

@@ -261,6 +261,55 @@
          before the module graph: the image request then overlaps the app download instead of starting after it.
          The CSP permits only this script's hash; changing these bytes also requires changing src/web.rs. -->
     <script data-den-early-hero>
+      // A shell Cloudflare kept past a failed purge can name hashed startup files den-edge no longer has, and
+      // those answer 404. Load the page once more under a query Cloudflare has never seen, which its cache cannot
+      // answer; if that shell fails too, say so rather than loop. Only before `load`: a lazy chunk that goes
+      // missing later is `recoverChunkFailure`'s (release.ts), which first checks that nothing on screen is lost.
+      void (() => {
+        const url = new URL(location.href);
+        const retried = url.searchParams.has('den-retry');
+        if (retried) {
+          url.searchParams.delete('den-retry');
+          history.replaceState(history.state, '', url);
+        }
+        let failed = false;
+        addEventListener(
+          'error',
+          (event) => {
+            const element = event.target;
+            const file =
+              element instanceof HTMLScriptElement
+                ? element.src
+                : element instanceof HTMLLinkElement
+                  ? element.href
+                  : '';
+            if (
+              failed ||
+              document.readyState === 'complete' ||
+              !file.startsWith(`${location.origin}/assets/`) ||
+              !navigator.onLine
+            )
+              return;
+            failed = true;
+            if (!retried) {
+              url.searchParams.set('den-retry', Date.now().toString(36));
+              location.replace(url);
+              return;
+            }
+            const say = () => {
+              const note = document.createElement('p');
+              note.setAttribute('role', 'alert');
+              note.textContent = 'Den could not load. Try again in a few minutes.';
+              note.style.cssText =
+                'position:fixed;inset:auto 16px 16px;z-index:2147483647;margin:0;padding:12px 16px;border-radius:8px;background:#26262c;color:#fff;font:15px/1.4 system-ui,sans-serif;text-align:center';
+              document.body.append(note);
+            };
+            if (document.body) say();
+            else addEventListener('DOMContentLoaded', say);
+          },
+          true,
+        );
+      })();
       void (() => {
         try {
           const fragment = location.hash.replace(/^#/, '');

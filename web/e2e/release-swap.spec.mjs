@@ -9,7 +9,7 @@ test('a waiting release is put on screen by the next page opened, never mid-visi
   page,
 }) => {
   await guardNetwork(page);
-  await page.route(`${E2E_ORIGIN}/tv/1399`, (route) =>
+  await page.route(`${E2E_ORIGIN}/tv/1399*`, (route) =>
     route.fulfill({ contentType: 'text/html', body: '<p id="swapped">the new release</p>' }),
   );
   await page.goto(`${E2E_ORIGIN}/test/router.html`);
@@ -50,9 +50,20 @@ test('a newer shell puts a Continue Watching destination on the new release', as
       },
     });
   });
-  await page.route(`${E2E_ORIGIN}/tv/6066-verano-azul`, (route) =>
-    route.fulfill({ contentType: 'text/html', body: '<p id="swapped">Verano azul</p>' }),
-  );
+  // Cloudflare keeps the shell until a deploy purges it, and the probe's HEAD is never kept, so after a failed purge
+  // a plain load still gets the old shell while the probe keeps finding the new one. Only an address Cloudflare
+  // has never seen (`den-retry`) reaches den-edge's current shell.
+  const destinations = [];
+  await page.route(`${E2E_ORIGIN}/tv/6066-verano-azul*`, (route) => {
+    const url = new URL(route.request().url());
+    destinations.push(url.search);
+    return route.fulfill({
+      contentType: 'text/html',
+      body: url.searchParams.has('den-retry')
+        ? '<p id="swapped">Verano azul</p>'
+        : '<p id="stale">the old shell Cloudflare kept</p>',
+    });
+  });
   await page.goto(`${E2E_ORIGIN}/test/router.html`);
   const active = page.locator('[data-route-page][data-active="true"]');
   await active.getByText('Details', { exact: true }).waitFor();
@@ -78,4 +89,8 @@ test('a newer shell puts a Continue Watching destination on the new release', as
   await expect(page.locator('#swapped')).toBeVisible();
   expect(new URL(page.url()).pathname).toBe('/tv/6066-verano-azul');
   expect(await page.evaluate(() => window.denSameDocument)).toBeUndefined();
+  // One load, past the kept shell.
+  await page.waitForTimeout(300);
+  expect(destinations).toHaveLength(1);
+  expect(destinations[0]).toMatch(/^\?den-retry=[0-9a-z]+$/);
 });

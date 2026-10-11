@@ -176,6 +176,37 @@ it('rejects malformed input and replaces a malformed dispatcher batch', async ()
   await host.close();
 });
 
+it('refuses an invalid content request to its requester alone', async () => {
+  const scope = new FakeScope();
+  const contentDispatch = vi.fn(async () => []);
+  const host = new LibraryServiceWorkerHost(
+    scope,
+    { dispatch: vi.fn(), listen: () => () => {}, close() {} },
+    { dispatch: contentDispatch, listen: () => () => {}, close() {} },
+  );
+
+  scope.emit({
+    type: 'content-query',
+    protocol: CONTENT_SERVICE_PROTOCOL,
+    requestId: 'atlas-card',
+    request: {
+      kind: 'titles',
+      titles: [{ type: 'movie', id: 10201, title: 'Atlas card fields do not belong on the wire' }],
+    },
+  });
+  await expect.poll(() => scope.posted.length).toBe(1);
+
+  expect(scope.posted[0]).toMatchObject([
+    {
+      type: 'content-error',
+      requestId: 'atlas-card',
+      error: { code: 'invalid-request', retryable: false },
+    },
+  ]);
+  expect(contentDispatch).not.toHaveBeenCalled();
+  await host.close();
+});
+
 it('stops accepting and publishing work before closing the dispatcher', async () => {
   const scope = new FakeScope();
   let release!: () => void;

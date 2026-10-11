@@ -683,7 +683,11 @@ async function reopenRetainedContinueCard(browser) {
   await expect(active().getByRole('heading', { name: 'Series 6066' })).toBeVisible();
 
   await active().evaluate((element) => (element.style.minHeight = '5000px'));
-  await page.evaluate(() => scrollTo(0, 3000));
+  // Scrolled by the viewer's own input. The tap scrolled Home to bring the card into view just before it opened
+  // the title, so the router holds the title where it put it (`holdScroll`) until an input or three still frames;
+  // a bare `scrollTo` 30-45 ms after arrival was put back to 0 by that hold in 4 of 30 runs.
+  await page.mouse.move(195, 422);
+  await page.mouse.wheel(0, 3000);
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(3000);
   await page.getByRole('link', { name: 'Den home' }).tap();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');

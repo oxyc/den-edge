@@ -54,7 +54,7 @@ const ready = (requestId: string): LibraryServiceServerMessage => ({
 const transportFor = (worker: FakeWorker) =>
   new WorkerLibraryServiceTransport(worker as unknown as Worker);
 
-it('validates requests and delivers a decoded batch in order', () => {
+it('posts requests and delivers a batch in order', () => {
   const worker = new FakeWorker();
   const transport = transportFor(worker);
   const received: unknown[] = [];
@@ -64,11 +64,6 @@ it('validates requests and delivers a decoded batch in order', () => {
   expect(worker.posted).toEqual([request]);
   worker.emit('message', { data: [ready('first'), ready('second')] } as MessageEvent<unknown>);
   expect(received).toEqual([ready('first'), ready('second')]);
-
-  expect(() =>
-    transport.send({ ...request, protocol: 99 } as unknown as LibraryServiceClientMessage),
-  ).toThrow('protocol 99 is not supported');
-  expect(worker.posted).toHaveLength(1);
   transport.close();
 });
 
@@ -113,35 +108,38 @@ it('multiplexes library and content replies onto separate channels', () => {
   transport.close();
 });
 
-it('rejects a malformed batch without delivering a partial batch', () => {
+it('rejects only the request the Worker host refused', async () => {
   const worker = new FakeWorker();
-  const transport = transportFor(worker);
-  const received: LibraryServiceServerMessage[] = [];
-  transport.listen((message) => received.push(message as LibraryServiceServerMessage));
+  const client = new LibraryServiceClient(transportFor(worker), 'tab-1');
+  const statuses = vi.fn();
+  client.onStatus(statuses);
+  const opening = client.open({
+    libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    mode: 'online',
+  });
+  const hello = worker.posted[0] as LibraryServiceClientMessage;
+  const refusal = {
+    code: 'protocol-mismatch' as const,
+    message: 'library service protocol 4 is not supported',
+    retryable: false,
+    expectedProtocol: LIBRARY_SERVICE_PROTOCOL,
+  };
 
   worker.emit('message', {
-    data: [ready('valid'), { type: 'invented', protocol: LIBRARY_SERVICE_PROTOCOL }],
+    data: [
+      {
+        type: 'error',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: hello.requestId,
+        error: refusal,
+      },
+    ],
   } as MessageEvent<unknown>);
 
-  expect(received).toMatchObject([
-    { type: 'error', error: { code: 'invalid-request', retryable: false } },
-  ]);
-  expect(worker.terminate).toHaveBeenCalledOnce();
-  expect([...worker.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
-});
-
-it('rejects an empty batch instead of leaving a request pending', () => {
-  const worker = new FakeWorker();
-  const transport = transportFor(worker);
-  const received: LibraryServiceServerMessage[] = [];
-  transport.listen((message) => received.push(message as LibraryServiceServerMessage));
-
-  worker.emit('message', { data: [] } as unknown as MessageEvent<unknown>);
-
-  expect(received).toMatchObject([
-    { type: 'error', error: { code: 'invalid-request', retryable: false } },
-  ]);
-  expect(worker.terminate).toHaveBeenCalledOnce();
+  await expect(opening).rejects.toMatchObject({ failure: refusal });
+  expect(statuses).not.toHaveBeenCalled();
+  expect(worker.terminate).not.toHaveBeenCalled();
+  client.close();
 });
 
 it('rejects pending client work on a terminal worker failure and closes cleanly', async () => {

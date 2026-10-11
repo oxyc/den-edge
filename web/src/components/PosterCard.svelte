@@ -5,8 +5,6 @@
      faded, as on the TV. -->
 <script module lang="ts">
   const LANDSCAPE_STILL_SIZES = 'clamp(203px, 55.1vw, 275.5px)';
-  /** Availability can be useful just before a card is seen, but need not follow the much wider art lookahead. */
-  export const AVAILABILITY_AHEAD = 250;
   const landscapeStillSrcset = (path: string) =>
     [
       `https://image.tmdb.org/t/p/w300${path} 300w`,
@@ -19,13 +17,14 @@
   import { availability } from '../lib/availability.svelte';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
-  import { ROW_NEAR } from './PosterRow.svelte';
+  import { AVAILABILITY_AHEAD, ROW_NEAR } from './PosterRow.svelte';
   import { notePressed } from '../lib/detail';
   import { contentServiceContext } from '../lib/contentContext';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
   import ActionMenu from './ActionMenu.svelte';
+  import DetailIcon from './DetailIcon.svelte';
   import { titleActionsContext, titleMenuItems } from '../lib/titleActions';
   import { toastContext } from '../lib/toast';
 
@@ -45,6 +44,7 @@
     downloadBadge,
     checkAvailability = true,
     onvisibilitychange,
+    onscreen,
   }: {
     title: Title;
     caption?: string;
@@ -79,6 +79,11 @@
     checkAvailability?: boolean;
     /** Lets work tied to this card reuse its shared page/row/card visibility instead of adding an observer. */
     onvisibilitychange?: (visible: boolean) => void;
+    /**
+     * Whether a windowing row (`WindowedPosterRow`, `BrowseRow`) has this card in its horizontal viewport. Given, the
+     * card takes its visibility from that and its row's (`ROW_NEAR`) instead of observing itself.
+     */
+    onscreen?: boolean;
   } = $props();
 
   const titleActions = titleActionsContext();
@@ -109,20 +114,21 @@
   );
   const portraitFallback = $derived(landscape && !!poster && art === poster);
   /** Far or retained-hidden cards keep their geometry but draw no poster; one shared observer activates nearby art. */
-  const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
+  const row = getContext<{ near: boolean; ahead: boolean } | undefined>(ROW_NEAR);
   const page = pageVisibility();
+  const windowed = $derived(onscreen !== undefined);
   let cardElement = $state<HTMLElement>();
   let imageNear = $state(false);
   let availabilityNear = $state(false);
   $effect(() => {
-    if (!cardElement) return;
+    if (!cardElement || windowed) return;
     // A retained hidden route still supplies the frozen frame for swipe history. Release its observer and stop new
     // image work, but preserve prior proximity so reactivation can restore loaded art without another observer turn.
     if (!page.active || row?.near === false) return;
     return observeNearViewport(cardElement, (near) => (imageNear = near), '1250px');
   });
   $effect(() => {
-    if (!cardElement || !checkAvailability) return;
+    if (!cardElement || !checkAvailability || windowed) return;
     if (!page.active || row?.near === false) {
       availabilityNear = false;
       return;
@@ -134,7 +140,7 @@
     );
   });
   // While live art is deferred, `pageSnapshot` can materialize it only in an inert swipe copy.
-  const showImage = $derived(page.active && (row?.near ?? true) && imageNear);
+  const showImage = $derived(page.active && (row?.near ?? true) && (onscreen ?? imageNear));
   $effect(() => onvisibilitychange?.(showImage));
   const faded = $derived(checkAvailability && availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
@@ -143,7 +149,8 @@
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
   const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
   $effect(() => {
-    if (checkAvailability && availabilityNear) availability.want(title);
+    if (checkAvailability && (windowed ? onscreen && row?.ahead : availabilityNear))
+      availability.want(title);
   });
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
@@ -352,8 +359,11 @@
   {/if}
 {/snippet}
 
+<!-- Drawn, not typed. Measured in fresh Chrome processes on macOS at 4x CPU throttling: the first U+22EF laid out
+     cost ~20ms (★ · … • and this SVG: ~1ms), and the poster-menu fixture's first layout fell from ~46ms to
+     ~22ms with this icon. Inferred, not observed: Chrome's font fallback, since the glyph is outside the UI font. -->
 {#snippet ellipsis()}
-  <span aria-hidden="true">⋯</span>
+  <DetailIcon name="more" />
 {/snippet}
 
 {#if hasMenu}
@@ -597,8 +607,6 @@
     border: 1px solid rgb(255 255 255 / 0.25);
     border-radius: 999px;
     background: rgb(0 0 0 / 0.72);
-    font-size: 16px;
-    line-height: 1;
     opacity: 0;
     transition: opacity 120ms;
   }
@@ -631,7 +639,6 @@
     :global(.holder .action) {
       width: 28px;
       height: 28px;
-      font-size: 14px;
       opacity: 0.8;
     }
   }

@@ -232,12 +232,13 @@
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
   /**
-   * PersonCard and BrowseRow are the deep trees at the foot of a detail page. Keep their final geometry in the
-   * first detail flush, but do not put all of their live DOM in it: the phone trace's single ~40 ms ParseHTML task
-   * was mostly these two sections. A scroll promotes them at once; otherwise they begin after paint, in idle time.
+   * PersonCard and BrowseRow are the deep trees at the foot of a detail page. Their reserved geometry mounts a task
+   * after the top of the page (`tailReady`), and their live DOM later still: the phone trace's single ~40 ms ParseHTML
+   * task was mostly these two sections. A scroll promotes them at once; otherwise they begin after paint, in idle time.
    */
   const CAST_DOM_CHUNK = 4;
   let castMounted = $state(0);
+  let tailReady = $state(false);
   let tailStarted = $state(false);
   let tailRoot = $state<HTMLDivElement>();
   function castEnd(node: HTMLElement) {
@@ -297,6 +298,7 @@
     displayedSeason = null;
     castShown = CAST_PAGE;
     castMounted = 0;
+    tailReady = false;
     tailStarted = false;
     void content
       .query({ kind: 'title.detail', title: current, region: country }, controller.signal)
@@ -358,14 +360,15 @@
     titleFacts = undefined;
   });
 
-  // Optional providers are one independent Worker question. They may finish after base detail and seasons, and a
-  // retained hidden route does no provider work until it is visible again. Once answered, the answer stays: asking
-  // again on every return handed Related titles new studios and facts, which rebuilt all its rows and so replaced
-  // the rows the viewer had scrolled along.
+  // Optional providers are one independent Worker question, asked beside base detail rather than after it: none of
+  // them reads the detail answer, and waiting for it made a first open serial — in a 4x-CPU e2e run with 150–220 ms
+  // providers, IMDb's id was asked only once the detail had rendered (~300 ms) and its rating appeared ~430 ms after
+  // the title did. A retained hidden route does no provider work until it is visible again. Once answered, the answer
+  // stays: asking again on every return handed Related titles new studios and facts, which rebuilt all its rows and
+  // so replaced the rows the viewer had scrolled along.
   $effect(() => {
     const request = extrasRequest;
-    const [visible, loaded] = [active, detail];
-    if (!visible || !loaded || extrasAnswered === request) return;
+    if (!active || extrasAnswered === request) return;
     const title = untrack(() => ({ type: ref.type, id: ref.id }));
     const categories = untrack(() => [...warningCategories]);
     const controller = new AbortController();
@@ -460,6 +463,22 @@
   const castTarget = $derived(Math.min(castShown, cast.length));
   const castRemaining = $derived(Math.max(0, castTarget - castMounted));
   const relatedMayMount = $derived(tailStarted && castMounted >= castTarget);
+
+  // The cast row and Related's reserves mount a task after the hero, as Home's lower shelves follow its top one.
+  // Nothing on the page is laid out after them, so their arrival moves nothing. Measured on test/detail.html at 390px
+  // and 4x CPU (production build, 15 runs), leaving them out of the detail flush took its task from a median 80 ms to
+  // 65 ms.
+  $effect(() => {
+    const current = detail;
+    if (!current || tailReady) return;
+    let live = true;
+    void yieldTask().then(() => {
+      if (live && detail === current) tailReady = true;
+    });
+    return () => {
+      live = false;
+    };
+  });
 
   // Register only while this retained page is in front. Two animation frames put the idle request after its first
   // paint; a real scroll or the reserved tail nearing the viewport bypasses that wait so content is ready when the
@@ -866,7 +885,7 @@
       </section>
     {/if}
     <div class="detail-tail" bind:this={tailRoot}>
-      {#if cast.length}
+      {#if tailReady && cast.length}
         <div aria-busy={castRemaining ? 'true' : undefined}>
           <PosterRow heading="Cast & Crew">
             {#each cast.slice(0, Math.min(castMounted, castTarget)) as c (c.id)}<PersonCard
@@ -886,16 +905,18 @@
           </PosterRow>
         </div>
       {/if}
-      <RelatedTitles
-        detail={d}
-        {content}
-        {atlas}
-        studios={iconicStudios}
-        facts={titleFacts}
-        {active}
-        mountRows={relatedMayMount}
-        {shown}
-      />
+      {#if tailReady}
+        <RelatedTitles
+          detail={d}
+          {content}
+          {atlas}
+          studios={iconicStudios}
+          facts={titleFacts}
+          {active}
+          mountRows={relatedMayMount}
+          {shown}
+        />
+      {/if}
     </div>
   {/if}
 {/if}

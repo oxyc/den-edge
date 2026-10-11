@@ -2,7 +2,12 @@
      stay exact, while only cards around the horizontal viewport own their menu, image and reactive trees. -->
 <script lang="ts" generics="T">
   import { onDestroy, tick, type Snippet } from 'svelte';
-  import { cardMaterializationOrder, cardWindow, posterCardWidth } from '../lib/cardWindow';
+  import {
+    cardMaterializationOrder,
+    cardsOnScreen,
+    cardWindow,
+    posterCardWidth,
+  } from '../lib/cardWindow';
   import { keyboardInput } from '../lib/inputModality';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
@@ -28,7 +33,8 @@
     landscape?: boolean;
     /** The viewer moved into or along this shelf, so its next dormant title tranche is useful. */
     onintent?: () => void;
-    children: Snippet<[T]>;
+    /** An item's card, and whether it is in the row's horizontal viewport (`PosterCard`'s `onscreen`). */
+    children: Snippet<[T, boolean]>;
   } = $props();
 
   let wrapper: HTMLElement;
@@ -38,6 +44,8 @@
   // False from a retained page's reactivation until the first observer delivery after it. See `.windowed`.
   let placed = $state(true);
   let materialized = $state<number[]>([]);
+  /** The cards on screen (`cardsOnScreen`), which `PosterCard` would otherwise each observe for themselves. */
+  let onscreen = $state.raw({ start: 0, end: 0 });
   let focusedKey = $state<string | null>(null);
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
   // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
@@ -129,6 +137,7 @@
     let frame: number | undefined;
     let materializeFrame: number | undefined;
     let viewportWidth = 0;
+    let contentWidth = 0;
     let materializeOrder: number[] = [];
 
     // Personal shelves can publish a desktop window of eight cards together. Keep the exact light slots in the
@@ -160,6 +169,14 @@
         14,
         0,
       );
+      const shown = cardsOnScreen(
+        items.length,
+        cachedScrollLeft,
+        contentWidth,
+        posterCardWidth(viewportWidth) * (landscape ? 1.45 : 1),
+        14,
+      );
+      if (shown.start !== onscreen.start || shown.end !== onscreen.end) onscreen = shown;
       materialized = materialized.filter((index) => index >= window.start && index < window.end);
       materializeOrder = cardMaterializationOrder(window, viewport);
       if (materializeFrame !== undefined) cancelAnimationFrame(materializeFrame);
@@ -208,6 +225,7 @@
       const width = entry.borderBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       if (width === viewportWidth) return;
       viewportWidth = width;
+      contentWidth = entry.contentBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       schedule();
     });
     resize.observe(scroller, { box: 'border-box' });
@@ -283,7 +301,7 @@
         onfocusout={releaseFocus}
       >
         {#if mounted(item, index)}
-          {@render children(item)}
+          {@render children(item, index >= onscreen.start && index < onscreen.end)}
         {:else}
           <a
             class="proxy"

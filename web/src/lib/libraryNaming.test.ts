@@ -1,6 +1,5 @@
 import { expect, it, vi } from 'vitest';
 import { LIBRARY_METADATA_BATCH, nameLibraryTitles, promoteLibraryTitle } from './libraryNaming';
-import type { Shape, Title } from './library';
 import type { LibraryModel } from './libraryModel.svelte';
 import { LibrarySession } from './librarySession.svelte';
 import type { LibraryMetadataShape, LibraryMetadataTitle } from './libraryServiceProtocol';
@@ -16,50 +15,55 @@ type MetadataLookup = (refs: readonly { type: 'movie' | 'tv'; id: number }[]) =>
 
 const session = (
   libraryMetadata: MetadataLookup = vi.fn(async () => ({ titles: [], shapes: [], retryable: [] })),
-) => ({
-  displays: [] as Title[],
-  shapes: new Map<string, Shape>(),
-  libraryMetadata,
-});
+) =>
+  new LibrarySession({ libraryMetadata, close() {} } as unknown as LibraryModel, false, {
+    query: vi.fn(),
+    onStatus: vi.fn(() => () => {}),
+  });
+const named = (state: LibrarySession) => [...state.displayTitles().values()];
 
 it('asks the service once for deduplicated missing metadata and skips what the page already has', async () => {
   const libraryMetadata = vi.fn(async () => ({ titles: [title], shapes: [], retryable: [] }));
   const state = session(libraryMetadata);
   await nameLibraryTitles(state, [movie, movie]);
   expect(libraryMetadata).toHaveBeenCalledWith([movie]);
-  expect(state.displays).toEqual([title]);
+  expect(named(state)).toEqual([title]);
 
   await promoteLibraryTitle(state, movie);
   expect(libraryMetadata).toHaveBeenCalledTimes(1);
 });
 
+it('does not ask again for a title the provider confirmed does not exist', async () => {
+  const libraryMetadata = vi.fn(async () => ({ titles: [], shapes: [], retryable: [] }));
+  const state = session(libraryMetadata);
+  await nameLibraryTitles(state, [movie]);
+  expect(state.displayMissing(movie)).toBe(true);
+
+  await nameLibraryTitles(state, [movie]);
+  expect(libraryMetadata).toHaveBeenCalledOnce();
+});
+
 it('publishes the Worker title and TV shape together in one page assignment', async () => {
   const series = { type: 'tv' as const, id: 7 };
-  const state = {
-    ...session(
-      vi.fn(async () => ({
-        titles: [{ ...series, title: 'Seven' }],
-        shapes: [
-          {
-            title: series,
-            seasons: [{ season: 1, episodes: 8 }],
-            lastAired: { season: 1, episode: 8 },
-          },
-        ],
-        retryable: [],
-      })),
-    ),
-    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
-      state.displays = [...state.displays, ...titles];
-      state.shapes = new Map([...state.shapes, ...shapes]);
-    },
-  };
+  const state = session(
+    vi.fn(async () => ({
+      titles: [{ ...series, title: 'Seven' }],
+      shapes: [
+        {
+          title: series,
+          seasons: [{ season: 1, episodes: 8 }],
+          lastAired: { season: 1, episode: 8 },
+        },
+      ],
+      retryable: [],
+    })),
+  );
   const publish = vi.spyOn(state, 'publishLibraryMetadata');
 
   await nameLibraryTitles(state, [series]);
 
   expect(publish).toHaveBeenCalledTimes(1);
-  expect(state.displays).toEqual([{ ...series, title: 'Seven' }]);
+  expect(named(state)).toEqual([{ ...series, title: 'Seven' }]);
   expect(state.shapes.get('tv:7')).toEqual({
     counts: new Map([[1, 8]]),
     lastAired: { season: 1, episode: 8 },
@@ -77,13 +81,7 @@ it('publishes each small service batch progressively across a tail larger than t
     shapes: [],
     retryable: [],
   }));
-  const state = {
-    ...session(libraryMetadata),
-    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
-      state.displays = [...state.displays, ...titles];
-      state.shapes = new Map([...state.shapes, ...shapes]);
-    },
-  };
+  const state = session(libraryMetadata);
   const publish = vi.spyOn(state, 'publishLibraryMetadata');
 
   await nameLibraryTitles(state, refs);
@@ -93,7 +91,7 @@ it('publishes each small service batch progressively across a tail larger than t
     1,
   ]);
   expect(publish).toHaveBeenCalledTimes(9);
-  expect(state.displays).toHaveLength(count);
+  expect(named(state)).toHaveLength(count);
 });
 
 it('asks each title once when a pass restarts over the same refs while the first is in flight', async () => {
@@ -114,13 +112,7 @@ it('asks each title once when a pass restarts over the same refs while the first
         ),
       ),
   );
-  const state = {
-    ...session(libraryMetadata),
-    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
-      state.displays = [...state.displays, ...titles];
-      state.shapes = new Map([...state.shapes, ...shapes]);
-    },
-  };
+  const state = session(libraryMetadata);
 
   const first = nameLibraryTitles(state, refs);
   // Home's effect restarts as the first batch is still out, with the same shelf refs.
@@ -139,7 +131,7 @@ it('asks each title once when a pass restarts over the same refs while the first
   const asked = libraryMetadata.mock.calls.flatMap(([batch]) => batch.map((ref) => ref.id));
   expect(asked).toHaveLength(refs.length);
   expect(new Set(asked).size).toBe(refs.length);
-  expect(state.displays).toHaveLength(refs.length);
+  expect(named(state)).toHaveLength(refs.length);
 });
 
 it('retries a refused title while its pass is still waiting on a later, slow batch', async () => {
@@ -169,7 +161,7 @@ it('retries a refused title while its pass is still waiting on a later, slow bat
     void nameLibraryTitles(state, refs);
     await vi.advanceTimersByTimeAsync(1_000);
 
-    await vi.waitFor(() => expect(state.displays.map(({ id }) => id)).toContain(refused.id));
+    await vi.waitFor(() => expect(named(state).map(({ id }) => id)).toContain(refused.id));
   } finally {
     vi.useRealTimers();
   }
@@ -185,9 +177,9 @@ it('leaves a failed Worker question retryable', async () => {
     const state = session(libraryMetadata);
 
     await expect(nameLibraryTitles(state, [movie])).resolves.toBeUndefined();
-    expect(state.displays).toEqual([]);
+    expect(named(state)).toEqual([]);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(state.displays).toEqual([title]));
+    await vi.waitFor(() => expect(named(state)).toEqual([title]));
     expect(libraryMetadata).toHaveBeenCalledTimes(2);
   } finally {
     vi.useRealTimers();
@@ -208,12 +200,12 @@ it('retries only transient refs while publishing successful neighbours immediate
       });
     const state = session(libraryMetadata);
     await nameLibraryTitles(state, [movie, later]);
-    expect(state.displays).toEqual([title]);
+    expect(named(state)).toEqual([title]);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(state.displays).toHaveLength(2));
+    await vi.waitFor(() => expect(named(state)).toHaveLength(2));
 
     expect(libraryMetadata.mock.calls.map(([refs]) => refs)).toEqual([[movie, later], [later]]);
-    expect(state.displays).toEqual([title, { ...later, title: 'Later' }]);
+    expect(named(state)).toEqual([title, { ...later, title: 'Later' }]);
   } finally {
     vi.useRealTimers();
   }
@@ -234,7 +226,7 @@ it('coalesces overlapping background retries for the same session and title', as
     await vi.advanceTimersByTimeAsync(1_000);
     expect(libraryMetadata).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(state.displays).toEqual([title]));
+    await vi.waitFor(() => expect(named(state)).toEqual([title]));
 
     expect(libraryMetadata).toHaveBeenCalledTimes(3);
     expect(libraryMetadata.mock.calls[2]?.[0]).toEqual([movie]);

@@ -21,14 +21,14 @@ use std::task::{ready, Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 
-// The only inline script in the app shell: its parser-time personalized lead preload and static hero insertion. A
-// hash keeps the shared shell cacheable and grants no other inline script permission. The test below binds this
-// value to web/index.html's bytes.
-const EARLY_HERO_SCRIPT: &str = "'sha256-P6cePhQlg6yr8H83d+82ZJT+sXtcuBC1UKjtm577mkA='";
+// The only inline script in the app shell: its one retry when the shell's own startup files are missing, and its
+// parser-time personalized lead preload and static hero insertion. A hash keeps the shared shell cacheable and
+// grants no other inline script permission. The test below binds this value to web/index.html's bytes.
+const EARLY_HERO_SCRIPT: &str = "'sha256-FTcr5ENLVdWiUi52L/q38JoBhr9+EXfxXWIcFsjUyBQ='";
 #[cfg(test)]
 const EARLY_HERO_SHA256: [u8; 32] = [
-    63, 167, 30, 62, 20, 37, 131, 172, 171, 240, 127, 55, 119, 239, 54, 100, 148, 254, 177, 123, 92, 184, 16,
-    181, 80, 168, 237, 155, 158, 251, 154, 64,
+    21, 55, 43, 228, 67, 75, 85, 213, 162, 82, 46, 118, 47, 250, 183, 240, 154, 1, 134, 191, 126, 17, 119,
+    241, 93, 98, 28, 22, 200, 212, 200, 20,
 ];
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
@@ -1191,6 +1191,10 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("/recommend/movies.json?day="));
+        // index.html's retry past Cloudflare's cache adds `den-retry` to the address: still the shell, with its preload.
+        let retry = h.send("GET", "/movies?den-retry=abc", None, &[]).await;
+        assert!(retry.headers()[header::LINK].to_str().unwrap().contains("/recommend/movies.json?day="));
+        assert!(body_text(retry).await.contains("<title>Den</title>"));
         // A chunk a later release may yet carry is never kept missing.
         let missing = h.send("GET", "/assets/missing.js", None, &[]).await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
