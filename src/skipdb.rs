@@ -18,6 +18,11 @@
 //! and caching without the runtime would serve one release's alignment to another. Most releases of a title
 //! share a runtime to the second, so this fragments into a handful of entries per title rather than one per
 //! viewer.
+//!
+//! For an episode SkipDB has nothing for (or cannot be asked about just now), den-remux's own detection is
+//! asked (`/remux/segments/…`, through the `/remux` relay) and answered in SkipDB's shape with `match: "detected"`.
+//! An episode remux does not know is asked of it to scan (`SEGMENTS_KEY`), and the miss given meanwhile is kept
+//! for seconds, not the hour a settled miss is.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
 use crate::metrics::{CacheAccess, CacheStore, Provider, ProviderUpstream};
@@ -77,6 +82,30 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     };
 
     let asked = req.headers();
+    match from_skipdb(state, &asked_for, asked, &ip, rid).await {
+        Outcome::Done(resp) => resp,
+        // Episodes only: a title's own segments are not something remux detects.
+        Outcome::Miss(miss) if asked_for.season.is_some() => {
+            detected(state, &asked_for, asked, rid, miss).await
+        }
+        Outcome::Miss(miss) => miss,
+    }
+}
+
+/// What SkipDB (or what is kept of it) had to say. A `Miss` carries the answer to give when nothing else turns
+/// up: SkipDB has no segment, or could not be asked right now.
+enum Outcome {
+    Done(Response),
+    Miss(Response),
+}
+
+async fn from_skipdb(
+    state: &Arc<AppState>,
+    asked_for: &Ask,
+    asked: &HeaderMap,
+    ip: &str,
+    rid: &str,
+) -> Outcome {
     let file = state.skipdb_cache_dir.as_ref().map(|dir| dir.join(asked_for.file_name()));
     // Segments past their freshness but inside `RETENTION`: asked for again, and served when SkipDB cannot say.
     let mut stale = None;
@@ -94,17 +123,17 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         let absent = body.matches(ABSENT);
         if absent && age < ABSENT_TTL {
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Negative);
-            return crate::warnings::absent();
+            return Outcome::Miss(crate::warnings::absent());
         }
         if !absent && age < FRESH {
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Fresh);
-            return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
+            return Outcome::Done(answer_file(state, body, FRESH.saturating_sub(age), "hit", asked));
         }
         if !absent && age < RETENTION {
             stale = Some(body);
         }
     }
-    match lookup(state, &asked_for, &ip, rid).await {
+    match lookup(state, asked_for, ip, rid).await {
         Ok(Some(body)) => {
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
             let target = keep();
@@ -112,31 +141,222 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             if let Some(file) = target {
                 let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
-            answer(body, FRESH, "miss", SystemTime::now(), asked)
+            Outcome::Done(answer(body, FRESH, "miss", SystemTime::now(), asked))
         }
         Ok(None) => {
             if let (Some(file), Some(body)) = (&file, stale) {
                 if !gone(file).await {
                     state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
-                    return answer_file(state, body, STALE_MAX_AGE, "stale", asked);
+                    return Outcome::Done(answer_file(state, body, STALE_MAX_AGE, "stale", asked));
                 }
             }
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
             store(state, keep().map(|file| file.as_path()), &Bytes::from_static(ABSENT)).await;
-            crate::warnings::absent()
+            Outcome::Miss(crate::warnings::absent())
         }
         // SkipDB down, slow or refusing: the segments kept are still the best answer there is.
         Err(refused) => match stale {
             Some(body) => {
                 state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
-                answer_file(state, body, STALE_MAX_AGE, "stale", asked)
+                Outcome::Done(answer_file(state, body, STALE_MAX_AGE, "stale", asked))
             }
             None => {
                 state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
-                *refused
+                // Only the wait for SkipDB (this box's own limit, or SkipDB asking for one) is a miss remux may
+                // fill; a SkipDB that is down or broken is passed on as it is.
+                if refused.status() == StatusCode::SERVICE_UNAVAILABLE {
+                    Outcome::Miss(*refused)
+                } else {
+                    Outcome::Done(*refused)
+                }
             }
         },
     }
+}
+
+/// How long a browser or the edge keeps "no segments yet" for an episode remux may be about to detect: short, so
+/// the TV asking again a minute later sees the result. Nothing in-process holds this answer: remux is asked every time.
+const MISS_MAX_AGE: Duration = Duration::from_secs(30);
+/// How long a detected answer is kept by a browser or the edge. Remux's times for a release do not change.
+const DETECTED_FRESH: Duration = Duration::from_secs(3600);
+/// Remux's answer is a few hundred bytes.
+const REMUX_ANSWER_BYTES: usize = 16 * 1024;
+const REMUX_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an episode that was asked of remux to scan is left alone, so a public route cannot make remux's scan
+/// queue (or its daily cap) its own.
+const SCAN_EVERY: Duration = Duration::from_secs(600);
+/// Episodes remembered as lately asked for; past it no further scan is asked until some expire.
+const SCANS_TRACKED: usize = 4096;
+
+/// What den-remux knows of an episode.
+enum Remux {
+    Found(serde_json::Value),
+    Pending,
+    Unknown,
+    /// Not configured, unreachable, or an answer that is none of the above.
+    Unavailable,
+}
+
+/// The answer for an episode SkipDB has nothing for: remux's detected segments, or `miss` (kept short while a scan
+/// may be under way).
+async fn detected(
+    state: &Arc<AppState>,
+    ask: &Ask,
+    asked: &HeaderMap,
+    rid: &str,
+    miss: Response,
+) -> Response {
+    let (Some(season), Some(episode)) = (ask.season, ask.episode) else { return miss };
+    let Some(url) =
+        crate::relay::target(&state.relays, &format!("/remux/segments/{}/{season}/{episode}", ask.imdb))
+    else {
+        return miss;
+    };
+    let tag = match remux_segments(state, &url, rid).await {
+        Remux::Found(found) => {
+            if let Some(body) = map_detected(&found, ask.duration) {
+                let mut resp = answer(
+                    Bytes::from(body.to_string()),
+                    DETECTED_FRESH,
+                    "detected",
+                    SystemTime::now(),
+                    asked,
+                );
+                resp.extensions_mut().insert(crate::handler::SrcTag("detected"));
+                return resp;
+            }
+            // Scanned, and nothing found (or nothing that fits this runtime): no scan will change that.
+            "none"
+        }
+        Remux::Pending => "pending",
+        Remux::Unknown => {
+            ask_scan(state, ask, season, episode, rid);
+            "unknown"
+        }
+        Remux::Unavailable => "unavailable",
+    };
+    let mut miss = miss;
+    if miss.status() == StatusCode::NOT_FOUND {
+        if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={}", MISS_MAX_AGE.as_secs())) {
+            miss.headers_mut().insert(header::CACHE_CONTROL, value);
+        }
+    }
+    miss.extensions_mut().insert(crate::handler::SrcTag(tag));
+    miss
+}
+
+async fn remux_segments(state: &AppState, url: &str, rid: &str) -> Remux {
+    let Ok(out) = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri(url)
+        .header(header::ACCEPT, "application/json")
+        .header("x-request-id", rid)
+        .body(Full::new(Bytes::new()))
+    else {
+        return Remux::Unavailable;
+    };
+    match crate::tmdb::exchange(&state.relay_client, out, REMUX_ANSWER_BYTES, REMUX_TIMEOUT, "remux segments")
+        .await
+    {
+        Ok((StatusCode::OK, _, bytes)) => {
+            serde_json::from_slice(&bytes).map_or(Remux::Unavailable, Remux::Found)
+        }
+        Ok((StatusCode::ACCEPTED, _, _)) => Remux::Pending,
+        Ok((StatusCode::NOT_FOUND, _, _)) => Remux::Unknown,
+        _ => Remux::Unavailable,
+    }
+}
+
+/// Ask remux to scan an episode it has not heard of, without making the caller wait for it. Not at all without a
+/// key, and an episode at most once per `SCAN_EVERY` from here.
+fn ask_scan(state: &Arc<AppState>, ask: &Ask, season: u32, episode: u32, rid: &str) {
+    let Some(key) = state.segments_key.clone() else { return };
+    let Some(url) = crate::relay::target(&state.relays, "/remux/segments/scan") else { return };
+    let name = format!("{}-s{season}e{episode}", ask.imdb);
+    if !may_scan(state, &name) {
+        return;
+    }
+    let body = serde_json::json!({ "imdb": ask.imdb, "season": season, "episode": episode }).to_string();
+    let Ok(out) = axum::http::Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-den-segments-key", key)
+        .header("x-request-id", rid)
+        .body(Full::new(Bytes::from(body)))
+    else {
+        return;
+    };
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        match crate::tmdb::exchange(&state.relay_client, out, REMUX_ANSWER_BYTES, REMUX_TIMEOUT, "remux scan")
+            .await
+        {
+            Ok((status, _, _)) if status.is_success() => {}
+            Ok((status, _, _)) => {
+                // Busy is not a scan done: let the next ask try again instead of waiting out the ten minutes.
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    crate::lock(&state.segments_scans).remove(&name);
+                }
+                eprintln!("skipdb: remux scan request: {status}");
+            }
+            Err(_) => {
+                crate::lock(&state.segments_scans).remove(&name);
+            }
+        }
+    });
+}
+
+/// Whether `name` may be asked of remux now, noting it if so.
+fn may_scan(state: &AppState, name: &str) -> bool {
+    let now = state.now();
+    let every = SCAN_EVERY.as_millis() as u64;
+    let mut asked = crate::lock(&state.segments_scans);
+    asked.retain(|_, at| now.saturating_sub(*at) < every);
+    if asked.contains_key(name) || asked.len() >= SCANS_TRACKED {
+        return false;
+    }
+    asked.insert(name.to_owned(), now);
+    true
+}
+
+/// How near the runtimes of two releases must be for remux's times to be used as they are.
+const SAME_RELEASE_SECS: f64 = 2.0;
+
+/// Remux's detected segments in SkipDB's wire shape, or `None` where none is left to give. Times are seconds.
+/// A runtime within `SAME_RELEASE_SECS` of the scanned one takes the times as they are; otherwise the intro stays
+/// anchored to the start, the credits are shifted by the difference in runtime and both are offered with less
+/// confidence than the client may auto-skip on. A shifted segment outside the release is dropped.
+fn map_detected(found: &serde_json::Value, duration: Option<u64>) -> Option<serde_json::Value> {
+    let scanned = found.get("duration").and_then(|d| d.as_f64()).filter(|d| *d > 0.0);
+    let asked = duration.map(|d| d as f64);
+    let same = matches!((scanned, asked), (Some(s), Some(a)) if (a - s).abs() <= SAME_RELEASE_SECS);
+    let confidence = if same { 0.9 } else { 0.6 };
+    let shift = match (scanned, asked) {
+        (Some(s), Some(a)) if !same => a - s,
+        _ => 0.0,
+    };
+    let segment = |name: &str, shift: f64| {
+        let part = found.get(name)?;
+        let (start, end) = (part.get("start")?.as_f64()? + shift, part.get("end")?.as_f64()? + shift);
+        // Times taken as they are were detected in this runtime; only a shifted one can land outside the file.
+        if start < 0.0 || end <= start || (shift != 0.0 && asked.is_some_and(|a| end > a)) {
+            return None;
+        }
+        Some(serde_json::json!({
+            "start_ms": (start * 1000.0).round() as u64,
+            "end_ms": (end * 1000.0).round() as u64,
+            "match": "detected",
+            "confidence": confidence,
+        }))
+    };
+    let (intro, outro) = (segment("intro", 0.0), segment("credits", shift));
+    if intro.is_none() && outro.is_none() {
+        return None;
+    }
+    Some(
+        serde_json::json!({ "segments": { "intro": intro, "recap": null, "outro": outro, "preview": null } }),
+    )
 }
 
 async fn store(state: &AppState, file: Option<&std::path::Path>, body: &Bytes) {
@@ -616,5 +836,243 @@ mod tests {
         assert_eq!(h.send("GET", "/skipdb/tt0000303/2/1", None, &[]).await.status(), StatusCode::OK);
         assert_eq!(crate::lock(&h.state.skipdb_kept_new).1, 1);
         assert!(cache.join("tt0000303-s2e1.json").exists());
+    }
+
+    /// A stand-in den-remux: answers `/remux/segments/…` with whatever `answer` holds and records each scan
+    /// request as (key header, body).
+    struct StandIn {
+        base: String,
+        answer: Shared<(StatusCode, &'static str)>,
+        gets: Shared<u32>,
+        scans: Shared<Vec<(Option<String>, String)>>,
+    }
+
+    async fn remux(answer: (StatusCode, &'static str)) -> StandIn {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let answer = std::sync::Arc::new(std::sync::Mutex::new(answer));
+        let gets = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let scans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a, g, s) = (answer.clone(), gets.clone(), scans.clone());
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let (a, g, s) = (a.clone(), g.clone(), s.clone());
+            async move {
+                if req.method() == Method::POST {
+                    assert_eq!(req.uri().path(), "/remux/segments/scan");
+                    let key = req.headers().get("x-den-segments-key").map(|v| v.to_str().unwrap().to_owned());
+                    let body = axum::body::to_bytes(req.into_body(), 4096).await.unwrap();
+                    crate::lock(&s).push((key, String::from_utf8(body.to_vec()).unwrap()));
+                    return (StatusCode::ACCEPTED, "{\"status\":\"queued\"}").into_response();
+                }
+                assert!(req.uri().path().starts_with("/remux/segments/tt"), "{}", req.uri());
+                *crate::lock(&g) += 1;
+                let (status, body) = *crate::lock(&a);
+                (status, body).into_response()
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        StandIn { base, answer, gets, scans }
+    }
+
+    use axum::response::IntoResponse;
+
+    const DETECTED: &str = r#"{"duration":2700.0,"intro":{"start":60.0,"end":150.5},"credits":{"start":2600.0,"end":2700.0},"method":"fingerprint","scanned_at":1}"#;
+    const UNKNOWN: (StatusCode, &str) = (StatusCode::NOT_FOUND, "{\"status\":\"unknown\"}");
+    const PENDING: (StatusCode, &str) = (StatusCode::ACCEPTED, "{\"status\":\"pending\"}");
+
+    fn harness(remux: &StandIn, key: Option<&str>) -> crate::handler::tests::Harness {
+        let base = remux.base.clone();
+        let key = key.map(str::to_owned);
+        crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), move |state| {
+            state.skipdb_cache_dir = Some(crate::handler::tests::temp_dir());
+            state.relays = crate::parse_relays(&format!("/remux={base}"));
+            state.segments_key = key;
+        })
+    }
+
+    async fn settled() {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    async fn scans(remux: &StandIn, n: usize) {
+        for _ in 0..40 {
+            if crate::lock(&remux.scans).len() >= n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        settled().await;
+        assert_eq!(crate::lock(&remux.scans).len(), n);
+    }
+
+    /// Segments SkipDB has are served as before, and remux is not asked.
+    #[tokio::test]
+    async fn a_skipdb_hit_never_asks_remux() {
+        let remux = remux((StatusCode::OK, DETECTED)).await;
+        let h = harness(&remux, Some("k"));
+        let _ = skipdb("tt0000501");
+        let resp = h.send("GET", "/skipdb/tt0000501/1/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-den-skipdb"], "miss");
+        assert_eq!(crate::handler::tests::body_json(resp).await["segments"]["intro"]["match"], "agnostic");
+        assert_eq!(*crate::lock(&remux.gets), 0);
+    }
+
+    /// SkipDB with nothing for an episode is answered from remux, in SkipDB's shape: as-is and sure when the runtime
+    /// is the scanned one's, shifted and less sure when it is not.
+    #[tokio::test]
+    async fn an_episode_skipdb_lacks_is_answered_from_remux() {
+        let remux = remux((StatusCode::OK, DETECTED)).await;
+        let h = harness(&remux, Some("k"));
+        let (answers, _) = skipdb("tt0000502");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+
+        let resp = h.send("GET", "/skipdb/tt0000502/1/1?duration=2701", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-den-skipdb"], "detected");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=3600");
+        assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "detected");
+        let body = crate::handler::tests::body_json(resp).await;
+        assert_eq!(
+            body["segments"]["intro"],
+            serde_json::json!({"start_ms":60000,"end_ms":150500,"match":"detected","confidence":0.9})
+        );
+        assert_eq!(body["segments"]["outro"]["start_ms"], 2_600_000);
+        assert_eq!(body["segments"]["outro"]["confidence"], 0.9);
+
+        let resp = h.send("GET", "/skipdb/tt0000502/1/2?duration=2760", None, &[]).await;
+        let body = crate::handler::tests::body_json(resp).await;
+        assert_eq!(body["segments"]["intro"]["start_ms"], 60000);
+        assert_eq!(body["segments"]["intro"]["confidence"], 0.6);
+        assert_eq!(body["segments"]["outro"]["start_ms"], 2_660_000);
+        assert_eq!(body["segments"]["outro"]["end_ms"], 2_760_000);
+
+        // A title (no episode) is never sent to remux.
+        let gets = *crate::lock(&remux.gets);
+        assert_eq!(h.send("GET", "/skipdb/tt0000502", None, &[]).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(*crate::lock(&remux.gets), gets);
+    }
+
+    #[test]
+    fn detected_times_follow_the_runtime_asked_about() {
+        let scanned = serde_json::from_str::<serde_json::Value>(DETECTED).unwrap();
+        let at = |body: &serde_json::Value, name: &str, field: &str| body["segments"][name][field].clone();
+
+        // Within two seconds either way: as they are.
+        for secs in [2698, 2700, 2702] {
+            let body = map_detected(&scanned, Some(secs)).unwrap();
+            assert_eq!(at(&body, "outro", "start_ms"), 2_600_000, "{secs}");
+            assert_eq!(at(&body, "outro", "confidence"), 0.9, "{secs}");
+        }
+        // Three seconds out is another encode: credits move with the end of the file, the intro does not.
+        let body = map_detected(&scanned, Some(2703)).unwrap();
+        assert_eq!(at(&body, "outro", "start_ms"), 2_603_000);
+        assert_eq!(at(&body, "intro", "start_ms"), 60_000);
+        assert_eq!(at(&body, "intro", "confidence"), 0.6);
+        // No runtime named: nothing to shift by, and less sure.
+        let body = map_detected(&scanned, None).unwrap();
+        assert_eq!(at(&body, "outro", "start_ms"), 2_600_000);
+        assert_eq!(at(&body, "outro", "confidence"), 0.6);
+
+        // Shifted before the start of the file: dropped, the intro stays.
+        let short = serde_json::json!({"duration":2700.0,"intro":{"start":60.0,"end":150.0},"credits":{"start":50.0,"end":100.0}});
+        let body = map_detected(&short, Some(2600)).unwrap();
+        assert!(body["segments"]["outro"].is_null());
+        assert!(!body["segments"]["intro"].is_null());
+        // Past its end: dropped.
+        let long = serde_json::json!({"duration":2700.0,"credits":{"start":2650.0,"end":2705.0}});
+        assert!(map_detected(&long, Some(2800)).is_none(), "nothing else was found");
+        assert!(
+            map_detected(&serde_json::json!({"duration":2700.0,"intro":null,"credits":null}), None).is_none()
+        );
+    }
+
+    /// An episode remux does not know is asked of it once, with the key, and not again for ten minutes; the miss
+    /// given meanwhile is kept for seconds, not the hour a settled miss is.
+    #[tokio::test]
+    async fn an_unknown_episode_is_asked_for_once_per_ten_minutes() {
+        let remux = remux(UNKNOWN).await;
+        let h = harness(&remux, Some("segkey"));
+        let (answers, _) = skipdb("tt0000503");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+
+        let resp = h.send("GET", "/skipdb/tt0000503/1/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+        assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "unknown");
+        scans(&remux, 1).await;
+        let (key, body) = crate::lock(&remux.scans)[0].clone();
+        assert_eq!(key.as_deref(), Some("segkey"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"imdb":"tt0000503","season":1,"episode":1})
+        );
+
+        // The same episode again, from the kept "nothing" and with another runtime: no second request.
+        assert_eq!(h.send("GET", "/skipdb/tt0000503/1/1?duration=2700", None, &[]).await.status(), 404);
+        assert_eq!(h.send("GET", "/skipdb/tt0000503/1/1?duration=2710", None, &[]).await.status(), 404);
+        scans(&remux, 1).await;
+        // Another episode is its own.
+        h.send("GET", "/skipdb/tt0000503/1/2", None, &[]).await;
+        scans(&remux, 2).await;
+
+        h.advance(601_000);
+        h.send("GET", "/skipdb/tt0000503/1/1?duration=2700", None, &[]).await;
+        scans(&remux, 3).await;
+    }
+
+    #[tokio::test]
+    async fn a_pending_scan_or_no_key_asks_for_nothing() {
+        let remux = remux(PENDING).await;
+        let h = harness(&remux, Some("segkey"));
+        let (answers, _) = skipdb("tt0000504");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = h.send("GET", "/skipdb/tt0000504/1/1", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+        assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "pending");
+        scans(&remux, 0).await;
+
+        // No key: remux is read, never asked to scan.
+        *crate::lock(&remux.answer) = UNKNOWN;
+        let keyless = harness(&remux, None);
+        let (answers, _) = skipdb("tt0000505");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = keyless.send("GET", "/skipdb/tt0000505/1/1", None, &[]).await;
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+        scans(&remux, 0).await;
+    }
+
+    /// Without remux configured a miss is the hour it always was.
+    #[tokio::test]
+    async fn without_remux_a_miss_is_unchanged() {
+        let h = crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.skipdb_cache_dir = Some(crate::handler::tests::temp_dir());
+        });
+        let (answers, _) = skipdb("tt0000506");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = h.send("GET", "/skipdb/tt0000506/1/1", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=3600");
+    }
+
+    /// This box's own limit on asking SkipDB is not a reason to leave an episode without segments remux has.
+    #[tokio::test]
+    async fn busy_skipdb_falls_back_to_remux() {
+        let remux = remux((StatusCode::OK, DETECTED)).await;
+        let h = harness(&remux, Some("k"));
+        let _ = skipdb("tt0000507");
+        for n in 1..=UPSTREAM_PER_ADDRESS {
+            let resp = h.send("GET", &format!("/skipdb/tt0000507/1/{n}"), None, &[]).await;
+            assert_eq!(resp.headers()["x-den-skipdb"], "miss", "{n}");
+        }
+        let resp = h.send("GET", "/skipdb/tt0000507/2/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-den-skipdb"], "detected");
+        // And where remux has nothing either, the wait is still what is said.
+        *crate::lock(&remux.answer) = UNKNOWN;
+        let resp = h.send("GET", "/skipdb/tt0000507/2/2?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
     }
 }

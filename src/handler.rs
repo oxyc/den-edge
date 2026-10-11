@@ -167,6 +167,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
             ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
+            ("src", resp.extensions().get::<SrcTag>().map(|s| s.0)),
         ]
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
@@ -385,6 +386,11 @@ pub struct PlaybackOutcomeTag(pub String);
 /// `StartupTag`.
 #[derive(Clone)]
 pub struct CastTag(pub String);
+
+/// Where a `/skipdb` answer came from when it was not SkipDB (`detected`, or the `pending`/`unknown` miss that
+/// followed asking den-remux), for the request log as `src=`.
+#[derive(Clone)]
+pub struct SrcTag(pub &'static str);
 
 /// The one line each request is logged as. Tags go on the end as `name=value`: an error answer's code, so a
 /// refusal can be told from another with the same status; a public session's listener scope; whether a TMDB
