@@ -45,8 +45,8 @@ const closedSessions = new WeakSet<NamedLibrary>();
 
 /**
  * What any naming pass for a session has asked and not yet had answered, so overlapping passes share it instead of
- * asking again: a later pass waits for that answer rather than repeating the question. Home restarts its pass on
- * every Continue update, and each answered batch of TV shapes is one: on a 744-series library that asked 9,850
+ * asking again: a later pass waits for that answer rather than repeating the question. Home restarts its pass when
+ * the titles it names change, as each answered batch of TV shapes does: on a 744-series library that asked 9,850
  * titles for 763 unique ones (measured on d.oxy.fi, 0.264.37).
  */
 const flights = new WeakMap<NamedLibrary, Map<string, Promise<void>>>();
