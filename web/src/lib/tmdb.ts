@@ -61,9 +61,13 @@ export function toTitle(
           .slice(0, take)
           .flatMap((entry) => (typeof entry.id === 'number' ? [entry.id] : []))
       : [];
+  // Once each: a director who also stars is one person, and the Worker refuses a retained billboard whose
+  // `people` repeat an id (seen 2026-10-11: "Animals", person 880 as director and lead).
   const people = [
-    ...ids(credited?.crew, 1, (entry) => entry.job === 'Director'),
-    ...ids(credited?.cast, 3),
+    ...new Set([
+      ...ids(credited?.crew, 1, (entry) => entry.job === 'Director'),
+      ...ids(credited?.cast, 3),
+    ]),
   ];
   // Origin is nationality; production countries include financing/co-production and can be much broader. Older
   // responses without origin_country retain the production-country fallback.
