@@ -278,44 +278,60 @@
   $effect(() => () => playOnTv.stop());
 
   // Name only first-paint shelves eagerly. History and the full watchlist stay behind their lazy screen lease.
-  $effect(() => {
+  const homeNamingRefs = $derived.by(() => {
     const view = overview;
     const continued = continueView;
-    if (!model || !view || !continued) {
-      shelvesReady = model === null;
-      shelfPlan = null;
-      return;
-    }
-    let disposed = false;
-    const initial = untrack(() => shelfPlan === null);
-    if (initial) {
-      shelvesReady = false;
-      if (!shelfBaselinesCaptured) {
-        const cachedPrefix = (refs: readonly TitleRef[]) => {
-          let count = 0;
-          for (const ref of refs) {
-            if (!session.displayTitle(ref)) break;
-            count++;
-          }
-          return count;
-        };
-        continueCachedPrefix = cachedPrefix(continued.items.map(({ title }) => title));
-        watchlistCachedPrefix = cachedPrefix(view.watchlist);
-        shelfBaselinesCaptured = true;
-      }
-    }
-    shelfPlan = { continue: continued.items.length > 0, watchlist: view.watchlist.length > 0 };
-    const refs = [
+    if (!view || !continued) return undefined;
+    return [
       ...continued.needsShapes,
       ...continued.items.slice(0, continueNameLimit).map(({ title }) => title),
       ...view.watchlist.slice(0, watchlistNameLimit),
       ...view.seeds.watched,
       ...view.seeds.watchlisted,
     ];
+  });
+  /**
+   * The titles that pass names, as a set: it restarts only when they change. Every Continue Watching update is a new
+   * view, and a position from another device only reorders it; on test/library.html five such updates restarted the
+   * pass five times and sent the Worker five more `retainHomeContinue`s.
+   */
+  const homeNamingSet = $derived(homeNamingRefs?.map(titleKey).sort().join(' '));
+  const continuePresent = $derived(!!continueView?.items.length);
+  const watchlistPresent = $derived(!!overview?.watchlist.length);
+  /** What this page last told the Worker to keep about Continue Watching; it is sent again only when that changes. */
+  let retainedSent: boolean | undefined;
+  $effect(() => {
+    // A baseline taken once from what is already named, before the set below is read: not an input to this pass.
+    untrack(() => {
+      if (shelfBaselinesCaptured || !overview || !continueView) return;
+      const cachedPrefix = (refs: readonly TitleRef[]) => {
+        let count = 0;
+        for (const ref of refs) {
+          if (!session.displayTitle(ref)) break;
+          count++;
+        }
+        return count;
+      };
+      continueCachedPrefix = cachedPrefix(continueView.items.map(({ title }) => title));
+      watchlistCachedPrefix = cachedPrefix(overview.watchlist);
+      shelfBaselinesCaptured = true;
+    });
+    if (!model || homeNamingSet === undefined) {
+      shelvesReady = model === null;
+      shelfPlan = null;
+      return;
+    }
+    const plan = { continue: continuePresent, watchlist: watchlistPresent };
+    let disposed = false;
+    if (untrack(() => shelfPlan === null)) shelvesReady = false;
+    shelfPlan = plan;
+    const refs = untrack(() => homeNamingRefs!);
     void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
       shelvesReady = true;
-      void model.retainHomeContinue(continued.items.length > 0).catch(warnKeep);
+      if (retainedSent === plan.continue) return;
+      retainedSent = plan.continue;
+      void model.retainHomeContinue(plan.continue).catch(warnKeep);
     });
     return () => {
       disposed = true;
