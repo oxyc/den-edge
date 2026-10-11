@@ -1812,6 +1812,11 @@ export class LibraryLog {
     return completed ? rows : null;
   }
 
+  /** The log's head as last read (library v2 §2): what an assistant projection says it is as of (assistant v1 §15). */
+  get logHead(): number {
+    return this.head;
+  }
+
   /** Every v4 document as it is held, with the seq den-edge last gave it: what tracker delivery decides on (§9). */
   documents(): { seq: number; document: DocumentRow }[] {
     return [...this.entries.values()].flatMap(({ seq, row }) =>

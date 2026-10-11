@@ -792,6 +792,10 @@ pub fn route_label(path: &str) -> &'static str {
         "/assistant/append" => "/assistant/append",
         "/assistant/drain" => "/assistant/drain",
         "/assistant/ack" => "/assistant/ack",
+        // A grant id never becomes a label: every projection call counts as one route.
+        p if p == "/assistant/projection" || p.starts_with("/assistant/projection/") => {
+            "/assistant/projection"
+        }
         "/pair/new" => "/pair/new",
         "/pair/open" => "/pair/open",
         p if p.starts_with("/pair/") && p.matches('/').count() == 3 => "/pair/:sid/:slot",
@@ -878,6 +882,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
         "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
+        "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
         "/inbox/append"
         | "/lib/:id/batch"
         | "/lib/:id/rewrite"
@@ -910,6 +915,7 @@ fn body_cap(route: &str) -> usize {
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
+        "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
 }

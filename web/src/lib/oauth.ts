@@ -16,12 +16,20 @@ export interface ConsentRequest {
   verified: boolean;
   /** Whether this request may also be allowed to change the library (`den:library.write`); a member decides. */
   write: boolean;
+  /** Whether it may also be allowed to read the watchlist and history (`den:library.read`, §15). */
+  read: boolean;
 }
 
 /** A write approval: the grant den-edge seals into the assistant's tokens. Never stored. */
 export interface WriteApproval {
   grant: string;
   key: string;
+}
+
+/** What an approval allows beyond searching: writing, reading (with the read key), or both with one grant. */
+export interface Approval {
+  write?: WriteApproval;
+  read?: WriteApproval & { readKey: string };
 }
 
 /** A connected assistant, as Settings lists it. */
@@ -35,8 +43,11 @@ export interface Connection {
   guest: string | null;
   createdAt: number;
   usedAt: number;
-  /** The grant it was allowed to change the library with, when it was; null for searching alone. */
+  /** The grant it was allowed to change or read the library with, when it was; null for searching alone. */
   grant: string | null;
+  /** What that grant allows. */
+  write: boolean;
+  read: boolean;
 }
 
 export type Reply<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
@@ -100,6 +111,7 @@ export async function consentRequest(
     redirectHost?: unknown;
     verified?: unknown;
     write?: unknown;
+    read?: unknown;
   } | null;
   if (typeof body?.client !== 'string') return { ok: false, status: 0, error: 'failed' };
   return {
@@ -109,25 +121,27 @@ export async function consentRequest(
       redirectHost: typeof body.redirectHost === 'string' ? body.redirectHost : null,
       verified: body.verified === true,
       write: body.write === true,
+      read: body.read === true,
     },
   };
 }
 
 /**
  * Say yes or no. Either way den-edge answers with where to send this browser: back to the assistant, with a code or
- * with `access_denied`. Only an https address, or http to this machine, is followed. `write` also lets it change the
- * library, with the grant just written into it.
+ * with `access_denied`. Only an https address, or http to this machine, is followed. `approval` also lets it change
+ * the library, read it, or both, with the grant and read key just written into it.
  */
 export async function answer(
   id: string,
   allow: boolean,
   fetchImpl: typeof fetch = relayFetch,
-  write?: WriteApproval,
+  approval?: Approval,
 ): Promise<Reply<string>> {
+  const granted = allow && approval && (approval.write || approval.read);
   const reply = await ask(fetchImpl, `/oauth/request/${id}/${allow ? 'approve' : 'deny'}`, {
     method: 'POST',
-    ...(allow && write
-      ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ write }) }
+    ...(granted
+      ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(approval) }
       : {}),
   });
   if (!reply.ok) return reply;
@@ -150,6 +164,7 @@ export function safeRedirect(to: string): boolean {
 function readConnection(raw: unknown): Connection | null {
   const c = raw as Partial<Connection> | null;
   if (typeof c?.sid !== 'string' || typeof c.client !== 'string') return null;
+  const grant = typeof c.grant === 'string' && /^[0-9a-f]{32}$/.test(c.grant) ? c.grant : null;
   return {
     sid: c.sid,
     client: c.client,
@@ -158,7 +173,10 @@ function readConnection(raw: unknown): Connection | null {
     guest: typeof c.guest === 'string' ? c.guest : null,
     createdAt: typeof c.createdAt === 'number' ? c.createdAt : 0,
     usedAt: typeof c.usedAt === 'number' ? c.usedAt : 0,
-    grant: typeof c.grant === 'string' && /^[0-9a-f]{32}$/.test(c.grant) ? c.grant : null,
+    grant,
+    // A den-edge from before reads names no `write`: every grant it lists writes.
+    write: grant !== null && (c.write === true || c.write === undefined),
+    read: grant !== null && c.read === true,
   };
 }
 

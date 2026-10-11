@@ -28,7 +28,7 @@
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
-  import { drainWhileOpen, renewListed, type ApplyResult } from './lib/assistant';
+  import { drainWhileOpen, publishWhileOpen, renewListed, type ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
 
@@ -345,6 +345,14 @@
             libraryId: libraryCredentialId() ?? 'library',
             apply: (messages) => model.applyAssistant(messages),
             applied: (result) => void announceAssistant(current, result),
+          },
+          stop.signal,
+        );
+        // And the projection connections that may read are given (§15).
+        void publishWhileOpen(
+          {
+            libraryId: libraryCredentialId() ?? 'library',
+            publish: () => model.publishAssistant(),
           },
           stop.signal,
         );

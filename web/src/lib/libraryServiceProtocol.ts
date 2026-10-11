@@ -535,9 +535,14 @@ export type LibraryTask =
   | { kind: 'key-reset.move'; destinationLibraryKey: string }
   | { kind: 'key-reset.settle'; destinationLibraryKey: string }
   | { kind: 'key-reset.adopt'; destinationLibraryKey: string }
-  /** A member allows an assistant to change the library: its grant row is written, its key returned once. */
-  | { kind: 'assistant.consent'; client: string }
+  /**
+   * A member allows an assistant to change the library, read it, or both: its grant row and read record are written,
+   * its keys returned once.
+   */
+  | { kind: 'assistant.consent'; client: string; write: boolean; read: boolean }
   | { kind: 'assistant.revoke'; grant: string }
+  /** Build every live read grant's projection and send what is due (§15). */
+  | { kind: 'assistant.publish' }
   /** The grants whose connection den-edge still lists, kept from expiring (at most daily). */
   | { kind: 'assistant.renew'; grants: string[] }
   /** A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. */
@@ -585,8 +590,9 @@ export type LibraryTaskResult =
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
   | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
-  | { kind: 'assistant.consent'; grant: string; key: string }
+  | { kind: 'assistant.consent'; grant: string; key: string; readKey?: string }
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }
+  | { kind: 'assistant.publish'; published: number }
   | { kind: 'assistant.renew'; renewed: number }
   | {
       kind: 'assistant.apply';
@@ -686,7 +692,7 @@ export type LibraryQueryResult =
       scope: RetainedBillboardScope;
       value: RetainedBillboard | null;
     }
-  | { kind: 'assistant.grants'; grants: AssistantGrantView[] };
+  | { kind: 'assistant.grants'; grants: AssistantGrantView[]; reads: AssistantGrantView[] };
 
 export type LibraryObservation =
   | {

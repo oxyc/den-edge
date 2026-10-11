@@ -3,13 +3,20 @@
      one, can allow it; den-edge checks that again, since this page is only where the question is asked. A browser
      that holds neither can link to a library right here, with the web app's own link screen, and then answer the
      same request: web storage is per address, so a library linked at another address of Den is not linked here.
-     A member may also let it change the library (den-spec wire/assistant-v1.md): unticked unless they tick it. -->
+     A member may also let it change the library, and read the watchlist and history (den-spec
+     wire/assistant-v1.md, §15): each its own checkbox, unticked unless they tick it. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { assistantLibrary } from '../lib/assistantLibrary.svelte';
   import { guestGrants } from '../lib/grants.svelte';
   import { links } from '../lib/links.svelte';
-  import { answer, consentRequest, consentRequestId, type ConsentRequest } from '../lib/oauth';
+  import {
+    answer,
+    consentRequest,
+    consentRequestId,
+    type Approval,
+    type ConsentRequest,
+  } from '../lib/oauth';
   import { canProve, relayFetch } from '../lib/relayFetch';
   import { LinkScreen } from '../lib/screens.svelte';
   import Button from './Button.svelte';
@@ -30,6 +37,9 @@
   /** Changing the library is a member's to allow, for a request den-edge can grant it to. */
   const canWrite = $derived(!!request?.write && !!assistantLibrary.model);
   let allowWrite = $state(false);
+  /** So is reading the watchlist and history. */
+  const canRead = $derived(!!request?.read && !!assistantLibrary.model);
+  let allowRead = $state(false);
 
   const failures: Record<string, string> = {
     request_expired:
@@ -85,12 +95,23 @@
       problem = failures.not_a_member!;
       return;
     }
-    const model = allow && canWrite && allowWrite ? assistantLibrary.model : null;
-    // The grant is written into the library before den-edge hears of it, so no request can reach a device first.
-    let write: { grant: string; key: string } | undefined;
+    const write = allow && canWrite && allowWrite;
+    const read = allow && canRead && allowRead;
+    const model = write || read ? assistantLibrary.model : null;
+    // The grant and read record are written into the library before den-edge hears of them, so no request can reach
+    // a device, and no projection be read, before the library records what allows it.
+    let approval: Approval | undefined;
+    let grant: string | undefined;
     if (model && request) {
       try {
-        write = await model.consentAssistant(request.client);
+        const keys = await model.consentAssistant(request.client, { write, read });
+        grant = keys.grant;
+        approval = {
+          ...(write ? { write: { grant: keys.grant, key: keys.key } } : {}),
+          ...(read && keys.readKey
+            ? { read: { grant: keys.grant, key: keys.key, readKey: keys.readKey } }
+            : {}),
+        };
       } catch (error) {
         console.error('den: an assistant grant could not be written', error);
         working = false;
@@ -98,15 +119,15 @@
         return;
       }
     }
-    const result = await answer(id, allow, relayFetch, write);
+    const result = await answer(id, allow, relayFetch, approval);
     if (result.ok) {
       location.assign(result.value);
       return;
     }
-    // Not approved: the grant written for it must never be usable.
-    if (model && write)
+    // Not approved: the grant and read record written for it must never be usable.
+    if (model && grant)
       await model
-        .revokeAssistant(write.grant)
+        .revokeAssistant(grant)
         .catch((error: unknown) =>
           console.error('den: an unused assistant grant could not be revoked', error),
         );
@@ -145,8 +166,10 @@
       people in Den’s index, and link you to their pages here.
     </p>
     <p>
-      It can’t see your library, watchlist or settings. You can disconnect it any time under
-      Settings › Assistants.
+      {allowRead
+        ? 'It can’t see your settings, accounts or devices.'
+        : 'It can’t see your library, watchlist or settings.'} You can disconnect it any time under Settings
+      › Assistants.
     </p>
     {#if canWrite}
       <label class="write">
@@ -155,7 +178,20 @@
           Allow changes to my library
           <small
             >It can add to and remove from your watchlist, mark titles seen or unseen, and rate
-            them. It still can’t see your library.</small
+            them.{#if !allowRead}
+              It still can’t see your library.{/if}</small
+          >
+        </span>
+      </label>
+    {/if}
+    {#if canRead}
+      <label class="write">
+        <input type="checkbox" bind:checked={allowRead} disabled={working} />
+        <span>
+          Allow reading my watchlist and history
+          <small
+            >It can see your watchlist, what you’re in the middle of, and what you’ve watched, as of
+            when Den last had it open. Never your settings, accounts or devices.</small
           >
         </span>
       </label>

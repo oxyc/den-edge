@@ -842,9 +842,16 @@ function task(value: unknown): value is LibraryTask {
         exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
       );
     case 'assistant.consent':
-      return exact(value, ['kind', 'client']) && boundedText(value.client, 80);
+      return (
+        exact(value, ['kind', 'client', 'write', 'read']) &&
+        boundedText(value.client, 80) &&
+        bool(value.write) &&
+        bool(value.read)
+      );
     case 'assistant.revoke':
       return exact(value, ['kind', 'grant']) && hexId(value.grant);
+    case 'assistant.publish':
+      return exact(value, ['kind']);
     case 'assistant.renew':
       return (
         exact(value, ['kind', 'grants']) &&
@@ -1518,8 +1525,9 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     return exact(value, ['kind', 'matches']) && bool(value.matches);
   if (value.kind === 'assistant.grants')
     return (
-      exact(value, ['kind', 'grants']) &&
-      list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+      exact(value, ['kind', 'grants', 'reads']) &&
+      list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
+      list(value.reads, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
     );
   if (value.kind === 'library.metadata')
     return (
@@ -1794,13 +1802,18 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'assistant.consent':
       return (
-        exact(value, ['kind', 'grant', 'key']) && hexId(value.grant) && boundedText(value.key, 64)
+        exact(value, ['kind', 'grant', 'key', 'readKey']) &&
+        hexId(value.grant) &&
+        boundedText(value.key, 64) &&
+        optional(value.readKey, (key): key is string => boundedText(key, 64))
       );
     case 'assistant.revoke':
       return (
         exact(value, ['kind', 'outcome']) &&
         (value.outcome === 'revoked' || value.outcome === 'absent')
       );
+    case 'assistant.publish':
+      return exact(value, ['kind', 'published']) && integer(value.published);
     case 'assistant.renew':
       return exact(value, ['kind', 'renewed']) && integer(value.renewed);
     case 'assistant.apply':

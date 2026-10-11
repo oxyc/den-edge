@@ -166,7 +166,7 @@ test('a browser with no library and no invite is offered linking, not Allow', as
  * Two browsers on one relay: one with a library that hosts a pairing from Settings, and one on the consent page
  * that joins it. `expired` makes den-edge forget the request once the page has first read it.
  */
-async function linkingContexts(browser, { expired = false, write = false } = {}) {
+async function linkingContexts(browser, { expired = false, write = false, read = false } = {}) {
   const slots = new Map();
   let sid = '';
   let opened = false;
@@ -192,7 +192,7 @@ async function linkingContexts(browser, { expired = false, write = false } = {})
       reads += 1;
       return expired && reads > 1
         ? json(404, { error: 'request_expired' })
-        : json(200, { client: 'Claude', redirectHost: 'claude.ai', verified: true, write });
+        : json(200, { client: 'Claude', redirectHost: 'claude.ai', verified: true, write, read });
     }
     if (url.pathname.startsWith(`/oauth/request/${ID}/`)) {
       const member = (await request.allHeaders())['x-den-library-member'] ?? null;
@@ -338,6 +338,42 @@ test('a member allows changes to the library, and the grant is in the library be
       'batch:1',
       'approve',
     ]);
+  } finally {
+    await browser.close();
+  }
+});
+
+// Reading is its own opt-in, also unticked: ticked alone it writes the read record into the library and approves
+// with `read` only, never `write`.
+test('a member allows reading the library without allowing changes', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { host, joiner, sent } = await linkingContexts(browser, { write: true, read: true });
+    const hostPage = await host.newPage();
+    const page = await joiner.newPage();
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    await linkThroughDialog(hostPage, dialog);
+
+    const reading = dialog.getByRole('checkbox', {
+      name: /Allow reading my watchlist and history/,
+    });
+    await expect(reading).toBeVisible();
+    await expect(reading).not.toBeChecked();
+    await expect(
+      dialog.getByRole('checkbox', { name: /Allow changes to my library/ }),
+    ).not.toBeChecked();
+    await reading.check();
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+    await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
+    const approval = sent.find((s) => s.path === `/oauth/request/${ID}/approve`);
+    expect(approval?.member).toBe(true);
+    expect(approval?.body?.write).toBeUndefined();
+    expect(approval?.body?.read?.grant).toMatch(/^[0-9a-f]{32}$/);
+    expect(approval?.body?.read?.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(approval?.body?.read?.readKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
   } finally {
     await browser.close();
   }
