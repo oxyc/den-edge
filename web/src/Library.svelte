@@ -455,6 +455,15 @@
     const at = sighting && livePosition(sighting, now);
     return at === undefined ? undefined : timecode(at);
   };
+  /** The open title's clock, as its Continue Watching card shows it, and which episode for a series. */
+  const pageLive = $derived.by(() => {
+    const opening = page;
+    const entry =
+      opening &&
+      continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
+    const clock = entry && liveClock(entry);
+    return clock ? { clock, episode: entry.episode } : undefined;
+  });
 
   // A route the viewer chose is foreground work. This removes it from the idle tail, or joins the exact pending
   // request when an idle slot got there first.
@@ -1476,6 +1485,7 @@
     autoplay={detailPrefs.autoplay}
     {scout}
     row={pageRow}
+    live={pageLive}
     episodes={pageEpisodes}
     seed={pageSeed}
     still={pageStill}

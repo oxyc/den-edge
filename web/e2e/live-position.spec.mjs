@@ -6,6 +6,7 @@
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
+import { routeTmdb } from './network.mjs';
 
 const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
 const WRITE_EVERY_MS = 3_000;
@@ -44,6 +45,27 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   const pushing = pushEveryMs ? setInterval(push, pushEveryMs) : undefined;
   const route = async (page, name) => {
     await routeLibraryEdge(page);
+    // `routeLibraryEdge` names movies only; the seeded series (tv:1003) is named here.
+    await routeTmdb(page, (route) => {
+      const id = new URL(route.request().url()).pathname.match(/\/tv\/(\d+)$/)?.[1];
+      if (!id) return route.fallback();
+      return route.fulfill({
+        json: {
+          id: Number(id),
+          name: `Series ${id}`,
+          first_air_date: '2026-01-01',
+          poster_path: '/poster.jpg',
+          backdrop_path: '/backdrop.jpg',
+          vote_average: 7.5,
+          vote_count: 500,
+          genres: [{ id: 18 }],
+          credits: { cast: [], crew: [] },
+          seasons: [{ season_number: 1, episode_count: 8 }],
+          last_episode_to_air: { season_number: 1, episode_number: 8 },
+          external_ids: {},
+        },
+      });
+    });
     // A paired page drains its assistants' queue; this library has no assistant.
     await page.route(`${E2E_ORIGIN}/assistant/**`, (route) => route.fulfill({ status: 404 }));
     pulls.set(name, []);
@@ -207,6 +229,50 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     const after = Date.now() - stopped;
     console.log(`clock gone ${after} ms after the last write`);
     expect(after).toBeLessThanOrEqual(50_000);
+  } finally {
+    await close();
+  }
+});
+
+test('a series’ page shows which episode plays where, and moves nothing as the clock comes and goes', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { play, close } = await openWithDevice(browser, page);
+  try {
+    await page.locator('.card', { hasText: 'Series 1003' }).click();
+    await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
+    const clock = page.locator('.hero .live');
+    const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
+    const actions = page.locator('.hero-actions');
+    const boxes = async () => [await heading.boundingBox(), await actions.boundingBox()];
+    // The seeded resume point was written as the page opened, so its own clock may still be running out.
+    await expect(clock).toBeHidden({ timeout: 60_000 });
+    const without = await boxes();
+
+    const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
+    await expect(clock).toHaveText(/^S1 · E3▶ 1\d:\d\d$/, { timeout: 40_000 });
+    expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
+    const samples = await watch(clock, 15_000);
+    expect(samples.filter((text) => text === null)).toEqual([]);
+    expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(10);
+    for (const width of [393, 1280]) {
+      await page.setViewportSize({ width, height: width < 500 ? 852 : 800 });
+      const poster = await page.locator('.hero .poster').boundingBox();
+      const pill = await clock.boundingBox();
+      // Inside the poster, at its foot.
+      expect(pill.x).toBeGreaterThanOrEqual(poster.x);
+      expect(pill.x + pill.width).toBeLessThanOrEqual(poster.x + poster.width);
+      expect(poster.y + poster.height - (pill.y + pill.height)).toBeCloseTo(8, 0);
+      await page.screenshot({ path: test.info().outputPath(`detail-live-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect(clock).toBeVisible();
+
+    playing.pause();
+    await expect(clock).toBeHidden({ timeout: 20_000 });
+    expect(await boxes(), 'nothing moved as the clock went').toEqual(without);
   } finally {
     await close();
   }
