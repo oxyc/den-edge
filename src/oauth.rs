@@ -69,8 +69,22 @@ const VERSION: u32 = 1;
 pub const SCOPE: &str = "den:search";
 /// Changing the library through den-mcp's sealed requests (assistant v1 §9).
 pub const WRITE_SCOPE: &str = "den:library.write";
-/// A write session's scope claim: space-separated, search first.
+/// Reading the watchlist, Continue Watching and Seen history from a projection devices publish (assistant v1 §15).
+pub const READ_SCOPE: &str = "den:library.read";
+/// The scope claim of a session that may write, read, or both: space-separated, search first.
 const WRITE_SCOPES: &str = "den:search den:library.write";
+const READ_SCOPES: &str = "den:search den:library.read";
+const READ_WRITE_SCOPES: &str = "den:search den:library.write den:library.read";
+
+/// The scope claim for what a token carries.
+fn scopes(write: bool, read: bool) -> &'static str {
+    match (write, read) {
+        (true, true) => READ_WRITE_SCOPES,
+        (true, false) => WRITE_SCOPES,
+        (false, true) => READ_SCOPES,
+        (false, false) => SCOPE,
+    }
+}
 /// How long an access token lasts. Short, because it is checked without asking this server; the relay's check of
 /// the session is what makes revocation immediate.
 const ACCESS_TTL_S: u64 = 15 * 60;
@@ -213,6 +227,12 @@ fn write_claim(public: &[u8], sub: &str, grant: &GrantKey) -> Option<String> {
     den_assistant::seal_claim_with_rng(public, sub, grant, &mut os_rng()).ok()
 }
 
+/// The `dr` claim (§15): the grant id and read key sealed afresh to den-mcp's key, bound to the token's `sub`; `None`
+/// for a grant key with no read key.
+fn read_claim(public: &[u8], sub: &str, grant: &GrantKey) -> Option<String> {
+    den_assistant::seal_read_claim_with_rng(public, sub, grant, &mut os_rng()).ok()
+}
+
 /// An authorization request waiting for the consent page.
 struct Pending {
     client_id: String,
@@ -223,8 +243,10 @@ struct Pending {
     until: u64,
     /// Arrival order, which decides the oldest when several arrived in the same millisecond.
     seq: u64,
-    /// Whether this request may be granted `den:library.write`: it asked for it, or named no scope.
+    /// Whether this request may be granted `den:library.write` / `den:library.read`: it asked for it, or named no
+    /// scope.
     write: bool,
+    read: bool,
 }
 
 /// A code, waiting to be exchanged.
@@ -234,8 +256,12 @@ struct Code {
     challenge: String,
     who: Who,
     until: u64,
-    /// The grant key a write approval carried. Held here, in memory, until the exchange wraps it.
+    /// The grant key a write or read approval carried, with the read key for a read one. Held here, in memory, until
+    /// the exchange wraps it.
     grant: Option<GrantKey>,
+    /// What the approval allowed with it.
+    write: bool,
+    read: bool,
 }
 
 /// Whom a connection speaks for.
@@ -307,6 +333,28 @@ struct Session {
     wrap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_wrap: Option<String>,
+    /// A session with a grant may write unless `read_only`; it may read when `read`, its wrap then holding the read
+    /// key too (§15). Absent on every session made before reads, which wrote.
+    #[serde(default, skip_serializing_if = "is_false")]
+    read_only: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    read: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Session {
+    /// Whether this session may change the library.
+    fn writes(&self) -> bool {
+        self.grant.is_some() && !self.read_only
+    }
+
+    /// Whether this session may read the library's projection.
+    fn reads(&self) -> bool {
+        self.grant.is_some() && self.read
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -430,7 +478,8 @@ fn metadata(oauth: &OAuth) -> Response {
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": if oauth.writable() { vec![SCOPE, WRITE_SCOPE] } else { vec![SCOPE] },
+            "scopes_supported":
+                if oauth.writable() { vec![SCOPE, WRITE_SCOPE, READ_SCOPE] } else { vec![SCOPE] },
             "authorization_response_iss_parameter_supported": true,
         }),
     )
@@ -486,13 +535,25 @@ fn valid_id(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Remove sessions (by sid) and their index entries. Under `oauth.lock`.
+/// Remove sessions (by sid) and their index entries. Under `oauth.lock`. A session that read takes its grant's
+/// projection with it (§15): a grant has one connection, so nobody is left who could read it.
 async fn drop_sessions(state: &AppState, index: &mut Index, sids: &[String]) -> io::Result<()> {
+    let mut read_grants = Vec::new();
     for sid in sids {
+        if let Ok(Some(session)) = load::<Session>(state, &session_key(sid)).await {
+            if session.reads() {
+                read_grants.extend(session.grant);
+            }
+        }
         state.store.delete(NS, &session_key(sid)).await?;
     }
     index.sessions.retain(|s| !sids.contains(&s.sid));
-    save(state, INDEX, index).await
+    save(state, INDEX, index).await?;
+    // After the session is gone, so a publish racing this finds no reader and is refused (`assistant.rs`).
+    for grant in read_grants {
+        crate::assistant::delete_projection(state, &grant).await?;
+    }
+    Ok(())
 }
 
 /// Remove one session. Under `oauth.lock`.
@@ -744,11 +805,12 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     }
     let scopes: Vec<&str> =
         get("scope").map(|s| s.split(' ').filter(|s| !s.is_empty()).collect()).unwrap_or_default();
-    if scopes.iter().any(|s| *s != SCOPE && !(oauth.writable() && *s == WRITE_SCOPE)) {
+    if scopes.iter().any(|s| *s != SCOPE && !(oauth.writable() && (*s == WRITE_SCOPE || *s == READ_SCOPE))) {
         return error_page("The assistant asked for more than Den gives: searching only (den:search).");
     }
-    // One that names no scope may be offered the write scope too; the person decides on the consent page.
+    // One that names no scope may be offered writing and reading too; the person decides on the consent page.
     let write = oauth.writable() && (scopes.is_empty() || scopes.contains(&WRITE_SCOPE));
+    let read = oauth.writable() && (scopes.is_empty() || scopes.contains(&READ_SCOPE));
     let now = state.now();
     let id = random_id();
     {
@@ -785,6 +847,7 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
                 until: now + PENDING_MS,
                 seq,
                 write,
+                read,
             },
         );
     }
@@ -823,6 +886,7 @@ fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Resp
                     "verified": verified,
                     "scope": SCOPE,
                     "write": p.write,
+                    "read": p.read,
                 }),
             )
         }
@@ -850,11 +914,19 @@ async fn who(state: &AppState, (member, grant): (Option<String>, Option<String>)
     Some(Who::Guest { gid: live.gid, host: live.host, name: live.name })
 }
 
-/// The grant an approval carries (`{"write": {"grant", "key"}}`), when it carries one: its id and its 32-byte seed.
-/// No body, or no `write`, is an approval of `den:search` alone, as before the write scope.
-async fn write_approval(
-    req: Request,
-) -> Result<Option<(String, zeroize::Zeroizing<[u8; 32]>)>, Box<Response>> {
+/// What an approval carries beyond `den:search`: the grant (its id and 32-byte seed), whether it may write and read,
+/// and the read key when it may read (§15).
+struct Approved {
+    grant: String,
+    seed: zeroize::Zeroizing<[u8; 32]>,
+    read_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    write: bool,
+    read: bool,
+}
+
+/// An approval's body: `{"write": {"grant", "key"}}`, `{"read": {"grant", "key", "readKey"}}`, or both naming the
+/// same grant and key. No body, or neither, approves `den:search` alone, as before the write scope.
+async fn approval(req: Request) -> Result<Option<Approved>, Box<Response>> {
     let bad = || Box::new(json_reply(StatusCode::BAD_REQUEST, &error("invalid_grant_key")));
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else {
         return Err(Box::new(json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))));
@@ -864,19 +936,41 @@ async fn write_approval(
     }
     let body: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("bad_request"))))?;
-    let write = match body.get("write") {
-        None | Some(Value::Null) => return Ok(None),
-        Some(write) => write,
+    let part = |name: &str| body.get(name).filter(|v| !v.is_null());
+    let key32 = |value: Option<&Value>| -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        let bytes = zeroize::Zeroizing::new(den_assistant::b64url_decode(value?.as_str()?)?);
+        Some(zeroize::Zeroizing::new(bytes.as_slice().try_into().ok()?))
     };
-    let grant = write.get("grant").and_then(Value::as_str).filter(|g| valid_id(g)).ok_or_else(bad)?;
-    let key = write
-        .get("key")
-        .and_then(Value::as_str)
-        .and_then(den_assistant::b64url_decode)
-        .map(zeroize::Zeroizing::new)
-        .ok_or_else(bad)?;
-    let seed: [u8; 32] = key.as_slice().try_into().map_err(|_| bad())?;
-    Ok(Some((grant.to_owned(), zeroize::Zeroizing::new(seed))))
+    let grant_of = |object: &Value| -> Option<(String, zeroize::Zeroizing<[u8; 32]>)> {
+        let grant = object.get("grant")?.as_str().filter(|g| valid_id(g))?;
+        Some((grant.to_owned(), key32(object.get("key"))?))
+    };
+    let write = match part("write") {
+        Some(object) => Some(grant_of(object).ok_or_else(bad)?),
+        None => None,
+    };
+    let read = match part("read") {
+        Some(object) => {
+            let (grant, seed) = grant_of(object).ok_or_else(bad)?;
+            Some((grant, seed, key32(object.get("readKey")).ok_or_else(bad)?))
+        }
+        None => None,
+    };
+    Ok(match (write, read) {
+        (None, None) => None,
+        (Some((grant, seed)), None) => {
+            Some(Approved { grant, seed, read_key: None, write: true, read: false })
+        }
+        (None, Some((grant, seed, key))) => {
+            Some(Approved { grant, seed, read_key: Some(key), write: false, read: true })
+        }
+        (Some((wg, ws)), Some((grant, seed, key))) => {
+            if wg != grant || *ws != *seed {
+                return Err(bad());
+            }
+            Some(Approved { grant, seed, read_key: Some(key), write: true, read: true })
+        }
+    })
 }
 
 async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approve: bool) -> Response {
@@ -893,40 +987,46 @@ async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approv
     } else {
         None
     };
-    let write = if approve {
-        match write_approval(req).await {
-            Ok(write) => write,
+    let approved = if approve {
+        match approval(req).await {
+            Ok(approved) => approved,
             Err(refused) => return *refused,
         }
     } else {
         None
     };
-    if write.is_some() && matches!(who, Some(Who::Guest { .. })) {
-        return json_reply(StatusCode::FORBIDDEN, &error("write_not_for_guests"));
+    if let (Some(approved), Some(Who::Guest { .. })) = (&approved, &who) {
+        let refusal = if approved.write { "write_not_for_guests" } else { "read_not_for_guests" };
+        return json_reply(StatusCode::FORBIDDEN, &error(refusal));
     }
-    let grant = {
+    let taken = {
         let mut pending = crate::lock(&oauth.pending);
         let Some(entry) = pending.get(id).filter(|p| p.until > now) else {
             pending.remove(id);
             return json_reply(StatusCode::NOT_FOUND, &error("request_expired"));
         };
-        // Refused before the request is taken: the consent page can still approve it without the write scope.
-        let grant = match write {
+        // Refused before the request is taken: the consent page can still approve it without these scopes.
+        let grant = match approved {
             None => None,
-            Some(_) if !entry.write || !oauth.writable() => {
+            Some(a) if (a.write && !entry.write) || (a.read && !entry.read) || !oauth.writable() => {
                 return json_reply(StatusCode::BAD_REQUEST, &error("invalid_scope"))
             }
-            Some((grant_id, seed)) => {
-                let key = GrantKey::from_secret(&seed);
-                if key.id() != grant_id {
+            Some(a) => {
+                let mut key = GrantKey::from_secret(&a.seed);
+                if key.id() != a.grant {
                     return json_reply(StatusCode::BAD_REQUEST, &error("invalid_grant_key"));
                 }
-                Some(key)
+                if let Some(read) = &a.read_key {
+                    key = key.with_read_key(read);
+                }
+                Some((key, a.write, a.read))
             }
         };
         (grant, pending.remove(id).expect("checked above"))
     };
-    let (grant, pending) = grant;
+    let (grant, pending) = taken;
+    let (write, read) = grant.as_ref().map_or((false, false), |(_, w, r)| (*w, *r));
+    let grant = grant.map(|(key, _, _)| key);
     let mut params = vec![("iss", oauth.issuer.clone())];
     if let Some(s) = &pending.state {
         params.push(("state", s.clone()));
@@ -946,6 +1046,8 @@ async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approv
                         who,
                         until: now + CODE_MS,
                         grant,
+                        write,
+                        read,
                     },
                 );
             }
@@ -993,8 +1095,9 @@ async fn params_of(req: Request) -> Option<HashMap<String, String>> {
 }
 
 /// An access token for `session`: a compact JWS, `EdDSA`, RFC 9068's claims. A guest's never outlasts the grant.
-/// With `grant` (a write session's key, unwrapped for this answer) and the write scope on, it carries the write scope
-/// and `dw`, sealed afresh for this token. Also the scope it carries.
+/// With `grant` (the session's key, unwrapped for this answer) and the write scope on, a session that writes carries
+/// the write scope and `dw`, and one that reads the read scope and `dr` (§15), each sealed afresh for this token.
+/// Also the scope it carries.
 fn access_token(
     oauth: &OAuth,
     session: &Session,
@@ -1005,11 +1108,14 @@ fn access_token(
     let now = now_ms / 1000;
     let exp = grant_end.map_or(now + ACCESS_TTL_S, |end| (now + ACCESS_TTL_S).min(end / 1000));
     let header = json!({ "alg": "EdDSA", "typ": "at+jwt", "kid": oauth.kid });
-    let dw = match (grant, &oauth.write_public) {
-        (Some(grant), Some(public)) => write_claim(public, &session.sid, grant),
-        _ => None,
+    let (dw, dr) = match (grant, &oauth.write_public) {
+        (Some(grant), Some(public)) => (
+            session.writes().then(|| write_claim(public, &session.sid, grant)).flatten(),
+            session.reads().then(|| read_claim(public, &session.sid, grant)).flatten(),
+        ),
+        _ => (None, None),
     };
-    let scope = if dw.is_some() { WRITE_SCOPES } else { SCOPE };
+    let scope = scopes(dw.is_some(), dr.is_some());
     let mut claims = json!({
         "iss": oauth.issuer,
         "aud": oauth.resource,
@@ -1023,6 +1129,9 @@ fn access_token(
     });
     if let Some(dw) = dw {
         claims["dw"] = json!(dw);
+    }
+    if let Some(dr) = dr {
+        claims["dr"] = json!(dr);
     }
     let signed =
         format!("{}.{}", b64url(header.to_string().as_bytes()), b64url(claims.to_string().as_bytes()));
@@ -1136,6 +1245,8 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
         grant: code.grant.as_ref().map(|g| g.id().to_owned()),
         wrap,
         previous_wrap: None,
+        read_only: code.grant.is_some() && !code.write,
+        read: code.grant.is_some() && code.read,
         client_id: code.client_id,
         client_name,
         redirect_host: redirect_host(&code.redirect_uri),
@@ -1352,6 +1463,8 @@ async fn connections(state: &AppState, req: Request) -> Response {
                 "createdAt": s.created_at,
                 "usedAt": s.used_at,
                 "grant": s.grant,
+                "write": s.writes(),
+                "read": s.reads(),
             })),
             Ok(None) => {}
             Err(e) => return internal("oauth session read", e),
@@ -1557,17 +1670,34 @@ fn token_claims(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Optio
     (fresh && ours).then_some((sid, claims))
 }
 
-/// A write session a bearer route (`/assistant/…`) acts for: its id and its member's library.
+/// The session a bearer route (`/assistant/…`) acts for: its id, its member's library, and its grant.
 pub(crate) struct WriteSession {
     pub sid: String,
     pub library: String,
+    pub grant: String,
 }
 
-/// The `/assistant` bearer routes' check (assistant v1 §9): an access token this server issued, in date, whose
-/// session still stands — checked on every call, as the `/mcp` relay does — with the write scope.
+/// The `/assistant` bearer routes' check for writing (assistant v1 §9): an access token this server issued, in date,
+/// whose session still stands — checked on every call, as the `/mcp` relay does — with the write scope.
 pub(crate) async fn write_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+) -> Result<WriteSession, Box<Response>> {
+    scoped_session(state, headers, WRITE_SCOPE).await
+}
+
+/// The same check for reading the projection (§15): the read scope, on a session that may read.
+pub(crate) async fn read_session(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<WriteSession, Box<Response>> {
+    scoped_session(state, headers, READ_SCOPE).await
+}
+
+async fn scoped_session(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    scope: &str,
 ) -> Result<WriteSession, Box<Response>> {
     let Some(oauth) = state.oauth.as_ref() else {
         return Err(Box::new(json_reply(StatusCode::NOT_FOUND, &error("not_found"))));
@@ -1588,11 +1718,27 @@ pub(crate) async fn write_session(
     let scoped = claims
         .get("scope")
         .and_then(Value::as_str)
-        .is_some_and(|scope| scope.split(' ').any(|s| s == WRITE_SCOPE));
-    match session.who {
-        Who::Member { library, .. } if scoped && session.grant.is_some() => Ok(WriteSession { sid, library }),
+        .is_some_and(|claimed| claimed.split(' ').any(|s| s == scope));
+    let allowed = if scope == READ_SCOPE { session.reads() } else { session.writes() };
+    match (session.who, session.grant) {
+        (Who::Member { library, .. }, Some(grant)) if scoped && allowed => {
+            Ok(WriteSession { sid, library, grant })
+        }
         _ => Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("insufficient_scope")))),
     }
+}
+
+/// Whether a session of `library` that may read names `grant` (§15): a projection is stored only for one.
+pub(crate) async fn reads_grant(state: &AppState, library: &str, grant: &str) -> io::Result<bool> {
+    let index = load_index(state).await?;
+    for entry in index.sessions.iter().filter(|e| e.host == library && e.gid.is_none()) {
+        if let Some(session) = load::<Session>(state, &session_key(&entry.sid)).await? {
+            if session.reads() && session.grant.as_deref() == Some(grant) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// `401 invalid_token`, with the challenge that says where to get one.
@@ -2000,13 +2146,37 @@ pub(crate) mod tests {
         json!({ "write": { "grant": key.id(), "key": b64url(seed) } })
     }
 
+    /// The approval body for a connection that may read (§15), with `write` too when asked.
+    fn read_body(seed: &[u8; 32], read_key: &[u8; 32], write: bool) -> Value {
+        let key = GrantKey::from_secret(seed);
+        let mut body =
+            json!({ "read": { "grant": key.id(), "key": b64url(seed), "readKey": b64url(read_key) } });
+        if write {
+            body["write"] = json!({ "grant": key.id(), "key": b64url(seed) });
+        }
+        body
+    }
+
     /// The whole flow for a member who lets the assistant change the library with the grant `seed`.
     pub(crate) async fn connect_write(h: &Harness, seed: &[u8; 32]) -> Value {
+        connect_with(h, write_body(seed)).await
+    }
+
+    /// The whole flow for a member who lets the assistant read (and write, when asked) with the grant `seed`.
+    pub(crate) async fn connect_read(
+        h: &Harness,
+        seed: &[u8; 32],
+        read_key: &[u8; 32],
+        write: bool,
+    ) -> Value {
+        connect_with(h, read_body(seed, read_key, write)).await
+    }
+
+    async fn connect_with(h: &Harness, body: Value) -> Value {
         let client = register(h).await;
         let id = request(h, &client).await;
         let claim = member();
-        let (status, approved) =
-            approve_with(h, &id, &[("x-den-library-member", &claim)], write_body(seed)).await;
+        let (status, approved) = approve_with(h, &id, &[("x-den-library-member", &claim)], body).await;
         assert_eq!(status, StatusCode::OK, "{approved}");
         let code = query_of(approved["redirect"].as_str().unwrap())["code"].clone();
         let (status, mut tokens) = post_form(
@@ -2084,6 +2254,138 @@ pub(crate) mod tests {
         assert!(write_public_key(&b64url(&[1; 32])).is_none(), "a key that is not X-Wing's is refused");
     }
 
+    /// The read vectors (§15): the 80-byte wrap opens under the refresh secret to the grant and its read key, and the
+    /// `dr` this server issues opens to the same; a read claim needs a read key.
+    #[test]
+    fn the_read_wrap_and_claim_are_the_vectors() {
+        let v = vectors();
+        let f = &v["fixed"];
+        let r = &f["read"];
+        let read_key: [u8; 32] =
+            den_assistant::b64url_decode(r["readKey"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let grant = GrantKey::from_secret(&seed("grant")).with_read_key(&read_key);
+        let session = r["wrap"]["session"].as_str().unwrap();
+        let (_, secret) = f["wrap"]["refreshToken"].as_str().unwrap().split_once('.').unwrap();
+        let vector = r["wrap"]["wrapped"].as_str().unwrap();
+        let opened = unwrap_grant(secret, session, vector).unwrap();
+        assert_eq!((opened.id(), opened.read_key()), (grant.id(), Some(&read_key)));
+        let wrapped = wrap_grant(secret, session, &grant);
+        assert_eq!(wrapped.len(), 144);
+        assert_eq!(unwrap_grant(secret, session, &wrapped).unwrap().read_key(), Some(&read_key));
+
+        let sub = r["claim"]["sub"].as_str().unwrap();
+        let public = write_public_key(f["keys"]["mcp"]["public"].as_str().unwrap()).unwrap();
+        let claim = read_claim(&public, sub, &grant).unwrap();
+        assert_eq!(claim.len() as u64, r["claim"]["claimLength"].as_u64().unwrap());
+        let opened = den_assistant::open_read_claim(&seed("mcp"), sub, &claim).unwrap();
+        assert_eq!((opened.grant(), opened.key()), (grant.id(), &read_key));
+        assert!(
+            den_assistant::open_read_claim(&seed("mcp"), sub, r["claim"]["claim"].as_str().unwrap()).is_ok()
+        );
+        assert!(read_claim(&public, sub, &GrantKey::from_secret(&seed("grant"))).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_member_lets_an_assistant_read_without_writing() {
+        let h = write_harness().await;
+        let read_key = [5u8; 32];
+        let tokens = connect_read(&h, &seed("grant"), &read_key, false).await;
+        assert_eq!(tokens["scope"], READ_SCOPES);
+        let access = tokens["access_token"].as_str().unwrap();
+        let claims = claims_of(access);
+        assert_eq!(claims["scope"], READ_SCOPES);
+        assert!(claims.get("dw").is_none(), "a read-only connection carries no grant key");
+        let sub = claims["sub"].as_str().unwrap();
+        let opened =
+            den_assistant::open_read_claim(&seed("mcp"), sub, claims["dr"].as_str().unwrap()).unwrap();
+        assert_eq!((opened.grant(), opened.key()), (GrantKey::from_secret(&seed("grant")).id(), &read_key));
+        let session = stored_session(&h, access).await;
+        assert!(session.read_only && session.read && !session.writes());
+        let claim = member();
+        let (_, listed) =
+            send_json(&h, "GET", "/oauth/connections", &[("x-den-library-member", &claim)]).await;
+        assert_eq!(
+            (&listed["connections"][0]["read"], &listed["connections"][0]["write"]),
+            (&json!(true), &json!(false))
+        );
+        // A refresh re-wraps the read key too: the next token still reads.
+        let first = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let (status, next) = refresh_with(&h, &tokens, &first).await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["scope"], READ_SCOPES);
+        let next_claims = claims_of(next["access_token"].as_str().unwrap());
+        assert!(
+            den_assistant::open_read_claim(&seed("mcp"), sub, next_claims["dr"].as_str().unwrap()).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_may_read_and_write_with_one_grant() {
+        let h = write_harness().await;
+        let tokens = connect_read(&h, &seed("grant"), &[6; 32], true).await;
+        assert_eq!(tokens["scope"], READ_WRITE_SCOPES);
+        let claims = claims_of(tokens["access_token"].as_str().unwrap());
+        assert!(claims["dw"].is_string() && claims["dr"].is_string());
+
+        // Both objects must name the same grant and key.
+        let client = register(&h).await;
+        let id = request(&h, &client).await;
+        let claim = member();
+        let proof = [("x-den-library-member", claim.as_str())];
+        let mut mixed = read_body(&seed("grant"), &[6; 32], true);
+        mixed["write"] = write_body(&seed("other"))["write"].clone();
+        assert_eq!(approve_with(&h, &id, &proof, mixed).await.1["error"], "invalid_grant_key");
+        let mut short = read_body(&seed("grant"), &[6; 32], false);
+        short["read"]["readKey"] = json!(b64url(&[1; 16]));
+        assert_eq!(approve_with(&h, &id, &proof, short).await.1["error"], "invalid_grant_key");
+        // A guest never reads; nor does a request that asked for searching alone.
+        let (_, guest_proof) = guest(&h, json!({})).await;
+        assert_eq!(
+            approve_with(
+                &h,
+                &id,
+                &[("x-den-grant", &guest_proof)],
+                read_body(&seed("grant"), &[6; 32], false)
+            )
+            .await,
+            (StatusCode::FORBIDDEN, json!({ "error": "read_not_for_guests" }))
+        );
+        let resp = h
+            .send("GET", &authorize_url(&client, "&scope=den%3Asearch%20den%3Alibrary.write"), None, &[])
+            .await;
+        let write_only = location(&resp).split_once("?request=").unwrap().1.to_owned();
+        assert_eq!(h.call("GET", &format!("/oauth/request/{write_only}"), None).await.1["read"], false);
+        assert_eq!(
+            approve_with(&h, &write_only, &proof, read_body(&seed("grant"), &[6; 32], false)).await,
+            (StatusCode::BAD_REQUEST, json!({ "error": "invalid_scope" }))
+        );
+    }
+
+    /// A write session made before reads (v0.265: a 48-byte wrap, no `read` or `read_only` in its record) keeps
+    /// refreshing as a writer, and its record is written back the same.
+    #[tokio::test]
+    async fn a_write_session_from_before_reads_keeps_working() {
+        let h = write_harness().await;
+        let tokens = connect_write(&h, &seed("grant")).await;
+        let access = tokens["access_token"].as_str().unwrap();
+        let sid = claims_of(access)["sub"].as_str().unwrap().to_owned();
+        let path = h
+            .dir
+            .join(NS)
+            .join(format!("{}.json", crate::hex(&Sha256::digest(session_key(&sid).as_bytes()))));
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(!stored.contains("\"read\"") && !stored.contains("read_only"), "{stored}");
+        let session = stored_session(&h, access).await;
+        assert_eq!(session.wrap.as_ref().unwrap().len(), 102, "the v1 48-byte wrap");
+        let first = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let (status, next) = refresh_with(&h, &tokens, &first).await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["scope"], WRITE_SCOPES);
+        let claims = claims_of(next["access_token"].as_str().unwrap());
+        assert!(claims["dw"].is_string() && claims.get("dr").is_none());
+        assert_eq!(stored_session(&h, next["access_token"].as_str().unwrap()).await.wrap.unwrap().len(), 102);
+    }
+
     #[tokio::test]
     async fn the_write_scope_is_offered_only_where_den_mcp_has_a_key() {
         let off = harness().await;
@@ -2097,7 +2399,7 @@ pub(crate) mod tests {
 
         let h = write_harness().await;
         let (_, meta) = h.call("GET", "/.well-known/oauth-authorization-server", None).await;
-        assert_eq!(meta["scopes_supported"], json!([SCOPE, WRITE_SCOPE]));
+        assert_eq!(meta["scopes_supported"], json!([SCOPE, WRITE_SCOPE, READ_SCOPE]));
         let client = register(&h).await;
         for (scope, write) in
             [("", true), ("&scope=den%3Asearch%20den%3Alibrary.write", true), ("&scope=den%3Asearch", false)]
@@ -2974,6 +3276,8 @@ pub(crate) mod tests {
             grant: None,
             wrap: None,
             previous_wrap: None,
+            read_only: false,
+            read: false,
         };
         let now = 1_800_000_000;
         let (token, _, _) = access_token(&oauth, &session, now * 1000, None, None);
@@ -3089,6 +3393,8 @@ pub(crate) mod tests {
             grant: None,
             wrap: None,
             previous_wrap: None,
+            read_only: false,
+            read: false,
         };
         let (forged, _, _) = access_token(&other, &session, h.state.now(), None, None);
         assert_eq!(call_mcp(&h, &forged).await.status(), StatusCode::UNAUTHORIZED);
@@ -3122,6 +3428,8 @@ pub(crate) mod tests {
             grant: None,
             wrap: None,
             previous_wrap: None,
+            read_only: false,
+            read: false,
         };
         let (token, expires_in, _) = access_token(&oauth, &session, 1_800_000_000_000, None, None);
         assert_eq!(expires_in, ACCESS_TTL_S);

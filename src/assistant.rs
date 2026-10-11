@@ -9,6 +9,13 @@
 //!   POST /assistant/drain[?wait=S]  member   every waiting request, oldest first, none removed
 //!   POST /assistant/ack             member   remove those up to a `seq`
 //!
+//! And reads (§15): devices publish each read grant's projection, sealed under a read key den-edge holds only wrapped
+//! under a refresh secret it does not keep, and den-mcp fetches it with the session's token.
+//!
+//!   PUT    /assistant/projection/{grant}  member   replace a grant's projection, all its parts at once
+//!   DELETE /assistant/projection/{grant}  member   drop it
+//!   GET    /assistant/projection          bearer   the session's grant's projection, every part of one publish
+//!
 //! Log lines name the route and status only (`handler.rs`); nothing here logs a body, a key or a token.
 
 use crate::handler::{error, internal, json_reply, read_json, retry_after};
@@ -39,6 +46,28 @@ const DAY_MS: u64 = 86_400_000;
 /// Held drains per address (as inbox v1 §3), and in all.
 pub const MAX_HELD_PER_ADDRESS: usize = 2;
 pub const MAX_HELD: usize = 16;
+/// A projection (§15): at most this many sealed parts, this many characters in all, and each part at least a nonce
+/// and a tag. Stored whole, so a reader never sees parts of two publishes.
+const MAX_PROJECTION_PARTS: usize = 64;
+const MAX_PROJECTION_CHARS: usize = 16 * 1024 * 1024;
+const MIN_PROJECTION_PART_BYTES: usize = 12 + 16;
+/// The body cap of a projection's PUT: its parts in JSON.
+pub const PROJECTION_BODY_BYTES: usize = MAX_PROJECTION_CHARS + 64 * 1024;
+/// Publishes per grant an hour.
+const PROJECTIONS_PER_HOUR: u32 = 60;
+const HOUR_MS: u64 = 3_600_000;
+
+#[derive(Serialize, Deserialize)]
+struct Projection {
+    library: String,
+    parts: Vec<String>,
+    #[serde(rename = "storedAt")]
+    stored_at: u64,
+}
+
+fn projection_key(grant: &str) -> String {
+    format!("p:{grant}")
+}
 
 #[derive(Serialize, Deserialize, Default)]
 struct Queue {
@@ -80,11 +109,125 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         (Method::POST, "/assistant/append") => append(state, req).await,
         (Method::POST, "/assistant/drain") => drain(state, req).await,
         (Method::POST, "/assistant/ack") => ack(state, req).await,
-        (_, "/assistant/dropbox" | "/assistant/append" | "/assistant/drain" | "/assistant/ack") => {
-            crate::handler::method_not_allowed()
-        }
-        _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        (Method::GET | Method::HEAD, "/assistant/projection") => get_projection(state, req).await,
+        (_, "/assistant/dropbox" | "/assistant/append" | "/assistant/drain" | "/assistant/ack")
+        | (_, "/assistant/projection") => crate::handler::method_not_allowed(),
+        (method, path) => match path.strip_prefix("/assistant/projection/") {
+            Some(grant)
+                if grant.len() == 32 && grant.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
+                let grant = grant.to_owned();
+                match method {
+                    Method::PUT => put_projection(state, req, &grant).await,
+                    Method::DELETE => drop_projection(state, req, &grant).await,
+                    _ => crate::handler::method_not_allowed(),
+                }
+            }
+            _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        },
     }
+}
+
+/// Every part unpadded base64url of at least a nonce and a tag, at most `MAX_PROJECTION_PARTS` of them and
+/// `MAX_PROJECTION_CHARS` in all.
+fn valid_parts(parts: &[String]) -> bool {
+    !parts.is_empty()
+        && parts.len() <= MAX_PROJECTION_PARTS
+        && parts.iter().map(String::len).sum::<usize>() <= MAX_PROJECTION_CHARS
+        && parts.iter().all(|part| {
+            den_assistant::b64url_decode(part).is_some_and(|bytes| bytes.len() >= MIN_PROJECTION_PART_BYTES)
+        })
+}
+
+async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response {
+    let library = match member_library(state, req.headers()).await {
+        Ok(library) => library,
+        Err(refused) => return *refused,
+    };
+    let bucket = format!("assistant-projection:{grant}");
+    if let Some(refused) =
+        limited(crate::link::throttled_per_window(state, &bucket, PROJECTIONS_PER_HOUR, 1, HOUR_MS))
+    {
+        return refused;
+    }
+    let body = match read_json(req, PROJECTION_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let Some(parts) = body
+        .get("parts")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.iter().map(|p| p.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>())
+        .filter(|parts| valid_parts(parts))
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_sealed"));
+    };
+    // Checked under the lock a session's end deletes the projection under, so a publish racing it is refused or
+    // deleted after it, never left behind.
+    let _write = state.assistant_lock.lock().await;
+    match crate::oauth::reads_grant(state, &library, grant).await {
+        Ok(true) => {}
+        Ok(false) => return json_reply(StatusCode::NOT_FOUND, &error("unknown_grant")),
+        Err(e) => return internal("assistant projection grant", e),
+    }
+    let record = Projection { library, parts, stored_at: state.now() };
+    let bytes = serde_json::to_vec(&record).expect("a projection always serialises");
+    if let Err(e) = state.store.put(NS, &projection_key(grant), &bytes).await {
+        return internal("assistant projection write", e);
+    }
+    no_content()
+}
+
+async fn drop_projection(state: &AppState, req: Request, grant: &str) -> Response {
+    let library = match member_library(state, req.headers()).await {
+        Ok(library) => library,
+        Err(refused) => return *refused,
+    };
+    let _write = state.assistant_lock.lock().await;
+    // Only the member's own library's: another library's grant is left as it is, and answered the same.
+    match load_projection(state, grant).await {
+        Ok(Some(held)) if held.library == library => {
+            if let Err(e) = state.store.delete(NS, &projection_key(grant)).await {
+                return internal("assistant projection delete", e);
+            }
+        }
+        Ok(_) => {}
+        Err(e) => return internal("assistant projection read", e),
+    }
+    no_content()
+}
+
+async fn get_projection(state: &AppState, req: Request) -> Response {
+    let session = match crate::oauth::read_session(state, req.headers()).await {
+        Ok(session) => session,
+        Err(refused) => return *refused,
+    };
+    match load_projection(state, &session.grant).await {
+        Ok(Some(held)) if held.library == session.library => json_reply(
+            StatusCode::OK,
+            &json!({
+                "library": held.library,
+                "grant": session.grant,
+                "parts": held.parts,
+                "storedAt": held.stored_at,
+            }),
+        ),
+        Ok(_) => json_reply(StatusCode::NOT_FOUND, &error("no_projection")),
+        Err(e) => internal("assistant projection read", e),
+    }
+}
+
+async fn load_projection(state: &AppState, grant: &str) -> std::io::Result<Option<Projection>> {
+    match state.store.get(NS, &projection_key(grant)).await? {
+        Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(std::io::Error::other),
+        None => Ok(None),
+    }
+}
+
+/// Drop a grant's projection: its last read session ended (`oauth.rs`).
+pub async fn delete_projection(state: &AppState, grant: &str) -> std::io::Result<()> {
+    let _write = state.assistant_lock.lock().await;
+    state.store.delete(NS, &projection_key(grant)).await
 }
 
 /// The library a member route's `x-den-library-member` proves, or `403 not_a_member`.
@@ -292,7 +435,7 @@ fn no_content() -> Response {
 mod tests {
     use crate::handler::tests::{body_json, Harness};
     use crate::oauth::tests::{
-        connect_member, connect_write, member, seed, vectors, write_harness, LIB, TOKEN,
+        connect_member, connect_read, connect_write, member, seed, vectors, write_harness, LIB, TOKEN,
     };
     use axum::http::{header, StatusCode};
     use serde_json::{json, Value};
@@ -617,5 +760,134 @@ mod tests {
             )
             .await;
         assert_eq!(body_json(refreshed).await["error"], "invalid_grant");
+    }
+
+    // ---- reads (§15)
+
+    fn grant_id() -> String {
+        den_assistant::GrantKey::from_secret(&seed("grant")).id().to_owned()
+    }
+
+    fn part(byte: u8) -> String {
+        den_assistant::b64url(&[byte; 64])
+    }
+
+    async fn read_access(h: &Harness) -> String {
+        let tokens = connect_read(h, &seed("grant"), &[5; 32], false).await;
+        tokens["access_token"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_device_publishes_a_projection_and_den_mcp_reads_every_part_of_it() {
+        let h = write_harness().await;
+        let path = format!("/assistant/projection/{}", grant_id());
+        // Nobody may read it yet: nothing is stored.
+        assert_eq!(
+            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await,
+            (StatusCode::NOT_FOUND, json!({ "error": "unknown_grant" }))
+        );
+        let access = read_access(&h).await;
+        assert_eq!(
+            as_assistant(&h, &access, "GET", "/assistant/projection", None).await,
+            (StatusCode::NOT_FOUND, json!({ "error": "no_projection" }))
+        );
+        let (status, _) = send(&h, "PUT", &path, Some(json!({ "parts": [part(1)] })), &[]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "only a member publishes");
+        let too_many: Vec<String> = (0..65).map(|_| part(1)).collect();
+        for bad in
+            [json!({ "parts": [] }), json!({ "parts": ["AAAA"] }), json!({ "parts": too_many }), json!({})]
+        {
+            assert_eq!(
+                as_member(&h, "PUT", &path, Some(bad)).await,
+                (StatusCode::BAD_REQUEST, json!({ "error": "invalid_sealed" }))
+            );
+        }
+        assert_eq!(
+            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1), part(2)] }))).await.0,
+            StatusCode::NO_CONTENT
+        );
+        // A later publish replaces the whole set: never parts of two.
+        assert_eq!(
+            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(3)] }))).await.0,
+            StatusCode::NO_CONTENT
+        );
+        let (status, got) = as_assistant(&h, &access, "GET", "/assistant/projection", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (&got["library"], &got["grant"], &got["parts"]),
+            (&json!(LIB), &json!(grant_id()), &json!([part(3)]))
+        );
+        assert!(got["storedAt"].is_u64());
+        // A write-only connection has no read scope.
+        let (_, write) = write_access(&h).await;
+        assert_eq!(
+            as_assistant(&h, &write, "GET", "/assistant/projection", None).await,
+            (StatusCode::FORBIDDEN, json!({ "error": "insufficient_scope" }))
+        );
+        // A device deletes it once the read is revoked.
+        assert_eq!(as_member(&h, "DELETE", &path, None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(as_member(&h, "DELETE", &path, None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            as_assistant(&h, &access, "GET", "/assistant/projection", None).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn publishes_are_limited_per_grant_an_hour() {
+        let h = write_harness().await;
+        read_access(&h).await;
+        let path = format!("/assistant/projection/{}", grant_id());
+        for _ in 0..super::PROJECTIONS_PER_HOUR {
+            assert_eq!(
+                as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        h.advance(super::HOUR_MS);
+        assert_eq!(
+            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// The projection goes with the last session that could read it: disconnected from Settings, or the library's key
+    /// reset.
+    #[tokio::test]
+    async fn a_projection_goes_with_its_read_session() {
+        let h = write_harness().await;
+        let path = format!("/assistant/projection/{}", grant_id());
+        let stored = |h: &Harness| {
+            let state = std::sync::Arc::clone(&h.state);
+            async move { state.store.get(super::NS, &super::projection_key(&grant_id())).await.unwrap().is_some() }
+        };
+        read_access(&h).await;
+        as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await;
+        assert!(stored(&h).await);
+        let claim = member();
+        let (_, listed) =
+            send(&h, "GET", "/oauth/connections", None, &[("x-den-library-member", &claim)]).await;
+        let sid = listed["connections"][0]["sid"].as_str().unwrap().to_owned();
+        send(&h, "DELETE", &format!("/oauth/connections/{sid}"), None, &[("x-den-library-member", &claim)])
+            .await;
+        assert!(!stored(&h).await, "disconnected");
+
+        read_access(&h).await;
+        as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await;
+        assert!(stored(&h).await);
+        let resp = h
+            .send(
+                "DELETE",
+                &format!("/lib/{LIB}"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-generation", "0")],
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!stored(&h).await, "the key reset");
     }
 }
