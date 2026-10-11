@@ -208,32 +208,6 @@ async fn serve_file(
     if let Some(release) = build {
         stamp_release(resp.headers_mut(), release);
     }
-    // A browser loading this shell over the network can ask for the shared billboard while it is still
-    // downloading/parsing the app bundle. This header only ever reaches an actual navigation, never a route the
-    // app's own router moves to in place (`Router.svelte`) — Home reached that way starts the same request at
-    // the top of `main.ts` instead.
-    if shell {
-        let scope = match path {
-            "/" | "/index.html" => Some("home"),
-            "/movies" => Some("movies"),
-            "/series" => Some("series"),
-            _ => None,
-        };
-        if let Some(scope) = scope {
-            let day = crate::cache::iso_date(SystemTime::now());
-            // `crossorigin` gives the preload the credentials mode of `main.ts`'s plain `fetch()`. Without it the
-            // browser refuses the preload for that fetch and asks the same address a second time.
-            let link =
-                format!("</atlas/recommend/{scope}.json?day={day}>; rel=preload; as=fetch; crossorigin");
-            if let Ok(value) = HeaderValue::from_str(&link) {
-                resp.headers_mut().insert(header::LINK, value);
-            }
-            // The preload names today, so Cloudflare's copy is fresh only until the day ends. Past that one visitor
-            // still gets it at once, preloading a row `main.ts` then does not ask for, while the next is fetched.
-            let stale = crate::cache::RELEASE_EDGE.1;
-            crate::cache::release_bound(resp.headers_mut(), (until_midnight(SystemTime::now()), stale));
-        }
-    }
     (if shell { "shell" } else { "asset" }, resp)
 }
 
@@ -710,12 +684,6 @@ fn respond(
     resp
 }
 
-/// Seconds from `now` to the next UTC midnight, 1 to 86400: when a shell's `Link` stops naming today.
-fn until_midnight(now: SystemTime) -> u64 {
-    let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    86_400 - secs % 86_400
-}
-
 const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
 
 /// The web build a shell belongs to — a diagnostic, readable on any request for `/`. Not the ETag: Cloudflare
@@ -757,15 +725,6 @@ mod tests {
     use axum::http::{header, StatusCode};
     use sha2::Digest;
     use std::sync::Arc;
-
-    #[test]
-    fn a_kept_shell_ends_with_the_utc_day() {
-        let at =
-            |secs: u64| super::until_midnight(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
-        assert_eq!(at(0), 86_400, "at midnight, a whole day");
-        assert_eq!(at(86_399), 1);
-        assert_eq!(at(86_400 * 20_000 + 3_600), 82_800);
-    }
 
     #[test]
     fn policy_allows_local_wasm_without_allowing_javascript_eval() {
@@ -1132,21 +1091,10 @@ mod tests {
         assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
-        // Cloudflare keeps it fresh until the day its `Link` names ends, and a deploy purges it by tag before then.
-        let edge = root.headers()["cdn-cache-control"].to_str().unwrap();
-        let secs: u64 = edge
-            .strip_prefix("max-age=")
-            .and_then(|rest| rest.strip_suffix(", stale-while-revalidate=86400"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        let left = super::until_midnight(std::time::SystemTime::now());
-        assert!(secs >= left && secs <= left + 1, "{edge} against {left}s to midnight");
         assert_eq!(root.headers()["cache-tag"], "den-edge");
-        let link = root.headers()[header::LINK].to_str().unwrap();
-        assert!(link.starts_with("</atlas/recommend/home.json?day="));
-        // Without `crossorigin` the browser refuses the preload for `main.ts`'s fetch and asks twice (#192).
-        assert!(link.ends_with(">; rel=preload; as=fetch; crossorigin"));
+        // No billboard preload: the billboard is fetched from the library service Worker, which a document's
+        // preload cannot answer. Measured on Chrome: the Worker asked again and Chrome warned on every load.
+        assert!(!root.headers().contains_key(header::LINK));
         assert!(body_text(root).await.contains("<title>Den</title>"));
 
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
@@ -1167,8 +1115,8 @@ mod tests {
             "public, max-age=86400, stale-while-revalidate=604800"
         );
         assert!(!og.headers().contains_key("cdn-cache-control"));
-        // A shell naming no day, and the service worker, are kept as long as atlas's answers, until a deploy purges.
-        for path in ["/sw.js", "/movies/603"] {
+        // Every shell, and the service worker, are kept as long as atlas's answers, until a deploy purges.
+        for path in ["/", "/index.html", "/movies", "/series", "/sw.js", "/movies/603"] {
             let resp = h.send("GET", path, None, &[]).await;
             assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
             assert_eq!(
@@ -1178,22 +1126,11 @@ mod tests {
             );
             assert_eq!(resp.headers()["cache-tag"], "den-edge", "{path}");
         }
-        let index = h.send("GET", "/index.html", None, &[]).await;
-        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
-        assert_eq!(index.headers()["cache-tag"], "den-edge");
-        let index_edge = index.headers()["cdn-cache-control"].to_str().unwrap();
-        assert!(!index_edge.starts_with("max-age=2592000"), "it names a day as `/` does: {index_edge}");
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");
-        assert!(!h.send("GET", "/movies/603", None, &[]).await.headers().contains_key(header::LINK));
-        assert!(h.send("GET", "/movies", None, &[]).await.headers()[header::LINK]
-            .to_str()
-            .unwrap()
-            .contains("/recommend/movies.json?day="));
-        // index.html's retry past Cloudflare's cache adds `den-retry` to the address: still the shell, with its preload.
+        // index.html's retry past Cloudflare's cache adds `den-retry` to the address: still the shell.
         let retry = h.send("GET", "/movies?den-retry=abc", None, &[]).await;
-        assert!(retry.headers()[header::LINK].to_str().unwrap().contains("/recommend/movies.json?day="));
         assert!(body_text(retry).await.contains("<title>Den</title>"));
         // A chunk a later release may yet carry is never kept missing.
         let missing = h.send("GET", "/assets/missing.js", None, &[]).await;
