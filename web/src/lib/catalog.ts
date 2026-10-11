@@ -880,37 +880,59 @@ export interface AtlasFilterSource {
  * atlas lists a title by id and name, and its poster only where some browser has already told den-edge
  * (`withSharedTitleMetadata`). A card with no poster is hidden, so without this an atlas row is mostly empty. The
  * ones still missing are looked up, as search's `drawable` does; one TMDB can't name stays as it was.
+ *
+ * A page's cards with a poster go at once, and those being looked up lead the next page. Waiting for them held the
+ * whole page: in a production trace, a person picked in Search showed none of their films until TMDB answered the
+ * lookup for one title den-edge had no poster for, 1.19 s. A page with nothing to show yet still waits, since an
+ * empty page ends the row.
  */
 export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
   if (!title) return row;
+  /** The last page's cards that were being looked up, as their lookups leave them. */
+  let looking: Promise<Title[]> = Promise.resolve([]);
   return {
     ...row,
     load: async (page) => {
+      if (page === 1) looking = Promise.resolve([]);
       const loaded = await row.load(page);
-      const out = [...loaded];
-      const missing = loaded.flatMap((title, at) => (title.posterPath ? [] : [{ title, at }]));
-      await runBounded(missing, 4, async ({ title: partial, at }) => {
-        try {
-          // The content wire intentionally accepts only a title reference. Atlas cards carry presentation fields
-          // too; passing the whole card made exact validation reject this local request before it reached the
-          // Worker, and a caller could mistake that programming error for a dead transport.
-          const full = await title({ type: partial.type, id: partial.id });
-          if (full)
-            out[at] = {
-              ...full,
-              primaryGenreName: partial.primaryGenreName ?? full.primaryGenreName,
-              likely: partial.likely,
-            };
-        } catch (error) {
-          console.warn('atlas row: no poster for', `${partial.type}:${partial.id}`, error);
-          // Leaving this page cancels the remaining speculative lookups. An ordinary failure still belongs only to
-          // this title, as before the queue was bounded; the other cards can still find their artwork.
-          if (error instanceof DOMException && error.name === 'AbortError') throw error;
-        }
-      }).catch(() => undefined);
-      return out;
+      const looked = lookUp(
+        loaded.filter((title) => !title.posterPath),
+        title,
+      );
+      const ready = [...(await looking), ...loaded.filter((title) => title.posterPath)];
+      looking = ready.length ? looked : Promise.resolve([]);
+      return ready.length ? ready : looked;
     },
   };
+}
+
+/** Each title as TMDB draws it, at most four asked at once; one TMDB can't draw is left as it was. */
+async function lookUp(
+  partials: Title[],
+  title: NonNullable<AtlasFilterSource['title']>,
+): Promise<Title[]> {
+  const out = [...partials];
+  const missing = partials.map((title, at) => ({ title, at }));
+  await runBounded(missing, 4, async ({ title: partial, at }) => {
+    try {
+      // The content wire intentionally accepts only a title reference. Atlas cards carry presentation fields
+      // too; passing the whole card made exact validation reject this local request before it reached the
+      // Worker, and a caller could mistake that programming error for a dead transport.
+      const full = await title({ type: partial.type, id: partial.id });
+      if (full)
+        out[at] = {
+          ...full,
+          primaryGenreName: partial.primaryGenreName ?? full.primaryGenreName,
+          likely: partial.likely,
+        };
+    } catch (error) {
+      console.warn('atlas row: no poster for', `${partial.type}:${partial.id}`, error);
+      // Leaving this page cancels the remaining speculative lookups. An ordinary failure still belongs only to
+      // this title, as before the queue was bounded; the other cards can still find their artwork.
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    }
+  }).catch(() => undefined);
+  return out;
 }
 
 /**

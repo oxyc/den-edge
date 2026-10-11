@@ -476,6 +476,51 @@ describe('rows atlas’s filter answers', () => {
     ]);
   });
 
+  it('shows a page’s posters without waiting on its lookups, which lead the next page', async () => {
+    const card = (id: number, posterPath?: string) => ({
+      type: 'movie' as const,
+      id,
+      title: `Title ${id}`,
+      ...(posterPath ? { posterPath } : {}),
+    });
+    const pages = [[card(1, '/1.jpg'), card(2), card(3, '/3.jpg')], [card(4, '/4.jpg')], []];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const row = drawn(
+      { id: 'staged', title: 'Staged', load: async (page) => pages[page - 1]! },
+      async (ref) => {
+        await gate;
+        return { ...ref, title: `Drawn ${ref.id}`, posterPath: `/${ref.id}.jpg` };
+      },
+    );
+
+    expect((await row.load(1)).map((title) => title.id)).toEqual([1, 3]);
+    const second = row.load(2);
+    release();
+    expect((await second).map((title) => title.title)).toEqual(['Drawn 2', 'Title 4']);
+    expect(await row.load(3)).toEqual([]);
+  });
+
+  it('carries a last page’s lookups onto the empty page after it', async () => {
+    const row = drawn(
+      {
+        id: 'tail',
+        title: 'Tail',
+        load: async (page) =>
+          page === 1
+            ? [
+                { type: 'movie' as const, id: 1, title: 'One', posterPath: '/1.jpg' },
+                { type: 'movie' as const, id: 2, title: 'Two' },
+              ]
+            : [],
+      },
+      async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/2.jpg' }),
+    );
+    expect((await row.load(1)).map((title) => title.id)).toEqual([1]);
+    expect((await row.load(2)).map((title) => title.id)).toEqual([2]);
+    expect(await row.load(3)).toEqual([]);
+  });
+
   it('bounds a posterless atlas page’s TMDB lookups', async () => {
     const titles = Array.from({ length: 10 }, (_, id) => ({
       type: 'movie' as const,
