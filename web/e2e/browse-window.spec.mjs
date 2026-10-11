@@ -132,6 +132,41 @@ test('large rows keep every title reachable while mounting a bounded card window
   await page.close();
 });
 
+test('a windowed row draws art for its on-screen cards without an observer per card', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await page.addInitScript(() => {
+    const observe = IntersectionObserver.prototype.observe;
+    window.observedCards = 0;
+    IntersectionObserver.prototype.observe = function (element) {
+      if (element.matches('.card')) window.observedCards++;
+      return observe.call(this, element);
+    };
+  });
+  await guardNetwork(page);
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  await page.goto(`${E2E_ORIGIN}/test/browse-window.html`);
+  const row = page.getByRole('region', { name: 'Windowed row' });
+  const drawn = () =>
+    row.evaluate((node) =>
+      [...node.querySelectorAll('[data-card-index]')]
+        .filter((slot) => slot.querySelector('img'))
+        .map((slot) => Number(slot.dataset.cardIndex)),
+    );
+  // A 1280px track has 48px gutters: card 6 starts inside the right one, which a card's own observer did not count.
+  await expect.poll(drawn).toEqual([0, 1, 2, 3, 4, 5]);
+  await row.locator('.track').evaluate((node) => (node.scrollLeft = 10 * 204));
+  await expect.poll(drawn).toEqual([10, 11, 12, 13, 14, 15]);
+  expect(await page.evaluate(() => window.observedCards)).toBe(0);
+  await page.close();
+});
+
 test('windowing materially reduces a large row DOM', async ({ browser }, testInfo) => {
   async function measure(search = '') {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });

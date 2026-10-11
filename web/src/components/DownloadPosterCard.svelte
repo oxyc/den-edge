@@ -14,6 +14,7 @@
     href,
     menu = true,
     active: _active = true,
+    onscreen,
   }: {
     download:
       DownloadViewItem | { title: { season?: number; episode?: number; stillPath?: string } };
@@ -26,6 +27,8 @@
     href?: string;
     menu?: boolean;
     active?: boolean;
+    /** `PosterCard`'s, from a windowing row. */
+    onscreen?: boolean;
   } = $props();
 
   const viewDownload = $derived('status' in download ? (download as DownloadViewItem) : undefined);
@@ -54,4 +57,5 @@
   {href}
   {menu}
   checkAvailability={false}
+  {onscreen}
 />

@@ -1579,7 +1579,7 @@
         itemLabel={(entry) => entry.title.title}
         onintent={admitContinueNames}
       >
-        {#snippet children(entry)}
+        {#snippet children(entry, onscreen)}
           <PosterCard
             title={entry.title}
             caption={caption(entry)}
@@ -1587,6 +1587,7 @@
             live={liveClock(entry)}
             href={titleHref(entry.title)}
             continueWatching
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>
@@ -1608,7 +1609,7 @@
         itemLabel={(download) => download.name}
         landscape
       >
-        {#snippet children(download)}
+        {#snippet children(download, onscreen)}
           {@const title = {
             type: download.title.type,
             id: download.title.id,
@@ -1624,6 +1625,7 @@
             caption={viewHeadline(download)}
             progress={download.status.fraction}
             href={titleHref(title)}
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>
@@ -1637,11 +1639,12 @@
         itemLabel={(title) => title.title}
         onintent={admitWatchlistNames}
       >
-        {#snippet children(title)}
+        {#snippet children(title, onscreen)}
           <PosterCard
             {title}
             caption={title.year ? String(title.year) : undefined}
             href={titleHref(title)}
+            {onscreen}
           />
         {/snippet}
       </WindowedPosterRow>

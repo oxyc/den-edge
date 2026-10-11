@@ -5,6 +5,8 @@
   export const ROW_NEAR = Symbol('row near');
   /** About as far ahead as a browser starts loading a lazy image on a fast connection. */
   const AHEAD = 1250;
+  /** Availability can be useful just before a card is seen, but need not follow the much wider art lookahead. */
+  export const AVAILABILITY_AHEAD = 250;
 </script>
 
 <script lang="ts">
@@ -41,7 +43,7 @@
    * Whether the row is within `AHEAD` of the active screen. Far and retained-hidden rows release their images;
    * one shared observer replaces a separate browser lazy-image watch for every poster.
    */
-  const row = $state({ near: false });
+  const row = $state({ near: false, ahead: false });
   setContext(ROW_NEAR, row);
   const page = pageVisibility();
   let section: HTMLElement;
@@ -55,6 +57,15 @@
       return;
     }
     return observeNearViewport(section, (near) => (row.near = near), `${AHEAD}px 0px`);
+  });
+  // A windowing row tells each card whether it is on screen (`PosterCard`'s `onscreen`), so the cards' vertical
+  // availability lookahead is this one track's rather than an observer target per card.
+  $effect(() => {
+    if (!page.active || !active || !track) {
+      row.ahead = false;
+      return;
+    }
+    return observeNearViewport(track, (near) => (row.ahead = near), `${AVAILABILITY_AHEAD}px 0px`);
   });
 </script>
 

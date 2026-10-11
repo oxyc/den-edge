@@ -135,6 +135,10 @@ for (const width of [393, 700, 759, 760, 844, 1280])
     await page.goto(`${E2E_ORIGIN}/test/detail.html?series`);
     await expect(page.getByRole('heading', { level: 1, name: 'Large Series' })).toBeVisible();
     await expect(page.locator('img.backdrop')).toHaveAttribute('fetchpriority', 'high');
+    // Related's reserves join a task after the hero; the geometry pinned below is the page's once they have.
+    await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+    await page.evaluate(() => window.fixtureYield());
+    await expect.poll(() => page.locator('[data-related-placeholder]').count()).toBeGreaterThan(0);
     releaseSeason();
     await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
     await expect(page.locator('.episode.deferred')).toHaveCount(46);
@@ -252,8 +256,15 @@ test('cast and related DOM promote in geometry-preserving cancellable batches', 
 
   await page.goto(`${E2E_ORIGIN}/test/detail.html?inactive`);
   await expect(page.getByRole('heading', { level: 1, name: 'Staged Movie' })).toBeVisible();
+  // The tail's reserves follow the top of the page by one task, and move nothing above them.
+  await expect(page.locator('[data-cast-placeholder]')).toHaveCount(0);
+  await expect(page.locator('[data-related-placeholder]')).toHaveCount(0);
+  const above = await page.locator('.title-sources').boundingBox();
+  await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+  await page.evaluate(() => window.fixtureYield());
   await expect(page.locator('a.person')).toHaveCount(0);
   await expect(page.locator('[data-cast-placeholder]')).toHaveCount(1);
+  expect(await page.locator('.title-sources').boundingBox()).toEqual(above);
   await expect.poll(() => page.locator('[data-related-placeholder]').count()).toBeGreaterThan(0);
   expect(
     await page
