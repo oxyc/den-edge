@@ -340,6 +340,8 @@ const downloadPhase = (
  */
 export class LibraryLogAuthority {
   readonly #shapes = new Map<string, StoredShape>();
+  /** Moves on whenever a shape is learnt or changes: an assistant projection's Continue Watching reads them. */
+  #shapesVersion = 0;
   readonly #continueProjector = new ContinueProjector();
   readonly #log: LibraryLog;
   readonly #clock: ClockStore;
@@ -465,6 +467,7 @@ export class LibraryLogAuthority {
             ]),
         ),
       head: () => this.#log.logHead,
+      inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
       putProjection: (grant, set, parts) =>
         this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { set, parts }),
       deleteProjection: (grant) => this.#memberSend(`/assistant/projection/${grant}`, 'DELETE'),
@@ -743,7 +746,8 @@ export class LibraryLogAuthority {
     switch (task.kind) {
       case 'assistant.consent': {
         const keys = await this.#assistant.consent(task.client, task);
-        return { result: { kind: 'assistant.consent', ...keys }, affected: [] };
+        // Settings carries what the page owes assistants: a first connection starts its work there.
+        return { result: { kind: 'assistant.consent', ...keys }, affected: [{ kind: 'settings' }] };
       }
       case 'assistant.publish':
         return {
@@ -756,12 +760,12 @@ export class LibraryLogAuthority {
       case 'assistant.revoke':
         return {
           result: { kind: 'assistant.revoke', outcome: await this.#assistant.revoke(task.grant) },
-          affected: [],
+          affected: [{ kind: 'settings' }],
         };
       case 'assistant.renew':
         return {
           result: { kind: 'assistant.renew', renewed: await this.#assistant.renew(task.grants) },
-          affected: [],
+          affected: [{ kind: 'settings' }],
         };
       case 'assistant.apply': {
         const { results, ack, dropbox, affected } = await this.#assistant.apply(task.messages);
@@ -799,6 +803,7 @@ export class LibraryLogAuthority {
       shape: { counts, ...(observation.lastAired ? { lastAired: observation.lastAired } : {}) },
       digest,
     });
+    this.#shapesVersion++;
     return {
       outcome: 'applied',
       affected: [{ kind: 'title', title: observation.title }, { kind: 'continue' }],
@@ -1049,7 +1054,7 @@ export class LibraryLogAuthority {
     };
   }
 
-  #settings(): Extract<LibrarySelectionValue, { kind: 'settings' }> {
+  async #settings(): Promise<Extract<LibrarySelectionValue, { kind: 'settings' }>> {
     const stored = readSyncedPrefs(this.#log.settings('prefs'));
     const validLanguage = (value: string | undefined): value is string =>
       value !== undefined && /^[a-z]{2}$/.test(value);
@@ -1099,6 +1104,7 @@ export class LibraryLogAuthority {
         ).slice(0, 256),
         services,
       },
+      assistant: await this.#assistant.needs(),
     };
   }
 

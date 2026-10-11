@@ -1472,7 +1472,14 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
           value.items.length
       );
     case 'settings':
-      return exact(value, ['kind', 'preferences']) && preferencesView(value.preferences);
+      return (
+        exact(value, ['kind', 'preferences', 'assistant']) &&
+        preferencesView(value.preferences) &&
+        record(value.assistant) &&
+        exact(value.assistant, ['write', 'read']) &&
+        bool(value.assistant.write) &&
+        bool(value.assistant.read)
+      );
     case 'connections':
       return connectionsView(value);
     case 'simkl':

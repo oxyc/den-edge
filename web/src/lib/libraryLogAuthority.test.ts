@@ -747,6 +747,7 @@ describe('LibraryLogAuthority', () => {
         servicesConfigured: false,
         maturityCeiling: undefined,
       },
+      assistant: { write: false, read: false },
     });
 
     await expect(

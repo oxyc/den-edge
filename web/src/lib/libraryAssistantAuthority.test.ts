@@ -96,6 +96,7 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     documents: () => shared.documents,
     layouts: () => ({}),
     head: () => 7,
+    inputs: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
     putProjection: async (grant, set, parts) => {
       shared.projections.set(grant, { set, parts });
       shared.sent.push(`put:${grant}`);
@@ -430,6 +431,78 @@ test('a projection is published for a live read grant, debounced, heartbeated, a
   expect(await authority.publish()).toEqual([]);
   expect(shared.sent.filter((s) => s === `delete:${grant}`).length).toBeLessThanOrEqual(1);
   expect(shared.projections.has(grant)).toBe(false);
+});
+
+test('a page owes nothing to a library with no live connection, and its work follows consent and revocation', async () => {
+  const shared = library();
+  const { authority } = device(shared, [seed('dropbox'), seed('grant'), seed('limited')]);
+  expect(await authority.needs()).toEqual({ write: false, read: false });
+  const { grant } = await authority.consent('Claude', { write: true, read: true });
+  expect(await authority.needs()).toEqual({ write: true, read: true });
+  shared.sent.length = 0;
+  await authority.revoke(grant);
+  expect(await authority.needs()).toEqual({ write: false, read: false });
+  // The dead read record's projection is dropped once, and this device remembers that it was.
+  await vi.waitFor(() => expect(shared.sent).toContain(`delete:${grant}`));
+  await authority.needs();
+  await authority.needs();
+  expect(shared.sent.filter((s) => s === `delete:${grant}`)).toHaveLength(1);
+});
+
+test('a read record found dead on another device’s word has its projection dropped without any publishing', async () => {
+  const shared = library();
+  const { authority } = device(shared, [seed('other'), seed('limited')]);
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  // Another device revokes it; this one only reads the rows.
+  const other = device(shared, []);
+  await other.authority.revoke(grant);
+  shared.sent.length = 0;
+  const fresh = device(shared, []);
+  expect(await fresh.authority.needs()).toEqual({ write: false, read: false });
+  await vi.waitFor(() => expect(shared.sent).toEqual([`delete:${grant}`]));
+});
+
+test('a quiet library’s publish tick builds nothing until its rows change or something is due', async () => {
+  const shared = library();
+  let builds = 0;
+  const { authority, later } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  builds = 0;
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(1);
+  for (let i = 0; i < 10; i++) {
+    later(30_000);
+    expect(await authority.publish()).toEqual([]);
+  }
+  expect(builds).toBe(1);
+  // The watchlist changes: built at once, sent once it has stood for 30 s.
+  shared.documents = [
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 550 },
+      status: { value: 'watchlist', at: [fixed.now, 0, DEVICE] },
+      addedAt: fixed.now,
+    },
+  ];
+  later(1_000);
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(2);
+  later(10_000);
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(2);
+  later(20_000);
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(3);
+  // And the heartbeat, 15 minutes on.
+  later(14 * 60_000);
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(3);
+  later(60_000);
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(4);
 });
 
 test('a library with no read records builds no projection at all', async () => {

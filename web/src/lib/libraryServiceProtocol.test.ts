@@ -793,10 +793,23 @@ describe('library service server protocol', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         subscriptionId: 'settings',
         version,
-        value: { kind: 'settings', preferences: value },
+        value: { kind: 'settings', preferences: value, assistant: { write: false, read: false } },
       });
 
     expect(update(preferences)).toMatchObject({ ok: true });
+    // What the page owes assistants is two flags, exactly.
+    const needs = (assistant: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'settings',
+        version,
+        value: { kind: 'settings', preferences, assistant },
+      });
+    expect(needs({ write: true, read: false })).toMatchObject({ ok: true });
+    expect(needs(undefined)).toMatchObject({ ok: false });
+    expect(needs({ write: 1, read: false })).toMatchObject({ ok: false });
+    expect(needs({ write: true, read: false, grants: [] })).toMatchObject({ ok: false });
     expect(update({ ...preferences, row: { kind: 'set', name: 'prefs' } })).toMatchObject({
       ok: false,
     });

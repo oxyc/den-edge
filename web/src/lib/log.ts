@@ -1817,6 +1817,11 @@ export class LibraryLog {
     return this.head;
   }
 
+  /** Moves on with every change to the rows held, a local edit's included: whether anything read from them may differ. */
+  get rowsVersion(): number {
+    return this.entriesVersion;
+  }
+
   /** Every v4 document as it is held, with the seq den-edge last gave it: what tracker delivery decides on (§9). */
   documents(): { seq: number; document: DocumentRow }[] {
     return [...this.entries.values()].flatMap(({ seq, row }) =>
