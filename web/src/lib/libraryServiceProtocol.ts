@@ -374,6 +374,16 @@ export interface PresenceView {
 export interface SettingsView {
   kind: 'settings';
   preferences: LibraryPreferences;
+  /**
+   * What an open page owes assistants (den-spec assistant v1): a live grant to write means draining its queue, a live
+   * read record means publishing a projection. Both false, as for nearly every library, and the page runs nothing.
+   */
+  assistant: AssistantNeeds;
+}
+
+export interface AssistantNeeds {
+  write: boolean;
+  read: boolean;
 }
 
 export interface LibraryDeviceView {

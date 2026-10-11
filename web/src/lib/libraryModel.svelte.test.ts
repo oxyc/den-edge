@@ -245,6 +245,7 @@ const settingsValue = (): LibrarySelectionValue => ({
     services: [],
     servicesConfigured: false,
   },
+  assistant: { write: false, read: false },
 });
 
 const runtimeValue = (): LibrarySelectionValue => ({

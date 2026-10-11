@@ -28,7 +28,7 @@
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
-  import { drainWhileOpen, publishWhileOpen, renewListed, type ApplyResult } from './lib/assistant';
+  import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
 
@@ -321,50 +321,93 @@
       .catch(() => {});
   });
 
-  // Assistant writes (den-spec wire/assistant-v1.md): while a member's library is open here, the consent dialog may
-  // write grants into it, and requests an assistant queued are drained, applied through the tap path, and told in a
-  // quiet toast. A library kept only in this browser is no member's on den-edge, and has no queue.
+  // Assistants (den-spec wire/assistant-v1.md): while a member's library is open here, the consent dialog may write
+  // grants into it. A library kept only in this browser is no member's on den-edge, and has none.
   $effect(() => {
     const current = session;
     const model = current.model;
     if (!model || current.local || !link) return;
-    const stop = new AbortController();
-    let renewal: ReturnType<typeof setInterval> | undefined;
+    let open = true;
     void model.ready.then(
       () => {
-        if (stop.signal.aborted) return;
-        assistantLibrary.model = model;
-        const renew = () =>
-          void renewListed((grants) => model.renewAssistant(grants)).catch((error: unknown) =>
-            console.warn('den: assistant grants could not be renewed', error),
-          );
-        renew();
-        renewal = setInterval(renew, RENEW_EVERY_MS);
-        void drainWhileOpen(
-          {
-            libraryId: libraryCredentialId() ?? 'library',
-            apply: (messages) => model.applyAssistant(messages),
-            applied: (result) => void announceAssistant(current, result),
-          },
-          stop.signal,
-        );
-        // And the projection connections that may read are given (§15).
-        void publishWhileOpen(
-          {
-            libraryId: libraryCredentialId() ?? 'library',
-            publish: () => model.publishAssistant(),
-          },
-          stop.signal,
-        );
+        if (open) assistantLibrary.model = model;
       },
       () => {},
     );
     return () => {
-      stop.abort();
-      clearInterval(renewal);
+      open = false;
       if (assistantLibrary.model === model) assistantLibrary.model = null;
     };
   });
+
+  // The work for connected assistants runs only while the library has one, as its settings say (most libraries never
+  // do, and pay nothing for it): with a live grant to write, requests an assistant queued are drained, applied through
+  // the tap path and told in a quiet toast; with a live read record, the projection is published (§15); with either,
+  // grants den-edge still lists are renewed. Each starts and stops as consent or revocation, here or on another
+  // device, changes the rows. The code itself is fetched only then.
+  const memberModel = $derived(!session.local && link ? session.model : null);
+  const drainNeeded = $derived(memberModel?.settings.value?.assistant.write ?? false);
+  const publishNeeded = $derived(memberModel?.settings.value?.assistant.read ?? false);
+  const renewNeeded = $derived(drainNeeded || publishNeeded);
+
+  function whileNeeded(
+    needed: boolean,
+    run: (
+      assistant: typeof import('./lib/assistant'),
+      model: LibraryModel,
+      signal: AbortSignal,
+    ) => void,
+  ) {
+    const current = session;
+    const model = memberModel;
+    if (!needed || !model) return;
+    const stop = new AbortController();
+    void import('./lib/assistant').then(
+      (assistant) => {
+        if (!stop.signal.aborted && current === session) run(assistant, model, stop.signal);
+      },
+      (error: unknown) => console.warn('den: the assistant connection could not be loaded', error),
+    );
+    return () => stop.abort();
+  }
+
+  $effect(() =>
+    whileNeeded(renewNeeded, ({ renewListed }, model, signal) => {
+      const renew = () =>
+        void renewListed((grants) => model.renewAssistant(grants)).catch((error: unknown) =>
+          console.warn('den: assistant grants could not be renewed', error),
+        );
+      renew();
+      const renewal = setInterval(renew, RENEW_EVERY_MS);
+      signal.addEventListener('abort', () => clearInterval(renewal), { once: true });
+    }),
+  );
+
+  $effect(() => {
+    const current = session;
+    return whileNeeded(drainNeeded, ({ drainWhileOpen }, model, signal) => {
+      void drainWhileOpen(
+        {
+          libraryId: libraryCredentialId() ?? 'library',
+          apply: (messages) => model.applyAssistant(messages),
+          applied: (result) => void announceAssistant(current, result),
+        },
+        signal,
+      );
+    });
+  });
+
+  $effect(() =>
+    whileNeeded(publishNeeded, ({ publishWhileOpen }, model, signal) => {
+      void publishWhileOpen(
+        {
+          libraryId: libraryCredentialId() ?? 'library',
+          publish: () => model.publishAssistant(),
+        },
+        signal,
+      );
+    }),
+  );
 
   // A direct detail route may never paint Home's hero. Optional provider work still starts after a hard ceiling.
   $effect(() => {

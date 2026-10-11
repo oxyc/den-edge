@@ -9,6 +9,7 @@ import type { LibraryAuthorityCommandResult, LibrarySelectionScope } from './lib
 import type {
   AssistantApplied,
   AssistantGrantView,
+  AssistantNeeds,
   LibraryCommand,
   TitleRef,
 } from './libraryServiceProtocol';
@@ -39,15 +40,20 @@ export interface DropboxKey {
 /**
  * This device's own records (§6): every grant it has seen revoked, and every applied entry it recorded or read, by
  * request id. Kept durably and only ever grown (pruned with the row), so an older row den-edge serves later can undo
- * neither for this device. `renewedAt`: when grants were last renewed (§5, at most daily).
+ * neither for this device. `renewedAt`: when grants were last renewed (§5, at most daily). `dropped`: read grants
+ * whose projection den-edge has dropped at this device's asking (§15), so it is asked once.
  */
 export interface AssistantRecords {
   revoked: string[];
   applied: Record<string, ConfigValue>;
   renewedAt: number;
+  dropped: string[];
 }
 
-const EMPTY: AssistantRecords = { revoked: [], applied: {}, renewedAt: 0 };
+const EMPTY: AssistantRecords = { revoked: [], applied: {}, renewedAt: 0, dropped: [] };
+
+/** A read record in these states has its projection dropped (§15); `newer` is left to a client that reads it. */
+const DEAD = new Set(['revoked', 'expired', 'malformed']);
 
 /** Under what this device keeps its records, sealed, beside the library (`LibraryLog.keep`). */
 export const ASSISTANT_RECORDS = 'assistant.records.v1';
@@ -91,6 +97,8 @@ export interface AssistantPort {
   documents(): unknown[];
   layouts(): Record<string, SeriesLayout>;
   head(): number;
+  /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
+  inputs(): string;
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
    * proof. */
   putProjection(grant: string, set: string, parts: string[]): Promise<boolean>;
@@ -147,6 +155,9 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
         ? value.applied
         : {},
     renewedAt: typeof value.renewedAt === 'number' ? value.renewedAt : 0,
+    dropped: Array.isArray(value.dropped)
+      ? value.dropped.filter((id) => typeof id === 'string')
+      : [],
   };
 }
 
@@ -217,6 +228,7 @@ export class LibraryAssistantAuthority {
         revoked,
         applied,
         renewedAt: Math.max(held.renewedAt, update.renewedAt ?? 0),
+        dropped: [...new Set([...held.dropped, ...(update.dropped ?? [])])].sort(),
       };
       // Losing a record weakens this device against an older row; it is said, never silent.
       await this.port.saveRecords(next).catch((error: unknown) => {
@@ -341,8 +353,8 @@ export class LibraryAssistantAuthority {
       });
       await this.port.patch(name, { [grant]: revoked.value });
     }
-    // Its projection goes at once; the next publish deletes it again should this not land.
-    if (found && this.#row(READ_ROW)?.values[grant]) void this.port.deleteProjection(grant);
+    // Its projection goes at once; asked again whenever the library is read should this not land.
+    if (found && this.#row(READ_ROW)?.values[grant]) void this.#drop(grant);
     return found ? 'revoked' : 'absent';
   }
 
@@ -381,22 +393,64 @@ export class LibraryAssistantAuthority {
     return renewed;
   }
 
+  /**
+   * What an open page owes assistants: draining for a live grant to write, publishing for a live read record. A
+   * library with neither row answers at once, with no den-core call. A read record no longer live has its projection
+   * dropped at den-edge here, once by this device, so that is done even when nothing publishes any more.
+   */
+  async needs(): Promise<AssistantNeeds> {
+    const grants = this.#row(GRANTS_ROW);
+    const read = this.#row(READ_ROW);
+    if (!Object.keys(grants?.values ?? {}).length && !Object.keys(read?.values ?? {}).length)
+      return { write: false, read: false };
+    const records = await this.#load();
+    const listed = syncPolicy<{ grants: AssistantGrantView[]; reads: AssistantGrantView[] }>({
+      op: 'assistant_grants',
+      grants,
+      read,
+      localRevoked: records.revoked,
+      now: this.port.now(),
+    });
+    const live = (list: AssistantGrantView[]) => list.some((g) => g.state === 'active');
+    const dead = listed.reads.flatMap((g) =>
+      DEAD.has(g.state) && !records.dropped.includes(g.grant) ? [g.grant] : [],
+    );
+    for (const grant of dead) void this.#drop(grant);
+    return { write: live(listed.grants), read: live(listed.reads) };
+  }
+
+  /** Ask den-edge to drop a grant's projection; once it has, this device never asks again. */
+  async #drop(grant: string): Promise<void> {
+    if (this.#dropping.has(grant)) return;
+    this.#dropping.add(grant);
+    try {
+      if (await this.port.deleteProjection(grant)) await this.#remember({ dropped: [grant] });
+    } finally {
+      this.#dropping.delete(grant);
+    }
+  }
+
   /** What was last sent for each grant: its digest and when, so a changed one waits, and an unchanged one heartbeats. */
   #published = new Map<string, { digest: string; at: number }>();
   /** The digest the library first read as, and when: a change is sent once it has stood `PUBLISH_DEBOUNCE_MS`. */
   #pending: { digest: string; since: number } | null = null;
-  /** Grants whose projection den-edge was asked to drop, so each is asked once (and again if it comes back). */
-  #deleted = new Set<string>();
+  #dropping = new Set<string>();
+  /** The projection's inputs at the last build, and when a build is next due with the inputs unchanged. */
+  #builtFrom: string | null = null;
+  #dueAt = 0;
 
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
-   * have stood for 30 s) or 15 minutes have passed; ask den-edge once to drop every dead grant's. Nothing to do,
-   * and nothing built, for a library with no read records. Which grants were sent.
+   * have stood for 30 s) or 15 minutes have passed; ask den-edge once to drop every dead grant's. A projection is
+   * rebuilt only when its inputs changed or something is due, so a quiet library's tick builds nothing; and nothing is
+   * built at all for a library with no read records. Which grants were sent.
    */
   async publish(): Promise<string[]> {
     const read = this.#row(READ_ROW);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
+    const inputs = this.port.inputs();
+    if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     const records = await this.#load();
     let built: ProjectionAnswer;
     try {
@@ -416,30 +470,38 @@ export class LibraryAssistantAuthority {
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
       console.error('den: the library is too large to publish for assistants', error);
+      // Not tried again until the library changes, or the heartbeat comes round.
+      this.#builtFrom = inputs;
+      this.#dueAt = now + HEARTBEAT_MS;
       return [];
     }
+    this.#builtFrom = inputs;
     if (this.#pending?.digest !== built.digest)
       this.#pending = { digest: built.digest, since: now };
-    const settled = now - this.#pending.since >= PUBLISH_DEBOUNCE_MS;
+    const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
     const sent: string[] = [];
+    let dueAt = Infinity;
     for (const entry of built.publish) {
-      this.#deleted.delete(entry.grant);
       const last = this.#published.get(entry.grant);
       const changed = last?.digest !== built.digest;
-      const due = !last || (changed && settled) || now - last.at >= HEARTBEAT_MS;
-      if (!due) continue;
-      if (await this.port.putProjection(entry.grant, entry.set, entry.parts)) {
+      const due = !last || (changed && now >= settleAt) || now - last.at >= HEARTBEAT_MS;
+      if (due && (await this.port.putProjection(entry.grant, entry.set, entry.parts))) {
         this.#published.set(entry.grant, { digest: built.digest, at: now });
         sent.push(entry.grant);
       }
+      // When this grant next needs a build: a send that failed at once, a change once it has settled, else its
+      // heartbeat.
+      const held = this.#published.get(entry.grant);
+      dueAt = Math.min(
+        dueAt,
+        !held ? now : held.digest !== built.digest ? settleAt : held.at + HEARTBEAT_MS,
+      );
     }
     for (const grant of built.delete) {
-      if (this.#deleted.has(grant)) continue;
-      if (await this.port.deleteProjection(grant)) {
-        this.#deleted.add(grant);
-        this.#published.delete(grant);
-      }
+      this.#published.delete(grant);
+      if (!records.dropped.includes(grant)) await this.#drop(grant);
     }
+    this.#dueAt = dueAt;
     return sent;
   }
 
