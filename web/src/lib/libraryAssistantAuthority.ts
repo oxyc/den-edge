@@ -91,8 +91,9 @@ export interface AssistantPort {
   documents(): unknown[];
   layouts(): Record<string, SeriesLayout>;
   head(): number;
-  /** Replace a grant's projection at den-edge with these sealed parts, or drop it, with the member's proof. */
-  putProjection(grant: string, parts: string[]): Promise<boolean>;
+  /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
+   * proof. */
+  putProjection(grant: string, set: string, parts: string[]): Promise<boolean>;
   deleteProjection(grant: string): Promise<boolean>;
   loadRecords(): Promise<AssistantRecords | null | undefined>;
   saveRecords(records: AssistantRecords): Promise<void>;
@@ -125,9 +126,9 @@ export interface SeriesLayout {
   last_aired: { season: number; episode: number } | null;
 }
 
-/** `assistant_projection`'s answer. A publish carries its sealed `parts` (one `sealed` from a build before parts). */
+/** `assistant_projection`'s answer: each publish is one set id and its sealed parts, sent as they are. */
 interface ProjectionAnswer {
-  publish: Array<{ grant: string; parts?: string[]; sealed?: string }>;
+  publish: Array<{ grant: string; set: string; parts: string[] }>;
   delete: string[];
   digest: string;
 }
@@ -397,18 +398,26 @@ export class LibraryAssistantAuthority {
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
     const records = await this.#load();
-    const built = syncPolicy<ProjectionAnswer>({
-      op: 'assistant_projection',
-      library: this.port.libraryId,
-      documents: this.port.documents(),
-      layouts: this.port.layouts(),
-      head: this.port.head(),
-      read,
-      grants: this.#row(GRANTS_ROW),
-      localRevoked: records.revoked,
-      random: this.port.random(),
-      now,
-    });
+    let built: ProjectionAnswer;
+    try {
+      built = syncPolicy<ProjectionAnswer>({
+        op: 'assistant_projection',
+        library: this.port.libraryId,
+        documents: this.port.documents(),
+        layouts: this.port.layouts(),
+        head: this.port.head(),
+        read,
+        grants: this.#row(GRANTS_ROW),
+        localRevoked: records.revoked,
+        random: this.port.random(),
+        now,
+      });
+    } catch (error) {
+      // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
+      if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
+      console.error('den: the library is too large to publish for assistants', error);
+      return [];
+    }
     if (this.#pending?.digest !== built.digest)
       this.#pending = { digest: built.digest, since: now };
     const settled = now - this.#pending.since >= PUBLISH_DEBOUNCE_MS;
@@ -419,8 +428,7 @@ export class LibraryAssistantAuthority {
       const changed = last?.digest !== built.digest;
       const due = !last || (changed && settled) || now - last.at >= HEARTBEAT_MS;
       if (!due) continue;
-      const parts = entry.parts ?? (entry.sealed ? [entry.sealed] : []);
-      if (parts.length && (await this.port.putProjection(entry.grant, parts))) {
+      if (await this.port.putProjection(entry.grant, entry.set, entry.parts)) {
         this.#published.set(entry.grant, { digest: built.digest, at: now });
         sent.push(entry.grant);
       }

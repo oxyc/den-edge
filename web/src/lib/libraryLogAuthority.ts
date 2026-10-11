@@ -465,8 +465,8 @@ export class LibraryLogAuthority {
             ]),
         ),
       head: () => this.#log.logHead,
-      putProjection: (grant, parts) =>
-        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { parts }),
+      putProjection: (grant, set, parts) =>
+        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { set, parts }),
       deleteProjection: (grant) => this.#memberSend(`/assistant/projection/${grant}`, 'DELETE'),
       now: () => Date.now(),
       random: randomHex,

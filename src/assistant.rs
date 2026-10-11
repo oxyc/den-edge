@@ -46,13 +46,12 @@ const DAY_MS: u64 = 86_400_000;
 /// Held drains per address (as inbox v1 §3), and in all.
 pub const MAX_HELD_PER_ADDRESS: usize = 2;
 pub const MAX_HELD: usize = 16;
-/// A projection (§15): at most this many sealed parts, this many characters in all, and each part at least a nonce
-/// and a tag. Stored whole, so a reader never sees parts of two publishes.
-const MAX_PROJECTION_PARTS: usize = 64;
-const MAX_PROJECTION_CHARS: usize = 16 * 1024 * 1024;
-const MIN_PROJECTION_PART_BYTES: usize = 12 + 16;
-/// The body cap of a projection's PUT: its parts in JSON.
-pub const PROJECTION_BODY_BYTES: usize = MAX_PROJECTION_CHARS + 64 * 1024;
+/// A projection (§15): one publish's set id and at most `MAX_PARTS` sealed parts of at most `MAX_PART` characters,
+/// 16 MiB in all, each longer than a nonce and a tag. Stored whole, so a reader never sees parts of two publishes.
+const MAX_PROJECTION_CHARS: usize = den_assistant::MAX_PART * den_assistant::MAX_PARTS;
+const PART_OVERHEAD_BYTES: usize = 12 + 16;
+/// The body cap of a projection's PUT: 17 MiB, its parts and set id in JSON.
+pub const PROJECTION_BODY_BYTES: usize = 17 * 1024 * 1024;
 /// Publishes per grant an hour.
 const PROJECTIONS_PER_HOUR: u32 = 60;
 const HOUR_MS: u64 = 3_600_000;
@@ -60,6 +59,7 @@ const HOUR_MS: u64 = 3_600_000;
 #[derive(Serialize, Deserialize)]
 struct Projection {
     library: String,
+    set: String,
     parts: Vec<String>,
     #[serde(rename = "storedAt")]
     stored_at: u64,
@@ -128,15 +128,21 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     }
 }
 
-/// Every part unpadded base64url of at least a nonce and a tag, at most `MAX_PROJECTION_PARTS` of them and
-/// `MAX_PROJECTION_CHARS` in all.
+/// Every part unpadded base64url of more than a nonce and a tag and at most `MAX_PART` characters, at most
+/// `MAX_PARTS` of them and `MAX_PROJECTION_CHARS` in all.
 fn valid_parts(parts: &[String]) -> bool {
     !parts.is_empty()
-        && parts.len() <= MAX_PROJECTION_PARTS
+        && parts.len() <= den_assistant::MAX_PARTS
         && parts.iter().map(String::len).sum::<usize>() <= MAX_PROJECTION_CHARS
         && parts.iter().all(|part| {
-            den_assistant::b64url_decode(part).is_some_and(|bytes| bytes.len() >= MIN_PROJECTION_PART_BYTES)
+            part.len() <= den_assistant::MAX_PART
+                && den_assistant::b64url_decode(part).is_some_and(|bytes| bytes.len() > PART_OVERHEAD_BYTES)
         })
+}
+
+/// A set id: 32 lowercase hex.
+fn valid_set(set: &str) -> bool {
+    set.len() == 32 && set.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response {
@@ -154,6 +160,10 @@ async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response
         Ok(body) => body,
         Err(resp) => return *resp,
     };
+    let Some(set) = body.get("set").and_then(Value::as_str).filter(|set| valid_set(set)).map(str::to_owned)
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_set"));
+    };
     let Some(parts) = body
         .get("parts")
         .and_then(Value::as_array)
@@ -170,7 +180,7 @@ async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response
         Ok(false) => return json_reply(StatusCode::NOT_FOUND, &error("unknown_grant")),
         Err(e) => return internal("assistant projection grant", e),
     }
-    let record = Projection { library, parts, stored_at: state.now() };
+    let record = Projection { library, set, parts, stored_at: state.now() };
     let bytes = serde_json::to_vec(&record).expect("a projection always serialises");
     if let Err(e) = state.store.put(NS, &projection_key(grant), &bytes).await {
         return internal("assistant projection write", e);
@@ -208,6 +218,7 @@ async fn get_projection(state: &AppState, req: Request) -> Response {
             &json!({
                 "library": held.library,
                 "grant": session.grant,
+                "set": held.set,
                 "parts": held.parts,
                 "storedAt": held.stored_at,
             }),
@@ -772,6 +783,13 @@ mod tests {
         den_assistant::b64url(&[byte; 64])
     }
 
+    const SET: &str = "fa55fe2ae16c6d338a484d1b247bb6f6";
+
+    /// A publish's body: one set id and these parts.
+    fn publish(parts: &[String]) -> Value {
+        json!({ "set": SET, "parts": parts })
+    }
+
     async fn read_access(h: &Harness) -> String {
         let tokens = connect_read(h, &seed("grant"), &[5; 32], false).await;
         tokens["access_token"].as_str().unwrap().to_owned()
@@ -783,7 +801,7 @@ mod tests {
         let path = format!("/assistant/projection/{}", grant_id());
         // Nobody may read it yet: nothing is stored.
         assert_eq!(
-            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await,
+            as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await,
             (StatusCode::NOT_FOUND, json!({ "error": "unknown_grant" }))
         );
         let access = read_access(&h).await;
@@ -791,31 +809,55 @@ mod tests {
             as_assistant(&h, &access, "GET", "/assistant/projection", None).await,
             (StatusCode::NOT_FOUND, json!({ "error": "no_projection" }))
         );
-        let (status, _) = send(&h, "PUT", &path, Some(json!({ "parts": [part(1)] })), &[]).await;
+        let (status, _) = send(&h, "PUT", &path, Some(publish(&[part(1)])), &[]).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "only a member publishes");
-        let too_many: Vec<String> = (0..65).map(|_| part(1)).collect();
-        for bad in
-            [json!({ "parts": [] }), json!({ "parts": ["AAAA"] }), json!({ "parts": too_many }), json!({})]
-        {
+        for bad in [
+            json!({ "parts": [part(1)] }),
+            json!({ "set": SET.to_uppercase(), "parts": [part(1)] }),
+            json!({ "set": &SET[1..], "parts": [part(1)] }),
+        ] {
+            assert_eq!(
+                as_member(&h, "PUT", &path, Some(bad)).await,
+                (StatusCode::BAD_REQUEST, json!({ "error": "invalid_set" }))
+            );
+        }
+        let too_many: Vec<String> = (0..=den_assistant::MAX_PARTS).map(|_| part(1)).collect();
+        // A nonce and a tag alone (28 bytes) carry nothing; a part may be no longer than `MAX_PART`.
+        let bare = den_assistant::b64url(&[1; 28]);
+        let too_long = "A".repeat(den_assistant::MAX_PART + 4);
+        let too_much: Vec<String> =
+            (0..den_assistant::MAX_PARTS).map(|_| "A".repeat(den_assistant::MAX_PART)).collect();
+        for bad in [
+            publish(&[]),
+            publish(&["AAAA".into()]),
+            publish(&["not base64url!".into()]),
+            publish(&[bare]),
+            publish(&[too_long]),
+            publish(&too_many),
+            json!({ "set": SET }),
+        ] {
             assert_eq!(
                 as_member(&h, "PUT", &path, Some(bad)).await,
                 (StatusCode::BAD_REQUEST, json!({ "error": "invalid_sealed" }))
             );
         }
+        // 64 full parts are exactly 16 MiB: the most a publish may carry.
+        assert_eq!(as_member(&h, "PUT", &path, Some(publish(&too_much))).await.0, StatusCode::NO_CONTENT);
         assert_eq!(
-            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1), part(2)] }))).await.0,
+            as_member(&h, "PUT", &path, Some(publish(&[den_assistant::b64url(&[1; 29]), part(2)]))).await.0,
             StatusCode::NO_CONTENT
         );
         // A later publish replaces the whole set: never parts of two.
+        let later = "0123456789abcdef0123456789abcdef";
         assert_eq!(
-            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(3)] }))).await.0,
+            as_member(&h, "PUT", &path, Some(json!({ "set": later, "parts": [part(3)] }))).await.0,
             StatusCode::NO_CONTENT
         );
         let (status, got) = as_assistant(&h, &access, "GET", "/assistant/projection", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            (&got["library"], &got["grant"], &got["parts"]),
-            (&json!(LIB), &json!(grant_id()), &json!([part(3)]))
+            (&got["library"], &got["grant"], &got["set"], &got["parts"]),
+            (&json!(LIB), &json!(grant_id()), &json!(later), &json!([part(3)]))
         );
         assert!(got["storedAt"].is_u64());
         // A write-only connection has no read scope.
@@ -840,19 +882,16 @@ mod tests {
         let path = format!("/assistant/projection/{}", grant_id());
         for _ in 0..super::PROJECTIONS_PER_HOUR {
             assert_eq!(
-                as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
+                as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await.0,
                 StatusCode::NO_CONTENT
             );
         }
         assert_eq!(
-            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
+            as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await.0,
             StatusCode::TOO_MANY_REQUESTS
         );
         h.advance(super::HOUR_MS);
-        assert_eq!(
-            as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await.0,
-            StatusCode::NO_CONTENT
-        );
+        assert_eq!(as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await.0, StatusCode::NO_CONTENT);
     }
 
     /// The projection goes with the last session that could read it: disconnected from Settings, or the library's key
@@ -866,7 +905,7 @@ mod tests {
             async move { state.store.get(super::NS, &super::projection_key(&grant_id())).await.unwrap().is_some() }
         };
         read_access(&h).await;
-        as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await;
+        as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await;
         assert!(stored(&h).await);
         let claim = member();
         let (_, listed) =
@@ -877,7 +916,7 @@ mod tests {
         assert!(!stored(&h).await, "disconnected");
 
         read_access(&h).await;
-        as_member(&h, "PUT", &path, Some(json!({ "parts": [part(1)] }))).await;
+        as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await;
         assert!(stored(&h).await);
         let resp = h
             .send(

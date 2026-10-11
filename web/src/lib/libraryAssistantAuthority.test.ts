@@ -6,6 +6,7 @@ import {
   GRANTS_ROW,
   READ_ROW,
   LibraryAssistantAuthority,
+  randomHex,
   resetAssistantRows,
   type AssistantPort,
   type AssistantRecords,
@@ -40,7 +41,7 @@ function library() {
     /** The library's v4 documents, what a projection is built from (§15). */
     documents: [] as unknown[],
     /** den-edge's projections by grant, and every PUT and DELETE it was sent, in order. */
-    projections: new Map<string, string[]>(),
+    projections: new Map<string, { set: string; parts: string[] }>(),
     sent: [] as string[],
     patch(name: string, changes: Record<string, ConfigValue | null>) {
       const base = rows.get(name) ?? { kind: 'set' as const, schema: 2, name, values: {} };
@@ -95,8 +96,8 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     documents: () => shared.documents,
     layouts: () => ({}),
     head: () => 7,
-    putProjection: async (grant, parts) => {
-      shared.projections.set(grant, parts);
+    putProjection: async (grant, set, parts) => {
+      shared.projections.set(grant, { set, parts });
       shared.sent.push(`put:${grant}`);
       return true;
     },
@@ -108,8 +109,8 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     loadRecords: async () => records && structuredClone(records),
     saveRecords: async (next) => void (records = structuredClone(next)),
     now: () => now,
-    // A projection's randomness may run out of scripted values: then any 32 bytes do.
-    random: () => randoms.shift() ?? '11'.repeat(32),
+    // A projection's randomness may run out of scripted values: then any fresh 32 bytes do.
+    random: () => randoms.shift() ?? randomHex(),
     ...overrides,
   };
   return {
@@ -412,12 +413,16 @@ test('a projection is published for a live read grant, debounced, heartbeated, a
   const { authority, later } = device(shared, [seed('other'), seed('limited')]);
   const { grant } = await authority.consent('Reader', READ_ONLY);
   expect(await authority.publish()).toEqual([grant]);
-  expect(shared.projections.get(grant)!.length).toBeGreaterThan(0);
+  const first = shared.projections.get(grant)!;
+  expect(first.set).toMatch(/^[0-9a-f]{32}$/);
+  expect(first.parts.length).toBeGreaterThan(0);
   // Unchanged: nothing more until the heartbeat.
   later(60_000);
   expect(await authority.publish()).toEqual([]);
   later(15 * 60_000);
   expect(await authority.publish()).toEqual([grant]);
+  // Every publish is a fresh set.
+  expect(shared.projections.get(grant)!.set).not.toBe(first.set);
   // Revoked: den-edge is asked to drop it, once, and nothing is published for it.
   await authority.revoke(grant);
   shared.sent.length = 0;
