@@ -92,6 +92,9 @@ export interface PlaybackCursorOptions {
 }
 
 const CAPABILITY = /^m\/s\/[A-Za-z0-9_-]{40,2048}\?s=[0-9a-fA-F]{24}$/;
+// A native HLS master: a playlist whose segments Google serves, so Edge relays it even on its public
+// names, where it refuses trailer bytes. Transport only redeems `m/s/`; this one goes straight to the relay.
+const NATIVE_MASTER = /^m\/n\/[A-Za-z0-9_-]{40,2048}\?s=[0-9a-fA-F]{24}$/;
 const PLAN_TTL_MS = 5 * 60_000;
 const prepared = new Map<string, { until: number; candidates: TrailerCandidate[] }>();
 
@@ -250,7 +253,7 @@ export function parseSourcePlan(value: unknown): SourcePlan | null {
     } else if (
       delivery.type === 'reel' &&
       typeof delivery.capability === 'string' &&
-      CAPABILITY.test(delivery.capability)
+      (CAPABILITY.test(delivery.capability) || NATIVE_MASTER.test(delivery.capability))
     ) {
       parsed = { type: 'reel', capability: delivery.capability };
     }
@@ -406,6 +409,14 @@ function parseTransport(
   return { attempts, ipv4HintWanted: answer.ipv4HintWanted === true };
 }
 
+function relayFor(capability: string, planUrl: string): TransportAttempt | null {
+  if (!planUrl.startsWith('/') || planUrl.startsWith('//')) return null;
+  const path = planUrl.split('?', 1)[0] ?? '';
+  const marker = path.lastIndexOf('/sources/');
+  if (marker <= 0) return null;
+  return { type: 'relay', url: `${path.slice(0, marker)}/${capability}` };
+}
+
 async function transport(
   capability: string,
   planUrl: string,
@@ -413,16 +424,7 @@ async function transport(
   signal: AbortSignal,
   lookupIpv4: () => Promise<string | undefined>,
 ): Promise<TransportAttempt[]> {
-  const relay = (() => {
-    if (!planUrl.startsWith('/') || planUrl.startsWith('//')) return null;
-    const path = planUrl.split('?', 1)[0] ?? '';
-    const marker = path.lastIndexOf('/sources/');
-    if (marker <= 0) return null;
-    const mount = path.slice(0, marker);
-    return CAPABILITY.test(capability)
-      ? ({ type: 'relay', url: `${mount}/${capability}` } satisfies TransportAttempt)
-      : null;
-  })();
+  const relay = CAPABILITY.test(capability) ? relayFor(capability, planUrl) : null;
   const fallback = () => (signal.aborted || !relay ? [] : [relay]);
   const ask = async (extra: { ipv4Hint?: string; noHint?: boolean } = {}) => {
     if (!relay) return { kind: 'failed' as const };
@@ -553,16 +555,19 @@ export class PlaybackCursor {
         this.#source += 1;
         continue;
       }
+      const delivery = source.delivery;
       this.#attempts =
-        source.delivery.type === 'external'
-          ? [{ type: 'external', url: source.delivery.url }]
-          : await transport(
-              source.delivery.capability,
-              candidate.planUrl,
-              this.#fetch,
-              this.#controller.signal,
-              this.#lookupIpv4,
-            );
+        delivery.type === 'external'
+          ? [{ type: 'external', url: delivery.url }]
+          : NATIVE_MASTER.test(delivery.capability)
+            ? [relayFor(delivery.capability, candidate.planUrl)].filter((relay) => relay !== null)
+            : await transport(
+                delivery.capability,
+                candidate.planUrl,
+                this.#fetch,
+                this.#controller.signal,
+                this.#lookupIpv4,
+              );
       if (this.#closed) return null;
       if (!this.#attempts.length) {
         this.#source += 1;

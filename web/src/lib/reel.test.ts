@@ -355,6 +355,50 @@ describe('PlaybackCursor', () => {
     await expect(cursor.next()).resolves.toMatchObject({ attemptType: 'relay', url: relay });
   });
 
+  it('falls back to a native master through the relay, without a transport call for it', async () => {
+    const master = `m/n/${'C'.repeat(40)}?s=${'d'.repeat(24)}`;
+    const asked: unknown[] = [];
+    const cursor = new PlaybackCursor(
+      [candidate(plan(carried(), { ...carried(master), kind: 'hls', width: null, height: null }))],
+      {
+        fetchImpl: async (_input, init) => {
+          asked.push(JSON.parse(String(init?.body)));
+          return new Response(
+            JSON.stringify({
+              v: 2,
+              capability: CAPABILITY,
+              attempts: [{ type: 'relay', url: `/reel/${CAPABILITY}` }],
+            }),
+          );
+        },
+      },
+    );
+
+    await expect(cursor.first()).resolves.toMatchObject({ attemptType: 'relay', kind: 'mp4' });
+    await expect(cursor.next()).resolves.toMatchObject({
+      attemptType: 'relay',
+      kind: 'hls',
+      url: `/reel/${master}`,
+    });
+    expect(asked).toEqual([{ capability: CAPABILITY }]);
+  });
+
+  it('offers no native master when the plan came from a direct origin', async () => {
+    const master = `m/n/${'C'.repeat(40)}?s=${'d'.repeat(24)}`;
+    const fetchImpl = vi.fn<typeof fetch>();
+    const cursor = new PlaybackCursor(
+      [
+        {
+          planUrl: 'https://lan.example/reel/sources/trailer.json?v=2',
+          plan: plan({ ...carried(master), kind: 'hls' }),
+        },
+      ],
+      { fetchImpl },
+    );
+    await expect(cursor.first()).resolves.toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('does not publish the relay fallback after its cursor is aborted', async () => {
     const controller = new AbortController();
     const cursor = new PlaybackCursor([candidate(plan(carried()))], {
