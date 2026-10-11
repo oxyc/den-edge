@@ -77,7 +77,12 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog, type DeferredDelivery } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
-import { LibraryAssistantAuthority, randomHex } from './libraryAssistantAuthority';
+import {
+  ASSISTANT_RECORDS,
+  LibraryAssistantAuthority,
+  randomHex,
+  type AssistantRecords,
+} from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
@@ -113,6 +118,7 @@ import {
   type EpisodeRow,
   type Row,
   type SettingsRow,
+  type Stamp,
   type TitleRow,
   type Stamped,
 } from './wire';
@@ -352,6 +358,11 @@ export class LibraryLogAuthority {
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
   readonly #admin?: LibraryAdminAuthority;
   readonly #assistant: LibraryAssistantAuthority;
+  /**
+   * While an assistant's request is performed: the stamp its writes take, the request's own time (assistant v1 §6),
+   * in place of a freshly issued one, so it never overrides a change made after it.
+   */
+  #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
@@ -371,9 +382,32 @@ export class LibraryLogAuthority {
       });
     this.#assistant = new LibraryAssistantAuthority({
       libraryId: log.libraryId,
+      get device() {
+        return clock.device;
+      },
       settings: (name) => this.#log.settings(name),
       refresh: async () => void (await this.#log.refresh()),
-      command: (command, operationId) => this.command(command, operationId),
+      command: async (command, operationId, stamp) => {
+        this.#asOf = stamp;
+        try {
+          return await this.command(command, operationId);
+        } finally {
+          this.#asOf = null;
+        }
+      },
+      ride: async (name, changes, work) => {
+        const row = this.#changedSettingsRow(name, changes, await this.#settingsStamp());
+        if (!row) return work();
+        let result!: Awaited<ReturnType<typeof work>>;
+        const rode = await this.#log.withRider(row, async () => {
+          result = await work();
+        });
+        // The edit made nothing to ride with: the entry is written on its own, straight after.
+        if (!rode) await this.#writeRow(row, []);
+        return result;
+      },
+      loadRecords: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
+      saveRecords: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
       loadShape: async (title) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         return this.#shapes.has(titleKey(title));
@@ -573,6 +607,8 @@ export class LibraryLogAuthority {
         return this.#administration().historyExport();
       case 'library.metadata':
         return this.#libraryMetadata(query.titles);
+      case 'assistant.grants':
+        return { kind: 'assistant.grants', grants: await this.#assistant.grants() };
       case 'download.refresh':
         return {
           kind: 'download.refresh',
@@ -674,6 +710,11 @@ export class LibraryLogAuthority {
       case 'assistant.revoke':
         return {
           result: { kind: 'assistant.revoke', outcome: await this.#assistant.revoke(task.grant) },
+          affected: [],
+        };
+      case 'assistant.renew':
+        return {
+          result: { kind: 'assistant.renew', renewed: await this.#assistant.renew(task.grants) },
           affected: [],
         };
       case 'assistant.apply': {
@@ -1240,7 +1281,7 @@ export class LibraryLogAuthority {
     const before = this.#log.title(ref) ?? blankTitle(ref, Date.now());
     if (already(before)) return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());
-    const at = await this.#clock.issue();
+    const at = await this.#issue();
     const event = recordTrackerEvent(before, change(before, at), at, operationId);
     if (!event) return this.#unchanged();
     return this.#writeAction(event, this.#affected(ref, affectsContinue, affectsHistory));
@@ -1256,7 +1297,7 @@ export class LibraryLogAuthority {
     const current = episodeProgress(before, this.#log.title(ref));
     if (current >= WATCHED === watched && (watched || current === 0)) return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());
-    const at = await this.#clock.issue();
+    const at = await this.#issue();
     const event = recordTrackerEvent(before, markEpisode(before, watched, at), at, operationId);
     if (!event) return this.#unchanged();
     return this.#writeAction(event, this.#affected(ref));
@@ -1279,7 +1320,7 @@ export class LibraryLogAuthority {
         blankEpisode(command.title, command.season, episode);
       const current = episodeProgress(before, this.#log.title(command.title));
       if (current >= WATCHED === command.watched && (command.watched || current === 0)) continue;
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         markEpisode(before, command.watched, at),
@@ -1321,7 +1362,7 @@ export class LibraryLogAuthority {
       const before = this.#log.episode(ref, season, episode) ?? blankEpisode(ref, season, episode);
       const current = episodeProgress(before, this.#log.title(ref));
       if (current >= WATCHED === watched && (watched || current === 0)) continue;
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         markEpisode(before, watched, at),
@@ -1337,7 +1378,7 @@ export class LibraryLogAuthority {
         before.resume.value === 0 &&
         before.episodesReset !== null;
     if (!titleAlready) {
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         (watched ? markWatched : unwatchSeries)(before, at),
@@ -1761,6 +1802,11 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const row = this.#changedSettingsRow(name, changes, await this.#settingsStamp());
     return row ? this.#writeRow(row, affected) : this.#unchanged();
+  }
+
+  /** The stamp an edit takes: a fresh one, or the request's own while an assistant's is performed. */
+  async #issue(): Promise<Stamp> {
+    return this.#asOf ?? (await this.#clock.issue());
   }
 
   async #settingsStamp() {

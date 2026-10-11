@@ -28,7 +28,7 @@
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
-  import { drainWhileOpen, type ApplyResult } from './lib/assistant';
+  import { drainWhileOpen, renewListed, type ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
 
@@ -88,6 +88,9 @@
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
+
+  /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
+  const RENEW_EVERY_MS = 6 * 60 * 60 * 1000;
 
   /** "Assistant added “Fauda” to your watchlist": quiet, and never an alert. */
   async function announceAssistant(
@@ -326,10 +329,17 @@
     const model = current.model;
     if (!model || current.local || !link) return;
     const stop = new AbortController();
+    let renewal: ReturnType<typeof setInterval> | undefined;
     void model.ready.then(
       () => {
         if (stop.signal.aborted) return;
         assistantLibrary.model = model;
+        const renew = () =>
+          void renewListed((grants) => model.renewAssistant(grants)).catch((error: unknown) =>
+            console.warn('den: assistant grants could not be renewed', error),
+          );
+        renew();
+        renewal = setInterval(renew, RENEW_EVERY_MS);
         void drainWhileOpen(
           {
             libraryId: libraryCredentialId() ?? 'library',
@@ -343,6 +353,7 @@
     );
     return () => {
       stop.abort();
+      clearInterval(renewal);
       if (assistantLibrary.model === model) assistantLibrary.model = null;
     };
   });

@@ -2,6 +2,7 @@ import {
   LIBRARY_SERVICE_PROTOCOL,
   LIBRARY_SERVICE_WIRE_LIMITS,
   type AssistantApplied,
+  type AssistantGrantView,
   type ContinueItem,
   type ConnectionsView,
   type DownloadReleaseDescriptor,
@@ -731,6 +732,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'relay.membership') return exact(value, ['kind']);
   if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
   if (value.kind === 'history.export') return exact(value, ['kind']);
+  if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'recovery.seal')
     return (
       exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
@@ -843,6 +845,11 @@ function task(value: unknown): value is LibraryTask {
       return exact(value, ['kind', 'client']) && boundedText(value.client, 80);
     case 'assistant.revoke':
       return exact(value, ['kind', 'grant']) && hexId(value.grant);
+    case 'assistant.renew':
+      return (
+        exact(value, ['kind', 'grants']) &&
+        list(value.grants, hexId, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+      );
     case 'assistant.apply':
       return (
         exact(value, ['kind', 'messages']) &&
@@ -865,6 +872,37 @@ function task(value: unknown): value is LibraryTask {
 const ASSISTANT_DRAIN_MAX = 200;
 const hexId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+
+/** A grant as den-core lists it: any member but `grant` and `state` may be missing from a malformed value. */
+function assistantGrant(value: unknown): value is AssistantGrantView {
+  return (
+    record(value) &&
+    exact(value, [
+      'grant',
+      'client',
+      'ops',
+      'cap',
+      'createdAt',
+      'expiresAt',
+      'revokedAt',
+      'state',
+    ]) &&
+    hexId(value.grant) &&
+    (value.state === 'active' ||
+      value.state === 'expired' ||
+      value.state === 'revoked' ||
+      value.state === 'newer' ||
+      value.state === 'malformed') &&
+    optional(value.client, (c): c is string => boundedText(c, 256)) &&
+    optional(value.ops, (ops): ops is string[] =>
+      list(ops, (op): op is string => boundedText(op, 64), 16),
+    ) &&
+    optional(value.cap, integer) &&
+    optional(value.createdAt, integer) &&
+    optional(value.expiresAt, integer) &&
+    optional(value.revokedAt, (at): at is number | null => at === null || integer(at))
+  );
+}
 
 function assistantApplied(value: unknown): value is AssistantApplied {
   if (!record(value) || !integer(value.seq)) return false;
@@ -1478,6 +1516,11 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify')
     return exact(value, ['kind', 'matches']) && bool(value.matches);
+  if (value.kind === 'assistant.grants')
+    return (
+      exact(value, ['kind', 'grants']) &&
+      list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+    );
   if (value.kind === 'library.metadata')
     return (
       exact(value, ['kind', 'titles', 'shapes', 'retryable', 'retryAfterMs']) &&
@@ -1758,6 +1801,8 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         exact(value, ['kind', 'outcome']) &&
         (value.outcome === 'revoked' || value.outcome === 'absent')
       );
+    case 'assistant.renew':
+      return exact(value, ['kind', 'renewed']) && integer(value.renewed);
     case 'assistant.apply':
       return (
         exact(value, ['kind', 'results', 'ack', 'dropbox']) &&

@@ -5,6 +5,7 @@
 import { blankEpisode, blankTitle } from './actions';
 import { hkdf } from './crypto';
 import { exclusive } from './exclusive';
+import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
@@ -116,6 +117,8 @@ export interface Moving {
   generation: string | null;
   /** The device moving it. */
   device: string;
+  /** The assistant grants the move revoked (assistant v1 §10), for that device's own revoked set. */
+  revokedGrants: string[];
 }
 
 /** Why a move did not start: a row only a newer build can carry, or a library that can't be read or moved now. */
@@ -228,6 +231,8 @@ interface KeptWork {
   rows: Row[];
   kind: 'restore' | 'bulk' | 'one' | 'rows' | 'ops';
   ops?: Op[];
+  /** Settings rows sent in the same batch as `ops` (`LibraryLog.withRider`). */
+  riders?: SettingsRow[];
 }
 
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
@@ -1345,7 +1350,16 @@ export class LibraryLog {
         kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
       else rows.push(row);
     }
-    return { rows, kept, head: read.head, generation: read.generation, device };
+    // Assistant v1 §10: no drop-box key is carried, and every grant goes revoked.
+    const assistant = resetAssistantRows(rows, Date.now());
+    return {
+      rows: assistant.rows,
+      kept,
+      head: read.head,
+      generation: read.generation,
+      device,
+      revokedGrants: assistant.revoked,
+    };
   }
 
   /** Every row in the log to its head, as den-edge stores it; null when a page couldn't be read. */
@@ -2294,17 +2308,29 @@ export class LibraryLog {
     durable = true,
     key?: string,
     answerFirst = false,
+    riders: SettingsRow[] = [],
   ): Promise<boolean> {
-    if (!ops.length) return true;
+    if (!ops.length && !riders.length) return true;
+    // A rider (`withRider`) goes with the first edit made by hand while it waits, never with kept work sent again.
+    if (answerFirst && !key && ops.length && this.rider) {
+      riders = [...riders, this.rider];
+      this.rider = null;
+    }
     let kept = key;
     if (!kept && durable && this.runtimeAvailable) {
       kept = this.pendingPrefix + 'ops:' + crypto.randomUUID();
-      if (!(await this.keepPending(kept, JSON.stringify({ ops: await this.sealKept(ops) }))))
-        return false;
+      const work = {
+        ops: await this.sealKept(ops),
+        ...(riders.length
+          ? { riders: await Promise.all(riders.map((row) => seal(this.keys, row))) }
+          : {}),
+      };
+      if (!(await this.keepPending(kept, JSON.stringify(work)))) return false;
       if (answerFirst) {
         this.projectOps(ops);
+        for (const row of riders) this.project(row);
         this.flushing.add(kept);
-        void this.deliverOps(ops, outcome, kept, undefined, true)
+        void this.deliverOps(ops, outcome, kept, undefined, true, riders)
           .then((result) => this.settleDeferred(ops, outcome, result))
           .catch((error: unknown) =>
             console.error('den: a library write could not be settled', error),
@@ -2312,7 +2338,7 @@ export class LibraryLog {
         return true;
       }
     }
-    const result = await this.deliverOps(ops, outcome, kept, key, false);
+    const result = await this.deliverOps(ops, outcome, kept, key, false, riders);
     // Kept: saved, for a fresh edit; still waiting, for kept work sent again.
     return result === 'sent' || (result === 'kept' && !key);
   }
@@ -2327,9 +2353,10 @@ export class LibraryLog {
     kept: string | undefined,
     key: string | undefined,
     drawn: boolean,
+    riders: SettingsRow[] = [],
   ): Promise<'sent' | 'refused' | 'kept' | 'lost'> {
     if (kept) this.flushing.add(kept);
-    const run = this.writes.then(() => this.sendOps(ops, outcome));
+    const run = this.writes.then(() => this.sendOps(ops, outcome, riders));
     this.writes = run.catch(() => false);
     const sent = await run
       .catch((error: unknown) => {
@@ -2390,18 +2417,26 @@ export class LibraryLog {
    * from what this browser draws, which already shows kept writes. A conflict is read and the writes derived again
    * (§8).
    */
-  private async sendOps(ops: Op[], outcome: Outcome): Promise<boolean> {
+  private async sendOps(ops: Op[], outcome: Outcome, riders: SettingsRow[] = []): Promise<boolean> {
     const stored = (name: string) => {
       const row = this.acknowledged.get(name)?.row;
       return row && isDocument(row) ? row : undefined;
     };
+    // Settings rows that go in the same batch as these writes (`withRider`): merged over den-edge's version of each,
+    // and on a conflict merged again and sent again with the writes, until each has landed.
+    let waiting = riders;
     for (let round = 0; round < ROUNDS; round++) {
       // A document of a newer format is never written: the write waits for this build to be updated (§4).
       if (touched(ops).some((name) => this.newerDocuments.has(name))) return false;
       const documents = applyOps(ops, stored);
-      if (!documents.length) return true;
-      const writes: { name: string; document: DocumentRow; base: number; k: string; v: string }[] =
-        [];
+      if (!documents.length && !waiting.length) return true;
+      const writes: { name: string; document: Row; base: number; k: string; v: string }[] = [];
+      for (const rider of waiting) {
+        const name = rowName(rider);
+        const held = this.acknowledged.get(name);
+        const row = held ? merge(held.row, rider) : rider;
+        writes.push({ name, document: row, base: held?.seq ?? 0, ...(await seal(this.keys, row)) });
+      }
       for (const document of documents) {
         const name = rowName(document);
         const encoded = encodeDocument(document, true);
@@ -2435,6 +2470,7 @@ export class LibraryLog {
         if (!applied) continue;
         this.acknowledge(write.name, applied.seq, write.document);
         outcome.applied = true;
+        waiting = waiting.filter((rider) => rowName(rider) !== write.name);
       }
       if (!batch.conflicts.length) {
         await this.registerMember();
@@ -2903,6 +2939,28 @@ export class LibraryLog {
       .finally(() => this.flushing.delete(key));
   }
 
+  /** A settings row waiting to go in the same batch as the next edit made by hand (`withRider`). */
+  private rider: SettingsRow | null = null;
+
+  /**
+   * Run `work`, sending `row` in the same `/lib` batch as the first edit it makes — and kept with it, so a send
+   * that does not get through sends both again (assistant v1 §6 *Performing*: a request's applied entry and its
+   * effect). False when `work` made no edit for it to ride with; the caller then writes `row` itself.
+   */
+  async withRider(row: SettingsRow, work: () => Promise<unknown>): Promise<boolean> {
+    if (this.wireMin < WIRE || this.offline) {
+      await work();
+      return false;
+    }
+    this.rider = row;
+    try {
+      await work();
+      return this.rider === null;
+    } finally {
+      this.rider = null;
+    }
+  }
+
   /** The immutable journal is authoritative; its snapshot repairs an interrupted projection write. */
   writeAction(journal: SettingsRow): Promise<Row | null> {
     return this.act(journal, true);
@@ -2976,9 +3034,19 @@ export class LibraryLog {
           restore?: { k: string; v: string }[];
           rows?: { k: string; v: string }[];
           ops?: string;
+          riders?: { k: string; v: string }[];
         };
         if (pending.ops !== undefined) {
-          kept.push({ key, rows: [], kind: 'ops', ops: await this.openKept(pending.ops) });
+          const riders = await Promise.all(
+            (pending.riders ?? []).map(({ k, v }) => open(this.keys, k, v)),
+          );
+          kept.push({
+            key,
+            rows: [],
+            kind: 'ops',
+            ops: await this.openKept(pending.ops),
+            riders: riders.filter((row): row is SettingsRow => row?.kind === 'set'),
+          });
           continue;
         }
         const sealed = pending.restore ?? pending.bulk ?? pending.rows ?? [pending];
@@ -3012,6 +3080,7 @@ export class LibraryLog {
       }
       for (const row of converted.restore) this.project(row);
       this.projectOps(converted.ops);
+      for (const row of work.riders ?? []) this.project(row);
       return;
     }
     const { rows, kind } = work;
@@ -3104,8 +3173,13 @@ export class LibraryLog {
       try {
         if (this.wireMin >= WIRE && !this.offline) {
           const { restore, ops } = this.v4Work(work);
-          for (const row of restore) this.project(row);
-          if (ops.length && !(await this.writeOps(ops, undefined, false, key))) continue;
+          const riders = work.riders ?? [];
+          for (const row of [...restore, ...riders]) this.project(row);
+          if (
+            (ops.length || riders.length) &&
+            !(await this.writeOps(ops, undefined, false, key, false, riders))
+          )
+            continue;
           if (!restore.length) await this.discard(key);
           else if ((await this.flushRows(key, [restore])) && kind === 'restore')
             this.recoveryRows = undefined;

@@ -538,8 +538,22 @@ export type LibraryTask =
   /** A member allows an assistant to change the library: its grant row is written, its key returned once. */
   | { kind: 'assistant.consent'; client: string }
   | { kind: 'assistant.revoke'; grant: string }
+  /** The grants whose connection den-edge still lists, kept from expiring (at most daily). */
+  | { kind: 'assistant.renew'; grants: string[] }
   /** A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. */
   | { kind: 'assistant.apply'; messages: Array<{ seq: number; sealed: string }> };
+
+/** A grant as the library's grants row holds it (`assistant_grants`), for Settings. */
+export interface AssistantGrantView {
+  grant: string;
+  client?: string;
+  ops?: string[];
+  cap?: number;
+  createdAt?: number;
+  expiresAt?: number;
+  revokedAt?: number | null;
+  state: 'active' | 'expired' | 'revoked' | 'newer' | 'malformed';
+}
 
 /** One drained assistant request, as the library service handled it. */
 export type AssistantApplied =
@@ -573,6 +587,7 @@ export type LibraryTaskResult =
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
   | { kind: 'assistant.consent'; grant: string; key: string }
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }
+  | { kind: 'assistant.renew'; renewed: number }
   | {
       kind: 'assistant.apply';
       results: AssistantApplied[];
@@ -610,7 +625,9 @@ export type LibraryQuery =
   | { kind: 'retained.services.get' }
   | { kind: 'retained.home-continue.get' }
   | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope }
-  | { kind: 'library.metadata'; titles: TitleRef[] };
+  | { kind: 'library.metadata'; titles: TitleRef[] }
+  /** The grants the library's row holds, whatever their state, for Settings › Assistants. */
+  | { kind: 'assistant.grants' };
 
 export type LibraryQueryResult =
   | {
@@ -668,7 +685,8 @@ export type LibraryQueryResult =
       kind: 'retained.billboard';
       scope: RetainedBillboardScope;
       value: RetainedBillboard | null;
-    };
+    }
+  | { kind: 'assistant.grants'; grants: AssistantGrantView[] };
 
 export type LibraryObservation =
   | {

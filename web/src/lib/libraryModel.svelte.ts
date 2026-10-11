@@ -683,6 +683,21 @@ export class LibraryModel {
     return result.outcome;
   }
 
+  /** The grants the library holds, whatever their state, for Settings › Assistants. */
+  async assistantGrants() {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'assistant.grants' });
+    if (result.kind !== 'assistant.grants') throw wrongQueryResult('assistant grants');
+    return result.grants;
+  }
+
+  /** Keep the grants whose connection den-edge still lists from expiring (at most daily). */
+  async renewAssistant(grants: readonly string[]): Promise<number> {
+    const { result } = await this.task({ kind: 'assistant.renew', grants: [...grants] });
+    if (result.kind !== 'assistant.renew') throw wrongQueryResult('assistant renew');
+    return result.renewed;
+  }
+
   /** Open, check and apply a drain of the assistant queue (`assistant.ts`). */
   async applyAssistant(messages: ReadonlyArray<{ seq: number; sealed: string }>) {
     const { result } = await this.task({

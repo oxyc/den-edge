@@ -4,7 +4,22 @@
 // takes, and acknowledges them. den-edge holds only the drop-box public key and opaque requests.
 
 import { exclusive } from './exclusive';
+import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
+
+/**
+ * §5 *Renewal*: the grants whose connection den-edge still lists, handed to the library service to renew (it renews
+ * at most once a day). A grant whose connection is gone is left to expire.
+ */
+export async function renewListed(
+  renew: (grants: string[]) => Promise<unknown>,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<void> {
+  const listed = await listConnections(fetchImpl);
+  if (!listed.ok) return;
+  const grants = listed.value.flatMap((c) => (c.grant && c.kind === 'member' ? [c.grant] : []));
+  if (grants.length) await renew(grants);
+}
 
 /** One waiting request, as den-edge hands it out. */
 export interface QueuedRequest {

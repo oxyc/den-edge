@@ -46,6 +46,7 @@
           cap: 100,
           client: 'Claude',
           createdAt: 1_789_000_000_000,
+          expiresAt: 4_102_444_800_000,
           ops: ['rate', 'seen', 'watchlist_add', 'watchlist_remove'],
           pk: 'jftOjtUEDF6Jm8aGfb7qQZsWQBTKy8ED5zIpdrgtmk0',
           revokedAt: null,

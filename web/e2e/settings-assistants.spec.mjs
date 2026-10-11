@@ -102,6 +102,10 @@ test('Assistants gives the connector address to copy, how to add it, and what is
     );
     await expect(listed.filter({ hasText: 'ChatGPT' })).toContainText('Guest · Sam · search only');
 
+    // The library's own record of who may change it, beside den-edge's connections.
+    const allowed = page.getByRole('button', { name: /Allowed to change your library/ });
+    await expect(allowed).toContainText('1 allowed');
+
     // Disconnect asks first, then revokes its grant in the library and ends that connection alone.
     await section.getByRole('button', { name: 'Disconnect Claude' }).click();
     const confirm = section.getByRole('group', { name: 'Disconnect Claude?' });
@@ -122,6 +126,11 @@ test('Assistants gives the connector address to copy, how to add it, and what is
       GRANT,
     );
     expect(grant.revokedAt).toEqual(expect.any(Number));
+    await expect(allowed).toContainText('None');
+    await allowed.click();
+    await expect(
+      page.getByRole('region', { name: 'Allowed to change your library' }).getByRole('listitem'),
+    ).toContainText('revoked');
   } finally {
     await browser.close();
   }
@@ -138,6 +147,34 @@ test('Assistants says when the connector is not enabled on this server', async (
     await expect(section.getByRole('button', { name: 'Copy' })).toHaveCount(0);
     await expect(section).not.toContainText('Add custom connector');
     expect(asked).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+// The grants the library holds are listed whatever den-edge says, and any of them can be revoked from here.
+test('a grant in the library is listed and revoked even with the connector off', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page } = await settings(browser, { config: {} });
+    const section = page.getByRole('region', { name: /Assistants/ });
+    const allowed = page.getByRole('button', { name: /Allowed to change your library/ });
+    await expect(allowed).toContainText('1 allowed');
+    await allowed.click();
+    const item = page
+      .getByRole('region', { name: 'Allowed to change your library' })
+      .getByRole('listitem');
+    await expect(item).toContainText('Claude');
+    await expect(item).toContainText('can change your library until');
+    await section.getByRole('button', { name: 'Revoke Claude' }).click();
+    await section
+      .getByRole('group', { name: 'Stop Claude changing your library?' })
+      .getByRole('button', { name: 'Revoke' })
+      .click();
+    await expect(item).toContainText('revoked');
+    await expect(section.getByRole('button', { name: 'Revoke Claude' })).toHaveCount(0);
   } finally {
     await browser.close();
   }

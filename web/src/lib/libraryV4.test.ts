@@ -1357,6 +1357,73 @@ describe('an edit answered before it is sent', () => {
   });
 });
 
+describe('a settings row riding with an edit (assistant v1 §6)', () => {
+  const ref = { type: 'movie' as const, id: 550 };
+  const applied = (id: string, at: Stamp): SettingsRow => ({
+    kind: 'set',
+    schema: 2,
+    name: 'assistant-applied',
+    values: { [id]: { value: { string: `{"applied":1,"at":1,"grant":"${id}"}` }, at } },
+  });
+
+  async function riding(rows: Row[] = []) {
+    const server = await edge([filmDocument(550), ...rows]);
+    const batches: number[] = [];
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      if (String(input).endsWith('/batch') && init.method === 'POST')
+        batches.push((JSON.parse(String(init.body)) as { writes: unknown[] }).writes.length);
+      return server.fetchImpl(input, init);
+    };
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    const settled: unknown[] = [];
+    log.onDeferred = (delivery) => settled.push(delivery);
+    return { server, log, batches, settled };
+  }
+
+  const stored = async (server: Awaited<ReturnType<typeof edge>>) =>
+    (await server.opened()).find(
+      (row): row is SettingsRow => row?.kind === 'set' && row.name === 'assistant-applied',
+    );
+
+  it('goes in the same batch as the edit, and only with it', async () => {
+    const { server, log, batches, settled } = await riding();
+    const before = log.title(ref)!;
+    const event = recordTrackerEvent(before, react(before, 'love', at(4000)), at(4000), 'op')!;
+    expect(
+      await log.withRider(applied('a'.repeat(32), at(5000)), () => log.writeAction(event)),
+    ).toBe(true);
+    await vi.waitFor(() => expect(settled).toHaveLength(1));
+    expect(batches).toEqual([2]);
+    expect(Object.keys((await stored(server))!.values)).toEqual(['a'.repeat(32)]);
+    expect(document(await server.opened(), 'title:movie:550')?.reaction).toEqual({
+      value: 'love',
+      at: at(4000),
+    });
+    // Work that makes no edit carries nothing: the caller writes the row itself.
+    expect(await log.withRider(applied('b'.repeat(32), at(6000)), async () => {})).toBe(false);
+    expect(batches).toEqual([2]);
+  });
+
+  it('is merged with another device’s version and sent again with the edit on a conflict', async () => {
+    const { server, log, settled } = await riding();
+    // Another device recorded a request after this browser read the log.
+    await server.append(applied('c'.repeat(32), at(3000)));
+    const before = log.title(ref)!;
+    const event = recordTrackerEvent(before, react(before, 'like', at(4000)), at(4000), 'op')!;
+    await log.withRider(applied('d'.repeat(32), at(5000)), () => log.writeAction(event));
+    await vi.waitFor(() => expect(settled).toHaveLength(1));
+    expect(Object.keys((await stored(server))!.values).sort()).toEqual([
+      'c'.repeat(32),
+      'd'.repeat(32),
+    ]);
+    expect(document(await server.opened(), 'title:movie:550')?.reaction).toEqual({
+      value: 'like',
+      at: at(4000),
+    });
+  });
+});
+
 function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {

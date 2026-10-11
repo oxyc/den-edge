@@ -313,6 +313,7 @@
       <SharingSection {link} plugins={pluginUrls} {routes} {ready} {sealHandover} {selfId} />
       <AssistantsSection
         revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
+        listGrants={link && !local ? () => model.assistantGrants() : undefined}
       />
       <ImportSection
         {ready}
