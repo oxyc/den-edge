@@ -1,13 +1,7 @@
 <script lang="ts">
   import { onMount, tick, type Snippet } from 'svelte';
-  import {
-    capturePage,
-    previewHistory,
-    prepareSwipeLanding,
-    type PageSnapshot,
-  } from './lib/pageSnapshot';
-  import { browserSwipesBack, swipeHistory } from './lib/swipeBack';
-  import LoadingSnapshot from './components/LoadingSnapshot.svelte';
+  import type { PageSnapshot } from './lib/pageSnapshot';
+  import type * as TouchNavigation from './lib/touchNavigation';
   import RoutePage from './components/RoutePage.svelte';
   import { Navigation, appPath, nearest, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
@@ -28,6 +22,8 @@
   /** The page whose arrival fades in (`RoutePage`), or none where something has already moved it. */
   let entering = $state.raw<string | null>(null);
   let loadingSnapshot = $state.raw<PageSnapshot | null>(null);
+  /** Page copies and Den's own swipe, loaded only where there is touch (`touchNavigation.ts`). */
+  let touch = $state.raw<typeof TouchNavigation | null>(null);
 
   onMount(() => {
     const previous = history.scrollRestoration;
@@ -86,13 +82,15 @@
     let stopLoading = () => {};
     function watchLoading(snapshot: PageSnapshot | null, ticket: number) {
       const page = document.querySelector<HTMLElement>('[data-route-page][data-active="true"]');
-      if (!snapshot || !page?.querySelector('[data-route-loading]')) return;
+      // A snapshot exists only once `touch` has loaded: it is what made it.
+      const loaded = touch;
+      if (!snapshot || !loaded || !page?.querySelector('[data-route-loading]')) return;
       loadingSnapshot = snapshot;
       let settling = false;
       const ready = () => {
         if (settling || page.querySelector('[data-route-loading]')) return;
         settling = true;
-        void prepareSwipeLanding().then(() => {
+        void loaded.prepareSwipeLanding().then(() => {
           if (ticket !== revision) return;
           if (page.querySelector('[data-route-loading]')) {
             settling = false;
@@ -121,40 +119,57 @@
       // Retained pages can receive data while hidden. Prepare their current layout, rather
       // than handing off from an old clone to a newer live page.
       const prepared = saved.refresh();
-      return previewHistory(prepared, direction);
+      return touch?.previewHistory(prepared, direction) ?? null;
     };
     const inScope = () => history.state?.denNavigation?.scope === scope;
     // Den's own swipe between pages, except where the browser has one (`browserSwipesBack`). Without it no page
     // left is ever shown again as a snapshot, so Back need not copy the page it leaves.
-    const swipes = !browserSwipesBack(
-      navigator,
-      () => matchMedia('(display-mode: standalone)').matches,
-    );
+    let swipes = false;
+    let stopSwipe = () => {};
+    let mounted = true;
     // A copy is shown only by a touch swipe or a loading cover. Without touch only the cover could show one, and
     // the capture was ~33 ms of every tap at 4x CPU on d.oxy.fi's Home; there the new page's own spinner shows.
+    // Neither happens without touch, so there nothing for them loads. A page left before it has loaded waits for it
+    // (`update`), so that page is still copied and can be swiped back to.
     const copies = navigator.maxTouchPoints > 0;
-    const stopSwipe = swipes
-      ? swipeHistory(document, {
-          back: {
-            canNavigate: () => inScope() && position > 0 && !!destination(-1),
-            navigate: () => {
-              swiping = true;
-              writeAddress();
-              history.back();
-            },
-            preview: () => previewDestination(-1, 1),
+    const touchReady: Promise<typeof TouchNavigation | null> = copies
+      ? import('./lib/touchNavigation').then(
+          (module) => {
+            if (!mounted) return null;
+            touch = module;
+            swipes = !module.browserSwipesBack(
+              navigator,
+              () => matchMedia('(display-mode: standalone)').matches,
+            );
+            if (swipes)
+              stopSwipe = module.swipeHistory(document, {
+                back: {
+                  canNavigate: () => inScope() && position > 0 && !!destination(-1),
+                  navigate: () => {
+                    swiping = true;
+                    writeAddress();
+                    history.back();
+                  },
+                  preview: () => previewDestination(-1, 1),
+                },
+                forward: {
+                  canNavigate: () => inScope() && !!destination(1),
+                  navigate: () => {
+                    swiping = true;
+                    writeAddress();
+                    history.forward();
+                  },
+                  preview: () => previewDestination(1, -1),
+                },
+              });
+            return module;
           },
-          forward: {
-            canNavigate: () => inScope() && !!destination(1),
-            navigate: () => {
-              swiping = true;
-              writeAddress();
-              history.forward();
-            },
-            preview: () => previewDestination(1, -1),
+          (error: unknown) => {
+            console.warn('den: page swipe could not be loaded', error);
+            return null;
           },
-        })
-      : () => {};
+        )
+      : Promise.resolve(null);
     onchange(current.route);
     const address = () => location.pathname + location.search;
     /**
@@ -275,7 +290,8 @@
         // one a quicker navigation has overtaken, which is why that one measures it too before giving way.
         // A copy is for a swipe to show, or for a loading cover over a page opened. Going Back with no swipe of
         // Den's own, neither can follow, and the copy is skipped.
-        const captured = copies && (push || swipes) ? capturePage() : null;
+        const loaded = touch ?? (copies ? await touchReady : null);
+        const captured = loaded && (push || swipes) ? loaded.capturePage() : null;
         if (unsaved !== null) {
           if (captured) snapshots.set(unsaved, captured);
           unsaved = null;
@@ -305,7 +321,7 @@
           if (ticket !== revision) return;
           restoring = false;
           if (swiping) {
-            await prepareSwipeLanding();
+            await touch?.prepareSwipeLanding();
             if (ticket !== revision) return;
             swiping = false;
             document.dispatchEvent(new Event('den:swipe-restored'));
@@ -368,6 +384,7 @@
     window.addEventListener('popstate', traversed);
     window.addEventListener('pagehide', writeAddress);
     return () => {
+      mounted = false;
       writeAddress();
       window.removeEventListener('pagehide', writeAddress);
       stopLoading();
@@ -401,8 +418,8 @@
   </RoutePage>
 {/each}
 
-{#if loadingSnapshot}
-  <LoadingSnapshot snapshot={loadingSnapshot} />
+{#if loadingSnapshot && touch}
+  <touch.LoadingSnapshot snapshot={loadingSnapshot} />
 {/if}
 
 <style>
