@@ -86,6 +86,8 @@ interface LibraryRecord {
   progressAt: number;
   /** The resume point in seconds, where the device that wrote it knew it. */
   seconds?: number;
+  /** The stamp device id of the device that wrote the resume point. */
+  progressBy?: string;
   addedAt: number;
   deleted: boolean;
 }
@@ -98,6 +100,8 @@ interface Mark {
   fraction: number;
   updatedAt: number;
   seconds?: number;
+  /** The stamp device id of the device that wrote it. */
+  updatedBy?: string;
   title: string;
   posterPath?: string;
   voteAverage: number;
@@ -161,11 +165,15 @@ export interface ContinueEntry {
   /** Where it was last playing, in seconds, and when that was written (epoch ms): `livePosition`. */
   seconds?: number;
   at?: number;
+  /** The name the device that wrote `seconds` gives itself in `set:devices`. */
+  device?: string;
 }
 
 /** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
-export interface ContinueCandidate extends Omit<ContinueEntry, 'title'> {
+export interface ContinueCandidate extends Omit<ContinueEntry, 'title' | 'device'> {
   ref: Pick<Title, 'type' | 'id'>;
+  /** The stamp device id that wrote `seconds`, which the library service names (`device`). */
+  by?: string;
   /** A started series takes its display from its latest mark; a bare flag and a film take it from the record. */
   display: 'mark' | 'record';
 }
@@ -286,6 +294,7 @@ class LibraryFold {
           fraction: decided.fraction,
           updatedAt: decided.at,
           ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
+          ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
           title: series?.title ?? '',
           posterPath: series?.posterPath,
           voteAverage: series?.voteAverage ?? 0,
@@ -305,6 +314,7 @@ class LibraryFold {
       progress: row.resume.value,
       progressAt: row.resume.at[0],
       ...(row.resume.seconds !== undefined ? { seconds: row.resume.seconds } : {}),
+      ...(row.resume.at[2] ? { progressBy: row.resume.at[2] } : {}),
       addedAt: row.addedAt,
       deleted: row.deleted.value,
     });
@@ -343,6 +353,7 @@ class LibraryFold {
         fraction: state.resume.value,
         updatedAt: state.resume.at[0],
         ...(state.resume.seconds !== undefined ? { seconds: state.resume.seconds } : {}),
+        ...(state.resume.at[2] ? { updatedBy: state.resume.at[2] } : {}),
         title: series?.title ?? '',
         posterPath: series?.posterPath,
         voteAverage: series?.voteAverage ?? 0,
@@ -759,7 +770,13 @@ function continueCandidates(
       display: mark ? 'mark' : 'record',
       fraction: answer.fraction,
       episode: answer.episode,
-      ...(resumes ? { seconds: mark.seconds, at: mark.updatedAt } : {}),
+      ...(resumes
+        ? {
+            seconds: mark.seconds,
+            at: mark.updatedAt,
+            ...(mark.updatedBy ? { by: mark.updatedBy } : {}),
+          }
+        : {}),
     });
   }
 
@@ -774,7 +791,13 @@ function continueCandidates(
       ref: record.title,
       display: 'record',
       fraction: record.progress,
-      ...(record.seconds !== undefined ? { seconds: record.seconds, at: record.progressAt } : {}),
+      ...(record.seconds !== undefined
+        ? {
+            seconds: record.seconds,
+            at: record.progressAt,
+            ...(record.progressBy ? { by: record.progressBy } : {}),
+          }
+        : {}),
     });
   }
   return entries;
@@ -802,7 +825,7 @@ export function nameContinueCandidates(
         updatedAt: mark.updatedAt,
       });
   }
-  return candidates.flatMap(({ ref, display, ...entry }) => {
+  return candidates.flatMap(({ ref, display, by: _by, ...entry }) => {
     const title = display === 'mark' ? marks.get(titleKey(ref))?.title : records.get(titleKey(ref));
     return title?.title ? [{ ...entry, title }] : [];
   });

@@ -97,8 +97,16 @@
     autoplay?: boolean;
     scout?: Addon | null;
     row: TitleRow | undefined;
-    /** Where this title is playing right now on some device, as a clock that ticks (`livePosition`). */
-    live?: { clock: string; episode?: { season: number; episode: number } };
+    /**
+     * Where this title is playing right now on some device, as a clock that ticks (`livePosition`), and how far in
+     * when its runtime is known.
+     */
+    live?: {
+      clock: string;
+      episode?: { season: number; episode: number };
+      device?: string;
+      fraction?: number;
+    };
     episodes: Map<string, EpisodeRow>;
     busy: boolean;
     failure: string | null;
@@ -653,12 +661,6 @@
       {@const d = detail}
       <div class="hero-content">
         <div class="head">
-          <!-- Over the poster's foot, as on its Continue Watching card: placed there, it moves nothing as it
-               comes and goes. -->
-          {#if live}<span class="live"
-              >{#if live.episode}<small>S{live.episode.season} · E{live.episode.episode}</small
-                >{/if}▶ {live.clock}</span
-            >{/if}
           {#if d.title.posterPath}<img
               class="poster"
               src="https://image.tmdb.org/t/p/w500{d.title.posterPath}"
@@ -688,18 +690,27 @@
               </p>{/if}
           </div>
         </div>
-        {#if continuing}
+        <!-- While it plays on another device this block says where, and its clock rides beside the track, so it
+             moves nothing as the clock comes and goes. -->
+        {#if continuing || live}
+          {@const coordinate = live
+            ? live.episode
+            : target && series?.kind === 'resume'
+              ? target
+              : undefined}
           <button
             class="continue"
             onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
           >
             <DetailIcon name="play" filled /><span
-              ><strong>{continueLabel}</strong>
-              {#if target && series?.kind === 'resume'}<small
-                  >S{target.season} · E{target.episode}</small
-                >{/if}
-              {#if fraction > RESUME_FLOOR && fraction < WATCHED}<span class="resume-track"
-                  ><span style:width={`${fraction * 100}%`}></span></span
+              ><strong
+                >{live ? `Playing on ${live.device ?? 'another device'}` : continueLabel}</strong
+              >
+              {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
+              {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
+                  class="resume-track"
+                  ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
+                  ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
                 >{/if}
             </span>
           </button>
@@ -1051,39 +1062,12 @@
   }
 
   .head {
-    --poster-w: clamp(110px, 11vw, 160px);
-
-    position: relative;
     display: flex;
     gap: 40px;
     align-items: start;
 
     /* The hero is bottom-aligned, so this block's height is what the trailer above it does not get. */
     min-height: clamp(200px, 22vw, 300px);
-  }
-
-  /* PosterCard's live clock, at the foot of the poster (2:3, at the head's top left). */
-  .live {
-    position: absolute;
-    z-index: 1;
-    top: calc(var(--poster-w) * 1.5 - 8px);
-    left: 8px;
-    max-width: calc(var(--poster-w) - 16px);
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--accent);
-    color: var(--on-accent, #fff);
-    font-size: 12px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    transform: translateY(-100%);
-  }
-
-  /* A series says which episode is playing, above its clock. */
-  .live small {
-    display: block;
-    font-size: 11px;
-    font-weight: 600;
   }
 
   .copy,
@@ -1094,8 +1078,8 @@
 
   .poster {
     display: block;
-    flex: 0 0 var(--poster-w);
-    width: var(--poster-w);
+    flex: 0 0 clamp(110px, 11vw, 160px);
+    width: clamp(110px, 11vw, 160px);
     height: auto;
     aspect-ratio: 2/3;
     object-fit: cover;
@@ -1151,6 +1135,7 @@
   }
 
   .resume-track {
+    position: relative;
     display: block;
     width: 240px;
     max-width: 100%;
@@ -1160,11 +1145,25 @@
     background: #fff4;
   }
 
-  .resume-track > span {
+  .resume-track > span:first-child {
     display: block;
     height: 100%;
     border-radius: inherit;
     background: var(--fg);
+  }
+
+  /* Out of flow beside the track, as a player's time sits beside its scrubber. */
+  .live-clock {
+    position: absolute;
+    top: 50%;
+    left: calc(100% + 10px);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    white-space: nowrap;
+    transform: translateY(-50%);
   }
 
   .continue:focus-visible {
@@ -1343,14 +1342,14 @@
     }
 
     .head {
-      --poster-w: clamp(96px, 22vw, 180px);
-
       gap: 20px;
       align-items: start;
       min-height: clamp(144px, 33vw, 270px);
     }
 
     .poster {
+      flex-basis: clamp(96px, 22vw, 180px);
+      width: clamp(96px, 22vw, 180px);
       border-radius: 12px;
     }
 

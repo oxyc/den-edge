@@ -219,7 +219,15 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     const clock = homeClock(page);
     play(PLAYED, 600);
     await expect(clock).toBeVisible({ timeout: 70_000 });
-    await expect(clock).toHaveText(/^▶ 1\d:\d\d$/);
+    await expect(clock).toHaveText(/^1\d:\d\d$/);
+    // In the art's lower-right corner, where the card's play glyph is, above its progress bar.
+    const art = await page
+      .locator('.card', { hasText: 'Movie 1002' })
+      .locator('.art')
+      .boundingBox();
+    const badge = await clock.boundingBox();
+    expect(art.x + art.width - (badge.x + badge.width)).toBeCloseTo(8, 0);
+    expect(art.y + art.height - (badge.y + badge.height)).toBeCloseTo(18, 0);
     await expectTicking(clock, edge);
 
     // Stopped on the TV: no more writes. The clock runs on until the last one is LIVE_MS (45 s) old.
@@ -234,7 +242,7 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
   }
 });
 
-test('a series’ page shows which episode plays where, and moves nothing as the clock comes and goes', async ({
+test('a series’ page says which device plays which episode, and moves nothing as the clock comes and goes', async ({
   browser,
   page,
 }) => {
@@ -243,28 +251,37 @@ test('a series’ page shows which episode plays where, and moves nothing as the
   try {
     await page.locator('.card', { hasText: 'Series 1003' }).click();
     await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
-    const clock = page.locator('.hero .live');
+    const block = page.locator('.hero .continue');
+    const label = block.locator('strong');
+    const clock = block.locator('.live-clock');
     const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
     const actions = page.locator('.hero-actions');
-    const boxes = async () => [await heading.boundingBox(), await actions.boundingBox()];
+    const boxes = async () => [
+      await heading.boundingBox(),
+      await block.boundingBox(),
+      await actions.boundingBox(),
+    ];
     // The seeded resume point was written as the page opened, so its own clock may still be running out.
     await expect(clock).toBeHidden({ timeout: 60_000 });
+    await expect(label).toHaveText('Continue Watching');
     const without = await boxes();
 
     const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
-    await expect(clock).toHaveText(/^S1 · E3▶ 1\d:\d\d$/, { timeout: 40_000 });
+    await expect(clock).toHaveText(/^1\d:\d\d$/, { timeout: 40_000 });
+    await expect(label).toHaveText('Playing on Apple TV');
+    await expect(block.locator('small')).toHaveText('S1 · E3');
     expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
     const samples = await watch(clock, 15_000);
     expect(samples.filter((text) => text === null)).toEqual([]);
     expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(10);
     for (const width of [393, 1280]) {
       await page.setViewportSize({ width, height: width < 500 ? 852 : 800 });
-      const poster = await page.locator('.hero .poster').boundingBox();
-      const pill = await clock.boundingBox();
-      // Inside the poster, at its foot.
-      expect(pill.x).toBeGreaterThanOrEqual(poster.x);
-      expect(pill.x + pill.width).toBeLessThanOrEqual(poster.x + poster.width);
-      expect(poster.y + poster.height - (pill.y + pill.height)).toBeCloseTo(8, 0);
+      const track = await block.locator('.resume-track').boundingBox();
+      const time = await clock.boundingBox();
+      // Beside the track, on its line, inside the page.
+      expect(time.x).toBeGreaterThan(track.x + track.width);
+      expect(time.x + time.width).toBeLessThanOrEqual(width);
+      expect(time.y + time.height / 2).toBeCloseTo(track.y + track.height / 2, 0);
       await page.screenshot({ path: test.info().outputPath(`detail-live-${width}.png`) });
     }
     await page.setViewportSize({ width: 1280, height: 720 });
@@ -272,6 +289,7 @@ test('a series’ page shows which episode plays where, and moves nothing as the
 
     playing.pause();
     await expect(clock).toBeHidden({ timeout: 20_000 });
+    await expect(label).toHaveText('Continue Watching');
     expect(await boxes(), 'nothing moved as the clock went').toEqual(without);
   } finally {
     await close();

@@ -25,7 +25,10 @@
   if (writer) {
     const services = createWorkerServiceSession();
     const model = new LibraryModel(services.library, { libraryKey, mode: 'online' });
-    void model.ready.then(() => (ready = true));
+    // Listed in `set:devices` under the name the page shows it by ("Playing on Apple TV").
+    void model.ready
+      .then(() => model.heartbeatDevice('Apple TV', 'fixture-device'))
+      .then(() => (ready = true));
     let written = 0;
     (
       window as unknown as {
