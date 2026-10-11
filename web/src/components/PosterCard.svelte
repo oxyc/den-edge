@@ -26,6 +26,7 @@
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
   import ActionMenu from './ActionMenu.svelte';
+  import DetailIcon from './DetailIcon.svelte';
   import { titleActionsContext, titleMenuItems } from '../lib/titleActions';
   import { toastContext } from '../lib/toast';
 
@@ -352,8 +353,11 @@
   {/if}
 {/snippet}
 
+<!-- Drawn, not typed. Measured in fresh Chrome processes on macOS at 4x CPU throttling: the first U+22EF laid out
+     cost ~20ms (★ · … • and this SVG: ~1ms), and the poster-menu fixture's first layout fell from ~46ms to
+     ~22ms with this icon. Inferred, not observed: Chrome's font fallback, since the glyph is outside the UI font. -->
 {#snippet ellipsis()}
-  <span aria-hidden="true">⋯</span>
+  <DetailIcon name="more" />
 {/snippet}
 
 {#if hasMenu}
@@ -597,8 +601,6 @@
     border: 1px solid rgb(255 255 255 / 0.25);
     border-radius: 999px;
     background: rgb(0 0 0 / 0.72);
-    font-size: 16px;
-    line-height: 1;
     opacity: 0;
     transition: opacity 120ms;
   }
@@ -631,7 +633,6 @@
     :global(.holder .action) {
       width: 28px;
       height: 28px;
-      font-size: 14px;
       opacity: 0.8;
     }
   }
