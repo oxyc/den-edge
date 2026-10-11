@@ -11,7 +11,9 @@ function place() {
   const went: string[] = [];
   return {
     went,
+    href: 'https://den.test/movies?keep=1#here',
     assign: (path: string | URL) => void went.push(`assign ${path}`),
+    replace: (path: string | URL) => void went.push(`replace ${path}`),
     reload: () => void went.push('reload'),
   };
 }
@@ -134,7 +136,26 @@ describe('a chunk failing to load', () => {
   it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
     const idle = hiddenPage();
     expect(release.recoverChunkFailure(idle.page)).toBe(true);
-    expect(idle.at.went).toEqual(['reload']);
+    const marked = /^replace https:\/\/den\.test\/movies\?keep=1&den-retry=[0-9a-z]+#here$/;
+    expect(idle.at.went).toEqual([expect.stringMatching(marked)]);
+  });
+
+  it('reloads past the shared cache once, not again moments later', () => {
+    const kept = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (key: string) => kept.get(key) ?? null,
+      setItem: (key: string, value: string) => void kept.set(key, value),
+    });
+    try {
+      const first = hiddenPage();
+      release.recoverChunkFailure(first.page);
+      const again = hiddenPage();
+      release.recoverChunkFailure(again.page);
+      expect(first.at.went).toHaveLength(1);
+      expect(again.at.went).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('still marks a release waiting, so it reaches the page by the usual route when it must defer', () => {

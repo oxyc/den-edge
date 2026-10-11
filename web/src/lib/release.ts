@@ -79,7 +79,7 @@ interface Page {
   scrollX: number;
   scrollY: number;
   document: Pick<Document, 'activeElement' | 'querySelectorAll'>;
-  location: Pick<Location, 'reload'>;
+  location: Pick<Location, 'reload' | 'replace' | 'href'>;
 }
 
 /** Whether reloading `page` right now would lose nothing: it sits at the top, nothing is heard playing, and
@@ -121,7 +121,13 @@ export function recoverChunkFailure(page: Page = window): boolean {
   return true;
 }
 
-/** Reload onto the current release, at most once in a while: a missing file must not become a reload loop. */
+/**
+ * Reload onto the current release, at most once in a while: a missing file must not become a reload loop. A plain
+ * reload can be answered by the same shell Cloudflare kept, which named the missing chunk; the address carries
+ * `den-retry`, the marker index.html's inline script uses for a shell whose startup files are gone, so the shell
+ * comes from den-edge. That script removes the marker again on arrival. When the guard holds, a screen that could
+ * not load says so and offers another try (`ScreenLoading`).
+ */
 export function reloadOnce(page: Pick<Page, 'location'> = window): void {
   try {
     const last = Number(sessionStorage.getItem('den.reloadedAt'));
@@ -130,5 +136,7 @@ export function reloadOnce(page: Pick<Page, 'location'> = window): void {
   } catch {
     // Without storage there is no loop guard; a reload is still better than a page that stays broken.
   }
-  page.location.reload();
+  const url = new URL(page.location.href);
+  url.searchParams.set('den-retry', Date.now().toString(36));
+  page.location.replace(url.href);
 }
