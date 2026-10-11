@@ -447,6 +447,33 @@ test.describe('Worker-owned detail metadata boundary', () => {
     expectWorkerOwned(requests);
   });
 
+  test('extras are asked beside base detail, not after it has rendered', async ({ page }) => {
+    await seed(page);
+    const detailGate = deferred();
+    const ratingsAsked = deferred();
+    const requests = await arrange(page, {
+      tmdb: async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (path.endsWith('/season/1')) return route.fulfill({ json: { episodes: [] } });
+        await detailGate.promise;
+        return route.fulfill({ json: titleBody(103) });
+      },
+      ratings: async (route) => {
+        ratingsAsked.resolve();
+        return route.fulfill({ json: { Response: 'True', imdbRating: '8.2', Ratings: [] } });
+      },
+    });
+
+    await page.goto(`${FIXTURE}?type=tv&id=103`);
+    // The IMDb id and its rating are asked while TMDB's detail answer is still held.
+    await ratingsAsked.promise;
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
+    detailGate.resolve();
+    await expect(page.getByRole('heading', { level: 1, name: 'Series 103' })).toBeVisible();
+    await expect(page.getByText('IMDb', { exact: true })).toBeVisible();
+    expectWorkerOwned(requests);
+  });
+
   test('a held old title neither blocks nor overwrites the newly active route', async ({
     page,
   }) => {
@@ -530,6 +557,10 @@ test.describe('Worker-owned detail metadata boundary', () => {
       ratings: async (route) => route.fulfill({ status: 503, body: 'Provider unavailable' }),
       warnings: async (route) => route.fulfill({ status: 404, json: { error: 'not_cached' } }),
     });
+    // Extras are asked beside the detail, so the missing title's IMDb id is asked too — and TMDB has none.
+    await page.route('**/tmdb/3/tv/308727/external_ids', (route) =>
+      route.fulfill({ status: 404, json: { error: 'not_found' } }),
+    );
 
     await page.goto(`${FIXTURE}?type=tv&id=308727`);
     await expect(page.getByText('Couldn’t load this title from TMDB.')).toBeVisible();

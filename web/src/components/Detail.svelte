@@ -360,14 +360,15 @@
     titleFacts = undefined;
   });
 
-  // Optional providers are one independent Worker question. They may finish after base detail and seasons, and a
-  // retained hidden route does no provider work until it is visible again. Once answered, the answer stays: asking
-  // again on every return handed Related titles new studios and facts, which rebuilt all its rows and so replaced
-  // the rows the viewer had scrolled along.
+  // Optional providers are one independent Worker question, asked beside base detail rather than after it: none of
+  // them reads the detail answer, and waiting for it made a first open serial — in a 4x-CPU e2e run with 150–220 ms
+  // providers, IMDb's id was asked only once the detail had rendered (~300 ms) and its rating appeared ~430 ms after
+  // the title did. A retained hidden route does no provider work until it is visible again. Once answered, the answer
+  // stays: asking again on every return handed Related titles new studios and facts, which rebuilt all its rows and
+  // so replaced the rows the viewer had scrolled along.
   $effect(() => {
     const request = extrasRequest;
-    const [visible, loaded] = [active, detail];
-    if (!visible || !loaded || extrasAnswered === request) return;
+    if (!active || extrasAnswered === request) return;
     const title = untrack(() => ({ type: ref.type, id: ref.id }));
     const categories = untrack(() => [...warningCategories]);
     const controller = new AbortController();
