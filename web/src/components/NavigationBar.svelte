@@ -398,19 +398,27 @@
   }
 
   .brand {
+    --brand-w: 54px;
+
     display: flex;
     flex-shrink: 0;
-    width: 54px;
+    width: var(--brand-w);
     height: 32px;
     overflow: hidden;
   }
 
+  /* The mark fills only the middle of its 400×240 canvas, so the image is drawn 2.2× the box and clipped to it.
+     It is laid out at that size rather than scaled up with a transform: the scaled version was reported soft on an
+     iPhone (2026-10-11, sharp once pinch-zoomed), while Chrome and macOS WebKit drew both identically, so why iOS
+     differed is not established. */
   .brand img {
     display: block;
-    width: 54px;
-    height: 32px;
+    flex-shrink: 0;
+    width: calc(var(--brand-w) * 2.2);
+    height: calc(32px * 2.2);
+    margin-top: calc((32px - 32px * 2.2) / 2 - 2px);
+    margin-left: calc((var(--brand-w) - var(--brand-w) * 2.2) / 2);
     object-fit: contain;
-    transform: translateY(-2px) scale(2.2);
   }
 
   .back {
@@ -696,9 +704,8 @@
       display: none;
     }
 
-    .brand,
-    .brand img {
-      width: 48px;
+    .brand {
+      --brand-w: 48px;
     }
 
     .search {
