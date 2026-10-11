@@ -5,7 +5,7 @@
 // minutes) is used or lapsed, whoever later sees it in a chat, a history or a photographed QR.
 
 import { ticketGrant } from './grants';
-import { parseCode } from './pair';
+import { parseCode } from './pairCode';
 
 export interface PhoneLink {
   /** Absent when the laptop's grant had ended: the phone then joins the library without the host's addons. */
