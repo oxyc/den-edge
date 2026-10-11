@@ -211,6 +211,11 @@ pub struct AppState {
     pub skipdb_cache_dir: Option<std::path::PathBuf>,
     /// Today (a UTC day number) and how many SkipDB answers have been kept under a new name in it (`skipdb::new_name`).
     pub skipdb_kept_new: Mutex<(u64, u32)>,
+    /// den-remux's key for asking it to detect an episode's segments (env `SEGMENTS_KEY`, sent as
+    /// `X-Den-Segments-Key`). Unset, `/skipdb` reads what remux has detected but never asks for a scan.
+    pub segments_key: Option<String>,
+    /// Episodes a scan was asked for lately, and when (ms), so one is asked for once per `skipdb::SCAN_EVERY`.
+    pub segments_scans: Mutex<HashMap<String, u64>>,
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
@@ -358,6 +363,8 @@ impl AppState {
             )),
             skipdb_cache_dir: None,
             skipdb_kept_new: Mutex::new((0, 0)),
+            segments_key: None,
+            segments_scans: Mutex::new(HashMap::new()),
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),
             ratings_refreshing: Mutex::new(std::collections::HashSet::new()),
@@ -467,6 +474,7 @@ async fn main() {
     state.tmdb_daily_max = env_number("TMDB_DAILY_MAX");
     state.media_daily_max = env_number("MEDIA_DAILY_MAX_BYTES");
     state.remux_edge_secret = env_opt("REMUX_EDGE_SECRET");
+    state.segments_key = env_opt("SEGMENTS_KEY");
     // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
     // a browser that cannot ask doesthedogdie itself. Built whether or not a key is lent — gated on the TMDB
     // key, a household that never lent one would find the warnings turned off with it, for no reason it could
