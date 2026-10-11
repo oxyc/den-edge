@@ -7,6 +7,7 @@ import {
 } from './actions';
 import type { ClockStore } from './clockStore';
 import { buildHistoryExport } from './historyExport';
+import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
 import { LibraryLog, projectV3Documents, successorTag } from './log';
@@ -219,6 +220,9 @@ export class LibraryAdminAuthority {
         return this.#settleKey(task, operationId);
       case 'key-reset.adopt':
         return this.#adoptKey(task, operationId);
+      default:
+        // Assistant tasks are the library authority's own (`LibraryAssistantAuthority`), never routed here.
+        throw new Error(`not an administrative task: ${task.kind}`);
     }
   }
 
@@ -559,6 +563,13 @@ export class LibraryAdminAuthority {
         );
       if (!(await next.takeMoved(moving, this.log.memberProof)))
         return this.#abandonReset(next, 'key-reset.move', 'unavailable');
+      // The grants the move revoked join this device's own revoked set for the new library (assistant v1 §10).
+      if (moving.revokedGrants.length)
+        await next
+          .keep(ASSISTANT_RECORDS, { revoked: moving.revokedGrants, applied: {}, renewedAt: 0 })
+          .catch((error: unknown) =>
+            console.error('den: the revoked assistant grants could not be recorded', error),
+          );
       switch (await this.log.endMoved(moving, next)) {
         case 'deleted':
           await this.log.rekeyKept(next);

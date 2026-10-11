@@ -129,12 +129,24 @@ pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -
 /// `throttled_per_minute` for an act that costs `cost` of the budget at once. Refused whole when it does not fit,
 /// and then it spends nothing.
 pub(crate) fn throttled_per_minute_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
+    throttled_per_window(state, bucket, limit, cost, CLAIM_WINDOW_MS)
+}
+
+/// `limit` in fixed windows of `window_ms`, as `throttled_per_minute_by` counts a minute: a daily budget (an
+/// assistant's appends to one library) is the same count over a longer window.
+pub(crate) fn throttled_per_window(
+    state: &AppState,
+    bucket: &str,
+    limit: u32,
+    cost: u32,
+    window_ms: u64,
+) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
     let Some(t) = claims.entry(bucket, now) else { return Some(CLAIM_WINDOW_MS) };
     if t.until <= now {
         t.count = 0;
-        t.until = now + CLAIM_WINDOW_MS;
+        t.until = now + window_ms;
     }
     if t.count.saturating_add(cost) > limit {
         return Some(t.until.saturating_sub(now));

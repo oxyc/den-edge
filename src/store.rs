@@ -99,8 +99,18 @@ fn load_generation(dir: &Path) -> io::Result<String> {
 }
 
 /// The kinds of record, one directory each.
-pub const NAMESPACES: [&str; 9] =
-    ["inbox", "plugins", "settings", "sync", "lib", "lib-rewrite", "grants", "oauth", "recovery"];
+pub const NAMESPACES: [&str; 10] = [
+    "inbox",
+    "plugins",
+    "settings",
+    "sync",
+    "lib",
+    "lib-rewrite",
+    "grants",
+    "oauth",
+    "recovery",
+    "assistant",
+];
 
 /// The cap unless `STORE_CAP_BYTES` sets one: far past one household's few MB.
 pub const DEFAULT_CAP: u64 = 1 << 30;
@@ -114,7 +124,7 @@ impl Store {
             // Guest grants hold a bearer copy of a host's addon installs (`grants.rs`); the assistants' connections
             // hold which library or grant each one speaks for (`oauth.rs`).
             #[cfg(unix)]
-            if ns == "grants" || ns == "oauth" {
+            if ns == "grants" || ns == "oauth" || ns == "assistant" {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(dir.join(ns), std::fs::Permissions::from_mode(0o700))?;
             }

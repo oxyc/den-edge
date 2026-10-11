@@ -77,6 +77,12 @@ import {
 } from './libraryServiceCore';
 import { LibraryLog, type DeferredDelivery } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
+import {
+  ASSISTANT_RECORDS,
+  LibraryAssistantAuthority,
+  randomHex,
+  type AssistantRecords,
+} from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
@@ -112,6 +118,7 @@ import {
   type EpisodeRow,
   type Row,
   type SettingsRow,
+  type Stamp,
   type TitleRow,
   type Stamped,
 } from './wire';
@@ -350,6 +357,12 @@ export class LibraryLogAuthority {
   readonly #listeners = new Set<(event: LibraryAuthorityEvent) => void>();
   #simklApproval?: { signature: string; id: string; shown: HeldRemovals };
   readonly #admin?: LibraryAdminAuthority;
+  readonly #assistant: LibraryAssistantAuthority;
+  /**
+   * While an assistant's request is performed: the stamp its writes take, the request's own time (assistant v1 §6),
+   * in place of a freshly issued one, so it never overrides a change made after it.
+   */
+  #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
@@ -367,6 +380,78 @@ export class LibraryLogAuthority {
         fetchImpl: options.fetchImpl,
         destination: options.destination,
       });
+    this.#assistant = new LibraryAssistantAuthority({
+      libraryId: log.libraryId,
+      get device() {
+        return clock.device;
+      },
+      settings: (name) => this.#log.settings(name),
+      refresh: async () => void (await this.#log.refresh()),
+      command: async (command, operationId, stamp) => {
+        this.#asOf = stamp;
+        try {
+          return await this.command(command, operationId);
+        } finally {
+          this.#asOf = null;
+        }
+      },
+      ride: async (name, changes, work) => {
+        const row = this.#changedSettingsRow(name, changes, await this.#settingsStamp());
+        if (!row) return work();
+        let result!: Awaited<ReturnType<typeof work>>;
+        const rode = await this.#log.withRider(row, async () => {
+          result = await work();
+        });
+        // The edit made nothing to ride with: the entry is written on its own, straight after.
+        if (!rode) await this.#writeRow(row, []);
+        return result;
+      },
+      loadRecords: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
+      saveRecords: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
+      loadShape: async (title) => {
+        if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
+        return this.#shapes.has(titleKey(title));
+      },
+      seasonEpisodes: async (title, season) => {
+        if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
+        const shape = this.#shapes.get(titleKey(title))?.shape;
+        if (!shape) return null;
+        return Array.from(
+          { length: shape.counts.get(season) ?? 0 },
+          (_, index) => index + 1,
+        ).filter((episode) => isAired({ season, episode }, shape.lastAired));
+      },
+      patch: async (name, changes) => {
+        const written = await this.#patchSettings(name, changes, []);
+        if (written.delivery === 'queued')
+          throw authorityError(
+            'unavailable',
+            'the library change has not reached den-edge yet',
+            true,
+          );
+        return written.affected;
+      },
+      replace: async (row) => void (await this.#writeRow(row, [])),
+      putDropbox: async (key) => {
+        const member = await this.#log.relayMembership();
+        if (!member) return false;
+        try {
+          const res = await this.#fetch('/assistant/dropbox', {
+            method: 'PUT',
+            headers: {
+              'content-type': 'application/json',
+              'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
+            },
+            body: JSON.stringify({ pk: key.public }),
+          });
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      now: () => Date.now(),
+      random: randomHex,
+    });
   }
 
   get generation(): string | null {
@@ -522,6 +607,8 @@ export class LibraryLogAuthority {
         return this.#administration().historyExport();
       case 'library.metadata':
         return this.#libraryMetadata(query.titles);
+      case 'assistant.grants':
+        return { kind: 'assistant.grants', grants: await this.#assistant.grants() };
       case 'download.refresh':
         return {
           kind: 'download.refresh',
@@ -596,6 +683,7 @@ export class LibraryLogAuthority {
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
+    if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
     if (
       ((task.kind === 'key-reset.move' ||
         task.kind === 'key-reset.settle' ||
@@ -605,6 +693,37 @@ export class LibraryLogAuthority {
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
     return this.#administration().task(task, operationId);
+  }
+
+  /**
+   * Assistant writes live only in a library den-edge holds: a library kept only here has no queue to drain and no
+   * den-edge to approve a grant with. Revoking one is always possible.
+   */
+  async #assistantTask(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+    if (this.#options.mode === 'local' && task.kind !== 'assistant.revoke')
+      throw authorityError('invalid-request', 'a library kept only here takes no assistant writes');
+    switch (task.kind) {
+      case 'assistant.consent': {
+        const { grant, key } = await this.#assistant.consent(task.client);
+        return { result: { kind: 'assistant.consent', grant, key }, affected: [] };
+      }
+      case 'assistant.revoke':
+        return {
+          result: { kind: 'assistant.revoke', outcome: await this.#assistant.revoke(task.grant) },
+          affected: [],
+        };
+      case 'assistant.renew':
+        return {
+          result: { kind: 'assistant.renew', renewed: await this.#assistant.renew(task.grants) },
+          affected: [],
+        };
+      case 'assistant.apply': {
+        const { results, ack, dropbox, affected } = await this.#assistant.apply(task.messages);
+        return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
+      }
+      default:
+        throw authorityError('invalid-request', 'not an assistant task');
+    }
   }
 
   #administration(): LibraryAdminAuthority {
@@ -1162,7 +1281,7 @@ export class LibraryLogAuthority {
     const before = this.#log.title(ref) ?? blankTitle(ref, Date.now());
     if (already(before)) return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());
-    const at = await this.#clock.issue();
+    const at = await this.#issue();
     const event = recordTrackerEvent(before, change(before, at), at, operationId);
     if (!event) return this.#unchanged();
     return this.#writeAction(event, this.#affected(ref, affectsContinue, affectsHistory));
@@ -1178,7 +1297,7 @@ export class LibraryLogAuthority {
     const current = episodeProgress(before, this.#log.title(ref));
     if (current >= WATCHED === watched && (watched || current === 0)) return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());
-    const at = await this.#clock.issue();
+    const at = await this.#issue();
     const event = recordTrackerEvent(before, markEpisode(before, watched, at), at, operationId);
     if (!event) return this.#unchanged();
     return this.#writeAction(event, this.#affected(ref));
@@ -1201,7 +1320,7 @@ export class LibraryLogAuthority {
         blankEpisode(command.title, command.season, episode);
       const current = episodeProgress(before, this.#log.title(command.title));
       if (current >= WATCHED === command.watched && (command.watched || current === 0)) continue;
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         markEpisode(before, command.watched, at),
@@ -1243,7 +1362,7 @@ export class LibraryLogAuthority {
       const before = this.#log.episode(ref, season, episode) ?? blankEpisode(ref, season, episode);
       const current = episodeProgress(before, this.#log.title(ref));
       if (current >= WATCHED === watched && (watched || current === 0)) continue;
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         markEpisode(before, watched, at),
@@ -1259,7 +1378,7 @@ export class LibraryLogAuthority {
         before.resume.value === 0 &&
         before.episodesReset !== null;
     if (!titleAlready) {
-      const at = await this.#clock.issue();
+      const at = await this.#issue();
       const event = recordTrackerEvent(
         before,
         (watched ? markWatched : unwatchSeries)(before, at),
@@ -1683,6 +1802,11 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const row = this.#changedSettingsRow(name, changes, await this.#settingsStamp());
     return row ? this.#writeRow(row, affected) : this.#unchanged();
+  }
+
+  /** The stamp an edit takes: a fresh one, or the request's own while an assistant's is performed. */
+  async #issue(): Promise<Stamp> {
+    return this.#asOf ?? (await this.#clock.issue());
   }
 
   async #settingsStamp() {
