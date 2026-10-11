@@ -1,4 +1,5 @@
-import type { Shape, Title } from './library';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import { titleKey, type Shape, type Title } from './library';
 import type { LibraryModel } from './libraryModel.svelte';
 import type {
   LibraryMetadataShape,
@@ -11,23 +12,21 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 
 const TOAST_MS = 6_000;
 
-/* eslint-disable svelte/prefer-svelte-reactivity -- Metadata indexes are non-reactive; published replacements are state. */
 /**
  * Page-only session state. LibraryModel owns storage, projection, polling and commands; this object owns only title
  * metadata learned from TMDB, live provider discovery and transient UI messages shared by retained routes.
+ *
+ * Metadata grows in place, one entry per title: a reader tracks the keys it read, not every later batch.
  */
 export class LibrarySession {
-  displays = $state<Title[]>([]);
-  /** TMDB confirmed these records do not exist; unlike a transient refusal they must not strand a shelf prefix. */
-  missingDisplays = $state<Set<string>>(new Set());
-  shapes = $state(new Map<string, Shape>());
-  displayRevision = $state(0);
-  shapeRevision = $state(0);
+  readonly shapes = new SvelteMap<string, Shape>();
   live = $state(false);
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
   readonly services: SessionServices;
-  #displayIndex = new Map<string, Title>();
+  readonly #displays = new SvelteMap<string, Title>();
+  /** TMDB confirmed these records do not exist; unlike a transient refusal they must not strand a shelf prefix. */
+  readonly #missing = new SvelteSet<string>();
   #toastTimer?: ReturnType<typeof setTimeout>;
   #closed = false;
   #foregroundReady = false;
@@ -61,30 +60,15 @@ export class LibrarySession {
     shapes: ReadonlyArray<readonly [string, Shape]>,
     missing: readonly TitleRef[] = [],
   ): void {
-    const added: Title[] = [];
     for (const title of titles) {
-      const key = `${title.type}:${title.id}`;
-      if (this.#displayIndex.has(key)) continue;
-      this.#displayIndex.set(key, title);
-      added.push(title);
+      const key = titleKey(title);
+      if (!this.#displays.has(key)) this.#displays.set(key, title);
     }
-    const absent = missing.filter((ref) => !this.#displayIndex.has(`${ref.type}:${ref.id}`));
-    if (added.length || absent.length) {
-      this.displays = [...this.displays, ...added];
-      if (absent.length) {
-        const next = new Set(this.missingDisplays);
-        for (const ref of absent) next.add(`${ref.type}:${ref.id}`);
-        this.missingDisplays = next;
-      }
-      this.displayRevision++;
+    for (const ref of missing) {
+      const key = titleKey(ref);
+      if (!this.#displays.has(key)) this.#missing.add(key);
     }
-    if (!shapes.length) return;
-    const next = new Map(this.shapes);
-    for (const [key, shape] of shapes) {
-      next.set(key, shape);
-    }
-    this.shapes = next;
-    this.shapeRevision++;
+    for (const [key, shape] of shapes) this.shapes.set(key, shape);
   }
 
   async libraryMetadata(refs: readonly TitleRef[]): Promise<{
@@ -101,18 +85,15 @@ export class LibrarySession {
   }
 
   displayTitle(ref: Pick<Title, 'type' | 'id'>): Title | undefined {
-    void this.displayRevision;
-    return this.#displayIndex.get(`${ref.type}:${ref.id}`);
+    return this.#displays.get(titleKey(ref));
   }
 
   displayMissing(ref: Pick<Title, 'type' | 'id'>): boolean {
-    void this.displayRevision;
-    return this.missingDisplays.has(`${ref.type}:${ref.id}`);
+    return this.#missing.has(titleKey(ref));
   }
 
   displayTitles(): ReadonlyMap<string, Title> {
-    void this.displayRevision;
-    return this.#displayIndex;
+    return this.#displays;
   }
 
   foregroundReady(): void {
@@ -149,4 +130,3 @@ export class LibrarySession {
     this.closeWorkerServices();
   }
 }
-/* eslint-enable svelte/prefer-svelte-reactivity */
