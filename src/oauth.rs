@@ -1006,9 +1006,7 @@ fn access_token(
     let exp = grant_end.map_or(now + ACCESS_TTL_S, |end| (now + ACCESS_TTL_S).min(end / 1000));
     let header = json!({ "alg": "EdDSA", "typ": "at+jwt", "kid": oauth.kid });
     let dw = match (grant, &oauth.write_public) {
-        (Some(grant), Some(public)) => {
-            write_claim(public, &session.sid, grant)
-        }
+        (Some(grant), Some(public)) => write_claim(public, &session.sid, grant),
         _ => None,
     };
     let scope = if dw.is_some() { WRITE_SCOPES } else { SCOPE };
@@ -1131,8 +1129,7 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
     let secret = b64url(&crate::random_bytes::<32>());
     let sid = random_id();
     // The grant key leaves memory only wrapped under the first refresh secret, which is kept only as its hash.
-    let wrap =
-        code.grant.as_ref().map(|grant| wrap_grant(&secret, &sid, grant));
+    let wrap = code.grant.as_ref().map(|grant| wrap_grant(&secret, &sid, grant));
     let session = Session {
         v: VERSION,
         sid,
