@@ -27,3 +27,20 @@ describe('TMDB title countries', () => {
     ).toEqual(['SE', 'DK']);
   });
 });
+
+describe('TMDB title people', () => {
+  it('names a director who also stars once', () => {
+    expect(
+      toTitle(
+        { type: 'movie', id: 1236045 },
+        {
+          title: 'Animals',
+          credits: {
+            crew: [{ id: 880, job: 'Director' }],
+            cast: [{ id: 880 }, { id: 11703 }, { id: 12214 }],
+          },
+        },
+      )?.people,
+    ).toEqual([880, 11703, 12214]);
+  });
+});
