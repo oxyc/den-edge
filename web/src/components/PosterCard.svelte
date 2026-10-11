@@ -269,9 +269,6 @@
         >{release.text}</time
       >
     {/if}
-    {#if live}
-      <span class="live" class:raised={progress}>▶ {live}</span>
-    {/if}
     {#if downloadBadge}
       <span
         class="standing download-{downloadBadge.state}"
@@ -296,6 +293,13 @@
           {/if}
         </svg>
       </span>
+    {:else if live}
+      <!-- The standing corner's play glyph, grown to carry the clock while it plays on some device. -->
+      <span class="standing live" class:raised={progress}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path class="filled" d="M8 5.5v13l10.5-6.5z" /></svg
+        >{live}</span
+      >
     {:else if standing}
       <span
         class="standing"
@@ -531,37 +535,32 @@
     );
   }
 
-  /* Above the progress bar where there is one. */
-  .live,
   .standing {
     position: absolute;
-    bottom: 8px;
-  }
-
-  .live.raised,
-  .standing.raised {
-    bottom: 18px;
-  }
-
-  .live {
-    left: 8px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--accent);
-    color: var(--on-accent, #fff);
-    font-size: 12px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .standing {
     right: 8px;
+    bottom: 8px;
     display: grid;
     width: 24px;
     height: 24px;
     place-items: center;
     border-radius: 999px;
     background: rgb(0 0 0 / 0.72);
+  }
+
+  /* Above the progress bar where there is one. */
+  .standing.raised {
+    bottom: 18px;
+  }
+
+  .standing.live {
+    display: flex;
+    width: auto;
+    align-items: center;
+    gap: 2px;
+    padding: 0 8px 0 4px;
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
 
   .standing svg {

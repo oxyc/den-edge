@@ -383,6 +383,7 @@
             ...(entry.episode ? { episode: entry.episode } : {}),
             ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
             ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
+            ...(entry.device === undefined ? {} : { device: entry.device }),
           },
         ]
       : [];
@@ -450,19 +451,32 @@
       ({ status }) => status.state === 'starting' || status.state === 'fetching',
     ),
   );
-  const liveClock = (entry: ContinueEntry) => {
+  const liveSeconds = (entry: ContinueEntry) => {
     const sighting = sighted.get(titleKey(entry.title));
-    const at = sighting && livePosition(sighting, now);
+    return sighting && livePosition(sighting, now);
+  };
+  const liveClock = (entry: ContinueEntry) => {
+    const at = liveSeconds(entry);
     return at === undefined ? undefined : timecode(at);
   };
-  /** The open title's clock, as its Continue Watching card shows it, and which episode for a series. */
+  /**
+   * The open title's clock, as its Continue Watching card shows it, which episode for a series, the device it plays
+   * on, and how far in: the written position's seconds over its fraction is the runtime.
+   */
   const pageLive = $derived.by(() => {
     const opening = page;
     const entry =
       opening &&
       continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
-    const clock = entry && liveClock(entry);
-    return clock ? { clock, episode: entry.episode } : undefined;
+    const at = entry ? liveSeconds(entry) : undefined;
+    if (!entry || at === undefined) return undefined;
+    const runtime = entry.seconds && entry.fraction > 0 ? entry.seconds / entry.fraction : 0;
+    return {
+      clock: timecode(at),
+      episode: entry.episode,
+      device: entry.device,
+      fraction: runtime ? Math.min(1, at / runtime) : undefined,
+    };
   });
 
   // A route the viewer chose is foreground work. This removes it from the idle tail, or joins the exact pending

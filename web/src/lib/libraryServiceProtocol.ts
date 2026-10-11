@@ -318,6 +318,8 @@ export interface ContinueItem {
   episode?: { season: number; episode: number };
   seconds?: number;
   updatedAt?: number;
+  /** The name the device that wrote `seconds` gives itself in `set:devices`. */
+  device?: string;
 }
 
 export interface ContinueView {

@@ -1005,7 +1005,7 @@ function progress(
 function continueItem(value: unknown): value is ContinueItem {
   return (
     record(value) &&
-    exact(value, ['title', 'fraction', 'episode', 'seconds', 'updatedAt']) &&
+    exact(value, ['title', 'fraction', 'episode', 'seconds', 'updatedAt', 'device']) &&
     titleRef(value.title) &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
@@ -1021,7 +1021,8 @@ function continueItem(value: unknown): value is ContinueItem {
     ) &&
     (value.episode === undefined || value.title.type === 'tv') &&
     optional(value.seconds, finite) &&
-    optional(value.updatedAt, integer)
+    optional(value.updatedAt, integer) &&
+    optional(value.device, text)
   );
 }
 

@@ -1002,17 +1002,22 @@ export class LibraryLogAuthority {
     const { home } = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
     const library = { ...home.continueLibrary, shapes };
+    const devices = this.#log.settings('devices');
     return {
       kind: 'continue',
       items: this.#continueProjector
         .project(library)
-        .map(({ ref, fraction, episode, seconds, at }) => ({
-          title: { type: ref.type, id: ref.id },
-          fraction,
-          ...(episode ? { episode } : {}),
-          ...(seconds !== undefined ? { seconds } : {}),
-          ...(at !== undefined ? { updatedAt: at } : {}),
-        })),
+        .map(({ ref, fraction, episode, seconds, at, by }) => {
+          const device = by && deviceName(devices, by)?.slice(0, 256);
+          return {
+            title: { type: ref.type, id: ref.id },
+            fraction,
+            ...(episode ? { episode } : {}),
+            ...(seconds !== undefined ? { seconds } : {}),
+            ...(at !== undefined ? { updatedAt: at } : {}),
+            ...(device ? { device } : {}),
+          };
+        }),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };
   }
