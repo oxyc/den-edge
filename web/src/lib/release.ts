@@ -61,17 +61,31 @@ export function releaseWaiting(): void {
 }
 
 /**
+ * `href` under `den-retry`, the marker index.html's inline script uses for a shell whose startup files are gone
+ * (and removes again on arrival). Every load onto a newer release goes through it: Cloudflare can keep the shell
+ * until a deploy purges it, and while a purge has failed a plain load gets that same old shell back, whose own
+ * release then differs from the release probe's HEAD (which Cloudflare passes to den-edge) — so, read from the
+ * code rather than seen live, the swap would never land and would run again at every check. A query Cloudflare
+ * has never seen is answered by den-edge.
+ */
+function pastSharedCache(href: string, base?: string): string {
+  const url = new URL(href, base);
+  url.searchParams.set('den-retry', Date.now().toString(36));
+  return url.href;
+}
+
+/**
  * Open `path` as a whole page load rather than drawing it in place, when a release is waiting: a fresh load gets
  * the current release's shell and chunks, so the page that loads runs it. `null` is a traversal, whose address is
  * already the page's.
  */
 export function swapOnNavigation(
   path: string | null,
-  place: Pick<Location, 'assign' | 'reload'> = location,
+  place: Pick<Location, 'assign' | 'replace' | 'href'> = location,
 ): boolean {
   if (!waiting) return false;
-  if (path === null) place.reload();
-  else place.assign(path);
+  if (path === null) place.replace(pastSharedCache(place.href));
+  else place.assign(pastSharedCache(path, place.href));
   return true;
 }
 
@@ -79,7 +93,7 @@ interface Page {
   scrollX: number;
   scrollY: number;
   document: Pick<Document, 'activeElement' | 'querySelectorAll'>;
-  location: Pick<Location, 'reload' | 'replace' | 'href'>;
+  location: Pick<Location, 'replace' | 'href'>;
 }
 
 /** Whether reloading `page` right now would lose nothing: it sits at the top, nothing is heard playing, and
@@ -97,7 +111,7 @@ function nothingToLose(page: Page): boolean {
  */
 export function swapWhileHidden(page: Page = window): boolean {
   if (!waiting || !nothingToLose(page)) return false;
-  page.location.reload();
+  page.location.replace(pastSharedCache(page.location.href));
   return true;
 }
 
@@ -122,11 +136,10 @@ export function recoverChunkFailure(page: Page = window): boolean {
 }
 
 /**
- * Reload onto the current release, at most once in a while: a missing file must not become a reload loop. A plain
- * reload can be answered by the same shell Cloudflare kept, which named the missing chunk; the address carries
- * `den-retry`, the marker index.html's inline script uses for a shell whose startup files are gone, so the shell
- * comes from den-edge. That script removes the marker again on arrival. When the guard holds, a screen that could
- * not load says so and offers another try (`ScreenLoading`).
+ * Reload onto the current release, at most once in a while: a missing file must not become a reload loop. Past
+ * the shared cache (`pastSharedCache`): a plain reload can be answered by the same shell Cloudflare kept, which
+ * named the missing chunk. When the guard holds, a screen that could not load says so and offers another try
+ * (`ScreenLoading`).
  */
 export function reloadOnce(page: Pick<Page, 'location'> = window): void {
   try {
@@ -136,7 +149,5 @@ export function reloadOnce(page: Pick<Page, 'location'> = window): void {
   } catch {
     // Without storage there is no loop guard; a reload is still better than a page that stays broken.
   }
-  const url = new URL(page.location.href);
-  url.searchParams.set('den-retry', Date.now().toString(36));
-  page.location.replace(url.href);
+  page.location.replace(pastSharedCache(page.location.href));
 }

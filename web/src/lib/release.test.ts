@@ -14,9 +14,11 @@ function place() {
     href: 'https://den.test/movies?keep=1#here',
     assign: (path: string | URL) => void went.push(`assign ${path}`),
     replace: (path: string | URL) => void went.push(`replace ${path}`),
-    reload: () => void went.push('reload'),
   };
 }
+
+/** `place()`'s own address, loaded again past the shared cache (`den-retry`). */
+const AGAIN = /^replace https:\/\/den\.test\/movies\?keep=1&den-retry=[0-9a-z]+#here$/;
 
 function hiddenPage({
   y = 0,
@@ -53,14 +55,17 @@ describe('a waiting release', () => {
     // Nothing happens on its own: only a navigation moves the page.
     expect(at.went).toEqual([]);
     expect(release.swapOnNavigation('/movie/550', at)).toBe(true);
-    expect(at.went).toEqual(['assign /movie/550']);
+    // Past Cloudflare's kept shell, which would otherwise answer with the release this page already runs.
+    expect(at.went).toEqual([
+      expect.stringMatching(/^assign https:\/\/den\.test\/movie\/550\?den-retry=[0-9a-z]+$/),
+    ]);
   });
 
   it('is put on screen by Back or Forward, whose address is already the page’s', () => {
     release.releaseWaiting();
     const at = place();
     expect(release.swapOnNavigation(null, at)).toBe(true);
-    expect(at.went).toEqual(['reload']);
+    expect(at.went).toEqual([expect.stringMatching(AGAIN)]);
   });
 
   it('is put on screen while hidden only when nothing on the page would be lost', () => {
@@ -76,7 +81,7 @@ describe('a waiting release', () => {
     // A muted trailer playing on Home is nothing anyone would miss.
     const idle = hiddenPage({ media: [{ paused: false, muted: true }] });
     expect(release.swapWhileHidden(idle.page)).toBe(true);
-    expect(idle.at.went).toEqual(['reload']);
+    expect(idle.at.went).toEqual([expect.stringMatching(AGAIN)]);
   });
 });
 
@@ -99,7 +104,9 @@ describe('watching the shell release', () => {
     });
     expect(at.went).toEqual([]);
     expect(release.swapOnNavigation('/tv/6066-verano-azul', at)).toBe(true);
-    expect(at.went).toEqual(['assign /tv/6066-verano-azul']);
+    expect(at.went).toEqual([
+      expect.stringMatching(/^assign https:\/\/den\.test\/tv\/6066-verano-azul\?den-retry=/),
+    ]);
   });
 
   it('coalesces probes, retries an offline check, and stops probing once a replacement is known', async () => {
@@ -136,8 +143,7 @@ describe('a chunk failing to load', () => {
   it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
     const idle = hiddenPage();
     expect(release.recoverChunkFailure(idle.page)).toBe(true);
-    const marked = /^replace https:\/\/den\.test\/movies\?keep=1&den-retry=[0-9a-z]+#here$/;
-    expect(idle.at.went).toEqual([expect.stringMatching(marked)]);
+    expect(idle.at.went).toEqual([expect.stringMatching(AGAIN)]);
   });
 
   it('reloads past the shared cache once, not again moments later', () => {
@@ -166,7 +172,7 @@ describe('a chunk failing to load', () => {
     // The release it found is now waiting, same as any other: the next navigation picks it up.
     const at = place();
     expect(release.swapOnNavigation('/movie/550', at)).toBe(true);
-    expect(at.went).toEqual(['assign /movie/550']);
+    expect(at.went).toEqual([expect.stringMatching(/^assign https:\/\/den\.test\/movie\/550\?/)]);
   });
 
   it('defers the same way a hidden page does: playing media or typing hold it off too', () => {
