@@ -21,8 +21,17 @@ for (const touch of [true, false])
         .locator('[data-following-content]')
         .evaluate((el) => el.getBoundingClientRect().top + scrollY);
       await page.evaluate(() => scrollTo(0, 250));
+      // The hero re-measures from a resize listener, which the page runs on a frame after setViewportSize
+      // has returned. Wait for the page's own resize event (registered after the hero's, so it runs after it)
+      // instead of guessing how long that takes.
+      const resized = page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            addEventListener('resize', () => requestAnimationFrame(resolve), { once: true }),
+          ),
+      );
       await page.setViewportSize({ width: 390, height: 950 });
-      await page.waitForTimeout(100);
+      await resized;
       const after = await hero.boundingBox();
       if (touch) {
         expect(after.height).toBe(before.height);
