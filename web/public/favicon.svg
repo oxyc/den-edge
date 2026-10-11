@@ -7,6 +7,6 @@
   <g clip-path="url(#plate)">
     <rect class="plate" width="64.00" height="64.00"/>
     <path d="M16.19 64.00V33.51A15.81 15.81 0 0 1 47.81 33.51V64.00Z" fill="url(#light)"/>
-    <path class="ink" d="M4.89 64.00V33.51A27.11 27.11 0 0 1 59.11 33.51V64.00ZM16.19 64.00V33.51A15.81 15.81 0 0 1 47.81 33.51V64.00Z" fill-rule="evenodd"/>
+    <path class="ink" d="M4.89 64.00V33.51A27.11 27.11 0 0 1 59.11 33.51V64.00H47.81V33.51A15.81 15.81 0 0 0 16.19 33.51V64.00Z"/>
   </g>
 </svg>
