@@ -936,6 +936,14 @@
     height: calc(var(--card-w) + 66.8px);
   }
 
+  /* Neither placeholder is a place to stop. As snap targets, Chrome kept the reserve snapped while cards were
+     inserted before it four at a time: arriving at Silo from Home, the row ended 816–2777px from its start with no
+     script scrolling it. Without them as targets it stayed at 0. `span` outranks PosterRow's `.track > *`. */
+  span.cast-end,
+  span.cast-reserve {
+    scroll-snap-align: none;
+  }
+
   .hero {
     position: relative;
     isolation: isolate;

@@ -280,6 +280,10 @@ test('cast and related DOM promote in geometry-preserving cancellable batches', 
   await page.waitForTimeout(0);
   await page.evaluate(() => scrollTo(0, 1));
   await expect(page.locator('a.person')).toHaveCount(4);
+  // Cards land before the reserve; the row must stay where it opened, not follow the reserve along.
+  const castScroll = () =>
+    page.locator('.track:has(a.person)').evaluate((track) => track.scrollLeft);
+  expect(await castScroll()).toBe(0);
 
   // Leaving while a continuation is pending cancels it; returning resumes at the next batch.
   await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
@@ -293,9 +297,11 @@ test('cast and related DOM promote in geometry-preserving cancellable batches', 
     window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
   );
   await expect(page.locator('a.person')).toHaveCount(8);
+  expect(await castScroll()).toBe(0);
   await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
   await page.evaluate(() => window.fixtureYield());
   await expect(page.locator('a.person')).toHaveCount(12);
+  expect(await castScroll()).toBe(0);
 
   const relatedCount = await page.locator('[data-related-placeholder]').count();
   const releaseRelatedBatch = async (before) => {
