@@ -80,7 +80,9 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   ) {
     this.#now = options.now ?? Date.now;
     this.#setTimer = options.setTimer ?? ((task, delay) => setTimeout(task, delay));
-    this.#clearTimer = options.clearTimer ?? clearTimeout;
+    // Called as a private method, a bare `clearTimeout` gets this instance as `this`: browsers throw "Illegal
+    // invocation" (seen in production in the library Worker), Node does not.
+    this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer));
     this.#background = options.background;
     this.#stopAuthority = authority.listen?.((event) => this.#emit(event));
     this.#stopBackground = options.background?.listen?.(() =>
