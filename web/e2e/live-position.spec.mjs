@@ -1,0 +1,301 @@
+// A title playing on another device shows where it is on this page, ticking, for as long as it plays — and stops
+// after it does. Two browsers share one in-memory den-edge: this page runs the production RoutedLibrary and Worker
+// (so the lifecycle it reports and the refresh cadence it gets are the real ones), and a second browser is the other
+// device, writing the position every three seconds as the Apple TV's player does. Real time, not a fake clock: the
+// cadence lives in the Worker, which a page clock does not reach.
+import { test, expect } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
+import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
+import { routeTmdb } from './network.mjs';
+
+const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
+const WRITE_EVERY_MS = 3_000;
+const PLAYING_MS = 45_000;
+/** A held read of den-edge (25 s) and the sync after it: how often the Apple TV's log reaches den-edge. */
+const TV_PUSH_MS = 27_000;
+
+/**
+ * One den-edge for both browsers: what one writes, the other pulls. `pulls` lists when each page asked, and
+ * `arrivals` how old the device's newest write was each time this page's pull carried it.
+ *
+ * `pushEveryMs` makes the device push as the Apple TV does: it writes its position every three seconds into its
+ * own log, but its log reaches den-edge only when its sync runs. den-edge's request log, with a TV playing, showed
+ * its `POST /lib/:id/batch` in bursts about 30 s apart. In den (the tvOS app) that is the reconciliation poll — a
+ * 25 s held read of `/changes`, then a sync (`RootView.startReconciliationPoll`, `HeldPoll.wait`) — and a debounced
+ * sync that each 3 s progress write pushes back, up to its 60 s cap (`LibraryLogSync.scheduleSync`).
+ */
+function sharedEdge({ pushEveryMs = 0 } = {}) {
+  const generation = 'live-position';
+  /** Every row den-edge holds, by key. */
+  const rows = new Map();
+  /** The device's rows as they will be once its sync next runs. */
+  const unpushed = new Map();
+  let head = 0;
+  const headers = { 'x-den-generation': generation, 'x-den-wire-min': '4' };
+  const pulls = new Map();
+  const arrivals = [];
+  let deviceWrote = 0;
+  let pushedWrite = 0;
+  let pulledWrite = 0;
+  const push = () => {
+    for (const [k, entry] of unpushed) rows.set(k, entry);
+    unpushed.clear();
+    pushedWrite = deviceWrote;
+  };
+  const pushing = pushEveryMs ? setInterval(push, pushEveryMs) : undefined;
+  const route = async (page, name) => {
+    await routeLibraryEdge(page);
+    // `routeLibraryEdge` names movies only; the seeded series (tv:1003) is named here.
+    await routeTmdb(page, (route) => {
+      const id = new URL(route.request().url()).pathname.match(/\/tv\/(\d+)$/)?.[1];
+      if (!id) return route.fallback();
+      return route.fulfill({
+        json: {
+          id: Number(id),
+          name: `Series ${id}`,
+          first_air_date: '2026-01-01',
+          poster_path: '/poster.jpg',
+          backdrop_path: '/backdrop.jpg',
+          vote_average: 7.5,
+          vote_count: 500,
+          genres: [{ id: 18 }],
+          credits: { cast: [], crew: [] },
+          seasons: [{ season_number: 1, episode_count: 8 }],
+          last_episode_to_air: { season_number: 1, episode_number: 8 },
+          external_ids: {},
+        },
+      });
+    });
+    // A paired page drains its assistants' queue; this library has no assistant.
+    await page.route(`${E2E_ORIGIN}/assistant/**`, (route) => route.fulfill({ status: 404 }));
+    pulls.set(name, []);
+    // Registered last, so it answers before the per-page edge `routeLibraryEdge` installs.
+    await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname.endsWith('/member') && request.method() === 'PUT')
+        return route.fulfill({ status: 200, headers });
+      if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
+        pulls.get(name).push(Date.now());
+        const since = Number(url.searchParams.get('since') ?? 0);
+        // The device reads its own log, pushed or not; this page reads only what has reached den-edge.
+        const held = new Map([...rows, ...(name === 'device' ? unpushed : [])]);
+        const entries = [...held.values()].filter((entry) => entry.seq > since);
+        if (name === 'page' && pushedWrite > pulledWrite) {
+          arrivals.push(Date.now() - pushedWrite);
+          pulledWrite = pushedWrite;
+        }
+        const heldHead = Math.max(0, ...[...held.values()].map((entry) => entry.seq));
+        return route.fulfill({
+          headers,
+          json: { generation, entries, head: heldHead, more: false },
+        });
+      }
+      if (url.pathname.endsWith('/batch') && request.method() === 'POST') {
+        const applied = [];
+        const conflicts = [];
+        const held = name === 'device' && pushEveryMs;
+        for (const write of request.postDataJSON().writes) {
+          const current = unpushed.get(write.k) ?? rows.get(write.k);
+          if ((current?.seq ?? 0) !== write.base) {
+            conflicts.push({ k: write.k, seq: current?.seq ?? 0, v: current?.v ?? null });
+            continue;
+          }
+          const entry = { k: write.k, seq: ++head, v: write.v };
+          (held ? unpushed : rows).set(write.k, entry);
+          applied.push({ k: write.k, seq: entry.seq });
+        }
+        if (name === 'device') {
+          deviceWrote = Date.now();
+          if (!held) pushedWrite = deviceWrote;
+        }
+        return route.fulfill({ headers, json: { applied, conflicts } });
+      }
+      return route.abort('blockedbyclient');
+    });
+  };
+  return { route, pulls, arrivals, close: () => clearInterval(pushing) };
+}
+
+/** This page on the paired library, seeded once, and the other device beside it. */
+async function openWithDevice(browser, page, options) {
+  const edge = sharedEdge(options);
+  await edge.route(page, 'page');
+  await page.goto(`${SEED_FIXTURE}?seed`);
+  await page
+    .getByRole('status')
+    .filter({ hasText: 'Worker library seeded' })
+    .waitFor({ timeout: 15_000 });
+  await page.goto(FIXTURE);
+  await expect(page.getByRole('heading', { name: 'Continue Watching' })).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const context = await browser.newContext();
+  const device = await context.newPage();
+  await edge.route(device, 'device');
+  await device.goto(`${FIXTURE}?writer`);
+  await device.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
+
+  let timer;
+  let pausedAt;
+  /**
+   * Writes `title`'s position every three seconds, counting on from `from`, until `stop()`. After `pause()` the
+   * writes go on at the position it paused at, as the TV's do while its player is paused.
+   */
+  const play = (title, from, episode) => {
+    const started = Date.now();
+    const write = () =>
+      device.evaluate(
+        ([title, seconds, episode]) => window.fixturePlay(title, seconds, episode),
+        [title, pausedAt ?? from + Math.floor((Date.now() - started) / 1000), episode],
+      );
+    void write();
+    timer = setInterval(() => void write(), WRITE_EVERY_MS);
+    return {
+      pause: () => (pausedAt = from + Math.floor((Date.now() - started) / 1000)),
+    };
+  };
+  const stop = () => clearInterval(timer);
+  const close = async () => {
+    stop();
+    edge.close();
+    await context.close();
+  };
+  return { edge, play, stop, close };
+}
+
+/** Samples `clock` every 250 ms for `ms`: each sample is its text, or null while it is not shown. */
+async function watch(clock, ms) {
+  const samples = [];
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    samples.push((await clock.isVisible()) ? await clock.textContent() : null);
+    await new Promise((done) => setTimeout(done, 250));
+  }
+  return samples;
+}
+
+/** Each gap between `times` and the next, in ms. */
+const gaps = (times) => times.slice(1).map((at, index) => at - times[index]);
+
+/** Samples as runs: "on 12.0s, off 3.5s, …". */
+const runs = (samples) => {
+  const out = [];
+  for (const text of samples) {
+    const state = text === null ? 'off' : 'on';
+    if (out.at(-1)?.state === state) out.at(-1).count++;
+    else out.push({ state, count: 1 });
+  }
+  return out.map(({ state, count }) => `${state} ${(count / 4).toFixed(1)}s`).join(', ');
+};
+
+/** Watches `clock` for PLAYING_MS and expects it shown, and ticking, the whole time. */
+async function expectTicking(clock, edge) {
+  const pullsBefore = edge.pulls.get('page').length;
+  const samples = await watch(clock, PLAYING_MS);
+  const pulled = edge.pulls.get('page').slice(pullsBefore);
+  console.log(`page pulls while playing, ms apart: ${gaps(pulled).join(' ')}`);
+  console.log(`newest write's age when a pull carried it, ms: ${edge.arrivals.join(' ')}`);
+  console.log(`clock while playing: ${runs(samples)}`);
+  const hidden = samples.filter((text) => text === null).length;
+  expect(hidden, `the clock was gone for ${hidden} of ${samples.length} samples`).toBe(0);
+  expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(PLAYING_MS / 1000 - 5);
+}
+
+// Not the seeded resume point (Movie 1001), whose own write is fresh enough to tick while the page opens.
+const PLAYED = { type: 'movie', id: 1002 };
+const homeClock = (page) => page.locator('.card', { hasText: 'Movie 1002' }).locator('.live');
+
+test('a title playing on the TV keeps its clock on Home between the TV’s pushes, until it stops', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { edge, play, stop, close } = await openWithDevice(browser, page, {
+    pushEveryMs: TV_PUSH_MS,
+  });
+  try {
+    const clock = homeClock(page);
+    play(PLAYED, 600);
+    await expect(clock).toBeVisible({ timeout: 70_000 });
+    await expect(clock).toHaveText(/^▶ 1\d:\d\d$/);
+    await expectTicking(clock, edge);
+
+    // Stopped on the TV: no more writes. The clock runs on until the last one is LIVE_MS (45 s) old.
+    stop();
+    const stopped = Date.now();
+    await expect(clock).toBeHidden({ timeout: 60_000 });
+    const after = Date.now() - stopped;
+    console.log(`clock gone ${after} ms after the last write`);
+    expect(after).toBeLessThanOrEqual(50_000);
+  } finally {
+    await close();
+  }
+});
+
+test('a series’ page shows which episode plays where, and moves nothing as the clock comes and goes', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { play, close } = await openWithDevice(browser, page);
+  try {
+    await page.locator('.card', { hasText: 'Series 1003' }).click();
+    await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
+    const clock = page.locator('.hero .live');
+    const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
+    const actions = page.locator('.hero-actions');
+    const boxes = async () => [await heading.boundingBox(), await actions.boundingBox()];
+    // The seeded resume point was written as the page opened, so its own clock may still be running out.
+    await expect(clock).toBeHidden({ timeout: 60_000 });
+    const without = await boxes();
+
+    const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
+    await expect(clock).toHaveText(/^S1 · E3▶ 1\d:\d\d$/, { timeout: 40_000 });
+    expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
+    const samples = await watch(clock, 15_000);
+    expect(samples.filter((text) => text === null)).toEqual([]);
+    expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(10);
+    for (const width of [393, 1280]) {
+      await page.setViewportSize({ width, height: width < 500 ? 852 : 800 });
+      const poster = await page.locator('.hero .poster').boundingBox();
+      const pill = await clock.boundingBox();
+      // Inside the poster, at its foot.
+      expect(pill.x).toBeGreaterThanOrEqual(poster.x);
+      expect(pill.x + pill.width).toBeLessThanOrEqual(poster.x + poster.width);
+      expect(poster.y + poster.height - (pill.y + pill.height)).toBeCloseTo(8, 0);
+      await page.screenshot({ path: test.info().outputPath(`detail-live-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect(clock).toBeVisible();
+
+    playing.pause();
+    await expect(clock).toBeHidden({ timeout: 20_000 });
+    expect(await boxes(), 'nothing moved as the clock went').toEqual(without);
+  } finally {
+    await close();
+  }
+});
+
+test('a title paused on another device stops its clock at the next write that did not move', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { edge, play, close } = await openWithDevice(browser, page);
+  try {
+    const clock = homeClock(page);
+    const playing = play(PLAYED, 600);
+    await expect(clock).toBeVisible({ timeout: 40_000 });
+    await expectTicking(clock, edge);
+
+    // Paused on the device: it goes on writing every three seconds, at one position.
+    playing.pause();
+    const paused = Date.now();
+    await expect(clock).toBeHidden({ timeout: 20_000 });
+    console.log(`clock gone ${Date.now() - paused} ms after the pause`);
+  } finally {
+    await close();
+  }
+});

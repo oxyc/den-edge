@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { LIVE_MS } from './livePosition';
 import { GIVE_UP_MS, HINT_MS, PEEK_MS, PlayOnTvTracker, playOnTvStatus } from './playOnTv.svelte';
 
 afterEach(() => {
@@ -142,7 +143,7 @@ describe('PlayOnTvTracker', () => {
     tracker.start(link, 'AAEC', 'Living Room TV', title);
     const sentAt = Date.now();
     session.notify.mockClear();
-    vi.setSystemTime(sentAt + 20_000);
+    vi.setSystemTime(sentAt + 1000 + LIVE_MS + 1);
     tracker.observe([{ title, seconds: 12, at: sentAt + 1000 }]);
     expect(session.notify).not.toHaveBeenCalled();
     tracker.stop();

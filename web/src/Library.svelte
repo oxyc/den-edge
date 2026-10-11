@@ -27,7 +27,13 @@
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
   import type { Link } from './lib/links.svelte';
-  import { clock as timecode, livePosition } from './lib/livePosition';
+  import {
+    clock as timecode,
+    livePosition,
+    recent,
+    sight,
+    type Sighting,
+  } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
@@ -403,7 +409,8 @@
 
   /**
    * The clock a Continue Watching card shows while its title plays on some device. It ticks each second only
-   * while something is playing, and meanwhile the library is pulled faster, so a pause stops it soon.
+   * while something is playing, and meanwhile the library is pulled faster, so each push from the device shows
+   * soon after den-edge has it (`livePosition.ts`).
    */
   let now = $state(Date.now());
   let foreground = $state(!document.hidden);
@@ -415,9 +422,21 @@
     document.addEventListener('visibilitychange', visible);
     return () => document.removeEventListener('visibilitychange', visible);
   });
-  const playingAnywhere = $derived(
-    continueEntries.some((entry) => livePosition(entry, now) !== undefined),
-  );
+  // Each title's latest write as seen on the pull before, so one that did not move the position reads as paused.
+  let sightings = new Map<string, Sighting>();
+  const sighted = $derived.by(() => {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole on each pull and never mutated after; the derived is what reacts.
+    const next = new Map<string, Sighting>();
+    for (const entry of continueEntries) {
+      const key = titleKey(entry.title);
+      const sighting = sight(sightings.get(key), entry);
+      if (sighting) next.set(key, sighting);
+    }
+    sightings = next;
+    return next;
+  });
+  // A paused title keeps the fast pull too: its player is still open, and playing again should show soon.
+  const playingAnywhere = $derived([...sighted.values()].some((sighting) => recent(sighting, now)));
   $effect(() => {
     session.live = playingAnywhere || playOnTv.active;
     if (!playingAnywhere || !foreground) return;
@@ -432,9 +451,19 @@
     ),
   );
   const liveClock = (entry: ContinueEntry) => {
-    const at = livePosition(entry, now);
+    const sighting = sighted.get(titleKey(entry.title));
+    const at = sighting && livePosition(sighting, now);
     return at === undefined ? undefined : timecode(at);
   };
+  /** The open title's clock, as its Continue Watching card shows it, and which episode for a series. */
+  const pageLive = $derived.by(() => {
+    const opening = page;
+    const entry =
+      opening &&
+      continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
+    const clock = entry && liveClock(entry);
+    return clock ? { clock, episode: entry.episode } : undefined;
+  });
 
   // A route the viewer chose is foreground work. This removes it from the idle tail, or joins the exact pending
   // request when an idle slot got there first.
@@ -1456,6 +1485,7 @@
     autoplay={detailPrefs.autoplay}
     {scout}
     row={pageRow}
+    live={pageLive}
     episodes={pageEpisodes}
     seed={pageSeed}
     still={pageStill}
