@@ -72,6 +72,22 @@ afterEach(() => {
 });
 
 describe('ScheduledLibraryServiceAuthority', () => {
+  it('cancels its default timer with the global as `this`, as a browser requires', async () => {
+    const native = globalThis.clearTimeout;
+    // A browser's clearTimeout throws "Illegal invocation" when called with another object as `this`; Node's does not.
+    vi.stubGlobal('clearTimeout', function (this: unknown, timer?: ReturnType<typeof setTimeout>) {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+      native(timer);
+    });
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, maintenance().port);
+
+    await scheduled.observe(lifecycle());
+    // A second observation reschedules, cancelling the pending timer first.
+    await expect(scheduled.observe(lifecycle({ playbackActive: true }))).resolves.toBeDefined();
+    scheduled.close();
+    vi.unstubAllGlobals();
+  });
+
   it('keeps optional background work behind foreground readiness and online visibility', async () => {
     vi.useFakeTimers();
     const base = authority();
