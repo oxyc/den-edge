@@ -1069,14 +1069,17 @@
    * library already holds.
    */
   let featured = $state<RecommendedTitle[]>([]);
-  let heroReady = $state(false);
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
-  $effect(() => {
-    void heroKey;
-    heroReady = false;
-  });
+  /**
+   * The lead the billboard last said had painted (`onready`). A key rather than a flag reset by an effect: with a
+   * retained lead already painted, Billboard's `onready` ran in the same flush as the lead's arrival and before
+   * the reset (measured on d.oxy.fi: onready at 373ms, reset for the same key at 374ms), so readiness was cleared
+   * for good and Home never preloaded its next screens.
+   */
+  let heroReadyKey = $state<string | null>(null);
+  const heroReady = $derived(heroReadyKey === heroKey);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Discovery may settle before this encrypted first-paint answer; a generic fallback must wait for both. */
@@ -1559,7 +1562,7 @@
     content={session.content}
     {reel}
     {routes}
-    onready={() => (heroReady = true)}
+    onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
       void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
     onplay={playHere && ((title) => playHere(title))}
