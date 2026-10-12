@@ -1,15 +1,21 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { routeLibraryEdge } from './library-edge.mjs';
 import { guardNetwork } from './network.mjs';
 
 const FIXTURE = `${E2E_ORIGIN}/test/profile-mode.html`;
+const ROUTED_FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
 
 async function open(page, enabled, suffix = '') {
   await guardNetwork(page);
   await page.route('**/capabilities/profiles', (route) =>
     enabled
-      ? route.fulfill({ json: { enabled: true } })
-      : route.fulfill({ status: 404, json: { error: 'not_found' } }),
+      ? route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } })
+      : route.fulfill({
+          status: 404,
+          headers: { 'cache-control': 'no-store' },
+          json: { error: 'not_found' },
+        }),
   );
   await page.goto(`${FIXTURE}${suffix}`);
   await expect
@@ -26,7 +32,60 @@ test('default-off capability leaves the legacy Owner path and storage untouched'
   await expect(page.locator('[data-mode]')).toHaveText('Legacy Owner active');
   await expect
     .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
-    .toMatchObject({ enabled: false, mode: 'owner', keys: [] });
+    .toMatchObject({ enabled: false, capability: 'disabled', mode: 'owner', keys: [] });
+});
+
+for (const [failure, answer] of [
+  [
+    'server error',
+    (route) =>
+      route.fulfill({
+        status: 503,
+        headers: { 'cache-control': 'no-store' },
+        json: { error: 'unavailable' },
+      }),
+  ],
+  [
+    'malformed response',
+    (route) => route.fulfill({ headers: { 'cache-control': 'no-store' }, body: '{broken json' }),
+  ],
+  ['network failure', (route) => route.abort('connectionfailed')],
+]) {
+  test(`${failure} stays neutral and never exposes legacy Owner`, async ({ page }) => {
+    await guardNetwork(page);
+    await page.route('**/capabilities/profiles', answer);
+    await page.goto(FIXTURE);
+    await expect
+      .poll(() => page.evaluate(() => window.denProfileModeFixture?.snapshot().checked))
+      .toBe(true);
+
+    await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible();
+    await expect(page.locator('[data-mode]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Switch profile/ })).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().capability))
+      .toBe('indeterminate');
+  });
+}
+
+test('RoutedLibrary keeps Owner hidden when profile discovery is indeterminate', async ({
+  page,
+}) => {
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      status: 503,
+      headers: { 'cache-control': 'no-store' },
+      json: { error: 'unavailable' },
+    }),
+  );
+  await page.goto(ROUTED_FIXTURE);
+
+  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible();
+  await expect(
+    page.getByText('The Owner library remains hidden. Reload Den to try again.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: /Switch profile/ })).toHaveCount(0);
 });
 
 test('capability discovery never exposes or enables the legacy Owner UI', async ({ page }) => {
@@ -35,7 +94,7 @@ test('capability discovery never exposes or enables the legacy Owner UI', async 
   const capability = new Promise((resolve) => (answerCapability = resolve));
   await page.route('**/capabilities/profiles', async (route) => {
     await capability;
-    await route.fulfill({ json: { enabled: true } });
+    await route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } });
   });
   await page.goto(FIXTURE);
 

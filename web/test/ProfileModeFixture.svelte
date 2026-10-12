@@ -9,6 +9,7 @@
   import {
     ProfileModeCoordinator,
     profilesCapability,
+    type ProfilesCapability,
   } from '../src/lib/profileModeCoordinator.svelte';
   import { ProfileSession } from '../src/lib/profileSession.svelte';
   import type {
@@ -23,7 +24,7 @@
     ? {
         available: () => true,
         async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
-          if (lockAttempts++ === 1) throw new Error('fixture lock refused');
+          if (lockAttempts++ === 2) throw new Error('fixture lock refused');
           return work();
         },
       }
@@ -59,12 +60,14 @@
   );
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   let checked = $state(false);
+  let capability = $state<ProfilesCapability | 'checking'>('checking');
 
   const fixture = {
     snapshot() {
       return {
         enabled: profiles !== null,
         checked,
+        capability,
         mode: profiles?.mode ?? 'owner',
         visitId: profiles?.mode === 'visitor' ? profiles.session!.identity.id : null,
         policyCeiling: profiles?.session?.policy?.settings.value?.preferences.maturityCeiling,
@@ -136,9 +139,11 @@
     let current = true;
     (window as typeof window & { denProfileModeFixture?: typeof fixture }).denProfileModeFixture =
       fixture;
-    void profilesCapability().then((enabled) => {
+    void profilesCapability(fetch, visitorLock).then((answer) => {
       if (!current) return;
-      if (enabled) profiles = new ProfileModeCoordinator(owner, localStorage, window, visitorLock);
+      capability = answer;
+      if (answer === 'enabled')
+        profiles = new ProfileModeCoordinator(owner, localStorage, window, visitorLock);
       checked = true;
     });
     return () => {
@@ -158,6 +163,11 @@
 <main>
   {#if !checked}
     <p role="status">Checking profiles…</p>
+  {:else if capability === 'indeterminate'}
+    <section aria-labelledby="profile-unavailable-title">
+      <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
+      <p>The Owner library remains hidden. Reload Den to try again.</p>
+    </section>
   {:else if profiles?.session}
     <ProfileSwitcher {profiles} />
     <p data-mode>{profiles.mode === 'owner' ? 'Owner active' : 'Visitor active'}</p>

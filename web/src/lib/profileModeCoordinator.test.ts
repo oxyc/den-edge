@@ -28,6 +28,8 @@ const immediateLock: VisitorActivityLock = {
     return work();
   },
 };
+const capabilityResponse = (body: string, status = 200): Response =>
+  new Response(body, { status, headers: { 'cache-control': 'no-store' } });
 
 function storageEvent(key: string): Event {
   const event = new Event('storage');
@@ -143,9 +145,11 @@ describe('ProfileModeCoordinator', () => {
     expect(activeOwner.coordinator.mode).toBe('owner');
     expect(ownerStorage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
 
-    const enabled = vi.fn(async () => new Response(JSON.stringify({ enabled: true })));
-    await expect(profilesCapability(enabled as typeof fetch, unavailable)).resolves.toBe(false);
-    expect(enabled).not.toHaveBeenCalled();
+    const enabled = vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: true })));
+    await expect(profilesCapability(enabled as typeof fetch, unavailable)).resolves.toBe(
+      'indeterminate',
+    );
+    expect(enabled).toHaveBeenCalledOnce();
 
     const rejecting: VisitorActivityLock = {
       available: () => true,
@@ -153,8 +157,10 @@ describe('ProfileModeCoordinator', () => {
         throw new Error('lock refused');
       },
     };
-    await expect(profilesCapability(enabled as typeof fetch, rejecting)).resolves.toBe(false);
-    expect(enabled).toHaveBeenCalledOnce();
+    await expect(profilesCapability(enabled as typeof fetch, rejecting)).resolves.toBe(
+      'indeterminate',
+    );
+    expect(enabled).toHaveBeenCalledTimes(2);
   });
 
   it('serializes shared-tab activity and revokes a stale tab before it can recreate an ended visit', async () => {
@@ -300,19 +306,49 @@ describe('ProfileModeCoordinator', () => {
 });
 
 describe('profilesCapability', () => {
-  it('enables only the explicit uncached capability answer', async () => {
-    const enabled = vi.fn(async () => new Response(JSON.stringify({ enabled: true })));
-    await expect(profilesCapability(enabled as typeof fetch)).resolves.toBe(true);
+  it('distinguishes explicit enabled and disabled answers from every indeterminate failure', async () => {
+    const enabled = vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: true })));
+    await expect(profilesCapability(enabled as typeof fetch, immediateLock)).resolves.toBe(
+      'enabled',
+    );
     expect(enabled).toHaveBeenCalledWith('/capabilities/profiles', {
       cache: 'no-store',
       credentials: 'same-origin',
     });
 
     await expect(
-      profilesCapability(vi.fn(async () => new Response('{}', { status: 404 })) as typeof fetch),
-    ).resolves.toBe(false);
+      profilesCapability(
+        vi.fn(async () =>
+          capabilityResponse(JSON.stringify({ error: 'not_found' }), 404),
+        ) as typeof fetch,
+        { available: () => false, run: immediateLock.run },
+      ),
+    ).resolves.toBe('disabled');
     await expect(
-      profilesCapability(vi.fn(async () => new Response('{broken')) as typeof fetch),
-    ).resolves.toBe(false);
+      profilesCapability(
+        vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: false }))) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{}', 404)) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{broken')) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{}')) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(
+        vi.fn(async () => new Response(JSON.stringify({ enabled: true }))) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(
+        vi.fn(async () => {
+          throw new TypeError('offline');
+        }) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
   });
 });

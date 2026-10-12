@@ -235,24 +235,42 @@ export class ProfileModeCoordinator {
   }
 }
 
-/** The capability is deliberately uncached and fail-closed. */
+export type ProfilesCapability = 'enabled' | 'disabled' | 'indeterminate';
+
+/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
 export async function profilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
-): Promise<boolean> {
-  if (!visitorLock.available()) return false;
+): Promise<ProfilesCapability> {
   try {
     const response = await fetchImpl('/capabilities/profiles', {
       cache: 'no-store',
       credentials: 'same-origin',
     });
-    if (!response.ok) return false;
+    if (!response.headers.get('cache-control')?.toLowerCase().includes('no-store'))
+      return 'indeterminate';
     const value: unknown = await response.json();
-    if (!(value && typeof value === 'object' && 'enabled' in value && value.enabled === true))
-      return false;
+    if (
+      response.status === 404 &&
+      value &&
+      typeof value === 'object' &&
+      Object.keys(value).length === 1 &&
+      'error' in value &&
+      value.error === 'not_found'
+    )
+      return 'disabled';
+    if (
+      !response.ok ||
+      !(value && typeof value === 'object') ||
+      Object.keys(value).length !== 1 ||
+      !('enabled' in value) ||
+      value.enabled !== true ||
+      !visitorLock.available()
+    )
+      return 'indeterminate';
     await visitorLock.run('den:visitor:capability', () => {});
-    return true;
+    return 'enabled';
   } catch {
-    return false;
+    return 'indeterminate';
   }
 }
