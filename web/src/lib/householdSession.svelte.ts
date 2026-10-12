@@ -1,5 +1,6 @@
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { LibraryModel } from './libraryModel.svelte';
+import { profilePolicy, type ProfilePolicy } from './profilePolicy';
 import { SessionServices } from './sessionServices.svelte';
 
 export type HouseholdIdentity =
@@ -21,35 +22,43 @@ export type HouseholdIdentity =
  */
 export class HouseholdSession {
   readonly services: SessionServices;
+  readonly policy: ProfilePolicy | null;
+  readonly #model: LibraryModel | null;
   #closed = false;
   #foregroundReady = false;
 
   constructor(
     readonly identity: HouseholdIdentity,
-    readonly model: LibraryModel | null,
+    model: LibraryModel | null,
     readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
   ) {
+    this.#model = model;
+    this.policy = profilePolicy(model);
     this.services = new SessionServices(model, content);
   }
 
+  ownsModel(model: LibraryModel | null): boolean {
+    return model === this.#model;
+  }
+
   configureServices(): void {
-    if (this.model && this.model.connection !== 'ready') return;
-    this.services.configure(this.model?.runtime.value);
+    if (this.#model && this.#model.connection !== 'ready') return;
+    this.services.configure(this.#model?.runtime.value);
   }
 
   foreground(): void {
     if (this.#foregroundReady || this.#closed) return;
     this.#foregroundReady = true;
     this.services.foregroundReady();
-    void this.model?.foregroundReady().catch(() => {});
+    void this.#model?.foregroundReady().catch(() => {});
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.services.stop();
-    this.model?.close();
+    this.#model?.close();
     this.closeWorkerServices();
   }
 }

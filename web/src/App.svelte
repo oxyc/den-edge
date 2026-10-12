@@ -19,6 +19,7 @@
     LinkScreen,
     PhoneDialogScreen,
   } from './lib/screens.svelte';
+  import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   // The invite and consent dialogs load only for a page that asks one of their questions: an invite link, or an
   // assistant's request to connect. Latched, since the invite dialog clears the code as it shows it.
   let invited = $state(false);
@@ -34,6 +35,7 @@
     if (phoneLanding.request) void PhoneDialogScreen.load();
   });
   const identityClock = browserClock();
+  let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight work must not retrigger the effect that starts it.
   const sendingIdentity = new Set<string>();
 
@@ -134,7 +136,7 @@
 </script>
 
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
-<NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
+<NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} {profiles} />
 {#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
 {#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
 {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
@@ -149,6 +151,7 @@
         {people}
         {watchedYear}
         onchange={(next) => (route = next)}
+        onprofilecontrol={(control) => (profiles = control)}
       />
     {/key}
   {:else if links.browsing}
@@ -161,6 +164,7 @@
       {people}
       {watchedYear}
       onchange={(next) => (route = next)}
+      onprofilecontrol={(control) => (profiles = control)}
     />
   {:else if LinkScreen.current}
     <LinkScreen.current />

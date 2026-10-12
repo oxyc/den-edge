@@ -35,12 +35,15 @@ export class SessionServices {
   #grants = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
+  readonly #model: LibraryModel | null;
 
   constructor(
-    private readonly model: LibraryModel | null,
+    model: LibraryModel | null,
     private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
-  ) {}
+  ) {
+    this.#model = model;
+  }
 
   /**
    * Publish an Atlas address only after this exact discovery generation is usable by the content Worker. An older
@@ -73,7 +76,7 @@ export class SessionServices {
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
     this.#configure(
-      this.model !== null,
+      this.#model !== null,
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
     );
@@ -107,8 +110,8 @@ export class SessionServices {
     };
 
     let live = false;
-    if (first && this.model)
-      void this.model
+    if (first && this.#model)
+      void this.#model
         .retainedServices()
         .then((saved) => {
           if (!current || live || !saved) return;
@@ -152,8 +155,8 @@ export class SessionServices {
                   void localNetworkRefused().then((refused) => {
                     if (current) this.remuxBlocked = refused;
                   });
-                if (found && this.model)
-                  void this.model.rememberPrivateRemux(found).catch(() => {
+                if (found && this.#model)
+                  void this.#model.rememberPrivateRemux(found).catch(() => {
                     // Rediscovered next visit; this background convenience is never user-blocking.
                   });
                 this.#settled();
@@ -190,11 +193,11 @@ export class SessionServices {
   }
 
   #settled(): void {
-    if (!this.model) return;
+    if (!this.#model) return;
     clearTimeout(this.#keep);
     this.#keep = setTimeout(() => {
       if (!Object.keys(this.routes).length) return;
-      void this.model
+      void this.#model
         ?.retainServices({
           routes: this.routes,
           scout: this.scout,

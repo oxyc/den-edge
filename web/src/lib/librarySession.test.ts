@@ -57,7 +57,8 @@ describe('ProfileSession presentation state', () => {
       libraryKey: 'same-library-key',
       retainedScope: 'same-library-key',
     });
-    expect(session.household.model).toBe(model);
+    expect(session.household.ownsModel(model)).toBe(true);
+    expect('model' in session.household).toBe(false);
     expect(session.household.identity).toEqual({
       kind: 'legacy',
       libraryKey: 'same-library-key',
