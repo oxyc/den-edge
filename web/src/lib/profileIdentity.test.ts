@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   legacyProfileIdentity,
   persistentProfileIdentity,
+  profileId,
   profileSessionKey,
 } from './profileIdentity';
+
+const KID_ID = '0123456789abcdef0123456789abcdef';
 
 describe('profile identity', () => {
   it('maps the unchanged linked path to Owner while preserving its cache and library key', () => {
@@ -31,18 +34,44 @@ describe('profile identity', () => {
   });
 
   it('gives every future persistent profile the same typed library and retained-state seam', () => {
-    const kid = persistentProfileIdentity('kid-a', 'kid-library-key');
+    const kid = persistentProfileIdentity(KID_ID, 'kid-library-key');
 
     expect(kid).toMatchObject({
       kind: 'profile',
-      id: 'kid-a',
+      id: KID_ID,
       libraryKey: 'kid-library-key',
       retainedScope: 'kid-library-key',
     });
-    expect(profileSessionKey(kid)).toBe('profile:kid-a:kid-library-key');
+    expect(profileSessionKey(kid)).toBe(`profile:${KID_ID}:kid-library-key`);
   });
 
-  it('refuses an empty persistent profile id before it can key retained state', () => {
-    expect(() => persistentProfileIdentity('', 'library-key')).toThrow(TypeError);
+  it('accepts only profiles-v1 lowercase 32-hex directory ids', () => {
+    expect(profileId('00000000000000000000000000000000')).toBe('00000000000000000000000000000000');
+    expect(profileId('ffffffffffffffffffffffffffffffff')).toBe('ffffffffffffffffffffffffffffffff');
+    for (const invalid of [
+      '',
+      '0'.repeat(31),
+      '0'.repeat(33),
+      '0123456789ABCDEF0123456789ABCDEF',
+      'g123456789abcdef0123456789abcdef',
+      'owner',
+      'personal',
+      'public',
+    ]) {
+      expect(() => profileId(invalid), invalid).toThrow(TypeError);
+      expect(() => persistentProfileIdentity(invalid, 'library-key'), invalid).toThrow(TypeError);
+    }
+  });
+
+  it('keeps directory ids and internal sentinels in disjoint retained-state keys', () => {
+    const libraryKey = 'same-library-key';
+    const keys = [
+      profileSessionKey(legacyProfileIdentity(libraryKey, false)),
+      profileSessionKey(legacyProfileIdentity(libraryKey, true)),
+      profileSessionKey(legacyProfileIdentity(null, false)),
+      profileSessionKey(persistentProfileIdentity(KID_ID, libraryKey)),
+    ];
+
+    expect(new Set(keys).size).toBe(keys.length);
   });
 });

@@ -1,8 +1,11 @@
-/** A stable profile-directory id. The constructor keeps arbitrary strings out of profile-scoped state keys. */
+/** A stable profiles-v1 directory id: exactly 128 random bits rendered as lowercase hexadecimal. */
 export type ProfileId = string & { readonly __profileId: unique symbol };
 
+const PROFILE_ID = /^[0-9a-f]{32}$/;
+
 export const profileId = (value: string): ProfileId => {
-  if (!value) throw new TypeError('A profile id must not be empty');
+  if (!PROFILE_ID.test(value))
+    throw new TypeError('A profile id must be exactly 32 lowercase hexadecimal characters');
   return value as ProfileId;
 };
 
@@ -35,9 +38,13 @@ export type ProfileIdentity =
       readonly retainedScope: null;
     };
 
-const OWNER_ID = profileId('owner');
-const PERSONAL_ID = profileId('personal');
-const PUBLIC_ID = profileId('public');
+type SentinelId = 'owner' | 'personal' | 'public';
+// These identities exist only before a directory-backed profile is active. Keep them visibly outside profiles-v1's
+// 32-hex domain so neither a decoded directory entry nor a retained-state key can collide with one.
+const sentinelId = (value: SentinelId): ProfileId => value as ProfileId;
+const OWNER_ID = sentinelId('owner');
+const PERSONAL_ID = sentinelId('personal');
+const PUBLIC_ID = sentinelId('public');
 
 /** A directory-backed persistent profile (Kid today, and any later persistent profile) uses the same seam. */
 export const persistentProfileIdentity = (

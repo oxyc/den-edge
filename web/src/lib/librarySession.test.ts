@@ -4,6 +4,8 @@ import type { LibraryModel } from './libraryModel.svelte';
 import { persistentProfileIdentity } from './profileIdentity';
 import { activeProfileSession, legacyProfileSession } from './profileSession.svelte';
 
+const KID_ID = '0123456789abcdef0123456789abcdef';
+
 afterEach(() => vi.useRealTimers());
 
 describe('ProfileSession presentation state', () => {
@@ -96,7 +98,7 @@ describe('ProfileSession presentation state', () => {
       content(),
     );
     const session = activeProfileSession(
-      persistentProfileIdentity('kid-a', 'kid-library-key'),
+      persistentProfileIdentity(KID_ID, 'kid-library-key'),
       household,
       profileModel,
     );
