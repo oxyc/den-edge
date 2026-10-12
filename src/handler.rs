@@ -1483,9 +1483,10 @@ pub mod tests {
         // `data:` is hls.js's, not ours: YouTube's master carries subtitle renditions, so it opens a
         // text track on `data:,WEBVTT` before any cue exists. Refused, that is a console error on
         // every trailer with subtitles — the media itself is a string the page wrote.
-        // The tailnet wildcard stands ahead of the table's own entries and does not replace them: a household
-        // on its LAN still reaches den-remux by the address the table names, and the wildcard is only what
-        // lets a page use the tailnet address it stored for itself when the table withholds one.
+        // The bounded wildcards stand ahead of the table's own entries and do not replace them: a household
+        // on its LAN still reaches den-remux by the address the table names. The tailnet wildcard lets a page use
+        // the address it stored for itself when the table withholds one; the direct-media wildcard admits a
+        // rotated listener name only on its dedicated port.
         // `https:` is the home-network trailer listener, allowed without being named (oxyc/den#197).
         assert!(
             csp.contains(
@@ -1499,7 +1500,8 @@ pub mod tests {
         assert!(
             csp.contains(
                 "connect-src 'self' https://api.themoviedb.org \
-                 https://*.ts.net:8443 https://1.1.1.1 https://api.ipify.org https://api.simkl.com \
+                 https://*.ts.net:8443 https://*.481920.xyz:8449 https://1.1.1.1 \
+                 https://api.ipify.org https://api.simkl.com \
                  https://pve.example:8443;"
             ),
             "{csp}"
