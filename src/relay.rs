@@ -186,6 +186,10 @@ fn remux_control(path: &str) -> bool {
     matches!(path, "/remux/health" | "/remux/session" | "/remux/releases" | "/remux/speed" | GRANT)
 }
 
+/// Where a player asks den-remux to find an episode's intro and credits with its own scout install (oxyc/den#227).
+/// A member's or a LAN player's call only: it is not in `remux_control`, so a guest's grant never reaches it.
+const SEGMENT_SCAN: &str = "/remux/segments/scan";
+
 /// Where a player re-asserts the public media grant for a session it already has, from whatever address it has now:
 /// `{"playlist": "/remux/s/<sid>/<sig>/master.m3u8"}`, plus `ipv4Hint`/`noHint` as a session start takes them.
 ///
@@ -657,7 +661,8 @@ async fn relay_with(
     // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
     // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
     let remux = req.uri().path().starts_with("/remux/");
-    if remux && !remux_control(req.uri().path()) {
+    let scan = grant.is_none() && method == Method::POST && req.uri().path() == SEGMENT_SCAN;
+    if remux && !remux_control(req.uri().path()) && !scan {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     let speed = req.uri().path() == "/remux/speed";
@@ -2815,6 +2820,26 @@ mod tests {
             .send("GET", "/remux/health", None, &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)])
             .await;
         assert_eq!(relayed.status(), StatusCode::BAD_GATEWAY, "member reached the absent upstream");
+    }
+
+    /// The TV asks for a segment scan on the LAN face: a POST to the one scan route goes through, and nothing else
+    /// under `/remux/segments` does.
+    #[tokio::test]
+    async fn a_segment_scan_is_relayed_and_nothing_else_under_segments() {
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays("/remux=http://127.0.0.1:9");
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let lan = [("host", "192.168.86.193:8094"), ("content-type", "application/json")];
+        let body =
+            || Some(json!({ "imdb": "tt1", "season": 1, "episode": 2, "scout": "http://x/c" }).to_string());
+
+        let scan = h.send("POST", "/remux/segments/scan", body(), &lan).await;
+        assert_eq!(scan.status(), StatusCode::BAD_GATEWAY, "the scan reached the absent upstream");
+        let read = h.send("GET", "/remux/segments/scan", None, &lan).await;
+        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+        let other = h.send("POST", "/remux/segments/tt1/1/2", body(), &lan).await;
+        assert_eq!(other.status(), StatusCode::NOT_FOUND);
     }
 
     /// A public session is never created unless its small answer already has space in the process-wide collection
