@@ -188,13 +188,15 @@ describe('ProfileMigrationParticipant', () => {
     expect(recovered.participant.journal?.state).toBe('owner-copied');
   });
 
-  it('adopts the committed winner and durably cleans a distinct losing candidate', async () => {
+  it('observes a competing commit after prepared reload, cleans its loser, and adopts the winner', async () => {
     const storage = memoryStorage();
     const seeded = fixture({ storage });
     seeded.participant.beginExplicitOwnerAction(true);
-    await seeded.participant.resume();
-    await seeded.participant.resume();
-    await seeded.participant.resume();
+    for (let step = 0; step < 5; step++) await seeded.participant.resume();
+    expect(seeded.participant.journal).toMatchObject({
+      state: 'commit-unknown',
+      prepared: { digest: 'prepared-digest' },
+    });
 
     const recovered = fixture({
       storage,
@@ -218,6 +220,89 @@ describe('ProfileMigrationParticipant', () => {
       ownerLibraryKey: WINNER_KEY,
     });
     expect(recovered.calls).toEqual(['retire', 'verify-winner', 'adopt']);
+  });
+
+  it('adopts its own committed candidate without retiring the winner', async () => {
+    const storage = memoryStorage();
+    const seeded = fixture({ storage });
+    seeded.participant.beginExplicitOwnerAction(true);
+    for (let step = 0; step < 5; step++) await seeded.participant.resume();
+
+    const recovered = fixture({
+      storage,
+      observe: async () => ({
+        kind: 'committed',
+        directory: directory(CANDIDATE_KEY),
+      }),
+    });
+    await recovered.participant.resume();
+    await expect(recovered.participant.resume()).resolves.toEqual({
+      kind: 'active',
+      ownerLibraryKey: CANDIDATE_KEY,
+    });
+    expect(recovered.calls).toEqual(['verify-winner', 'adopt']);
+    expect(recovered.executor.retireLosingCandidate).not.toHaveBeenCalled();
+  });
+
+  it('persists commit uncertainty while retaining the prepared rewrite across reload', async () => {
+    const storage = memoryStorage();
+    const seeded = fixture({ storage });
+    seeded.participant.beginExplicitOwnerAction(true);
+    for (let step = 0; step < 5; step++) await seeded.participant.resume();
+    expect(seeded.participant.journal).toMatchObject({
+      state: 'commit-unknown',
+      prepared: { digest: 'prepared-digest' },
+      ownerVerification: { head: 'owner-head' },
+    });
+
+    const recovered = fixture({ storage });
+    await expect(recovered.participant.resume()).resolves.toEqual({
+      kind: 'ready-to-commit',
+      prepared: { digest: 'prepared-digest' },
+    });
+    expect(recovered.executor.observe).toHaveBeenCalledOnce();
+    expect(recovered.calls).toEqual([]);
+    expect(recovered.participant.journal?.state).toBe('commit-unknown');
+  });
+
+  it('retries deletion of a seeded active journal before returning active', async () => {
+    const backing = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'active',
+        winnerLibraryKey: WINNER_KEY,
+        winnerVerified: true,
+      }),
+    });
+    let failRemoval = true;
+    const storage: Storage = {
+      get length() {
+        return backing.length;
+      },
+      clear: () => backing.clear(),
+      getItem: (key) => backing.getItem(key),
+      key: (index) => backing.key(index),
+      removeItem: (key) => {
+        if (failRemoval) {
+          failRemoval = false;
+          throw new Error('remove failed');
+        }
+        backing.removeItem(key);
+      },
+      setItem: (key, value) => backing.setItem(key, value),
+    };
+    const first = fixture({ storage });
+    await expect(first.participant.resume()).rejects.toThrow('remove failed');
+    expect(first.participant.journal?.state).toBe('active');
+
+    const relaunched = fixture({ storage });
+    await expect(relaunched.participant.resume()).resolves.toEqual({
+      kind: 'active',
+      ownerLibraryKey: WINNER_KEY,
+    });
+    expect(relaunched.participant.journal).toBeNull();
+    expect(relaunched.executor.observe).not.toHaveBeenCalled();
   });
 
   it('proves cleanup cannot target the Owner, another live profile, or the household', async () => {

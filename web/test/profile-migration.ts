@@ -8,25 +8,28 @@ import {
 
 const OWNER = '00112233445566778899aabbccddeeff';
 const calls: string[] = [];
-const directory = {
-  format: 4,
-  kind: 'profiles',
-  schema: 1,
-  owner: OWNER,
-  migration: {},
-  profiles: {
-    [OWNER]: {
-      library: { value: { key: 'winner-key' } },
-      deleted: { value: false },
+const directory = (ownerKey: string) =>
+  ({
+    format: 4,
+    kind: 'profiles',
+    schema: 1,
+    owner: OWNER,
+    migration: {},
+    profiles: {
+      [OWNER]: {
+        library: { value: { key: ownerKey } },
+        deleted: { value: false },
+      },
     },
-  },
-} as ProfilesDirectory;
+  }) as ProfilesDirectory;
 
 const executor: ProfileMigrationExecutor = {
-  observe: async () =>
-    localStorage.getItem('fixture.profileMigration.winner')
-      ? { kind: 'committed', directory }
-      : { kind: 'legacy', fence: 'same' },
+  observe: async () => {
+    const winner = localStorage.getItem('fixture.profileMigration.winner');
+    return winner
+      ? { kind: 'committed', directory: directory(winner) }
+      : { kind: 'legacy', fence: 'same' };
+  },
   acquireFence: async () => {
     calls.push('fence');
     return { generation: 'fixture-generation', base: 9, rewrite: 'fixture-rewrite' };
@@ -109,7 +112,10 @@ document.querySelector('#advance')!.addEventListener('click', () => {
   });
 });
 document.querySelector('#winner')!.addEventListener('click', () => {
-  localStorage.setItem('fixture.profileMigration.winner', 'true');
+  localStorage.setItem('fixture.profileMigration.winner', 'winner-key');
+});
+document.querySelector('#candidate-winner')!.addEventListener('click', () => {
+  localStorage.setItem('fixture.profileMigration.winner', 'candidate-key');
 });
 
 declare global {

@@ -295,16 +295,24 @@ export class ProfileMigrationParticipant {
     const journal = this.#read();
     if (this.#invalidJournal) return { kind: 'blocked', reason: 'invalid-journal' };
     if (!journal) return { kind: 'inactive' };
-    if (journal.state === 'active' && journal.winnerLibraryKey)
+    if (journal.state === 'active' && journal.winnerLibraryKey) {
+      // Activation is durable before cleanup. If removeItem failed or the process died between those effects, a
+      // relaunch must finish deleting the journal before it reports the already-adopted winner as active.
+      this.#storage.removeItem(this.#key);
       return { kind: 'active', ownerLibraryKey: journal.winnerLibraryKey };
+    }
     if (journal.state === 'restore-required') return { kind: 'restore-required' };
-    if (journal.prepared) return { kind: 'ready-to-commit', prepared: journal.prepared };
 
     await this.#ensurePolicy();
     const observation = await this.#executor.observe(journal);
     const committed =
       observation.kind === 'committed' ? this.#validated(observation.directory) : null;
     const winnerLibraryKey = committed ? ownerLibrary(committed) : undefined;
+    // A prepared rewrite may have been handed to an executor immediately before another participant committed.
+    // Always resolve a canonical directory first; only offer this attempt's rewrite while its original fence is
+    // still the observed household state.
+    if (journal.prepared && observation.kind === 'legacy' && observation.fence === 'same')
+      return { kind: 'ready-to-commit', prepared: journal.prepared };
     const decision = this.#planner({
       state: journal.state,
       observed: observation.kind,
@@ -366,10 +374,13 @@ export class ProfileMigrationParticipant {
           candidate: journal.candidate,
           ownerVerification: journal.ownerVerification,
         });
-        this.#write({ ...journal, state: 'ready-to-commit', prepared });
+        // The next externally visible effect will be the future executor's compare-and-set. Record uncertainty
+        // before exposing the rewrite so process death or a timed-out commit can only resume through observation.
+        this.#write({ ...journal, state: 'commit-unknown', prepared });
         return { kind: 'ready-to-commit', prepared };
       }
       case 'read-household':
+        this.#write({ ...journal, state: 'commit-unknown' });
         return { kind: 'progress', state: 'commit-unknown' };
       case 'retire-losing-candidate': {
         if (!journal.candidate) throw new Error('Losing Owner candidate is missing');
