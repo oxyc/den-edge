@@ -74,13 +74,13 @@ describe('VisitorProfileSession', () => {
     expect(restored.displayTitle(movie)).toEqual(movie);
     expect(restored.displayTitle(series)).toEqual(series);
 
-    restored.endVisit();
+    await restored.endVisit();
     const ended = visitorProfileSession(household, storage, FIRST);
     expect(ended.profileActivity!.titles).toEqual([]);
     expect(ownerWrite).not.toHaveBeenCalled();
   });
 
-  it('preserves a closed visit for reconstruction and ends only that visit explicitly', () => {
+  it('preserves a closed visit for reconstruction and ends only that visit explicitly', async () => {
     const storage = memoryStorage();
     const householdClose = vi.fn();
     const household = new HouseholdSession(
@@ -92,8 +92,8 @@ describe('VisitorProfileSession', () => {
     const second = visitorProfileSession(household, storage, SECOND);
     storage.setItem('den.owner.untouched', 'owner');
 
-    first.activity.set('progress:movie:550', { fraction: 0.25 });
-    second.activity.set('progress:movie:550', { fraction: 0.75 });
+    await first.activity.set('progress:movie:550', { fraction: 0.25 });
+    await second.activity.set('progress:movie:550', { fraction: 0.75 });
 
     expect(first.activity.get('progress:movie:550')).toEqual({ fraction: 0.25 });
     expect(second.activity.get('progress:movie:550')).toEqual({ fraction: 0.75 });
@@ -113,8 +113,8 @@ describe('VisitorProfileSession', () => {
     expect(storage.getItem('den.owner.untouched')).toBe('owner');
     expect(householdClose).not.toHaveBeenCalled();
 
-    restored.endVisit();
-    restored.endVisit();
+    await restored.endVisit();
+    await restored.endVisit();
 
     expect(() => restored.activity.get('progress:movie:550')).toThrow('disposed');
     expect(second.activity.get('progress:movie:550')).toEqual({ fraction: 0.75 });

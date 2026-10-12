@@ -91,8 +91,8 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   await page.getByRole('button', { name: 'Use Visitor' }).click();
   await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
   await expect(page.getByText('Visitor can’t manage household settings.')).toBeVisible();
-  const first = await page.evaluate(() => {
-    window.denProfileModeFixture.setActivity('progress:movie:550', 'half');
+  const first = await page.evaluate(async () => {
+    await window.denProfileModeFixture.setActivity('progress:movie:550', 'half');
     return window.denProfileModeFixture.snapshot();
   });
   expect(first.policyCeiling).toBe('pg13');
@@ -148,4 +148,47 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
   const ended = await page.evaluate(() => window.denProfileModeFixture.snapshot());
   expect(ended.keys).toEqual(['den.profile.active.v1']);
+});
+
+test('two tabs merge Visitor activity and an Owner switch revokes the stale tab', async ({
+  page,
+  context,
+}) => {
+  await open(page, true, '?pin=none');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  const visitId = (await page.evaluate(() => window.denProfileModeFixture.snapshot())).visitId;
+
+  const other = await context.newPage();
+  await open(other, true, '?pin=none');
+  await expect(other.locator('[data-mode]')).toHaveText('Visitor active');
+
+  await Promise.all([
+    page.evaluate(() => window.denProfileModeFixture.addVisitorWatchlist(1, 'One')),
+    other.evaluate(() => window.denProfileModeFixture.addVisitorWatchlist(2, 'Two')),
+  ]);
+  for (const tab of [page, other]) {
+    await expect
+      .poll(() => tab.evaluate(() => window.denProfileModeFixture.snapshot().watchlist.sort()))
+      .toEqual(['One', 'Two']);
+  }
+
+  await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(other.locator('[data-mode]')).toHaveText('Owner active');
+  await expect(
+    other.evaluate(() => window.denProfileModeFixture.addVisitorWatchlist(3, 'Three')),
+  ).resolves.toBe('inactive');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (id) =>
+          Object.keys(localStorage).filter((key) =>
+            key.startsWith(`den.profile.visitor.v1:${id}:`),
+          ),
+        visitId,
+      ),
+    )
+    .toEqual([]);
+  await other.close();
 });

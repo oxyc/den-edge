@@ -16,6 +16,11 @@
   } from '../src/lib/actions';
   import { parseRoute, type Route } from '../src/lib/route';
   import type { ProfileSession } from '../src/lib/profileSession.svelte';
+  import { visitorVisitId } from '../src/lib/profileIdentity';
+  import {
+    visitorProfileSession,
+    type VisitorProfileSession,
+  } from '../src/lib/visitorProfileSession.svelte';
   import { trackerEvent } from '../src/lib/trackerEvents';
   import { browserClock } from '../src/lib/clock';
   import { startRow } from '../src/lib/downloadRows';
@@ -214,7 +219,23 @@
     openGate,
   });
   publish = () => library.publish();
-  const session: ProfileSession = library.session;
+  const visitor = params.has('visitor');
+  const session: ProfileSession = visitor
+    ? visitorProfileSession(
+        library.session.household,
+        localStorage,
+        visitorVisitId('11111111111111111111111111111111'),
+      )
+    : library.session;
+  let visitorReady = $state(!visitor);
+  if (visitor) {
+    const activity = (session as VisitorProfileSession).profileActivity!;
+    void Promise.all([
+      activity.setWatchlisted({ type: 'movie', id: 4001, title: 'Visitor saved' }, true),
+      activity.recordProgress({ type: 'movie', id: 4002, title: 'Visitor resumed' }, 0.4, 1200),
+      activity.setWatched({ type: 'movie', id: 4003, title: 'Visitor watched' }, true),
+    ]).then(() => (visitorReady = true));
+  }
   if (!unnamedMany) {
     const named = Array.from({ length: many }, (_, index) => ({
       type: 'movie' as const,
@@ -232,7 +253,7 @@
     libraryKey: 'fixture',
     linkKey: 'fixture',
   };
-  const shownLink = params.has('local') ? null : link;
+  const shownLink = params.has('local') || visitor ? null : link;
 
   // Test-only seam for den-edge#235's Playwright spec: stands in for "a library pull landed a fresh position",
   // since this fixture's library never actually pulls over the network. `at` defaults to now, so a test can pass
@@ -256,6 +277,7 @@
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
+  {#if visitorReady}<span data-visitor-ready hidden>ready</span>{/if}
   <LibraryStatus toast={session.toast} alert={session.alert} />
   <Library
     link={shownLink}

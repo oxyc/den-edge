@@ -80,7 +80,7 @@
       };
     },
     setActivity(key: string, value: string) {
-      (profiles?.session as VisitorProfileSession).activity.set(key, value);
+      return (profiles?.session as VisitorProfileSession).activity.set(key, value);
     },
     getActivity(key: string) {
       return (profiles?.session as VisitorProfileSession).activity.get(key);
@@ -93,6 +93,16 @@
         episode: 3,
       });
       await activity.setWatched({ type: 'movie', id: 603, title: 'The Matrix' }, true);
+    },
+    async addVisitorWatchlist(id: number, title: string) {
+      const activity = (profiles?.session as VisitorProfileSession | undefined)?.profileActivity;
+      if (!activity) return 'inactive';
+      try {
+        await activity.setWatchlisted({ type: 'movie', id, title }, true);
+        return 'saved';
+      } catch (error) {
+        return error instanceof Error ? error.message : 'failed';
+      }
     },
     outbound() {
       const visitor = profiles?.session as VisitorProfileSession;

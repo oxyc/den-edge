@@ -5,6 +5,7 @@ import type { ConnectionsView } from './libraryServiceProtocol';
 import { legacyProfileIdentity } from './profileIdentity';
 import { ProfileModeCoordinator, profilesCapability } from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
+import type { VisitorProfileSession } from './visitorProfileSession.svelte';
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -22,7 +23,16 @@ function memoryStorage(): Storage {
 
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
-function owner(storage: Storage, pinConfigured = true) {
+function storageEvent(key: string): Event {
+  const event = new Event('storage');
+  Object.defineProperties(event, {
+    key: { value: key },
+    storageArea: { value: null },
+  });
+  return event;
+}
+
+function owner(storage: Storage, pinConfigured = true, events: EventTarget | null = null) {
   const release = vi.fn();
   const close = vi.fn();
   const verifyParentalPin = vi.fn(async (pin: string) => pin === '1234');
@@ -52,7 +62,11 @@ function owner(storage: Storage, pinConfigured = true) {
     true,
   );
   return {
-    coordinator: new ProfileModeCoordinator(session, storage),
+    coordinator: new ProfileModeCoordinator(
+      session,
+      storage,
+      events as unknown as Pick<Window, 'addEventListener' | 'removeEventListener'>,
+    ),
     model,
     close,
     closeWorker,
@@ -62,7 +76,40 @@ function owner(storage: Storage, pinConfigured = true) {
 }
 
 describe('ProfileModeCoordinator', () => {
-  it('persists one Visitor across teardown and reconstructs its local namespace', () => {
+  it('serializes shared-tab activity and revokes a stale tab before it can recreate an ended visit', async () => {
+    const storage = memoryStorage();
+    const events = new EventTarget();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
+    const first = owner(storage, false, events);
+    first.coordinator.switchToVisitor();
+    const visitId = first.coordinator.session!.identity.id;
+    const second = owner(storage, false, events);
+    const a = first.coordinator.session as VisitorProfileSession;
+    const b = second.coordinator.session as VisitorProfileSession;
+
+    await Promise.all([
+      a.profileActivity!.setWatchlisted({ type: 'movie', id: 1, title: 'One' }, true),
+      b.profileActivity!.setWatchlisted({ type: 'movie', id: 2, title: 'Two' }, true),
+    ]);
+    events.dispatchEvent(storageEvent(`${a.activity.prefix}activity`));
+    expect(a.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
+    expect(b.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
+
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    expect(storage.getItem(`${a.activity.prefix}activity`)).toBeNull();
+    await expect(
+      b.profileActivity!.setWatchlisted({ type: 'movie', id: 3, title: 'Three' }, true),
+    ).rejects.toThrow('ended');
+    expect(storage.getItem(`${a.activity.prefix}activity`)).toBeNull();
+
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    expect(second.coordinator.mode).toBe('owner');
+    expect(second.coordinator.session!.identity.id).not.toBe(visitId);
+    first.coordinator.dispose();
+    second.coordinator.dispose();
+  });
+
+  it('persists one Visitor across teardown and reconstructs its local namespace', async () => {
     const storage = memoryStorage();
     storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage);
@@ -82,9 +129,9 @@ describe('ProfileModeCoordinator', () => {
       JSON.stringify({ mode: 'visitor', visitId }),
     );
     const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
-      activity: { set: (key: string, value: string) => void };
+      activity: { set: (key: string, value: string) => Promise<void> };
     };
-    activity.activity.set('progress:movie:550', 'half');
+    await activity.activity.set('progress:movie:550', 'half');
     first.coordinator.dispose();
 
     const restored = owner(storage);
@@ -134,9 +181,9 @@ describe('ProfileModeCoordinator', () => {
     first.coordinator.switchToVisitor();
     const endedId = first.coordinator.session!.identity.id;
     const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
-      activity: { set: (key: string, value: number) => void };
+      activity: { set: (key: string, value: number) => Promise<void> };
     };
-    activity.activity.set('progress', 1);
+    await activity.activity.set('progress', 1);
     storage.setItem('den.profile.visitor.v1:ffffffffffffffffffffffffffffffff:progress', '2');
 
     await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);

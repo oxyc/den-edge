@@ -1,5 +1,4 @@
 import { WATCHED } from './actions';
-import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { WatchedEntry, SeenEpisode } from './history';
 import { titleKey, type ContinueEntry, type Title } from './library';
 import { titleViewRows } from './libraryViewPresentation';
@@ -8,7 +7,7 @@ import type { EpisodeRow, TitleRow } from './wire';
 
 export interface VisitorActivityStore {
   get(key: string): unknown;
-  set(key: string, value: null | boolean | number | string | unknown[] | object): void;
+  update<T>(key: string, change: (current: unknown) => T): Promise<T>;
 }
 
 /** The intentionally small activity surface Library presentation may receive from an active profile. */
@@ -77,6 +76,12 @@ export class VisitorActivityProjection implements ProfileActivity {
     this.#state = this.#read(stored);
   }
 
+  /** Reconcile a storage event from another tab without manufacturing a write of our own. */
+  reload(): void {
+    this.#state = this.#read(this.store.get(STORAGE_KEY));
+    this.#revision++;
+  }
+
   get titles(): readonly Title[] {
     this.#observe();
     return Object.values(this.#state.titles).map(({ title }) => structuredClone(title));
@@ -140,7 +145,8 @@ export class VisitorActivityProjection implements ProfileActivity {
 
   get watchedKeys(): ReadonlySet<string> {
     this.#observe();
-    return new SvelteSet(
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Fresh immutable snapshot; #revision is the reactive source.
+    return new Set(
       Object.entries(this.#state.titles)
         .filter(([, activity]) => activity.watched)
         .map(([key]) => key),
@@ -149,7 +155,8 @@ export class VisitorActivityProjection implements ProfileActivity {
 
   get standings(): ReadonlyMap<string, 'watchlist' | 'watched' | 'inProgress'> {
     this.#observe();
-    const standings = new SvelteMap<string, 'watchlist' | 'watched' | 'inProgress'>();
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Fresh immutable snapshot; #revision is the reactive source.
+    const standings = new Map<string, 'watchlist' | 'watched' | 'inProgress'>();
     for (const [key, activity] of Object.entries(this.#state.titles)) {
       if (activity.watched) standings.set(key, 'watched');
       else if (this.#inProgress(activity)) standings.set(key, 'inProgress');
@@ -160,7 +167,8 @@ export class VisitorActivityProjection implements ProfileActivity {
 
   seenEpisodes(): ReadonlyMap<string, readonly SeenEpisode[]> {
     this.#observe();
-    return new SvelteMap(
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Fresh immutable snapshot; #revision is the reactive source.
+    return new Map(
       Object.entries(this.#state.titles).flatMap(([key, activity]) => {
         const seen = Object.values(activity.episodes)
           .filter(({ watched }) => watched)
@@ -179,31 +187,33 @@ export class VisitorActivityProjection implements ProfileActivity {
     const activity = this.#activity(title);
     return activity
       ? titleViewRows(activity.title, this.#view(activity))
-      : { row: undefined, episodes: new SvelteMap() };
+      : {
+          row: undefined,
+          // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Empty immutable presentation snapshot.
+          episodes: new Map(),
+        };
   }
 
   async setWatchlisted(title: Title, on: boolean): Promise<{ delivery: 'local' }> {
-    const activity = this.#ensure(title);
-    activity.watchlisted = on;
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => {
+      const activity = this.#ensure(state, title);
+      activity.watchlisted = on;
+    });
   }
 
   async setReaction(title: Title, reaction: Reaction | null): Promise<{ delivery: 'local' }> {
-    this.#ensure(title).reaction = reaction;
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => (this.#ensure(state, title).reaction = reaction));
   }
 
   async setWatched(title: Title, watched: boolean): Promise<{ delivery: 'local' }> {
-    const activity = this.#ensure(title);
-    activity.watched = watched;
-    activity.watchedAt = watched ? Date.now() : undefined;
-    activity.watchlisted = watched ? false : activity.watchlisted;
-    activity.progress = watched ? { fraction: 1, updatedAt: activity.watchedAt! } : undefined;
-    if (!watched && title.type === 'tv') activity.episodes = {};
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => {
+      const activity = this.#ensure(state, title);
+      activity.watched = watched;
+      activity.watchedAt = watched ? Date.now() : undefined;
+      activity.watchlisted = watched ? false : activity.watchlisted;
+      activity.progress = watched ? { fraction: 1, updatedAt: activity.watchedAt! } : undefined;
+      if (!watched && title.type === 'tv') activity.episodes = {};
+    });
   }
 
   async setEpisodeWatched(
@@ -212,22 +222,7 @@ export class VisitorActivityProjection implements ProfileActivity {
     episode: number,
     watched: boolean,
   ): Promise<{ delivery: 'local' }> {
-    const activity = this.#ensure(title);
-    const key = `${season}:${episode}`;
-    if (watched) {
-      activity.episodes[key] = {
-        season,
-        episode,
-        watched: true,
-        fraction: 1,
-        updatedAt: Date.now(),
-      };
-      activity.watchlisted = false;
-    } else delete activity.episodes[key];
-    activity.watched = false;
-    activity.dismissed = false;
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => this.#setEpisodeWatched(state, title, season, episode, watched));
   }
 
   async setSeasonWatched(
@@ -236,8 +231,10 @@ export class VisitorActivityProjection implements ProfileActivity {
     episodes: readonly number[],
     watched: boolean,
   ): Promise<{ delivery: 'local' }> {
-    for (const episode of episodes) await this.setEpisodeWatched(title, season, episode, watched);
-    return { delivery: 'local' };
+    return this.#change((state) => {
+      for (const episode of episodes)
+        this.#setEpisodeWatched(state, title, season, episode, watched);
+    });
   }
 
   async recordProgress(
@@ -246,32 +243,30 @@ export class VisitorActivityProjection implements ProfileActivity {
     seconds: number,
     episode?: { season: number; episode: number },
   ): Promise<{ delivery: 'local' }> {
-    const activity = this.#ensure(title);
-    const updatedAt = Date.now();
-    activity.dismissed = false;
-    activity.watchlisted = false;
-    if (episode) {
-      activity.watched = false;
-      activity.episodes[`${episode.season}:${episode.episode}`] = {
-        ...episode,
-        fraction,
-        seconds,
-        updatedAt,
-        watched: fraction >= WATCHED,
-      };
-    } else {
-      activity.progress = { fraction, seconds, updatedAt };
-      activity.watched = fraction >= WATCHED;
-      activity.watchedAt = activity.watched ? updatedAt : undefined;
-    }
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => {
+      const activity = this.#ensure(state, title);
+      const updatedAt = Date.now();
+      activity.dismissed = false;
+      activity.watchlisted = false;
+      if (episode) {
+        activity.watched = false;
+        activity.episodes[`${episode.season}:${episode.episode}`] = {
+          ...episode,
+          fraction,
+          seconds,
+          updatedAt,
+          watched: fraction >= WATCHED,
+        };
+      } else {
+        activity.progress = { fraction, seconds, updatedAt };
+        activity.watched = fraction >= WATCHED;
+        activity.watchedAt = activity.watched ? updatedAt : undefined;
+      }
+    });
   }
 
   async setContinueDismissed(title: Title, dismissed: boolean): Promise<{ delivery: 'local' }> {
-    this.#ensure(title).dismissed = dismissed;
-    this.#save();
-    return { delivery: 'local' };
+    return this.#change((state) => (this.#ensure(state, title).dismissed = dismissed));
   }
 
   #view(activity: TitleActivity): TitleView {
@@ -312,9 +307,9 @@ export class VisitorActivityProjection implements ProfileActivity {
     return this.#state.titles[titleKey(ref)];
   }
 
-  #ensure(title: Title): TitleActivity {
+  #ensure(state: StoredActivity, title: Title): TitleActivity {
     const key = titleKey(title);
-    const existing = this.#state.titles[key];
+    const existing = state.titles[key];
     if (existing) {
       existing.title = structuredClone(title);
       return existing;
@@ -327,8 +322,31 @@ export class VisitorActivityProjection implements ProfileActivity {
       dismissed: false,
       episodes: {},
     };
-    this.#state.titles[key] = created;
+    state.titles[key] = created;
     return created;
+  }
+
+  #setEpisodeWatched(
+    state: StoredActivity,
+    title: Title,
+    season: number,
+    episode: number,
+    watched: boolean,
+  ): void {
+    const activity = this.#ensure(state, title);
+    const key = `${season}:${episode}`;
+    if (watched) {
+      activity.episodes[key] = {
+        season,
+        episode,
+        watched: true,
+        fraction: 1,
+        updatedAt: Date.now(),
+      };
+      activity.watchlisted = false;
+    } else delete activity.episodes[key];
+    activity.watched = false;
+    activity.dismissed = false;
   }
 
   #ordered(predicate: (activity: TitleActivity) => boolean): TitleActivity[] {
@@ -356,9 +374,15 @@ export class VisitorActivityProjection implements ProfileActivity {
     );
   }
 
-  #save(): void {
-    this.store.set(STORAGE_KEY, this.#state);
+  async #change(change: (state: StoredActivity) => void): Promise<{ delivery: 'local' }> {
+    const state = await this.store.update(STORAGE_KEY, (current) => {
+      const latest = this.#read(current);
+      change(latest);
+      return latest;
+    });
+    this.#state = state;
     this.#revision++;
+    return { delivery: 'local' };
   }
 
   #observe(): void {

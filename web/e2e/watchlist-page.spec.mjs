@@ -129,6 +129,27 @@ test('the Watchlist billboard shows the watchlist, newest addition first, and go
   }
 });
 
+test('the actual Watchlist surface renders Visitor-local activity', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await openWatchlist(browser, 1280, '&visitor');
+    await expect(page.locator('[data-visitor-ready]')).toBeAttached();
+    await expect(
+      page.getByRole('region', { name: 'Continue Watching', exact: true }),
+    ).toContainText('Visitor resumed');
+    await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toContainText(
+      'Visitor saved',
+    );
+    await expect(page.getByRole('region', { name: 'Watched', exact: true })).toContainText(
+      'Visitor watched',
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [393, 1280]) {
   test(`the Watchlist page lists continue watching, the watchlist by type and the watched history at ${width}px`, async () => {
     const browser = await chromium.launch({
