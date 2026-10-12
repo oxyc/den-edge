@@ -184,7 +184,8 @@
   // One lookup index per immutable service snapshot; billboard renders and actions never scan the whole library.
   const overviewTitles = $derived(overview ? new OverviewTitleIndex(overview) : undefined);
   const continueView = $derived(model?.continueWatching.value);
-  const settings = $derived(model?.settings.value);
+  // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
+  const settings = $derived(session.policyModel?.settings.value);
   /**
    * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
    * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains

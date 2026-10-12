@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
@@ -31,6 +31,7 @@
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
+  import { ProfileModeCoordinator, profilesCapability } from './lib/profileModeCoordinator.svelte';
 
   let {
     link,
@@ -39,6 +40,7 @@
     people,
     watchedYear,
     onchange,
+    onprofilecontrol = () => {},
   }: {
     link: Link | null;
     query: string;
@@ -46,6 +48,7 @@
     people: PeopleView;
     watchedYear: string | undefined;
     onchange: (route: Route) => void;
+    onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
   } = $props();
 
   const ownKey = untrack(() => (link ? null : localLibraryKey()));
@@ -89,6 +92,33 @@
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
+  let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
+
+  // Discovery is fail-closed and asynchronous: the legacy Owner is already on screen, and a default-off or
+  // unreachable capability leaves that exact session and every route untouched.
+  onMount(() => {
+    if (!libraryIdentity || !session.model) return;
+    let current = true;
+    void profilesCapability().then((enabled) => {
+      if (!current || !enabled || profileCoordinator || !session.model) return;
+      const coordinator = new ProfileModeCoordinator(session);
+      profileCoordinator = coordinator;
+      session = coordinator.session;
+      onprofilecontrol(coordinator);
+    });
+    return () => {
+      current = false;
+      const coordinator = profileCoordinator;
+      profileCoordinator = null;
+      onprofilecontrol(null);
+      coordinator?.dispose();
+    };
+  });
+
+  $effect(() => {
+    const coordinator = profileCoordinator;
+    if (coordinator && session !== coordinator.session) session = coordinator.session;
+  });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
   const RENEW_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -526,13 +556,25 @@
   <Router
     onchange={(route) => {
       if (route.page === 'settings')
-        void (link || session.local ? SettingsScreen.load() : LinkScreen.load());
+        void (session.identity.kind === 'visitor'
+          ? Promise.resolve()
+          : link || session.local
+            ? SettingsScreen.load()
+            : LinkScreen.load());
       onchange(route);
     }}
   >
     {#snippet children(route, active)}
       {#if route.page === 'settings'}
-        {#if link || session.local}
+        {#if session.identity.kind === 'visitor'}
+          <section class="visitor-settings" aria-labelledby="visitor-settings-title">
+            <h1 id="visitor-settings-title">Owner settings</h1>
+            <p>
+              Visitor can’t manage household settings. Use the Visitor button above to switch to
+              Owner.
+            </p>
+          </section>
+        {:else if link || session.local}
           {#if SettingsScreen.current}
             <SettingsScreen.current
               {link}
@@ -553,8 +595,37 @@
           <ScreenLoading screen={LinkScreen} />
         {/if}
       {:else}
-        <Library {link} {session} {route} {active} {query} {explore} {people} {watchedYear} />
+        <Library
+          link={session.identity.kind === 'visitor' ? null : link}
+          {session}
+          {route}
+          {active}
+          {query}
+          {explore}
+          {people}
+          {watchedYear}
+        />
       {/if}
     {/snippet}
   </Router>
 {/key}
+
+<style>
+  .visitor-settings {
+    max-width: 680px;
+    margin: 24px auto;
+    padding: 24px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--card);
+  }
+
+  .visitor-settings h1 {
+    margin-top: 0;
+  }
+
+  .visitor-settings p {
+    margin-bottom: 0;
+    color: var(--muted);
+  }
+</style>

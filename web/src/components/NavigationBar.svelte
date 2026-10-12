@@ -1,6 +1,7 @@
 <script lang="ts">
   import icon from '../assets/den-mark.svg';
   import DetailIcon from './DetailIcon.svelte';
+  import ProfileSwitcher from './ProfileSwitcher.svelte';
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
@@ -20,7 +21,12 @@
     RECENT_SEARCHES_CHANGED,
     rememberSearch,
   } from '../lib/recentSearches';
-  let { route, query = '' }: { route: Route; query?: string } = $props();
+  import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  let {
+    route,
+    query = '',
+    profiles = null,
+  }: { route: Route; query?: string; profiles?: ProfileModeCoordinator | null } = $props();
   /**
    * On People the field finds people and facets there: what is typed stays in People's address (`q=`) instead of
    * opening Search, and Enter still searches titles.
@@ -355,6 +361,7 @@
         </a>
       {/each}
     </nav>
+    {#if profiles}<ProfileSwitcher {profiles} />{/if}
     <button
       class="search-toggle"
       type="button"

@@ -36,7 +36,9 @@ export class ProfileSession {
     readonly household: HouseholdSession,
     readonly model: LibraryModel | null,
     readonly local: boolean,
-    private readonly closeHousehold: boolean,
+    private closeHousehold: boolean,
+    /** Household policy is readable by Visitor without lending it the Owner's activity/write model. */
+    readonly policyModel: LibraryModel | null = model,
   ) {}
 
   get content(): ContentServiceClientPort {
@@ -128,6 +130,11 @@ export class ProfileSession {
     clearTimeout(this.#toastTimer);
     if (this.closeHousehold) this.household.close();
     else if (this.model !== this.household.model) this.model?.close();
+  }
+
+  /** Transfer the shared household lifetime to the profiles coordinator before this session is switched away. */
+  relinquishHouseholdOwnership(): void {
+    this.closeHousehold = false;
   }
 }
 

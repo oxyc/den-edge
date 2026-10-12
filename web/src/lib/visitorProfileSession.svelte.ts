@@ -102,7 +102,7 @@ export class VisitorProfileSession extends ProfileSession {
     household: HouseholdSession,
     readonly activity: VisitorActivityNamespace,
   ) {
-    super(visitorProfileIdentity(activity.visitId), household, null, true, false);
+    super(visitorProfileIdentity(activity.visitId), household, null, true, false, household.model);
   }
 
   /** Explicitly switching away ends the visit; ordinary route/app teardown must call `close` and retain it. */
