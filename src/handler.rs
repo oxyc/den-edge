@@ -243,6 +243,7 @@ fn is_control(route: &str) -> bool {
         "/health"
             | "/version"
             | "/config"
+            | "/capabilities/profiles"
             | "/routes"
             | "/metrics"
             | "/link"
@@ -590,6 +591,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
             || revalidated(config(state), req.headers(), ENV_EDGE),
             |prepared| revalidated_prepared(&prepared.config, req.headers()),
         ),
+        // A separate, uncached discovery surface keeps a host-scoped canary out of `/config`, whose one prepared
+        // representation is deliberately shared by the web, API and LAN faces. Empty means absent, and a listed
+        // name still has to be a WEB_HOSTS name: a typo must not expose the capability on the LAN fallback.
+        "/capabilities/profiles" => profile_capability(state, &req, face),
         // Both public names get the public table when the deployment built one: a stranger at either has no use
         // for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks is
         // not part of answering them. The LAN and the tailnet keep the whole table, which is what a TV at home
@@ -652,30 +657,9 @@ pub enum Face {
 
 impl Face {
     fn of(state: &AppState, req: &Request) -> Face {
-        let mut fields = req.headers().get_all(header::HOST).iter();
-        let first = fields.next();
-        if fields.next().is_some() {
-            return Face::Invalid;
-        }
-        let raw = match first {
-            Some(h) => match h.to_str() {
-                Ok(h) => Some(h),
-                Err(_) => return Face::Invalid,
-            },
-            None => req.uri().authority().map(|a| a.as_str()),
-        };
-        let host = match raw {
-            Some(raw) => match raw.parse::<axum::http::uri::Authority>() {
-                Ok(a) if !raw.contains('@') && (a.port().is_none() || a.port_u16().is_some()) => {
-                    let name = a.host().trim_end_matches('.').to_ascii_lowercase();
-                    if name.is_empty() {
-                        return Face::Invalid;
-                    }
-                    Some(name)
-                }
-                _ => return Face::Invalid,
-            },
-            None => None,
+        let host = match request_host(req) {
+            Ok(host) => host,
+            Err(()) => return Face::Invalid,
         };
         let named = |names: &[String]| {
             host.as_ref()
@@ -736,11 +720,58 @@ impl Face {
             || crate::oauth::is_path(path);
         match (self, path) {
             (Face::Invalid, _) => false,
+            (Face::Web, "/capabilities/profiles") => true,
+            (_, "/capabilities/profiles") => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
             _ if tmdb => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,
         }
+    }
+}
+
+/// A normalized request host, shared by face selection and exact-host feature gates. A port and a DNS root dot
+/// are authority syntax, not a different host; malformed or duplicate Host fields are refused.
+fn request_host(req: &Request) -> Result<Option<String>, ()> {
+    let mut fields = req.headers().get_all(header::HOST).iter();
+    let first = fields.next();
+    if fields.next().is_some() {
+        return Err(());
+    }
+    let raw = match first {
+        Some(h) => match h.to_str() {
+            Ok(h) => Some(h),
+            Err(_) => return Err(()),
+        },
+        None => req.uri().authority().map(|a| a.as_str()),
+    };
+    match raw {
+        Some(raw) => match raw.parse::<axum::http::uri::Authority>() {
+            Ok(a) if !raw.contains('@') && (a.port().is_none() || a.port_u16().is_some()) => {
+                let name = a.host().trim_end_matches('.').to_ascii_lowercase();
+                if name.is_empty() {
+                    return Err(());
+                }
+                Ok(Some(name))
+            }
+            _ => Err(()),
+        },
+        None => Ok(None),
+    }
+}
+
+fn profile_capability(state: &AppState, req: &Request, face: Face) -> Response {
+    let enabled = face == Face::Web
+        && request_host(req).ok().flatten().is_some_and(|host| {
+            state
+                .profiles_hosts
+                .iter()
+                .any(|allowed| allowed.trim_end_matches('.').eq_ignore_ascii_case(&host))
+        });
+    if enabled {
+        bare_json(StatusCode::OK, &json!({ "enabled": true }))
+    } else {
+        bare_json(StatusCode::NOT_FOUND, &error("not_found"))
     }
 }
 
@@ -791,6 +822,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/health" => "/health",
         "/version" => "/version",
         "/config" => "/config",
+        "/capabilities/profiles" => "/capabilities/profiles",
         "/routes" => "/routes",
         "/metrics" => "/metrics",
         "/link" => "/link",
@@ -889,7 +921,13 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/grant/device-ticket"
         | "/grant/device" => Some(POST),
         "/grant/addons" => Some(GET),
-        "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
+        "/health"
+        | "/version"
+        | "/config"
+        | "/capabilities/profiles"
+        | "/metrics"
+        | "/lib/:id/changes"
+        | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
         "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
         "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
@@ -1168,6 +1206,17 @@ pub mod tests {
     }
 
     #[test]
+    fn profiles_capability_is_a_get_only_control_route() {
+        assert_eq!(route_label("/capabilities/profiles"), "/capabilities/profiles");
+        assert_eq!(allowed_methods("/capabilities/profiles"), Some(&[Method::GET][..]));
+        assert!(is_control("/capabilities/profiles"));
+        assert!(Face::Web.serves("/capabilities/profiles"));
+        for face in [Face::Api, Face::Both, Face::Invalid] {
+            assert!(!face.serves("/capabilities/profiles"), "{face:?}");
+        }
+    }
+
+    #[test]
     fn library_rewrite_routes_have_stable_labels_and_the_large_body_cap() {
         let root = "/lib/0123456789abcdef/rewrite";
         let action = format!("{root}/abcdef0123456789");
@@ -1439,6 +1488,48 @@ pub mod tests {
     fn prepare_public_json(h: &mut Harness) {
         let prepared = PreparedPublicJson::new(&h.state);
         Arc::get_mut(&mut h.state).unwrap().prepared_public_json = Some(prepared);
+    }
+
+    #[tokio::test]
+    async fn profiles_capability_is_default_off_on_every_face() {
+        let h = split_harness();
+        for host in ["d.oxy.fi", "d-api.oxy.fi", "192.168.86.193:8094", "other.example"] {
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", host)]).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{host}");
+            assert_ne!(body_json(resp).await.get("enabled"), Some(&Value::Bool(true)), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profiles_capability_is_uncached_and_exactly_limited_to_allowed_web_hosts() {
+        let mut h = split_harness();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi,preview.oxy.fi");
+        state.profiles_hosts = crate::parse_hosts("PROFILES_HOSTS", "D.OXY.FI,not-a-web-host.example");
+
+        for host in ["d.oxy.fi", "D.OXY.FI.:443"] {
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", host)]).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{host}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{host}");
+            for header in [header::ETAG.as_str(), "cdn-cache-control", "cache-tag"] {
+                assert!(!resp.headers().contains_key(header), "{header} on {host}");
+            }
+            assert_eq!(body_json(resp).await, json!({ "enabled": true }), "{host}");
+        }
+
+        for host in ["preview.oxy.fi", "d-api.oxy.fi", "192.168.86.193:8094", "not-a-web-host.example"] {
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", host)]).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}");
+            assert_ne!(body_json(resp).await.get("enabled"), Some(&Value::Bool(true)), "{host}");
+        }
+
+        let post = h.send("POST", "/capabilities/profiles", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let head = h.send("HEAD", "/capabilities/profiles", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(body_text(head).await.is_empty());
     }
 
     /// With a public table built for it, the web app's public name serves that and nothing else: the LAN
