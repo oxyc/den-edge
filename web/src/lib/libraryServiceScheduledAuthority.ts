@@ -331,7 +331,15 @@ export function librarySimklDelivery(
 
 function logStatus(log: LibraryLog): LibraryAuthorityStatus {
   if (log.moved) return { kind: 'moved' };
-  if (log.upgradeRequired !== null) return { kind: 'read-only', reason: 'Library update required' };
+  if (log.upgradeRequired !== null)
+    return {
+      kind: 'failed',
+      error: {
+        code: 'update-required',
+        message: 'A newer version of Den is required to open this library.',
+        retryable: false,
+      },
+    };
   if (log.predatesV3) return { kind: 'read-only', reason: 'Library backup predates v3' };
   if (log.switchFailure)
     return { kind: 'read-only', reason: `Library update failed: ${log.switchFailure}` };

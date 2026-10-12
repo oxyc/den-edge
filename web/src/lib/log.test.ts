@@ -9,7 +9,7 @@ import {
   withDisplay,
   type Library,
 } from './library';
-import { LibraryLog } from './log';
+import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
 import { deliverSimkl } from './simklDelivery';
@@ -305,6 +305,26 @@ describe('LibraryLog', () => {
     expect(await log.write(row(2))).toBeNull();
     const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, null))!;
     expect(reopened.wireMinimum).toBe(5);
+  });
+
+  it('distinguishes den-edge’s 426 wire fence from an unreachable library', async () => {
+    const requests: RequestInit[] = [];
+    const future: typeof fetch = async (_input, init = {}) => {
+      requests.push(init);
+      return new Response(JSON.stringify({ error: 'upgrade_required' }), {
+        status: 426,
+        headers: { 'content-type': 'application/json', 'x-den-wire-min': '5' },
+      });
+    };
+
+    await expect(LibraryLog.open(LIBRARY_KEY, future, undefined, null)).rejects.toEqual(
+      expect.objectContaining<Partial<LibraryUpdateRequiredError>>({
+        name: 'LibraryUpdateRequiredError',
+        requiredWire: 5,
+      }),
+    );
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    for (const request of requests) expect(request.headers).toMatchObject({ 'x-den-wire': '4' });
   });
 
   it('keeps a settings-style row across a generation or rewrite refusal', async () => {

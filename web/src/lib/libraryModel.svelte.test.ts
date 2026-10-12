@@ -662,3 +662,21 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   expect(lease.snapshot.connection).toBe('closed');
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
 });
+
+it('replaces an open cached library with a non-retryable update-required failure', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const updateRequired: LibraryServiceFailure = {
+    code: 'update-required',
+    message: 'A newer version of Den is required to open this library.',
+    retryable: false,
+  };
+
+  service.status({ kind: 'failed', error: updateRequired });
+
+  expect(model.connection).toBe('failed');
+  expect(model.status).toEqual({ kind: 'failed', error: updateRequired });
+  expect(model.openFailure).toEqual(updateRequired);
+  model.close();
+});

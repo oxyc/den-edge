@@ -228,6 +228,7 @@
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
   );
+  const updateRequired = $derived(model?.openFailure?.code === 'update-required');
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
@@ -1470,7 +1471,15 @@
   </p>
 {/if}
 
-{#if link && model && !overview && !serviceFailed}
+{#if updateRequired}
+  <section class="library-failure" role="alert">
+    <h1>Update Den to open your library</h1>
+    <p class="note">
+      This library was updated by a newer version of Den. Update Den on this device, then open it
+      again.
+    </p>
+  </section>
+{:else if link && model && !overview && !serviceFailed}
   <Loading label="Loading your library" page />
 {:else if serviceFailed}
   <section class="library-failure" role="alert">

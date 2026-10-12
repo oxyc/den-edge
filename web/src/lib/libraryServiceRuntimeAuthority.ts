@@ -4,9 +4,13 @@ import { DownloadServiceRuntime, type DownloadContent } from './downloadServiceR
 import { LibraryLogAuthority } from './libraryLogAuthority';
 import { DurableOperationAuthority } from './libraryOperationAuthority';
 import type { LibraryServiceHello } from './libraryServiceProtocol';
-import type { LibraryAuthorityEvent, LibraryServiceAuthority } from './libraryServiceCore';
+import {
+  LibraryServiceAuthorityError,
+  type LibraryAuthorityEvent,
+  type LibraryServiceAuthority,
+} from './libraryServiceCore';
 import { libraryVault, type Vault } from './localVault';
-import { LibraryLog } from './log';
+import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { readApiKey } from './prefs';
 import { useLibraryRelayMembership } from './relayFetch';
 import {
@@ -70,10 +74,21 @@ export async function openLibraryServiceAuthority(
   // Seed the durable clock before opening the log so a failed clock cannot leave an opened log behind. Durable
   // clock state wins inside openClockStore; the page-provided value is migration input only.
   const clock = await openClockStore(vault, { legacy: request.legacyClock });
-  const log =
-    request.mode === 'local'
-      ? await LibraryLog.openLocal(request.libraryKey, vault)
-      : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
+  let log: LibraryLog | null;
+  try {
+    log =
+      request.mode === 'local'
+        ? await LibraryLog.openLocal(request.libraryKey, vault)
+        : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
+  } catch (error) {
+    if (error instanceof LibraryUpdateRequiredError)
+      throw new LibraryServiceAuthorityError({
+        code: 'update-required',
+        message: error.message,
+        retryable: false,
+      });
+    throw error;
+  }
   if (!log) return null;
   // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
   // before the authority can answer `ready`: a source query that already carries an IMDb id goes straight from

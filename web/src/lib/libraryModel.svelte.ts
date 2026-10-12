@@ -815,7 +815,10 @@ export class LibraryModel {
     } else if (status.kind === 'reconnecting') this.#connection = 'reconnecting';
     else if (status.kind === 'moved') {
       this.#connection = 'failed';
-    } else if (status.kind === 'failed') this.#connection = 'failed';
+    } else if (status.kind === 'failed') {
+      this.#connection = 'failed';
+      this.#openFailure = Object.freeze(status.error);
+    }
   }
 
   #assertOpen(): void {

@@ -28,6 +28,8 @@
     libraryKey,
     mode: online ? 'online' : 'local',
   });
+  // Root snapshots render startup failures; match RoutedLibrary and do not leave their ready promise unhandled.
+  void model.ready.catch(() => {});
   const session = new LibrarySession(model, false, services.content, () => services.close());
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
@@ -185,11 +187,13 @@
         })
         .catch(() => {});
     };
-    void model.ready.then(async () => {
-      if (stopped) return;
-      observe();
-      await model.foregroundReady();
-    });
+    void model.ready
+      .then(async () => {
+        if (stopped) return;
+        observe();
+        await model.foregroundReady();
+      })
+      .catch(() => {});
     window.addEventListener('online', observe);
     window.addEventListener('offline', observe);
     document.addEventListener('visibilitychange', observe);

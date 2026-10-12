@@ -1,6 +1,50 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { FIXTURE, routeLibraryEdge } from './library-edge.mjs';
+
+const expectUpdateRequired = async (page) => {
+  await expect(
+    page.getByRole('heading', { name: 'Update Den to open your library' }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'This library was updated by a newer version of Den. Update Den on this device, then open it again.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+};
+
+test('a cold linked library renders HTTP 426 as a stable update-required screen', async ({
+  page,
+}) => {
+  const edge = { upgradeRequired: 5 };
+  await routeLibraryEdge(page, edge);
+
+  await page.goto(`${FIXTURE}?online&lifecycle`);
+
+  await expectUpdateRequired(page);
+  expect(edge.wires.length).toBeGreaterThanOrEqual(2);
+  expect(new Set(edge.wires)).toEqual(new Set(['4']));
+});
+
+test('a cached linked library replaces its contents when refresh receives HTTP 426', async ({
+  page,
+}) => {
+  const edge = {};
+  await routeLibraryEdge(page, edge);
+  await page.goto(`${FIXTURE}?seed`);
+  await page.getByRole('status').filter({ hasText: 'Worker library seeded' }).waitFor();
+  edge.upgradeRequired = 5;
+  edge.wires.length = 0;
+
+  await page.goto(`${FIXTURE}?online&lifecycle`);
+
+  await expectUpdateRequired(page);
+  expect(edge.wires.length).toBeGreaterThan(0);
+  expect(new Set(edge.wires)).toEqual(new Set(['4']));
+});
 
 test('local library keeps its progressive page visible while startup settles', async ({ page }) => {
   await guardNetwork(page);
