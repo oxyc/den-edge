@@ -64,18 +64,24 @@ function owner(storage: Storage, pinConfigured = true) {
 describe('ProfileModeCoordinator', () => {
   it('persists one Visitor across teardown and reconstructs its local namespace', () => {
     const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage);
 
     first.coordinator.switchToVisitor();
-    const visitId = first.coordinator.session.identity.id;
+    const visitId = first.coordinator.session!.identity.id;
     expect(visitId).toMatch(/^[0-9a-f]{32}$/);
     expect(first.coordinator.mode).toBe('visitor');
-    expect(first.coordinator.session.model).toBeNull();
-    expect(first.coordinator.session.policyModel).toBe(first.model);
+    expect(first.coordinator.session!.model).toBeNull();
+    expect(first.coordinator.session!.policy).not.toBe(first.model);
+    expect(Object.keys(first.coordinator.session!.policy!)).toEqual(['settings']);
+    expect('commands' in first.coordinator.session!.policy!).toBe(false);
+    expect('track' in first.coordinator.session!.policy!).toBe(false);
+    expect('model' in first.coordinator.session!.household).toBe(false);
+    expect('model' in first.coordinator.session!.services).toBe(false);
     expect(storage.getItem('den.profile.active.v1')).toBe(
       JSON.stringify({ mode: 'visitor', visitId }),
     );
-    const activity = first.coordinator.session as typeof first.coordinator.session & {
+    const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
       activity: { set: (key: string, value: string) => void };
     };
     activity.activity.set('progress:movie:550', 'half');
@@ -83,17 +89,39 @@ describe('ProfileModeCoordinator', () => {
 
     const restored = owner(storage);
     expect(restored.coordinator.mode).toBe('visitor');
-    expect(restored.coordinator.session.identity.id).toBe(visitId);
-    const restoredActivity = restored.coordinator.session as typeof restored.coordinator.session & {
+    expect(restored.coordinator.session!.identity.id).toBe(visitId);
+    const restoredActivity = restored.coordinator.session as NonNullable<
+      typeof restored.coordinator.session
+    > & {
       activity: { get: (key: string) => unknown };
     };
     expect(restoredActivity.activity.get('progress:movie:550')).toBe('half');
   });
 
-  it('persists the default Owner only after the capability constructs the coordinator', () => {
-    const storage = memoryStorage();
-    const first = owner(storage);
+  it.each([null, '{broken', JSON.stringify({ mode: 'unknown' })])(
+    'requires the configured PIN before an absent or invalid marker can establish Owner (%s)',
+    async (marker) => {
+      const storage = memoryStorage();
+      if (marker !== null) storage.setItem('den.profile.active.v1', marker);
+      const first = owner(storage);
 
+      expect(first.coordinator.mode).toBeNull();
+      expect(first.coordinator.session).toBeNull();
+      expect(storage.getItem('den.profile.active.v1')).toBe(marker);
+      await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+      expect(first.coordinator.session).toBeNull();
+      await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+      expect(first.coordinator.mode).toBe('owner');
+      expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
+    },
+  );
+
+  it('establishes and persists Owner directly when no PIN is configured', () => {
+    const storage = memoryStorage();
+    const first = owner(storage, false);
+
+    expect(first.coordinator.mode).toBeNull();
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(true);
     expect(first.coordinator.mode).toBe('owner');
     expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
   });
@@ -101,10 +129,11 @@ describe('ProfileModeCoordinator', () => {
   it('denies a wrong configured PIN and ends only the active visit after the right PIN', async () => {
     const storage = memoryStorage();
     storage.setItem('den.owner.untouched', 'owner');
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage);
     first.coordinator.switchToVisitor();
-    const endedId = first.coordinator.session.identity.id;
-    const activity = first.coordinator.session as typeof first.coordinator.session & {
+    const endedId = first.coordinator.session!.identity.id;
+    const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
       activity: { set: (key: string, value: number) => void };
     };
     activity.activity.set('progress', 1);
@@ -127,6 +156,7 @@ describe('ProfileModeCoordinator', () => {
 
   it('switches to Owner without a PIN when none is configured and closes household only on disposal', async () => {
     const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage, false);
     first.coordinator.switchToVisitor();
 

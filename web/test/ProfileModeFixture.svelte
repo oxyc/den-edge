@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import ProfileOwnerGate from '../src/components/ProfileOwnerGate.svelte';
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
   import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
@@ -52,8 +53,14 @@
         enabled: profiles !== null,
         checked,
         mode: profiles?.mode ?? 'owner',
-        visitId: profiles?.mode === 'visitor' ? profiles.session.identity.id : null,
-        policyCeiling: profiles?.session.policyModel?.settings.value?.preferences.maturityCeiling,
+        visitId: profiles?.mode === 'visitor' ? profiles.session!.identity.id : null,
+        policyCeiling: profiles?.session?.policy?.settings.value?.preferences.maturityCeiling,
+        policyKeys: profiles?.session?.policy ? Object.keys(profiles.session.policy) : [],
+        policyHasWriter: profiles?.session?.policy
+          ? 'commands' in profiles.session.policy || 'track' in profiles.session.policy
+          : false,
+        householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
+        servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
         keys: Object.keys(localStorage).sort(),
       };
     },
@@ -95,17 +102,23 @@
   });
 
   onDestroy(() => (profiles ? profiles.dispose() : owner.close()));
+
+  $effect(() => {
+    if (profiles && !profiles.session) profiles.establishUnprotectedOwner();
+  });
 </script>
 
 <main>
   {#if !checked}
     <p role="status">Checking profiles…</p>
-  {:else if profiles}
+  {:else if profiles?.session}
     <ProfileSwitcher {profiles} />
     <p data-mode>{profiles.mode === 'owner' ? 'Owner active' : 'Visitor active'}</p>
     {#if profiles.mode === 'visitor'}
       <p>Visitor can’t manage household settings.</p>
     {/if}
+  {:else if profiles}
+    <ProfileOwnerGate {profiles} />
   {:else}
     <p data-mode>Legacy Owner active</p>
   {/if}

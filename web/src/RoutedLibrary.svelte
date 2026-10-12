@@ -3,6 +3,7 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
@@ -93,23 +94,29 @@
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
+  let profileCapabilityChecked = $state(untrack(() => !libraryIdentity || !session.model));
+  let profileControlPublished = false;
 
-  // Discovery is fail-closed and asynchronous: the legacy Owner is already on screen, and a default-off or
-  // unreachable capability leaves that exact session and every route untouched.
+  // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
+  // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
   onMount(() => {
     if (!libraryIdentity || !session.model) return;
     let current = true;
     void profilesCapability().then((enabled) => {
-      if (!current || !enabled || profileCoordinator || !session.model) return;
+      if (!current) return;
+      if (!enabled || profileCoordinator || !session.model) {
+        profileCapabilityChecked = true;
+        return;
+      }
       const coordinator = new ProfileModeCoordinator(session);
       profileCoordinator = coordinator;
-      session = coordinator.session;
-      onprofilecontrol(coordinator);
+      profileCapabilityChecked = true;
     });
     return () => {
       current = false;
       const coordinator = profileCoordinator;
       profileCoordinator = null;
+      profileControlPublished = false;
       onprofilecontrol(null);
       coordinator?.dispose();
     };
@@ -117,7 +124,15 @@
 
   $effect(() => {
     const coordinator = profileCoordinator;
-    if (coordinator && session !== coordinator.session) session = coordinator.session;
+    if (!coordinator) return;
+    if (!coordinator.session) coordinator.establishUnprotectedOwner();
+    const active = coordinator.session;
+    if (!active) return;
+    if (session !== active) session = active;
+    if (!profileControlPublished) {
+      profileControlPublished = true;
+      onprofilecontrol(coordinator);
+    }
   });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
@@ -551,64 +566,70 @@
   });
 </script>
 
-{#key session.identity}
-  <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
-  <Router
-    onchange={(route) => {
-      if (route.page === 'settings')
-        void (session.identity.kind === 'visitor'
-          ? Promise.resolve()
-          : link || session.local
-            ? SettingsScreen.load()
-            : LinkScreen.load());
-      onchange(route);
-    }}
-  >
-    {#snippet children(route, active)}
-      {#if route.page === 'settings'}
-        {#if session.identity.kind === 'visitor'}
-          <section class="visitor-settings" aria-labelledby="visitor-settings-title">
-            <h1 id="visitor-settings-title">Owner settings</h1>
-            <p>
-              Visitor can’t manage household settings. Use the Visitor button above to switch to
-              Owner.
-            </p>
-          </section>
-        {:else if link || session.local}
-          {#if SettingsScreen.current}
-            <SettingsScreen.current
-              {link}
-              model={session.model!}
-              content={session.content}
-              local={session.local}
-              onjoin={joinLibrary}
-              onresetkey={resetLibraryKey}
-              heldReset={pendingReset?.held === true}
-              onadoptheld={adoptHeldReset}
-            />
+{#if !profileCapabilityChecked}
+  <p class="profile-loading" role="status">Opening profiles…</p>
+{:else if profileCoordinator && !profileCoordinator.session}
+  <ProfileOwnerGate profiles={profileCoordinator} />
+{:else}
+  {#key session.identity}
+    <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+    <Router
+      onchange={(route) => {
+        if (route.page === 'settings')
+          void (session.identity.kind === 'visitor'
+            ? Promise.resolve()
+            : link || session.local
+              ? SettingsScreen.load()
+              : LinkScreen.load());
+        onchange(route);
+      }}
+    >
+      {#snippet children(route, active)}
+        {#if route.page === 'settings'}
+          {#if session.identity.kind === 'visitor'}
+            <section class="visitor-settings" aria-labelledby="visitor-settings-title">
+              <h1 id="visitor-settings-title">Owner settings</h1>
+              <p>
+                Visitor can’t manage household settings. Use the Visitor button above to switch to
+                Owner.
+              </p>
+            </section>
+          {:else if link || session.local}
+            {#if SettingsScreen.current}
+              <SettingsScreen.current
+                {link}
+                model={session.model!}
+                content={session.content}
+                local={session.local}
+                onjoin={joinLibrary}
+                onresetkey={resetLibraryKey}
+                heldReset={pendingReset?.held === true}
+                onadoptheld={adoptHeldReset}
+              />
+            {:else}
+              <ScreenLoading screen={SettingsScreen} />
+            {/if}
+          {:else if LinkScreen.current}
+            <LinkScreen.current />
           {:else}
-            <ScreenLoading screen={SettingsScreen} />
+            <ScreenLoading screen={LinkScreen} />
           {/if}
-        {:else if LinkScreen.current}
-          <LinkScreen.current />
         {:else}
-          <ScreenLoading screen={LinkScreen} />
+          <Library
+            link={session.identity.kind === 'visitor' ? null : link}
+            {session}
+            {route}
+            {active}
+            {query}
+            {explore}
+            {people}
+            {watchedYear}
+          />
         {/if}
-      {:else}
-        <Library
-          link={session.identity.kind === 'visitor' ? null : link}
-          {session}
-          {route}
-          {active}
-          {query}
-          {explore}
-          {people}
-          {watchedYear}
-        />
-      {/if}
-    {/snippet}
-  </Router>
-{/key}
+      {/snippet}
+    </Router>
+  {/key}
+{/if}
 
 <style>
   .visitor-settings {
@@ -626,6 +647,12 @@
 
   .visitor-settings p {
     margin-bottom: 0;
+    color: var(--muted);
+  }
+
+  .profile-loading {
+    margin: 48px auto;
+    text-align: center;
     color: var(--muted);
   }
 </style>

@@ -185,7 +185,7 @@
   const overviewTitles = $derived(overview ? new OverviewTitleIndex(overview) : undefined);
   const continueView = $derived(model?.continueWatching.value);
   // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
-  const settings = $derived(session.policyModel?.settings.value);
+  const settings = $derived(session.policy?.settings.value);
   /**
    * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
    * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains

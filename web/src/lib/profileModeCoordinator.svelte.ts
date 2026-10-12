@@ -15,9 +15,11 @@ export type ActiveProfileMode = 'owner' | 'visitor';
 type StoredActiveProfile =
   { readonly mode: 'owner' } | { readonly mode: 'visitor'; readonly visitId: string };
 
-const readActiveProfile = (storage: Storage): StoredActiveProfile => {
+const readActiveProfile = (storage: Storage): StoredActiveProfile | null => {
   try {
     const value: unknown = JSON.parse(storage.getItem(ACTIVE_PROFILE_KEY) ?? 'null');
+    if (value && typeof value === 'object' && 'mode' in value && value.mode === 'owner')
+      return { mode: 'owner' };
     if (
       value &&
       typeof value === 'object' &&
@@ -29,9 +31,9 @@ const readActiveProfile = (storage: Storage): StoredActiveProfile => {
     )
       return { mode: 'visitor', visitId: value.visitId };
   } catch {
-    // A damaged or unavailable preference must fall back to today's Owner session.
+    // Missing and damaged preferences both require establishing an Owner below.
   }
-  return { mode: 'owner' };
+  return null;
 };
 
 const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void => {
@@ -54,6 +56,7 @@ export class ProfileModeCoordinator {
   readonly #local;
   readonly #storage;
   readonly #connections: LibraryModelLease<ConnectionsView>;
+  #pendingOwner: ProfileSession | null;
   #disposed = false;
 
   constructor(owner: ProfileSession, storage: Storage = localStorage) {
@@ -66,23 +69,29 @@ export class ProfileModeCoordinator {
     this.#local = owner.local;
     this.#storage = storage;
     this.#connections = owner.model.connections();
+    this.#pendingOwner = owner;
 
     const saved = readActiveProfile(storage);
-    this.#session =
-      saved.mode === 'visitor'
-        ? visitorProfileSession(this.#household, storage, visitorVisitId(saved.visitId))
-        : owner;
-    if (saved.mode === 'owner') keepActiveProfile(storage, saved);
-    if (this.session !== owner) owner.close();
+    if (saved?.mode === 'visitor') {
+      this.#session = visitorProfileSession(
+        this.#household,
+        storage,
+        visitorVisitId(saved.visitId),
+      );
+      this.#pendingOwner = null;
+      owner.close();
+    } else if (saved?.mode === 'owner') {
+      this.#session = owner;
+      this.#pendingOwner = null;
+    }
   }
 
-  get session(): ProfileSession {
-    if (!this.#session) throw new Error('Profile mode coordinator has no active session');
+  get session(): ProfileSession | null {
     return this.#session;
   }
 
-  get mode(): ActiveProfileMode {
-    return this.session.identity.kind === 'visitor' ? 'visitor' : 'owner';
+  get mode(): ActiveProfileMode | null {
+    return this.session?.identity.kind === 'visitor' ? 'visitor' : this.session ? 'owner' : null;
   }
 
   /** Undefined only while the existing Settings-owned connection view is opening. */
@@ -90,14 +99,16 @@ export class ProfileModeCoordinator {
     return this.#connections.snapshot.value?.parentalPinConfigured;
   }
 
-  switchToVisitor(): void {
+  switchToVisitor(): boolean {
     this.#assertOpen();
-    if (this.mode === 'visitor') return;
-    const previous = this.session;
+    if (this.mode === 'visitor') return true;
+    if (!this.#session) return false;
+    const previous = this.#session;
     const next = visitorProfileSession(this.#household, this.#storage, randomVisitorVisitId());
     keepActiveProfile(this.#storage, { mode: 'visitor', visitId: next.identity.id });
     this.#session = next;
     previous.close();
+    return true;
   }
 
   async switchToOwner(pin?: string): Promise<boolean> {
@@ -107,17 +118,21 @@ export class ProfileModeCoordinator {
     if (configured === undefined) return false;
     if (configured && (!pin || !(await this.#ownerModel.verifyParentalPin(pin)))) return false;
 
-    const previous = this.session as VisitorProfileSession;
-    const next = new ProfileSession(
-      this.#ownerIdentity.kind === 'owner' || this.#ownerIdentity.kind === 'personal'
-        ? this.#ownerIdentity
-        : legacyProfileIdentity(this.#ownerIdentity.libraryKey, this.#local),
-      this.#household,
-      this.#ownerModel,
-      this.#local,
-      false,
-    );
-    previous.endVisit();
+    const previous = this.#session as VisitorProfileSession | null;
+    const next = this.#pendingOwner ?? this.#newOwner();
+    this.#pendingOwner = null;
+    previous?.endVisit();
+    keepActiveProfile(this.#storage, { mode: 'owner' });
+    this.#session = next;
+    return true;
+  }
+
+  /** Establishes an absent/corrupt marker only after proving this household has no Owner PIN. */
+  establishUnprotectedOwner(): boolean {
+    if (this.#session) return true;
+    if (this.parentalPinConfigured !== false) return false;
+    const next = this.#pendingOwner ?? this.#newOwner();
+    this.#pendingOwner = null;
     keepActiveProfile(this.#storage, { mode: 'owner' });
     this.#session = next;
     return true;
@@ -128,8 +143,21 @@ export class ProfileModeCoordinator {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#connections.release();
-    this.session.close();
+    this.#session?.close();
+    this.#pendingOwner?.close();
     this.#household.close();
+  }
+
+  #newOwner(): ProfileSession {
+    return new ProfileSession(
+      this.#ownerIdentity.kind === 'owner' || this.#ownerIdentity.kind === 'personal'
+        ? this.#ownerIdentity
+        : legacyProfileIdentity(this.#ownerIdentity.libraryKey, this.#local),
+      this.#household,
+      this.#ownerModel,
+      this.#local,
+      false,
+    );
   }
 
   #assertOpen(): void {

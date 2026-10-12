@@ -4,6 +4,7 @@ import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
 import type { LibraryModel } from './libraryModel.svelte';
+import { profilePolicy, type ProfilePolicy } from './profilePolicy';
 import {
   legacyProfileIdentity,
   type PersistentProfileIdentity,
@@ -37,8 +38,8 @@ export class ProfileSession {
     readonly model: LibraryModel | null,
     readonly local: boolean,
     private closeHousehold: boolean,
-    /** Household policy is readable by Visitor without lending it the Owner's activity/write model. */
-    readonly policyModel: LibraryModel | null = model,
+    /** Household policy is readable without lending the profile an Owner activity/write model. */
+    readonly policy: ProfilePolicy | null = profilePolicy(model),
   ) {}
 
   get content(): ContentServiceClientPort {
@@ -103,7 +104,7 @@ export class ProfileSession {
 
   foregroundReady(): void {
     this.household.foreground();
-    if (this.model !== this.household.model) void this.model?.foregroundReady().catch(() => {});
+    if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});
   }
 
   notify(
@@ -129,7 +130,7 @@ export class ProfileSession {
     cancelLibraryTitleNaming(this);
     clearTimeout(this.#toastTimer);
     if (this.closeHousehold) this.household.close();
-    else if (this.model !== this.household.model) this.model?.close();
+    else if (!this.household.ownsModel(this.model)) this.model?.close();
   }
 
   /** Transfer the shared household lifetime to the profiles coordinator before this session is switched away. */

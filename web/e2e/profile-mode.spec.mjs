@@ -29,6 +29,51 @@ test('default-off capability leaves the legacy Owner path and storage untouched'
     .toMatchObject({ enabled: false, mode: 'owner', keys: [] });
 });
 
+test('capability discovery never exposes or enables the legacy Owner UI', async ({ page }) => {
+  await guardNetwork(page);
+  let answerCapability;
+  const capability = new Promise((resolve) => (answerCapability = resolve));
+  await page.route('**/capabilities/profiles', async (route) => {
+    await capability;
+    await route.fulfill({ json: { enabled: true } });
+  });
+  await page.goto(FIXTURE);
+
+  await expect(page.getByRole('status')).toHaveText('Checking profiles…');
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Switch profile/ })).toHaveCount(0);
+  answerCapability();
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+});
+
+test('missing active mode requires the configured Owner PIN and persists success', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234');
+
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await page.getByLabel('Owner PIN').fill('0000');
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('den.profile.active.v1')))
+    .toBe(JSON.stringify({ mode: 'owner' }));
+});
+
+test('a corrupt active marker cannot expose Owner without its PIN', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('den.profile.active.v1', '{broken'));
+  await open(page, true, '?pin=1234');
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+});
+
 test('Visitor stays active across reload, PIN denial preserves it, and success disposes only its visit', async ({
   page,
 }) => {
@@ -37,6 +82,10 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
     if (request.method() !== 'GET') writes.push(`${request.method()} ${request.url()}`);
   });
   await open(page, true, '?pin=1234');
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
 
   await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
   await page.getByRole('button', { name: 'Use Visitor' }).click();
@@ -47,6 +96,10 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
     return window.denProfileModeFixture.snapshot();
   });
   expect(first.policyCeiling).toBe('pg13');
+  expect(first.policyKeys).toEqual(['settings']);
+  expect(first.policyHasWriter).toBe(false);
+  expect(first.householdExposesModel).toBe(false);
+  expect(first.servicesExposeModel).toBe(false);
 
   await page.reload();
   await expect
