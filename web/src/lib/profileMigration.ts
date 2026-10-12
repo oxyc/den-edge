@@ -242,8 +242,20 @@ function validJournal(value: unknown): value is ProfileMigrationJournal {
   const initialEvidence = ['fence', 'backup', 'candidate', 'ownerVerification', 'prepared'];
   const winnerEvidence = ['winnerLibraryKey', 'winnerVerified', 'candidateRetired'];
   switch (value.state) {
-    case 'idle':
-      return none(...initialEvidence, ...winnerEvidence);
+    case 'idle': {
+      const pristine = none(...initialEvidence, ...winnerEvidence);
+      // A changed legacy fence first retires the already-created candidate, then returns here for one final
+      // planner pass which discards the attempt. Preserve that cleanup proof, but never executable preparation.
+      const retiredAfterFenceChange =
+        has('fence') &&
+        has('backup') &&
+        has('candidate') &&
+        value.candidateRetired === true &&
+        !has('prepared') &&
+        !has('winnerLibraryKey') &&
+        value.winnerVerified !== true;
+      return pristine || retiredAfterFenceChange;
+    }
     case 'fenced':
       return has('fence') && none(...initialEvidence.slice(1), ...winnerEvidence);
     case 'backed-up':
@@ -270,7 +282,9 @@ function validJournal(value: unknown): value is ProfileMigrationJournal {
     case 'commit-unknown':
       return initialEvidence.every(has) && none(...winnerEvidence);
     case 'cleaning-loser':
-      return has('candidate') && has('winnerLibraryKey') && value.candidateRetired !== true;
+      // A competing committed directory names its winner, while a changed legacy fence has no winner yet. Both
+      // paths still have one safe cleanup target: this attempt's persisted candidate.
+      return has('candidate') && value.candidateRetired !== true;
     case 'adopting':
       return has('winnerLibraryKey');
     case 'active':

@@ -333,6 +333,41 @@ describe('ProfileMigrationParticipant', () => {
     expect(recovered.participant.journal?.state).toBe('commit-unknown');
   });
 
+  it('retires a candidate after a changed legacy fence, then discards the completed attempt', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'owner-copied',
+        fence: { generation: 'generation-a', base: 7, rewrite: 'rewrite-a' },
+        backup: { id: 'backup-a', digest: 'backup-digest' },
+        candidate: {
+          profileId: OWNER,
+          libraryId: 'candidate-id',
+          libraryKey: CANDIDATE_KEY,
+        },
+      }),
+    });
+    const recovered = fixture({
+      storage,
+      observe: async () => ({ kind: 'legacy', fence: 'changed' }),
+      planner: (input) =>
+        input.candidateLibrary && !input.candidateRetired ? 'retire-losing-candidate' : 'restart',
+    });
+
+    await expect(recovered.participant.resume()).resolves.toEqual({
+      kind: 'progress',
+      state: 'idle',
+    });
+    expect(recovered.participant.journal).toMatchObject({
+      state: 'idle',
+      candidateRetired: true,
+    });
+    await expect(recovered.participant.resume()).resolves.toEqual({ kind: 'inactive' });
+    expect(recovered.calls).toEqual(['retire']);
+    expect(recovered.participant.journal).toBeNull();
+  });
+
   it('retries deletion of a seeded active journal before returning active', async () => {
     const backing = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
