@@ -15,6 +15,7 @@ export const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
 export async function routeLibraryEdge(page, edge = {}) {
   edge.batches = 0;
   edge.wires = [];
+  edge.libraryRequests = [];
   const generation = 'optimistic-actions';
   const rows = new Map();
   let head = 0;
@@ -38,6 +39,11 @@ export async function routeLibraryEdge(page, edge = {}) {
     const request = route.request();
     const url = new URL(request.url());
     edge.wires.push(request.headers()['x-den-wire']);
+    edge.libraryRequests.push({
+      method: request.method(),
+      path: url.pathname,
+      body: request.postData() ?? null,
+    });
     edge.trace?.push(`${Date.now() % 100000} ${request.method()} ${url.pathname.split('/').pop()}`);
     if (edge.upgradeRequired)
       return route.fulfill({

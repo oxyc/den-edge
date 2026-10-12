@@ -15,7 +15,7 @@ import {
   type TitleRef,
 } from './libraryServiceProtocol';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
-import { LibrarySession } from './librarySession.svelte';
+import { legacyProfileSession } from './profileSession.svelte';
 
 // A Home load the size of d.oxy.fi's (0.264.42): 744 series needing shapes and ~760 titles named in 64-title
 // batches. Each answered batch records its shapes, so the Worker republishes Continue (one fewer batch of
@@ -219,7 +219,7 @@ async function homeLoad(): Promise<{ replies: number; batches: number; named: nu
     },
     close() {},
   } as unknown as LibraryModel;
-  const session = new LibrarySession(model, false, {
+  const session = legacyProfileSession('benchmark', false, model, {
     query: vi.fn(),
     onStatus: () => () => {},
   });

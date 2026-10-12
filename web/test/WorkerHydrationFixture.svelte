@@ -9,7 +9,7 @@
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
-  import { LibrarySession } from '../src/lib/librarySession.svelte';
+  import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Link } from '../src/lib/links.svelte';
   import type { Route } from '../src/lib/route';
   import '../src/app.css';
@@ -30,7 +30,9 @@
   });
   // Root snapshots render startup failures; match RoutedLibrary and do not leave their ready promise unhandled.
   void model.ready.catch(() => {});
-  const session = new LibrarySession(model, false, services.content, () => services.close());
+  const session = legacyProfileSession(libraryKey, false, model, services.content, () =>
+    services.close(),
+  );
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
@@ -228,25 +230,11 @@
     {:else if routed}
       <Router onchange={(next) => (routedRoute = next)}>
         {#snippet children(route, active)}
-          <Library
-            {link}
-            libraryIdentity={libraryKey}
-            {session}
-            {route}
-            {active}
-            watchedYear={undefined}
-          />
+          <Library {link} {session} {route} {active} watchedYear={undefined} />
         {/snippet}
       </Router>
     {:else}
-      <Library
-        {link}
-        libraryIdentity={libraryKey}
-        {session}
-        {route}
-        active={true}
-        watchedYear={undefined}
-      />
+      <Library {link} {session} {route} active={true} watchedYear={undefined} />
     {/if}
   {/if}
 </main>

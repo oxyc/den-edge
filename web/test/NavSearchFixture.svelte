@@ -5,7 +5,7 @@
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
   import type { LibraryLog } from '../src/lib/log';
-  import { LibrarySession } from '../src/lib/librarySession.svelte';
+  import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
   import { fixtureLibraryService } from './libraryService';
   import { fixtureContentServiceContext } from './contentService';
@@ -93,7 +93,12 @@
   } as unknown as LibraryLog;
   const library = guest ? null : fixtureLibraryService({ log });
   const content = fixtureContentServiceContext();
-  const session: LibrarySession = new LibrarySession(library?.model ?? null, true, content);
+  const session = legacyProfileSession(
+    guest ? null : 'fixture',
+    true,
+    library?.model ?? null,
+    content,
+  );
   // RoutedLibrary normally configures after opening the model; this fixture mounts Library directly.
   if (library) void library.model.ready.then(() => session.configureServices());
   else session.configureServices();

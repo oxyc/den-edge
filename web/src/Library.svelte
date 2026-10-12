@@ -35,7 +35,7 @@
     type Sighting,
   } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
-  import type { LibrarySession } from './lib/librarySession.svelte';
+  import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
@@ -86,7 +86,6 @@
 
   let {
     link,
-    libraryIdentity,
     route,
     active,
     session,
@@ -97,11 +96,9 @@
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
-    /** The exact library key, including a browser-local library where `link` is null. */
-    libraryIdentity?: string | null;
     route: Route;
     active: boolean;
-    session: LibrarySession;
+    session: ProfileSession;
     query?: string;
     /** What Search's Explore state is browsing, from the address as `query` is. */
     explore?: Explore;
@@ -715,7 +712,7 @@
 
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
-  // the page toast, the one `LibrarySession.notify` already shows for other library news.
+  // the page toast, the one `ProfileSession.notify` already shows for other library news.
   setToastContext((message, undo) => session.notify(message, { undo }));
   setContentServiceContext(untrack(() => session.content));
   function menuToast(
@@ -1322,7 +1319,7 @@
         if (model) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
-            libraryIdentity,
+            session.identity.retainedScope,
             type,
             fresh,
             picked,
@@ -1633,7 +1630,7 @@
     {routes}
     onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
-      void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
+      void enrichPersonalBackdrop(session.identity.retainedScope, facet, fresh, title, detail)}
     onplay={playHere && ((title) => playHere(title))}
     rowOf={model ? rowOf : undefined}
     onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}

@@ -4,7 +4,7 @@
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { LibrarySession } from './lib/librarySession.svelte';
+  import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryModel } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
@@ -75,7 +75,8 @@
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
     const services = createWorkerServiceSession();
-    if (!key) return new LibrarySession(null, false, services.content, () => services.close());
+    if (!key)
+      return legacyProfileSession(null, false, null, services.content, () => services.close());
     const clock = legacyClock();
     const model = new LibraryModel(services.library, {
       libraryKey: key,
@@ -84,7 +85,7 @@
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
     void model.ready.catch(() => {});
-    return new LibrarySession(model, local, services.content, () => services.close());
+    return legacyProfileSession(key, local, model, services.content, () => services.close());
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
@@ -94,7 +95,7 @@
 
   /** "Assistant added “Fauda” to your watchlist": quiet, and never an alert. */
   async function announceAssistant(
-    owner: LibrarySession,
+    owner: ProfileSession,
     result: Extract<ApplyResult, { outcome: 'accepted' }>,
   ) {
     let name = owner.displayTitle(result.title)?.title;
@@ -441,7 +442,7 @@
         else converge(winner);
       }, 2_000);
     };
-    const drain = async (owner: LibrarySession, winner: string) => {
+    const drain = async (owner: ProfileSession, winner: string) => {
       const model = owner.model;
       if (!model) return;
       let complete = true;
@@ -520,7 +521,7 @@
   });
 </script>
 
-{#key session}
+{#key session.identity}
   <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   <Router
     onchange={(route) => {
@@ -552,17 +553,7 @@
           <ScreenLoading screen={LinkScreen} />
         {/if}
       {:else}
-        <Library
-          {link}
-          {libraryIdentity}
-          {session}
-          {route}
-          {active}
-          {query}
-          {explore}
-          {people}
-          {watchedYear}
-        />
+        <Library {link} {session} {route} {active} {query} {explore} {people} {watchedYear} />
       {/if}
     {/snippet}
   </Router>

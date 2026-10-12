@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { LIBRARY_METADATA_BATCH, nameLibraryTitles, promoteLibraryTitle } from './libraryNaming';
 import type { LibraryModel } from './libraryModel.svelte';
-import { LibrarySession } from './librarySession.svelte';
+import { legacyProfileSession, type ProfileSession } from './profileSession.svelte';
 import type { LibraryMetadataShape, LibraryMetadataTitle } from './libraryServiceProtocol';
 
 const movie = { type: 'movie' as const, id: 42 };
@@ -16,11 +16,16 @@ type MetadataLookup = (refs: readonly { type: 'movie' | 'tv'; id: number }[]) =>
 const session = (
   libraryMetadata: MetadataLookup = vi.fn(async () => ({ titles: [], shapes: [], retryable: [] })),
 ) =>
-  new LibrarySession({ libraryMetadata, close() {} } as unknown as LibraryModel, false, {
-    query: vi.fn(),
-    onStatus: vi.fn(() => () => {}),
-  });
-const named = (state: LibrarySession) => [...state.displayTitles().values()];
+  legacyProfileSession(
+    'fixture',
+    false,
+    { libraryMetadata, close() {} } as unknown as LibraryModel,
+    {
+      query: vi.fn(),
+      onStatus: vi.fn(() => () => {}),
+    },
+  );
+const named = (state: ProfileSession) => [...state.displayTitles().values()];
 
 it('asks the service once for deduplicated missing metadata and skips what the page already has', async () => {
   const libraryMetadata = vi.fn(async () => ({ titles: [title], shapes: [], retryable: [] }));
@@ -235,7 +240,7 @@ it('coalesces overlapping background retries for the same session and title', as
   }
 });
 
-it('cancels a pending retry when its LibrarySession closes', async () => {
+it('cancels a pending retry when its ProfileSession closes', async () => {
   vi.useFakeTimers();
   try {
     const libraryMetadata = vi.fn<MetadataLookup>().mockResolvedValue({
@@ -245,7 +250,7 @@ it('cancels a pending retry when its LibrarySession closes', async () => {
     });
     const close = vi.fn();
     const model = { libraryMetadata, close } as unknown as LibraryModel;
-    const state = new LibrarySession(model, false, {
+    const state = legacyProfileSession('fixture', false, model, {
       query: vi.fn(),
       onStatus: vi.fn(() => () => {}),
     });

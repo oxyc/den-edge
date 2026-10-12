@@ -1,43 +1,50 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import type { ContentServiceClientPort } from './contentServiceClient';
+import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
+import { cancelLibraryTitleNaming } from './libraryNaming';
 import type { LibraryModel } from './libraryModel.svelte';
+import {
+  legacyProfileIdentity,
+  type PersistentProfileIdentity,
+  type ProfileIdentity,
+} from './profileIdentity';
 import type {
   LibraryMetadataShape,
   LibraryMetadataTitle,
   TitleRef,
 } from './libraryServiceProtocol';
-import { cancelLibraryTitleNaming } from './libraryNaming';
-import { SessionServices } from './sessionServices.svelte';
-import type { ContentServiceClientPort } from './contentServiceClient';
 
 const TOAST_MS = 6_000;
 
 /**
- * Page-only session state. LibraryModel owns storage, projection, polling and commands; this object owns only title
- * metadata learned from TMDB, live provider discovery and transient UI messages shared by retained routes.
- *
- * Metadata grows in place, one entry per title: a reader tracks the keys it read, not every later batch.
+ * Active-profile presentation and activity state. Every persistent profile will use this same class; this first
+ * inactive slice gives the legacy Owner the current mixed model without starting a second log or changing data.
  */
-export class LibrarySession {
+export class ProfileSession {
   readonly shapes = new SvelteMap<string, Shape>();
   live = $state(false);
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
-  readonly services: SessionServices;
   readonly #displays = new SvelteMap<string, Title>();
-  /** TMDB confirmed these records do not exist; unlike a transient refusal they must not strand a shelf prefix. */
   readonly #missing = new SvelteSet<string>();
   #toastTimer?: ReturnType<typeof setTimeout>;
   #closed = false;
-  #foregroundReady = false;
 
   constructor(
+    readonly identity: ProfileIdentity,
+    readonly household: HouseholdSession,
     readonly model: LibraryModel | null,
     readonly local: boolean,
-    readonly content: ContentServiceClientPort,
-    private readonly closeWorkerServices: () => void = () => {},
-  ) {
-    this.services = new SessionServices(model, content);
+    private readonly closeHousehold: boolean,
+  ) {}
+
+  get content(): ContentServiceClientPort {
+    return this.household.content;
+  }
+
+  get services() {
+    return this.household.services;
   }
 
   get alert(): string | null {
@@ -48,11 +55,7 @@ export class LibrarySession {
   }
 
   configureServices(): void {
-    // A library's relay membership is installed by the service hello before it publishes ready. Do not let the
-    // page's first provider discovery run as an anonymous visitor while that one bootstrap is still connecting.
-    // Guests have no library capability to wait for and configure immediately.
-    if (this.model && this.model.connection !== 'ready') return;
-    this.services.configure(this.model?.runtime.value);
+    this.household.configureServices();
   }
 
   publishLibraryMetadata(
@@ -97,10 +100,8 @@ export class LibrarySession {
   }
 
   foregroundReady(): void {
-    if (this.#foregroundReady || this.#closed) return;
-    this.#foregroundReady = true;
-    this.services.foregroundReady();
-    void this.model?.foregroundReady().catch(() => {});
+    this.household.foreground();
+    if (this.model !== this.household.model) void this.model?.foregroundReady().catch(() => {});
   }
 
   notify(
@@ -125,8 +126,39 @@ export class LibrarySession {
     this.#closed = true;
     cancelLibraryTitleNaming(this);
     clearTimeout(this.#toastTimer);
-    this.services.stop();
-    this.model?.close();
-    this.closeWorkerServices();
+    if (this.closeHousehold) this.household.close();
+    else if (this.model !== this.household.model) this.model?.close();
   }
+}
+
+/** A directory-backed active profile sharing the household's content/provider authority. */
+export function activeProfileSession(
+  identity: PersistentProfileIdentity,
+  household: HouseholdSession,
+  model: LibraryModel,
+): ProfileSession {
+  return new ProfileSession(identity, household, model, false, false);
+}
+
+/** Today's one-log topology expressed through the household/profile boundary. */
+export function legacyProfileSession(
+  libraryKey: string | null,
+  local: boolean,
+  model: LibraryModel | null,
+  content: ContentServiceClientPort,
+  closeWorkerServices: () => void = () => {},
+): ProfileSession {
+  const household = new HouseholdSession(
+    { kind: 'legacy', libraryKey, configurationOnly: false },
+    model,
+    content,
+    closeWorkerServices,
+  );
+  return new ProfileSession(
+    legacyProfileIdentity(libraryKey, local),
+    household,
+    model,
+    local,
+    true,
+  );
 }

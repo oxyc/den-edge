@@ -6,7 +6,7 @@
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
-  import { LibrarySession } from '../src/lib/librarySession.svelte';
+  import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Route } from '../src/lib/route';
   import '../src/app.css';
 
@@ -17,7 +17,9 @@
   const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
   const services = createWorkerServiceSession();
   const model = new LibraryModel(services.library, { libraryKey, mode: 'local' });
-  const session = new LibrarySession(model, true, services.content, () => services.close());
+  const session = legacyProfileSession(libraryKey, true, model, services.content, () =>
+    services.close(),
+  );
   const initialType = params.get('type') === 'movie' ? 'movie' : 'tv';
   const initialId = Number(params.get('id') ?? 308727);
   const initialQuery = params.get('q') ?? '';
@@ -138,7 +140,6 @@
   {:else}
     <Library
       link={null}
-      libraryIdentity={libraryKey}
       {session}
       {route}
       query={initialQuery}

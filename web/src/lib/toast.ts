@@ -1,4 +1,4 @@
-// The page toast (`LibrarySession.notify`), reached from components that have no `session` prop of their own —
+// The page toast (`ProfileSession.notify`), reached from components that have no `session` prop of their own —
 // `TitleActions`, on the title page, and the poster menu (`titleActions.ts`) — by context rather than threading
 // it through every intermediate component.
 

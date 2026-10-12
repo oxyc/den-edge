@@ -46,6 +46,29 @@ test('a cached linked library replaces its contents when refresh receives HTTP 4
   expect(new Set(edge.wires)).toEqual(new Set(['4']));
 });
 
+test('the inactive Owner profile seam opens only the existing wire-4 library and adds no row writes', async ({
+  page,
+}) => {
+  const edge = {};
+  await routeLibraryEdge(page, edge);
+
+  await page.goto(`${FIXTURE}?online`);
+  await expect(page.getByText('Loading your library', { exact: true })).toHaveCount(0);
+  await expect.poll(() => edge.libraryRequests.length).toBeGreaterThan(0);
+
+  const libraryIds = new Set(edge.libraryRequests.map(({ path }) => path.split('/')[2]));
+  expect(libraryIds.size).toBe(1);
+  expect(new Set(edge.libraryRequests.map(({ path }) => path.split('/').at(-1)))).toEqual(
+    new Set(['changes', 'member']),
+  );
+  expect(new Set(edge.wires)).toEqual(new Set(['4']));
+  expect(new Set(edge.libraryRequests.map(({ method }) => method))).toEqual(
+    new Set(['GET', 'PUT']),
+  );
+  expect(edge.libraryRequests.every(({ body }) => body === null)).toBe(true);
+  expect(edge.batches).toBe(0);
+});
+
 test('local library keeps its progressive page visible while startup settles', async ({ page }) => {
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
