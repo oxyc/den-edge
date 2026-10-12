@@ -29,7 +29,7 @@ function memoryStorage(): Storage {
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
 describe('VisitorProfileSession', () => {
-  it('isolates visits and disposes only the closed visit while the household stays open', () => {
+  it('preserves a closed visit for reconstruction and ends only that visit explicitly', () => {
     const storage = memoryStorage();
     const householdClose = vi.fn();
     const household = new HouseholdSession(
@@ -56,7 +56,16 @@ describe('VisitorProfileSession', () => {
     first.close();
     first.close();
 
-    expect(() => first.activity.get('progress:movie:550')).toThrow('disposed');
+    const restored = visitorProfileSession(household, storage, FIRST);
+    expect(restored.activity.get('progress:movie:550')).toEqual({ fraction: 0.25 });
+    expect(second.activity.get('progress:movie:550')).toEqual({ fraction: 0.75 });
+    expect(storage.getItem('den.owner.untouched')).toBe('owner');
+    expect(householdClose).not.toHaveBeenCalled();
+
+    restored.endVisit();
+    restored.endVisit();
+
+    expect(() => restored.activity.get('progress:movie:550')).toThrow('disposed');
     expect(second.activity.get('progress:movie:550')).toEqual({ fraction: 0.75 });
     expect(storage.getItem('den.owner.untouched')).toBe('owner');
     expect(householdClose).not.toHaveBeenCalled();

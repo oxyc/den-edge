@@ -55,7 +55,7 @@ export class VisitorActivityNamespace {
     this.storage.removeItem(this.#key(key));
   }
 
-  /** Switching away from Visitor calls this idempotently and removes no other browser or visit state. */
+  /** Ending a visit calls this idempotently and removes no other browser or visit state. */
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -97,7 +97,6 @@ export class NoSyncVisitorWriter {
 export class VisitorProfileSession extends ProfileSession {
   declare readonly identity: VisitorProfileIdentity;
   readonly outbound = new NoSyncVisitorWriter();
-  #disposed = false;
 
   constructor(
     household: HouseholdSession,
@@ -106,12 +105,10 @@ export class VisitorProfileSession extends ProfileSession {
     super(visitorProfileIdentity(activity.visitId), household, null, true, false);
   }
 
-  override close(): void {
-    if (!this.#disposed) {
-      this.#disposed = true;
-      this.activity.dispose();
-    }
-    super.close();
+  /** Explicitly switching away ends the visit; ordinary route/app teardown must call `close` and retain it. */
+  endVisit(): void {
+    this.activity.dispose();
+    this.close();
   }
 }
 

@@ -5,7 +5,7 @@ import { guardNetwork } from './network.mjs';
 const FIRST = '11111111111111111111111111111111';
 const SECOND = '22222222222222222222222222222222';
 
-test('inactive Visitor sessions isolate and dispose browser activity without outbound delivery', async ({
+test('inactive Visitor sessions survive close and end only through explicit disposal', async ({
   page,
 }) => {
   const requests = [];
@@ -22,6 +22,7 @@ test('inactive Visitor sessions isolate and dispose browser activity without out
       const two = window.denVisitorFixture.create(second);
       window.denVisitorFixture.set(first, 'progress:movie:550', { fraction: 0.25 });
       window.denVisitorFixture.set(second, 'progress:movie:550', { fraction: 0.75 });
+      window.denVisitorFixture.close(first);
       return { one, two };
     },
     { first: FIRST, second: SECOND },
@@ -39,7 +40,8 @@ test('inactive Visitor sessions isolate and dispose browser activity without out
         two: window.denVisitorFixture.get(second, 'progress:movie:550'),
       };
       const outbound = await window.denVisitorFixture.outbound(first);
-      window.denVisitorFixture.close(first);
+      window.denVisitorFixture.endVisit(first);
+      window.denVisitorFixture.endVisit(first);
       return {
         restored,
         outbound,

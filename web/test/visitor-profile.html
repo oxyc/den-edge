@@ -36,6 +36,9 @@
         close(id) {
           sessions.get(id).close();
         },
+        endVisit(id) {
+          sessions.get(id).endVisit();
+        },
         outbound(id) {
           const session = sessions.get(id);
           return Promise.all([
