@@ -103,6 +103,10 @@ test('capability discovery never exposes or enables the legacy Owner UI', async 
   await expect(page.getByRole('button', { name: /Switch profile/ })).toHaveCount(0);
   answerCapability();
   await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await expect(page.locator('[data-pin-slot].active')).toHaveCount(1);
+  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/active/);
+  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/ready/);
   await expect(page.locator('[data-mode]')).toHaveCount(0);
 });
 
@@ -112,13 +116,15 @@ test('missing active mode requires the configured Owner PIN and persists success
   await open(page, true, '?pin=1234');
 
   await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await expect(page.getByLabel('Owner PIN')).toHaveAttribute('type', 'password');
+  await expect(page.getByLabel('Owner PIN')).toHaveAttribute('pattern', '[0-9][0-9][0-9][0-9]');
   await page.getByLabel('Owner PIN').fill('0000');
-  await page.getByRole('button', { name: 'Use Owner' }).click();
   await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.locator('[data-pin-slot].filled')).toHaveCount(0);
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
   await expect(page.locator('[data-mode]')).toHaveCount(0);
 
   await page.getByLabel('Owner PIN').fill('1234');
-  await page.getByRole('button', { name: 'Use Owner' }).click();
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('den.profile.active.v1')))
@@ -133,6 +139,208 @@ test('a corrupt active marker cannot expose Owner without its PIN', async ({ pag
   await expect(page.locator('[data-mode]')).toHaveCount(0);
 });
 
+test('preview directory switches sticky Kids and Visitor without a launch picker', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?pin=1234`);
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await page.getByLabel('Owner PIN').fill('1234');
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await expect(page.getByRole('button', { name: 'Use Kids' })).toBeVisible();
+  await expect(
+    page.getByText('Profile preview · content filtering is not active yet'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({
+      effectivePreferences: {
+        excludedGenres: [],
+        excludedLanguages: [],
+        hideAnime: false,
+        hideWatched: false,
+        watchRegion: 'FI',
+        services: [{ id: 8, country: 'FI' }],
+        servicesConfigured: true,
+      },
+      contentPolicy: { maximumAge: 12, unknownRatings: 'block' },
+    });
+  await expect(
+    page.getByRole('button', { name: 'Switch profile, current Kids' }),
+  ).not.toBeFocused();
+
+  await page.reload();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).focus();
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).press('Enter');
+  await page.getByRole('dialog').press('Escape');
+  await expect(page.getByRole('button', { name: 'Switch profile, current Kids' })).toBeFocused();
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  await expect(page.getByText('Owner approval required')).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/active/);
+  await expect(page.getByLabel('Owner PIN')).toHaveAttribute('type', 'password');
+  await expect(page.getByLabel('Owner PIN')).toHaveAttribute('pattern', '[0-9][0-9][0-9][0-9]');
+  await page.getByLabel('Owner PIN').fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.locator('[data-pin-slot].filled')).toHaveCount(0);
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await page.getByLabel('Owner PIN').fill('123');
+  await expect(page.locator('[data-pin-slot].filled')).toHaveCount(3);
+  await page.getByLabel('Owner PIN').press('4');
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({
+      effectivePreferences: {
+        excludedGenres: [],
+        excludedLanguages: [],
+        hideAnime: false,
+        hideWatched: false,
+        watchRegion: 'FI',
+        services: [{ id: 8, country: 'FI' }],
+        servicesConfigured: true,
+      },
+      contentPolicy: { maximumAge: null, unknownRatings: 'allow' },
+    });
+
+  await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).click();
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+});
+
+test('an in-flight switch cannot finish behind a dismissed dialog', async ({ page }) => {
+  await guardNetwork(page);
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000001',
+      }),
+    ),
+  );
+  await page.goto(`${FIXTURE}?pin=1234&slowLock=1`);
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await expect(dialog).toBeVisible();
+  await dialog.press('Escape');
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Done' })).toBeDisabled();
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  await expect(dialog).toBeHidden();
+});
+
+test('profile control moves from the desktop header to the mobile Settings row', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000001',
+      }),
+    ),
+  );
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(FIXTURE);
+  const headerTrigger = page.locator('.profile-trigger');
+  await expect(headerTrigger).toBeVisible();
+  await expect(headerTrigger).toHaveAttribute('aria-label', 'Switch profile, current Owner');
+  await expect(headerTrigger).toHaveAttribute('title', 'Switch profile, current Owner');
+  await expect(headerTrigger.locator('svg')).toHaveCount(1);
+  await expect(headerTrigger).not.toContainText(/[OKV]/);
+  await expect(headerTrigger).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(headerTrigger).toHaveCSS('border-top-width', '0px');
+  await expect(headerTrigger.locator('.neutral')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(headerTrigger.locator('.den-arch')).toHaveCount(1);
+  const occupant = headerTrigger.locator('.occupant');
+  const edge = await headerTrigger.evaluate((trigger) => {
+    const svg = trigger.querySelector('svg').getBoundingClientRect();
+    const doorway = trigger.querySelector('.doorway-clip');
+    const box = trigger.getBoundingClientRect();
+    return {
+      svgLeftGap: svg.left - box.left,
+      svgRightGap: box.right - svg.right,
+      doorwayTransform: getComputedStyle(doorway).transform,
+      doorwayClip: getComputedStyle(doorway).clipPath,
+    };
+  });
+  expect(Math.abs(edge.svgLeftGap - edge.svgRightGap)).toBeLessThanOrEqual(0.5);
+  expect(edge.doorwayTransform).toBe('none');
+  expect(edge.doorwayClip).toContain('den-opening');
+  const restingTransform = await occupant.evaluate((node) => getComputedStyle(node).transform);
+  await headerTrigger.hover();
+  await expect
+    .poll(() => occupant.evaluate((node) => getComputedStyle(node).transform))
+    .not.toBe(restingTransform);
+  await page.mouse.move(0, 700);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedTransform = await occupant.evaluate((node) => getComputedStyle(node).transform);
+  await headerTrigger.hover();
+  await expect(occupant).toHaveCSS('transition-duration', '0s');
+  await expect
+    .poll(() => occupant.evaluate((node) => getComputedStyle(node).transform))
+    .toBe(reducedTransform);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expect(page.locator('.mobile-profile-row')).toBeHidden();
+
+  await headerTrigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await expect(dialog).toBeVisible();
+  await dialog.locator('form').dispatchEvent('pointerdown', { pointerType: 'mouse' });
+  await dialog.dispatchEvent('click');
+  await expect(dialog).toBeVisible();
+  await dialog.dispatchEvent('pointerdown', { pointerType: 'mouse' });
+  await dialog.locator('form').dispatchEvent('click');
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 700);
+  await expect(dialog).toBeHidden();
+  await expect(headerTrigger).not.toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 780 });
+  await expect(page.locator('.profile-trigger')).toBeHidden();
+  await expect(page.locator('.mobile-profile-row')).toBeVisible();
+  await page.locator('.mobile-profile-row').click();
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('dialog')).toHaveCount(1);
+  await dialog.dispatchEvent('pointerdown', { pointerType: 'touch' });
+  await dialog.dispatchEvent('click');
+  await expect(dialog).toBeHidden();
+});
+
 test('Visitor stays active across reload, PIN denial preserves it, and success disposes only its visit', async ({
   page,
 }) => {
@@ -143,7 +351,6 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   await open(page, true, '?pin=1234');
 
   await page.getByLabel('Owner PIN').fill('1234');
-  await page.getByRole('button', { name: 'Use Owner' }).click();
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
 
   await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
@@ -154,7 +361,15 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
     await window.denProfileModeFixture.setActivity('progress:movie:550', 'half');
     return window.denProfileModeFixture.snapshot();
   });
-  expect(first.policyCeiling).toBe('pg13');
+  expect(first.policyCeiling).toBeUndefined();
+  expect(first.effectivePreferences).toMatchObject({
+    excludedGenres: [],
+    excludedLanguages: [],
+    hideAnime: false,
+    hideWatched: false,
+    watchRegion: 'FI',
+    services: [{ id: 8, country: 'FI' }],
+  });
   expect(first.policyKeys).toEqual(['settings']);
   expect(first.policyHasWriter).toBe(false);
   expect(first.householdExposesModel).toBe(false);
@@ -194,8 +409,8 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   expect(writes).toEqual([]);
 
   await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
-  await page.getByLabel('Owner PIN').fill('0000');
   await page.getByRole('button', { name: 'Use Owner' }).click();
+  await page.getByLabel('Owner PIN').fill('0000');
   await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
   await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
   await expect
@@ -203,7 +418,6 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
     .toBe('half');
 
   await page.getByLabel('Owner PIN').fill('1234');
-  await page.getByRole('button', { name: 'Use Owner' }).click();
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
   const ended = await page.evaluate(() => window.denProfileModeFixture.snapshot());
   expect(ended.keys).toEqual(['den.profile.active.v1']);

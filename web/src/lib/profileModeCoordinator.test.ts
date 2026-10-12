@@ -3,7 +3,12 @@ import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
 import type { ConnectionsView } from './libraryServiceProtocol';
 import { legacyProfileIdentity } from './profileIdentity';
-import { ProfileModeCoordinator, profilesCapability } from './profileModeCoordinator.svelte';
+import {
+  ProfileModeCoordinator,
+  previewProfileDirectory,
+  profilesCapability,
+  type PreviewProfileDirectory,
+} from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
 import type { VisitorActivityLock, VisitorProfileSession } from './visitorProfileSession.svelte';
 
@@ -45,6 +50,7 @@ function owner(
   pinConfigured = true,
   events: EventTarget | null = null,
   visitorLock?: VisitorActivityLock,
+  directory?: PreviewProfileDirectory,
 ) {
   const release = vi.fn();
   const close = vi.fn();
@@ -80,6 +86,7 @@ function owner(
       storage,
       events as unknown as Pick<Window, 'addEventListener' | 'removeEventListener'>,
       visitorLock ?? immediateLock,
+      directory,
     ),
     model,
     close,
@@ -303,6 +310,51 @@ describe('ProfileModeCoordinator', () => {
     expect(first.close).toHaveBeenCalledOnce();
     expect(first.closeWorker).toHaveBeenCalledOnce();
   });
+
+  it('keeps preview Kid and Visitor sticky and PIN-gates every looser transition', async () => {
+    const storage = memoryStorage();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const first = owner(storage, true, null, undefined, directory);
+
+    expect(first.coordinator.choices.map(({ name }) => name)).toEqual(['Owner', 'Kids', 'Visitor']);
+    await expect(first.coordinator.switchToKid()).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('kid');
+    expect(first.coordinator.activeChoice?.name).toBe('Kids');
+    expect(storage.getItem('den.profile.active.v1')).toBe(
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000002',
+      }),
+    );
+
+    await expect(first.coordinator.switchToVisitor('0000')).resolves.toBe(false);
+    expect(first.coordinator.mode).toBe('kid');
+    await expect(first.coordinator.switchToVisitor('1234')).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('visitor');
+    expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
+      version: 1,
+      mode: 'visitor',
+    });
+
+    first.coordinator.dispose();
+    const restoredVisitor = owner(storage, true, null, undefined, directory);
+    expect(restoredVisitor.coordinator.mode).toBe('visitor');
+    await expect(restoredVisitor.coordinator.switchToKid()).resolves.toBe(true);
+    expect(restoredVisitor.coordinator.mode).toBe('kid');
+    restoredVisitor.coordinator.dispose();
+
+    const restoredKid = owner(storage, true, null, undefined, directory);
+    expect(restoredKid.coordinator.mode).toBe('kid');
+    await expect(restoredKid.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    expect(restoredKid.coordinator.mode).toBe('kid');
+    await expect(restoredKid.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    expect(restoredKid.coordinator.mode).toBe('owner');
+  });
 });
 
 describe('profilesCapability', () => {
@@ -315,6 +367,16 @@ describe('profilesCapability', () => {
       cache: 'no-store',
       credentials: 'same-origin',
     });
+
+    const preview = vi.fn(async () =>
+      capabilityResponse(JSON.stringify({ enabled: true, preview: true })),
+    );
+    await expect(profilesCapability(preview as typeof fetch, immediateLock, true)).resolves.toBe(
+      'preview',
+    );
+    await expect(profilesCapability(preview as typeof fetch, immediateLock, false)).resolves.toBe(
+      'indeterminate',
+    );
 
     await expect(
       profilesCapability(

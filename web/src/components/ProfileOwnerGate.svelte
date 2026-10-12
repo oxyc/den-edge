@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  import PinInput from './PinInput.svelte';
 
   let { profiles }: { profiles: ProfileModeCoordinator } = $props();
   let pin = $state('');
   let denied = $state(false);
   let failed = $state(false);
   let establishing = $state(false);
+  let gate = $state<HTMLElement>();
 
   async function establishOwner() {
     if (establishing) return;
@@ -20,36 +23,38 @@
       establishing = false;
       pin = '';
     }
+    await tick();
+    requestAnimationFrame(() =>
+      gate?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
+    );
   }
 </script>
 
-<section class="owner-gate" aria-labelledby="owner-gate-title">
+<section bind:this={gate} class="owner-gate" aria-labelledby="owner-gate-title">
   {#if profiles.parentalPinConfigured === undefined}
     <h1 id="owner-gate-title">Opening profiles…</h1>
     <p role="status">Checking parental controls…</p>
   {:else}
     <h1 id="owner-gate-title">Owner access</h1>
     <p>Enter the Owner PIN to use the household library.</p>
-    <form onsubmit={(event) => event.preventDefault()}>
-      <label>
-        Owner PIN
-        <input
-          bind:value={pin}
-          inputmode="numeric"
-          autocomplete="off"
-          maxlength="4"
-          pattern="[0-9]{4}"
-          aria-invalid={denied}
-          oninput={() => (denied = false)}
-        />
-      </label>
+    <form
+      onsubmit={(event) => {
+        event.preventDefault();
+        if (/^\d{4}$/.test(pin)) void establishOwner();
+      }}
+    >
+      <PinInput
+        id="owner-gate-pin"
+        label="Owner PIN"
+        bind:value={pin}
+        focusOnMount
+        invalid={denied}
+        onvalue={() => (denied = false)}
+        oncomplete={() => void establishOwner()}
+      />
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
-      <button
-        type="button"
-        disabled={establishing || !/^\d{4}$/.test(pin)}
-        onclick={() => void establishOwner()}
-      >
+      <button type="submit" disabled={establishing || !/^\d{4}$/.test(pin)}>
         {establishing ? 'Opening…' : 'Use Owner'}
       </button>
     </form>
@@ -73,26 +78,13 @@
     margin: 0;
   }
 
-  p,
-  label {
+  p {
     color: var(--muted);
   }
 
-  form,
-  label {
+  form {
     display: grid;
     gap: 10px;
-  }
-
-  input {
-    width: 8ch;
-    padding: 9px 11px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: rgb(255 255 255 / 0.06);
-    color: var(--fg);
-    font: inherit;
-    letter-spacing: 0.2em;
   }
 
   button {

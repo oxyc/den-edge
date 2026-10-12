@@ -1,4 +1,5 @@
 import { HouseholdSession } from './householdSession.svelte';
+import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
 import { ProfileSession } from './profileSession.svelte';
 import {
   visitorProfileIdentity,
@@ -181,6 +182,7 @@ export class VisitorProfileSession extends ProfileSession {
   constructor(
     household: HouseholdSession,
     readonly activity: VisitorActivityNamespace,
+    contentPolicy: ProfileContentPolicy | null = null,
   ) {
     const projection = new VisitorActivityProjection(activity);
     super(
@@ -189,8 +191,9 @@ export class VisitorProfileSession extends ProfileSession {
       null,
       true,
       false,
-      household.policy,
+      isolatedProfilePolicy(household.policy),
       projection,
+      contentPolicy,
     );
     for (const title of projection.titles) this.rememberTitle(title);
   }
@@ -220,9 +223,11 @@ export function visitorProfileSession(
   storage: Storage = localStorage,
   visitId: VisitorVisitId = randomVisitorVisitId(),
   options: { active?: () => boolean; lock?: VisitorActivityLock } = {},
+  contentPolicy: ProfileContentPolicy | null = null,
 ): VisitorProfileSession {
   return new VisitorProfileSession(
     household,
     new VisitorActivityNamespace(visitId, storage, options.active, options.lock),
+    contentPolicy,
   );
 }
