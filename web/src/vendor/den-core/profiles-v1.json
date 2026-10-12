@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "legacy pg13 becomes numeric age 13",
+      "request": {"op": "profile_policy_normalize_legacy", "legacy": "pg13"},
+      "ok": {"maximumAge": 13, "unknownRatings": "allow"}
+    },
+    {
+      "name": "explicit approval wins before an unknown blocked rating",
+      "request": {
+        "op": "profile_policy_allows",
+        "policy": {"maximumAge": 10, "unknownRatings": "block", "futurePolicyFlag": true},
+        "minimumAge": null,
+        "explicitApproval": true
+      },
+      "ok": true
+    },
+    {
+      "name": "opposite policy movements are incomparable",
+      "request": {
+        "op": "profile_policy_relation",
+        "a": {"maximumAge": 10, "unknownRatings": "allow"},
+        "b": {"maximumAge": 13, "unknownRatings": "block"}
+      },
+      "ok": "incomparable"
+    },
+    {
+      "name": "a stale allow cannot resurrect after a newer approval tombstone",
+      "request": {
+        "op": "kid_title_approvals_merge",
+        "logicalName": "kid-title-approvals:11112222333344445555666677778888",
+        "directory": {
+          "format": 4,
+          "kind": "profiles",
+          "schema": 1,
+          "owner": "00112233445566778899aabbccddeeff",
+          "profiles": {
+            "00112233445566778899aabbccddeeff": {
+              "id": "00112233445566778899aabbccddeeff",
+              "role": "owner",
+              "display": {"value": {"name": "Owner"}, "at": [1, 0, "a1b2c3d4e5f60718"]},
+              "library": {"value": {"keyVersion": 1, "key": "ERERERERERERERERERERERERERERERERERERERERERE="}, "at": [1, 1, "a1b2c3d4e5f60718"]},
+              "policy": {"value": {"maximumAge": null, "unknownRatings": "allow"}, "at": [1, 2, "a1b2c3d4e5f60718"]},
+              "deleted": {"value": false, "at": [1, 3, "a1b2c3d4e5f60718"]}
+            },
+            "11112222333344445555666677778888": {
+              "id": "11112222333344445555666677778888",
+              "role": "kid",
+              "display": {"value": {"name": "Kid"}, "at": [2, 0, "a1b2c3d4e5f60718"]},
+              "library": {"value": {"keyVersion": 1, "key": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="}, "at": [2, 1, "a1b2c3d4e5f60718"]},
+              "policy": {"value": {"maximumAge": 10, "unknownRatings": "block"}, "at": [2, 2, "a1b2c3d4e5f60718"]},
+              "deleted": {"value": false, "at": [2, 3, "a1b2c3d4e5f60718"]}
+            }
+          }
+        },
+        "a": {
+          "format": 4,
+          "kind": "kid-title-approvals",
+          "schema": 1,
+          "kid": "11112222333344445555666677778888",
+          "approvals": {"movie:550": {"value": "tombstone", "at": [20, 0, "a1b2c3d4e5f60718"], "futureEntryFact": "kept"}},
+          "futureDocumentFact": "new"
+        },
+        "b": {
+          "format": 4,
+          "kind": "kid-title-approvals",
+          "schema": 1,
+          "kid": "11112222333344445555666677778888",
+          "approvals": {"movie:550": {"value": "allow", "at": [10, 0, "0f1e2d3c4b5a6978"], "futureEntryFact": "stale"}},
+          "futureDocumentFact": "old"
+        }
+      },
+      "ok": {
+        "format": 4,
+        "kind": "kid-title-approvals",
+        "schema": 1,
+        "kid": "11112222333344445555666677778888",
+        "approvals": {"movie:550": {"value": "tombstone", "at": [20, 0, "a1b2c3d4e5f60718"], "futureEntryFact": "kept"}},
+        "futureDocumentFact": "new"
+      }
+    },
+    {
+      "name": "migration planner cleans a losing candidate before activation",
+      "request": {
+        "op": "profiles_migration_next",
+        "input": {
+          "state": "ready-to-commit",
+          "observed": "committed",
+          "candidateLibrary": "candidate-a",
+          "winnerLibrary": "winner-b",
+          "winnerVerified": true,
+          "candidateRetired": false
+        }
+      },
+      "ok": "retire-losing-candidate"
+    },
+    {
+      "name": "reset planner waits for every live profile verification",
+      "request": {
+        "op": "profiles_reset_next",
+        "input": {
+          "householdCommitted": false,
+          "oldHouseholdRetired": false,
+          "profiles": [
+            {"oldKey": "owner-old", "newKey": "owner-new", "oldVersion": 1, "newVersion": 2, "deleted": false, "verified": true, "oldRetired": false},
+            {"oldKey": "kid-old", "newKey": "kid-new", "oldVersion": 1, "newVersion": 2, "deleted": false, "verified": false, "oldRetired": false}
+          ]
+        }
+      },
+      "ok": "move-live-profiles"
+    }
+  ]
+}
