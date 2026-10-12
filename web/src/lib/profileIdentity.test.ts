@@ -4,6 +4,8 @@ import {
   persistentProfileIdentity,
   profileId,
   profileSessionKey,
+  visitorProfileIdentity,
+  visitorVisitId,
 } from './profileIdentity';
 
 const KID_ID = '0123456789abcdef0123456789abcdef';
@@ -70,8 +72,20 @@ describe('profile identity', () => {
       profileSessionKey(legacyProfileIdentity(libraryKey, true)),
       profileSessionKey(legacyProfileIdentity(null, false)),
       profileSessionKey(persistentProfileIdentity(KID_ID, libraryKey)),
+      profileSessionKey(visitorProfileIdentity(KID_ID)),
     ];
 
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('keeps a visit outside the directory and personalized retained-state domains', () => {
+    expect(visitorProfileIdentity(visitorVisitId(KID_ID))).toEqual({
+      kind: 'visitor',
+      id: KID_ID,
+      libraryKey: null,
+      retainedScope: null,
+    });
+    expect(profileSessionKey(visitorProfileIdentity(KID_ID))).toBe(`visitor:${KID_ID}:`);
+    expect(() => visitorVisitId('visitor')).toThrow(TypeError);
   });
 });

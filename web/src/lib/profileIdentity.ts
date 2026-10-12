@@ -1,5 +1,6 @@
 /** A stable profiles-v1 directory id: exactly 128 random bits rendered as lowercase hexadecimal. */
 export type ProfileId = string & { readonly __profileId: unique symbol };
+export type VisitorVisitId = string & { readonly __visitorVisitId: unique symbol };
 
 const PROFILE_ID = /^[0-9a-f]{32}$/;
 
@@ -8,6 +9,20 @@ export const profileId = (value: string): ProfileId => {
     throw new TypeError('A profile id must be exactly 32 lowercase hexadecimal characters');
   return value as ProfileId;
 };
+
+export const visitorVisitId = (value: string): VisitorVisitId => {
+  if (!PROFILE_ID.test(value))
+    throw new TypeError('A Visitor visit id must be exactly 32 lowercase hexadecimal characters');
+  return value as VisitorVisitId;
+};
+
+export interface VisitorProfileIdentity {
+  readonly kind: 'visitor';
+  readonly id: VisitorVisitId;
+  readonly libraryKey: null;
+  /** Visitor recommendations and plaintext presentation caches must never become personalized retained state. */
+  readonly retainedScope: null;
+}
 
 export interface PersistentProfileIdentity {
   readonly kind: 'profile';
@@ -18,6 +33,7 @@ export interface PersistentProfileIdentity {
 
 export type ProfileIdentity =
   | PersistentProfileIdentity
+  | VisitorProfileIdentity
   | {
       readonly kind: 'owner';
       readonly id: ProfileId;
@@ -55,6 +71,14 @@ export const persistentProfileIdentity = (
   id: profileId(id),
   libraryKey,
   retainedScope: libraryKey,
+});
+
+/** One disposable, device-local Visitor visit. It is not a directory profile and has no synced library key. */
+export const visitorProfileIdentity = (id: string): VisitorProfileIdentity => ({
+  kind: 'visitor',
+  id: visitorVisitId(id),
+  libraryKey: null,
+  retainedScope: null,
 });
 
 /**
