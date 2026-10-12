@@ -6,6 +6,7 @@ import {
   NoSyncVisitorWriter,
   randomVisitorVisitId,
   visitorProfileSession,
+  type VisitorActivityLock,
 } from './visitorProfileSession.svelte';
 import type { TrackerEvent } from './trackerEvents';
 
@@ -29,6 +30,48 @@ function memoryStorage(): Storage {
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
 describe('VisitorProfileSession', () => {
+  it('shares an in-flight disposal and remains retryable when acquiring its lock fails', async () => {
+    const storage = memoryStorage();
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+    let rejectLock!: (error: Error) => void;
+    let attempt = 0;
+    let runCalls = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        runCalls++;
+        if (attempt++ === 0)
+          await new Promise<never>((_resolve, reject) => {
+            rejectLock = reject;
+          });
+        return work();
+      },
+    };
+    const visitor = visitorProfileSession(household, storage, FIRST, { lock });
+    storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ retained: true }));
+    const revoke = vi.fn();
+
+    const first = visitor.endVisit(revoke);
+    const concurrent = visitor.endVisit(revoke);
+    expect(runCalls).toBe(1);
+    rejectLock(new Error('lock refused'));
+    await expect(first).rejects.toThrow('lock refused');
+    await expect(concurrent).rejects.toThrow('lock refused');
+    expect(revoke).not.toHaveBeenCalled();
+    expect(visitor.activity.get('activity')).toEqual({ retained: true });
+
+    await expect(visitor.endVisit(revoke)).resolves.toBeUndefined();
+    expect(runCalls).toBe(2);
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
+    await expect(visitor.endVisit(revoke)).resolves.toBeUndefined();
+    expect(runCalls).toBe(2);
+  });
+
   it('projects watchlist, watched, progress, resume, and history durably without Owner writes', async () => {
     const storage = memoryStorage();
     const ownerWrite = vi.fn();

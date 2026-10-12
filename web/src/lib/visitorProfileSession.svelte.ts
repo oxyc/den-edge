@@ -15,10 +15,12 @@ const VISITOR_STORAGE_PREFIX = 'den.profile.visitor.v1:';
 const localLocks = new Map<string, Promise<void>>();
 
 export interface VisitorActivityLock {
+  available(): boolean;
   run<T>(name: string, work: () => Promise<T> | T): Promise<T>;
 }
 
 const fallbackLock: VisitorActivityLock = {
+  available: () => true,
   async run<T>(name: string, work: () => Promise<T> | T): Promise<T> {
     const previous = localLocks.get(name) ?? Promise.resolve();
     let release!: () => void;
@@ -35,7 +37,10 @@ const fallbackLock: VisitorActivityLock = {
   },
 };
 
-const crossTabLock: VisitorActivityLock = {
+export const crossTabVisitorActivityLock: VisitorActivityLock = {
+  available: () =>
+    typeof window === 'undefined' ||
+    (typeof navigator !== 'undefined' && navigator.locks !== undefined),
   run<T>(name: string, work: () => Promise<T> | T): Promise<T> {
     if (typeof navigator !== 'undefined' && navigator.locks)
       return navigator.locks.request(name, () => work());
@@ -62,12 +67,13 @@ export type VisitorActivityValue =
 export class VisitorActivityNamespace {
   readonly prefix: string;
   #disposed = false;
+  #disposeInFlight: Promise<void> | null = null;
 
   constructor(
     readonly visitId: VisitorVisitId,
     private readonly storage: Storage,
     private readonly active: () => boolean = () => true,
-    private readonly lock: VisitorActivityLock = crossTabLock,
+    private readonly lock: VisitorActivityLock = crossTabVisitorActivityLock,
   ) {
     this.prefix = `${VISITOR_STORAGE_PREFIX}${visitId}:`;
   }
@@ -113,16 +119,25 @@ export class VisitorActivityNamespace {
   }
 
   /** Ending a visit serializes revocation and deletion with every activity write in every tab. */
-  async dispose(revoke: () => void = () => {}): Promise<void> {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    await this.lock.run(`den:visitor:${this.visitId}`, () => {
-      revoke();
-      for (let index = this.storage.length - 1; index >= 0; index--) {
-        const key = this.storage.key(index);
-        if (key?.startsWith(this.prefix)) this.storage.removeItem(key);
-      }
-    });
+  dispose(revoke: () => void = () => {}): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    if (this.#disposeInFlight) return this.#disposeInFlight;
+    const attempt = this.lock
+      .run(`den:visitor:${this.visitId}`, () => {
+        revoke();
+        for (let index = this.storage.length - 1; index >= 0; index--) {
+          const key = this.storage.key(index);
+          if (key?.startsWith(this.prefix)) this.storage.removeItem(key);
+        }
+      })
+      .then(() => {
+        this.#disposed = true;
+      })
+      .finally(() => {
+        if (!this.#disposed) this.#disposeInFlight = null;
+      });
+    this.#disposeInFlight = attempt;
+    return attempt;
   }
 
   #key(key: string): string {

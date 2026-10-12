@@ -6,10 +6,12 @@
   let dialog = $state<HTMLDialogElement>();
   let pin = $state('');
   let denied = $state(false);
+  let failed = $state(false);
   let switching = $state(false);
 
   async function open() {
     denied = false;
+    failed = false;
     pin = '';
     dialog?.showModal();
     await tick();
@@ -17,19 +19,31 @@
       dialog?.querySelector<HTMLInputElement>('input')?.focus();
   }
 
-  function useVisitor() {
-    profiles.switchToVisitor();
-    dialog?.close();
+  async function useVisitor() {
+    if (switching) return;
+    switching = true;
+    failed = false;
+    try {
+      if (await profiles.switchToVisitor()) dialog?.close();
+      else failed = true;
+    } catch {
+      failed = true;
+    } finally {
+      switching = false;
+    }
   }
 
   async function useOwner() {
     if (switching) return;
     switching = true;
     denied = false;
+    failed = false;
     try {
       const switched = await profiles.switchToOwner(pin);
       if (switched) dialog?.close();
       else denied = true;
+    } catch {
+      failed = true;
     } finally {
       switching = false;
       pin = '';
@@ -50,14 +64,22 @@
 <dialog
   bind:this={dialog}
   aria-labelledby="profile-switcher-title"
-  onclose={() => (denied = false)}
+  onclose={() => {
+    denied = false;
+    failed = false;
+  }}
 >
   <form method="dialog" onsubmit={(event) => event.preventDefault()}>
     <h2 id="profile-switcher-title">Who’s watching?</h2>
+    {#if failed}<p class="denied" role="alert">
+        The profile switch couldn’t be completed. Try again.
+      </p>{/if}
     {#if profiles.mode === 'owner'}
       <p>Visitor keeps activity only in this browser and won’t change the household library.</p>
       <div class="actions">
-        <button class="primary" type="button" onclick={useVisitor}>Use Visitor</button>
+        <button class="primary" type="button" disabled={switching} onclick={() => void useVisitor()}
+          >{switching ? 'Switching…' : 'Use Visitor'}</button
+        >
         <button type="button" onclick={() => dialog?.close()}>Cancel</button>
       </div>
     {:else}

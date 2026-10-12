@@ -11,10 +11,23 @@
     profilesCapability,
   } from '../src/lib/profileModeCoordinator.svelte';
   import { ProfileSession } from '../src/lib/profileSession.svelte';
-  import type { VisitorProfileSession } from '../src/lib/visitorProfileSession.svelte';
+  import type {
+    VisitorActivityLock,
+    VisitorProfileSession,
+  } from '../src/lib/visitorProfileSession.svelte';
 
   const params = new URLSearchParams(location.search);
   const configured = params.get('pin') !== 'none';
+  let lockAttempts = 0;
+  const visitorLock: VisitorActivityLock | undefined = params.has('rejectLock')
+    ? {
+        available: () => true,
+        async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+          if (lockAttempts++ === 1) throw new Error('fixture lock refused');
+          return work();
+        },
+      }
+    : undefined;
   const release = () => {};
   const model = {
     settings: {
@@ -125,7 +138,7 @@
       fixture;
     void profilesCapability().then((enabled) => {
       if (!current) return;
-      if (enabled) profiles = new ProfileModeCoordinator(owner);
+      if (enabled) profiles = new ProfileModeCoordinator(owner, localStorage, window, visitorLock);
       checked = true;
     });
     return () => {

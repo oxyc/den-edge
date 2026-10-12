@@ -150,6 +150,30 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   expect(ended.keys).toEqual(['den.profile.active.v1']);
 });
 
+test('a refused Visitor lock leaves the switch retryable and reports the failure', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=none&rejectLock');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  const marker = await page.evaluate(() => localStorage.getItem('den.profile.active.v1'));
+
+  await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.getByRole('alert')).toHaveText(
+    'The profile switch couldn’t be completed. Try again.',
+  );
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  expect(await page.evaluate(() => localStorage.getItem('den.profile.active.v1'))).toBe(marker);
+
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  expect(await page.evaluate(() => localStorage.getItem('den.profile.active.v1'))).toBe(
+    JSON.stringify({ mode: 'owner' }),
+  );
+});
+
 test('two tabs merge Visitor activity and an Owner switch revokes the stale tab', async ({
   page,
   context,

@@ -3,8 +3,10 @@ import type { ConnectionsView } from './libraryServiceProtocol';
 import { legacyProfileIdentity, visitorVisitId } from './profileIdentity';
 import { ProfileSession } from './profileSession.svelte';
 import {
+  crossTabVisitorActivityLock,
   randomVisitorVisitId,
   visitorProfileSession,
+  type VisitorActivityLock,
   type VisitorProfileSession,
 } from './visitorProfileSession.svelte';
 
@@ -39,11 +41,9 @@ const readActiveProfile = (storage: Storage): StoredActiveProfile | null => {
 };
 
 const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void => {
-  try {
-    storage.setItem(ACTIVE_PROFILE_KEY, JSON.stringify(value));
-  } catch {
-    // The active tab can still switch when a browser temporarily refuses persistence.
-  }
+  // Profile transitions are durable commits. Failing the marker write must abort the transition before the old
+  // namespace can be deleted or another tab can mistake the visit for active.
+  storage.setItem(ACTIVE_PROFILE_KEY, JSON.stringify(value));
 };
 
 /**
@@ -58,6 +58,7 @@ export class ProfileModeCoordinator {
   readonly #local;
   readonly #storage;
   readonly #events: StorageEvents | null;
+  readonly #visitorLock: VisitorActivityLock;
   readonly #connections: LibraryModelLease<ConnectionsView>;
   #pendingOwner: ProfileSession | null;
   #disposed = false;
@@ -66,6 +67,7 @@ export class ProfileModeCoordinator {
     owner: ProfileSession,
     storage: Storage = localStorage,
     events: StorageEvents | null = typeof window === 'undefined' ? null : window,
+    visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
   ) {
     if (!owner.model || owner.identity.libraryKey === null)
       throw new TypeError('Profiles require an open Owner library');
@@ -76,11 +78,12 @@ export class ProfileModeCoordinator {
     this.#local = owner.local;
     this.#storage = storage;
     this.#events = events;
+    this.#visitorLock = visitorLock;
     this.#connections = owner.model.connections();
     this.#pendingOwner = owner;
 
     const saved = readActiveProfile(storage);
-    if (saved?.mode === 'visitor') {
+    if (saved?.mode === 'visitor' && visitorLock.available()) {
       this.#session = this.#newVisitor(visitorVisitId(saved.visitId));
       this.#pendingOwner = null;
       owner.close();
@@ -104,13 +107,20 @@ export class ProfileModeCoordinator {
     return this.#connections.snapshot.value?.parentalPinConfigured;
   }
 
-  switchToVisitor(): boolean {
+  async switchToVisitor(): Promise<boolean> {
     this.#assertOpen();
     if (this.mode === 'visitor') return true;
-    if (!this.#session) return false;
+    if (!this.#session || !this.#visitorLock.available()) return false;
     const previous = this.#session;
     const next = this.#newVisitor(randomVisitorVisitId());
-    keepActiveProfile(this.#storage, { mode: 'visitor', visitId: next.identity.id });
+    try {
+      await this.#visitorLock.run(`den:visitor:${next.identity.id}`, () =>
+        keepActiveProfile(this.#storage, { mode: 'visitor', visitId: next.identity.id }),
+      );
+    } catch (error) {
+      next.close();
+      throw error;
+    }
     this.#session = next;
     previous.close();
     return true;
@@ -124,13 +134,13 @@ export class ProfileModeCoordinator {
     if (configured && (!pin || !(await this.#ownerModel.verifyParentalPin(pin)))) return false;
 
     const previous = this.#session as VisitorProfileSession | null;
-    const next = this.#pendingOwner ?? this.#newOwner();
-    this.#pendingOwner = null;
     // Revocation and deletion take the same visit-wide lock as writes. A write wins before deletion or observes the
     // Owner marker afterward; no interleaving can recreate the namespace after the visit ends.
     if (previous)
       await previous.endVisit(() => keepActiveProfile(this.#storage, { mode: 'owner' }));
     else keepActiveProfile(this.#storage, { mode: 'owner' });
+    const next = this.#pendingOwner ?? this.#newOwner();
+    this.#pendingOwner = null;
     this.#session = next;
     return true;
   }
@@ -139,9 +149,13 @@ export class ProfileModeCoordinator {
   establishUnprotectedOwner(): boolean {
     if (this.#session) return true;
     if (this.parentalPinConfigured !== false) return false;
+    try {
+      keepActiveProfile(this.#storage, { mode: 'owner' });
+    } catch {
+      return false;
+    }
     const next = this.#pendingOwner ?? this.#newOwner();
     this.#pendingOwner = null;
-    keepActiveProfile(this.#storage, { mode: 'owner' });
     this.#session = next;
     return true;
   }
@@ -175,6 +189,7 @@ export class ProfileModeCoordinator {
         const current = readActiveProfile(this.#storage);
         return current?.mode === 'visitor' && current.visitId === visitId;
       },
+      lock: this.#visitorLock,
     });
   }
 
@@ -191,6 +206,7 @@ export class ProfileModeCoordinator {
     }
     const saved = readActiveProfile(this.#storage);
     if (saved?.mode === 'visitor') {
+      if (!this.#visitorLock.available()) return;
       if (current?.identity.kind === 'visitor' && current.identity.id === saved.visitId) {
         (current as VisitorProfileSession).reloadActivity();
         return;
@@ -202,9 +218,16 @@ export class ProfileModeCoordinator {
       return;
     }
     if (saved?.mode !== 'owner' || current?.identity.kind !== 'visitor') return;
-    void (current as VisitorProfileSession).endVisit();
-    this.#session = this.#pendingOwner ?? this.#newOwner();
-    this.#pendingOwner = null;
+    void (current as VisitorProfileSession)
+      .endVisit()
+      .then(() => {
+        if (this.#disposed || this.#session !== current) return;
+        this.#session = this.#pendingOwner ?? this.#newOwner();
+        this.#pendingOwner = null;
+      })
+      .catch(() => {
+        // Keep the ended Visitor session visible so an explicit Owner switch can retry the cleanup.
+      });
   };
 
   #assertOpen(): void {
@@ -213,7 +236,11 @@ export class ProfileModeCoordinator {
 }
 
 /** The capability is deliberately uncached and fail-closed. */
-export async function profilesCapability(fetchImpl: typeof fetch = fetch): Promise<boolean> {
+export async function profilesCapability(
+  fetchImpl: typeof fetch = fetch,
+  visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
+): Promise<boolean> {
+  if (!visitorLock.available()) return false;
   try {
     const response = await fetchImpl('/capabilities/profiles', {
       cache: 'no-store',
@@ -221,7 +248,10 @@ export async function profilesCapability(fetchImpl: typeof fetch = fetch): Promi
     });
     if (!response.ok) return false;
     const value: unknown = await response.json();
-    return !!value && typeof value === 'object' && 'enabled' in value && value.enabled === true;
+    if (!(value && typeof value === 'object' && 'enabled' in value && value.enabled === true))
+      return false;
+    await visitorLock.run('den:visitor:capability', () => {});
+    return true;
   } catch {
     return false;
   }
