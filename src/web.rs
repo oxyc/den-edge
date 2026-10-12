@@ -31,6 +31,10 @@ const EARLY_HERO_SHA256: [u8; 32] = [
     241, 93, 98, 28, 22, 200, 212, 200, 20,
 ];
 
+/// Direct-media DNS names are short-lived sibling labels. Keep script-driven HLS bounded to that
+/// deployment zone and listener port while allowing a freshly rotated name before the shell is purged.
+const DIRECT_MEDIA_CONNECT: &str = "https://*.481920.xyz:8449";
+
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
 /// `tailscale serve` on the tailnet) — TMDB's images and API, OMDb's ratings (both BYOK, straight from the
 /// browser), YouTube's embed for trailers, YouTube's own media hosts — den-reel's `/direct` hands the page a
@@ -78,7 +82,7 @@ const EARLY_HERO_SHA256: [u8; 32] = [
 /// `media-src` also takes any `https:` source. At home a trailer plays from the home-network listener
 /// (`lanBase`, oxyc/den#197), whose name is the household's own: naming it would publish it to every visitor, and
 /// naming it only to a browser at home would miss one seen over IPv6 and one whose kept shell came from away. A
-/// media load cannot run script, so the widening is negligible. `connect-src` stays exact: the page never
+/// media load cannot run script, so the widening is negligible. `connect-src` stays bounded: the page never
 /// fetches from the home-network listener (`reel.ts` offers it only to a bare `<video>`).
 fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
@@ -90,8 +94,8 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
          https://live.metahub.space; \
          media-src 'self' blob: data: https: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
-         connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 https://1.1.1.1 \
-         https://api.ipify.org https://api.simkl.com{media}; \
+         connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 {DIRECT_MEDIA_CONNECT} \
+         https://1.1.1.1 https://api.ipify.org https://api.simkl.com{media}; \
          frame-src https://www.youtube-nocookie.com{cast}; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -798,6 +802,14 @@ mod tests {
         assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
         // Bounded: https, and the one port `tailscale serve` publishes.
         assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
+    }
+
+    #[test]
+    fn policy_allows_rotating_direct_media_names_only_on_the_media_port() {
+        let policy = super::csp(&[], None);
+        let connect = policy.split("connect-src").nth(1).unwrap().split(';').next().unwrap();
+        assert!(connect.contains("https://*.481920.xyz:8449"), "{policy}");
+        assert!(!connect.contains("https://*.481920.xyz "), "the media port must stay bounded: {policy}");
     }
 
     /// At home a trailer plays from the home-network listener, whose name is the household's own: `media-src` allows

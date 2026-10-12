@@ -45,6 +45,7 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
     return {
       overflowX: getComputedStyle(node).overflowX,
       overflowY: getComputedStyle(node).overflowY,
+      overflowAnchor: getComputedStyle(node).overflowAnchor,
       scrollLeft: node.scrollLeft,
       scrollTop: node.scrollTop,
       scrollable: node.scrollWidth > node.clientWidth,
@@ -53,6 +54,7 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
   expect(geometry).toMatchObject({
     overflowX: 'auto',
     overflowY: 'hidden',
+    overflowAnchor: 'none',
     scrollTop: 0,
     scrollable: true,
   });

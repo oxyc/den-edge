@@ -202,6 +202,17 @@ test('a row entering the viewport materializes card trees in small frame batches
   browser,
 }, testInfo) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await page.addInitScript(() => {
+    window.fixtureLayoutShifts = [];
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.hadRecentInput) continue;
+        const sources = entry.sources ?? [];
+        if (sources.some((source) => source.node?.closest?.('[aria-label="Windowed row"]')))
+          window.fixtureLayoutShifts.push(entry.value);
+      }
+    }).observe({ type: 'layout-shift', buffered: true });
+  });
   await guardNetwork(page);
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
@@ -232,6 +243,10 @@ test('a row entering the viewport materializes card trees in small frame batches
   });
   expect(Math.max(...additions)).toBeLessThanOrEqual(2);
   expect(counts.at(-1)).toBeGreaterThan(4);
+  expect(await row.locator('.track').evaluate((node) => node.scrollLeft)).toBe(0);
+  expect(
+    await page.evaluate(() => window.fixtureLayoutShifts.reduce((sum, value) => sum + value, 0)),
+  ).toBe(0);
 
   // A keyboard target is interactive immediately even if its ordinary frame has not been reached yet.
   await row

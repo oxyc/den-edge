@@ -877,6 +877,35 @@ describe('premeasureLink', () => {
     expect(again.waiting, 'remembered: not timed again').toBe(false);
   });
 
+  it('does not admit the speculative transfer during the page-settling window', async () => {
+    vi.useFakeTimers();
+    let idle: (() => void) | undefined;
+    vi.stubGlobal('requestIdleCallback', (run: () => void) => {
+      idle = run;
+      return 1;
+    });
+    vi.stubGlobal('cancelIdleCallback', vi.fn());
+    const asked: string[] = [];
+    const cancel = premeasureLink('/remux', {
+      fetchImpl: speed(asked),
+      storage: memoryStorage(),
+    });
+
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(idle).toBeUndefined();
+    expect(asked).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(idle).toBeDefined();
+    expect(asked).toEqual([]);
+    idle?.();
+    await Promise.resolve();
+    expect(asked).toEqual([`/remux/speed?bytes=${SPEED_PROBE_BYTES}`]);
+
+    cancel();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
   it('times a route once per page even when it could not be timed, and never at home', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const storage = memoryStorage();

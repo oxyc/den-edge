@@ -300,13 +300,20 @@ export function relayLimit(
 /** Routes whose link this page has set out to time ahead of a play (`premeasureLink`). */
 const premeasured = new Set<string>();
 
+/** Keep a speculative multi-megabyte probe behind the page's first paint and immediate control calls. */
+const PREMEASURE_SETTLE_MS = 1_500;
+
 function whenIdle(run: () => void): () => void {
-  if (typeof globalThis.requestIdleCallback === 'function') {
-    const id = requestIdleCallback(run, { timeout: 5_000 });
-    return () => cancelIdleCallback(id);
-  }
-  const id = setTimeout(run, 1_000);
-  return () => clearTimeout(id);
+  let idle: number | undefined;
+  const timer = setTimeout(() => {
+    if (typeof globalThis.requestIdleCallback === 'function')
+      idle = requestIdleCallback(run, { timeout: 5_000 });
+    else run();
+  }, PREMEASURE_SETTLE_MS);
+  return () => {
+    clearTimeout(timer);
+    if (idle !== undefined) cancelIdleCallback(idle);
+  };
 }
 
 /**
