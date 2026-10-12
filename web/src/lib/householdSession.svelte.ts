@@ -1,6 +1,7 @@
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { LibraryModel } from './libraryModel.svelte';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
+import type { ProfileMigrationParticipant } from './profileMigration';
 import { SessionServices } from './sessionServices.svelte';
 
 export type HouseholdIdentity =
@@ -32,6 +33,8 @@ export class HouseholdSession {
     model: LibraryModel | null,
     readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
+    /** Default-off initial-split participant. No production path supplies one or starts an attempt yet. */
+    readonly profileMigration: ProfileMigrationParticipant | null = null,
   ) {
     this.#model = model;
     this.policy = profilePolicy(model);

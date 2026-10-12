@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fixtures from '../vendor/den-core/policy-v1.json';
+import profileFixtures from '../vendor/den-core/profiles-v1.json';
 import { inPolicySlices, syncPolicy } from './syncCore';
 import { assistantPolicy, ensureAssistantPolicy } from './assistantCore';
 import { createHash } from 'node:crypto';
@@ -62,7 +63,7 @@ describe('shared Rust WASM sync policy', () => {
   // The assistant ops are a module of their own, which the main one refuses as `assistant_module`.
   const assistantOp = (request: Record<string, unknown>) =>
     String(request.op).startsWith('assistant_');
-  for (const test of fixtures.cases) {
+  for (const test of [...fixtures.cases, ...profileFixtures.cases]) {
     it(test.name, async () => {
       const policy = assistantOp(test.request) ? assistantPolicy : syncPolicy;
       if (assistantOp(test.request)) await ensureAssistantPolicy();

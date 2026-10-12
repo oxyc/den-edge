@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
+import type { ProfileMigrationParticipant } from './profileMigration';
 import { persistentProfileIdentity } from './profileIdentity';
 import { activeProfileSession, legacyProfileSession } from './profileSession.svelte';
 
@@ -64,8 +65,28 @@ describe('ProfileSession presentation state', () => {
       libraryKey: 'same-library-key',
       configurationOnly: false,
     });
+    expect(session.household.profileMigration).toBeNull();
     expect(session.content).toBe(contentPort);
     expect(closeWorkerServices).toHaveBeenCalledOnce();
+  });
+
+  it('can carry a dormant migration participant without starting or resuming it', () => {
+    const resume = vi.fn();
+    const migration = { resume } as unknown as ProfileMigrationParticipant;
+    const household = new HouseholdSession(
+      { kind: 'legacy', libraryKey: 'household-key', configurationOnly: false },
+      null,
+      content(),
+      undefined,
+      migration,
+    );
+
+    household.configureServices();
+    household.foreground();
+    household.close();
+
+    expect(household.profileMigration).toBe(migration);
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it('owns only transient toast and undo timing', () => {
