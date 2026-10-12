@@ -153,6 +153,43 @@ describe('ProfileMigrationParticipant', () => {
     expect(() => participant.beginExplicitOwnerAction(true)).toThrow('requires recovery');
   });
 
+  it('blocks a prepared rewrite attached to an idle journal', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'idle',
+        prepared: { digest: 'prepared-digest' },
+      }),
+    });
+    const { participant, executor } = fixture({ storage });
+
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'invalid-journal',
+    });
+    expect(executor.observe).not.toHaveBeenCalled();
+  });
+
+  it('blocks an active journal without proof for its winner key', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'active',
+        winnerLibraryKey: WINNER_KEY,
+      }),
+    });
+    const { participant, executor } = fixture({ storage });
+
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'invalid-journal',
+    });
+    expect(executor.observe).not.toHaveBeenCalled();
+    expect(participant.journal).toBeNull();
+  });
+
   it('is inert until an explicit verified Owner action and stops before the commit', async () => {
     const { participant, calls } = fixture();
     await expect(participant.resume()).resolves.toEqual({ kind: 'inactive' });
@@ -242,6 +279,37 @@ describe('ProfileMigrationParticipant', () => {
     });
     expect(recovered.calls).toEqual(['verify-winner', 'adopt']);
     expect(recovered.executor.retireLosingCandidate).not.toHaveBeenCalled();
+  });
+
+  it('re-verifies when the observed winner key changes after an earlier verification', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'adopting',
+        winnerLibraryKey: 'earlier-winner-key',
+        winnerVerified: true,
+      }),
+    });
+    const recovered = fixture({
+      storage,
+      observe: async () => ({ kind: 'committed', directory: directory(WINNER_KEY) }),
+    });
+
+    await expect(recovered.participant.resume()).resolves.toEqual({
+      kind: 'progress',
+      state: 'adopting',
+    });
+    expect(recovered.calls).toEqual(['verify-winner']);
+    expect(recovered.participant.journal).toMatchObject({
+      winnerLibraryKey: WINNER_KEY,
+      winnerVerified: true,
+    });
+    await expect(recovered.participant.resume()).resolves.toEqual({
+      kind: 'active',
+      ownerLibraryKey: WINNER_KEY,
+    });
+    expect(recovered.calls).toEqual(['verify-winner', 'adopt']);
   });
 
   it('persists commit uncertainty while retaining the prepared rewrite across reload', async () => {

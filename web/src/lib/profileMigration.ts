@@ -227,11 +227,58 @@ function validJournal(value: unknown): value is ProfileMigrationJournal {
     (!record(value.prepared) || typeof value.prepared.digest !== 'string')
   )
     return false;
-  return (
-    optionalString(value.winnerLibraryKey) &&
-    (value.winnerVerified === undefined || typeof value.winnerVerified === 'boolean') &&
-    (value.candidateRetired === undefined || typeof value.candidateRetired === 'boolean')
-  );
+  if (
+    !optionalString(value.winnerLibraryKey) ||
+    (typeof value.winnerLibraryKey === 'string' && value.winnerLibraryKey.length === 0) ||
+    (value.winnerVerified !== undefined && typeof value.winnerVerified !== 'boolean') ||
+    (value.candidateRetired !== undefined && typeof value.candidateRetired !== 'boolean') ||
+    (value.winnerVerified === true && value.winnerLibraryKey === undefined) ||
+    (value.candidateRetired === true && value.candidate === undefined)
+  )
+    return false;
+
+  const has = (key: string): boolean => value[key] !== undefined;
+  const none = (...keys: string[]): boolean => keys.every((key) => !has(key));
+  const initialEvidence = ['fence', 'backup', 'candidate', 'ownerVerification', 'prepared'];
+  const winnerEvidence = ['winnerLibraryKey', 'winnerVerified', 'candidateRetired'];
+  switch (value.state) {
+    case 'idle':
+      return none(...initialEvidence, ...winnerEvidence);
+    case 'fenced':
+      return has('fence') && none(...initialEvidence.slice(1), ...winnerEvidence);
+    case 'backed-up':
+      // The candidate is durably named before its first copy, while the state remains backed-up. That crash
+      // boundary is intentional: a retry must copy into, and eventually retire, the same library.
+      return (
+        has('fence') && has('backup') && none('ownerVerification', 'prepared', ...winnerEvidence)
+      );
+    case 'owner-copied':
+      return (
+        has('fence') &&
+        has('backup') &&
+        has('candidate') &&
+        none('ownerVerification', 'prepared', ...winnerEvidence)
+      );
+    case 'ready-to-commit':
+      return (
+        has('fence') &&
+        has('backup') &&
+        has('candidate') &&
+        has('ownerVerification') &&
+        none('prepared', ...winnerEvidence)
+      );
+    case 'commit-unknown':
+      return initialEvidence.every(has) && none(...winnerEvidence);
+    case 'cleaning-loser':
+      return has('candidate') && has('winnerLibraryKey') && value.candidateRetired !== true;
+    case 'adopting':
+      return has('winnerLibraryKey');
+    case 'active':
+      return has('winnerLibraryKey') && value.winnerVerified === true;
+    case 'restore-required':
+      return true;
+  }
+  return false;
 }
 
 /**
@@ -311,8 +358,15 @@ export class ProfileMigrationParticipant {
     // A prepared rewrite may have been handed to an executor immediately before another participant committed.
     // Always resolve a canonical directory first; only offer this attempt's rewrite while its original fence is
     // still the observed household state.
-    if (journal.prepared && observation.kind === 'legacy' && observation.fence === 'same')
+    if (
+      journal.state === 'commit-unknown' &&
+      journal.prepared &&
+      observation.kind === 'legacy' &&
+      observation.fence === 'same'
+    )
       return { kind: 'ready-to-commit', prepared: journal.prepared };
+    const winnerVerified =
+      journal.winnerVerified === true && journal.winnerLibraryKey === winnerLibraryKey;
     const decision = this.#planner({
       state: journal.state,
       observed: observation.kind,
@@ -321,7 +375,7 @@ export class ProfileMigrationParticipant {
       ...(journal.candidate ? { candidateLibrary: journal.candidate.libraryKey } : {}),
       ...(journal.ownerVerification ? { ownerVerified: true } : {}),
       ...(winnerLibraryKey ? { winnerLibrary: winnerLibraryKey } : {}),
-      ...(journal.winnerVerified ? { winnerVerified: true } : {}),
+      ...(winnerVerified ? { winnerVerified: true } : {}),
       ...(journal.candidateRetired ? { candidateRetired: true } : {}),
     });
 
@@ -392,6 +446,7 @@ export class ProfileMigrationParticipant {
         this.#write({
           ...journal,
           state: 'cleaning-loser',
+          winnerVerified,
           ...(winnerLibraryKey ? { winnerLibraryKey } : {}),
         });
         await this.#executor.retireLosingCandidate(journal.candidate);
@@ -399,6 +454,7 @@ export class ProfileMigrationParticipant {
           ...journal,
           state: committed ? 'adopting' : 'idle',
           candidateRetired: true,
+          winnerVerified,
           ...(winnerLibraryKey ? { winnerLibraryKey } : {}),
         });
         return { kind: 'progress', state: committed ? 'adopting' : 'idle' };
@@ -416,7 +472,7 @@ export class ProfileMigrationParticipant {
         return { kind: 'progress', state: 'adopting' };
       }
       case 'activate': {
-        if (!committed || !winnerLibraryKey || !journal.winnerVerified)
+        if (!committed || !winnerLibraryKey || !winnerVerified)
           throw new Error('Verified committed winner is missing');
         const adopting = this.#write({
           ...journal,
