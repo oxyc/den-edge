@@ -32,7 +32,11 @@
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
-  import { ProfileModeCoordinator, profilesCapability } from './lib/profileModeCoordinator.svelte';
+  import {
+    ProfileModeCoordinator,
+    profilesCapability,
+    type ProfilesCapability,
+  } from './lib/profileModeCoordinator.svelte';
 
   let {
     link,
@@ -94,7 +98,9 @@
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
-  let profileCapabilityChecked = $state(untrack(() => !libraryIdentity || !session.model));
+  let profileCapability = $state<ProfilesCapability | 'checking'>(
+    untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
+  );
   let profileControlPublished = false;
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
@@ -102,15 +108,15 @@
   onMount(() => {
     if (!libraryIdentity || !session.model) return;
     let current = true;
-    void profilesCapability().then((enabled) => {
+    void profilesCapability().then((capability) => {
       if (!current) return;
-      if (!enabled || profileCoordinator || !session.model) {
-        profileCapabilityChecked = true;
+      if (capability !== 'enabled' || profileCoordinator || !session.model) {
+        profileCapability = capability;
         return;
       }
       const coordinator = new ProfileModeCoordinator(session);
       profileCoordinator = coordinator;
-      profileCapabilityChecked = true;
+      profileCapability = 'enabled';
     });
     return () => {
       current = false;
@@ -566,8 +572,13 @@
   });
 </script>
 
-{#if !profileCapabilityChecked}
+{#if profileCapability === 'checking'}
   <p class="profile-loading" role="status">Opening profiles…</p>
+{:else if profileCapability === 'indeterminate'}
+  <section class="profile-unavailable" aria-labelledby="profile-unavailable-title">
+    <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
+    <p>The Owner library remains hidden. Reload Den to try again.</p>
+  </section>
 {:else if profileCoordinator && !profileCoordinator.session}
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
@@ -650,9 +661,32 @@
     color: var(--muted);
   }
 
-  .profile-loading {
+  .profile-loading,
+  .profile-unavailable {
     margin: 48px auto;
+  }
+
+  .profile-loading {
     text-align: center;
+    color: var(--muted);
+  }
+
+  .profile-unavailable {
+    display: grid;
+    gap: 12px;
+    max-width: 520px;
+    padding: 24px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--card);
+  }
+
+  .profile-unavailable h1,
+  .profile-unavailable p {
+    margin: 0;
+  }
+
+  .profile-unavailable p {
     color: var(--muted);
   }
 </style>

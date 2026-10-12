@@ -5,6 +5,7 @@ import type { ConnectionsView } from './libraryServiceProtocol';
 import { legacyProfileIdentity } from './profileIdentity';
 import { ProfileModeCoordinator, profilesCapability } from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
+import type { VisitorActivityLock, VisitorProfileSession } from './visitorProfileSession.svelte';
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -21,8 +22,30 @@ function memoryStorage(): Storage {
 }
 
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
+const immediateLock: VisitorActivityLock = {
+  available: () => true,
+  async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+    return work();
+  },
+};
+const capabilityResponse = (body: string, status = 200): Response =>
+  new Response(body, { status, headers: { 'cache-control': 'no-store' } });
 
-function owner(storage: Storage, pinConfigured = true) {
+function storageEvent(key: string): Event {
+  const event = new Event('storage');
+  Object.defineProperties(event, {
+    key: { value: key },
+    storageArea: { value: null },
+  });
+  return event;
+}
+
+function owner(
+  storage: Storage,
+  pinConfigured = true,
+  events: EventTarget | null = null,
+  visitorLock?: VisitorActivityLock,
+) {
   const release = vi.fn();
   const close = vi.fn();
   const verifyParentalPin = vi.fn(async (pin: string) => pin === '1234');
@@ -52,7 +75,12 @@ function owner(storage: Storage, pinConfigured = true) {
     true,
   );
   return {
-    coordinator: new ProfileModeCoordinator(session, storage),
+    coordinator: new ProfileModeCoordinator(
+      session,
+      storage,
+      events as unknown as Pick<Window, 'addEventListener' | 'removeEventListener'>,
+      visitorLock ?? immediateLock,
+    ),
     model,
     close,
     closeWorker,
@@ -62,12 +90,118 @@ function owner(storage: Storage, pinConfigured = true) {
 }
 
 describe('ProfileModeCoordinator', () => {
-  it('persists one Visitor across teardown and reconstructs its local namespace', () => {
+  it('keeps a failed Owner transition intact and retries the same durable visit', async () => {
+    const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
+    let attempts = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      run: async <T>(_name: string, work: () => Promise<T> | T): Promise<T> => {
+        if (attempts++ === 1) throw new Error('lock refused');
+        return work();
+      },
+    };
+    const first = owner(storage, false, null, lock);
+    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    const visitor = first.coordinator.session as VisitorProfileSession;
+    const marker = storage.getItem('den.profile.active.v1');
+    storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ retained: true }));
+
+    await expect(first.coordinator.switchToOwner()).rejects.toThrow('lock refused');
+    expect(first.coordinator.session).toBe(visitor);
+    expect(first.coordinator.mode).toBe('visitor');
+    expect(storage.getItem('den.profile.active.v1')).toBe(marker);
+    expect(storage.getItem(`${visitor.activity.prefix}activity`)).not.toBeNull();
+    expect(visitor.activity.get('activity')).toEqual({ retained: true });
+
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('owner');
+    expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
+    expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    expect(attempts).toBe(3);
+  });
+
+  it('does not enter or restore Visitor when cross-tab locking is unavailable', async () => {
+    const unavailable: VisitorActivityLock = {
+      available: () => false,
+      run: async <T>(): Promise<T> => {
+        throw new Error('must not run');
+      },
+    };
+    const storage = memoryStorage();
+    const visitId = '11111111111111111111111111111111';
+    const marker = JSON.stringify({ mode: 'visitor', visitId });
+    storage.setItem('den.profile.active.v1', marker);
+    const restored = owner(storage, true, null, unavailable);
+    expect(restored.coordinator.mode).toBeNull();
+    expect(restored.coordinator.session).toBeNull();
+    expect(storage.getItem('den.profile.active.v1')).toBe(marker);
+
+    const ownerStorage = memoryStorage();
+    ownerStorage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
+    const activeOwner = owner(ownerStorage, false, null, unavailable);
+    await expect(activeOwner.coordinator.switchToVisitor()).resolves.toBe(false);
+    expect(activeOwner.coordinator.mode).toBe('owner');
+    expect(ownerStorage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
+
+    const enabled = vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: true })));
+    await expect(profilesCapability(enabled as typeof fetch, unavailable)).resolves.toBe(
+      'indeterminate',
+    );
+    expect(enabled).toHaveBeenCalledOnce();
+
+    const rejecting: VisitorActivityLock = {
+      available: () => true,
+      run: async <T>(): Promise<T> => {
+        throw new Error('lock refused');
+      },
+    };
+    await expect(profilesCapability(enabled as typeof fetch, rejecting)).resolves.toBe(
+      'indeterminate',
+    );
+    expect(enabled).toHaveBeenCalledTimes(2);
+  });
+
+  it('serializes shared-tab activity and revokes a stale tab before it can recreate an ended visit', async () => {
+    const storage = memoryStorage();
+    const events = new EventTarget();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
+    const first = owner(storage, false, events);
+    await first.coordinator.switchToVisitor();
+    const visitId = first.coordinator.session!.identity.id;
+    const second = owner(storage, false, events);
+    const a = first.coordinator.session as VisitorProfileSession;
+    const b = second.coordinator.session as VisitorProfileSession;
+
+    await Promise.all([
+      a.profileActivity!.setWatchlisted({ type: 'movie', id: 1, title: 'One' }, true),
+      b.profileActivity!.setWatchlisted({ type: 'movie', id: 2, title: 'Two' }, true),
+    ]);
+    events.dispatchEvent(storageEvent(`${a.activity.prefix}activity`));
+    expect(a.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
+    expect(b.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
+
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    expect(storage.getItem(`${a.activity.prefix}activity`)).toBeNull();
+    await expect(
+      b.profileActivity!.setWatchlisted({ type: 'movie', id: 3, title: 'Three' }, true),
+    ).rejects.toThrow('ended');
+    expect(storage.getItem(`${a.activity.prefix}activity`)).toBeNull();
+
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    await vi.waitFor(() => expect(second.coordinator.mode).toBe('owner'));
+    expect(second.coordinator.session!.identity.id).not.toBe(visitId);
+    first.coordinator.dispose();
+    second.coordinator.dispose();
+  });
+
+  it('persists one Visitor across teardown and reconstructs its local namespace', async () => {
     const storage = memoryStorage();
     storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage);
 
-    first.coordinator.switchToVisitor();
+    await first.coordinator.switchToVisitor();
     const visitId = first.coordinator.session!.identity.id;
     expect(visitId).toMatch(/^[0-9a-f]{32}$/);
     expect(first.coordinator.mode).toBe('visitor');
@@ -82,9 +216,9 @@ describe('ProfileModeCoordinator', () => {
       JSON.stringify({ mode: 'visitor', visitId }),
     );
     const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
-      activity: { set: (key: string, value: string) => void };
+      activity: { set: (key: string, value: string) => Promise<void> };
     };
-    activity.activity.set('progress:movie:550', 'half');
+    await activity.activity.set('progress:movie:550', 'half');
     first.coordinator.dispose();
 
     const restored = owner(storage);
@@ -131,12 +265,12 @@ describe('ProfileModeCoordinator', () => {
     storage.setItem('den.owner.untouched', 'owner');
     storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage);
-    first.coordinator.switchToVisitor();
+    await first.coordinator.switchToVisitor();
     const endedId = first.coordinator.session!.identity.id;
     const activity = first.coordinator.session as NonNullable<typeof first.coordinator.session> & {
-      activity: { set: (key: string, value: number) => void };
+      activity: { set: (key: string, value: number) => Promise<void> };
     };
-    activity.activity.set('progress', 1);
+    await activity.activity.set('progress', 1);
     storage.setItem('den.profile.visitor.v1:ffffffffffffffffffffffffffffffff:progress', '2');
 
     await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
@@ -158,7 +292,7 @@ describe('ProfileModeCoordinator', () => {
     const storage = memoryStorage();
     storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const first = owner(storage, false);
-    first.coordinator.switchToVisitor();
+    await first.coordinator.switchToVisitor();
 
     await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
     expect(first.verifyParentalPin).not.toHaveBeenCalled();
@@ -172,19 +306,49 @@ describe('ProfileModeCoordinator', () => {
 });
 
 describe('profilesCapability', () => {
-  it('enables only the explicit uncached capability answer', async () => {
-    const enabled = vi.fn(async () => new Response(JSON.stringify({ enabled: true })));
-    await expect(profilesCapability(enabled as typeof fetch)).resolves.toBe(true);
+  it('distinguishes explicit enabled and disabled answers from every indeterminate failure', async () => {
+    const enabled = vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: true })));
+    await expect(profilesCapability(enabled as typeof fetch, immediateLock)).resolves.toBe(
+      'enabled',
+    );
     expect(enabled).toHaveBeenCalledWith('/capabilities/profiles', {
       cache: 'no-store',
       credentials: 'same-origin',
     });
 
     await expect(
-      profilesCapability(vi.fn(async () => new Response('{}', { status: 404 })) as typeof fetch),
-    ).resolves.toBe(false);
+      profilesCapability(
+        vi.fn(async () =>
+          capabilityResponse(JSON.stringify({ error: 'not_found' }), 404),
+        ) as typeof fetch,
+        { available: () => false, run: immediateLock.run },
+      ),
+    ).resolves.toBe('disabled');
     await expect(
-      profilesCapability(vi.fn(async () => new Response('{broken')) as typeof fetch),
-    ).resolves.toBe(false);
+      profilesCapability(
+        vi.fn(async () => capabilityResponse(JSON.stringify({ enabled: false }))) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{}', 404)) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{broken')) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(vi.fn(async () => capabilityResponse('{}')) as typeof fetch),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(
+        vi.fn(async () => new Response(JSON.stringify({ enabled: true }))) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(
+        vi.fn(async () => {
+          throw new TypeError('offline');
+        }) as typeof fetch,
+      ),
+    ).resolves.toBe('indeterminate');
   });
 });

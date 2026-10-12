@@ -9,12 +9,26 @@
   import {
     ProfileModeCoordinator,
     profilesCapability,
+    type ProfilesCapability,
   } from '../src/lib/profileModeCoordinator.svelte';
   import { ProfileSession } from '../src/lib/profileSession.svelte';
-  import type { VisitorProfileSession } from '../src/lib/visitorProfileSession.svelte';
+  import type {
+    VisitorActivityLock,
+    VisitorProfileSession,
+  } from '../src/lib/visitorProfileSession.svelte';
 
   const params = new URLSearchParams(location.search);
   const configured = params.get('pin') !== 'none';
+  let lockAttempts = 0;
+  const visitorLock: VisitorActivityLock | undefined = params.has('rejectLock')
+    ? {
+        available: () => true,
+        async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+          if (lockAttempts++ === 2) throw new Error('fixture lock refused');
+          return work();
+        },
+      }
+    : undefined;
   const release = () => {};
   const model = {
     settings: {
@@ -46,12 +60,14 @@
   );
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   let checked = $state(false);
+  let capability = $state<ProfilesCapability | 'checking'>('checking');
 
   const fixture = {
     snapshot() {
       return {
         enabled: profiles !== null,
         checked,
+        capability,
         mode: profiles?.mode ?? 'owner',
         visitId: profiles?.mode === 'visitor' ? profiles.session!.identity.id : null,
         policyCeiling: profiles?.session?.policy?.settings.value?.preferences.maturityCeiling,
@@ -61,14 +77,48 @@
           : false,
         householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
         servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
+        watchlist:
+          (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.watchlist.map(
+            ({ title }) => title,
+          ) ?? [],
+        continueWatching:
+          (
+            profiles?.session as VisitorProfileSession | undefined
+          )?.profileActivity?.continueWatching.map(({ title, fraction }) => ({
+            title: title.title,
+            fraction,
+          })) ?? [],
+        watched:
+          (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.history.map(
+            ({ title }) => title.title,
+          ) ?? [],
         keys: Object.keys(localStorage).sort(),
       };
     },
     setActivity(key: string, value: string) {
-      (profiles?.session as VisitorProfileSession).activity.set(key, value);
+      return (profiles?.session as VisitorProfileSession).activity.set(key, value);
     },
     getActivity(key: string) {
       return (profiles?.session as VisitorProfileSession).activity.get(key);
+    },
+    async addVisitorActivity() {
+      const activity = (profiles?.session as VisitorProfileSession).profileActivity!;
+      await activity.setWatchlisted({ type: 'movie', id: 550, title: 'Fight Club' }, true);
+      await activity.recordProgress({ type: 'tv', id: 1399, title: 'Game of Thrones' }, 0.4, 1200, {
+        season: 2,
+        episode: 3,
+      });
+      await activity.setWatched({ type: 'movie', id: 603, title: 'The Matrix' }, true);
+    },
+    async addVisitorWatchlist(id: number, title: string) {
+      const activity = (profiles?.session as VisitorProfileSession | undefined)?.profileActivity;
+      if (!activity) return 'inactive';
+      try {
+        await activity.setWatchlisted({ type: 'movie', id, title }, true);
+        return 'saved';
+      } catch (error) {
+        return error instanceof Error ? error.message : 'failed';
+      }
     },
     outbound() {
       const visitor = profiles?.session as VisitorProfileSession;
@@ -89,9 +139,11 @@
     let current = true;
     (window as typeof window & { denProfileModeFixture?: typeof fixture }).denProfileModeFixture =
       fixture;
-    void profilesCapability().then((enabled) => {
+    void profilesCapability(fetch, visitorLock).then((answer) => {
       if (!current) return;
-      if (enabled) profiles = new ProfileModeCoordinator(owner);
+      capability = answer;
+      if (answer === 'enabled')
+        profiles = new ProfileModeCoordinator(owner, localStorage, window, visitorLock);
       checked = true;
     });
     return () => {
@@ -111,11 +163,32 @@
 <main>
   {#if !checked}
     <p role="status">Checking profiles…</p>
+  {:else if capability === 'indeterminate'}
+    <section aria-labelledby="profile-unavailable-title">
+      <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
+      <p>The Owner library remains hidden. Reload Den to try again.</p>
+    </section>
   {:else if profiles?.session}
     <ProfileSwitcher {profiles} />
     <p data-mode>{profiles.mode === 'owner' ? 'Owner active' : 'Visitor active'}</p>
     {#if profiles.mode === 'visitor'}
       <p>Visitor can’t manage household settings.</p>
+      <button type="button" onclick={() => void fixture.addVisitorActivity()}>Add activity</button>
+      <section aria-label="Visitor watchlist">
+        {#each profiles.session.profileActivity?.watchlist ?? [] as title (title.id)}
+          <span>{title.title}</span>
+        {/each}
+      </section>
+      <section aria-label="Visitor Continue Watching">
+        {#each profiles.session.profileActivity?.continueWatching ?? [] as entry (entry.title.id)}
+          <span>{entry.title.title} {Math.round(entry.fraction * 100)}%</span>
+        {/each}
+      </section>
+      <section aria-label="Visitor watched">
+        {#each profiles.session.profileActivity?.history ?? [] as entry (entry.title.id)}
+          <span>{entry.title.title}</span>
+        {/each}
+      </section>
     {/if}
   {:else if profiles}
     <ProfileOwnerGate {profiles} />

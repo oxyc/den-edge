@@ -199,6 +199,15 @@ export async function routeGuestEdge(page, edge) {
       );
     return api ? route.fulfill({ status: 404, json: {} }) : route.continue();
   });
+  // This page-level catch-all bypasses guardNetwork's context route when it continues to the dev server. Preserve
+  // the shipped default-off capability response explicitly so guest specs exercise the legacy Owner contract.
+  await page.route(`${E2E_ORIGIN}/capabilities/profiles`, (route) =>
+    route.fulfill({
+      status: 404,
+      headers: { 'cache-control': 'no-store' },
+      json: { error: 'not_found' },
+    }),
+  );
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'guest-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));

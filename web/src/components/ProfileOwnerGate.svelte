@@ -4,14 +4,18 @@
   let { profiles }: { profiles: ProfileModeCoordinator } = $props();
   let pin = $state('');
   let denied = $state(false);
+  let failed = $state(false);
   let establishing = $state(false);
 
   async function establishOwner() {
     if (establishing) return;
     establishing = true;
     denied = false;
+    failed = false;
     try {
       if (!(await profiles.switchToOwner(pin))) denied = true;
+    } catch {
+      failed = true;
     } finally {
       establishing = false;
       pin = '';
@@ -40,6 +44,7 @@
         />
       </label>
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
+      {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
       <button
         type="button"
         disabled={establishing || !/^\d{4}$/.test(pin)}

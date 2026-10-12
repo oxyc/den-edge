@@ -28,7 +28,7 @@
           };
         },
         set(id, key, value) {
-          sessions.get(id).activity.set(key, value);
+          return sessions.get(id).activity.set(key, value);
         },
         get(id, key) {
           return sessions.get(id).activity.get(key);
@@ -37,7 +37,7 @@
           sessions.get(id).close();
         },
         endVisit(id) {
-          sessions.get(id).endVisit();
+          return sessions.get(id).endVisit();
         },
         outbound(id) {
           const session = sessions.get(id);

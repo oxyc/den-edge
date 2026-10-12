@@ -15,13 +15,13 @@ test('inactive Visitor sessions survive close and end only through explicit disp
   await page.waitForFunction(() => window.denVisitorFixture);
 
   const created = await page.evaluate(
-    ({ first, second }) => {
+    async ({ first, second }) => {
       localStorage.clear();
       localStorage.setItem('den.owner.untouched', 'owner');
       const one = window.denVisitorFixture.create(first);
       const two = window.denVisitorFixture.create(second);
-      window.denVisitorFixture.set(first, 'progress:movie:550', { fraction: 0.25 });
-      window.denVisitorFixture.set(second, 'progress:movie:550', { fraction: 0.75 });
+      await window.denVisitorFixture.set(first, 'progress:movie:550', { fraction: 0.25 });
+      await window.denVisitorFixture.set(second, 'progress:movie:550', { fraction: 0.75 });
       window.denVisitorFixture.close(first);
       return { one, two };
     },
@@ -40,8 +40,8 @@ test('inactive Visitor sessions survive close and end only through explicit disp
         two: window.denVisitorFixture.get(second, 'progress:movie:550'),
       };
       const outbound = await window.denVisitorFixture.outbound(first);
-      window.denVisitorFixture.endVisit(first);
-      window.denVisitorFixture.endVisit(first);
+      await window.denVisitorFixture.endVisit(first);
+      await window.denVisitorFixture.endVisit(first);
       return {
         restored,
         outbound,

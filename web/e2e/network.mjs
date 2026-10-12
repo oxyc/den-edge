@@ -64,9 +64,13 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
     if (url.origin === origin && url.pathname === '/tmdb/warm')
       return route.fulfill({ status: 204 });
     // Profiles are a host-scoped, default-off canary. Specs that opt in install a page route first; every other
-    // application fixture sees the production default instead of treating capability discovery as an API leak.
+    // application fixture receives the shipped explicit disabled response required to reveal the legacy Owner path.
     if (url.origin === origin && url.pathname === '/capabilities/profiles')
-      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+      return route.fulfill({
+        status: 404,
+        headers: { 'cache-control': 'no-store' },
+        json: { error: 'not_found' },
+      });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
     if (url.origin === origin && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);

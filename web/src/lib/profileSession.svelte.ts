@@ -15,6 +15,7 @@ import type {
   LibraryMetadataTitle,
   TitleRef,
 } from './libraryServiceProtocol';
+import type { ProfileActivity } from './visitorActivity.svelte';
 
 const TOAST_MS = 6_000;
 
@@ -40,6 +41,8 @@ export class ProfileSession {
     private closeHousehold: boolean,
     /** Household policy is readable without lending the profile an Owner activity/write model. */
     readonly policy: ProfilePolicy | null = profilePolicy(model),
+    /** Device-local activity only for Visitor; never a synced Owner LibraryModel. */
+    readonly profileActivity: ProfileActivity | null = null,
   ) {}
 
   get content(): ContentServiceClientPort {
