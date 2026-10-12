@@ -804,6 +804,7 @@ export type LibraryServiceErrorCode =
   | 'read-only'
   | 'moved'
   | 'storage'
+  | 'update-required'
   | 'unavailable'
   | 'cancelled'
   | 'internal';

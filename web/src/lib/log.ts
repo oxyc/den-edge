@@ -106,6 +106,14 @@ interface DryRun {
 /** The highest library format this build reads and writes. */
 export const WIRE = 4;
 
+/** den-edge fenced this library against this older client (`426` plus a newer `x-den-wire-min`). */
+export class LibraryUpdateRequiredError extends Error {
+  constructor(readonly requiredWire: number) {
+    super('A newer version of Den is required to open this library.');
+    this.name = 'LibraryUpdateRequiredError';
+  }
+}
+
 /**
  * What a move to another key carries (library v4 §12, `LibraryLog.moving`): the decoded rows, the plaintext of each
  * newer-format document, and the head and generation they were read at.
@@ -1715,6 +1723,8 @@ export class LibraryLog {
         log.moved = true;
         return log;
       }
+      if (res.status === 426 && log.upgradeRequired !== null)
+        throw new LibraryUpdateRequiredError(log.upgradeRequired);
       if (!res.ok) return null;
       let page: Page;
       try {

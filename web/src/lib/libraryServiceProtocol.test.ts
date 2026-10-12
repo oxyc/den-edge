@@ -719,6 +719,22 @@ describe('library service server protocol', () => {
 
     expect(
       decodeLibraryServiceServerMessage({
+        type: 'error',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-update',
+        error: {
+          code: 'update-required',
+          message: 'A newer version of Den is required to open this library.',
+          retryable: false,
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: { error: { code: 'update-required', retryable: false } },
+    });
+
+    expect(
+      decodeLibraryServiceServerMessage({
         type: 'update',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         subscriptionId: 'title',

@@ -1858,6 +1858,7 @@ function failure(value: unknown): value is LibraryServiceFailure {
       value.code === 'read-only' ||
       value.code === 'moved' ||
       value.code === 'storage' ||
+      value.code === 'update-required' ||
       value.code === 'unavailable' ||
       value.code === 'cancelled' ||
       value.code === 'internal') &&

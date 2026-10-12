@@ -14,6 +14,7 @@ export const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
  */
 export async function routeLibraryEdge(page, edge = {}) {
   edge.batches = 0;
+  edge.wires = [];
   const generation = 'optimistic-actions';
   const rows = new Map();
   let head = 0;
@@ -36,7 +37,14 @@ export async function routeLibraryEdge(page, edge = {}) {
   await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    edge.wires.push(request.headers()['x-den-wire']);
     edge.trace?.push(`${Date.now() % 100000} ${request.method()} ${url.pathname.split('/').pop()}`);
+    if (edge.upgradeRequired)
+      return route.fulfill({
+        status: 426,
+        headers: { ...headers, 'x-den-wire-min': String(edge.upgradeRequired) },
+        json: { error: 'upgrade_required' },
+      });
     if (url.pathname.endsWith('/member') && request.method() === 'PUT')
       return route.fulfill({ status: 200, headers });
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
