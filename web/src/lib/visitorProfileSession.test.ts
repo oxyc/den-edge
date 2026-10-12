@@ -29,6 +29,57 @@ function memoryStorage(): Storage {
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
 describe('VisitorProfileSession', () => {
+  it('projects watchlist, watched, progress, resume, and history durably without Owner writes', async () => {
+    const storage = memoryStorage();
+    const ownerWrite = vi.fn();
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { command: ownerWrite, close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+    const movie = { type: 'movie' as const, id: 550, title: 'Fight Club', year: 1999 };
+    const series = { type: 'tv' as const, id: 1399, title: 'Game of Thrones' };
+    const first = visitorProfileSession(household, storage, FIRST);
+
+    await first.profileActivity!.setWatchlisted(movie, true);
+    await first.profileActivity!.recordProgress(series, 0.4, 1_200, {
+      season: 2,
+      episode: 3,
+    });
+    await first.profileActivity!.setWatched(movie, true);
+
+    expect(first.profileActivity!.watchlist).toEqual([]);
+    expect(first.profileActivity!.continueWatching).toEqual([
+      expect.objectContaining({
+        title: series,
+        fraction: 0.4,
+        seconds: 1_200,
+        episode: { season: 2, episode: 3 },
+      }),
+    ]);
+    expect(first.profileActivity!.history).toEqual([
+      expect.objectContaining({ title: movie, episodes: 0 }),
+    ]);
+    expect(first.profileActivity!.row(movie)?.status.value).toBe('watched');
+    expect(first.profileActivity!.rows(series).episodes.get('2:3')?.progress.value).toBe(0.4);
+    expect(ownerWrite).not.toHaveBeenCalled();
+
+    first.close();
+    const restored = visitorProfileSession(household, storage, FIRST);
+    expect(restored.profileActivity!.continueWatching[0]).toMatchObject({
+      title: series,
+      fraction: 0.4,
+      episode: { season: 2, episode: 3 },
+    });
+    expect(restored.displayTitle(movie)).toEqual(movie);
+    expect(restored.displayTitle(series)).toEqual(series);
+
+    restored.endVisit();
+    const ended = visitorProfileSession(household, storage, FIRST);
+    expect(ended.profileActivity!.titles).toEqual([]);
+    expect(ownerWrite).not.toHaveBeenCalled();
+  });
+
   it('preserves a closed visit for reconstruction and ends only that visit explicitly', () => {
     const storage = memoryStorage();
     const householdClose = vi.fn();
@@ -86,6 +137,21 @@ describe('VisitorProfileSession', () => {
     await expect(writer.track(event)).resolves.toEqual({ outcome: 'suppressed' });
     expect(writer.syncEnabled).toBe(false);
     expect(writer.trackerEnabled).toBe(false);
+  });
+
+  it('ignores a malformed durable activity projection instead of exposing partial state', () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      `den.profile.visitor.v1:${FIRST}:activity`,
+      JSON.stringify({ version: 1, titles: { broken: null, wrong: { title: { type: 'book' } } } }),
+    );
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+
+    expect(visitorProfileSession(household, storage, FIRST).profileActivity!.titles).toEqual([]);
   });
 
   it('creates a lowercase random 128-bit visit id', () => {

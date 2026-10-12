@@ -118,6 +118,9 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  // Visitor owns only this device-local activity adapter. It is deliberately independent of LibraryModel, so none
+  // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
+  const profileActivity = untrack(() => session.profileActivity);
   const SHELF_TRANCHE = 8;
   let shelvesReady = $state(model === null);
   /**
@@ -222,7 +225,9 @@
   const watchlistNameLimit = $derived(
     metadataLimit(overview?.watchlist ?? [], watchlistNames, watchlistCachedPrefix),
   );
-  const libraryOpen = $derived(model === null || overview !== undefined);
+  const libraryOpen = $derived(
+    profileActivity !== null || model === null || overview !== undefined,
+  );
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
   );
@@ -389,19 +394,27 @@
   };
   // Playback and title actions need every known resume point, including a directly opened title beyond Home's
   // staged shelf. Only the shelf rendering is prefix-limited.
-  const continueEntries = $derived((continueView?.items ?? []).flatMap(displayContinueEntry));
+  const continueEntries = $derived(
+    profileActivity
+      ? [...profileActivity.continueWatching]
+      : (continueView?.items ?? []).flatMap(displayContinueEntry),
+  );
   const continueShelfEntries = $derived(
-    (continueView?.items ?? []).slice(0, continueNameLimit).flatMap(displayContinueEntry),
+    profileActivity
+      ? [...profileActivity.continueWatching]
+      : (continueView?.items ?? []).slice(0, continueNameLimit).flatMap(displayContinueEntry),
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() =>
     libraryStandings.set(
       new Map(
-        (overview?.standings ?? []).map(({ title, standing }) => [
-          titleKey(title),
-          standing === 'in-progress' ? 'inProgress' : standing,
-        ]),
+        profileActivity
+          ? profileActivity.standings
+          : (overview?.standings ?? []).map(({ title, standing }) => [
+              titleKey(title),
+              standing === 'in-progress' ? 'inProgress' : standing,
+            ]),
       ),
     ),
   );
@@ -502,6 +515,7 @@
     const opening = page;
     if (!opening) return { row: undefined, episodes: new Map() };
     const title = session.displayTitle(opening) ?? { ...opening, title: '' };
+    if (profileActivity) return profileActivity.rows(title);
     return titleViewRows(title, titleLease?.snapshot.value);
   });
   const pageRow = $derived(pageRows.row);
@@ -542,7 +556,7 @@
   }
 
   /** A title's row as last read, for the billboard's Watchlist and Seen. */
-  const rowOf = (title: Title) => overviewTitles?.row(title);
+  const rowOf = (title: Title) => profileActivity?.row(title) ?? overviewTitles?.row(title);
 
   /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
   async function fromSlide(write: Promise<boolean | undefined>) {
@@ -563,11 +577,22 @@
 
   const toggleWatchlist = (title: Title, on: boolean) =>
     runCommand(
-      model ? () => (on ? model.addToWatchlist(title) : model.removeFromLibrary(title)) : undefined,
+      profileActivity
+        ? () => profileActivity.setWatchlisted(title, on)
+        : model
+          ? () => (on ? model.addToWatchlist(title) : model.removeFromLibrary(title))
+          : undefined,
       title,
     );
   const setReaction = (title: Title, reaction: 'seen' | 'dislike' | 'like' | 'love' | null) =>
-    runCommand(model ? () => model.setReaction(title, reaction) : undefined, title);
+    runCommand(
+      profileActivity
+        ? () => profileActivity.setReaction(title, reaction)
+        : model
+          ? () => model.setReaction(title, reaction)
+          : undefined,
+      title,
+    );
 
   /**
    * Off Continue Watching. Not an action the trackers hear about — nothing about what was watched changed, and the
@@ -575,12 +600,26 @@
    * sync policy doesn't capture for this change and `act` would then drop.
    */
   async function dismiss(title: Title) {
-    return runCommand(model ? () => model.setContinueDismissed(title, true) : undefined, title);
+    return runCommand(
+      profileActivity
+        ? () => profileActivity.setContinueDismissed(title, true)
+        : model
+          ? () => model.setContinueDismissed(title, true)
+          : undefined,
+      title,
+    );
   }
 
   /** Undoes `dismiss` — the poster menu's "Remove from Continue Watching" offers this in its toast. */
   async function restore(title: Title) {
-    return runCommand(model ? () => model.setContinueDismissed(title, false) : undefined, title);
+    return runCommand(
+      profileActivity
+        ? () => profileActivity.setContinueDismissed(title, false)
+        : model
+          ? () => model.setContinueDismissed(title, false)
+          : undefined,
+      title,
+    );
   }
 
   /**
@@ -591,9 +630,11 @@
    */
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
     const ok = await runCommand(
-      model
-        ? () => model.setEpisodeWatched({ type: 'tv', id: title.id, season, episode }, seen)
-        : undefined,
+      profileActivity
+        ? () => profileActivity.setEpisodeWatched(title, season, episode, seen)
+        : model
+          ? () => model.setEpisodeWatched({ type: 'tv', id: title.id, season, episode }, seen)
+          : undefined,
       title,
     );
     if (!ok) session.notify(SAVE_FAILED);
@@ -602,9 +643,9 @@
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
-    if (!model) return;
+    if (!model && !profileActivity) return;
     try {
-      if (title.type === 'tv') {
+      if (title.type === 'tv' && !profileActivity) {
         if (!session.shapes.has(titleKey(title))) await promoteLibraryTitle(session, title);
         const shape = session.shapes.get(titleKey(title));
         if (!shape) {
@@ -612,7 +653,12 @@
           return false;
         }
       }
-      return await runCommand(() => model.setWatched(title, seen), title);
+      return await runCommand(
+        profileActivity
+          ? () => profileActivity.setWatched(title, seen)
+          : () => model!.setWatched(title, seen),
+        title,
+      );
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -634,7 +680,11 @@
     if (!episodes.length) return;
     const tv = title.type === 'tv' ? { type: 'tv' as const, id: title.id } : null;
     return runCommand(
-      model && tv ? () => model.setSeasonWatched(tv, season, episodes, seen) : undefined,
+      profileActivity
+        ? () => profileActivity.setSeasonWatched(title, season, episodes, seen)
+        : model && tv
+          ? () => model.setSeasonWatched(tv, season, episodes, seen)
+          : undefined,
       title,
     );
   }
@@ -726,7 +776,7 @@
   }
   setTitleActionsContext({
     get libraryOpen() {
-      return model !== null;
+      return model !== null || profileActivity !== null;
     },
     get busy() {
       return busy;
@@ -818,19 +868,27 @@
 
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
-    if (!model) return;
+    if (!model && !profileActivity) return;
     const { title, season, episode } = target;
     return runCommand(
-      () =>
-        model.recordProgress({
-          title,
-          ...(season !== undefined && episode !== undefined
-            ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
-            : {}),
-          fraction,
-          seconds,
-          observedAt: Date.now(),
-        }),
+      profileActivity
+        ? () =>
+            profileActivity.recordProgress(
+              title,
+              fraction,
+              seconds,
+              season !== undefined && episode !== undefined ? { season, episode } : undefined,
+            )
+        : () =>
+            model!.recordProgress({
+              title,
+              ...(season !== undefined && episode !== undefined
+                ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
+                : {}),
+              fraction,
+              seconds,
+              observedAt: Date.now(),
+            }),
       title,
     );
   }
@@ -929,7 +987,11 @@
   });
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
-  const watched = $derived(new Set((overview?.watched ?? []).map(titleKey)));
+  const watched = $derived(
+    profileActivity
+      ? new Set(profileActivity.watchedKeys)
+      : new Set((overview?.watched ?? []).map(titleKey)),
+  );
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
@@ -1391,6 +1453,7 @@
   /** Lazy history is named only while the Watchlist screen owns its lease. */
   const history = $derived.by(() => {
     if (route.page !== 'watchlist') return [];
+    if (profileActivity) return [...profileActivity.history];
     return (historyLease?.snapshot.value?.items ?? []).flatMap((entry): WatchedEntry[] => {
       const title = session.displayTitle(entry.title);
       return title
@@ -1407,6 +1470,7 @@
   });
   const seenOfSeries = $derived.by(() => {
     if (route.page !== 'watchlist') return new Map<string, SeenEpisode[]>();
+    if (profileActivity) return new Map(profileActivity.seenEpisodes());
     return new Map(
       (historyLease?.snapshot.value?.items ?? []).flatMap((entry) =>
         entry.title.type === 'tv'
@@ -1417,7 +1481,8 @@
   });
   const savedCounts = $derived.by(() => {
     const counts = { all: 0, movie: 0, tv: 0 };
-    for (const ref of overview?.watchlist ?? []) {
+    const saved = profileActivity ? profileActivity.watchlist : (overview?.watchlist ?? []);
+    for (const ref of saved) {
       if (seenOfSeries.get(titleKey(ref))?.length) continue;
       counts.all++;
       counts[ref.type]++;
@@ -1425,10 +1490,12 @@
     return counts;
   });
   const savedTitles = $derived(
-    (route.page === 'watchlist'
-      ? (overview?.watchlist ?? [])
-      : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
-    ).flatMap((ref) => session.displayTitle(ref) ?? []),
+    profileActivity
+      ? [...profileActivity.watchlist]
+      : (route.page === 'watchlist'
+          ? (overview?.watchlist ?? [])
+          : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
+        ).flatMap((ref) => session.displayTitle(ref) ?? []),
   );
   const continueShelf = $derived(
     continueShelfEntries.filter((entry) => !facet || entry.title.type === facet),
@@ -1578,7 +1645,7 @@
     <DownloadsScreen.current {model} {active} />
   {/if}
 {:else if route.page === 'watchlist'}
-  {#if !model}
+  {#if !model && !profileActivity}
     <p class="note">
       Your watchlist lives in your library, which this browser can’t keep. <a href="/settings"
         >Link a TV</a

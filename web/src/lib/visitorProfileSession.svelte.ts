@@ -8,6 +8,7 @@ import {
 } from './profileIdentity';
 import type { LibraryCommand } from './libraryServiceProtocol';
 import type { TrackerEvent } from './trackerEvents';
+import { VisitorActivityProjection } from './visitorActivity.svelte';
 
 const VISITOR_STORAGE_PREFIX = 'den.profile.visitor.v1:';
 
@@ -102,7 +103,17 @@ export class VisitorProfileSession extends ProfileSession {
     household: HouseholdSession,
     readonly activity: VisitorActivityNamespace,
   ) {
-    super(visitorProfileIdentity(activity.visitId), household, null, true, false, household.policy);
+    const projection = new VisitorActivityProjection(activity);
+    super(
+      visitorProfileIdentity(activity.visitId),
+      household,
+      null,
+      true,
+      false,
+      household.policy,
+      projection,
+    );
+    for (const title of projection.titles) this.rememberTitle(title);
   }
 
   /** Explicitly switching away ends the visit; ordinary route/app teardown must call `close` and retain it. */

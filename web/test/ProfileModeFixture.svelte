@@ -61,6 +61,21 @@
           : false,
         householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
         servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
+        watchlist:
+          (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.watchlist.map(
+            ({ title }) => title,
+          ) ?? [],
+        continueWatching:
+          (
+            profiles?.session as VisitorProfileSession | undefined
+          )?.profileActivity?.continueWatching.map(({ title, fraction }) => ({
+            title: title.title,
+            fraction,
+          })) ?? [],
+        watched:
+          (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.history.map(
+            ({ title }) => title.title,
+          ) ?? [],
         keys: Object.keys(localStorage).sort(),
       };
     },
@@ -69,6 +84,15 @@
     },
     getActivity(key: string) {
       return (profiles?.session as VisitorProfileSession).activity.get(key);
+    },
+    async addVisitorActivity() {
+      const activity = (profiles?.session as VisitorProfileSession).profileActivity!;
+      await activity.setWatchlisted({ type: 'movie', id: 550, title: 'Fight Club' }, true);
+      await activity.recordProgress({ type: 'tv', id: 1399, title: 'Game of Thrones' }, 0.4, 1200, {
+        season: 2,
+        episode: 3,
+      });
+      await activity.setWatched({ type: 'movie', id: 603, title: 'The Matrix' }, true);
     },
     outbound() {
       const visitor = profiles?.session as VisitorProfileSession;
@@ -116,6 +140,22 @@
     <p data-mode>{profiles.mode === 'owner' ? 'Owner active' : 'Visitor active'}</p>
     {#if profiles.mode === 'visitor'}
       <p>Visitor can’t manage household settings.</p>
+      <button type="button" onclick={() => void fixture.addVisitorActivity()}>Add activity</button>
+      <section aria-label="Visitor watchlist">
+        {#each profiles.session.profileActivity?.watchlist ?? [] as title (title.id)}
+          <span>{title.title}</span>
+        {/each}
+      </section>
+      <section aria-label="Visitor Continue Watching">
+        {#each profiles.session.profileActivity?.continueWatching ?? [] as entry (entry.title.id)}
+          <span>{entry.title.title} {Math.round(entry.fraction * 100)}%</span>
+        {/each}
+      </section>
+      <section aria-label="Visitor watched">
+        {#each profiles.session.profileActivity?.history ?? [] as entry (entry.title.id)}
+          <span>{entry.title.title}</span>
+        {/each}
+      </section>
     {/if}
   {:else if profiles}
     <ProfileOwnerGate {profiles} />

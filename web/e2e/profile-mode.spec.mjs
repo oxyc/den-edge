@@ -101,11 +101,25 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
   expect(first.householdExposesModel).toBe(false);
   expect(first.servicesExposeModel).toBe(false);
 
+  writes.length = 0;
+  await page.getByRole('button', { name: 'Add activity' }).click();
+  await expect(page.getByRole('region', { name: 'Visitor watchlist' })).toContainText('Fight Club');
+  await expect(page.getByRole('region', { name: 'Visitor Continue Watching' })).toContainText(
+    'Game of Thrones 40%',
+  );
+  await expect(page.getByRole('region', { name: 'Visitor watched' })).toContainText('The Matrix');
+  expect(writes).toEqual([]);
+
   await page.reload();
   await expect
     .poll(() => page.evaluate(() => window.denProfileModeFixture?.snapshot().checked))
     .toBe(true);
   await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  await expect(page.getByRole('region', { name: 'Visitor watchlist' })).toContainText('Fight Club');
+  await expect(page.getByRole('region', { name: 'Visitor Continue Watching' })).toContainText(
+    'Game of Thrones 40%',
+  );
+  await expect(page.getByRole('region', { name: 'Visitor watched' })).toContainText('The Matrix');
   await expect
     .poll(() => page.evaluate(() => window.denProfileModeFixture.getActivity('progress:movie:550')))
     .toBe('half');
