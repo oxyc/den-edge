@@ -11,7 +11,7 @@
     children,
     onchange,
   }: { children: Snippet<[Route, boolean]>; onchange: (route: Route) => void } = $props();
-  // The parent keys this entire scope by the paired library, including all retained pages and data.
+  // The parent keys this entire scope by the typed active profile, including all retained pages and data.
   const navigation = new Navigation(location.pathname + location.search);
   let current = $state.raw(navigation.current);
   let pages = $state.raw([...navigation.pages.values()]);

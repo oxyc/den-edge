@@ -10,7 +10,7 @@
 
 import { stillQueued } from './inbox';
 import type { Link } from './links.svelte';
-import type { LibrarySession } from './librarySession.svelte';
+import type { ProfileSession } from './profileSession.svelte';
 import { LIVE_MS } from './livePosition';
 
 /** How often den-edge's read-only "is it still queued" peek is asked while waiting (`POST /inbox/pending`). */
@@ -80,7 +80,7 @@ export class PlayOnTvTracker {
   private generation = 0;
 
   constructor(
-    private readonly session: Pick<LibrarySession, 'notify'>,
+    private readonly session: Pick<ProfileSession, 'notify'>,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
   ) {}

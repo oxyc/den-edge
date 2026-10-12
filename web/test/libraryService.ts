@@ -7,7 +7,7 @@ import {
 import { DownloadCoordinatorDriver } from '../src/lib/downloadCoordinatorDriver';
 import { LibraryLogAuthority } from '../src/lib/libraryLogAuthority';
 import { LibraryModel } from '../src/lib/libraryModel.svelte';
-import { LibrarySession } from '../src/lib/librarySession.svelte';
+import { legacyProfileSession } from '../src/lib/profileSession.svelte';
 import { LibraryServiceError } from '../src/lib/libraryServiceClient';
 import type { LibraryAuthorityEvent, LibrarySelectionScope } from '../src/lib/libraryServiceCore';
 import type {
@@ -292,7 +292,12 @@ export function fixtureLibraryService({
   });
   // RoutedLibrary owns this observation in production; fixtures render the model directly.
   void model.ready.catch(() => {});
-  const session = new LibrarySession(model, false, fixtureContentService());
+  const session = legacyProfileSession(
+    libraryKey ?? 'fixture',
+    false,
+    model,
+    fixtureContentService(),
+  );
   return {
     model,
     session,

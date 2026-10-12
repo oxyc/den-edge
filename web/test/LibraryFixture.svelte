@@ -15,7 +15,7 @@
     updateProgress,
   } from '../src/lib/actions';
   import { parseRoute, type Route } from '../src/lib/route';
-  import type { LibrarySession } from '../src/lib/librarySession.svelte';
+  import type { ProfileSession } from '../src/lib/profileSession.svelte';
   import { trackerEvent } from '../src/lib/trackerEvents';
   import { browserClock } from '../src/lib/clock';
   import { startRow } from '../src/lib/downloadRows';
@@ -214,7 +214,7 @@
     openGate,
   });
   publish = () => library.publish();
-  const session: LibrarySession = library.session;
+  const session: ProfileSession = library.session;
   if (!unnamedMany) {
     const named = Array.from({ length: many }, (_, index) => ({
       type: 'movie' as const,
