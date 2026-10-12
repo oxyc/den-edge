@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Visitor profile fixture</title>
+  </head>
+  <body>
+    <script type="module">
+      import { HouseholdSession } from '../src/lib/householdSession.svelte.ts';
+      import { visitorVisitId } from '../src/lib/profileIdentity.ts';
+      import { visitorProfileSession } from '../src/lib/visitorProfileSession.svelte.ts';
+
+      const household = new HouseholdSession(
+        { kind: 'profiles', libraryKey: 'fixture-household', configurationOnly: true },
+        null,
+        { query: async () => ({}), onStatus: () => () => {} },
+      );
+      const sessions = new Map();
+      window.denVisitorFixture = {
+        create(id) {
+          const session = visitorProfileSession(household, localStorage, visitorVisitId(id));
+          sessions.set(id, session);
+          return {
+            kind: session.identity.kind,
+            libraryKey: session.identity.libraryKey,
+            retainedScope: session.identity.retainedScope,
+            prefix: session.activity.prefix,
+          };
+        },
+        set(id, key, value) {
+          sessions.get(id).activity.set(key, value);
+        },
+        get(id, key) {
+          return sessions.get(id).activity.get(key);
+        },
+        close(id) {
+          sessions.get(id).close();
+        },
+        endVisit(id) {
+          sessions.get(id).endVisit();
+        },
+        outbound(id) {
+          const session = sessions.get(id);
+          return Promise.all([
+            session.outbound.write({
+              kind: 'progress.record',
+              title: { type: 'movie', id: 550 },
+              fraction: 0.5,
+              seconds: 60,
+              observedAt: 1,
+            }),
+            session.outbound.track({ schema: 1 }),
+          ]);
+        },
+      };
+    </script>
+  </body>
+</html>
