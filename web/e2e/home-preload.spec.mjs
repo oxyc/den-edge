@@ -73,9 +73,9 @@ test('a lead already painted before the billboard arrives still readies Home', a
     return image?.complete && image.naturalWidth > 0;
   });
   await page.evaluate(async () => {
-    const { LibrarySession } = await import('/src/lib/librarySession.svelte.ts');
-    const ready = LibrarySession.prototype.foregroundReady;
-    LibrarySession.prototype.foregroundReady = function () {
+    const { ProfileSession } = await import('/src/lib/profileSession.svelte.ts');
+    const ready = ProfileSession.prototype.foregroundReady;
+    ProfileSession.prototype.foregroundReady = function () {
       window.foregroundReadyAt ??= performance.now();
       return ready.call(this);
     };
