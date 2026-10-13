@@ -1,4 +1,8 @@
-import type { MigrationSnapshotRow } from './profileMigrationCore';
+import type {
+  MigrationSealedRow,
+  MigrationSnapshotRow,
+  ProfileMigrationEffect,
+} from './profileMigrationCore';
 
 const ID = /^[0-9a-f]{32}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -31,6 +35,8 @@ export interface OwnerSplitCandidateHandle {
 
 export interface OwnerSplitAuthenticatedCopy {
   readonly ownerHead: string;
+  /** Fully sealed household rewrite rows, including core-constructed `profiles`; safe to persist and stage. */
+  readonly householdWrites: readonly MigrationSealedRow[];
 }
 
 export type OwnerSplitPurpose = 'split' | 'restore';
@@ -89,6 +95,18 @@ export interface OwnerSplitProvider {
   abort(attempt: string): Promise<OwnerSplitAttemptLookup>;
   createBackup(attempt: string): Promise<{ readonly id: string; readonly digest: string }>;
   readBackup(attempt: string): Promise<OwnerSplitBackup>;
+  stage(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly writes: readonly MigrationSealedRow[];
+  }): Promise<string>;
+  commit(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly stagedDigest: string;
+  }): Promise<OwnerSplitAttemptLookup>;
   readHousehold(): Promise<OwnerSplitHouseholdObservation>;
   retireCandidate(input: {
     readonly attempt: string;
@@ -123,6 +141,15 @@ export interface OwnerSplitSecureWorker {
     readonly backup: VerifiedOwnerSplitBackup;
     readonly candidate: OwnerSplitCandidateHandle;
   }): Promise<OwnerSplitAuthenticatedCopy>;
+  verifyOwnerLibrary(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: VerifiedOwnerSplitBackup;
+    readonly candidate: OwnerSplitCandidateHandle;
+    readonly expectedHead: string;
+  }): Promise<void>;
+  /** Resolve opaque key refs and invoke den-core `profiles_migration_next`; no lifecycle policy lives in TS. */
+  planNext(input: OwnerSplitPlannerEvidence): Promise<ProfileMigrationEffect>;
   verifyCommittedWinner(input: {
     readonly directory: unknown;
     readonly attempt: string;
@@ -135,6 +162,13 @@ export interface OwnerSplitSecureWorker {
     readonly ownerLibraryId: string;
     readonly protectedLibraryIds: readonly string[];
   }>;
+  verifyDirectoryWinner(directory: unknown): Promise<{
+    readonly winnerAttempt: string;
+    readonly ownerHead: string;
+    readonly ownerLibraryId: string;
+    readonly protectedLibraryIds: readonly string[];
+  }>;
+  adoptWinner(directory: unknown): Promise<void>;
   forgetCandidate(keyRef: string): Promise<void>;
 }
 
@@ -153,19 +187,45 @@ export interface OwnerSplitDurableEvidence {
   readonly backup: { readonly id: string; readonly digest: string };
   readonly candidate: OwnerSplitCandidateHandle;
   readonly ownerHead: string;
+  readonly householdWrites: readonly MigrationSealedRow[];
 }
 
-/**
- * Future den-core #57 lifecycle seam. The current vendored core intentionally cannot implement this interface.
- * No fallback planner exists in TypeScript, keeping consent, recovery and crash decisions out of the client.
- */
-export interface OwnerSplitLifecyclePlanner {
-  decide(input: unknown): unknown;
+export interface OwnerSplitPlannerEvidence {
+  readonly state: OwnerSplitJournalState;
+  readonly explicitIntent: true;
+  readonly fence?: OwnerSplitFence;
+  readonly backupVerified: boolean;
+  readonly candidate?: OwnerSplitCandidateHandle;
+  readonly candidateAttempt?: string;
+  readonly ownerVerified: boolean;
+  readonly candidateHead?: string;
+  readonly winnerVerified: boolean;
+  readonly candidateRetired: boolean;
+  readonly commitAuthorized: boolean;
+  readonly cancelRequested: boolean;
+  readonly attemptAborted: boolean;
+  readonly attemptLookup?: OwnerSplitAttemptLookup['state'];
+  readonly householdFresh: boolean;
+  readonly recoveryIntent: boolean;
+  readonly household?: OwnerSplitHouseholdObservation;
 }
+
+export type OwnerSplitJournalState =
+  | 'idle'
+  | 'fenced'
+  | 'backed-up'
+  | 'owner-copied'
+  | 'awaiting-confirmation'
+  | 'ready-to-commit'
+  | 'commit-unknown'
+  | 'adopting'
+  | 'cleaning-loser'
+  | 'active'
+  | 'restore-required';
 
 export class OwnerSplitUnavailableError extends Error {
   constructor() {
-    super('Owner split lifecycle awaits the den-core #57 planner');
+    super('Owner split lifecycle is dormant');
     this.name = 'OwnerSplitUnavailableError';
   }
 }
@@ -192,15 +252,15 @@ export class DormantOwnerSplitEffectExecutor {
   capabilities(): {
     readonly enabled: boolean;
     readonly activatable: false;
-    readonly lifecyclePlanner: 'unavailable';
-    readonly householdStage: 'unavailable';
+    readonly lifecyclePlanner: 'den-core';
+    readonly householdStage: 'available';
     readonly rawKeyPersistence: false;
   } {
     return {
       enabled: this.#enabled,
       activatable: false,
-      lifecyclePlanner: 'unavailable',
-      householdStage: 'unavailable',
+      lifecyclePlanner: 'den-core',
+      householdStage: 'available',
       rawKeyPersistence: false,
     };
   }
@@ -219,6 +279,20 @@ export class DormantOwnerSplitEffectExecutor {
     checkedAttempt(attempt);
     checkedFence(fence);
     const created = checkedBackup(await this.#provider.createBackup(attempt));
+    const reread = await this.#provider.readBackup(attempt);
+    await this.#secure.verifyBackup({ attempt, fence, created, reread });
+    return { manifest: reread, [VERIFIED_BACKUP]: true };
+  }
+
+  async reverifyBackup(
+    attempt: string,
+    fence: OwnerSplitFence,
+    reference: { readonly id: string; readonly digest: string },
+  ): Promise<VerifiedOwnerSplitBackup> {
+    this.#requireEnabled();
+    checkedAttempt(attempt);
+    checkedFence(fence);
+    const created = checkedBackup(reference);
     const reread = await this.#provider.readBackup(attempt);
     await this.#secure.verifyBackup({ attempt, fence, created, reread });
     return { manifest: reread, [VERIFIED_BACKUP]: true };
@@ -245,6 +319,7 @@ export class DormantOwnerSplitEffectExecutor {
       candidate,
     });
     checkedDigest(copied.ownerHead);
+    checkedWrites(copied.householdWrites);
     return {
       attempt: input.attempt,
       householdId: backup.householdId,
@@ -252,7 +327,69 @@ export class DormantOwnerSplitEffectExecutor {
       backup: { id: backup.id, digest: backup.digest },
       candidate,
       ownerHead: copied.ownerHead,
+      householdWrites: copied.householdWrites,
     };
+  }
+
+  async verifyPreparedOwner(input: {
+    readonly evidence: OwnerSplitDurableEvidence;
+    readonly backup: VerifiedOwnerSplitBackup;
+  }): Promise<void> {
+    this.#requireEnabled();
+    checkedEvidence(input.evidence);
+    const manifest = checkedVerifiedBackup(input.backup);
+    if (
+      manifest.attempt !== input.evidence.attempt ||
+      !sameFence(manifest.source, input.evidence.fence)
+    )
+      throw new Error('Verified backup does not belong to prepared Owner');
+    await this.#secure.verifyOwnerLibrary({
+      attempt: input.evidence.attempt,
+      fence: input.evidence.fence,
+      backup: input.backup,
+      candidate: input.evidence.candidate,
+      expectedHead: input.evidence.ownerHead,
+    });
+  }
+
+  async stageHousehold(input: { readonly evidence: OwnerSplitDurableEvidence }): Promise<string> {
+    this.#requireEnabled();
+    checkedEvidence(input.evidence);
+    const stagedDigest = await this.#provider.stage({
+      attempt: input.evidence.attempt,
+      fence: input.evidence.fence,
+      backup: input.evidence.backup,
+      writes: input.evidence.householdWrites,
+    });
+    checkedDigest(stagedDigest);
+    return stagedDigest;
+  }
+
+  commitHousehold(input: {
+    readonly evidence: OwnerSplitDurableEvidence;
+    readonly stagedDigest: string;
+  }): Promise<OwnerSplitAttemptLookup> {
+    this.#requireEnabled();
+    checkedEvidence(input.evidence);
+    checkedDigest(input.stagedDigest);
+    return this.#provider.commit({
+      attempt: input.evidence.attempt,
+      fence: input.evidence.fence,
+      backup: input.evidence.backup,
+      stagedDigest: input.stagedDigest,
+    });
+  }
+
+  planNext(input: OwnerSplitPlannerEvidence): Promise<ProfileMigrationEffect> {
+    this.#requireEnabled();
+    return this.#secure.planNext(input);
+  }
+
+  async adoptWinner(household: OwnerSplitHouseholdObservation): Promise<void> {
+    this.#requireEnabled();
+    if (household.kind !== 'committed' || household.directory === undefined)
+      throw new Error('Winner adoption requires a fresh committed directory');
+    await this.#secure.adoptWinner(household.directory);
   }
 
   async lookupWithFreshAuthority(attempt: string): Promise<{
@@ -282,6 +419,23 @@ export class DormantOwnerSplitEffectExecutor {
     });
   }
 
+  async verifyWinner(household: OwnerSplitHouseholdObservation): Promise<{
+    readonly winnerAttempt: string;
+    readonly ownerHead: string;
+    readonly ownerLibraryId: string;
+    readonly protectedLibraryIds: readonly string[];
+  }> {
+    this.#requireEnabled();
+    if (household.kind !== 'committed' || household.directory === undefined)
+      throw new Error('Winner verification requires a fresh committed directory');
+    return this.#secure.verifyDirectoryWinner(household.directory);
+  }
+
+  readHousehold(): Promise<OwnerSplitHouseholdObservation> {
+    this.#requireEnabled();
+    return this.#provider.readHousehold();
+  }
+
   async abortWithFreshAuthority(attempt: string): Promise<{
     readonly lookup: OwnerSplitAttemptLookup;
     readonly household: OwnerSplitHouseholdObservation;
@@ -297,13 +451,17 @@ export class DormantOwnerSplitEffectExecutor {
   async retireLoser(
     evidence: OwnerSplitDurableEvidence,
     household: OwnerSplitHouseholdObservation,
+    lookup: OwnerSplitAttemptLookup,
   ): Promise<'retired' | 'absent'> {
     this.#requireEnabled();
     checkedEvidence(evidence);
+    if (lookup.attempt !== evidence.attempt)
+      throw new Error('Candidate cleanup attempt evidence does not match');
     if (
       household.kind === 'legacy' &&
       household.generation === evidence.fence.generation &&
-      household.head === evidence.fence.head
+      household.head === evidence.fence.head &&
+      lookup.state !== 'aborted'
     )
       throw new Error('Refusing candidate cleanup against the unchanged legacy source');
     const directoryProtectedIds =
@@ -324,6 +482,24 @@ export class DormantOwnerSplitEffectExecutor {
     return result;
   }
 
+  restore(input: {
+    readonly recoveryAttempt: string;
+    readonly originalAttempt: string;
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly household: OwnerSplitHouseholdObservation;
+  }): Promise<OwnerSplitAttemptLookup> {
+    this.#requireEnabled();
+    checkedAttempt(input.recoveryAttempt);
+    checkedAttempt(input.originalAttempt);
+    checkedBackup(input.backup);
+    return this.#provider.restore({
+      attempt: input.recoveryAttempt,
+      backup: { attempt: input.originalAttempt, ...input.backup },
+      observation: input.household,
+      plannerDecision: 'restore-backup',
+    });
+  }
+
   #requireEnabled(): void {
     if (!this.#enabled) throw new OwnerSplitUnavailableError();
   }
@@ -336,6 +512,7 @@ function checkedEvidence(value: OwnerSplitDurableEvidence): void {
   checkedBackup(value.backup);
   checkedCandidate(value.candidate);
   checkedDigest(value.ownerHead);
+  checkedWrites(value.householdWrites);
 }
 
 function checkedVerifiedBackup(value: VerifiedOwnerSplitBackup): OwnerSplitBackup {
@@ -386,4 +563,15 @@ function checkedCandidate(value: OwnerSplitCandidateHandle): void {
 
 function checkedDigest(value: string): void {
   if (!DIGEST.test(value)) throw new Error('Invalid migration digest');
+}
+
+function checkedWrites(value: readonly MigrationSealedRow[]): void {
+  const keys = new Set<string>();
+  if (!Array.isArray(value) || value.length === 0)
+    throw new Error('Invalid sealed household rewrite');
+  for (const row of value) {
+    if (!DIGEST.test(row.k) || typeof row.v !== 'string' || row.v.length === 0 || keys.has(row.k))
+      throw new Error('Invalid sealed household rewrite');
+    keys.add(row.k);
+  }
 }

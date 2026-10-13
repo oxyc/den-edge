@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import fixture from '../vendor/den-core/profiles-v1.json';
 import {
   profileMigrationAuthorizationFingerprint,
+  profileCapability,
   profileMigrationConstructDirectory,
   profileMigrationDigest,
   profileMigrationMaterialize,
+  profileMigrationNext,
   profileMigrationPartition,
   validMigrationSnapshot,
   type MigrationBackupManifest,
@@ -93,5 +95,35 @@ describe('profile migration den-core boundary', () => {
         expect(() => operation(vector.request.input), vector.name).toThrow(vector.error);
       else expect(operation(vector.request.input), vector.name).toEqual(vector.ok);
     }
+  });
+
+  it('uses den-core #57 for lifecycle, capability and exact seal-ready directory bytes', () => {
+    expect(profileMigrationNext({ state: 'idle', observed: 'legacy', explicitIntent: true })).toBe(
+      'acquire-fence',
+    );
+    expect(profileMigrationNext({ state: 'idle', observed: 'legacy', explicitIntent: false })).toBe(
+      'no-op',
+    );
+    expect(
+      profileCapability({
+        enrollment: 'prepare',
+        wireMin: 4,
+        directory: 'absent',
+        request: 'migration',
+        wire: 5,
+        authenticated: true,
+      }),
+    ).toEqual({ state: 'prepare', effect: 'migration-storage' });
+
+    const constructed = profileMigrationConstructDirectory(
+      fixture.migrationDirectoryConstructorInput as Record<string, unknown>,
+    );
+    const expected = fixture.migrationDirectoryConstructorCases[0]!.expect!;
+    // JavaScript preserves a parsed negative zero while RFC 8785 canonicalizes it to zero.
+    expect(constructed.directory).toEqual(JSON.parse(JSON.stringify(expected.directory)));
+    expect(constructed.jcs).toBe(expected.jcs);
+    expect(constructed.plaintext).toBe(expected.plaintext);
+    expect(constructed.jcs).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(constructed.plaintext).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 });

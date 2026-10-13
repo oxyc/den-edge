@@ -58,6 +58,7 @@ pub(crate) struct ProtectedLibraries {
 }
 
 pub(crate) struct RetirementRequest<'a> {
+    pub attempt: &'a str,
     pub source: &'a MigrationFence,
     pub authority: &'a RetirementAuthority,
     pub profiles_row: Option<&'a SealedProfilesRow>,
@@ -870,7 +871,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         candidate_token_hash: [u8; 32],
         request: RetirementRequest<'_>,
     ) -> Result<RetirementResult, MigrationError> {
-        let RetirementRequest { source, authority, profiles_row, protected, candidate_id } = request;
+        let RetirementRequest { attempt, source, authority, profiles_row, protected, candidate_id } = request;
+        valid_attempt(attempt)?;
         if household_id == candidate_id
             || !super::valid_hex_id(household_id)
             || !super::valid_hex_id(candidate_id)
@@ -918,6 +920,18 @@ impl<'a> ProfileMigrationStorage<'a> {
         if current_authority != *authority {
             return Err(MigrationError::FenceChanged);
         }
+        // The attempt is server-owned durable authority, not a client assertion. In particular, an unchanged
+        // legacy source is safe to clean up only after this exact split attempt reached the terminal Aborted state.
+        // An abort cannot race a commit here: abort establishes its state while holding the same household lock.
+        let cleanup_attempt =
+            self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
+        if cleanup_attempt.household_id != household_id
+            || cleanup_attempt.attempt != attempt
+            || cleanup_attempt.purpose != AttemptPurpose::Split
+            || cleanup_attempt.fence != *source
+        {
+            return Err(MigrationError::FenceChanged);
+        }
         match authority.kind {
             AuthorityKind::Committed => {
                 let expected = profiles_row.ok_or(MigrationError::Invalid("profiles row is absent"))?;
@@ -934,6 +948,7 @@ impl<'a> ProfileMigrationStorage<'a> {
                 if current.protocol.migration_generation == source.generation
                     && current.protocol.head == source.base
                     && authenticated_head(household_id, &current)? == source.authenticated_head
+                    && cleanup_attempt.state != AttemptState::Aborted
                 {
                     return Err(MigrationError::SameLegacyFence);
                 }
@@ -1590,6 +1605,7 @@ pub(crate) async fn handle(
                     token_hash,
                     candidate_hash,
                     RetirementRequest {
+                        attempt,
                         source: &input.source,
                         authority: &input.authority,
                         profiles_row: input.profiles_row.as_ref(),
@@ -1921,6 +1937,60 @@ mod tests {
             StatusCode::NOT_FOUND,
             "opening a migration must never auto-start a library"
         );
+    }
+
+    #[tokio::test]
+    async fn retirement_route_uses_its_own_durable_abort_to_clean_an_unchanged_source() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
+        write(&h, CANDIDATE, ACTIVITY, 0, "candidate", CANDIDATE_TOKEN).await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let opened = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string()),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        let body = json!({
+            "source": opened["fence"],
+            "authority": {
+                "generation": opened["fence"]["generation"],
+                "base": opened["fence"]["base"],
+                "head": opened["fence"]["head"],
+                "kind": "changed-legacy",
+            },
+            "profilesRow": null,
+            "protectedLibraryIds": [HOUSEHOLD],
+            "candidateLibraryId": CANDIDATE,
+        })
+        .to_string();
+        let attempt_path = format!("{base}/{ATTEMPT}");
+        let retire_path = format!("{attempt_path}/retire-candidate");
+        let retire = |body: String| {
+            h.send(
+                "POST",
+                &retire_path,
+                Some(body),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                    ("x-den-candidate-library-token", CANDIDATE_TOKEN),
+                ],
+            )
+        };
+
+        assert_eq!(retire(body.clone()).await.status(), StatusCode::CONFLICT);
+        let aborted =
+            body_json(migration_request(&h, "DELETE", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(aborted["state"], "aborted");
+        assert_eq!(body_json(retire(body).await).await["result"], "retired");
     }
 
     #[tokio::test]
@@ -2317,6 +2387,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_aborted_split_retires_its_candidate_against_the_unchanged_source_only() {
+        let h = Harness::new();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
+        write(&h, CANDIDATE, ACTIVITY, 0, "candidate", CANDIDATE_TOKEN).await;
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let source = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let unchanged = RetirementAuthority {
+            generation: source.generation,
+            base: source.base,
+            head: source.authenticated_head.clone(),
+            kind: AuthorityKind::ChangedLegacy,
+        };
+        let protected = ProtectedLibraries { ids: HashSet::from([HOUSEHOLD.to_owned()]) };
+        let request = || RetirementRequest {
+            attempt: ATTEMPT,
+            source: &source,
+            authority: &unchanged,
+            profiles_row: None,
+            protected: &protected,
+            candidate_id: CANDIDATE,
+        };
+
+        assert!(matches!(
+            storage
+                .conditionally_retire_candidate(
+                    HOUSEHOLD,
+                    token(HOUSEHOLD_TOKEN),
+                    token(CANDIDATE_TOKEN),
+                    request(),
+                )
+                .await,
+            Err(MigrationError::SameLegacyFence)
+        ));
+        let other = storage
+            .open_attempt(ATTEMPT2, AttemptPurpose::Split, HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
+        assert_eq!(other.state, AttemptState::Open);
+        assert_eq!(
+            storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap().state,
+            AttemptState::Aborted
+        );
+        assert!(matches!(
+            storage
+                .conditionally_retire_candidate(
+                    HOUSEHOLD,
+                    token(HOUSEHOLD_TOKEN),
+                    token(CANDIDATE_TOKEN),
+                    request(),
+                )
+                .await,
+            Err(MigrationError::SameLegacyFence)
+        ));
+        let aborted = storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap();
+        assert_eq!(aborted.state, AttemptState::Aborted);
+        assert_eq!(
+            storage
+                .conditionally_retire_candidate(
+                    HOUSEHOLD,
+                    token(HOUSEHOLD_TOKEN),
+                    token(CANDIDATE_TOKEN),
+                    request(),
+                )
+                .await
+                .unwrap(),
+            RetirementResult::Retired
+        );
+    }
+
+    #[tokio::test]
     async fn retirement_rechecks_the_directory_and_excludes_every_live_id_and_key() {
         let h = Harness::new();
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
@@ -2339,6 +2479,7 @@ mod tests {
                     token(HOUSEHOLD_TOKEN),
                     token(CANDIDATE_TOKEN),
                     RetirementRequest {
+                        attempt: ATTEMPT,
                         source: &source,
                         authority: &unchanged,
                         profiles_row: None,
@@ -2372,6 +2513,7 @@ mod tests {
                     household_hash,
                     candidate_hash,
                     RetirementRequest {
+                        attempt: ATTEMPT,
                         source: &source,
                         authority: &committed,
                         profiles_row: Some(&sealed),
@@ -2389,6 +2531,7 @@ mod tests {
                     household_hash,
                     candidate_hash,
                     RetirementRequest {
+                        attempt: ATTEMPT,
                         source: &source,
                         authority: &committed,
                         profiles_row: Some(&sealed),
@@ -2418,6 +2561,7 @@ mod tests {
                     household_hash,
                     candidate_hash,
                     RetirementRequest {
+                        attempt: ATTEMPT,
                         source: &source,
                         authority: &committed,
                         profiles_row: Some(&sealed),
