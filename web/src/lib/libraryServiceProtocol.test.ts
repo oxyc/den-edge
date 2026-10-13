@@ -82,6 +82,15 @@ describe('library service client protocol', () => {
 
     expect(decoded).toMatchObject({ ok: true, value: { selection: { kind: 'presence' } } });
     expect(JSON.stringify(decoded)).not.toContain('row');
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'subscribe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-profiles',
+        subscriptionId: 'household-profiles',
+        selection: { kind: 'profiles' },
+      }),
+    ).toMatchObject({ ok: true, value: { selection: { kind: 'profiles' } } });
   });
 
   it('accepts bounded semantic tasks and rejects row-shaped import payloads', () => {
@@ -613,6 +622,39 @@ describe('library service client protocol', () => {
 });
 
 describe('library service server protocol', () => {
+  it('accepts only bounded typed profile directory projections', () => {
+    const update = (profiles: unknown, owner: unknown = '00112233445566778899aabbccddeeff') =>
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'household-profiles',
+        version,
+        value: { kind: 'profiles', owner, profiles },
+      });
+    const profile = {
+      id: '00112233445566778899aabbccddeeff',
+      role: 'owner',
+      name: 'Cindy',
+      avatar: 'fox',
+      libraryKey,
+      keyVersion: 1,
+      policy: { maximumAge: null, unknownRatings: 'allow' },
+      deleted: false,
+    };
+
+    expect(update([profile])).toMatchObject({
+      ok: true,
+      value: { value: { kind: 'profiles', profiles: [{ name: 'Cindy' }] } },
+    });
+    expect(update([{ ...profile, libraryKey: 'not-a-key' }])).toMatchObject({ ok: false });
+    expect(
+      update([{ ...profile, policy: { maximumAge: 19, unknownRatings: 'block' } }]),
+    ).toMatchObject({
+      ok: false,
+    });
+    expect(update([profile], 'ffffffffffffffffffffffffffffffff')).toMatchObject({ ok: false });
+  });
+
   it('accepts a versioned ready reply and immutable subscription replacement', () => {
     expect(
       decodeLibraryServiceServerMessage({

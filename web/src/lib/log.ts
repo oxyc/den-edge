@@ -8,6 +8,7 @@ import { exclusive } from './exclusive';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
+import { validateProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import {
@@ -215,12 +216,18 @@ interface Snapshot {
   generation?: string;
   head: number;
   entries: [name: string, seq: number, row: Row][];
+  /** A null document records a newer, correctly named directory that failed validation (fail closed offline too). */
+  profileDirectory?: [seq: number, document: ProfileDirectoryDocument | null];
   memberRegistered?: boolean;
   /**
    * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
    * on den-edge remembers den-edge's answer in the browser runtime vault instead.
    */
   wireMin?: number;
+}
+
+interface InvalidProfileDirectory {
+  readonly invalidProfileDirectory: true;
 }
 
 /** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
@@ -279,6 +286,10 @@ export class LibraryLog {
   private entriesVersion = 0;
   /** Each row as last read or written, by the name its key is the HMAC of. */
   private readonly entries = new ChangedMap<string, Entry>(() => this.entriesVersion++);
+  /** Read-only household control state; it is never projected into an activity library. */
+  private profileDirectoryEntry?: { seq: number; document: ProfileDirectoryDocument };
+  /** Highest transport sequence seen for the control row, including an invalid replacement. */
+  private profileDirectorySeq = 0;
   /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
   private rowsCache?: { version: number; rows: Row[] };
   /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
@@ -740,6 +751,7 @@ export class LibraryLog {
       log.acknowledged.set(name, { seq, row });
       log.entries.set(name, { seq, row });
     });
+    log.restoreProfileDirectory(saved);
     return log;
   }
 
@@ -1333,13 +1345,17 @@ export class LibraryLog {
     const kept: Moving['kept'] = [];
     for (const { k, v } of read.entries) {
       const opened = await openEntry(this.keys, k, v);
-      if ('unknown' in opened || 'newerFraming' in opened) {
+      if ('unknown' in opened || 'newerFraming' in opened || 'invalidProfileDirectory' in opened) {
         console.warn(`den: the library row ${k} can't be moved by this build`);
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
         // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
         console.warn(`den: the unreadable library row ${k} stays behind (${opened.unreadable})`);
+        continue;
+      }
+      if ('profileDirectory' in opened) {
+        kept.push({ name: 'profiles', plaintext: (await openPlaintext(this.keys, k, v))! });
         continue;
       }
       const row = opened.row;
@@ -1512,7 +1528,8 @@ export class LibraryLog {
           if (!conflict || conflict.omitted || conflict.v === null) return false;
           // Another version is here: the next round merges onto it.
           const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
-          if (!theirs) return false;
+          if (!theirs || this.isProfileDirectory(theirs) || this.isInvalidProfileDirectory(theirs))
+            return false;
           this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
         }
       }
@@ -1672,6 +1689,7 @@ export class LibraryLog {
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       });
+      log.restoreProfileDirectory(saved);
       // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
       // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
       // follows at once, sends the work kept here.
@@ -1699,6 +1717,7 @@ export class LibraryLog {
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       });
+      log.restoreProfileDirectory(partial);
     }
     for (;;) {
       let res: Response;
@@ -1740,6 +1759,7 @@ export class LibraryLog {
         await log.registerMember();
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
+        log.resetProfileDirectory();
         if (log.wireMin >= WIRE)
           for (const [name, { row }] of log.entries) if (legacy(row)) log.entries.delete(name);
         log.acknowledged.clear();
@@ -1750,6 +1770,14 @@ export class LibraryLog {
         // Tampered with, sealed under another library's key, or newer than this build: not read as a row.
         const row = await log.readEntry(entry);
         if (!row) continue;
+        if (log.isInvalidProfileDirectory(row)) {
+          log.invalidateProfileDirectory(entry);
+          continue;
+        }
+        if (log.isProfileDirectory(row)) {
+          log.acceptProfileDirectory(entry, row);
+          continue;
+        }
         const previous = log.entries.get(rowName(row));
         log.entries.set(rowName(row), {
           seq: entry.seq,
@@ -1839,6 +1867,11 @@ export class LibraryLog {
     );
   }
 
+  /** The den-core-validated directory, when this library is already a profile-aware household. */
+  profileDirectory(): ProfileDirectoryDocument | null {
+    return this.profileDirectoryEntry?.document ?? null;
+  }
+
   private document(name: string): DocumentRow | undefined {
     const row = this.entries.get(name)?.row;
     return row && isDocument(row) ? row : undefined;
@@ -1848,7 +1881,10 @@ export class LibraryLog {
    * A stored row read as library v4 reads one (§4), keeping track of what can't be: an unreadable row by its `k`, to
    * be removed (`compact`); a newer framing or format, which stops this build writing. Null for a row not read.
    */
-  private async readEntry(entry: { k: string; v: string }): Promise<Row | null> {
+  private async readEntry(entry: {
+    k: string;
+    v: string;
+  }): Promise<Row | ProfileDirectoryDocument | InvalidProfileDirectory | null> {
     const opened = await openEntry(this.keys, entry.k, entry.v);
     this.unreadable.delete(entry.k);
     this.newerFraming.delete(entry.k);
@@ -1863,8 +1899,52 @@ export class LibraryLog {
       return null;
     }
     if ('unknown' in opened) return null;
+    if ('invalidProfileDirectory' in opened) return opened;
+    if ('profileDirectory' in opened) return opened.profileDirectory;
     this.noteFormat(opened.row);
     return believe(opened.row);
+  }
+
+  private isProfileDirectory(
+    value: Row | ProfileDirectoryDocument | InvalidProfileDirectory,
+  ): value is ProfileDirectoryDocument {
+    return 'kind' in value && value.kind === 'profiles';
+  }
+
+  private isInvalidProfileDirectory(
+    value: Row | ProfileDirectoryDocument | InvalidProfileDirectory,
+  ): value is InvalidProfileDirectory {
+    return 'invalidProfileDirectory' in value;
+  }
+
+  private acceptProfileDirectory(
+    entry: { seq: number },
+    document: ProfileDirectoryDocument,
+  ): boolean {
+    if (entry.seq <= this.profileDirectorySeq) return false;
+    this.profileDirectorySeq = entry.seq;
+    this.profileDirectoryEntry = { seq: entry.seq, document };
+    this.entriesVersion++;
+    this.dirty = true;
+    return true;
+  }
+
+  private invalidateProfileDirectory(entry: { seq: number }): boolean {
+    if (entry.seq <= this.profileDirectorySeq) return false;
+    this.profileDirectorySeq = entry.seq;
+    this.profileDirectoryEntry = undefined;
+    this.entriesVersion++;
+    this.dirty = true;
+    return true;
+  }
+
+  private resetProfileDirectory(): boolean {
+    if (this.profileDirectorySeq === 0 && !this.profileDirectoryEntry) return false;
+    this.profileDirectorySeq = 0;
+    this.profileDirectoryEntry = undefined;
+    this.entriesVersion++;
+    this.dirty = true;
+    return true;
   }
 
   /** A document of a newer format is read, never written, and says this build needs updating (§4). */
@@ -1908,8 +1988,9 @@ export class LibraryLog {
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
+            const lostDirectory = this.resetProfileDirectory();
             this.dirty = true;
-            if (staged) this.unreported = true;
+            if (staged || lostDirectory) this.unreported = true;
             return 'missing'; // A first offline action must be able to create the log on reconnect: `replay` sends it.
           }
           if (!res.ok) return null;
@@ -1933,6 +2014,7 @@ export class LibraryLog {
             await this.registerMember();
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
+            this.resetProfileDirectory();
             // Switched to v4 meanwhile: what was read of the v3 log is not drawn beside its documents.
             if (this.wireMin >= WIRE)
               for (const [name, { row }] of this.entries)
@@ -1949,6 +2031,14 @@ export class LibraryLog {
             // Unreadable rows are skipped individually, as on initial open.
             const row = await this.readEntry(entry);
             if (!row) continue;
+            if (this.isInvalidProfileDirectory(row)) {
+              if (this.invalidateProfileDirectory(entry)) this.unreported = true;
+              continue;
+            }
+            if (this.isProfileDirectory(row)) {
+              if (this.acceptProfileDirectory(entry, row)) this.unreported = true;
+              continue;
+            }
             const previous = this.entries.get(rowName(row));
             if (!previous || entry.seq > previous.seq) {
               this.entries.set(rowName(row), {
@@ -2042,7 +2132,7 @@ export class LibraryLog {
       this.wireMin >= WIRE && !this.offline ? [SNAPSHOT_V4, SNAPSHOT] : [SNAPSHOT, SNAPSHOT_V4];
     const save = async (kept: Snapshot) => {
       await this.local?.vault.remove(`${this.keys.id}:${other}`);
-      return kept.entries.length
+      return kept.entries.length || kept.profileDirectory
         ? this.keep(name, kept)
         : this.local?.vault.remove(`${this.keys.id}:${name}`);
     };
@@ -2079,8 +2169,32 @@ export class LibraryLog {
       head: this.head,
       memberRegistered: this.memberRegistered,
       entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
+      ...(this.profileDirectorySeq > 0
+        ? {
+            profileDirectory: [
+              this.profileDirectorySeq,
+              this.profileDirectoryEntry?.document ?? null,
+            ] as [number, ProfileDirectoryDocument | null],
+          }
+        : {}),
       ...(this.offline && this.wireMin > 2 ? { wireMin: this.wireMin } : {}),
     };
+  }
+
+  private restoreProfileDirectory(snapshot: Snapshot | undefined): void {
+    if (!snapshot?.profileDirectory) return;
+    try {
+      const [seq, document] = snapshot.profileDirectory;
+      if (!Number.isSafeInteger(seq) || seq < 0) return;
+      this.profileDirectorySeq = seq;
+      this.profileDirectoryEntry = document
+        ? { seq, document: validateProfileDirectory(document) }
+        : undefined;
+    } catch {
+      // A damaged local cache is not a directory. The encrypted household row remains authoritative.
+      this.profileDirectorySeq = 0;
+      this.profileDirectoryEntry = undefined;
+    }
   }
 
   /** The pages a first read has read so far (`PARTIAL`); a failure only costs the next visit those pages. */
@@ -2507,7 +2621,8 @@ export class LibraryLog {
           continue;
         }
         const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
-        if (!theirs) return false;
+        if (!theirs || this.isProfileDirectory(theirs) || this.isInvalidProfileDirectory(theirs))
+          return false;
         this.entries.set(write.name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
         this.dirty = true;
@@ -2575,7 +2690,12 @@ export class LibraryLog {
       }
       const conflict = batch.conflicts.find((entry) => entry.k === k);
       const theirs = conflict?.v ? await this.readEntry({ k, v: conflict.v }) : null;
-      if (conflict && theirs) {
+      if (
+        conflict &&
+        theirs &&
+        !this.isProfileDirectory(theirs) &&
+        !this.isInvalidProfileDirectory(theirs)
+      ) {
         this.entries.set(name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(name, { seq: conflict.seq, row: theirs });
         this.dirty = true;

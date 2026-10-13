@@ -706,6 +706,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'simkl':
     case 'recovery':
     case 'runtime':
+    case 'profiles':
     case 'downloads':
       return exact(value, ['kind']);
     case 'title':
@@ -1481,6 +1482,8 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         bool(value.assistant.write) &&
         bool(value.assistant.read)
       );
+    case 'profiles':
+      return profileDirectoryView(value);
     case 'connections':
       return connectionsView(value);
     case 'simkl':
@@ -1525,6 +1528,64 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
     default:
       return false;
   }
+}
+
+function profileDirectoryView(
+  value: unknown,
+): value is Extract<LibrarySelectionValue, { kind: 'profiles' }> {
+  if (
+    !record(value) ||
+    !exact(value, ['kind', 'owner', 'profiles']) ||
+    value.kind !== 'profiles' ||
+    !nullable(
+      value.owner,
+      (id): id is string => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id),
+    ) ||
+    !list(
+      value.profiles,
+      (
+        profile,
+      ): profile is Extract<LibrarySelectionValue, { kind: 'profiles' }>['profiles'][number] =>
+        record(profile) &&
+        exact(profile, [
+          'id',
+          'role',
+          'name',
+          'avatar',
+          'libraryKey',
+          'keyVersion',
+          'policy',
+          'deleted',
+        ]) &&
+        typeof profile.id === 'string' &&
+        /^[0-9a-f]{32}$/.test(profile.id) &&
+        (profile.role === 'owner' || profile.role === 'kid' || profile.role === 'adult') &&
+        boundedText(profile.name, 256) &&
+        optional(
+          profile.avatar,
+          (avatar): avatar is string =>
+            typeof avatar === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(avatar),
+        ) &&
+        libraryKey(profile.libraryKey) &&
+        integer(profile.keyVersion) &&
+        profile.keyVersion > 0 &&
+        record(profile.policy) &&
+        exact(profile.policy, ['maximumAge', 'unknownRatings']) &&
+        nullable(
+          profile.policy.maximumAge,
+          (age): age is number => integer(age) && age >= 0 && age <= 18,
+        ) &&
+        (profile.policy.unknownRatings === 'allow' || profile.policy.unknownRatings === 'block') &&
+        bool(profile.deleted),
+      LIBRARY_SERVICE_WIRE_LIMITS.profileEntries,
+    )
+  )
+    return false;
+  const profiles = value.profiles;
+  return (
+    unique(profiles, (profile) => profile.id) &&
+    (value.owner === null || profiles.some((profile) => profile.id === value.owner))
+  );
 }
 
 function queryResult(value: unknown): value is LibraryQueryResult {

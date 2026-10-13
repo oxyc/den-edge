@@ -25,6 +25,7 @@ import type {
   LibraryVersion,
   MediaServerKind,
   PresenceView,
+  ProfileDirectoryView,
   Reaction,
   RecoveryView,
   RetainedBillboard,
@@ -99,7 +100,8 @@ type LeasedView =
   | SimklView
   | RecoveryView
   | TitleView
-  | PresenceView;
+  | PresenceView
+  | ProfileDirectoryView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
@@ -117,6 +119,7 @@ export class LibraryModel {
   #connections?: SharedSelection<ConnectionsView>;
   #simkl?: SharedSelection<SimklView>;
   #recovery?: SharedSelection<RecoveryView>;
+  #profiles?: SharedSelection<ProfileDirectoryView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
@@ -215,6 +218,17 @@ export class LibraryModel {
       () => (this.#recovery = undefined),
     );
     return this.#recovery.acquire();
+  }
+
+  /** Household-only profile directory. It stays lazy until the profiles capability has opted this page in. */
+  profiles(): LibraryModelLease<ProfileDirectoryView> {
+    this.#assertOpen();
+    this.#profiles ??= new SharedSelection<ProfileDirectoryView>(
+      this.service,
+      { kind: 'profiles' },
+      () => (this.#profiles = undefined),
+    );
+    return this.#profiles.acquire();
   }
 
   get settings(): LibraryModelSnapshot<SettingsView> {
@@ -792,6 +806,8 @@ export class LibraryModel {
     this.#simkl = undefined;
     this.#recovery?.close();
     this.#recovery = undefined;
+    this.#profiles?.close();
+    this.#profiles = undefined;
     this.#settings = closedSnapshot(this.#settings);
     this.#runtime = closedSnapshot(this.#runtime);
     this.#connection = 'closed';
@@ -845,6 +861,7 @@ class SharedSelection<View extends LeasedView> {
       | { kind: 'connections' }
       | { kind: 'simkl' }
       | { kind: 'recovery' }
+      | { kind: 'profiles' }
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,
