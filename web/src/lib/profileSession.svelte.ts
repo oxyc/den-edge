@@ -16,6 +16,7 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import type { ProfileActivity } from './visitorActivity.svelte';
+import type { PreviewProfilePreferences } from './profilePreferences.svelte';
 
 const TOAST_MS = 6_000;
 
@@ -45,6 +46,8 @@ export class ProfileSession {
     readonly profileActivity: ProfileActivity | null = null,
     /** Numeric directory policy stays distinct from legacy presentation preferences. */
     readonly contentPolicy: ProfileContentPolicy | null = null,
+    /** Preview seam only; production profiles will replace this with their own encrypted settings writer. */
+    readonly preferences: PreviewProfilePreferences | null = null,
   ) {}
 
   get content(): ContentServiceClientPort {
@@ -134,6 +137,7 @@ export class ProfileSession {
     this.#closed = true;
     cancelLibraryTitleNaming(this);
     clearTimeout(this.#toastTimer);
+    this.preferences?.close();
     if (this.closeHousehold) this.household.close();
     else if (!this.household.ownsModel(this.model)) this.model?.close();
   }

@@ -10,6 +10,7 @@ import {
 import type { LibraryCommand } from './libraryServiceProtocol';
 import type { TrackerEvent } from './trackerEvents';
 import { VisitorActivityProjection } from './visitorActivity.svelte';
+import { PreviewProfilePreferences } from './profilePreferences.svelte';
 
 const VISITOR_STORAGE_PREFIX = 'den.profile.visitor.v1:';
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise mutex bookkeeping is not presentation state.
@@ -183,6 +184,7 @@ export class VisitorProfileSession extends ProfileSession {
     household: HouseholdSession,
     readonly activity: VisitorActivityNamespace,
     contentPolicy: ProfileContentPolicy | null = null,
+    preferences: PreviewProfilePreferences | null = null,
   ) {
     const projection = new VisitorActivityProjection(activity);
     super(
@@ -191,9 +193,10 @@ export class VisitorProfileSession extends ProfileSession {
       null,
       true,
       false,
-      isolatedProfilePolicy(household.policy),
+      preferences?.policy ?? isolatedProfilePolicy(household.policy),
       projection,
       contentPolicy,
+      preferences,
     );
     for (const title of projection.titles) this.rememberTitle(title);
   }
@@ -222,12 +225,20 @@ export function visitorProfileSession(
   household: HouseholdSession,
   storage: Storage = localStorage,
   visitId: VisitorVisitId = randomVisitorVisitId(),
-  options: { active?: () => boolean; lock?: VisitorActivityLock } = {},
+  options: {
+    active?: () => boolean;
+    lock?: VisitorActivityLock;
+    previewPreferences?: boolean;
+    events?: Pick<Window, 'addEventListener' | 'removeEventListener'> | null;
+  } = {},
   contentPolicy: ProfileContentPolicy | null = null,
 ): VisitorProfileSession {
-  return new VisitorProfileSession(
-    household,
-    new VisitorActivityNamespace(visitId, storage, options.active, options.lock),
-    contentPolicy,
-  );
+  const activity = new VisitorActivityNamespace(visitId, storage, options.active, options.lock);
+  const identity = visitorProfileIdentity(visitId);
+  const householdPolicy = isolatedProfilePolicy(household.policy);
+  const preferences =
+    options.previewPreferences && householdPolicy
+      ? new PreviewProfilePreferences(identity, householdPolicy, storage, options.events, activity)
+      : null;
+  return new VisitorProfileSession(household, activity, contentPolicy, preferences);
 }

@@ -223,6 +223,105 @@ test('preview directory switches sticky Kids and Visitor without a launch picker
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
 });
 
+test('preview Kid and Visitor Settings are personal while household administration stays unreachable', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.addInitScript(() => {
+    if (!localStorage.getItem('den.profile.active.v1'))
+      localStorage.setItem(
+        'den.profile.active.v1',
+        JSON.stringify({
+          version: 1,
+          mode: 'persistent',
+          profileId: '00000000000000000000000000000001',
+        }),
+      );
+  });
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?settings`);
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Playback', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Content', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'About', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Connections', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Up to age 12 · managed by Owner')).toBeVisible();
+  await page.getByRole('button', { name: 'Streaming household Finland' }).click();
+  await expect(page.getByText('Region: Finland · 1 shared service')).toBeVisible();
+  await expect(page.getByText('Parental PIN')).toHaveCount(0);
+
+  await page.getByLabel('Audio language').selectOption('da');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.denProfileModeFixture.snapshot().effectivePreferences.audioLanguage,
+      ),
+    )
+    .toBe('da');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(localStorage).find((key) =>
+          key.startsWith('den.profile.preferences.preview.v1:'),
+        ),
+      ),
+    )
+    .toBe('den.profile.preferences.preview.v1:00000000000000000000000000000002');
+  await page.reload();
+  await expect(page.getByLabel('Audio language')).toHaveValue('da');
+
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().preferencesIdentity))
+    .toMatchObject({ kind: 'visitor' });
+  await page.getByLabel('Subtitle language', { exact: true }).selectOption('es');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.denProfileModeFixture.snapshot().effectivePreferences.subtitleLanguage,
+      ),
+    )
+    .toBe('es');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+          .filter((key) => key !== null)
+          .filter((key) => key.startsWith('den.profile.visitor.v1:'))
+          .map((key) => localStorage.getItem(key)),
+      ),
+    )
+    .toContainEqual(expect.stringContaining('"subtitleLanguage":"es"'));
+  await page.reload();
+  await expect(page.getByLabel('Subtitle language', { exact: true })).toHaveValue('es');
+  await expect(page.getByLabel('Audio language')).toHaveValue('');
+
+  const visitorPrefix = await page.evaluate(() =>
+    Object.keys(localStorage).find((key) => key.startsWith('den.profile.visitor.v1:')),
+  );
+  expect(visitorPrefix).toBeTruthy();
+  await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(localStorage).filter((key) => key.startsWith('den.profile.visitor.v1:')),
+      ),
+    )
+    .toEqual([]);
+  await expect(page.getByLabel('Audio language')).toHaveValue('da');
+});
+
 test('an in-flight switch cannot finish behind a dismissed dialog', async ({ page }) => {
   await guardNetwork(page);
   await page.route('**/capabilities/profiles', (route) =>
