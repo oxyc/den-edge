@@ -38,6 +38,14 @@ const profileDirectory = (name = 'Cindy') => ({
   kind: 'profiles' as const,
   schema: 1 as const,
   owner: OWNER_ID,
+  migration: {
+    version: 1 as const,
+    attempt: '0123456789abcdef0123456789abcdef',
+    source: { generation: 7, head: 'a'.repeat(64) },
+    backup: { id: 'backup-7', digest: 'b'.repeat(64) },
+    ownerProfile: OWNER_ID,
+    ownerHead: 'c'.repeat(64),
+  },
   profiles: {
     [OWNER_ID]: {
       id: OWNER_ID,
@@ -225,6 +233,15 @@ describe('LibraryLog', () => {
     ))!;
     expect(misnamed.profileDirectory()).toBeNull();
     expect([...misnamed.unreadable.values()]).toContain('identity');
+  });
+
+  it('does not treat constructor-valid shape without migration evidence as a committed directory', async () => {
+    const { migration: _migration, ...uncommitted } = profileDirectory();
+    const server = await edge([], [await sealedDirectoryAs('profiles', uncommitted)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+
+    expect(log.profileDirectory()).toBeNull();
+    expect(log.unreadable.size).toBe(0);
   });
 
   it('deactivates a valid and cached directory when a newer profiles row is invalid', async () => {

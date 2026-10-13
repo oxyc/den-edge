@@ -8,6 +8,15 @@ export interface ProfileDirectoryDocument {
   readonly kind: 'profiles';
   readonly schema: 1;
   readonly owner: string;
+  /** Immutable proof that this directory was committed by the initial Owner split. */
+  readonly migration: {
+    readonly version: 1;
+    readonly attempt: string;
+    readonly source: { readonly generation: number; readonly head: string };
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly ownerProfile: string;
+    readonly ownerHead: string;
+  };
   readonly profiles: Record<
     string,
     {
@@ -36,6 +45,9 @@ export interface ProfileDirectoryDocument {
   readonly [extension: string]: unknown;
 }
 
-/** The shared den-core contract is the sole authority for directory shape and cross-entry invariants. */
-export const validateProfileDirectory = (document: unknown): ProfileDirectoryDocument =>
-  syncPolicy<ProfileDirectoryDocument>({ op: 'profiles_validate', document });
+/**
+ * Validate a directory read from committed household state. `stored` is deliberately fixed here: constructor
+ * input may omit migration evidence, but a row/cache/session may never interpret that input as a committed split.
+ */
+export const validateStoredProfileDirectory = (document: unknown): ProfileDirectoryDocument =>
+  syncPolicy<ProfileDirectoryDocument>({ op: 'profiles_validate', document, stored: true });

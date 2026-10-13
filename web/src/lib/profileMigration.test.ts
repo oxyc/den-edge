@@ -7,6 +7,7 @@ import type {
   ProfilesDirectory,
 } from './profileMigration';
 import { ProfileMigrationParticipant } from './profileMigration';
+import type { Stamp } from './wire';
 
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
 const OWNER = '00112233445566778899aabbccddeeff';
@@ -37,6 +38,7 @@ function memoryStorage(initial: Record<string, string> = {}): Storage {
 }
 
 function directory(ownerKey = WINNER_KEY, kidKey = KID_KEY): ProfilesDirectory {
+  const at = (time: number): Stamp => [time, 0, 'a1b2c3d4e5f60718'];
   return {
     format: 4,
     kind: 'profiles',
@@ -52,12 +54,20 @@ function directory(ownerKey = WINNER_KEY, kidKey = KID_KEY): ProfilesDirectory {
     },
     profiles: {
       [OWNER]: {
-        library: { value: { key: ownerKey } },
-        deleted: { value: false },
+        id: OWNER,
+        role: 'owner',
+        display: { value: { name: 'Owner' }, at: at(1) },
+        library: { value: { keyVersion: 1, key: ownerKey }, at: at(2) },
+        policy: { value: { maximumAge: null, unknownRatings: 'allow' }, at: at(3) },
+        deleted: { value: false, at: at(4) },
       },
       [KID]: {
-        library: { value: { key: kidKey } },
-        deleted: { value: false },
+        id: KID,
+        role: 'kid',
+        display: { value: { name: 'Kid' }, at: at(5) },
+        library: { value: { keyVersion: 1, key: kidKey }, at: at(6) },
+        policy: { value: { maximumAge: 12, unknownRatings: 'block' }, at: at(7) },
+        deleted: { value: false, at: at(8) },
       },
     },
   } as ProfilesDirectory;
@@ -145,13 +155,40 @@ function fixture(
     storage: options.storage ?? memoryStorage(),
     executor,
     planner,
-    validateDirectory: (value) => value,
     randomAttempt: () => ATTEMPT,
   });
   return { participant, executor, calls };
 }
 
 describe('ProfileMigrationParticipant', () => {
+  it('rejects constructor-valid shape without migration evidence before adoption planning', async () => {
+    const committed = directory();
+    const { migration: _migration, ...uncommitted } = committed;
+    const planner = vi.fn(() => 'verify-winner' as const);
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 2,
+        attempt: ATTEMPT,
+        explicitIntent: true,
+        state: 'adopting',
+        winnerLibraryKey: WINNER_KEY,
+      }),
+    });
+    const recovered = fixture({
+      storage,
+      observe: async () => ({
+        kind: 'committed',
+        directory: uncommitted as ProfilesDirectory,
+      }),
+      planner,
+    });
+
+    await expect(recovered.participant.resume()).rejects.toThrow('migration_missing');
+    expect(planner).not.toHaveBeenCalled();
+    expect(recovered.executor.verifyWinner).not.toHaveBeenCalled();
+    expect(recovered.executor.retireLosingCandidate).not.toHaveBeenCalled();
+  });
+
   it('blocks an otherwise executable version-1 journal instead of interpreting stale evidence', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({

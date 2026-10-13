@@ -8,7 +8,7 @@ import { exclusive } from './exclusive';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
-import { validateProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
+import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import {
@@ -2197,7 +2197,7 @@ export class LibraryLog {
       if (!Number.isSafeInteger(seq) || seq < 0) return;
       this.profileDirectorySeq = seq;
       this.profileDirectoryEntry = document
-        ? { seq, document: validateProfileDirectory(document) }
+        ? { seq, document: validateStoredProfileDirectory(document) }
         : undefined;
     } catch {
       // A damaged local cache is not a directory. The encrypted household row remains authoritative.

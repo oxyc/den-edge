@@ -3,7 +3,7 @@
 // checks it against den-spec's vectors, which the TV checks itself against too.
 
 import { hex, hkdf } from './crypto';
-import { validateProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
+import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import { syncPolicy } from './syncCore';
 
 const utf8 = new TextEncoder();
@@ -370,7 +370,7 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
     if (row.kind !== 'profiles') return { unknown: row };
     if (!(await named('profiles'))) return { unreadable: 'identity' };
     try {
-      return { profileDirectory: validateProfileDirectory(row) };
+      return { profileDirectory: validateStoredProfileDirectory(row) };
     } catch {
       // It opened under the correct logical name, so report an invalid control document distinctly. Treating a
       // contract violation as cryptographic damage would let ordinary unreadable-row compaction delete it, while

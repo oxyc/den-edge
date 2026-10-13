@@ -19,8 +19,9 @@ const BACKUP_DIGEST = 'b'.repeat(64);
 const OWNER_HEAD = 'c'.repeat(64);
 const PREPARED_DIGEST = 'd'.repeat(64);
 const calls: string[] = [];
-const directory = (ownerKey: string) =>
-  ({
+const directory = (ownerKey: string) => {
+  const at = (time: number): [number, number, string] => [time, 0, 'a1b2c3d4e5f60718'];
+  return {
     format: 4,
     kind: 'profiles',
     schema: 1,
@@ -35,11 +36,16 @@ const directory = (ownerKey: string) =>
     },
     profiles: {
       [OWNER]: {
-        library: { value: { key: ownerKey } },
-        deleted: { value: false },
+        id: OWNER,
+        role: 'owner',
+        display: { value: { name: 'Owner' }, at: at(1) },
+        library: { value: { keyVersion: 1, key: ownerKey }, at: at(2) },
+        policy: { value: { maximumAge: null, unknownRatings: 'allow' }, at: at(3) },
+        deleted: { value: false, at: at(4) },
       },
     },
-  }) as ProfilesDirectory;
+  } as ProfilesDirectory;
+};
 
 const executor: ProfileMigrationExecutor = {
   observe: async () => {
@@ -108,7 +114,6 @@ const participant = new ProfileMigrationParticipant({
   storage: localStorage,
   executor,
   planner,
-  validateDirectory: (value) => value,
   randomAttempt: () => ATTEMPT,
 });
 

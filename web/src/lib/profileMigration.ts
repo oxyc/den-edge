@@ -1,5 +1,6 @@
 import { ensureSyncPolicy } from './syncLoader';
 import { syncPolicy } from './syncCore';
+import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 
 const JOURNAL_PREFIX = 'den.profile.migration.v1:';
 const ID = /^[0-9a-f]{32}$/;
@@ -64,27 +65,8 @@ export interface PreparedHouseholdRewrite {
   readonly digest: string;
 }
 
-export type ProfilesDirectory = Record<string, unknown> & {
-  format: 4;
-  kind: 'profiles';
-  schema: 1;
-  owner: string;
-  migration: {
-    version: 1;
-    attempt: string;
-    source: ProfileMigrationFenceProjection;
-    backup: ProfileMigrationBackup;
-    ownerProfile: string;
-    ownerHead: string;
-  };
-  profiles: Record<
-    string,
-    {
-      library: { value: { key: string } };
-      deleted: { value: boolean };
-    }
-  >;
-};
+/** A directory accepted from committed household state, including immutable split evidence. */
+export type ProfilesDirectory = ProfileDirectoryDocument;
 
 export type HouseholdMigrationObservation =
   | { readonly kind: 'legacy'; readonly observedFence: ProfileMigrationFenceProjection }
@@ -178,7 +160,6 @@ export type ProfileMigrationDecision =
   | 'cleanup_targets_winner';
 
 type MigrationPlanner = (input: Record<string, unknown>) => ProfileMigrationDecision;
-type DirectoryValidator = (directory: ProfilesDirectory) => ProfilesDirectory;
 
 const randomAttempt = (): string =>
   [...crypto.getRandomValues(new Uint8Array(16))]
@@ -361,7 +342,6 @@ export class ProfileMigrationParticipant {
   readonly #storage: Storage;
   readonly #executor: ProfileMigrationExecutor;
   readonly #planner: MigrationPlanner;
-  readonly #validateDirectory: DirectoryValidator;
   readonly #ensurePolicy: () => Promise<void>;
   readonly #attempt: () => string;
   #invalidJournal = false;
@@ -372,7 +352,6 @@ export class ProfileMigrationParticipant {
     storage: Storage;
     executor: ProfileMigrationExecutor;
     planner?: MigrationPlanner;
-    validateDirectory?: DirectoryValidator;
     randomAttempt?: () => string;
   }) {
     this.#key = `${JOURNAL_PREFIX}${options.householdId}`;
@@ -382,11 +361,9 @@ export class ProfileMigrationParticipant {
     this.#planner =
       options.planner ??
       ((input) => syncPolicy<ProfileMigrationDecision>({ op: 'profiles_migration_next', input }));
-    this.#validateDirectory =
-      options.validateDirectory ??
-      ((directory) =>
-        syncPolicy<ProfilesDirectory>({ op: 'profiles_validate', document: directory }));
-    this.#ensurePolicy = options.planner ? async () => {} : ensureSyncPolicy;
+    // Committed observations always pass through den-core's stored-directory validator, even when a test/future
+    // caller supplies a planner. Loading policy is therefore part of every active journal resume.
+    this.#ensurePolicy = ensureSyncPolicy;
     this.#attempt = options.randomAttempt ?? randomAttempt;
     this.#read();
   }
@@ -610,7 +587,7 @@ export class ProfileMigrationParticipant {
   }
 
   #validated(directory: ProfilesDirectory): ProfilesDirectory {
-    return this.#validateDirectory(directory);
+    return validateStoredProfileDirectory(directory) as ProfilesDirectory;
   }
 
   #read(): ProfileMigrationJournal | null {
