@@ -734,6 +734,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
   if (value.kind === 'history.export') return exact(value, ['kind']);
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
+  if (value.kind === 'profile-migration.status') return exact(value, ['kind']);
   if (value.kind === 'recovery.seal')
     return (
       exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
@@ -1592,6 +1593,22 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify')
     return exact(value, ['kind', 'matches']) && bool(value.matches);
+  if (value.kind === 'profile-migration.status')
+    return (
+      exact(value, ['kind', 'phase', 'attempt']) &&
+      (value.phase === 'off' ||
+        value.phase === 'available' ||
+        value.phase === 'preparing' ||
+        value.phase === 'ready' ||
+        value.phase === 'reconciling' ||
+        value.phase === 'enabled' ||
+        value.phase === 'recovery-required') &&
+      optional(
+        value.attempt,
+        (attempt): attempt is string =>
+          typeof attempt === 'string' && /^[0-9a-f]{32}$/.test(attempt),
+      )
+    );
   if (value.kind === 'assistant.grants')
     return (
       exact(value, ['kind', 'grants', 'reads', 'plays']) &&

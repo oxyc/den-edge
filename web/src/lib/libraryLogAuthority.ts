@@ -85,6 +85,13 @@ import {
 } from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
+import {
+  workerStatusControl,
+  type OwnerSplitWorkerController,
+} from './profileOwnerSplitWorkerController';
+import { OwnerSplitWorkerSecureAdapter } from './profileOwnerSplitWorkerSecure';
+import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
+import { OwnerSplitWorkerTransport } from './profileOwnerSplitWorkerTransport';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
@@ -366,6 +373,7 @@ export class LibraryLogAuthority {
    */
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
+  #ownerSplit?: OwnerSplitWorkerController;
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
     this.#log = log;
@@ -638,6 +646,10 @@ export class LibraryLogAuthority {
           matches: !!stored && (await pinMatches(stored, query.pin)),
         };
       }
+      case 'profile-migration.status': {
+        const status = await this.#profileMigration().status();
+        return { kind: 'profile-migration.status', ...status };
+      }
       case 'relay.membership':
         return { kind: 'relay.membership', capability: await this.#log.relayMembership() };
       case 'key-reset.prepare':
@@ -721,6 +733,20 @@ export class LibraryLogAuthority {
       default:
         return query satisfies never;
     }
+  }
+
+  /** Built only for an explicit worker query. Merely opening or syncing a library never resumes a migration. */
+  #profileMigration(): OwnerSplitWorkerController {
+    if (this.#ownerSplit) return this.#ownerSplit;
+    const store = new OwnerSplitWorkerStore(this.#log);
+    const transport = new OwnerSplitWorkerTransport(this.#log, store);
+    const secure = new OwnerSplitWorkerSecureAdapter(this.#log, store);
+    this.#ownerSplit = workerStatusControl(
+      () => transport.capability(),
+      () => store.load(),
+      secure,
+    );
+    return this.#ownerSplit;
   }
 
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {

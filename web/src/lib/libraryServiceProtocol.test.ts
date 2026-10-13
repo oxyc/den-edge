@@ -9,6 +9,44 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
+  it('exposes only a bounded, non-secret profile migration status query', () => {
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-status',
+        query: { kind: 'profile-migration.status' },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-status',
+        version,
+        result: {
+          kind: 'profile-migration.status',
+          phase: 'ready',
+          attempt: '0123456789abcdef0123456789abcdef',
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-status',
+        version,
+        result: {
+          kind: 'profile-migration.status',
+          phase: 'ready',
+          attempt: '0123456789abcdef0123456789abcdef',
+          libraryKey,
+        },
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
   it('accepts a handshake and semantic, idempotent commands', () => {
     expect(
       decodeLibraryServiceClientMessage({
