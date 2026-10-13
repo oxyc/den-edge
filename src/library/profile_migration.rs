@@ -2116,6 +2116,7 @@ mod tests {
     async fn retirement_route_uses_its_own_durable_abort_to_clean_an_unchanged_source() {
         let mut h = Harness::new();
         Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
         write(&h, CANDIDATE, ACTIVITY, 0, "candidate", CANDIDATE_TOKEN).await;
         let base = format!("/lib/{HOUSEHOLD}/profile-migration");
