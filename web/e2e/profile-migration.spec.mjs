@@ -3,6 +3,10 @@ import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
 
 const FIXTURE = `${E2E_ORIGIN}/test/profile-migration.html`;
+const key = (fill) => Buffer.alloc(32, fill).toString('base64');
+const CANDIDATE_KEY = key(2);
+const SOURCE_HEAD = 'a'.repeat(64);
+const PREPARED_DIGEST = 'd'.repeat(64);
 
 const snapshot = (page) => page.evaluate(() => window.denProfileMigrationFixture.snapshot());
 
@@ -29,10 +33,10 @@ test('the browser session stays inert until Owner action and only prepares the f
       status: 'ready-to-commit',
       journal: {
         state: 'commit-unknown',
-        fence: { generation: 'fixture-generation', base: 9 },
+        fence: { generation: 7, head: SOURCE_HEAD, base: 9 },
         backup: { id: 'fixture-backup' },
-        candidate: { libraryKey: 'candidate-key' },
-        prepared: { digest: 'fixture-prepared-digest' },
+        candidate: { libraryKey: CANDIDATE_KEY },
+        prepared: { digest: PREPARED_DIGEST },
       },
     });
 
@@ -42,7 +46,7 @@ test('the browser session stays inert until Owner action and only prepares the f
     .toMatchObject({
       calls: [],
       status: 'recoverable',
-      journal: { state: 'commit-unknown', prepared: { digest: 'fixture-prepared-digest' } },
+      journal: { state: 'commit-unknown', prepared: { digest: PREPARED_DIGEST } },
     });
   await page.getByRole('button', { name: 'Advance one durable effect' }).click();
   await expect.poll(() => snapshot(page).then(({ status }) => status)).toBe('ready-to-commit');
