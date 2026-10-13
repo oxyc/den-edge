@@ -16,7 +16,7 @@ export interface OwnerSplitBackup {
   readonly source: OwnerSplitFence;
   readonly householdId: string;
   readonly attempt: string;
-  readonly wireMin: 4;
+  readonly wireMin: number;
   readonly authorization: { readonly tokenHash: string; readonly memberHash: string | null };
   readonly rows: readonly MigrationSnapshotRow[];
 }
@@ -33,29 +33,40 @@ export interface OwnerSplitAuthenticatedCopy {
   readonly ownerHead: string;
 }
 
+export type OwnerSplitPurpose = 'split' | 'restore';
+
+interface OwnerSplitAttemptBase {
+  readonly attempt: string;
+  readonly purpose: OwnerSplitPurpose;
+  readonly wireMin: number;
+  readonly fence: OwnerSplitFence;
+}
+
+export interface OwnerSplitOpenAttempt extends OwnerSplitAttemptBase {
+  readonly state: 'open';
+}
+
+interface OwnerSplitTerminal {
+  readonly attempt: string;
+  readonly generation: number;
+  readonly base: number;
+  readonly head: string;
+  readonly wireMin: number;
+  readonly backup: { readonly id: string; readonly digest: string };
+}
+
+export type OwnerSplitWinner =
+  | (OwnerSplitTerminal & { readonly state: 'committed'; readonly stagedDigest: string })
+  | (OwnerSplitTerminal & { readonly state: 'restored'; readonly stagedDigest: null });
+
 export type OwnerSplitAttemptLookup =
-  | {
-      readonly state: 'open' | 'aborted';
-      readonly attempt: string;
-      readonly fence: OwnerSplitFence;
-    }
-  | {
-      readonly state: 'committed' | 'restored';
-      readonly attempt: string;
-      readonly fence: OwnerSplitFence;
-      readonly head: string;
-      readonly stagedDigest: string;
-    }
-  | {
-      readonly state: 'superseded';
-      readonly attempt: string;
-      readonly fence: OwnerSplitFence;
-      readonly winner: {
-        readonly attempt: string;
-        readonly head: string;
-        readonly stagedDigest: string;
-      };
-    };
+  | OwnerSplitOpenAttempt
+  | (OwnerSplitAttemptBase & { readonly state: 'aborted' })
+  | (OwnerSplitAttemptBase &
+      OwnerSplitTerminal & { readonly state: 'committed'; readonly stagedDigest: string })
+  | (OwnerSplitAttemptBase &
+      OwnerSplitTerminal & { readonly state: 'restored'; readonly stagedDigest: null })
+  | (OwnerSplitAttemptBase & { readonly state: 'superseded'; readonly winner: OwnerSplitWinner });
 
 export interface OwnerSplitHouseholdObservation {
   readonly kind: 'legacy' | 'committed' | 'corrupt';
@@ -89,7 +100,6 @@ export interface OwnerSplitProvider {
   restore(input: {
     readonly attempt: string;
     readonly backup: Pick<OwnerSplitBackup, 'id' | 'digest'> & { readonly attempt: string };
-    readonly fence: OwnerSplitFence;
     readonly observation: OwnerSplitHouseholdObservation;
     readonly plannerDecision: string;
   }): Promise<OwnerSplitAttemptLookup>;
@@ -110,7 +120,7 @@ export interface OwnerSplitSecureWorker {
   copyAndAuthenticateOwner(input: {
     readonly attempt: string;
     readonly fence: OwnerSplitFence;
-    readonly backup: OwnerSplitBackup;
+    readonly backup: VerifiedOwnerSplitBackup;
     readonly candidate: OwnerSplitCandidateHandle;
   }): Promise<OwnerSplitAuthenticatedCopy>;
   verifyCommittedWinner(input: {
@@ -128,8 +138,17 @@ export interface OwnerSplitSecureWorker {
   forgetCandidate(keyRef: string): Promise<void>;
 }
 
+const VERIFIED_BACKUP: unique symbol = Symbol('verified-owner-split-backup');
+
+/** Nominal proof produced only after create + reread + worker verification completes. */
+export interface VerifiedOwnerSplitBackup {
+  readonly manifest: OwnerSplitBackup;
+  readonly [VERIFIED_BACKUP]: true;
+}
+
 export interface OwnerSplitDurableEvidence {
   readonly attempt: string;
+  readonly householdId: string;
   readonly fence: OwnerSplitFence;
   readonly backup: { readonly id: string; readonly digest: string };
   readonly candidate: OwnerSplitCandidateHandle;
@@ -192,33 +211,45 @@ export class DormantOwnerSplitEffectExecutor {
     return this.#provider.open(attempt, purpose);
   }
 
-  async createVerifiedBackup(attempt: string, fence: OwnerSplitFence): Promise<OwnerSplitBackup> {
+  async createVerifiedBackup(
+    attempt: string,
+    fence: OwnerSplitFence,
+  ): Promise<VerifiedOwnerSplitBackup> {
     this.#requireEnabled();
     checkedAttempt(attempt);
     checkedFence(fence);
     const created = checkedBackup(await this.#provider.createBackup(attempt));
     const reread = await this.#provider.readBackup(attempt);
     await this.#secure.verifyBackup({ attempt, fence, created, reread });
-    return reread;
+    return { manifest: reread, [VERIFIED_BACKUP]: true };
   }
 
   async copyAndAuthenticateCandidate(input: {
     readonly attempt: string;
     readonly fence: OwnerSplitFence;
-    readonly backup: OwnerSplitBackup;
+    readonly backup: VerifiedOwnerSplitBackup;
     readonly candidate?: OwnerSplitCandidateHandle;
   }): Promise<OwnerSplitDurableEvidence> {
     this.#requireEnabled();
     checkedAttempt(input.attempt);
     checkedFence(input.fence);
+    const backup = checkedVerifiedBackup(input.backup);
+    if (backup.attempt !== input.attempt || !sameFence(backup.source, input.fence))
+      throw new Error('Verified backup does not belong to this attempt and fence');
     const candidate = input.candidate ?? (await this.#secure.allocateCandidate(input.attempt));
     checkedCandidate(candidate);
-    const copied = await this.#secure.copyAndAuthenticateOwner({ ...input, candidate });
+    const copied = await this.#secure.copyAndAuthenticateOwner({
+      attempt: input.attempt,
+      fence: input.fence,
+      backup: input.backup,
+      candidate,
+    });
     checkedDigest(copied.ownerHead);
     return {
       attempt: input.attempt,
+      householdId: backup.householdId,
       fence: input.fence,
-      backup: { id: input.backup.id, digest: input.backup.digest },
+      backup: { id: backup.id, digest: backup.digest },
       candidate,
       ownerHead: copied.ownerHead,
     };
@@ -275,10 +306,11 @@ export class DormantOwnerSplitEffectExecutor {
       household.head === evidence.fence.head
     )
       throw new Error('Refusing candidate cleanup against the unchanged legacy source');
-    const protectedLibraryIds =
+    const directoryProtectedIds =
       household.kind === 'committed' && household.directory !== undefined
         ? (await this.#secure.inspectCommittedDirectory(household.directory)).protectedLibraryIds
         : [];
+    const protectedLibraryIds = [...new Set([evidence.householdId, ...directoryProtectedIds])];
     if (protectedLibraryIds.includes(evidence.candidate.libraryId))
       throw new Error('Refusing to retire a live profile library');
     const result = await this.#provider.retireCandidate({
@@ -299,10 +331,26 @@ export class DormantOwnerSplitEffectExecutor {
 
 function checkedEvidence(value: OwnerSplitDurableEvidence): void {
   checkedAttempt(value.attempt);
+  if (!ID.test(value.householdId)) throw new Error('Invalid household library identity');
   checkedFence(value.fence);
   checkedBackup(value.backup);
   checkedCandidate(value.candidate);
   checkedDigest(value.ownerHead);
+}
+
+function checkedVerifiedBackup(value: VerifiedOwnerSplitBackup): OwnerSplitBackup {
+  if (!value || value[VERIFIED_BACKUP] !== true)
+    throw new Error('Owner split backup has not been verified');
+  return value.manifest;
+}
+
+function sameFence(left: OwnerSplitFence, right: OwnerSplitFence): boolean {
+  return (
+    left.generation === right.generation &&
+    left.base === right.base &&
+    left.head === right.head &&
+    left.rewrite === right.rewrite
+  );
 }
 
 function checkedAttempt(value: string): void {

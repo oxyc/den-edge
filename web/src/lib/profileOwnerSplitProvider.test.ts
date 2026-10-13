@@ -17,7 +17,7 @@ describe('Owner split HTTP provider', () => {
       request: vi.fn(async (input) => {
         calls.push(input);
         if (input.path.endsWith('/retire-candidate')) return { result: 'retired' };
-        return { state: 'open', attempt: ATTEMPT, fence };
+        return { state: 'open', attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence };
       }),
       readHousehold: vi.fn(async () => ({
         kind: 'legacy' as const,
@@ -35,14 +35,20 @@ describe('Owner split HTTP provider', () => {
     await provider.retireCandidate({
       attempt: ATTEMPT,
       source: fence,
-      authority: { kind: 'legacy', generation: 8, base: 5, head: 'b'.repeat(64) },
+      authority: {
+        kind: 'legacy',
+        generation: 8,
+        base: 5,
+        head: 'b'.repeat(64),
+        profilesRow: { k: 'set:profiles', seq: 12, v: 'sealed', digest: 'c'.repeat(64) },
+      },
       candidate: {
         profileId: HOUSEHOLD,
         libraryId: CANDIDATE,
         keyRef: 'secure-slot',
         keyFingerprint: DIGEST,
       },
-      protectedLibraryIds: [HOUSEHOLD],
+      protectedLibraryIds: [],
     });
     expect(calls).toEqual([
       {
@@ -60,6 +66,142 @@ describe('Owner split HTTP provider', () => {
     ]);
     expect(JSON.stringify(calls)).not.toContain('libraryKey');
     expect(JSON.stringify(calls)).not.toContain('candidateToken');
+    const retirement = calls.at(-1) as { body: Record<string, unknown> };
+    expect(retirement.body.profilesRow).toEqual({ k: 'set:profiles', seq: 12, v: 'sealed' });
+    expect(retirement.body.profilesRow).not.toHaveProperty('digest');
+    expect(retirement.body.protectedLibraryIds).toEqual([HOUSEHOLD]);
+  });
+
+  it('validates terminal lookup shapes and carries the recovery wire minimum into restore', async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    const restoreFence = { ...fence, generation: 9, base: 6 };
+    const transport: OwnerSplitMigrationTransport = {
+      request: vi.fn(async (input) => {
+        calls.push(input);
+        if (!input.path.endsWith('/restore'))
+          return {
+            state: 'open',
+            attempt: ATTEMPT,
+            purpose: 'restore',
+            wireMin: 5,
+            fence: restoreFence,
+          };
+        return {
+          state: 'restored',
+          attempt: ATTEMPT,
+          purpose: 'restore',
+          wireMin: 5,
+          fence: restoreFence,
+          generation: 10,
+          base: 7,
+          head: 'd'.repeat(64),
+          backup: { id: 'backup-7', digest: DIGEST },
+          stagedDigest: null,
+        };
+      }),
+      readHousehold: vi.fn(),
+    };
+    const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
+    const recovery = await provider.open(ATTEMPT, 'restore');
+    expect(recovery).toMatchObject({ state: 'open', purpose: 'restore', wireMin: 5 });
+    if (recovery.state !== 'open' || recovery.purpose !== 'restore') throw new Error('bad fixture');
+    const restored = await provider.restore({
+      attempt: recovery.attempt,
+      backup: { attempt: 'f'.repeat(32), id: 'backup-7', digest: DIGEST },
+      observation: { kind: 'corrupt', generation: 9, base: 6, head: 'e'.repeat(64) },
+      plannerDecision: 'restore-backup',
+    });
+    expect(restored).toMatchObject({ state: 'restored', stagedDigest: null, wireMin: 5 });
+    expect(calls.at(-1)?.body).toMatchObject({ wireMin: 5, fence: restoreFence });
+    expect(calls.at(-2)).toEqual({
+      method: 'GET',
+      path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`,
+      body: undefined,
+    });
+  });
+
+  it.each([
+    ['missing purpose', { state: 'open', attempt: ATTEMPT, wireMin: 4, fence }],
+    ['missing wire minimum', { state: 'open', attempt: ATTEMPT, purpose: 'split', fence }],
+    [
+      'restored with a staged digest',
+      {
+        state: 'restored',
+        attempt: ATTEMPT,
+        purpose: 'restore',
+        wireMin: 5,
+        fence,
+        generation: 8,
+        base: 5,
+        head: DIGEST,
+        backup: { id: 'backup', digest: DIGEST },
+        stagedDigest: DIGEST,
+      },
+    ],
+    [
+      'committed without a staged digest',
+      {
+        state: 'committed',
+        attempt: ATTEMPT,
+        purpose: 'split',
+        wireMin: 5,
+        fence,
+        generation: 8,
+        base: 5,
+        head: DIGEST,
+        backup: { id: 'backup', digest: DIGEST },
+        stagedDigest: null,
+      },
+    ],
+    [
+      'superseded with incomplete winner evidence',
+      {
+        state: 'superseded',
+        attempt: ATTEMPT,
+        purpose: 'split',
+        wireMin: 4,
+        fence,
+        winner: { attempt: 'f'.repeat(32), state: 'committed', head: DIGEST },
+      },
+    ],
+  ])('rejects %s evidence instead of blindly casting it', async (_label, answer) => {
+    const transport: OwnerSplitMigrationTransport = {
+      request: vi.fn(async () => answer),
+      readHousehold: vi.fn(),
+    };
+    await expect(new HttpOwnerSplitProvider(HOUSEHOLD, transport).lookup(ATTEMPT)).rejects.toThrow(
+      'invalid migration attempt evidence',
+    );
+  });
+
+  it('accepts complete superseded evidence with a restored winner and null staged digest', async () => {
+    const winnerAttempt = 'f'.repeat(32);
+    const transport: OwnerSplitMigrationTransport = {
+      request: vi.fn(async () => ({
+        state: 'superseded',
+        attempt: ATTEMPT,
+        purpose: 'split',
+        wireMin: 4,
+        fence,
+        winner: {
+          attempt: winnerAttempt,
+          state: 'restored',
+          generation: 11,
+          base: 8,
+          head: 'd'.repeat(64),
+          wireMin: 5,
+          backup: { id: 'backup-8', digest: DIGEST },
+          stagedDigest: null,
+        },
+      })),
+      readHousehold: vi.fn(),
+    };
+    await expect(
+      new HttpOwnerSplitProvider(HOUSEHOLD, transport).lookup(ATTEMPT),
+    ).resolves.toMatchObject({
+      state: 'superseded',
+      winner: { attempt: winnerAttempt, state: 'restored', wireMin: 5, stagedDigest: null },
+    });
   });
 
   it('rejects noncanonical path identities before transport', async () => {

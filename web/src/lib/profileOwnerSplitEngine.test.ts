@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   DormantOwnerSplitEffectExecutor,
   OwnerSplitUnavailableError,
@@ -8,6 +8,7 @@ import {
   type OwnerSplitHouseholdObservation,
   type OwnerSplitProvider,
   type OwnerSplitSecureWorker,
+  type VerifiedOwnerSplitBackup,
 } from './profileOwnerSplitEngine';
 
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
@@ -35,6 +36,7 @@ const backup = {
 };
 const evidence: OwnerSplitDurableEvidence = {
   attempt: ATTEMPT,
+  householdId: PROFILE,
   fence,
   backup: { id: backup.id, digest: backup.digest },
   candidate,
@@ -48,11 +50,23 @@ function harness() {
     base: 5,
     head: 'f'.repeat(64),
   };
-  const opened: OwnerSplitAttemptLookup = { state: 'open', attempt: ATTEMPT, fence };
+  const opened: OwnerSplitAttemptLookup = {
+    state: 'open',
+    attempt: ATTEMPT,
+    purpose: 'split',
+    wireMin: 4,
+    fence,
+  };
   const provider: OwnerSplitProvider = {
     open: vi.fn(async () => opened),
     lookup: vi.fn(async () => opened),
-    abort: vi.fn(async () => ({ state: 'aborted' as const, attempt: ATTEMPT, fence })),
+    abort: vi.fn(async () => ({
+      state: 'aborted' as const,
+      attempt: ATTEMPT,
+      purpose: 'split' as const,
+      wireMin: 4,
+      fence,
+    })),
     createBackup: vi.fn(async () => ({ id: backup.id, digest: backup.digest })),
     readBackup: vi.fn(async () => backup),
     readHousehold: vi.fn(async () => observation),
@@ -113,7 +127,8 @@ describe('dormant Owner split effect executor', () => {
 
   it('creates, rereads and verifies a backup before returning it', async () => {
     const value = harness();
-    expect(await value.executor.createVerifiedBackup(ATTEMPT, fence)).toEqual(backup);
+    const verified = await value.executor.createVerifiedBackup(ATTEMPT, fence);
+    expect(verified.manifest).toEqual(backup);
     expect(value.provider.createBackup).toHaveBeenCalledOnce();
     expect(value.provider.readBackup).toHaveBeenCalledOnce();
     expect(value.secure.verifyBackup).toHaveBeenCalledWith({
@@ -126,15 +141,30 @@ describe('dormant Owner split effect executor', () => {
 
   it('keeps the candidate key opaque while copying and reading back Owner', async () => {
     const value = harness();
+    const verified = await value.executor.createVerifiedBackup(ATTEMPT, fence);
     const result = await value.executor.copyAndAuthenticateCandidate({
       attempt: ATTEMPT,
       fence,
-      backup,
+      backup: verified,
     });
     expect(result).toEqual(evidence);
     expect(JSON.stringify(result)).not.toContain('libraryKey');
     expect(JSON.stringify(result)).not.toContain('candidateToken');
     expect(value.secure.copyAndAuthenticateOwner).toHaveBeenCalledOnce();
+  });
+
+  it('requires nominal create+reread verification evidence before candidate copy', async () => {
+    expectTypeOf(backup).not.toMatchTypeOf<VerifiedOwnerSplitBackup>();
+    const value = harness();
+    await expect(
+      value.executor.copyAndAuthenticateCandidate({
+        attempt: ATTEMPT,
+        fence,
+        backup: backup as unknown as VerifiedOwnerSplitBackup,
+      }),
+    ).rejects.toThrow('has not been verified');
+    expect(value.secure.allocateCandidate).not.toHaveBeenCalled();
+    expect(value.secure.copyAndAuthenticateOwner).not.toHaveBeenCalled();
   });
 
   it('couples uncertain lookup and abort with a fresh household read', async () => {
@@ -145,6 +175,8 @@ describe('dormant Owner split effect executor', () => {
     vi.mocked(value.provider.lookup).mockResolvedValueOnce({
       state: 'aborted',
       attempt: ATTEMPT,
+      purpose: 'split',
+      wireMin: 4,
       fence,
     });
     await value.executor.abortWithFreshAuthority(ATTEMPT);
@@ -168,6 +200,19 @@ describe('dormant Owner split effect executor', () => {
       expect.objectContaining({ protectedLibraryIds: [PROFILE, '2'.repeat(32)] }),
     );
     expect(value.secure.forgetCandidate).toHaveBeenCalledWith(candidate.keyRef);
+  });
+
+  it('protects the household library during changed-legacy loser retirement', async () => {
+    const value = harness();
+    await value.executor.retireLoser(evidence, {
+      kind: 'legacy',
+      generation: fence.generation + 1,
+      base: fence.base + 1,
+      head: 'f'.repeat(64),
+    });
+    expect(value.provider.retireCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({ protectedLibraryIds: [PROFILE] }),
+    );
   });
 
   it('refuses retirement against unchanged legacy authority or a live candidate', async () => {
