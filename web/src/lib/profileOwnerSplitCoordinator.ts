@@ -2,6 +2,7 @@ import {
   profileCapability,
   profileMigrationDigest,
   type MigrationSealedRow,
+  type ProfileMigrationAuthorization,
   type ProfileCapabilityDecision,
 } from './profileMigrationCore';
 import {
@@ -20,15 +21,16 @@ const ID = /^[0-9a-f]{32}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
 export interface OwnerSplitJournal {
-  readonly version: 5;
+  readonly version: 6;
   readonly attempt: string;
   readonly explicitIntent: true;
+  readonly householdId: string;
   /** Exact pre-PIN source observed and durably bound before this split attempt may open. */
   readonly source: OwnerSplitSource;
+  readonly splitAuthorization: ProfileMigrationAuthorization;
   readonly state: OwnerSplitJournalState;
   readonly fence?: OwnerSplitFence;
   readonly backup?: { readonly id: string; readonly digest: string };
-  readonly householdId?: string;
   readonly candidate?: OwnerSplitCandidateHandle;
   readonly ownerHead?: string;
   readonly householdWrites?: readonly MigrationSealedRow[];
@@ -38,14 +40,6 @@ export interface OwnerSplitJournal {
   readonly candidateRetired?: boolean;
   readonly cancelRequested?: boolean;
   readonly attemptAborted?: boolean;
-}
-
-export interface OwnerSplitCommitAuthorization {
-  readonly version: 1;
-  readonly attempt: string;
-  readonly ownerHead: string;
-  readonly stagedDigest: string;
-  readonly commitAuthorized: true;
 }
 
 export interface OwnerSplitRecoveryIntent {
@@ -58,17 +52,12 @@ export interface OwnerSplitRecoveryIntent {
 }
 
 /**
- * Device-secure durable boundary. `authorizeCommit` atomically stores the ready journal and a distinct authorization
- * record; neither raw candidate keys nor provider tokens are accepted by this interface.
+ * Device-secure durable boundary. The exact core authorization is part of the sealed journal; neither raw candidate
+ * keys nor provider tokens are accepted by this interface.
  */
 export interface OwnerSplitJournalStore {
   load(): Promise<OwnerSplitJournal | null>;
   save(journal: OwnerSplitJournal): Promise<void>;
-  authorizeCommit(
-    journal: OwnerSplitJournal & { readonly state: 'ready-to-commit' },
-    authorization: OwnerSplitCommitAuthorization,
-  ): Promise<void>;
-  loadCommitAuthorization(attempt: string): Promise<OwnerSplitCommitAuthorization | null>;
   authorizeRecovery(intent: OwnerSplitRecoveryIntent): Promise<void>;
   loadRecoveryIntent(attempt: string): Promise<OwnerSplitRecoveryIntent | null>;
   clear(attempt: string): Promise<void>;
@@ -92,10 +81,17 @@ export type OwnerSplitRunResult =
 export class DormantOwnerSplitCoordinator {
   readonly #effects: DormantOwnerSplitEffectExecutor;
   readonly #store: OwnerSplitJournalStore;
+  readonly #household: string;
 
-  constructor(effects: DormantOwnerSplitEffectExecutor, store: OwnerSplitJournalStore) {
+  constructor(
+    effects: DormantOwnerSplitEffectExecutor,
+    store: OwnerSplitJournalStore,
+    householdId: string,
+  ) {
+    if (!ID.test(householdId)) throw new Error('Invalid household library identity');
     this.#effects = effects;
     this.#store = store;
+    this.#household = householdId;
   }
 
   capability(input: {
@@ -109,45 +105,35 @@ export class DormantOwnerSplitCoordinator {
     return profileCapability(input);
   }
 
-  /** Explicit Owner intent prepares only. It always stops before final authorization, even after a reload. */
-  async prepare(attempt: string): Promise<OwnerSplitRunResult> {
+  observeSource(): Promise<OwnerSplitSource> {
+    return this.#effects.observeSource();
+  }
+
+  /** A PIN-verified action binds the already observed source and authorizes this exact attempt end to end. */
+  async prepare(attempt: string, source: OwnerSplitSource): Promise<OwnerSplitRunResult> {
     checkedAttempt(attempt);
     if ((await this.#store.load()) !== null)
       throw new Error('Owner split already has a durable journal');
-    const source = await this.#effects.observeSource();
-    await this.#store.save({
-      version: 5,
+    const householdId = this.#householdId();
+    const splitAuthorization = await this.#effects.prepareAuthorization({
       attempt,
-      explicitIntent: true,
-      state: 'idle',
+      householdId,
       source,
     });
-    return this.#drive(false);
+    await this.#store.save({
+      version: 6,
+      attempt,
+      explicitIntent: true,
+      householdId,
+      state: 'idle',
+      source,
+      splitAuthorization,
+    });
+    return this.#drive();
   }
 
   async resume(): Promise<OwnerSplitRunResult> {
-    return this.#drive(true);
-  }
-
-  /** A separate explicit action. The store must atomically persist the ready state and bound authorization record. */
-  async authorizeCommit(attempt: string): Promise<void> {
-    const journal = checkedOwnerSplitJournal(await this.#store.load());
-    if (
-      journal === null ||
-      journal.attempt !== attempt ||
-      journal.state !== 'awaiting-confirmation' ||
-      journal.ownerHead === undefined ||
-      journal.stagedDigest === undefined
-    )
-      throw new Error('Owner split is not awaiting final confirmation');
-    const ready = { ...journal, state: 'ready-to-commit' as const };
-    await this.#store.authorizeCommit(ready, {
-      version: 1,
-      attempt,
-      ownerHead: journal.ownerHead,
-      stagedDigest: journal.stagedDigest,
-      commitAuthorized: true,
-    });
+    return this.#drive();
   }
 
   async cancel(attempt: string): Promise<OwnerSplitRunResult> {
@@ -155,15 +141,18 @@ export class DormantOwnerSplitCoordinator {
     if (journal === null || journal.attempt !== attempt)
       throw new Error('Owner split attempt is absent');
     await this.#store.save({ ...journal, cancelRequested: true });
-    return this.#drive(true);
+    return this.#drive();
   }
 
-  async authorizeRecovery(attempt: string, recoveryAttempt: string): Promise<OwnerSplitRunResult> {
+  async authorizeRecovery(
+    attempt: string,
+    recoveryAttempt: string,
+    source: OwnerSplitSource,
+  ): Promise<OwnerSplitRunResult> {
     checkedAttempt(recoveryAttempt);
     const journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null || journal.attempt !== attempt || journal.state !== 'restore-required')
       throw new Error('Owner split recovery is not required');
-    const source = await this.#effects.observeSource();
     await this.#store.authorizeRecovery({
       version: 2,
       attempt,
@@ -171,10 +160,10 @@ export class DormantOwnerSplitCoordinator {
       recoveryIntent: true,
       source,
     });
-    return this.#drive(true);
+    return this.#drive();
   }
 
-  async #drive(allowCommit: boolean): Promise<OwnerSplitRunResult> {
+  async #drive(): Promise<OwnerSplitRunResult> {
     let journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null) return { kind: 'inactive' };
     let lookup: OwnerSplitAttemptLookup | undefined;
@@ -183,7 +172,6 @@ export class DormantOwnerSplitCoordinator {
     let verifiedBackup: VerifiedOwnerSplitBackup | undefined;
 
     for (let step = 0; step < 32; step += 1) {
-      const authorization = await this.#checkedAuthorization(journal);
       const recovery = await this.#checkedRecoveryIntent(journal);
       if (journal.backup && journal.fence && verifiedBackup === undefined)
         verifiedBackup = await this.#effects.reverifyBackup(
@@ -207,7 +195,8 @@ export class DormantOwnerSplitCoordinator {
         candidateHead: journal.ownerVerified ? journal.ownerHead : undefined,
         winnerVerified: journal.winnerVerified === true,
         candidateRetired: journal.candidateRetired === true,
-        commitAuthorized: allowCommit && authorization !== null,
+        commitAuthorized:
+          journal.state !== 'restore-required' && journal.splitAuthorization.commitBinding !== null,
         cancelRequested: journal.cancelRequested === true,
         attemptAborted: journal.attemptAborted === true,
         attemptLookup: lookup?.state,
@@ -215,11 +204,25 @@ export class DormantOwnerSplitCoordinator {
         recoveryIntent: recovery !== null,
         source: journal.state === 'idle' ? journal.source : undefined,
         household,
+        attempt: journal.attempt,
+        householdId: journal.householdId,
+        backupDigest: journal.backup?.digest,
+        stagedDigest: journal.stagedDigest,
+        splitAuthorization: journal.splitAuthorization,
       });
 
       if (effect === 'no-op') return { kind: 'inactive' };
       if (effect === 'acquire-fence') {
-        const opened = await this.#effects.open(journal.attempt, 'split', journal.source);
+        let opened: OwnerSplitAttemptLookup;
+        try {
+          opened = await this.#effects.open(journal.attempt, 'split', journal.source);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('migration_source_changed')) {
+            await this.#store.clear(journal.attempt);
+            return { kind: 'restart-required' };
+          }
+          throw error;
+        }
         if (opened.state !== 'open' || opened.purpose !== 'split')
           throw new Error('Split attempt did not open');
         journal = await this.#save({ ...journal, state: 'fenced', fence: opened.fence });
@@ -272,16 +275,24 @@ export class DormantOwnerSplitCoordinator {
         });
         continue;
       }
-      if (effect === 'await-final-confirmation')
-        return {
-          kind: 'awaiting-confirmation',
-          attempt: journal.attempt,
-          ownerHead: requiredDigest(journal.ownerHead, 'Owner head'),
-        };
+      if (effect === 'record-commit-binding') {
+        const evidence = durableEvidence(journal);
+        const stagedDigest = requiredDigest(journal.stagedDigest, 'staged digest');
+        const splitAuthorization = await this.#effects.bindAuthorization({
+          authorization: journal.splitAuthorization,
+          evidence,
+          stagedDigest,
+        });
+        journal = await this.#save({
+          ...journal,
+          state: 'ready-to-commit',
+          splitAuthorization,
+        });
+        continue;
+      }
       if (effect === 'commit-fenced-household' || effect === 'retry-bound-commit') {
-        if (!allowCommit || authorization === null)
-          throw new Error('Commit effect lacks separately durable authorization');
-        checkedAuthorizationBinding(journal, authorization);
+        if (journal.splitAuthorization.commitBinding === null)
+          throw new Error('Commit effect lacks exact-attempt authorization');
         if (effect === 'commit-fenced-household') {
           journal = await this.#save({ ...journal, state: 'commit-unknown' });
         }
@@ -341,6 +352,11 @@ export class DormantOwnerSplitCoordinator {
         await this.#store.clear(journal.attempt);
         return { kind: 'restart-required' };
       }
+      if (effect === 'invalidate-authorization') {
+        if (lookup?.state === 'open') await this.#effects.abortWithFreshAuthority(journal.attempt);
+        await this.#store.clear(journal.attempt);
+        return { kind: 'restart-required' };
+      }
       if (effect === 'recovery-blocked')
         return { kind: 'recovery-blocked', attempt: journal.attempt };
       if (effect === 'open-recovery-attempt') {
@@ -370,22 +386,6 @@ export class DormantOwnerSplitCoordinator {
     throw new Error('Owner split exceeded its bounded effect budget');
   }
 
-  async #checkedAuthorization(
-    journal: OwnerSplitJournal,
-  ): Promise<OwnerSplitCommitAuthorization | null> {
-    const value = await this.#store.loadCommitAuthorization(journal.attempt);
-    if (value === null) return null;
-    if (
-      value.version !== 1 ||
-      value.commitAuthorized !== true ||
-      value.attempt !== journal.attempt ||
-      !DIGEST.test(value.ownerHead) ||
-      !DIGEST.test(value.stagedDigest)
-    )
-      throw new Error('Invalid durable commit authorization');
-    return value;
-  }
-
   async #checkedRecoveryIntent(
     journal: OwnerSplitJournal,
   ): Promise<OwnerSplitRecoveryIntent | null> {
@@ -408,6 +408,10 @@ export class DormantOwnerSplitCoordinator {
     await this.#store.save(checked);
     return checked;
   }
+
+  #householdId(): string {
+    return this.#household;
+  }
 }
 
 /** Strict durable boundary shared by the Worker store and coordinator. */
@@ -416,9 +420,10 @@ export function checkedOwnerSplitJournal(
 ): OwnerSplitJournal | null {
   if (value === null) return null;
   if (
-    value.version !== 5 ||
+    value.version !== 6 ||
     value.explicitIntent !== true ||
     !ID.test(value.attempt) ||
+    !ID.test(value.householdId) ||
     ![
       'idle',
       'fenced',
@@ -435,13 +440,12 @@ export function checkedOwnerSplitJournal(
   )
     throw new Error('Invalid Owner split journal');
   checkedSource(value.source, 'Invalid Owner split journal');
+  checkedSplitAuthorization(value.splitAuthorization, value);
   for (const digest of [value.backup?.digest, value.ownerHead, value.stagedDigest])
     if (digest !== undefined && !DIGEST.test(digest))
       throw new Error('Invalid Owner split journal');
   if (value.fence !== undefined) checkedJournalFence(value.fence);
   if (value.backup !== undefined && value.backup.id.length === 0)
-    throw new Error('Invalid Owner split journal');
-  if (value.householdId !== undefined && !ID.test(value.householdId))
     throw new Error('Invalid Owner split journal');
   if (value.candidate !== undefined) checkedJournalCandidate(value.candidate);
   if (value.householdWrites !== undefined) checkedJournalWrites(value.householdWrites);
@@ -540,16 +544,41 @@ function checkedJournalWrites(value: readonly MigrationSealedRow[]): void {
   }
 }
 
-function checkedAuthorizationBinding(
-  journal: OwnerSplitJournal,
-  authorization: OwnerSplitCommitAuthorization,
-): void {
+function checkedSplitAuthorization(
+  authorization: unknown,
+  journal: Pick<OwnerSplitJournal, 'attempt' | 'householdId' | 'source'>,
+): asserts authorization is ProfileMigrationAuthorization {
+  if (typeof authorization !== 'object' || authorization === null || Array.isArray(authorization))
+    throw new Error('Invalid Owner split journal');
+  const record = authorization as Record<string, unknown>;
   if (
-    authorization.attempt !== journal.attempt ||
-    authorization.ownerHead !== journal.ownerHead ||
-    authorization.stagedDigest !== journal.stagedDigest
+    Object.keys(record).some((key) => !['intent', 'intentDigest', 'commitBinding'].includes(key)) ||
+    typeof record.intent !== 'object' ||
+    record.intent === null ||
+    Array.isArray(record.intent)
   )
-    throw new Error('Commit authorization is not bound to prepared evidence');
+    throw new Error('Invalid Owner split journal');
+  const intent = record.intent as Record<string, unknown>;
+  if (
+    Object.keys(intent).some(
+      (key) => !['version', 'action', 'attempt', 'householdId', 'source'].includes(key),
+    ) ||
+    intent.version !== 1 ||
+    intent.action !== 'enable-profiles' ||
+    intent.attempt !== journal.attempt ||
+    intent.householdId !== journal.householdId
+  )
+    throw new Error('Invalid Owner split journal');
+  checkedSource(intent.source, 'Invalid Owner split journal');
+  if (
+    intent.source.generation !== journal.source.generation ||
+    intent.source.head !== journal.source.head ||
+    typeof record.intentDigest !== 'string' ||
+    !DIGEST.test(record.intentDigest) ||
+    (record.commitBinding !== null &&
+      (typeof record.commitBinding !== 'string' || !DIGEST.test(record.commitBinding)))
+  )
+    throw new Error('Invalid Owner split journal');
 }
 
 function durableEvidence(journal: OwnerSplitJournal): OwnerSplitDurableEvidence {

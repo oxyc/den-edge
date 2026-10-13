@@ -92,6 +92,9 @@ import {
 import { OwnerSplitWorkerSecureAdapter } from './profileOwnerSplitWorkerSecure';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import { OwnerSplitWorkerTransport } from './profileOwnerSplitWorkerTransport';
+import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
+import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
+import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
@@ -643,12 +646,27 @@ export class LibraryLogAuthority {
         const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
         return {
           kind: 'parental-pin.verify',
-          matches: !!stored && (await pinMatches(stored, query.pin)),
+          matches:
+            this.#parentalPinDelivery() !== 'queued' &&
+            !!stored &&
+            (await pinMatches(stored, query.pin)),
         };
       }
       case 'profile-migration.status': {
         const status = await this.#profileMigration().status();
         return { kind: 'profile-migration.status', ...status };
+      }
+      case 'profile-migration.observe': {
+        const observation = await this.#profileMigration().observe();
+        return { kind: 'profile-migration.observe', ...observation };
+      }
+      case 'profile-migration.observe-recovery': {
+        const observation = await this.#profileMigration().observeRecovery(query.attempt);
+        return {
+          kind: 'profile-migration.observe-recovery',
+          attempt: query.attempt,
+          ...observation,
+        };
       }
       case 'relay.membership':
         return { kind: 'relay.membership', capability: await this.#log.relayMembership() };
@@ -741,9 +759,16 @@ export class LibraryLogAuthority {
     const store = new OwnerSplitWorkerStore(this.#log);
     const transport = new OwnerSplitWorkerTransport(this.#log, store);
     const secure = new OwnerSplitWorkerSecureAdapter(this.#log, store);
+    const effects = new DormantOwnerSplitEffectExecutor({
+      provider: new HttpOwnerSplitProvider(this.#log.libraryId, transport),
+      secureWorker: secure,
+      enabled: true,
+    });
+    const coordinator = new DormantOwnerSplitCoordinator(effects, store, this.#log.libraryId);
     this.#ownerSplit = workerStatusControl(
       () => transport.capability(),
       () => store.load(),
+      coordinator,
       secure,
     );
     return this.#ownerSplit;
@@ -754,6 +779,12 @@ export class LibraryLogAuthority {
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
     if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
     if (
+      task.kind === 'profile-migration.enable' ||
+      task.kind === 'profile-migration.cancel' ||
+      task.kind === 'profile-migration.recover'
+    )
+      return this.#profileMigrationTask(task);
+    if (
       ((task.kind === 'key-reset.move' ||
         task.kind === 'key-reset.settle' ||
         task.kind === 'key-reset.adopt') &&
@@ -762,6 +793,38 @@ export class LibraryLogAuthority {
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
     return this.#administration().task(task, operationId);
+  }
+
+  async #profileMigrationTask(
+    task: Extract<LibraryTask, { kind: `profile-migration.${string}` }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const control = this.#profileMigration();
+    const result =
+      task.kind === 'profile-migration.enable'
+        ? await control.enable(task.attempt, task.source)
+        : task.kind === 'profile-migration.cancel'
+          ? await control.cancel(task.attempt)
+          : await control.recover(task.attempt, task.recoveryAttempt, task.source);
+    const outcome =
+      result.kind === 'active' || result.kind === 'restored'
+        ? 'enabled'
+        : result.kind === 'recovery-blocked'
+          ? 'recovery-required'
+          : result.kind === 'restart-required'
+            ? 'source-changed'
+            : result.kind === 'cancelled'
+              ? 'cancelled'
+              : result.kind === 'commit-unknown'
+                ? 'reconciling'
+                : 'preparing';
+    return {
+      result: {
+        kind: task.kind,
+        outcome,
+        ...('attempt' in result ? { attempt: result.attempt } : {}),
+      },
+      affected: [],
+    };
   }
 
   /**
@@ -1182,6 +1245,7 @@ export class LibraryLogAuthority {
       kind: 'connections',
       apiKeys,
       parentalPinConfigured: !!readApiKey(keys, 'parentalPIN'),
+      parentalPinDelivery: this.#parentalPinDelivery(),
       remoteAccessConfigured:
         !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
       plugins,
@@ -1625,12 +1689,34 @@ export class LibraryLogAuthority {
     if (pin !== null && !/^\d{4}$/.test(pin))
       throw authorityError('invalid-request', 'parental PIN must be four digits');
     const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
-    if (pin !== null && current && (await pinMatches(current, pin))) return this.#unchanged();
+    const matches = pin === null ? !current : !!current && (await pinMatches(current, pin));
+    if (matches) {
+      // A queued PIN is already projected into `settings`, including after reload. Drive its durable recovery row
+      // before deciding that the repeated command is unchanged; only den-edge's authenticated copy proves sync.
+      if (this.#parentalPinDelivery() === 'queued') await this.#log.refresh();
+      const refreshed = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+      const stillMatches =
+        pin === null ? !refreshed : !!refreshed && (await pinMatches(refreshed, pin));
+      if (stillMatches)
+        return {
+          outcome: 'unchanged',
+          delivery: this.#parentalPinDelivery(),
+          affected: [],
+        };
+    }
     return this.#patchSettings(
       'keys',
       { parentalPIN: pin === null ? null : { string: await hashPin(pin) } },
       [{ kind: 'connections' }],
     );
+  }
+
+  /** Compare only the PIN value, not unrelated keys sharing this settings document. */
+  #parentalPinDelivery(): Delivery {
+    if (this.#options.mode === 'local') return 'local';
+    const projected = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    const acknowledged = readApiKey(this.#log.acknowledgedSettings('keys'), 'parentalPIN');
+    return projected === acknowledged ? 'synced' : 'queued';
   }
 
   async #setRemoteAccess(

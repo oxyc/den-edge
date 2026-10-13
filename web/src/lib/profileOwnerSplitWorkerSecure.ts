@@ -1,9 +1,14 @@
 import { validateStoredProfileDirectory } from './profileDirectory';
+import {
+  profileMigrationAuthorization,
+  type ProfileMigrationAuthorization,
+} from './profileMigrationCore';
 import { planOwnerSplitWithCore } from './profileOwnerSplitCoreWorker';
 import type {
   OwnerSplitAuthenticatedCopy,
   OwnerSplitBackup,
   OwnerSplitCandidateHandle,
+  OwnerSplitDurableEvidence,
   OwnerSplitFence,
   OwnerSplitPlannerEvidence,
   OwnerSplitSecureWorker,
@@ -56,6 +61,25 @@ export class OwnerSplitWorkerSecureAdapter implements OwnerSplitSecureWorker {
     return this.#store.allocateCandidate(attempt);
   }
 
+  async prepareAuthorization(input: {
+    readonly attempt: string;
+    readonly householdId: string;
+    readonly source: { readonly generation: number; readonly head: string };
+  }): Promise<ProfileMigrationAuthorization> {
+    if (input.householdId !== this.#io.libraryId)
+      throw new Error('Split authorization belongs to another household');
+    return profileMigrationAuthorization({
+      intent: {
+        version: 1,
+        action: 'enable-profiles',
+        attempt: input.attempt,
+        householdId: input.householdId,
+        source: input.source,
+      },
+      evidence: null,
+    });
+  }
+
   verifyBackup(input: {
     readonly attempt: string;
     readonly fence: OwnerSplitFence;
@@ -84,6 +108,30 @@ export class OwnerSplitWorkerSecureAdapter implements OwnerSplitSecureWorker {
   }): Promise<void> {
     const candidate = await this.#resolved(input.candidate, input.attempt);
     await this.#io.verifyMigrationOwner({ ...input, candidate });
+  }
+
+  async bindAuthorization(input: {
+    readonly authorization: ProfileMigrationAuthorization;
+    readonly evidence: OwnerSplitDurableEvidence;
+    readonly stagedDigest: string;
+  }): Promise<ProfileMigrationAuthorization> {
+    const candidate = await this.#resolved(input.evidence.candidate, input.evidence.attempt);
+    return profileMigrationAuthorization({
+      intent: input.authorization.intent,
+      evidence: {
+        attempt: input.evidence.attempt,
+        householdId: input.evidence.householdId,
+        fence: {
+          generation: input.evidence.fence.generation,
+          head: input.evidence.fence.head,
+        },
+        backupDigest: input.evidence.backup.digest,
+        candidateKey: candidate.libraryKey,
+        candidateHead: input.evidence.ownerHead,
+        stagedDigest: input.stagedDigest,
+        wireMin: 5,
+      },
+    });
   }
 
   async planNext(input: OwnerSplitPlannerEvidence) {

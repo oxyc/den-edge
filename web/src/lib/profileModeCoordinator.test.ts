@@ -13,6 +13,7 @@ import {
   type PreviewProfileDirectory,
 } from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
+import { profileHouseholdSettingsModel, profileSettingsRoute } from './profileSettingsRoute';
 import type { VisitorActivityLock, VisitorProfileSession } from './visitorProfileSession.svelte';
 
 function memoryStorage(): Storage {
@@ -66,7 +67,11 @@ function owner(
         ({
           snapshot: {
             connection: 'ready',
-            value: { kind: 'connections', parentalPinConfigured: configured },
+            value: {
+              kind: 'connections',
+              parentalPinConfigured: configured,
+              parentalPinDelivery: 'synced',
+            },
           },
           release,
         }) as unknown as LibraryModelLease<ConnectionsView>,
@@ -469,6 +474,13 @@ describe('ProfileModeCoordinator', () => {
     opening.resolve({});
     await expect(switching).resolves.toBe(true);
     expect(first.coordinator.mode).toBe('owner');
+    expect(profileSettingsRoute(first.coordinator.session!, first.coordinator.mode)).toBe(
+      'household',
+    );
+    expect(profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode)).toBe(
+      first.householdModel,
+    );
+    expect(first.coordinator.session!.model).not.toBe(first.householdModel);
     expect(first.close).toHaveBeenCalledOnce();
     expect(first.householdClose).not.toHaveBeenCalled();
   });
@@ -496,6 +508,12 @@ describe('ProfileModeCoordinator', () => {
     expect(first.householdClose).not.toHaveBeenCalled();
     kidOpening.resolve({});
     await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    expect(profileSettingsRoute(first.coordinator.session!, first.coordinator.mode)).toBe(
+      'personal',
+    );
+    expect(
+      profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode),
+    ).toBeNull();
 
     await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
     await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
@@ -506,6 +524,16 @@ describe('ProfileModeCoordinator', () => {
     await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
     await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
     await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    expect(profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode)).toBe(
+      first.householdModel,
+    );
+    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    expect(profileSettingsRoute(first.coordinator.session!, first.coordinator.mode)).toBe(
+      'personal',
+    );
+    expect(
+      profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode),
+    ).toBeNull();
 
     expect(first.activityVerifyParentalPin).not.toHaveBeenCalled();
     expect(first.verifyParentalPin.mock.calls).toEqual([['0000'], ['1234'], ['0000'], ['1234']]);

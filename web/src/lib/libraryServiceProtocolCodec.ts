@@ -735,6 +735,9 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'history.export') return exact(value, ['kind']);
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.status') return exact(value, ['kind']);
+  if (value.kind === 'profile-migration.observe') return exact(value, ['kind']);
+  if (value.kind === 'profile-migration.observe-recovery')
+    return exact(value, ['kind', 'attempt']) && hexId(value.attempt);
   if (value.kind === 'recovery.seal')
     return (
       exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
@@ -871,6 +874,21 @@ function task(value: unknown): value is LibraryTask {
             boundedText(message.sealed, 4_096),
           ASSISTANT_DRAIN_MAX,
         )
+      );
+    case 'profile-migration.enable':
+      return (
+        exact(value, ['kind', 'attempt', 'source']) &&
+        hexId(value.attempt) &&
+        migrationSource(value.source)
+      );
+    case 'profile-migration.cancel':
+      return exact(value, ['kind', 'attempt']) && hexId(value.attempt);
+    case 'profile-migration.recover':
+      return (
+        exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
+        hexId(value.attempt) &&
+        hexId(value.recoveryAttempt) &&
+        migrationSource(value.source)
       );
     default:
       return false;
@@ -1260,6 +1278,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
       'kind',
       'apiKeys',
       'parentalPinConfigured',
+      'parentalPinDelivery',
       'remoteAccessConfigured',
       'plugins',
       'servers',
@@ -1277,6 +1296,9 @@ function connectionsView(value: unknown): value is ConnectionsView {
         boundedText(candidate.masked, 32),
     ) ||
     !bool(value.parentalPinConfigured) ||
+    (value.parentalPinDelivery !== 'synced' &&
+      value.parentalPinDelivery !== 'queued' &&
+      value.parentalPinDelivery !== 'local') ||
     !bool(value.remoteAccessConfigured)
   )
     return false;
@@ -1609,6 +1631,19 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           typeof attempt === 'string' && /^[0-9a-f]{32}$/.test(attempt),
       )
     );
+  if (value.kind === 'profile-migration.observe')
+    return (
+      exact(value, ['kind', 'attempt', 'source']) &&
+      hexId(value.attempt) &&
+      migrationSource(value.source)
+    );
+  if (value.kind === 'profile-migration.observe-recovery')
+    return (
+      exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
+      hexId(value.attempt) &&
+      hexId(value.recoveryAttempt) &&
+      migrationSource(value.source)
+    );
   if (value.kind === 'assistant.grants')
     return (
       exact(value, ['kind', 'grants', 'reads', 'plays']) &&
@@ -1917,9 +1952,33 @@ function taskResult(value: unknown): value is LibraryTaskResult {
             boundedText(key.public, 2_048),
         )
       );
+    case 'profile-migration.enable':
+    case 'profile-migration.cancel':
+    case 'profile-migration.recover':
+      return (
+        exact(value, ['kind', 'outcome', 'attempt']) &&
+        (value.outcome === 'preparing' ||
+          value.outcome === 'reconciling' ||
+          value.outcome === 'enabled' ||
+          value.outcome === 'recovery-required' ||
+          value.outcome === 'source-changed' ||
+          value.outcome === 'cancelled') &&
+        optional(value.attempt, hexId)
+      );
     default:
       return false;
   }
+}
+
+function migrationSource(value: unknown): value is { generation: number; head: string } {
+  return (
+    record(value) &&
+    exact(value, ['generation', 'head']) &&
+    integer(value.generation) &&
+    value.generation >= 0 &&
+    typeof value.head === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.head)
+  );
 }
 
 function failure(value: unknown): value is LibraryServiceFailure {

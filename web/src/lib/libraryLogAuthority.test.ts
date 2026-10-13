@@ -99,7 +99,109 @@ function authority(
   return new LibraryLogAuthority(log, clock, { mode, downloads, content, fetchImpl });
 }
 
+async function pinDeliveryServer() {
+  const stored = new Map<string, { k: string; seq: number; v: string }>();
+  let head = 0;
+  let acceptWrites = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    if (init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as {
+        writes?: { k: string; base: number; v: string }[];
+      };
+      if (!body.writes) return new Response('{}');
+      if (!acceptWrites) return new Response('{"error":"unavailable"}', { status: 503 });
+      const applied: { k: string; seq: number }[] = [];
+      const conflicts: { k: string; seq: number; v: string | null }[] = [];
+      for (const write of body.writes) {
+        const current = stored.get(write.k);
+        if ((current?.seq ?? 0) !== write.base) {
+          conflicts.push({ k: write.k, seq: current?.seq ?? 0, v: current?.v ?? null });
+        } else {
+          stored.set(write.k, { k: write.k, seq: ++head, v: write.v });
+          applied.push({ k: write.k, seq: head });
+        }
+      }
+      return new Response(JSON.stringify({ head, applied, conflicts }));
+    }
+    const since = Number(new URL(String(input), 'https://den.example').searchParams.get('since'));
+    const entries = [...stored.values()].filter((entry) => entry.seq > since);
+    return new Response(JSON.stringify({ entries, head, more: false, generation: 'pin-test' }));
+  };
+  return { fetchImpl, allowWrites: () => (acceptWrites = true) };
+}
+
 describe('LibraryLogAuthority', () => {
+  it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    const firstLog = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const firstClock = await openClockStore(vault, {
+      key: 'queued-pin-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const first = authority(firstLog, firstClock, 'online');
+
+    await expect(
+      first.command({ kind: 'parental-pin.set', pin: '1234' }, 'first'),
+    ).resolves.toMatchObject({
+      outcome: 'applied',
+      delivery: 'queued',
+    });
+    await expect(first.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinConfigured: true,
+      parentalPinDelivery: 'queued',
+    });
+    await expect(first.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: false,
+    });
+    firstLog.close();
+
+    const reopenedLog = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const reopenedClock = await openClockStore(vault, {
+      key: 'queued-pin-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const reopened = authority(reopenedLog, reopenedClock, 'online');
+    await expect(reopened.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinConfigured: true,
+      parentalPinDelivery: 'queued',
+    });
+    await expect(
+      reopened.command({ kind: 'parental-pin.set', pin: '1234' }, 'retry-offline'),
+    ).resolves.toMatchObject({ outcome: 'unchanged', delivery: 'queued' });
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: false,
+    });
+    await expect(
+      reopened.command({ kind: 'parental-pin.set', pin: '4321' }, 'replace-offline'),
+    ).resolves.toMatchObject({ outcome: 'applied', delivery: 'queued' });
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '4321' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: false,
+    });
+
+    server.allowWrites();
+    await expect(
+      reopened.command({ kind: 'parental-pin.set', pin: '4321' }, 'retry-online'),
+    ).resolves.toMatchObject({ outcome: 'unchanged', delivery: 'synced' });
+    await expect(reopened.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinConfigured: true,
+      parentalPinDelivery: 'synced',
+    });
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: false,
+    });
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '4321' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    reopenedLog.close();
+  });
+
   it('queries the authenticated profile capability without starting a migration', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
@@ -979,6 +1081,7 @@ describe('LibraryLogAuthority', () => {
         'content-warnings': { configured: true, masked: '••••cret' },
       },
       parentalPinConfigured: true,
+      parentalPinDelivery: 'local',
       remoteAccessConfigured: true,
       plugins: [
         {

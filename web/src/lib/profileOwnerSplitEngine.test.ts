@@ -82,6 +82,8 @@ function harness() {
     restore: vi.fn(async () => opened),
   };
   const secure: OwnerSplitSecureWorker = {
+    prepareAuthorization: vi.fn(),
+    bindAuthorization: vi.fn(),
     allocateCandidate: vi.fn(async () => candidate),
     verifyBackup: vi.fn(async () => {}),
     copyAndAuthenticateOwner: vi.fn(async () => ({

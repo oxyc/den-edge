@@ -26,7 +26,13 @@ export function planOwnerSplitWithCore(
     attemptAborted: evidence.attemptAborted,
     householdFresh: evidence.householdFresh,
     recoveryIntent: evidence.recoveryIntent,
+    attempt: evidence.attempt,
+    householdId: evidence.householdId,
+    splitAuthorization: evidence.splitAuthorization,
+    wireMin: 5,
   };
+  if (evidence.backupDigest) input.backupDigest = evidence.backupDigest;
+  if (evidence.stagedDigest) input.stagedDigest = evidence.stagedDigest;
   if (evidence.fence)
     input.fence = { generation: evidence.fence.generation, head: evidence.fence.head };
   if (evidence.attemptLookup) input.attemptLookup = evidence.attemptLookup;

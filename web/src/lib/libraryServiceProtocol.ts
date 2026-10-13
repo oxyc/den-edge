@@ -426,6 +426,8 @@ export interface ConnectionsView {
   kind: 'connections';
   apiKeys: Partial<Record<LibraryApiKeyService, { configured: true; masked: string }>>;
   parentalPinConfigured: boolean;
+  /** `queued` means the shown PIN is only a durable local projection and cannot authorize security actions yet. */
+  parentalPinDelivery: 'synced' | 'queued' | 'local';
   remoteAccessConfigured: boolean;
   plugins: LibraryPluginView[];
   servers: Array<{ kind: MediaServerKind; url: string; user?: string }>;
@@ -578,7 +580,19 @@ export type LibraryTask =
   /** The grants whose connection den-edge still lists, kept from expiring (at most daily). */
   | { kind: 'assistant.renew'; grants: string[] }
   /** A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. */
-  | { kind: 'assistant.apply'; messages: Array<{ seq: number; sealed: string }> };
+  | { kind: 'assistant.apply'; messages: Array<{ seq: number; sealed: string }> }
+  | {
+      kind: 'profile-migration.enable';
+      attempt: string;
+      source: { generation: number; head: string };
+    }
+  | { kind: 'profile-migration.cancel'; attempt: string }
+  | {
+      kind: 'profile-migration.recover';
+      attempt: string;
+      recoveryAttempt: string;
+      source: { generation: number; head: string };
+    };
 
 /** A grant as the library's grants row holds it (`assistant_grants`), for Settings. */
 export interface AssistantGrantView {
@@ -633,6 +647,17 @@ export type LibraryTaskResult =
       ack: number | null;
       /** The drop-box public key den-edge should hold, or null when the library has none. */
       dropbox: { kid: string; public: string } | null;
+    }
+  | {
+      kind: 'profile-migration.enable' | 'profile-migration.cancel' | 'profile-migration.recover';
+      outcome:
+        | 'preparing'
+        | 'reconciling'
+        | 'enabled'
+        | 'recovery-required'
+        | 'source-changed'
+        | 'cancelled';
+      attempt?: string;
     };
 
 export type LibraryQuery =
@@ -666,7 +691,9 @@ export type LibraryQuery =
   | { kind: 'library.metadata'; titles: TitleRef[] }
   /** The grants the library's row holds, whatever their state, for Settings › Assistants. */
   | { kind: 'assistant.grants' }
-  | { kind: 'profile-migration.status' };
+  | { kind: 'profile-migration.status' }
+  | { kind: 'profile-migration.observe' }
+  | { kind: 'profile-migration.observe-recovery'; attempt: string };
 
 export type LibraryQueryResult =
   | {
@@ -696,6 +723,17 @@ export type LibraryQueryResult =
         | 'enabled'
         | 'recovery-required';
       attempt?: string;
+    }
+  | {
+      kind: 'profile-migration.observe';
+      attempt: string;
+      source: { generation: number; head: string };
+    }
+  | {
+      kind: 'profile-migration.observe-recovery';
+      attempt: string;
+      recoveryAttempt: string;
+      source: { generation: number; head: string };
     }
   | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }
   | { kind: 'recovery.seal'; sealed: string }

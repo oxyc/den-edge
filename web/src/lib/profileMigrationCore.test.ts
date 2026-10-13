@@ -98,9 +98,18 @@ describe('profile migration den-core boundary', () => {
   });
 
   it('uses den-core #57 for lifecycle, capability and exact seal-ready directory bytes', () => {
-    expect(profileMigrationNext({ state: 'idle', observed: 'legacy', explicitIntent: true })).toBe(
-      'acquire-fence',
-    );
+    const authorization = fixture.migrationAuthorization.prepared;
+    expect(
+      profileMigrationNext({
+        state: 'idle',
+        observed: 'legacy',
+        explicitIntent: true,
+        attempt: authorization.intent.attempt,
+        householdId: authorization.intent.householdId,
+        observedFence: authorization.intent.source,
+        splitAuthorization: authorization,
+      }),
+    ).toBe('acquire-fence');
     expect(profileMigrationNext({ state: 'idle', observed: 'legacy', explicitIntent: false })).toBe(
       'no-op',
     );

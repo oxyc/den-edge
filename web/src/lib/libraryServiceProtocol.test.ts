@@ -9,7 +9,9 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
-  it('exposes only a bounded, non-secret profile migration status query', () => {
+  it('exposes only bounded, non-secret profile migration control messages', () => {
+    const attempt = '0123456789abcdef0123456789abcdef';
+    const source = { generation: 7, head: 'a'.repeat(64) };
     expect(
       decodeLibraryServiceClientMessage({
         type: 'query',
@@ -43,6 +45,63 @@ describe('library service client protocol', () => {
           attempt: '0123456789abcdef0123456789abcdef',
           libraryKey,
         },
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-recovery-observe',
+        query: { kind: 'profile-migration.observe-recovery', attempt },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-recover',
+        operationId: 'profile-recover',
+        task: {
+          kind: 'profile-migration.recover',
+          attempt,
+          recoveryAttempt: 'f'.repeat(32),
+          source,
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-observe',
+        query: { kind: 'profile-migration.observe' },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-observe',
+        version,
+        result: { kind: 'profile-migration.observe', attempt, source },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-enable',
+        operationId: 'profile-enable',
+        task: { kind: 'profile-migration.enable', attempt, source },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-secret',
+        operationId: 'profile-secret',
+        task: { kind: 'profile-migration.enable', attempt, source, candidateKey: libraryKey },
       }),
     ).toMatchObject({ ok: false });
   });
@@ -941,6 +1000,7 @@ describe('library service server protocol', () => {
       kind: 'connections',
       apiKeys: { tmdb: { configured: true, masked: '••••cret' } },
       parentalPinConfigured: true,
+      parentalPinDelivery: 'synced',
       remoteAccessConfigured: false,
       plugins: [
         {

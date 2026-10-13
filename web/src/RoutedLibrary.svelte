@@ -48,7 +48,7 @@
     type ProfileActivityModelFactory,
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
-  import { profileSettingsRoute } from './lib/profileSettingsRoute';
+  import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
 
   let {
     link,
@@ -124,6 +124,9 @@
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
   const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
+  const householdSettingsModel = $derived(
+    profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
+  );
   const profileActivityReady = $derived(
     profileCapability === 'disabled' ||
       profileCapability === 'preview' ||
@@ -757,11 +760,11 @@
                   : 'Owner profile settings will appear here after the household split is activated.'}
               </p>
             </section>
-          {:else if link || session.local}
+          {:else if (link || session.local) && householdSettingsModel}
             {#if SettingsScreen.current}
               <SettingsScreen.current
                 {link}
-                model={session.model!}
+                model={householdSettingsModel}
                 content={session.content}
                 local={session.local}
                 onjoin={joinLibrary}
