@@ -2,7 +2,9 @@
      year floor, which warnings and ratings show, the player's subtitle list, and the parental limit. Each of the
      TV's pushed screens opens in place here. -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Button from '../components/Button.svelte';
+  import PinInput from '../components/PinInput.svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import CheckGrid from './CheckGrid.svelte';
   import { rows } from './rows.svelte';
@@ -244,6 +246,8 @@
   let pinEntry = $state('');
   let pinWrong = $state(false);
   let newPin = $state('');
+  let unlockForm = $state<HTMLFormElement>();
+  let newPinForm = $state<HTMLFormElement>();
   const canChangeLimit = $derived(!pinConfigured || unlocked);
   const limitLabel = $derived(
     prefs.maturityCeiling === 'pg13' ? 'PG-13' : prefs.maturityCeiling === 'r' ? 'R' : 'None',
@@ -252,6 +256,11 @@
     pinWrong = !(pinConfigured && (await verifyPin(pinEntry)));
     if (!pinWrong) unlocked = true;
     pinEntry = '';
+    await tick();
+    if (pinWrong)
+      requestAnimationFrame(() =>
+        unlockForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
+      );
   }
   async function setPin() {
     if (!/^\d{4}$/.test(newPin)) return;
@@ -259,7 +268,13 @@
     if (await savePin(newPin)) {
       newPin = '';
       unlocked = true;
+      return;
     }
+    newPin = '';
+    await tick();
+    requestAnimationFrame(() =>
+      newPinForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
+    );
   }
 
   const count = (n: number, none: string) => (n ? String(n) : none);
@@ -546,22 +561,20 @@
     />
     {#if pinConfigured && !unlocked}
       <form
+        bind:this={unlockForm}
         class="form"
         onsubmit={(event) => {
           event.preventDefault();
           unlock();
         }}
       >
-        <input
+        <PinInput
           id="parental-pin"
-          class="field short"
-          type="password"
-          inputmode="numeric"
-          autocomplete="off"
-          maxlength="4"
-          placeholder="Parental PIN"
-          aria-label="Parental PIN"
+          label="Parental PIN"
           bind:value={pinEntry}
+          invalid={pinWrong}
+          onvalue={() => (pinWrong = false)}
+          oncomplete={() => void unlock()}
         />
         <Button type="submit" variant="primary" label="Unlock" disabled={pinEntry.length < 4} />
       </form>
@@ -570,22 +583,19 @@
     {:else}
       <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
       <form
+        bind:this={newPinForm}
         class="form"
         onsubmit={(event) => {
           event.preventDefault();
           void setPin();
         }}
       >
-        <input
+        <PinInput
           id="new-parental-pin"
-          class="field short"
-          type="password"
-          inputmode="numeric"
-          autocomplete="new-password"
-          maxlength="4"
-          placeholder={pinConfigured ? 'New 4-digit PIN' : 'Set a 4-digit PIN'}
-          aria-label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
+          label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
           bind:value={newPin}
+          autocomplete="new-password"
+          oncomplete={() => void setPin()}
         />
         <Button
           type="submit"
@@ -613,11 +623,6 @@
 </SettingsSection>
 
 <style>
-  /* Four digits need no more room; `input` outweighs the page's shared field style. */
-  input.short {
-    flex: 0 1 200px;
-  }
-
   /* Ten short groups as columns of lists, the way the TV lists each group under its heading. */
   .warning-groups {
     margin-top: 8px;

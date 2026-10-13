@@ -3,6 +3,7 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
@@ -34,6 +35,7 @@
   import { libraryCredentialId } from './lib/relayFetch';
   import {
     ProfileModeCoordinator,
+    previewProfileDirectory,
     profilesCapability,
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
@@ -110,13 +112,23 @@
     let current = true;
     void profilesCapability().then((capability) => {
       if (!current) return;
-      if (capability !== 'enabled' || profileCoordinator || !session.model) {
+      if (
+        (capability !== 'enabled' && capability !== 'preview') ||
+        profileCoordinator ||
+        !session.model
+      ) {
         profileCapability = capability;
         return;
       }
-      const coordinator = new ProfileModeCoordinator(session);
+      const coordinator = new ProfileModeCoordinator(
+        session,
+        localStorage,
+        window,
+        undefined,
+        capability === 'preview' ? previewProfileDirectory() : null,
+      );
       profileCoordinator = coordinator;
-      profileCapability = 'enabled';
+      profileCapability = capability;
     });
     return () => {
       current = false;
@@ -582,6 +594,9 @@
 {:else if profileCoordinator && !profileCoordinator.session}
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
+  {#if profileCapability === 'preview'}
+    <p class="profile-preview" role="status">Local profile preview · production remains off</p>
+  {/if}
   {#key session.identity}
     <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
     <Router
@@ -597,12 +612,13 @@
     >
       {#snippet children(route, active)}
         {#if route.page === 'settings'}
-          {#if session.identity.kind === 'visitor'}
+          {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
+          {#if session.identity.kind === 'visitor' || session.identity.kind === 'profile'}
             <section class="visitor-settings" aria-labelledby="visitor-settings-title">
               <h1 id="visitor-settings-title">Owner settings</h1>
               <p>
-                Visitor can’t manage household settings. Use the Visitor button above to switch to
-                Owner.
+                {session.identity.kind === 'visitor' ? 'Visitor' : 'Kids'} can’t manage household settings.
+                Use the profile button above to switch to Owner.
               </p>
             </section>
           {:else if link || session.local}
@@ -664,6 +680,17 @@
   .profile-loading,
   .profile-unavailable {
     margin: 48px auto;
+  }
+
+  .profile-preview {
+    width: fit-content;
+    margin: 0 auto 16px;
+    padding: 6px 11px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .profile-loading {

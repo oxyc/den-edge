@@ -143,7 +143,6 @@ for (const width of [320, 390, 820, 1280]) {
       const parental = page.getByRole('region', { name: 'Parental controls' });
       await expect(parental.getByRole('radio', { name: 'R' })).toBeDisabled();
       await parental.getByLabel('Parental PIN').fill('1234');
-      await parental.getByRole('button', { name: 'Unlock' }).click();
       await expect(parental.getByRole('radio', { name: 'R' })).toBeEnabled();
 
       // A delete asks first, in place.

@@ -361,7 +361,7 @@
         </a>
       {/each}
     </nav>
-    {#if profiles}<ProfileSwitcher {profiles} />{/if}
+    {#if profiles}<ProfileSwitcher {profiles} hideOnMobile />{/if}
     <button
       class="search-toggle"
       type="button"
@@ -396,6 +396,10 @@
     min-height: 46px;
     padding: 6px 12px;
     border-radius: 999px;
+  }
+
+  .bar > :global(.profile-trigger) {
+    margin-left: -12px;
   }
 
   .leading {

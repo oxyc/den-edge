@@ -2,12 +2,14 @@
   import { onDestroy, onMount } from 'svelte';
   import ProfileOwnerGate from '../src/components/ProfileOwnerGate.svelte';
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
+  import MobileProfileRow from '../src/components/MobileProfileRow.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
   import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
   import { legacyProfileIdentity } from '../src/lib/profileIdentity';
   import {
     ProfileModeCoordinator,
+    previewProfileDirectory,
     profilesCapability,
     type ProfilesCapability,
   } from '../src/lib/profileModeCoordinator.svelte';
@@ -20,20 +22,44 @@
   const params = new URLSearchParams(location.search);
   const configured = params.get('pin') !== 'none';
   let lockAttempts = 0;
-  const visitorLock: VisitorActivityLock | undefined = params.has('rejectLock')
-    ? {
-        available: () => true,
-        async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
-          if (lockAttempts++ === 2) throw new Error('fixture lock refused');
-          return work();
-        },
-      }
-    : undefined;
+  const visitorLock: VisitorActivityLock | undefined =
+    params.has('rejectLock') || params.has('slowLock')
+      ? {
+          available: () => true,
+          async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+            if (lockAttempts++ === 2) throw new Error('fixture lock refused');
+            if (params.has('slowLock')) await new Promise((resolve) => setTimeout(resolve, 1000));
+            return work();
+          },
+        }
+      : undefined;
   const release = () => {};
   const model = {
     settings: {
       connection: 'ready',
-      value: { kind: 'settings', preferences: { maturityCeiling: 'pg13' } },
+      value: {
+        kind: 'settings',
+        assistant: { read: true, write: true },
+        preferences: {
+          excludedGenres: [27],
+          excludedLanguages: ['sv'],
+          hideAnime: true,
+          hideWatched: true,
+          minReleaseYear: 1999,
+          audioLanguage: 'sv',
+          subtitleLanguage: 'fi',
+          shownSubtitleLanguages: ['sv'],
+          subtitlesPerLanguage: 1,
+          autoSkipSegments: true,
+          autoplayTrailers: false,
+          ratingSources: [],
+          shownWarnings: ['violence'],
+          watchRegion: 'FI',
+          services: [{ id: 8, country: 'FI' }],
+          servicesConfigured: true,
+          maturityCeiling: 'pg13',
+        },
+      },
     },
     connections: () =>
       ({
@@ -71,6 +97,8 @@
         mode: profiles?.mode ?? 'owner',
         visitId: profiles?.mode === 'visitor' ? profiles.session!.identity.id : null,
         policyCeiling: profiles?.session?.policy?.settings.value?.preferences.maturityCeiling,
+        effectivePreferences: profiles?.session?.policy?.settings.value?.preferences,
+        contentPolicy: profiles?.session?.contentPolicy,
         policyKeys: profiles?.session?.policy ? Object.keys(profiles.session.policy) : [],
         policyHasWriter: profiles?.session?.policy
           ? 'commands' in profiles.session.policy || 'track' in profiles.session.policy
@@ -142,8 +170,14 @@
     void profilesCapability(fetch, visitorLock).then((answer) => {
       if (!current) return;
       capability = answer;
-      if (answer === 'enabled')
-        profiles = new ProfileModeCoordinator(owner, localStorage, window, visitorLock);
+      if (answer === 'enabled' || answer === 'preview')
+        profiles = new ProfileModeCoordinator(
+          owner,
+          localStorage,
+          window,
+          visitorLock,
+          answer === 'preview' ? previewProfileDirectory() : null,
+        );
       checked = true;
     });
     return () => {
@@ -169,8 +203,15 @@
       <p>The Owner library remains hidden. Reload Den to try again.</p>
     </section>
   {:else if profiles?.session}
-    <ProfileSwitcher {profiles} />
-    <p data-mode>{profiles.mode === 'owner' ? 'Owner active' : 'Visitor active'}</p>
+    <ProfileSwitcher {profiles} hideOnMobile />
+    <MobileProfileRow {profiles} />
+    <p data-mode>
+      {profiles.mode === 'owner'
+        ? 'Owner active'
+        : profiles.mode === 'kid'
+          ? 'Kids active'
+          : 'Visitor active'}
+    </p>
     {#if profiles.mode === 'visitor'}
       <p>Visitor can’t manage household settings.</p>
       <button type="button" onclick={() => void fixture.addVisitorActivity()}>Add activity</button>

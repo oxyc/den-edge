@@ -4,7 +4,7 @@ import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
 import type { LibraryModel } from './libraryModel.svelte';
-import { profilePolicy, type ProfilePolicy } from './profilePolicy';
+import { profilePolicy, type ProfileContentPolicy, type ProfilePolicy } from './profilePolicy';
 import {
   legacyProfileIdentity,
   type PersistentProfileIdentity,
@@ -43,6 +43,8 @@ export class ProfileSession {
     readonly policy: ProfilePolicy | null = profilePolicy(model),
     /** Device-local activity only for Visitor; never a synced Owner LibraryModel. */
     readonly profileActivity: ProfileActivity | null = null,
+    /** Numeric directory policy stays distinct from legacy presentation preferences. */
+    readonly contentPolicy: ProfileContentPolicy | null = null,
   ) {}
 
   get content(): ContentServiceClientPort {

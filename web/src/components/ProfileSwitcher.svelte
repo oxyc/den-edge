@@ -1,104 +1,173 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  import { flushSync, onMount, tick } from 'svelte';
+  import type {
+    ActiveProfileMode,
+    ProfileChoice,
+    ProfileModeCoordinator,
+  } from '../lib/profileModeCoordinator.svelte';
+  import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
+  import PinInput from './PinInput.svelte';
+  import ProfileAvatar from './ProfileAvatar.svelte';
 
-  let { profiles }: { profiles: ProfileModeCoordinator } = $props();
+  let {
+    profiles,
+    hideOnMobile = false,
+  }: { profiles: ProfileModeCoordinator; hideOnMobile?: boolean } = $props();
   let dialog = $state<HTMLDialogElement>();
+  let trigger = $state<HTMLButtonElement>();
   let pin = $state('');
   let denied = $state(false);
   let failed = $state(false);
   let switching = $state(false);
+  let pending = $state<ProfileChoice | null>(null);
+  let restoreTriggerFocus = false;
+  let backdropPress = false;
+  let returnFocus = $state<HTMLElement>();
 
-  async function open() {
+  const active = $derived(profiles.activeChoice);
+
+  function focusPinAfterPaint() {
+    requestAnimationFrame(() =>
+      dialog?.querySelector<HTMLInputElement>('#owner-pin')?.focus({ preventScroll: true }),
+    );
+  }
+
+  function show(opener: HTMLElement, restoreFocus: boolean) {
     denied = false;
     failed = false;
     pin = '';
+    pending = null;
+    returnFocus = opener;
+    restoreTriggerFocus = restoreFocus;
     dialog?.showModal();
-    await tick();
-    if (profiles.mode === 'visitor' && profiles.parentalPinConfigured)
-      dialog?.querySelector<HTMLInputElement>('input')?.focus();
   }
 
-  async function useVisitor() {
-    if (switching) return;
-    switching = true;
-    failed = false;
-    try {
-      if (await profiles.switchToVisitor()) dialog?.close();
-      else failed = true;
-    } catch {
-      failed = true;
-    } finally {
-      switching = false;
-    }
+  function open(event: MouseEvent) {
+    show(event.currentTarget as HTMLElement, event.detail === 0);
   }
 
-  async function useOwner() {
+  onMount(() =>
+    onProfileSwitcherRequest(({ trigger: opener, restoreFocus }) => show(opener, restoreFocus)),
+  );
+
+  async function switchTo(target: ActiveProfileMode) {
     if (switching) return;
     switching = true;
     denied = false;
     failed = false;
     try {
-      const switched = await profiles.switchToOwner(pin);
-      if (switched) dialog?.close();
-      else denied = true;
+      const switched =
+        target === 'owner'
+          ? await profiles.switchToOwner(pin)
+          : target === 'kid'
+            ? await profiles.switchToKid(pin)
+            : await profiles.switchToVisitor(pin);
+      if (switched) {
+        dialog?.close();
+        return;
+      }
+      denied = true;
     } catch {
       failed = true;
     } finally {
       switching = false;
       pin = '';
     }
+    await tick();
+    focusPinAfterPaint();
+  }
+
+  async function choose(choice: ProfileChoice) {
+    denied = false;
+    failed = false;
+    if (choice.role === profiles.mode) {
+      dialog?.close();
+      return;
+    }
+    if (!profiles.requiresPin(choice.role) || profiles.parentalPinConfigured === false)
+      return switchTo(choice.role);
+    // iOS opens its numeric keyboard only while this original tap still owns user activation. Render the PIN
+    // synchronously, then focus it before returning from the choice's click handler.
+    flushSync(() => (pending = choice));
+    dialog?.querySelector<HTMLInputElement>('#owner-pin')?.focus({ preventScroll: true });
   }
 </script>
 
 <button
+  bind:this={trigger}
   class="profile-trigger"
+  class:mobile-hidden={hideOnMobile}
   type="button"
   aria-haspopup="dialog"
-  aria-label={`Switch profile, current ${profiles.mode === 'owner' ? 'Owner' : 'Visitor'}`}
+  aria-label={`Switch profile, current ${active?.name ?? 'profile'}`}
+  title={`Switch profile, current ${active?.name ?? 'profile'}`}
   onclick={open}
 >
-  {profiles.mode === 'owner' ? 'Owner' : 'Visitor'}
+  <ProfileAvatar choice={active} compact neutral />
 </button>
 
 <dialog
   bind:this={dialog}
   aria-labelledby="profile-switcher-title"
+  oncancel={(event) => {
+    if (switching) event.preventDefault();
+  }}
+  onpointerdown={(event) => (backdropPress = event.target === dialog)}
+  onpointercancel={() => (backdropPress = false)}
+  onclick={(event) => {
+    if (!switching && backdropPress && event.target === dialog) {
+      restoreTriggerFocus = false;
+      dialog?.close();
+    }
+    backdropPress = false;
+  }}
   onclose={() => {
     denied = false;
     failed = false;
+    pending = null;
+    requestAnimationFrame(() => {
+      if (restoreTriggerFocus) returnFocus?.focus({ preventScroll: true });
+      else {
+        returnFocus?.blur();
+        trigger?.blur();
+      }
+    });
   }}
 >
-  <form method="dialog" onsubmit={(event) => event.preventDefault()}>
+  <form
+    method="dialog"
+    onsubmit={(event) => {
+      event.preventDefault();
+      if (pending && /^\d{4}$/.test(pin)) void switchTo(pending.role);
+    }}
+  >
     <h2 id="profile-switcher-title">Who’s watching?</h2>
     {#if failed}<p class="denied" role="alert">
         The profile switch couldn’t be completed. Try again.
       </p>{/if}
-    {#if profiles.mode === 'owner'}
-      <p>Visitor keeps activity only in this browser and won’t change the household library.</p>
-      <div class="actions">
-        <button class="primary" type="button" disabled={switching} onclick={() => void useVisitor()}
-          >{switching ? 'Switching…' : 'Use Visitor'}</button
-        >
-        <button type="button" onclick={() => dialog?.close()}>Cancel</button>
+    {#if pending}
+      <button
+        class="back"
+        type="button"
+        disabled={switching}
+        onclick={() => ((pending = null), (pin = ''))}>← Profiles</button
+      >
+      <div class="pending-profile">
+        <ProfileAvatar choice={pending} />
+        <div><strong>{pending.name}</strong><span>Owner approval required</span></div>
       </div>
-    {:else}
-      <p>Switch to Owner to manage the household and use its library.</p>
       {#if profiles.parentalPinConfigured === undefined}
         <p role="status">Checking parental controls…</p>
       {:else if profiles.parentalPinConfigured}
-        <label>
-          Owner PIN
-          <input
-            bind:value={pin}
-            inputmode="numeric"
-            autocomplete="off"
-            maxlength="4"
-            pattern="[0-9]{4}"
-            aria-invalid={denied}
-            oninput={() => (denied = false)}
-          />
-        </label>
+        <PinInput
+          id="owner-pin"
+          label="Owner PIN"
+          bind:value={pin}
+          invalid={denied}
+          onvalue={() => (denied = false)}
+          oncomplete={() => pending && void switchTo(pending.role)}
+        />
+        {#if profiles.preview}<p class="preview-pin">Preview PIN: <strong>1234</strong></p>{/if}
         {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {/if}
       <div class="actions">
@@ -108,9 +177,42 @@
           disabled={profiles.parentalPinConfigured === undefined ||
             switching ||
             (profiles.parentalPinConfigured === true && !/^\d{4}$/.test(pin))}
-          onclick={() => void useOwner()}>{switching ? 'Switching…' : 'Use Owner'}</button
+          onclick={() => void switchTo(pending!.role)}
+          >{switching ? 'Switching…' : `Use ${pending.name}`}</button
         >
-        <button type="button" onclick={() => dialog?.close()}>Cancel</button>
+        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
+      </div>
+    {:else}
+      <p class="intro">Choose once. Den opens here next time until you switch again.</p>
+      <div class="profiles" aria-label="Profiles">
+        {#each profiles.choices as choice (choice.role)}
+          <button
+            class="profile-choice"
+            class:current={choice.role === profiles.mode}
+            type="button"
+            disabled={switching}
+            aria-label={`Use ${choice.name}`}
+            onclick={() => void choose(choice)}
+          >
+            <ProfileAvatar {choice} />
+            <span class="choice-copy">
+              <strong>{choice.name}</strong>
+              <small>
+                {choice.role === 'kid'
+                  ? profiles.preview
+                    ? 'Profile preview · content filtering is not active yet'
+                    : `${choice.policy?.maximumAge ?? 12} and under · unrated hidden`
+                  : choice.role === 'visitor'
+                    ? 'Stays on this browser · activity erased when you switch profiles'
+                    : 'Your library and household settings'}
+              </small>
+            </span>
+            {#if choice.role === profiles.mode}<span class="current-label">Current</span>{/if}
+          </button>
+        {/each}
+      </div>
+      <div class="actions">
+        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Done</button>
       </div>
     {/if}
   </form>
@@ -118,18 +220,37 @@
 
 <style>
   .profile-trigger {
+    position: relative;
+    display: grid;
+    overflow: hidden;
     flex-shrink: 0;
-    min-height: 32px;
-    padding: 0 11px;
-    border: 1px solid var(--line);
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
     border-radius: 999px;
-    background: rgb(255 255 255 / 0.06);
-    color: var(--fg);
+    background: transparent;
+    color: var(--muted);
     cursor: pointer;
+    transition: opacity 120ms ease;
+  }
+
+  .profile-trigger:hover {
+    opacity: 0.78;
+
+    --den-occupant-transform: translate(0, -0.4px) rotate(0deg);
+  }
+
+  .profile-trigger:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+
+    --den-occupant-transform: translate(0, -0.4px) rotate(0deg);
   }
 
   dialog {
-    width: min(420px, calc(100vw - 32px));
+    width: min(440px, calc(100vw - 32px));
     padding: 0;
     border: 1px solid var(--line);
     border-radius: 18px;
@@ -153,29 +274,85 @@
     margin: 0;
   }
 
-  p,
-  label {
+  p {
     color: var(--muted);
   }
 
-  label {
+  .intro {
+    font-size: 14px;
+  }
+
+  .profiles {
     display: grid;
     gap: 8px;
   }
 
-  input {
-    width: 8ch;
-    padding: 9px 11px;
+  .profile-choice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 64px;
+    padding: 10px 12px;
     border: 1px solid var(--line);
-    border-radius: 9px;
-    background: rgb(255 255 255 / 0.06);
+    border-radius: 13px;
+    background: rgb(255 255 255 / 0.035);
     color: var(--fg);
-    font: inherit;
-    letter-spacing: 0.2em;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .profile-choice:hover,
+  .profile-choice:focus-visible {
+    border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+    background: rgb(255 255 255 / 0.075);
+  }
+
+  .profile-choice.current {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  }
+
+  .choice-copy,
+  .pending-profile div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .choice-copy small,
+  .pending-profile span {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .current-label {
+    margin-left: auto;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 650;
+  }
+
+  .pending-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .back {
+    justify-self: start;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
   }
 
   .denied {
     color: var(--bad, #ff9a9a);
+  }
+
+  .preview-pin {
+    font-size: 12px;
   }
 
   .actions {
@@ -203,5 +380,11 @@
   .actions button:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+
+  @media (width <= 759px) {
+    .profile-trigger.mobile-hidden {
+      display: none;
+    }
   }
 </style>

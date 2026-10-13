@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import type { Plugin, ViteDevServer } from 'vite';
 import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 
@@ -34,6 +35,33 @@ const remux = process.env.DEN_REMUX ?? 'http://192.168.86.193:8095';
 // request and fails every spec that guards the network. On for a session someone is watching from a
 // phone — `env DEN_PROBE=1 npm run dev -- --host` — and off the rest of the time.
 const watching = process.env.DEN_PROBE === '1';
+const profilesPreview = process.env.DEN_PROFILES_PREVIEW === '1';
+
+/** A local-only capability answer. Production serves the endpoint in Rust and remains default-off. */
+const previewProfiles = (): Plugin => ({
+  name: 'den-preview-profiles',
+  configureServer(server: ViteDevServer) {
+    if (!profilesPreview) return;
+    server.middlewares.use(
+      '/capabilities/profiles',
+      (
+        request: { method?: string },
+        response: {
+          statusCode: number;
+          setHeader: (name: string, value: string) => void;
+          end: (body: string) => void;
+        },
+        next: () => void,
+      ) => {
+        if (request.method !== 'GET') return next();
+        response.statusCode = 200;
+        response.setHeader('content-type', 'application/json');
+        response.setHeader('cache-control', 'no-store');
+        response.end(JSON.stringify({ enabled: true, preview: true }));
+      },
+    );
+  },
+});
 
 /**
  * Keep the full application graph on the wire beside the tiny entry without evaluating it. The entry can then
@@ -98,7 +126,13 @@ const preloadApplication = () => ({
 });
 
 export default defineConfig({
-  plugins: [previewBuild(), ...(watching ? [probe()] : []), svelte(), preloadApplication()],
+  plugins: [
+    previewProfiles(),
+    previewBuild(),
+    ...(watching ? [probe()] : []),
+    svelte(),
+    preloadApplication(),
+  ],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
     // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`
