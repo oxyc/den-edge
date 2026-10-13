@@ -1,7 +1,16 @@
 import { expect, it, vi } from 'vitest';
+import profileFixture from '../vendor/den-core/profiles-v1.json';
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type { LibraryServiceClientPort } from './libraryServiceSupervisor';
 import { LibraryServiceSupervisor } from './libraryServiceSupervisor';
+import { validateStoredProfileDirectory } from './profileDirectory';
+import {
+  ProfileKidCreateCoordinator,
+  ProfileKidCreateStore,
+  type ProfileKidCreateIO,
+  type ProfileKidCreateVault,
+} from './profileKidCreateWorker';
+import type { Stamp } from './wire';
 import {
   LIBRARY_SERVICE_PROTOCOL,
   type LibraryCommand,
@@ -278,6 +287,156 @@ it('replays an in-flight task with its original operation ID after a lost reply'
     version: second.version(1),
   });
   await expect(task).resolves.toMatchObject({ result: { outcome: 'disabled' } });
+  supervisor.close();
+});
+
+const profileReplayStamps = [
+  [1_800_000_005_000, 0, 'a1b2c3d4e5f60718'],
+  [1_800_000_005_000, 1, 'a1b2c3d4e5f60718'],
+  [1_800_000_005_000, 2, 'a1b2c3d4e5f60718'],
+  [1_800_000_005_000, 3, 'a1b2c3d4e5f60718'],
+] as const satisfies readonly [Stamp, Stamp, Stamp, Stamp];
+
+function profileReplayHarness() {
+  const stored = new Map<string, unknown>();
+  const vault: ProfileKidCreateVault = {
+    libraryId: '1'.repeat(32),
+    async keepRequired(name, value) {
+      stored.set(name, structuredClone(value));
+    },
+    async keptRequired<T>(name: string) {
+      return stored.has(name)
+        ? { kind: 'value' as const, value: structuredClone(stored.get(name)) as T }
+        : { kind: 'absent' as const };
+    },
+    async discardKept(name) {
+      stored.delete(name);
+    },
+  };
+  const source = (
+    profileFixture.migrationDirectoryConstructorCases as Array<{
+      expect?: { directory: unknown };
+    }>
+  )[0]!.expect!.directory;
+  let directory = validateStoredProfileDirectory(structuredClone(source));
+  let base = 10;
+  const io: ProfileKidCreateIO = {
+    hasActiveOwner: () => true,
+    readDirectory: async () => ({
+      directory: structuredClone(directory),
+      authority: { base, generation: 'store-a.library-9' },
+    }),
+    createAndVerifyProfileLibrary: vi.fn(async () => undefined),
+    casDirectory: async (_authority, candidate) => {
+      directory = structuredClone(candidate);
+      base += 1;
+      return 'committed';
+    },
+    retireProfileLibrary: async () => true,
+    adoptDirectory: async (candidate) => {
+      const profile = Object.keys(candidate.profiles).find((id) => id !== candidate.owner)!;
+      if (!directory.profiles[profile]) throw new Error('receipt is not directory-bound');
+    },
+    proveProfileResult: async (result) => {
+      if (!directory.profiles[result.profile]) throw new Error('receipt is not directory-bound');
+    },
+  };
+  const store = new ProfileKidCreateStore(vault);
+  return {
+    io,
+    coordinator: () => new ProfileKidCreateCoordinator(vault.libraryId, store, io),
+  };
+}
+
+it('replays a pending profile.create through a replacement Worker without allocating again', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const clients = [first, second];
+  const replaying = new LibraryServiceSupervisor(() => clients.shift()!);
+  await replaying.open(openOptions);
+  const request = { kind: 'profile.create', name: 'Sam', maximumAge: 8, pin: '1234' } as const;
+  const pending = replaying.task(request, 'create-sam');
+  await vi.waitFor(() => expect(first.tasks).toHaveLength(1));
+  const h = profileReplayHarness();
+  vi.mocked(h.io.createAndVerifyProfileLibrary).mockRejectedValueOnce(new Error('offline'));
+  await expect(
+    h
+      .coordinator()
+      .begin(first.tasks[0]!.operationId!, request.name, request.maximumAge, profileReplayStamps),
+  ).rejects.toThrow('offline');
+  first.fail(unavailable('reply lost'));
+  await vi.waitFor(() => expect(second.tasks).toHaveLength(1));
+  const result = await h
+    .coordinator()
+    .begin(second.tasks[0]!.operationId!, request.name, request.maximumAge, profileReplayStamps);
+  second.tasks[0]!.resolve({
+    result: { kind: 'profile.create', outcome: 'created', ...result },
+    version: second.version(1),
+  });
+  await expect(pending).resolves.toMatchObject({ result: { profile: result.profile } });
+  expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledTimes(2);
+  replaying.close();
+});
+
+it('replays profile.create after terminal cleanup and returns its receipt instead of a second Kid', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const clients = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => clients.shift()!);
+  await supervisor.open(openOptions);
+  const request = { kind: 'profile.create', name: 'Sam', maximumAge: 8, pin: '1234' } as const;
+  const pending = supervisor.task(request, 'create-sam');
+  await vi.waitFor(() => expect(first.tasks).toHaveLength(1));
+  const h = profileReplayHarness();
+  const firstResult = await h
+    .coordinator()
+    .begin(first.tasks[0]!.operationId!, request.name, request.maximumAge, profileReplayStamps);
+  first.fail(unavailable('reply lost after completion'));
+  await vi.waitFor(() => expect(second.tasks).toHaveLength(1));
+  const replayed = await h
+    .coordinator()
+    .begin(second.tasks[0]!.operationId!, request.name, request.maximumAge, profileReplayStamps);
+  second.tasks[0]!.resolve({
+    result: { kind: 'profile.create', outcome: 'created', ...replayed },
+    version: second.version(1),
+  });
+  await expect(pending).resolves.toMatchObject({ result: { profile: firstResult.profile } });
+  expect(replayed).toEqual(firstResult);
+  expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledOnce();
+  await h.coordinator().acknowledge(replayed.receipt);
+  await h.coordinator().acknowledge(replayed.receipt);
+  supervisor.close();
+});
+
+it('replays a lost profile.create.ack reply idempotently through the replacement Worker', async () => {
+  const creator = profileReplayHarness();
+  const created = await creator
+    .coordinator()
+    .begin('create-before-ack', 'Sam', 8, profileReplayStamps);
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const clients = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => clients.shift()!);
+  await supervisor.open(openOptions);
+
+  const pending = supervisor.task(
+    { kind: 'profile.create.ack', receipt: created.receipt },
+    'ack-1',
+  );
+  await vi.waitFor(() => expect(first.tasks).toHaveLength(1));
+  await creator.coordinator().acknowledge(created.receipt);
+  first.fail(unavailable('ack reply lost'));
+  await vi.waitFor(() => expect(second.tasks).toHaveLength(1));
+  await creator.coordinator().acknowledge(created.receipt);
+  second.tasks[0]!.resolve({
+    result: { kind: 'profile.create.ack', outcome: 'acknowledged' },
+    version: second.version(1),
+  });
+
+  await expect(pending).resolves.toMatchObject({ result: { outcome: 'acknowledged' } });
   supervisor.close();
 });
 

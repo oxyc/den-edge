@@ -244,6 +244,18 @@ describe('library service client protocol', () => {
       }),
     ).toMatchObject({ ok: true });
     expect(
+      decodeTask({ kind: 'profile.create', name: '😀'.repeat(64), maximumAge: 8, pin: '1234' }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({ kind: 'profile.create', name: '😀'.repeat(65), maximumAge: 8, pin: '1234' }),
+    ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'profile.create.ack', receipt: 'create-sam' })).toMatchObject({
+      ok: true,
+    });
+    expect(decodeTask({ kind: 'profile.create.ack', receipt: 'x'.repeat(257) })).toMatchObject({
+      ok: false,
+    });
+    expect(
       decodeLibraryServiceServerMessage({
         type: 'task-result',
         protocol: LIBRARY_SERVICE_PROTOCOL,

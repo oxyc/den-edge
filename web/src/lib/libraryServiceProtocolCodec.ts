@@ -193,6 +193,10 @@ function boundedText(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
+function boundedScalarText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && [...value].length <= max;
+}
+
 const apiKeyService = (value: unknown) =>
   value === 'tmdb' || value === 'omdb' || value === 'content-warnings';
 const mediaServer = (value: unknown) => value === 'jellyfin' || value === 'plex';
@@ -735,6 +739,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'history.export') return exact(value, ['kind']);
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.status') return exact(value, ['kind']);
+  if (value.kind === 'profile-create.status') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.observe') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.observe-recovery')
     return exact(value, ['kind', 'attempt']) && hexId(value.attempt);
@@ -890,6 +895,17 @@ function task(value: unknown): value is LibraryTask {
         hexId(value.recoveryAttempt) &&
         migrationSource(value.source)
       );
+    case 'profile.create':
+      return (
+        exact(value, ['kind', 'name', 'maximumAge', 'pin']) &&
+        boundedScalarText(value.name, 64) &&
+        integer(value.maximumAge) &&
+        value.maximumAge >= 0 &&
+        value.maximumAge <= 18 &&
+        pin(value.pin)
+      );
+    case 'profile.create.ack':
+      return exact(value, ['kind', 'receipt']) && boundedText(value.receipt, 256);
     default:
       return false;
   }
@@ -1631,6 +1647,25 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           typeof attempt === 'string' && /^[0-9a-f]{32}$/.test(attempt),
       )
     );
+  if (value.kind === 'profile-create.status') {
+    if (!exact(value, ['kind', 'phase', 'profile', 'name', 'maximumAge', 'receipt'])) return false;
+    if (value.phase === 'idle')
+      return (
+        value.profile === undefined &&
+        value.name === undefined &&
+        value.maximumAge === undefined &&
+        value.receipt === undefined
+      );
+    return (
+      value.phase === 'created' &&
+      hexId(value.profile) &&
+      boundedScalarText(value.name, 64) &&
+      integer(value.maximumAge) &&
+      value.maximumAge >= 0 &&
+      value.maximumAge <= 18 &&
+      boundedText(value.receipt, 256)
+    );
+  }
   if (value.kind === 'profile-migration.observe')
     return (
       exact(value, ['kind', 'attempt', 'source']) &&
@@ -1965,6 +2000,19 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'cancelled') &&
         optional(value.attempt, hexId)
       );
+    case 'profile.create':
+      return (
+        exact(value, ['kind', 'outcome', 'profile', 'name', 'maximumAge', 'receipt']) &&
+        value.outcome === 'created' &&
+        hexId(value.profile) &&
+        boundedScalarText(value.name, 64) &&
+        integer(value.maximumAge) &&
+        value.maximumAge >= 0 &&
+        value.maximumAge <= 18 &&
+        boundedText(value.receipt, 256)
+      );
+    case 'profile.create.ack':
+      return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
     default:
       return false;
   }

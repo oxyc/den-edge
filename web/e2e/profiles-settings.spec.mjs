@@ -11,7 +11,7 @@ test('Owner enables profiles with one exact attempt after establishing a missing
   await expect(page.getByRole('heading', { name: 'Create your Owner PIN' })).toBeVisible();
   await page.locator('#profiles-owner-pin').fill('1234');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByText('Kid profile').locator('..')).toContainText('Coming next');
+  await expect(page.locator('#profile-create-kid')).toContainText('Not created');
   await expect
     .poll(() => page.evaluate(() => window.profileSettingsEvents()))
     .toEqual([
@@ -20,6 +20,24 @@ test('Owner enables profiles with one exact attempt after establishing a missing
       'verify:1234',
       `enable:0123456789abcdef0123456789abcdef:7:${'a'.repeat(64)}`,
     ]);
+});
+
+test('Owner creates a fail-closed Kid profile with a name, age and one PIN entry', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/profiles-settings.html?enabled`);
+  await page.getByRole('button', { name: 'Create Kid profile' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Create a Kid profile' })).toBeVisible();
+  await page.getByLabel('Name').fill('Mina');
+  await page.getByLabel('Maximum age rating').fill('8');
+  await page.locator('#profiles-owner-pin').fill('1234');
+
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#profile-create-kid')).toContainText('Mina is ready.');
+  await expect
+    .poll(() => page.evaluate(() => window.profileSettingsEvents()))
+    .toEqual(['verify:1234', 'create:Mina:8:1234']);
 });
 
 test('recovery observes and binds its own source before the fresh Owner PIN', async ({ page }) => {

@@ -15,11 +15,15 @@ import {
   profileMigrationDigest,
   profileMigrationMaterialize,
   profileMigrationPartition,
+  profilesMaterialize,
+  profilesMerge,
   validMigrationSnapshot,
+  type ProfileCreateJournal,
   type AuthenticatedMigrationRow,
   type MigrationProjection,
   type MigrationSealedRow,
 } from './profileMigrationCore';
+import type { ProfileDirectoryAuthority } from './profileKidCreateWorker';
 import type {
   OwnerSplitAuthenticatedCopy,
   OwnerSplitBackup,
@@ -1700,6 +1704,169 @@ export class LibraryLog {
       rows.push(...page.entries);
       if (!page.more || page.entries.length === 0) return rows;
       since = page.entries.at(-1)!.seq;
+    }
+  }
+
+  /** Fresh authenticated directory authority for den-core's Kid creation planner. */
+  async readKidProfileDirectory(): Promise<{
+    readonly directory: ProfileDirectoryDocument;
+    readonly authority: ProfileDirectoryAuthority;
+  }> {
+    const snapshot = await this.readAll();
+    if (!snapshot || !snapshot.generation)
+      throw new Error('Profile-aware household could not be read to a stable generation');
+    let found: { row: RawEntry; directory: ProfileDirectoryDocument } | undefined;
+    for (const row of snapshot.entries) {
+      const opened = await openEntry(this.keys, row.k, row.v);
+      if ('invalidProfileDirectory' in opened) throw new Error('Profile directory is corrupt');
+      if ('profileDirectory' in opened) found = { row, directory: opened.profileDirectory };
+    }
+    if (!found) throw new Error('Kid creation requires an active Owner split');
+    this.acceptProfileDirectory(found.row, found.directory);
+    return {
+      directory: found.directory,
+      authority: { base: found.row.seq, generation: snapshot.generation },
+    };
+  }
+
+  /** Create an empty activity library and prove its only initial row decrypts exactly under the journal key. */
+  async createAndVerifyKidProfileLibrary(journal: ProfileCreateJournal): Promise<void> {
+    const keys = await this.kidProfileKeys(journal);
+    const initial: SettingsRow = { kind: 'set', schema: 2, name: 'prefs', values: {} };
+    const expected = await seal(keys, initial);
+    await this.writeMigrationCandidate(keys, [expected]);
+    const rows = await this.readMigrationCandidate(keys);
+    if (rows.length !== 1 || rows[0]!.k !== expected.k)
+      throw new Error('Kid activity library contains unexpected rows');
+    const [wanted, actual] = await Promise.all([
+      openPlaintext(keys, expected.k, expected.v),
+      openPlaintext(keys, rows[0]!.k, rows[0]!.v),
+    ]);
+    if (
+      wanted === null ||
+      actual === null ||
+      wanted.length !== actual.length ||
+      wanted.some((byte, index) => byte !== actual[index])
+    )
+      throw new Error('Kid activity library readback did not match its initial row');
+  }
+
+  /** Exact `set:profiles` row CAS. A lost response is deliberately reported as unknown. */
+  async casKidProfileDirectory(
+    authority: ProfileDirectoryAuthority,
+    directory: ProfileDirectoryDocument,
+  ): Promise<'committed' | 'conflict' | 'unknown'> {
+    const materialized = profilesMaterialize(directory);
+    const write = await sealPlaintext(this.keys, 'profiles', fromBase64url(materialized.plaintext));
+    let response: Response;
+    try {
+      response = await this.send(`/lib/${this.keys.id}/batch`, {
+        method: 'POST',
+        headers: {
+          ...this.headers(),
+          'x-den-wire': '5',
+          'x-den-generation': authority.generation,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ writes: [{ ...write, base: authority.base }] }),
+      });
+    } catch {
+      return 'unknown';
+    }
+    if (!response.ok) {
+      if (response.status === 409 && (await errorCode(response)) === 'generation_changed')
+        return 'conflict';
+      throw new Error('Kid directory CAS was refused');
+    }
+    try {
+      const value = (await response.json()) as unknown;
+      if (!migrationBatch(value)) return 'unknown';
+      const applied = value.applied.find(({ k }) => k === write.k);
+      if (applied) {
+        this.acceptProfileDirectory({ seq: applied.seq }, materialized.directory);
+        return 'committed';
+      }
+      if (value.conflicts.some(({ k }) => k === write.k)) return 'conflict';
+      return 'unknown';
+    } catch {
+      // A successful response whose evidence was lost or malformed is ambiguous and must be reconciled by reread.
+      return 'unknown';
+    }
+  }
+
+  /** Confirm candidate retirement with its owner token; ambiguous network outcomes remain retryable. */
+  async retireKidProfileLibrary(journal: ProfileCreateJournal): Promise<boolean> {
+    const keys = await this.kidProfileKeys(journal);
+    try {
+      const standing = await this.send(`/lib/${keys.id}/changes?since=0&limit=1`, {
+        headers: {
+          'x-den-library-token': keys.token,
+          'x-den-wire': String(WIRE),
+          'x-den-generation': '0',
+        },
+      });
+      if (standing.status === 404 || standing.status === 410) return true;
+      if (!standing.ok) return false;
+      const page = (await standing.json()) as unknown;
+      if (!migrationPage(page)) return false;
+      const generation = page.generation ?? standing.headers.get('x-den-generation');
+      if (!generation) return false;
+      const response = await this.send(`/lib/${keys.id}`, {
+        method: 'DELETE',
+        headers: {
+          'x-den-library-token': keys.token,
+          'x-den-wire': String(WIRE),
+          'x-den-generation': generation,
+        },
+      });
+      return response.ok || response.status === 404 || response.status === 410;
+    } catch {
+      return false;
+    }
+  }
+
+  async adoptKidProfileDirectory(directory: ProfileDirectoryDocument): Promise<void> {
+    validateStoredProfileDirectory(directory);
+    const current = await this.readKidProfileDirectory();
+    const merged = profilesMerge(directory, current.directory);
+    if (profilesMaterialize(merged).jcs !== profilesMaterialize(current.directory).jcs)
+      throw new Error('Fresh household directory does not contain the created Kid');
+  }
+
+  /** Re-prove an acknowledged/replayed create result from the current authenticated directory. */
+  async proveKidProfileResult(result: {
+    readonly profile: string;
+    readonly name: string;
+    readonly maximumAge: number;
+  }): Promise<void> {
+    const current = await this.readKidProfileDirectory();
+    const profile = current.directory.profiles[result.profile];
+    if (
+      !profile ||
+      profile.role !== 'kid' ||
+      profile.deleted.value ||
+      profile.display.value.name !== result.name ||
+      profile.policy.value.maximumAge !== result.maximumAge ||
+      profile.policy.value.unknownRatings !== 'block'
+    )
+      throw new Error('Fresh household directory does not contain the created Kid');
+  }
+
+  private async kidProfileKeys(journal: ProfileCreateJournal): Promise<LibraryKeys> {
+    let raw: Uint8Array<ArrayBuffer>;
+    try {
+      raw = Uint8Array.from(atob(journal.key), (character) => character.charCodeAt(0));
+    } catch {
+      throw new Error('Kid profile key is not canonical');
+    }
+    if (raw.length !== 32 || btoa(String.fromCharCode(...raw)) !== journal.key) {
+      raw.fill(0);
+      throw new Error('Kid profile key is not canonical');
+    }
+    try {
+      return await deriveKeys(raw);
+    } finally {
+      raw.fill(0);
     }
   }
 

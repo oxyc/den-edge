@@ -32,14 +32,18 @@
     recoveryAttempt: string;
     source: { generation: number; head: string };
   } | null>(null);
-  let modal = $state<'create-pin' | 'enable' | 'recover' | null>(null);
+  let modal = $state<'create-pin' | 'enable' | 'recover' | 'create-kid' | null>(null);
   let pinEstablished = $state(false);
   let pin = $state('');
   let denied = $state(false);
   let working = $state(false);
   let failure = $state<string | null>(null);
+  let kidName = $state('Kids');
+  let maximumAge = $state(12);
+  let created = $state<string | null>(null);
 
   const busy = $derived(working || status?.phase === 'reconciling');
+  const kidNameValid = $derived(!!kidName.trim() && [...kidName.trim()].length <= 64);
 
   onMount(() => void refresh());
 
@@ -50,6 +54,16 @@
     } catch {
       // Capability 404/off and transport failures are deliberately indistinguishable here.
       status = { kind: 'profile-migration.status', phase: 'off' };
+      return;
+    }
+    if (status.phase === 'enabled') {
+      try {
+        const resumed = await model.profileCreateStatus();
+        if (resumed.phase === 'created') created = `${resumed.name} is ready.`;
+      } catch {
+        // The household is still profile-aware. A transient Kid-journal retry must not hide profile settings.
+        failure = 'A pending Kid profile couldn’t be resumed yet. Try again when Den is online.';
+      }
     }
   }
 
@@ -88,6 +102,46 @@
       denied = false;
     } catch {
       failure = 'Profile recovery is not available yet.';
+    }
+  }
+
+  function beginCreateKid() {
+    if (busy || disabled) return;
+    kidName = 'Kids';
+    maximumAge = 12;
+    pin = '';
+    denied = false;
+    failure = null;
+    modal = 'create-kid';
+  }
+
+  async function createKid(value: string) {
+    if (
+      working ||
+      !/^\d{4}$/.test(value) ||
+      !kidNameValid ||
+      !Number.isInteger(maximumAge) ||
+      maximumAge < 0 ||
+      maximumAge > 18
+    )
+      return;
+    working = true;
+    denied = false;
+    failure = null;
+    try {
+      if (!(await verifyPin(value))) {
+        denied = true;
+        return;
+      }
+      const { result } = await model.createKidProfile(kidName.trim(), maximumAge, value);
+      if (result.kind !== 'profile.create') throw new Error('Wrong profile creation result');
+      created = `${result.name} is ready.`;
+      finishModal();
+    } catch {
+      failure = 'The Kid profile couldn’t be created safely. Enter your PIN and try again.';
+    } finally {
+      working = false;
+      pin = '';
     }
   }
 
@@ -206,7 +260,7 @@
 <SettingsSection
   id="profiles"
   title="Profiles"
-  subtitle="Separate Owner activity now; Kid and Visitor profiles come next."
+  subtitle="Separate Owner, Kid and Visitor activity and preferences."
 >
   <SettingRow
     id="profile-migration"
@@ -246,9 +300,17 @@
     <SettingRow
       id="profile-create-kid"
       label="Kid profile"
-      detail="Profile creation will arrive after the directory writer is enabled."
-      value="Coming next"
+      detail="Create a separate activity library. Unrated titles stay hidden; you choose the maximum age."
+      value={created ?? 'Not created'}
     />
+    <div class="actions">
+      <Button
+        variant="secondary"
+        label="Create Kid profile"
+        disabled={disabled || working}
+        onclick={beginCreateKid}
+      />
+    </div>
   {/if}
   {#if failure && !modal}<p class="failure" role="alert">{failure}</p>{/if}
 </SettingsSection>
@@ -263,21 +325,35 @@
   >
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="profiles-pin-title">
       <h2 id="profiles-pin-title">
-        {modal === 'recover'
-          ? 'Authorize profile recovery'
-          : modal === 'enable'
-            ? 'Enable Profiles'
-            : pinConfigured
-              ? 'Finish saving your Owner PIN'
-              : 'Create your Owner PIN'}
+        {modal === 'create-kid'
+          ? 'Create a Kid profile'
+          : modal === 'recover'
+            ? 'Authorize profile recovery'
+            : modal === 'enable'
+              ? 'Enable Profiles'
+              : pinConfigured
+                ? 'Finish saving your Owner PIN'
+                : 'Create your Owner PIN'}
       </h2>
       <p>
-        {modal !== 'create-pin'
-          ? 'Enter your Owner PIN. This authorizes this exact setup from backup through commit.'
-          : pinConfigured
-            ? 'Enter the same four-digit Owner PIN to finish syncing it before setup.'
-            : 'Choose a four-digit Owner PIN. Den saves it and uses this entry to authorize setup.'}
+        {modal === 'create-kid'
+          ? 'Choose the profile name and oldest allowed rating, then enter your Owner PIN.'
+          : modal !== 'create-pin'
+            ? 'Enter your Owner PIN. This authorizes this exact setup from backup through commit.'
+            : pinConfigured
+              ? 'Enter the same four-digit Owner PIN to finish syncing it before setup.'
+              : 'Choose a four-digit Owner PIN. Den saves it and uses this entry to authorize setup.'}
       </p>
+      {#if modal === 'create-kid'}
+        <label class="field">
+          <span>Name</span>
+          <input bind:value={kidName} maxlength="128" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Maximum age rating</span>
+          <input bind:value={maximumAge} type="number" min="0" max="18" inputmode="numeric" />
+        </label>
+      {/if}
       <PinInput
         id="profiles-owner-pin"
         label="Owner PIN"
@@ -287,7 +363,7 @@
         invalid={denied}
         engaged={!working}
         onvalue={() => (denied = false)}
-        oncomplete={(value) => void authorize(value)}
+        oncomplete={(value) => void (modal === 'create-kid' ? createKid(value) : authorize(value))}
       />
       {#if denied}<p class="failure" role="alert">That PIN didn’t match.</p>{/if}
       {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
@@ -295,9 +371,11 @@
         <Button variant="tertiary" label="Cancel" disabled={working} onclick={closeModal} />
         <Button
           variant="primary"
-          label={working ? 'Authorizing…' : 'Continue'}
-          disabled={working || !/^\d{4}$/.test(pin)}
-          onclick={() => void authorize(pin)}
+          label={working ? 'Working…' : modal === 'create-kid' ? 'Create profile' : 'Continue'}
+          disabled={working ||
+            !/^\d{4}$/.test(pin) ||
+            (modal === 'create-kid' && (!kidNameValid || maximumAge < 0 || maximumAge > 18))}
+          onclick={() => void (modal === 'create-kid' ? createKid(pin) : authorize(pin))}
         />
       </div>
     </div>
@@ -352,5 +430,21 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  .field {
+    display: grid;
+    gap: 7px;
+    color: var(--muted);
+  }
+
+  .field input {
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: inherit;
+    background: var(--background, #111);
+    font: inherit;
   }
 </style>
