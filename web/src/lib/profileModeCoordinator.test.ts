@@ -55,32 +55,39 @@ function owner(
   visitorLock?: VisitorActivityLock,
   directory?: PreviewProfileDirectory,
   profileModels?: ProfileActivityModelFactory,
+  householdPinConfigured?: boolean,
 ) {
-  const release = vi.fn();
-  const close = vi.fn();
-  const verifyParentalPin = vi.fn(async (pin: string) => pin === '1234');
-  const connections = vi.fn(
-    () =>
-      ({
-        snapshot: {
-          connection: 'ready',
-          value: { kind: 'connections', parentalPinConfigured: pinConfigured },
-        },
-        release,
-      }) as unknown as LibraryModelLease<ConnectionsView>,
-  );
-  const model = { close, connections, verifyParentalPin } as unknown as LibraryModel;
+  const authority = (configured: boolean) => {
+    const release = vi.fn();
+    const close = vi.fn();
+    const verifyParentalPin = vi.fn(async (pin: string) => pin === '1234');
+    const connections = vi.fn(
+      () =>
+        ({
+          snapshot: {
+            connection: 'ready',
+            value: { kind: 'connections', parentalPinConfigured: configured },
+          },
+          release,
+        }) as unknown as LibraryModelLease<ConnectionsView>,
+    );
+    const model = { close, connections, verifyParentalPin } as unknown as LibraryModel;
+    return { model, close, connections, release, verifyParentalPin };
+  };
+  const activity = authority(pinConfigured);
+  const control =
+    householdPinConfigured === undefined ? activity : authority(householdPinConfigured);
   const closeWorker = vi.fn();
   const household = new HouseholdSession(
     { kind: 'legacy', libraryKey: 'household-key', configurationOnly: false },
-    model,
+    control.model,
     content(),
     closeWorker,
   );
   const session = new ProfileSession(
     legacyProfileIdentity('household-key', false),
     household,
-    model,
+    activity.model,
     false,
     true,
   );
@@ -93,11 +100,15 @@ function owner(
       directory,
       profileModels,
     ),
-    model,
-    close,
+    model: activity.model,
+    close: activity.close,
     closeWorker,
-    release,
-    verifyParentalPin,
+    release: control.release,
+    verifyParentalPin: control.verifyParentalPin,
+    activityRelease: activity.release,
+    activityVerifyParentalPin: activity.verifyParentalPin,
+    householdModel: control.model,
+    householdClose: control.close,
   };
 }
 
@@ -434,6 +445,74 @@ describe('ProfileModeCoordinator', () => {
     expect(first.coordinator.session!.household.identity.libraryKey).toBe('household-key');
     expect(first.coordinator.session!.model).not.toBe(first.model);
     expect(first.coordinator.session!.preferences).not.toBeNull();
+  });
+
+  it('uses the household PIN when a missing marker leaves Owner activity unselected', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey, opening]]));
+    // The activity log deliberately disagrees: security configuration belongs to the household control log.
+    const first = owner(storage, false, null, undefined, directory, models.factory, true);
+
+    expect(first.coordinator.parentalPinConfigured).toBe(true);
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    expect(first.activityVerifyParentalPin).not.toHaveBeenCalled();
+    expect(first.verifyParentalPin).toHaveBeenCalledWith('0000');
+
+    const switching = first.coordinator.switchToOwner('1234');
+    await vi.waitFor(() => expect(models.handles).toHaveLength(1));
+    opening.resolve({});
+    await expect(switching).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('owner');
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(first.householdClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps household PIN authority alive across Kid and Visitor restores', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const kidOpening = deferred<unknown>();
+    const ownerOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [kid.libraryKey, kidOpening],
+        [ownerProfile.libraryKey, ownerOpening],
+      ]),
+    );
+    const first = owner(storage, false, null, undefined, directory, models.factory, true);
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(first.householdClose).not.toHaveBeenCalled();
+    kidOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    const fromKid = first.coordinator.switchToOwner('1234');
+    ownerOpening.resolve({});
+    await expect(fromKid).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+
+    expect(first.activityVerifyParentalPin).not.toHaveBeenCalled();
+    expect(first.verifyParentalPin.mock.calls).toEqual([['0000'], ['1234'], ['0000'], ['1234']]);
+    expect(first.householdClose).not.toHaveBeenCalled();
+    first.coordinator.dispose();
+    expect(first.release).toHaveBeenCalledOnce();
+    expect(first.householdClose).toHaveBeenCalledOnce();
   });
 
   it('switches between Kid profiles by id and opens the selected encrypted library', async () => {

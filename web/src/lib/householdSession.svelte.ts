@@ -1,5 +1,6 @@
 import type { ContentServiceClientPort } from './contentServiceClient';
-import type { LibraryModel } from './libraryModel.svelte';
+import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
+import type { ConnectionsView } from './libraryServiceProtocol';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
 import type { ProfileMigrationParticipant } from './profileMigration';
@@ -61,6 +62,17 @@ export class HouseholdSession {
 
   ownsModel(model: LibraryModel | null): boolean {
     return model === this.#model;
+  }
+
+  /** Household security settings stay on the control log after Owner activity moves to its own library. */
+  controlConnections(): LibraryModelLease<ConnectionsView> {
+    if (!this.#model) throw new Error('Profiles require an open household control library');
+    return this.#model.connections();
+  }
+
+  /** Verify the household-owned Owner PIN without exposing the control model to profile activity code. */
+  async verifyParentalPin(pin: string): Promise<boolean> {
+    return (await this.#model?.verifyParentalPin(pin)) ?? false;
   }
 
   get updateRequired(): boolean {
