@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { PreviewProfilePreferences } from './profilePreferences.svelte';
+import { PreviewProfilePreferences, SyncedProfilePreferences } from './profilePreferences.svelte';
 import { profileId, visitorVisitId } from './profileIdentity';
 import type { ProfileSession } from './profileSession.svelte';
+import type { LibraryModel } from './libraryModel.svelte';
 import {
   VisitorActivityNamespace,
   type VisitorProfileSession,
@@ -164,5 +165,71 @@ describe('preview profile preferences', () => {
     expect(ownerPreferences.watchRegion).toBe('FI');
     expect(ownerPreferences.maturityCeiling).toBe('r');
     expect(ownerPreferences.services).toEqual([{ id: 8, country: 'FI' }]);
+  });
+});
+
+describe('synced profile preferences', () => {
+  it('reads personal values from the profile and household values from the control log', () => {
+    const personal: LibraryPreferences = {
+      ...ownerPreferences,
+      excludedGenres: [35],
+      audioLanguage: 'da',
+      watchRegion: 'US',
+      services: [],
+      servicesConfigured: false,
+      maturityCeiling: 'pg13',
+    };
+    const model = {
+      settings: {
+        connection: 'ready',
+        value: { kind: 'settings', preferences: personal, assistant: { read: true, write: true } },
+      },
+      patchPreferences: async () => ({}),
+    } as unknown as LibraryModel;
+    const preferences = new SyncedProfilePreferences(kid().identity, model, policy);
+
+    expect(preferences.value).toMatchObject({
+      excludedGenres: [35],
+      audioLanguage: 'da',
+      watchRegion: 'FI',
+      services: [{ id: 8, country: 'FI' }],
+      servicesConfigured: true,
+      maturityCeiling: undefined,
+    });
+    expect(preferences.policy.settings.value).toMatchObject({
+      assistant: { read: false, write: false },
+      preferences: { excludedGenres: [35], watchRegion: 'FI', maturityCeiling: undefined },
+    });
+  });
+
+  it('writes personal changes only to the active profile model', async () => {
+    const patches: unknown[] = [];
+    const model = {
+      settings: {
+        connection: 'ready',
+        value: {
+          kind: 'settings',
+          preferences: ownerPreferences,
+          assistant: { read: false, write: false },
+        },
+      },
+      patchPreferences: async (patch: unknown) => {
+        patches.push(patch);
+        return {};
+      },
+    } as unknown as LibraryModel;
+    const preferences = new SyncedProfilePreferences(kid().identity, model, policy);
+
+    await preferences.patch({ audioLanguage: 'da', excludedGenres: [35] });
+    await expect(preferences.patch({ watchRegion: 'SE' })).rejects.toThrow(
+      'A profile cannot write household settings or content policy',
+    );
+    await expect(preferences.patch({ maturityCeiling: 'r' })).rejects.toThrow(
+      'A profile cannot write household settings or content policy',
+    );
+    await expect(preferences.patch({ services: { kind: 'values', values: [] } })).rejects.toThrow(
+      'A profile cannot write household settings or content policy',
+    );
+    expect(patches).toEqual([{ audioLanguage: 'da', excludedGenres: [35] }]);
   });
 });

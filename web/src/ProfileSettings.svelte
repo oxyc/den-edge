@@ -1,4 +1,4 @@
-<!-- Preview-only personal settings for Kid and Visitor. No Owner LibraryModel or household writer is reachable here. -->
+<!-- Personal settings for Kid and Visitor. No household writer is reachable here. -->
 <script lang="ts">
   import AboutSection from './settings/AboutSection.svelte';
   import ContentSection from './settings/ContentSection.svelte';
@@ -6,18 +6,18 @@
   import SettingsNav from './settings/SettingsNav.svelte';
   import { ATLAS_FALLBACK } from './settings/credits';
   import type { ProfileSession } from './lib/profileSession.svelte';
-  import type { PreviewProfilePreferences } from './lib/profilePreferences.svelte';
+  import type { ProfilePreferences } from './lib/profilePreferences.svelte';
 
   let { session }: { session: ProfileSession } = $props();
-  const prefs = $derived((session.preferences as PreviewProfilePreferences).value);
+  const prefs = $derived((session.preferences as ProfilePreferences).value);
   let saving = $state(false);
   let failure = $state<string | null>(null);
   const role = $derived(session.identity.kind === 'visitor' ? 'Visitor' : 'Kid');
 
-  function save(changes: Parameters<PreviewProfilePreferences['patch']>[0]) {
+  function save(changes: Parameters<ProfilePreferences['patch']>[0]) {
     saving = true;
     failure = null;
-    void (session.preferences as PreviewProfilePreferences)
+    void (session.preferences as ProfilePreferences)
       .patch(changes)
       .catch((error: unknown) => {
         console.warn('den: profile preference save failed', error);

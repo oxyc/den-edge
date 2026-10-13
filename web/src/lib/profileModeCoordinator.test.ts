@@ -433,6 +433,7 @@ describe('ProfileModeCoordinator', () => {
     expect(first.coordinator.session!.model).toBe(models.handles[0]!.model);
     expect(first.coordinator.session!.household.identity.libraryKey).toBe('household-key');
     expect(first.coordinator.session!.model).not.toBe(first.model);
+    expect(first.coordinator.session!.preferences).not.toBeNull();
   });
 
   it('switches between Kid profiles by id and opens the selected encrypted library', async () => {
@@ -655,6 +656,7 @@ describe('ProfileModeCoordinator', () => {
     expect(first.coordinator.session).toBe(ownerSession);
     await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
     const visitor = first.coordinator.session;
+    expect(visitor?.preferences).not.toBeNull();
     first.coordinator.updateDirectory(ownerOnly);
     expect(first.coordinator.session).toBe(visitor);
     const withoutPolicies = {

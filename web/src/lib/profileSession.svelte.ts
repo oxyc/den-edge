@@ -17,7 +17,7 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import type { ProfileActivity } from './visitorActivity.svelte';
-import type { PreviewProfilePreferences } from './profilePreferences.svelte';
+import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
 
 const TOAST_MS = 6_000;
 
@@ -47,8 +47,8 @@ export class ProfileSession {
     readonly profileActivity: ProfileActivity | null = null,
     /** Numeric directory policy stays distinct from legacy presentation preferences. */
     readonly contentPolicy: ProfileContentPolicy | null = null,
-    /** Preview seam only; production profiles will replace this with their own encrypted settings writer. */
-    readonly preferences: PreviewProfilePreferences | null = null,
+    /** Personal preference projection. Persistent profiles write only to their own encrypted activity library. */
+    readonly preferences: ProfilePreferences | null = null,
     /** Owns the separate Worker session behind a directory-backed activity model. */
     private readonly closeActivityModel: (() => void) | null = null,
   ) {}
@@ -168,16 +168,20 @@ export function activeProfileSession(
   closeActivityModel: (() => void) | null = null,
   contentPolicy: ProfileContentPolicy | null = null,
 ): ProfileSession {
+  const householdPolicy = household.policy;
+  const preferences = householdPolicy
+    ? new SyncedProfilePreferences(identity, model, householdPolicy)
+    : null;
   return new ProfileSession(
     identity,
     household,
     model,
     false,
     false,
-    undefined,
+    preferences?.policy ?? undefined,
     null,
     contentPolicy,
-    null,
+    preferences,
     closeActivityModel,
   );
 }

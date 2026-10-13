@@ -1,6 +1,7 @@
 import { RATING_SOURCES } from '../settings/catalogs';
 import type { PreferenceChanges } from '../settings/preferences';
 import type { LibraryPreferences } from './libraryServiceProtocol';
+import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { ProfileIdentity } from './profileIdentity';
 import type { ProfilePolicy } from './profilePolicy';
 import type { VisitorActivityNamespace } from './visitorProfileSession.svelte';
@@ -13,6 +14,13 @@ type PersonalPreferences = Omit<
   LibraryPreferences,
   'watchRegion' | 'services' | 'servicesConfigured' | 'maturityCeiling'
 >;
+
+export interface ProfilePreferences {
+  readonly value: LibraryPreferences | undefined;
+  readonly policy: ProfilePolicy;
+  patch(changes: PreferenceChanges): Promise<void>;
+  close(): void;
+}
 
 const personalDefaults = (): PersonalPreferences => ({
   excludedGenres: [],
@@ -109,7 +117,7 @@ const applyPersonalPatch = (
  * Preview-only preference storage. Kid is durable under its profile ID; Visitor lives inside the disposable visit
  * namespace, so the same end-visit operation that removes activity also removes preferences.
  */
-export class PreviewProfilePreferences {
+export class PreviewProfilePreferences implements ProfilePreferences {
   #personal = $state.raw<PersonalPreferences>(personalDefaults());
   readonly #kidKey: string | null;
   readonly #visitor: VisitorActivityNamespace | null;
@@ -198,3 +206,76 @@ export class PreviewProfilePreferences {
       this.#personal = readPersonal(this.#visitor.get(VISITOR_DOCUMENT));
   };
 }
+
+/**
+ * A persistent profile's personal preference document. Reads combine the profile's own encrypted preferences with
+ * the household-only region/service values, while writes can reach only the profile activity library.
+ */
+export class SyncedProfilePreferences implements ProfilePreferences {
+  readonly policy: ProfilePolicy;
+
+  constructor(
+    readonly identity: ProfileIdentity,
+    private readonly model: LibraryModel,
+    private readonly household: ProfilePolicy,
+  ) {
+    if (identity.kind !== 'profile')
+      throw new TypeError('Synced profile preferences require a persistent profile');
+    const effectiveSettings = () => {
+      const personal = model.settings;
+      const shared = household.settings;
+      const profilePreferences = personal.value?.preferences;
+      const householdPreferences = shared.value?.preferences;
+      return {
+        connection: personal.connection,
+        version: personal.version,
+        error: personal.error ?? shared.error,
+        value:
+          profilePreferences && householdPreferences
+            ? {
+                kind: 'settings' as const,
+                preferences: mergeProfilePreferences(profilePreferences, householdPreferences),
+                assistant: { read: false, write: false },
+              }
+            : undefined,
+      };
+    };
+    this.policy = Object.freeze({
+      get settings() {
+        return effectiveSettings();
+      },
+    });
+  }
+
+  get value(): LibraryPreferences | undefined {
+    const personal = this.model.settings.value?.preferences;
+    const household = this.household.settings.value?.preferences;
+    return personal && household ? mergeProfilePreferences(personal, household) : undefined;
+  }
+
+  async patch(changes: PreferenceChanges): Promise<void> {
+    assertPersonalPatch(changes);
+    await this.model.patchPreferences(changes);
+  }
+
+  close(): void {}
+}
+
+const assertPersonalPatch = (patch: PreferenceChanges): void => {
+  if ('watchRegion' in patch || 'services' in patch || 'maturityCeiling' in patch)
+    throw new TypeError('A profile cannot write household settings or content policy');
+};
+
+const mergeProfilePreferences = (
+  personal: Immutable<LibraryPreferences>,
+  household: Immutable<LibraryPreferences>,
+): LibraryPreferences => {
+  const copy = structuredClone(personal) as LibraryPreferences;
+  return {
+    ...copy,
+    watchRegion: household.watchRegion,
+    services: household.services.map((service) => ({ ...service })),
+    servicesConfigured: household.servicesConfigured,
+    maturityCeiling: undefined,
+  };
+};
