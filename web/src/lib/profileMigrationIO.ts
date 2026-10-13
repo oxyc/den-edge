@@ -9,6 +9,7 @@ import type {
   ProfileMigrationJournal,
   ProfilesDirectory,
 } from './profileMigration';
+import { validateStoredProfileDirectory } from './profileDirectory';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const LIBRARY_ID = /^[0-9a-f]{32}$/;
@@ -173,7 +174,6 @@ export class DormantOwnerSplitExecutor implements ProfileMigrationExecutor {
   readonly #householdLibraryKey: string;
   readonly #storage: OwnerSplitStorage;
   readonly #partitionPreferences: OwnerPreferencePartitioner;
-  readonly #validateDirectory: ProfilesDirectoryValidator;
 
   constructor(
     storage: OwnerSplitStorage,
@@ -181,7 +181,6 @@ export class DormantOwnerSplitExecutor implements ProfileMigrationExecutor {
       householdId: string;
       householdLibraryKey: string;
       partitionPreferences: OwnerPreferencePartitioner;
-      validateDirectory: ProfilesDirectoryValidator;
       enabled?: boolean;
     },
   ) {
@@ -191,7 +190,6 @@ export class DormantOwnerSplitExecutor implements ProfileMigrationExecutor {
     this.#householdId = options.householdId;
     this.#householdLibraryKey = options.householdLibraryKey;
     this.#partitionPreferences = options.partitionPreferences;
-    this.#validateDirectory = options.validateDirectory;
     this.#enabled = options.enabled ?? false;
   }
 
@@ -324,7 +322,7 @@ export class DormantOwnerSplitExecutor implements ProfileMigrationExecutor {
   async verifyWinner(directory: ProfilesDirectory, ownerLibraryKey: string): Promise<boolean> {
     this.#requireEnabled();
     if (!canonicalLibraryKey(ownerLibraryKey)) throw new Error('Winner library key is invalid');
-    const validated = this.#validateDirectory(directory);
+    const validated = validateStoredProfileDirectory(directory) as ProfilesDirectory;
     const migration = record(validated.migration) ? validated.migration : null;
     const attempt = migration?.attempt;
     if (typeof attempt !== 'string') throw new Error('Winner migration attempt is invalid');
@@ -352,7 +350,8 @@ export class DormantOwnerSplitExecutor implements ProfileMigrationExecutor {
       context,
       source,
       candidate: checked,
-      validateDirectory: this.#validateDirectory,
+      validateDirectory: (directory) =>
+        validateStoredProfileDirectory(directory) as ProfilesDirectory,
     });
     if (evidence.result === 'blocked')
       throw new Error(`Owner split cleanup refused: ${evidence.reason ?? 'unknown'}`);

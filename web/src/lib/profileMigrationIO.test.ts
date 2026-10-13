@@ -13,6 +13,7 @@ import {
   type OwnerPreferencePartition,
   type OwnerSplitStorage,
 } from './profileMigrationIO';
+import type { Stamp } from './wire';
 
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
 const OWNER = '00112233445566778899aabbccddeeff';
@@ -54,6 +55,7 @@ const context = {
 };
 
 function directory(ownerKey = CANDIDATE_KEY): ProfilesDirectory {
+  const at = (time: number): Stamp => [time, 0, 'a1b2c3d4e5f60718'];
   return {
     format: 4,
     kind: 'profiles',
@@ -68,8 +70,22 @@ function directory(ownerKey = CANDIDATE_KEY): ProfilesDirectory {
       ownerHead: HEAD,
     },
     profiles: {
-      [OWNER]: { library: { value: { key: ownerKey } }, deleted: { value: false } },
-      [KID_ID]: { library: { value: { key: KID_KEY } }, deleted: { value: false } },
+      [OWNER]: {
+        id: OWNER,
+        role: 'owner',
+        display: { value: { name: 'Owner' }, at: at(1) },
+        library: { value: { keyVersion: 1, key: ownerKey }, at: at(2) },
+        policy: { value: { maximumAge: null, unknownRatings: 'allow' }, at: at(3) },
+        deleted: { value: false, at: at(4) },
+      },
+      [KID_ID]: {
+        id: KID_ID,
+        role: 'kid',
+        display: { value: { name: 'Kid' }, at: at(5) },
+        library: { value: { keyVersion: 1, key: KID_KEY }, at: at(6) },
+        policy: { value: { maximumAge: 12, unknownRatings: 'block' }, at: at(7) },
+        deleted: { value: false, at: at(8) },
+      },
     },
   };
 }
@@ -92,8 +108,8 @@ function safeRetirement(
 function fixture(options: { enabled?: boolean } = {}) {
   const calls: string[] = [];
   const partitionPreferences = vi.fn(() => partition);
-  const validateDirectory = vi.fn((document: unknown) => document as ProfilesDirectory);
   let retirement = safeRetirement();
+  let retirementDirectory: unknown = directory();
   const storage: OwnerSplitStorage = {
     observe: vi.fn(async (): Promise<HouseholdMigrationObservation> => ({
       kind: 'legacy',
@@ -155,7 +171,7 @@ function fixture(options: { enabled?: boolean } = {}) {
     verifyWinner: vi.fn(async () => true),
     conditionallyRetireUnreferenced: vi.fn(async ({ validateDirectory: validate }) => {
       calls.push('conditional-retire');
-      validate(directory());
+      validate(retirementDirectory);
       return retirement;
     }),
   };
@@ -164,18 +180,19 @@ function fixture(options: { enabled?: boolean } = {}) {
       householdId: HOUSEHOLD_ID,
       householdLibraryKey: HOUSEHOLD_KEY,
       partitionPreferences,
-      validateDirectory,
       enabled: options.enabled,
     });
   return {
     calls,
     storage,
     partitionPreferences,
-    validateDirectory,
     executor: makeExecutor(),
     makeExecutor,
     setRetirement(value: ConditionalRetirementEvidence) {
       retirement = value;
+    },
+    setRetirementDirectory(value: unknown) {
+      retirementDirectory = value;
     },
   };
 }
@@ -195,14 +212,13 @@ describe('DormantOwnerSplitExecutor', () => {
   });
 
   it('requires canonical household identity even while dormant', () => {
-    const { storage, partitionPreferences, validateDirectory } = fixture();
+    const { storage, partitionPreferences } = fixture();
     expect(
       () =>
         new DormantOwnerSplitExecutor(storage, {
           householdId: 'not-an-id',
           householdLibraryKey: HOUSEHOLD_KEY,
           partitionPreferences,
-          validateDirectory,
         }),
     ).toThrow('Household identity is not canonical');
   });
@@ -404,12 +420,11 @@ describe('DormantOwnerSplitExecutor', () => {
   });
 
   it('uses one atomic conditional retirement and rejects TOCTOU or incomplete exclusion proof', async () => {
-    const { executor, storage, validateDirectory, setRetirement } = fixture({ enabled: true });
+    const { executor, storage, setRetirement } = fixture({ enabled: true });
     await expect(executor.retireLosingCandidate(ATTEMPT, fence, candidate)).resolves.toBe(
       'retired',
     );
     expect(storage.conditionallyRetireUnreferenced).toHaveBeenCalledOnce();
-    expect(validateDirectory).toHaveBeenCalledOnce();
 
     setRetirement({
       ...safeRetirement(),
@@ -426,6 +441,21 @@ describe('DormantOwnerSplitExecutor', () => {
     });
     await expect(executor.retireLosingCandidate(ATTEMPT, fence, candidate)).rejects.toThrow(
       'proof is invalid',
+    );
+  });
+
+  it('rejects shape without migration evidence at winner and cleanup boundaries', async () => {
+    const { executor, storage, setRetirementDirectory } = fixture({ enabled: true });
+    const { migration: _migration, ...uncommitted } = directory();
+
+    await expect(
+      executor.verifyWinner(uncommitted as ProfilesDirectory, CANDIDATE_KEY),
+    ).rejects.toThrow('migration_missing');
+    expect(storage.verifyWinner).not.toHaveBeenCalled();
+
+    setRetirementDirectory(uncommitted);
+    await expect(executor.retireLosingCandidate(ATTEMPT, fence, candidate)).rejects.toThrow(
+      'migration_missing',
     );
   });
 
