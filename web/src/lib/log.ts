@@ -27,6 +27,7 @@ import type {
   VerifiedOwnerSplitBackup,
 } from './profileOwnerSplitEngine';
 import type { ResolvedOwnerSplitCandidate } from './profileOwnerSplitWorkerStore';
+import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import {
@@ -156,6 +157,9 @@ const migrationBatch = (value: unknown): value is Batch => {
     )
   );
 };
+
+const migrationAAD = (name: string, binding: string): Uint8Array<ArrayBuffer> =>
+  utf8.encode(`${name}\u0000${binding}`);
 
 /** `v4_form`'s answer (§10): the documents of the switch, and the rows staged as they are stored. */
 interface V4Form {
@@ -1401,14 +1405,10 @@ export class LibraryLog {
     readonly body?: unknown;
     readonly candidateToken?: string;
   }): Promise<{ readonly status: number; readonly body: unknown }> {
-    const root = `/lib/${this.keys.id}/`;
-    const action = input.path.startsWith(root) ? input.path.slice(root.length) : '';
-    if (
-      action !== 'profile-capability' &&
-      action !== 'profile-migration' &&
-      !action.startsWith('profile-migration/')
-    )
-      throw new Error('Profile migration path is outside this household');
+    const route = ownerSplitWorkerRoute(this.keys.id, input.method, input.path);
+    if (route === null) throw new Error('Profile migration method or path is not allowed');
+    if ((input.candidateToken !== undefined) !== (route.kind === 'retire-candidate'))
+      throw new Error('Candidate authority is valid only for exact retirement requests');
     const response = await this.send(input.path, {
       method: input.method,
       headers: {
@@ -1662,14 +1662,8 @@ export class LibraryLog {
         `/lib/${keys.id}/batch`,
         {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-den-library-token': keys.token,
-            'x-den-library-member': `${keys.id}:${keys.member}`,
-            'x-den-wire': String(WIRE),
-            'x-den-wire-min': String(WIRE),
-            'x-den-generation': '0',
-          },
+          // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
+          headers: ownerSplitCandidateWriteHeaders(this.keys, keys),
           body: JSON.stringify({ writes: chunk }),
         },
         false,
@@ -2486,11 +2480,45 @@ export class LibraryLog {
   }
 
   /** Migration state is security-critical and must never silently degrade to an in-memory credential. */
-  async keepRequired(name: string, value: unknown): Promise<void> {
+  async keepRequired(name: string, value: unknown, binding = ''): Promise<void> {
     if (!this.local) throw new Error('Encrypted library storage is unavailable');
-    await this.keep(name, value);
-    if ((await this.kept<unknown>(name)) === undefined)
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sealed = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: migrationAAD(name, binding) },
+      this.local.key,
+      utf8.encode(JSON.stringify(value)),
+    );
+    const bytes = new Uint8Array(iv.length + sealed.byteLength);
+    bytes.set(iv);
+    bytes.set(new Uint8Array(sealed), iv.length);
+    await this.local.vault.put(`${this.keys.id}:${name}`, bytes);
+    if ((await this.keptRequired<unknown>(name, binding)).kind !== 'value')
       throw new Error('Encrypted library storage could not retain migration state');
+  }
+
+  /** Unlike ordinary cached `kept`, a corrupt migration value is distinct from a genuinely absent value. */
+  async keptRequired<T>(
+    name: string,
+    binding = '',
+  ): Promise<{ readonly kind: 'absent' } | { readonly kind: 'value'; readonly value: T }> {
+    if (!this.local) throw new Error('Encrypted library storage is unavailable');
+    const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
+    if (bytes === undefined) return { kind: 'absent' };
+    if (bytes.length < 13) throw new Error('Encrypted migration state is corrupt');
+    try {
+      const plain = await crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: bytes.slice(0, 12),
+          additionalData: migrationAAD(name, binding),
+        },
+        this.local.key,
+        bytes.slice(12),
+      );
+      return { kind: 'value', value: JSON.parse(new TextDecoder().decode(plain)) as T };
+    } catch {
+      throw new Error('Encrypted migration state is corrupt');
+    }
   }
 
   /** What `keep` kept under `name`; undefined when nothing was, or it doesn't open under this library's key. */

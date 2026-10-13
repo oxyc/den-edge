@@ -19,8 +19,11 @@ const CANDIDATE_VERSION = 1;
 /** The only persistence operations the migration adapter may use. LibraryLog seals both with its household key. */
 export interface OwnerSplitWorkerVault {
   readonly libraryId: string;
-  keepRequired(name: string, value: unknown): Promise<void>;
-  kept<T>(name: string): Promise<T | undefined>;
+  keepRequired(name: string, value: unknown, binding?: string): Promise<void>;
+  keptRequired<T>(
+    name: string,
+    binding?: string,
+  ): Promise<{ readonly kind: 'absent' } | { readonly kind: 'value'; readonly value: T }>;
   discardKept(name: string): Promise<void>;
 }
 
@@ -89,7 +92,11 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
       libraryKey: toBase64(raw),
     };
     raw.fill(0);
-    await this.#vault.keepRequired(this.#candidateName(keyRef), record);
+    await this.#vault.keepRequired(
+      this.#candidateName(keyRef),
+      record,
+      this.#candidateBinding(attempt),
+    );
     // A best-effort browser store is not sufficient for a migration credential. Prove the encrypted value is
     // readable before revealing even its opaque handle to the lifecycle planner.
     await this.resolveCandidate(keyRef, attempt);
@@ -99,8 +106,12 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
   async resolveCandidate(keyRef: string, attempt: string): Promise<ResolvedOwnerSplitCandidate> {
     checkedAttempt(attempt);
     if (!KEY_REF.test(keyRef)) throw new Error('Candidate secure reference is invalid');
-    const value = await this.#vault.kept<unknown>(this.#candidateName(keyRef));
-    const record = checkedCandidateCredential(value);
+    const opened = await this.#vault.keptRequired<unknown>(
+      this.#candidateName(keyRef),
+      this.#candidateBinding(attempt),
+    );
+    if (opened.kind === 'absent') throw new Error('Candidate credential is unavailable or corrupt');
+    const record = checkedCandidateCredential(opened.value);
     if (
       record.householdId !== this.#vault.libraryId ||
       record.attempt !== attempt ||
@@ -144,15 +155,19 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
     await this.#locked(async () => {
       const current = await this.#state();
       const sameAttempt = current?.journal.attempt === checked.attempt;
-      await this.#vault.keepRequired(this.#stateName(), {
-        version: 1,
-        householdId: this.#vault.libraryId,
-        journal: checked,
-        ...(sameAttempt && current?.authorization
-          ? { authorization: checkedCommitAuthorization(current.authorization, checked) }
-          : {}),
-        ...(sameAttempt && current?.recovery ? { recovery: current.recovery } : {}),
-      } satisfies DurableOwnerSplitState);
+      await this.#vault.keepRequired(
+        this.#stateName(),
+        {
+          version: 1,
+          householdId: this.#vault.libraryId,
+          journal: checked,
+          ...(sameAttempt && current?.authorization
+            ? { authorization: checkedCommitAuthorization(current.authorization, checked) }
+            : {}),
+          ...(sameAttempt && current?.recovery ? { recovery: current.recovery } : {}),
+        } satisfies DurableOwnerSplitState,
+        this.#stateBinding(),
+      );
     });
   }
 
@@ -172,13 +187,17 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
         throw new Error('Owner split journal changed before authorization');
       // One AES-GCM envelope/one Vault put makes the ready journal and its separately typed authorization durable
       // together. The coordinator still requires both independently bound members before it may commit.
-      await this.#vault.keepRequired(this.#stateName(), {
-        version: 1,
-        householdId: this.#vault.libraryId,
-        journal: checked,
-        authorization,
-        ...(current.recovery ? { recovery: current.recovery } : {}),
-      } satisfies DurableOwnerSplitState);
+      await this.#vault.keepRequired(
+        this.#stateName(),
+        {
+          version: 1,
+          householdId: this.#vault.libraryId,
+          journal: checked,
+          authorization,
+          ...(current.recovery ? { recovery: current.recovery } : {}),
+        } satisfies DurableOwnerSplitState,
+        this.#stateBinding(),
+      );
     });
   }
 
@@ -195,10 +214,11 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
       const current = await this.#state();
       if (current === null || current.journal.attempt !== intent.attempt)
         throw new Error('Owner split journal changed before recovery authorization');
-      await this.#vault.keepRequired(this.#stateName(), {
-        ...current,
-        recovery: checked,
-      } satisfies DurableOwnerSplitState);
+      await this.#vault.keepRequired(
+        this.#stateName(),
+        { ...current, recovery: checked } satisfies DurableOwnerSplitState,
+        this.#stateBinding(),
+      );
     });
   }
 
@@ -222,8 +242,9 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
   }
 
   async #state(): Promise<DurableOwnerSplitState | null> {
-    const value = await this.#vault.kept<unknown>(this.#stateName());
-    if (value === undefined) return null;
+    const opened = await this.#vault.keptRequired<unknown>(this.#stateName(), this.#stateBinding());
+    if (opened.kind === 'absent') return null;
+    const value = opened.value;
     if (!record(value) || value.version !== 1 || value.householdId !== this.#vault.libraryId)
       throw new Error('Owner split durable state is unavailable or corrupt');
     const journal = checkedOwnerSplitJournal(value.journal as OwnerSplitJournal);
@@ -255,6 +276,14 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
 
   #candidateName(keyRef: string): string {
     return `profile-migration/v1/candidate/${keyRef}`;
+  }
+
+  #candidateBinding(attempt: string): string {
+    return `candidate:${this.#vault.libraryId}:${attempt}:${CANDIDATE_VERSION}`;
+  }
+
+  #stateBinding(): string {
+    return `state:${this.#vault.libraryId}:1`;
   }
 }
 

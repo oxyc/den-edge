@@ -1,9 +1,9 @@
 import type { OwnerSplitHouseholdObservation } from './profileOwnerSplitEngine';
 import type { OwnerSplitMigrationTransport } from './profileOwnerSplitProvider';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
+import { ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 
 const ID = /^[0-9a-f]{32}$/;
-const ATTEMPT_PATH = /^\/lib\/[0-9a-f]{32}\/profile-migration\/([0-9a-f]{32})(?:\/|$)/;
 
 export interface OwnerSplitCapability {
   readonly enrollment: 'off' | 'prepare';
@@ -53,14 +53,17 @@ export class OwnerSplitWorkerTransport implements OwnerSplitMigrationTransport {
     readonly body?: unknown;
     readonly candidateKeyRef?: string;
   }): Promise<unknown> {
-    const root = `/lib/${this.#network.libraryId}/profile-migration`;
-    if (input.path !== root && !input.path.startsWith(`${root}/`))
-      throw new Error('Profile migration path is outside this household');
+    const route = ownerSplitWorkerRoute(this.#network.libraryId, input.method, input.path);
+    if (route === null || route.kind === 'capability')
+      throw new Error('Profile migration method or path is not allowed');
     let candidateToken: string | undefined;
     if (input.candidateKeyRef !== undefined) {
-      const match = ATTEMPT_PATH.exec(input.path);
-      if (!match) throw new Error('Candidate request is not bound to an attempt route');
-      candidateToken = (await this.#store.resolveCandidate(input.candidateKeyRef, match[1]!)).token;
+      if (route.kind !== 'retire-candidate')
+        throw new Error('Candidate authority is valid only for exact retirement requests');
+      candidateToken = (await this.#store.resolveCandidate(input.candidateKeyRef, route.attempt))
+        .token;
+    } else if (route.kind === 'retire-candidate') {
+      throw new Error('Candidate retirement requires Worker-owned authority');
     }
     const response = await this.#network.profileMigrationRequest({
       method: input.method,

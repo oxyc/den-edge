@@ -10,12 +10,23 @@ const ATTEMPT = 'a'.repeat(32);
 
 function harness(status = 200, body: unknown = { ok: true }) {
   const values = new Map<string, unknown>();
+  const bindings = new Map<string, string>();
   const store = new OwnerSplitWorkerStore({
     libraryId: HOUSEHOLD,
-    keepRequired: async (name: string, value: unknown) =>
-      void values.set(name, structuredClone(value)),
-    kept: async <T>(name: string) => values.get(name) as T | undefined,
-    discardKept: async (name) => void values.delete(name),
+    keepRequired: async (name: string, value: unknown, binding = '') => {
+      values.set(name, structuredClone(value));
+      bindings.set(name, binding);
+    },
+    keptRequired: async <T>(name: string, binding = '') => {
+      const value = values.get(name);
+      if (value === undefined) return { kind: 'absent' as const };
+      if (bindings.get(name) !== binding) throw new Error('Encrypted migration state is corrupt');
+      return { kind: 'value' as const, value: value as T };
+    },
+    discardKept: async (name) => {
+      values.delete(name);
+      bindings.delete(name);
+    },
   });
   const request = vi.fn(
     async (_input: Parameters<OwnerSplitWorkerNetwork['profileMigrationRequest']>[0]) => ({
@@ -77,14 +88,40 @@ describe('OwnerSplit Worker authenticated transport', () => {
     const candidate = await store.allocateCandidate(ATTEMPT);
     await expect(
       transport.request({ method: 'GET', path: `/lib/${'2'.repeat(32)}/profile-migration` }),
-    ).rejects.toThrow(/outside/);
+    ).rejects.toThrow(/not allowed/);
     await expect(
       transport.request({
         method: 'POST',
         path: `/lib/${HOUSEHOLD}/profile-migration/${'b'.repeat(32)}/retire-candidate`,
         candidateKeyRef: candidate.keyRef,
       }),
-    ).rejects.toThrow(/not bound/);
+    ).rejects.toThrow(/corrupt/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('rejects suffix, query, dot-segment, method confusion and candidate-token leakage', async () => {
+    const { transport, store, request } = harness();
+    const candidate = await store.allocateCandidate(ATTEMPT);
+    const retire = `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/retire-candidate`;
+    for (const input of [
+      { method: 'GET' as const, path: retire, candidateKeyRef: candidate.keyRef },
+      { method: 'POST' as const, path: `${retire}/extra`, candidateKeyRef: candidate.keyRef },
+      { method: 'POST' as const, path: `${retire}?x=1`, candidateKeyRef: candidate.keyRef },
+      {
+        method: 'POST' as const,
+        path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/../${ATTEMPT}/retire-candidate`,
+        candidateKeyRef: candidate.keyRef,
+      },
+      {
+        method: 'POST' as const,
+        path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/rows`,
+        candidateKeyRef: candidate.keyRef,
+      },
+    ])
+      await expect(transport.request(input)).rejects.toThrow();
+    await expect(transport.request({ method: 'POST', path: retire })).rejects.toThrow(
+      /requires Worker-owned authority/,
+    );
     expect(request).not.toHaveBeenCalled();
   });
 });

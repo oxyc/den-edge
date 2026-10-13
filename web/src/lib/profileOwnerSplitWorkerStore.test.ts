@@ -12,19 +12,28 @@ class MemoryWorkerVault implements OwnerSplitWorkerVault {
   constructor(
     readonly libraryId: string,
     readonly values = new Map<string, unknown>(),
+    readonly bindings = new Map<string, string>(),
   ) {}
 
-  async keepRequired(name: string, value: unknown): Promise<void> {
+  async keepRequired(name: string, value: unknown, binding = ''): Promise<void> {
     this.values.set(name, structuredClone(value));
+    this.bindings.set(name, binding);
   }
 
-  async kept<T>(name: string): Promise<T | undefined> {
+  async keptRequired<T>(
+    name: string,
+    binding = '',
+  ): Promise<{ kind: 'absent' } | { kind: 'value'; value: T }> {
     const value = this.values.get(name);
-    return value === undefined ? undefined : (structuredClone(value) as T);
+    if (value === undefined) return { kind: 'absent' };
+    if (this.bindings.get(name) !== binding)
+      throw new Error('Encrypted migration state is corrupt');
+    return { kind: 'value', value: structuredClone(value) as T };
   }
 
   async discardKept(name: string): Promise<void> {
     this.values.delete(name);
+    this.bindings.delete(name);
   }
 }
 
@@ -78,11 +87,15 @@ describe('OwnerSplit Worker durable store', () => {
 
   it('fails closed on a corrupt journal instead of treating it as absent', async () => {
     const vault = new MemoryWorkerVault(HOUSEHOLD);
-    vault.values.set('profile-migration/v1/state', {
-      version: 1,
-      householdId: HOUSEHOLD,
-      journal: { ...idle(), explicitIntent: false },
-    });
+    await vault.keepRequired(
+      'profile-migration/v1/state',
+      {
+        version: 1,
+        householdId: HOUSEHOLD,
+        journal: { ...idle(), explicitIntent: false },
+      },
+      `state:${HOUSEHOLD}:1`,
+    );
     await expect(new OwnerSplitWorkerStore(vault).load()).rejects.toThrow(
       /Invalid Owner split journal/,
     );
@@ -106,23 +119,23 @@ describe('OwnerSplit Worker durable store', () => {
 
   it('binds candidate credentials to household and attempt across restart', async () => {
     const values = new Map<string, unknown>();
-    const original = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD, values));
+    const bindings = new Map<string, string>();
+    const original = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD, values, bindings));
     const handle = await original.allocateCandidate(ATTEMPT);
     expect(JSON.stringify(handle)).not.toContain('libraryKey');
 
-    const restarted = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD, values));
+    const restarted = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD, values, bindings));
     await expect(restarted.resolveCandidate(handle.keyRef, ATTEMPT)).resolves.toMatchObject({
       handle,
     });
     await expect(restarted.resolveCandidate(handle.keyRef, OTHER_ATTEMPT)).rejects.toThrow(
-      /not bound/,
+      /corrupt/,
     );
     await expect(
-      new OwnerSplitWorkerStore(new MemoryWorkerVault(OTHER_HOUSEHOLD, values)).resolveCandidate(
-        handle.keyRef,
-        ATTEMPT,
-      ),
-    ).rejects.toThrow(/not bound/);
+      new OwnerSplitWorkerStore(
+        new MemoryWorkerVault(OTHER_HOUSEHOLD, values, bindings),
+      ).resolveCandidate(handle.keyRef, ATTEMPT),
+    ).rejects.toThrow(/corrupt/);
   });
 
   it('rejects candidate corruption and removes the credential idempotently', async () => {
