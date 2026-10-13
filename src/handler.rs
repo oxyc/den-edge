@@ -895,6 +895,9 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.ends_with("/profile-capability") => "/lib/:id/profile-capability",
         p if p.starts_with("/lib/") && p.ends_with("/profile-migration") => "/lib/:id/profile-migration",
+        p if p.starts_with("/lib/") && p.ends_with("/profile-migration/source") => {
+            "/lib/:id/profile-migration/source"
+        }
         p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/backup") => {
             "/lib/:id/profile-migration/:attempt/backup"
         }
@@ -989,6 +992,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/capabilities/profiles"
         | "/metrics"
         | "/lib/:id/profile-capability"
+        | "/lib/:id/profile-migration/source"
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
@@ -1307,6 +1311,9 @@ pub mod tests {
         assert_eq!(route_label(base), "/lib/:id/profile-migration");
         assert_eq!(allowed_methods(route_label(base)), Some(&[Method::POST][..]));
         assert_eq!(body_cap(route_label(base)), crate::library::PROFILE_MIGRATION_BODY_BYTES);
+        let source = format!("{base}/source");
+        assert_eq!(route_label(&source), "/lib/:id/profile-migration/source");
+        assert_eq!(allowed_methods(route_label(&source)), Some(&[Method::GET][..]));
 
         let cases = [
             ("", "/lib/:id/profile-migration/:attempt", &[Method::GET, Method::DELETE][..]),

@@ -7,6 +7,7 @@ import type {
   OwnerSplitHouseholdObservation,
   OwnerSplitOpenAttempt,
   OwnerSplitProvider,
+  OwnerSplitSource,
   OwnerSplitWinner,
 } from './profileOwnerSplitEngine';
 
@@ -36,8 +37,35 @@ export class HttpOwnerSplitProvider implements OwnerSplitProvider {
     this.#transport = transport;
   }
 
-  open(attempt: string, purpose: 'split' | 'restore'): Promise<OwnerSplitAttemptLookup> {
-    return this.#attemptRequest('POST', attempt, undefined, { attempt, purpose });
+  async observeSource(): Promise<OwnerSplitSource> {
+    const answer = await this.#transport.request({
+      method: 'GET',
+      path: `/lib/${this.#householdId}/profile-migration/source`,
+    });
+    if (
+      !record(answer) ||
+      Object.keys(answer).length !== 1 ||
+      !Object.hasOwn(answer, 'source') ||
+      !record(answer.source)
+    )
+      throw new Error('Provider returned invalid migration source evidence');
+    const source = parsedSource(answer.source);
+    if (source === null) throw new Error('Provider returned invalid migration source evidence');
+    return source;
+  }
+
+  open(
+    attempt: string,
+    purpose: 'split' | 'restore',
+    expectedSource: OwnerSplitSource,
+  ): Promise<OwnerSplitAttemptLookup> {
+    const source = parsedSource(expectedSource);
+    if (source === null) throw new TypeError('Migration source is not canonical');
+    return this.#attemptRequest('POST', attempt, undefined, {
+      attempt,
+      purpose,
+      expectedSource: source,
+    });
   }
 
   lookup(attempt: string): Promise<OwnerSplitAttemptLookup> {
@@ -232,6 +260,18 @@ function checkedLookup(value: unknown, attempt: string): OwnerSplitAttemptLookup
     return winner === null ? invalidLookup() : { ...common, state: 'superseded', winner };
   }
   return invalidLookup();
+}
+
+function parsedSource(value: unknown): OwnerSplitSource | null {
+  if (
+    !record(value) ||
+    !Number.isSafeInteger(value.generation) ||
+    Number(value.generation) < 0 ||
+    !DIGEST.test(String(value.head)) ||
+    Object.keys(value).some((key) => key !== 'generation' && key !== 'head')
+  )
+    return null;
+  return { generation: Number(value.generation), head: String(value.head) };
 }
 
 type ParsedTerminalBase = {

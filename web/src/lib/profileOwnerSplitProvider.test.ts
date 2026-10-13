@@ -14,6 +14,7 @@ const ATTEMPT = '0123456789abcdef0123456789abcdef';
 const CANDIDATE = '11112222333344445555666677778888';
 const DIGEST = 'a'.repeat(64);
 const fence = { generation: 7, base: 4, head: DIGEST, rewrite: 'rewrite-7' };
+const source = { generation: fence.generation, head: fence.head };
 
 describe('Owner split HTTP provider', () => {
   it('uses exact migration routes and never places credential material in a URL', async () => {
@@ -21,6 +22,7 @@ describe('Owner split HTTP provider', () => {
     const transport: OwnerSplitMigrationTransport = {
       request: vi.fn(async (input) => {
         calls.push(input);
+        if (input.path.endsWith('/profile-migration/source')) return { source };
         if (input.path.endsWith('/retire-candidate')) return { result: 'retired' };
         if (input.path.endsWith('/rows')) return { stagedDigest: DIGEST };
         if (input.path.endsWith('/commit'))
@@ -46,7 +48,8 @@ describe('Owner split HTTP provider', () => {
       })),
     };
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
-    await provider.open(ATTEMPT, 'split');
+    await expect(provider.observeSource()).resolves.toEqual(source);
+    await provider.open(ATTEMPT, 'split', source);
     await provider.lookup(ATTEMPT);
     await provider.abort(ATTEMPT);
     await expect(
@@ -84,10 +87,11 @@ describe('Owner split HTTP provider', () => {
       protectedLibraryIds: [],
     });
     expect(calls).toEqual([
+      { method: 'GET', path: `/lib/${HOUSEHOLD}/profile-migration/source` },
       {
         method: 'POST',
         path: `/lib/${HOUSEHOLD}/profile-migration`,
-        body: { attempt: ATTEMPT, purpose: 'split' },
+        body: { attempt: ATTEMPT, purpose: 'split', expectedSource: source },
       },
       { method: 'GET', path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`, body: undefined },
       { method: 'DELETE', path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`, body: undefined },
@@ -124,6 +128,20 @@ describe('Owner split HTTP provider', () => {
     expect(retirement.body.protectedLibraryIds).toEqual([HOUSEHOLD]);
   });
 
+  it.each([
+    ['missing wrapper', source],
+    ['extra response member', { source, extra: true }],
+    ['unsafe generation', { source: { ...source, generation: Number.MAX_SAFE_INTEGER + 1 } }],
+    ['noncanonical head', { source: { ...source, head: 'A'.repeat(64) } }],
+    ['extra source member', { source: { ...source, base: 4 } }],
+  ])('rejects malformed source evidence: %s', async (_name, answer) => {
+    const provider = new HttpOwnerSplitProvider(HOUSEHOLD, {
+      request: vi.fn(async () => answer),
+      readHousehold: vi.fn(),
+    });
+    await expect(provider.observeSource()).rejects.toThrow(/invalid migration source/);
+  });
+
   it('validates terminal lookup shapes and carries the recovery wire minimum into restore', async () => {
     const calls: Array<{ method: string; path: string; body?: unknown }> = [];
     const restoreFence = { ...fence, generation: 9, base: 6 };
@@ -154,7 +172,7 @@ describe('Owner split HTTP provider', () => {
       readHousehold: vi.fn(),
     };
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
-    const recovery = await provider.open(ATTEMPT, 'restore');
+    const recovery = await provider.open(ATTEMPT, 'restore', source);
     expect(recovery).toMatchObject({ state: 'open', purpose: 'restore', wireMin: 5 });
     if (recovery.state !== 'open' || recovery.purpose !== 'restore') throw new Error('bad fixture');
     const restored = await provider.restore({

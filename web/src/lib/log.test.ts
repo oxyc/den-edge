@@ -217,10 +217,11 @@ describe('LibraryLog', () => {
     const store = new OwnerSplitWorkerStore(log);
     await expect(store.load()).resolves.toBeNull();
     await store.save({
-      version: 4,
+      version: 5,
       attempt: '0123456789abcdef0123456789abcdef',
       explicitIntent: true,
       state: 'idle',
+      source: { generation: 1, head: 'a'.repeat(64) },
     });
     const name = `${log.libraryId}:profile-migration/v1/state`;
     const sealed = data.get(name)!;

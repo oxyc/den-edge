@@ -12,6 +12,7 @@ import {
   type OwnerSplitFence,
   type OwnerSplitHouseholdObservation,
   type OwnerSplitJournalState,
+  type OwnerSplitSource,
   type VerifiedOwnerSplitBackup,
 } from './profileOwnerSplitEngine';
 
@@ -19,9 +20,11 @@ const ID = /^[0-9a-f]{32}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
 export interface OwnerSplitJournal {
-  readonly version: 4;
+  readonly version: 5;
   readonly attempt: string;
   readonly explicitIntent: true;
+  /** Exact pre-PIN source observed and durably bound before this split attempt may open. */
+  readonly source: OwnerSplitSource;
   readonly state: OwnerSplitJournalState;
   readonly fence?: OwnerSplitFence;
   readonly backup?: { readonly id: string; readonly digest: string };
@@ -46,10 +49,12 @@ export interface OwnerSplitCommitAuthorization {
 }
 
 export interface OwnerSplitRecoveryIntent {
-  readonly version: 1;
+  readonly version: 2;
   readonly attempt: string;
   readonly recoveryAttempt: string;
   readonly recoveryIntent: true;
+  /** Recovery has its own fresh explicit authorization and therefore its own durable source binding. */
+  readonly source: OwnerSplitSource;
 }
 
 /**
@@ -109,11 +114,13 @@ export class DormantOwnerSplitCoordinator {
     checkedAttempt(attempt);
     if ((await this.#store.load()) !== null)
       throw new Error('Owner split already has a durable journal');
+    const source = await this.#effects.observeSource();
     await this.#store.save({
-      version: 4,
+      version: 5,
       attempt,
       explicitIntent: true,
       state: 'idle',
+      source,
     });
     return this.#drive(false);
   }
@@ -156,11 +163,13 @@ export class DormantOwnerSplitCoordinator {
     const journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null || journal.attempt !== attempt || journal.state !== 'restore-required')
       throw new Error('Owner split recovery is not required');
+    const source = await this.#effects.observeSource();
     await this.#store.authorizeRecovery({
-      version: 1,
+      version: 2,
       attempt,
       recoveryAttempt,
       recoveryIntent: true,
+      source,
     });
     return this.#drive(true);
   }
@@ -182,7 +191,9 @@ export class DormantOwnerSplitCoordinator {
           journal.fence,
           journal.backup,
         );
-      if (household === undefined && journal.state !== 'commit-unknown')
+      // The real Worker transport deliberately refuses household reads until a durable fence exists. The initial
+      // source is a separate authenticated endpoint and was already persisted by prepare before this loop.
+      if (household === undefined && journal.state !== 'idle' && journal.state !== 'commit-unknown')
         household = await this.#effects.readHousehold();
 
       const effect = await this.#effects.planNext({
@@ -202,12 +213,13 @@ export class DormantOwnerSplitCoordinator {
         attemptLookup: lookup?.state,
         householdFresh,
         recoveryIntent: recovery !== null,
+        source: journal.state === 'idle' ? journal.source : undefined,
         household,
       });
 
       if (effect === 'no-op') return { kind: 'inactive' };
       if (effect === 'acquire-fence') {
-        const opened = await this.#effects.open(journal.attempt, 'split');
+        const opened = await this.#effects.open(journal.attempt, 'split', journal.source);
         if (opened.state !== 'open' || opened.purpose !== 'split')
           throw new Error('Split attempt did not open');
         journal = await this.#save({ ...journal, state: 'fenced', fence: opened.fence });
@@ -334,7 +346,11 @@ export class DormantOwnerSplitCoordinator {
       if (effect === 'open-recovery-attempt') {
         if (recovery === null || household === undefined || journal.backup === undefined)
           throw new Error('Recovery effect lacks durable evidence');
-        const opened = await this.#effects.open(recovery.recoveryAttempt, 'restore');
+        const opened = await this.#effects.open(
+          recovery.recoveryAttempt,
+          'restore',
+          recovery.source,
+        );
         if (opened.state !== 'open' || opened.purpose !== 'restore')
           throw new Error('Recovery attempt did not open');
         const restored = await this.#effects.restore({
@@ -376,12 +392,13 @@ export class DormantOwnerSplitCoordinator {
     const value = await this.#store.loadRecoveryIntent(journal.attempt);
     if (value === null) return null;
     if (
-      value.version !== 1 ||
+      value.version !== 2 ||
       value.recoveryIntent !== true ||
       value.attempt !== journal.attempt ||
       !ID.test(value.recoveryAttempt)
     )
       throw new Error('Invalid durable recovery intent');
+    checkedSource(value.source, 'Invalid durable recovery intent');
     return value;
   }
 
@@ -399,7 +416,7 @@ export function checkedOwnerSplitJournal(
 ): OwnerSplitJournal | null {
   if (value === null) return null;
   if (
-    value.version !== 4 ||
+    value.version !== 5 ||
     value.explicitIntent !== true ||
     !ID.test(value.attempt) ||
     ![
@@ -417,6 +434,7 @@ export function checkedOwnerSplitJournal(
     ].includes(value.state)
   )
     throw new Error('Invalid Owner split journal');
+  checkedSource(value.source, 'Invalid Owner split journal');
   for (const digest of [value.backup?.digest, value.ownerHead, value.stagedDigest])
     if (digest !== undefined && !DIGEST.test(digest))
       throw new Error('Invalid Owner split journal');
@@ -468,6 +486,26 @@ export function checkedOwnerSplitJournal(
   )
     throw new Error('Invalid Owner split journal');
   return value;
+}
+
+function checkedSource(value: unknown, message: string): asserts value is OwnerSplitSource {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    !Object.hasOwn(value, 'generation') ||
+    !Object.hasOwn(value, 'head')
+  )
+    throw new Error(message);
+  const source = value as Record<string, unknown>;
+  if (
+    Object.keys(source).some((key) => key !== 'generation' && key !== 'head') ||
+    !Number.isSafeInteger(source.generation) ||
+    Number(source.generation) < 0 ||
+    typeof source.head !== 'string' ||
+    !DIGEST.test(source.head)
+  )
+    throw new Error(message);
 }
 
 function checkedJournalFence(value: OwnerSplitFence): void {
