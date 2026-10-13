@@ -2085,6 +2085,15 @@ mod tests {
         assert_eq!(body_json(response).await, json!({ "error": "not_found" }));
     }
 
+    fn row_values(value: &Value, field: &str) -> std::collections::BTreeMap<String, String> {
+        value[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row["k"].as_str().unwrap().to_owned(), row["v"].as_str().unwrap().to_owned()))
+            .collect()
+    }
+
     #[tokio::test]
     async fn disabled_adapter_is_uniformly_unreachable_before_global_routing() {
         let h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
@@ -2768,13 +2777,35 @@ mod tests {
     async fn synthetic_server_rehearsal_covers_split_race_cleanup_lost_response_and_restore() {
         let mut h = Harness::new();
         let dir = h.dir.clone();
-        for (key, value) in [
-            (ACTIVITY, "synthetic-owner-activity"),
-            (CONFIG, "synthetic-household-config"),
-            (DELIVERY, "synthetic-delivery-state"),
-        ] {
-            assert_eq!(write(&h, HOUSEHOLD, key, 0, value, HOUSEHOLD_TOKEN).await, StatusCode::OK);
-        }
+        let source_rows = std::collections::BTreeMap::from([
+            (ACTIVITY.to_owned(), "synthetic-owner-activity".to_owned()),
+            (CONFIG.to_owned(), "synthetic-household-config".to_owned()),
+            (DELIVERY.to_owned(), "synthetic-delivery-state".to_owned()),
+        ]);
+        let created_household = h
+            .send(
+                "POST",
+                &format!("/lib/{HOUSEHOLD}/batch"),
+                Some(
+                    json!({
+                        "writes": [
+                            { "k": ACTIVITY, "base": 0, "v": "synthetic-owner-activity" },
+                            { "k": CONFIG, "base": 0, "v": "synthetic-household-config" },
+                            { "k": DELIVERY, "base": 0, "v": "synthetic-delivery-state" },
+                        ],
+                    })
+                    .to_string(),
+                ),
+                &[
+                    ("x-den-wire", "4"),
+                    ("x-den-wire-min", "4"),
+                    ("x-den-generation", "0"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                ],
+            )
+            .await;
+        assert_eq!(created_household.status(), StatusCode::OK);
+        assert_eq!(created_household.headers()["x-den-wire-min"], "4");
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.profile_migration_enabled = true;
         state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
@@ -2816,7 +2847,7 @@ mod tests {
         )
         .await;
         assert_eq!(backup_artifact["digest"], winner_backup["digest"]);
-        assert_eq!(backup_artifact["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(row_values(&backup_artifact, "rows"), source_rows);
 
         // Copy the profile-owned rows from the verified backup into each independently authenticated candidate,
         // then read them back over the normal wire-4 library API before touching the household.
@@ -2844,17 +2875,25 @@ mod tests {
                 )
                 .await;
             assert_eq!(created.status(), StatusCode::OK);
-            let readback = body_json(
-                h.send(
+            assert_eq!(created.headers()["x-den-wire-min"], "4");
+            let readback_response = h
+                .send(
                     "GET",
                     &format!("/lib/{candidate}/changes"),
                     None,
                     &[("x-den-wire", "4"), ("x-den-library-token", candidate_token)],
                 )
-                .await,
-            )
-            .await;
-            assert_eq!(readback["entries"].as_array().unwrap().len(), 2);
+                .await;
+            assert_eq!(readback_response.status(), StatusCode::OK);
+            assert_eq!(readback_response.headers()["x-den-wire-min"], "4");
+            let readback = body_json(readback_response).await;
+            assert_eq!(
+                row_values(&readback, "entries"),
+                std::collections::BTreeMap::from([
+                    (ACTIVITY.to_owned(), "synthetic-owner-activity".to_owned()),
+                    (DELIVERY.to_owned(), "synthetic-delivery-state".to_owned()),
+                ])
+            );
             assert_eq!(readback["head"], 2);
         }
 
@@ -2971,6 +3010,13 @@ mod tests {
             .await,
         )
         .await;
+        assert_eq!(
+            row_values(&current, "entries"),
+            std::collections::BTreeMap::from([
+                (CONFIG.to_owned(), "synthetic-household-config".to_owned()),
+                (DIRECTORY.to_owned(), format!("synthetic-directory-owner:{CANDIDATE}")),
+            ])
+        );
         let profiles =
             current["entries"].as_array().unwrap().iter().find(|row| row["k"] == DIRECTORY).unwrap().clone();
 
@@ -3078,6 +3124,15 @@ mod tests {
         )
         .await;
         assert_eq!(restored_lookup["state"], "restored");
+        let committed_lookup =
+            body_json(migration_request(&restarted, "GET", &winner_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(committed_lookup["state"], "committed");
+        let superseded_lookup =
+            body_json(migration_request(&restarted, "GET", &loser_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(superseded_lookup["state"], "superseded");
+        assert_eq!(superseded_lookup["winner"]["attempt"], ATTEMPT);
         let household = body_json(
             restarted
                 .send(
@@ -3090,7 +3145,7 @@ mod tests {
         )
         .await;
         assert_eq!(household["head"], 3);
-        assert!(household["entries"].as_array().unwrap().iter().all(|row| row["k"] != DIRECTORY));
+        assert_eq!(row_values(&household, "entries"), source_rows);
         assert_eq!(
             restarted
                 .send(
