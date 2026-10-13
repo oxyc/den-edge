@@ -273,6 +273,7 @@
       <ProfilesSection
         {model}
         pinConfigured={connections?.parentalPinConfigured ?? false}
+        pinDelivery={connections?.parentalPinDelivery ?? 'queued'}
         {disabled}
         savePin={async (pin) => (await model.setParentalPin(pin)).delivery}
         verifyPin={(pin) => model.verifyParentalPin(pin)}

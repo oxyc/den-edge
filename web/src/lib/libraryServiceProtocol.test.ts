@@ -1000,6 +1000,7 @@ describe('library service server protocol', () => {
       kind: 'connections',
       apiKeys: { tmdb: { configured: true, masked: '••••cret' } },
       parentalPinConfigured: true,
+      parentalPinDelivery: 'synced',
       remoteAccessConfigured: false,
       plugins: [
         {

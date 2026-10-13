@@ -646,7 +646,10 @@ export class LibraryLogAuthority {
         const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
         return {
           kind: 'parental-pin.verify',
-          matches: !!stored && (await pinMatches(stored, query.pin)),
+          matches:
+            this.#parentalPinDelivery() !== 'queued' &&
+            !!stored &&
+            (await pinMatches(stored, query.pin)),
         };
       }
       case 'profile-migration.status': {
@@ -1242,6 +1245,7 @@ export class LibraryLogAuthority {
       kind: 'connections',
       apiKeys,
       parentalPinConfigured: !!readApiKey(keys, 'parentalPIN'),
+      parentalPinDelivery: this.#parentalPinDelivery(),
       remoteAccessConfigured:
         !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
       plugins,
@@ -1685,12 +1689,34 @@ export class LibraryLogAuthority {
     if (pin !== null && !/^\d{4}$/.test(pin))
       throw authorityError('invalid-request', 'parental PIN must be four digits');
     const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
-    if (pin !== null && current && (await pinMatches(current, pin))) return this.#unchanged();
+    const matches = pin === null ? !current : !!current && (await pinMatches(current, pin));
+    if (matches) {
+      // A queued PIN is already projected into `settings`, including after reload. Drive its durable recovery row
+      // before deciding that the repeated command is unchanged; only den-edge's authenticated copy proves sync.
+      if (this.#parentalPinDelivery() === 'queued') await this.#log.refresh();
+      const refreshed = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+      const stillMatches =
+        pin === null ? !refreshed : !!refreshed && (await pinMatches(refreshed, pin));
+      if (stillMatches)
+        return {
+          outcome: 'unchanged',
+          delivery: this.#parentalPinDelivery(),
+          affected: [],
+        };
+    }
     return this.#patchSettings(
       'keys',
       { parentalPIN: pin === null ? null : { string: await hashPin(pin) } },
       [{ kind: 'connections' }],
     );
+  }
+
+  /** Compare only the PIN value, not unrelated keys sharing this settings document. */
+  #parentalPinDelivery(): Delivery {
+    if (this.#options.mode === 'local') return 'local';
+    const projected = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    const acknowledged = readApiKey(this.#log.acknowledgedSettings('keys'), 'parentalPIN');
+    return projected === acknowledged ? 'synced' : 'queued';
   }
 
   async #setRemoteAccess(

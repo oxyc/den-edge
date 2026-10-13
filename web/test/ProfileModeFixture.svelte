@@ -66,7 +66,11 @@
       ({
         snapshot: {
           connection: 'ready',
-          value: { kind: 'connections', parentalPinConfigured: configured },
+          value: {
+            kind: 'connections',
+            parentalPinConfigured: configured,
+            parentalPinDelivery: 'synced',
+          },
         },
         release,
       }) as unknown as LibraryModelLease<ConnectionsView>,

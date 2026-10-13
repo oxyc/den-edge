@@ -1278,6 +1278,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
       'kind',
       'apiKeys',
       'parentalPinConfigured',
+      'parentalPinDelivery',
       'remoteAccessConfigured',
       'plugins',
       'servers',
@@ -1295,6 +1296,9 @@ function connectionsView(value: unknown): value is ConnectionsView {
         boundedText(candidate.masked, 32),
     ) ||
     !bool(value.parentalPinConfigured) ||
+    (value.parentalPinDelivery !== 'synced' &&
+      value.parentalPinDelivery !== 'queued' &&
+      value.parentalPinDelivery !== 'local') ||
     !bool(value.remoteAccessConfigured)
   )
     return false;

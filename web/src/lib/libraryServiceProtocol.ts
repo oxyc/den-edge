@@ -426,6 +426,8 @@ export interface ConnectionsView {
   kind: 'connections';
   apiKeys: Partial<Record<LibraryApiKeyService, { configured: true; masked: string }>>;
   parentalPinConfigured: boolean;
+  /** `queued` means the shown PIN is only a durable local projection and cannot authorize security actions yet. */
+  parentalPinDelivery: 'synced' | 'queued' | 'local';
   remoteAccessConfigured: boolean;
   plugins: LibraryPluginView[];
   servers: Array<{ kind: MediaServerKind; url: string; user?: string }>;

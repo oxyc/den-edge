@@ -2742,6 +2742,12 @@ export class LibraryLog {
     return row?.kind === 'set' ? row : undefined;
   }
 
+  /** The settings document last authenticated from den-edge, excluding this browser's durable unsent projection. */
+  acknowledgedSettings(name: string): SettingsRow | undefined {
+    const row = this.acknowledged.get(`set:${name}`)?.row;
+    return row?.kind === 'set' ? row : undefined;
+  }
+
   /** The newest stamp read, so this browser's next edit is stamped after everything it has seen. */
   newestStamp(now = Date.now()): Stamp {
     return this.currentSummary(now).stamp;

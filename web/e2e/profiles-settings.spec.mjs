@@ -46,10 +46,28 @@ test('a queued new Owner PIN never observes or enables profiles', async ({ page 
   await page.getByRole('button', { name: 'Enable Profiles' }).click();
   await page.locator('#profiles-owner-pin').fill('1234');
 
-  await expect(
-    page.getByText('Profiles couldn’t be enabled. Enter your PIN and try again.'),
-  ).toBeVisible();
+  await expect(page.getByText('Your Owner PIN is waiting to sync.')).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => window.profileSettingsEvents()))
     .toEqual(['set:1234']);
+});
+
+test('a reloaded queued PIN requires an exact synced retry before source observation', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/profiles-settings.html?reloaded-pending`);
+  await page.getByRole('button', { name: 'Enable Profiles' }).click();
+  await expect(page.getByRole('heading', { name: 'Finish saving your Owner PIN' })).toBeVisible();
+  expect(await page.evaluate(() => window.profileSettingsEvents())).toEqual([]);
+
+  await page.locator('#profiles-owner-pin').fill('1234');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.profileSettingsEvents()))
+    .toEqual([
+      'set:1234',
+      'observe',
+      'verify:1234',
+      `enable:0123456789abcdef0123456789abcdef:7:${'a'.repeat(64)}`,
+    ]);
 });

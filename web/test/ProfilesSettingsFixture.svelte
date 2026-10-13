@@ -7,6 +7,7 @@
   const events: string[] = [];
   const recovering = new URLSearchParams(location.search).has('recovery');
   const queued = new URLSearchParams(location.search).has('queued');
+  const reloadedPending = new URLSearchParams(location.search).has('reloaded-pending');
   let phase = (recovering ? 'recovery-required' : 'available') as
     'available' | 'enabled' | 'recovery-required';
   let savedPin = recovering ? '1234' : '';
@@ -59,7 +60,8 @@
 <main style="max-width:760px;margin:40px auto">
   <ProfilesSection
     {model}
-    pinConfigured={recovering}
+    pinConfigured={recovering || reloadedPending}
+    pinDelivery={reloadedPending ? 'queued' : 'synced'}
     savePin={async (pin) => {
       events.push(`set:${pin}`);
       savedPin = pin;

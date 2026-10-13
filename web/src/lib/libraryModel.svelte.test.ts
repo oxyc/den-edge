@@ -209,6 +209,7 @@ const connectionsValue = (): LibrarySelectionValue => ({
   kind: 'connections',
   apiKeys: { tmdb: { configured: true, masked: '•••' } },
   parentalPinConfigured: true,
+  parentalPinDelivery: 'synced',
   remoteAccessConfigured: false,
   plugins: [],
   servers: [],

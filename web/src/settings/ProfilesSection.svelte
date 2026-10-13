@@ -13,12 +13,14 @@
   let {
     model,
     pinConfigured,
+    pinDelivery,
     disabled = false,
     savePin,
     verifyPin,
   }: {
     model: LibraryModel;
     pinConfigured: boolean;
+    pinDelivery: 'synced' | 'queued' | 'local';
     disabled?: boolean;
     savePin: (pin: string) => Promise<'synced' | 'queued' | 'local'>;
     verifyPin: (pin: string) => Promise<boolean>;
@@ -54,7 +56,7 @@
   async function beginEnable() {
     if (busy || disabled) return;
     failure = null;
-    if (!pinConfigured && !pinEstablished) {
+    if ((!pinConfigured || pinDelivery !== 'synced') && !pinEstablished) {
       modal = 'create-pin';
       pin = '';
       denied = false;
@@ -98,7 +100,10 @@
       if (modal === 'create-pin') {
         // A locally accepted/queued PIN is not yet household authority. Do not observe or authorize a source until
         // this exact command is durably acknowledged by the server; a later retry is a fresh explicit interaction.
-        if ((await savePin(value)) !== 'synced') throw new Error('PIN was not synced');
+        if ((await savePin(value)) !== 'synced') {
+          failure = 'Your Owner PIN is waiting to sync. Stay connected, then enter it again.';
+          return;
+        }
         pinEstablished = true;
         // Saving the PIN changes the authoritative household head, so the exact source must be observed after that
         // write. Keep the freshly entered value only in this call, verify the saved PIN, and authorize without a
@@ -245,7 +250,7 @@
       value="Coming next"
     />
   {/if}
-  {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
+  {#if failure && !modal}<p class="failure" role="alert">{failure}</p>{/if}
 </SettingsSection>
 
 {#if modal}
@@ -262,12 +267,16 @@
           ? 'Authorize profile recovery'
           : modal === 'enable'
             ? 'Enable Profiles'
-            : 'Create your Owner PIN'}
+            : pinConfigured
+              ? 'Finish saving your Owner PIN'
+              : 'Create your Owner PIN'}
       </h2>
       <p>
         {modal !== 'create-pin'
           ? 'Enter your Owner PIN. This authorizes this exact setup from backup through commit.'
-          : 'Choose a four-digit Owner PIN. Den saves it and uses this entry to authorize setup.'}
+          : pinConfigured
+            ? 'Enter the same four-digit Owner PIN to finish syncing it before setup.'
+            : 'Choose a four-digit Owner PIN. Den saves it and uses this entry to authorize setup.'}
       </p>
       <PinInput
         id="profiles-owner-pin"
@@ -281,6 +290,7 @@
         oncomplete={(value) => void authorize(value)}
       />
       {#if denied}<p class="failure" role="alert">That PIN didn’t match.</p>{/if}
+      {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
       <div class="modal-actions">
         <Button variant="tertiary" label="Cancel" disabled={working} onclick={closeModal} />
         <Button
