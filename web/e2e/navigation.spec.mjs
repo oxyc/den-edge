@@ -4,6 +4,26 @@ import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { E2E_ORIGIN } from './base-url.mjs';
 
+test('a profile reset retires the current route without leaving it behind Back', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.goto(`${E2E_ORIGIN}/test/router.html`);
+  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.waitForFunction(() => location.pathname === '/settings');
+
+  await page.evaluate(() =>
+    document.dispatchEvent(
+      new CustomEvent('den:navigate', { detail: { path: '/', replace: true } }),
+    ),
+  );
+
+  await page.waitForFunction(() => location.pathname === '/');
+  await page.evaluate(() => history.back());
+  await page.waitForFunction(() => location.pathname !== '/');
+  assert.notEqual(new URL(page.url()).pathname, '/settings');
+});
+
 test('navigation regressions', async () => {
   for (const [name, engine] of [['chromium', chromium]]) {
     const browser = await engine.launch({

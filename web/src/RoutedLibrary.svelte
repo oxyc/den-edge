@@ -38,7 +38,8 @@
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
-  import { persistentProfileIdentity } from './lib/profileIdentity';
+  import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
+  import { resetProfileNavigation } from './lib/profileNavigation';
   import {
     allowsImplicitAssistant,
     ProfileModeCoordinator,
@@ -115,6 +116,7 @@
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
+  let routedProfile = untrack(() => profileSessionKey(session.identity));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
@@ -127,6 +129,17 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
+
+  // Every retained route owns profile-specific presentation and in-flight work. Before Svelte replaces the keyed
+  // route tree, move the old Router to Home with a replace (not a history entry). This also flushes a debounced
+  // search address before teardown, so a Kid/Visitor never inherits the previous viewer's detail, Settings route,
+  // scroll snapshot or request graph. The pre-effect runs for local and cross-tab switches alike.
+  $effect.pre(() => {
+    const next = profileSessionKey(session.identity);
+    if (next === routedProfile) return;
+    resetProfileNavigation();
+    routedProfile = next;
+  });
   const profileActivityReady = $derived(
     profileCapability === 'disabled' ||
       profileCapability === 'preview' ||
@@ -266,7 +279,12 @@
     if (!coordinator.session) coordinator.establishUnprotectedOwner();
     const active = coordinator.session;
     if (!active) return;
-    if (session !== active) session = active;
+    if (session !== active) {
+      // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
+      // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
+      if (!profileControlPublished) routedProfile = profileSessionKey(active.identity);
+      session = active;
+    }
     if (!profileControlPublished) {
       profileControlPublished = true;
       onprofilecontrol(coordinator);
