@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import fixture from '../vendor/den-core/profiles-v1.json';
 import {
+  profileMigrationAuthorizationFingerprint,
+  profileMigrationConstructDirectory,
   profileMigrationDigest,
+  profileMigrationMaterialize,
+  profileMigrationPartition,
   validMigrationSnapshot,
   type MigrationBackupManifest,
   type MigrationSnapshotRow,
@@ -19,6 +23,13 @@ interface DigestCase {
 const cases = (fixture.cases as DigestCase[]).filter(({ request }) =>
   ['source', 'backup', 'staged', 'owner'].includes(request.kind),
 );
+
+interface CoreCase {
+  name: string;
+  request: { op: string; input: Record<string, unknown> };
+  ok?: unknown;
+  error?: string;
+}
 
 describe('profile migration den-core boundary', () => {
   it('matches every vendored profiles-v1 migration digest vector', () => {
@@ -57,5 +68,30 @@ describe('profile migration den-core boundary', () => {
         rows: [row],
       } satisfies MigrationBackupManifest),
     ).toThrow(/invalid_migration_digest/);
+  });
+
+  it('matches every vendored partition, materialize, directory and authorization vector', () => {
+    const operations = new Map<string, (input: Record<string, unknown>) => unknown>([
+      ['profiles_migration_partition_rows', (input) => profileMigrationPartition(input as never)],
+      [
+        'profiles_migration_materialize_plaintext',
+        (input) => profileMigrationMaterialize(input as never),
+      ],
+      ['profiles_migration_construct_directory', profileMigrationConstructDirectory],
+      [
+        'profiles_migration_authorization_fingerprint',
+        (input) => profileMigrationAuthorizationFingerprint(input as never),
+      ],
+    ]);
+    const vectors = (fixture.cases as CoreCase[]).filter(({ request }) =>
+      operations.has(request.op),
+    );
+    expect(vectors.length).toBeGreaterThanOrEqual(10);
+    for (const vector of vectors) {
+      const operation = operations.get(vector.request.op)!;
+      if (vector.error)
+        expect(() => operation(vector.request.input), vector.name).toThrow(vector.error);
+      else expect(operation(vector.request.input), vector.name).toEqual(vector.ok);
+    }
   });
 });
