@@ -1430,9 +1430,10 @@ fn migration_error(error_value: MigrationError) -> Response {
     }
 }
 
-async fn typed<T: for<'de> Deserialize<'de>>(request: Request, cap: usize) -> Result<T, Response> {
-    let value = read_json(request, cap).await.map_err(|response| *response)?;
-    serde_json::from_value(value).map_err(|_| json_reply(StatusCode::BAD_REQUEST, &error("bad_request")))
+async fn typed<T: for<'de> Deserialize<'de>>(request: Request, cap: usize) -> Result<T, Box<Response>> {
+    let value = read_json(request, cap).await?;
+    serde_json::from_value(value)
+        .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("bad_request"))))
 }
 
 pub(crate) async fn handle(
@@ -1449,7 +1450,7 @@ pub(crate) async fn handle(
         }
         let input: OpenRequest = match typed(request, BODY_BYTES).await {
             Ok(input) => input,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         return match storage.open_attempt(&input.attempt, input.purpose, household_id, token_hash).await {
             Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
@@ -1509,7 +1510,7 @@ pub(crate) async fn handle(
         (Some("rows"), Method::POST) => {
             let input: StageRequest = match typed(request, super::BATCH_MAX_BODY_BYTES).await {
                 Ok(input) => input,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let backup = backup_reference(attempt, input.backup);
             let rows = input
@@ -1525,7 +1526,7 @@ pub(crate) async fn handle(
         (Some("commit"), Method::POST) => {
             let input: CommitRequest = match typed(request, BODY_BYTES).await {
                 Ok(input) => input,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             if input.wire_minimum != PROFILE_WIRE_MINIMUM || !valid_digest(&input.staged_digest) {
                 return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
@@ -1545,7 +1546,7 @@ pub(crate) async fn handle(
         (Some("restore"), Method::POST) => {
             let input: RestoreRequest = match typed(request, BODY_BYTES).await {
                 Ok(input) => input,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             match storage.restore_backup(attempt, household_id, token_hash, &input).await {
                 Ok(_) => match storage.lookup_attempt(household_id, token_hash, attempt).await {
@@ -1567,7 +1568,7 @@ pub(crate) async fn handle(
             };
             let input: RetireRequest = match typed(request, BODY_BYTES).await {
                 Ok(input) => input,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let evidence = match storage.lookup_attempt(household_id, token_hash, attempt).await {
                 Ok(evidence) => evidence,
