@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
-import type { ConnectionsView } from './libraryServiceProtocol';
+import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProtocol';
 import { legacyProfileIdentity } from './profileIdentity';
 import {
+  allowsImplicitAssistant,
   ProfileModeCoordinator,
   previewProfileDirectory,
+  profileDirectoryChoices,
   profilesCapability,
+  type ProfileActivityModelFactory,
   type PreviewProfileDirectory,
 } from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
@@ -51,6 +54,7 @@ function owner(
   events: EventTarget | null = null,
   visitorLock?: VisitorActivityLock,
   directory?: PreviewProfileDirectory,
+  profileModels?: ProfileActivityModelFactory,
 ) {
   const release = vi.fn();
   const close = vi.fn();
@@ -87,6 +91,7 @@ function owner(
       events as unknown as Pick<Window, 'addEventListener' | 'removeEventListener'>,
       visitorLock ?? immediateLock,
       directory,
+      profileModels,
     ),
     model,
     close,
@@ -96,7 +101,97 @@ function owner(
   };
 }
 
+const realDirectoryView = (
+  ownerKey = 'owner-profile-key',
+  kidKey = 'kid-profile-key',
+): ProfileDirectoryView => {
+  const preview = previewProfileDirectory();
+  return {
+    kind: 'profiles',
+    owner: preview.owner,
+    profiles: preview.profiles.map((profile, index) => ({
+      id: profile.id!,
+      role: profile.role as 'owner' | 'kid',
+      name: profile.name,
+      avatar: profile.avatar,
+      libraryKey: index === 0 ? ownerKey : kidKey,
+      keyVersion: 1,
+      policy: profile.policy!,
+      deleted: false,
+    })),
+  };
+};
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+};
+
+function profileModels(openings: Map<string, ReturnType<typeof deferred<unknown>>>) {
+  const handles: Array<{ key: string; model: LibraryModel; close: ReturnType<typeof vi.fn> }> = [];
+  const factory: ProfileActivityModelFactory = (key) => {
+    const opening = openings.get(key) ?? deferred<unknown>();
+    openings.set(key, opening);
+    const model = {
+      ready: opening.promise,
+      close: vi.fn(),
+      settings: { connection: 'connecting' },
+    } as unknown as LibraryModel;
+    const close = vi.fn(() => model.close());
+    handles.push({ key, model, close });
+    return { model, close };
+  };
+  return { factory, handles };
+}
+
 describe('ProfileModeCoordinator', () => {
+  it('accepts only an active Owner and Kid with available versioned profile keys', () => {
+    const valid = realDirectoryView();
+    expect(profileDirectoryChoices(valid)?.profiles.map(({ role }) => role)).toEqual([
+      'owner',
+      'kid',
+    ]);
+    expect(
+      profileDirectoryChoices({
+        ...valid,
+        profiles: valid.profiles.map((profile) =>
+          profile.role === 'kid' ? { ...profile, libraryKey: '' } : profile,
+        ),
+      }),
+    ).toBeNull();
+    expect(
+      profileDirectoryChoices({
+        ...valid,
+        profiles: valid.profiles.map((profile) =>
+          profile.role === 'owner' ? { ...profile, deleted: true } : profile,
+        ),
+      }),
+    ).toBeNull();
+
+    const ownerOnly = {
+      ...valid,
+      profiles: valid.profiles.filter((profile) => profile.role === 'owner'),
+    };
+    expect(profileDirectoryChoices(ownerOnly)?.profiles.map(({ role }) => role)).toEqual(['owner']);
+
+    const secondKid = {
+      ...valid.profiles.find((profile) => profile.role === 'kid')!,
+      id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'Teens',
+      libraryKey: 'second-kid-key',
+    };
+    expect(
+      profileDirectoryChoices({ ...valid, profiles: [...valid.profiles, secondKid] })?.profiles.map(
+        ({ name }) => name,
+      ),
+    ).toEqual(['Owner', 'Kids', 'Teens']);
+  });
+
   it('keeps a failed Owner transition intact and retries the same durable visit', async () => {
     const storage = memoryStorage();
     storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
@@ -309,6 +404,329 @@ describe('ProfileModeCoordinator', () => {
     expect(first.release).toHaveBeenCalledOnce();
     expect(first.close).toHaveBeenCalledOnce();
     expect(first.closeWorker).toHaveBeenCalledOnce();
+  });
+
+  it('restores a real Kid only after its separate encrypted model is ready', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    expect(first.coordinator.session).toBeNull();
+    expect(models.handles.map(({ key }) => key)).toEqual([kid.libraryKey]);
+    expect(first.coordinator.choices.every((choice) => !('libraryKey' in choice))).toBe(true);
+
+    opening.resolve({ generation: 'profile-generation', head: 0 });
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    expect(first.coordinator.session!.identity).toMatchObject({
+      kind: 'profile',
+      id: kid.id,
+      libraryKey: kid.libraryKey,
+    });
+    expect(first.coordinator.session!.model).toBe(models.handles[0]!.model);
+    expect(first.coordinator.session!.household.identity.libraryKey).toBe('household-key');
+    expect(first.coordinator.session!.model).not.toBe(first.model);
+  });
+
+  it('switches between Kid profiles by id and opens the selected encrypted library', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const firstKid = view.profiles.find((profile) => profile.role === 'kid')!;
+    const secondKid = {
+      ...firstKid,
+      id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'Teens',
+      libraryKey: 'second-kid-key',
+    };
+    const directory = profileDirectoryChoices({
+      ...view,
+      profiles: [...view.profiles, secondKid],
+    })!;
+    const firstChoice = directory.profiles.find((choice) => choice.id === firstKid.id)!;
+    const secondChoice = directory.profiles.find((choice) => choice.id === secondKid.id)!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: firstChoice.id }),
+    );
+    const firstOpening = deferred<unknown>();
+    const secondOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [firstKid.libraryKey, firstOpening],
+        [secondKid.libraryKey, secondOpening],
+      ]),
+    );
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    firstOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.activeChoice?.id).toBe(firstChoice.id));
+
+    const switching = first.coordinator.switchToPersistent(secondChoice.id!);
+    secondOpening.resolve({});
+    await expect(switching).resolves.toBe(true);
+    expect(first.coordinator.activeChoice?.id).toBe(secondChoice.id);
+    expect(first.coordinator.session!.identity.libraryKey).toBe(secondKid.libraryKey);
+    expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
+      profileId: secondChoice.id,
+    });
+    expect(models.handles.map(({ key }) => key)).toEqual([
+      firstKid.libraryKey,
+      secondKid.libraryKey,
+    ]);
+  });
+
+  it('converges a legacy Owner marker without ever publishing household activity', async () => {
+    const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey, opening]]));
+    const first = owner(storage, false, null, undefined, directory, models.factory);
+
+    expect(first.coordinator.session).toBeNull();
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    expect(models.handles).toHaveLength(1);
+    expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
+
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    expect(first.coordinator.session!.model).toBe(models.handles[0]!.model);
+    expect(first.coordinator.session!.model).not.toBe(first.model);
+    expect(storage.getItem('den.profile.active.v1')).toBe(
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: ownerProfile.id,
+      }),
+    );
+  });
+
+  it('keeps the household activity hidden when a remembered profile cannot open', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    const marker = JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id });
+    storage.setItem('den.profile.active.v1', marker);
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+
+    opening.reject(new Error('profile unavailable'));
+    await vi.waitFor(() => expect(models.handles[0]!.close).toHaveBeenCalledOnce());
+    expect(models.handles[0]!.model.close).toHaveBeenCalledOnce();
+    expect(first.coordinator.session).toBeNull();
+    expect(storage.getItem('den.profile.active.v1')).toBe(marker);
+    expect(first.close).not.toHaveBeenCalled();
+  });
+
+  it('closes an in-flight profile model on coordinator disposal', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+
+    first.coordinator.dispose();
+    expect(models.handles[0]!.close).toHaveBeenCalledOnce();
+    expect(models.handles[0]!.model.close).toHaveBeenCalledOnce();
+    opening.resolve({});
+    await Promise.resolve();
+    expect(first.coordinator.session).toBeNull();
+    expect(models.handles[0]!.close).toHaveBeenCalledOnce();
+    expect(models.handles[0]!.model.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps Kid active until Owner is ready, then commits the marker and closes only Kid activity', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const kidOpening = deferred<unknown>();
+    const ownerOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [kid.libraryKey, kidOpening],
+        [ownerProfile.libraryKey, ownerOpening],
+      ]),
+    );
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    kidOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    const kidSession = first.coordinator.session!;
+
+    const switching = first.coordinator.switchToOwner('1234');
+    await vi.waitFor(() => expect(models.handles).toHaveLength(2));
+    expect(first.coordinator.session).toBe(kidSession);
+    expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
+      profileId: kid.id,
+    });
+
+    ownerOpening.resolve({});
+    await expect(switching).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('owner');
+    expect(first.coordinator.session!.identity.libraryKey).toBe(ownerProfile.libraryKey);
+    expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
+      profileId: ownerProfile.id,
+    });
+    expect(models.handles[0]!.close).toHaveBeenCalledOnce();
+    expect(first.close).not.toHaveBeenCalled();
+  });
+
+  it('drops a stale profile immediately and rejects an opening superseded by key rotation', async () => {
+    const storage = memoryStorage();
+    const firstView = realDirectoryView();
+    const firstDirectory = profileDirectoryChoices(firstView)!;
+    const kid = firstView.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const oldOpening = deferred<unknown>();
+    const newOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [kid.libraryKey, oldOpening],
+        ['rotated-kid-key', newOpening],
+      ]),
+    );
+    const first = owner(storage, true, null, undefined, firstDirectory, models.factory);
+
+    const rotated = profileDirectoryChoices(
+      realDirectoryView('owner-profile-key', 'rotated-kid-key'),
+    )!;
+    first.coordinator.updateDirectory(rotated);
+    expect(first.coordinator.session).toBeNull();
+    oldOpening.resolve({});
+    await vi.waitFor(() => expect(models.handles[0]!.close).toHaveBeenCalledOnce());
+    expect(first.coordinator.session).toBeNull();
+
+    newOpening.resolve({});
+    await vi.waitFor(() =>
+      expect(first.coordinator.session?.identity.libraryKey).toBe('rotated-kid-key'),
+    );
+    first.coordinator.updateDirectory(null);
+    expect(first.coordinator.session).toBeNull();
+    expect(models.handles[1]!.close).toHaveBeenCalledOnce();
+    expect(models.handles[1]!.model.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps Owner and Visitor alive when the only Kid is deleted', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    const ownerSession = first.coordinator.session;
+    const ownerOnly = profileDirectoryChoices({
+      ...view,
+      profiles: view.profiles.map((profile) =>
+        profile.role === 'kid' ? { ...profile, deleted: true } : profile,
+      ),
+    })!;
+    first.coordinator.updateDirectory(ownerOnly);
+    expect(first.coordinator.session).toBe(ownerSession);
+    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    const visitor = first.coordinator.session;
+    first.coordinator.updateDirectory(ownerOnly);
+    expect(first.coordinator.session).toBe(visitor);
+    const withoutPolicies = {
+      ...ownerOnly,
+      profiles: ownerOnly.profiles.map(({ policy: _policy, ...profile }) => profile),
+    };
+    first.coordinator.updateDirectory(withoutPolicies);
+    const policylessVisitor = first.coordinator.session;
+    first.coordinator.updateDirectory(withoutPolicies);
+    expect(first.coordinator.session).toBe(policylessVisitor);
+  });
+
+  it('restores the retained Visitor namespace after an invalid directory recovers', async () => {
+    const storage = memoryStorage();
+    const directory = profileDirectoryChoices(realDirectoryView())!;
+    const first = owner(
+      storage,
+      true,
+      null,
+      undefined,
+      directory,
+      profileModels(new Map()).factory,
+    );
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'visitor', visitorNamespace: 'a'.repeat(32) }),
+    );
+    first.coordinator.updateDirectory(directory);
+    expect(first.coordinator.mode).toBe('visitor');
+    first.coordinator.updateDirectory(null);
+    expect(first.coordinator.session).toBeNull();
+    first.coordinator.updateDirectory(directory);
+    expect(first.coordinator.mode).toBe('visitor');
+    expect(first.coordinator.session!.identity.id).toBe('a'.repeat(32));
+  });
+
+  it('allows implicit assistants only for the active Owner', async () => {
+    const storage = memoryStorage();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const first = owner(storage, true, null, undefined, directory);
+    expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(true);
+    await first.coordinator.switchToKid();
+    expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
+    await first.coordinator.switchToVisitor('1234');
+    expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
+  });
+
+  it.each([
+    null,
+    '{broken',
+    JSON.stringify({ mode: 'unknown' }),
+    JSON.stringify({ version: 1, mode: 'persistent', profileId: 'f'.repeat(32) }),
+  ])('neutral-gates an active session after an invalid cross-tab marker (%s)', async (marker) => {
+    const storage = memoryStorage();
+    const events = new EventTarget();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const first = owner(storage, true, events, undefined, directory);
+    expect(first.coordinator.mode).toBe('owner');
+    if (marker === null) storage.removeItem('den.profile.active.v1');
+    else storage.setItem('den.profile.active.v1', marker);
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    expect(first.coordinator.session).toBeNull();
+    expect(first.coordinator.mode).toBeNull();
   });
 
   it('keeps preview Kid and Visitor sticky and PIN-gates every looser transition', async () => {

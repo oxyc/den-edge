@@ -9,6 +9,7 @@
   let failed = $state(false);
   let establishing = $state(false);
   let gate = $state<HTMLElement>();
+  let pinReady = $derived(profiles.parentalPinConfigured === false || /^\d{4}$/.test(pin));
 
   async function establishOwner() {
     if (establishing) return;
@@ -36,25 +37,31 @@
     <p role="status">Checking parental controls…</p>
   {:else}
     <h1 id="owner-gate-title">Owner access</h1>
-    <p>Enter the Owner PIN to use the household library.</p>
+    <p>
+      {profiles.parentalPinConfigured
+        ? 'Enter the Owner PIN to continue.'
+        : 'Continue to the Owner profile.'}
+    </p>
     <form
       onsubmit={(event) => {
         event.preventDefault();
-        if (/^\d{4}$/.test(pin)) void establishOwner();
+        if (pinReady) void establishOwner();
       }}
     >
-      <PinInput
-        id="owner-gate-pin"
-        label="Owner PIN"
-        bind:value={pin}
-        focusOnMount
-        invalid={denied}
-        onvalue={() => (denied = false)}
-        oncomplete={() => void establishOwner()}
-      />
+      {#if profiles.parentalPinConfigured}
+        <PinInput
+          id="owner-gate-pin"
+          label="Owner PIN"
+          bind:value={pin}
+          focusOnMount
+          invalid={denied}
+          onvalue={() => (denied = false)}
+          oncomplete={() => void establishOwner()}
+        />
+      {/if}
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
-      <button type="submit" disabled={establishing || !/^\d{4}$/.test(pin)}>
+      <button type="submit" disabled={establishing || !pinReady}>
         {establishing ? 'Opening…' : 'Use Owner'}
       </button>
     </form>

@@ -49,6 +49,8 @@ export class ProfileSession {
     readonly contentPolicy: ProfileContentPolicy | null = null,
     /** Preview seam only; production profiles will replace this with their own encrypted settings writer. */
     readonly preferences: PreviewProfilePreferences | null = null,
+    /** Owns the separate Worker session behind a directory-backed activity model. */
+    private readonly closeActivityModel: (() => void) | null = null,
   ) {}
 
   get content(): ContentServiceClientPort {
@@ -146,7 +148,10 @@ export class ProfileSession {
     clearTimeout(this.#toastTimer);
     this.preferences?.close();
     if (this.closeHousehold) this.household.close();
-    else if (!this.household.ownsModel(this.model)) this.model?.close();
+    else if (!this.household.ownsModel(this.model)) {
+      if (this.closeActivityModel) this.closeActivityModel();
+      else this.model?.close();
+    }
   }
 
   /** Transfer the shared household lifetime to the profiles coordinator before this session is switched away. */
@@ -160,8 +165,21 @@ export function activeProfileSession(
   identity: PersistentProfileIdentity,
   household: HouseholdSession,
   model: LibraryModel,
+  closeActivityModel: (() => void) | null = null,
+  contentPolicy: ProfileContentPolicy | null = null,
 ): ProfileSession {
-  return new ProfileSession(identity, household, model, false, false);
+  return new ProfileSession(
+    identity,
+    household,
+    model,
+    false,
+    false,
+    undefined,
+    null,
+    contentPolicy,
+    null,
+    closeActivityModel,
+  );
 }
 
 /** Today's one-log topology expressed through the household/profile boundary. */
