@@ -6,6 +6,7 @@
   const source = { generation: 7, head: 'a'.repeat(64) };
   const events: string[] = [];
   const recovering = new URLSearchParams(location.search).has('recovery');
+  const queued = new URLSearchParams(location.search).has('queued');
   let phase = (recovering ? 'recovery-required' : 'available') as
     'available' | 'enabled' | 'recovery-required';
   let savedPin = recovering ? '1234' : '';
@@ -62,7 +63,7 @@
     savePin={async (pin) => {
       events.push(`set:${pin}`);
       savedPin = pin;
-      return true;
+      return queued ? 'queued' : 'synced';
     }}
     verifyPin={async (pin) => {
       events.push(`verify:${pin}`);

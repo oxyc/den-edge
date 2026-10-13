@@ -64,6 +64,11 @@ export class HouseholdSession {
     return model === this.#model;
   }
 
+  /** Household Settings remain on the retained control log after Owner activity moves to a profile library. */
+  ownerSettingsModel(): LibraryModel | null {
+    return this.#model;
+  }
+
   /** Household security settings stay on the control log after Owner activity moves to its own library. */
   controlConnections(): LibraryModelLease<ConnectionsView> {
     if (!this.#model) throw new Error('Profiles require an open household control library');

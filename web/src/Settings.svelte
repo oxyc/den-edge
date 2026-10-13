@@ -274,7 +274,7 @@
         {model}
         pinConfigured={connections?.parentalPinConfigured ?? false}
         {disabled}
-        savePin={(pin) => run(() => model.setParentalPin(pin))}
+        savePin={async (pin) => (await model.setParentalPin(pin)).delivery}
         verifyPin={(pin) => model.verifyParentalPin(pin)}
       />
       <ConnectionsSection

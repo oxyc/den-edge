@@ -20,7 +20,7 @@
     model: LibraryModel;
     pinConfigured: boolean;
     disabled?: boolean;
-    savePin: (pin: string) => Promise<boolean>;
+    savePin: (pin: string) => Promise<'synced' | 'queued' | 'local'>;
     verifyPin: (pin: string) => Promise<boolean>;
   } = $props();
 
@@ -96,7 +96,9 @@
     failure = null;
     try {
       if (modal === 'create-pin') {
-        if (!(await savePin(value))) throw new Error('PIN was not saved');
+        // A locally accepted/queued PIN is not yet household authority. Do not observe or authorize a source until
+        // this exact command is durably acknowledged by the server; a later retry is a fresh explicit interaction.
+        if ((await savePin(value)) !== 'synced') throw new Error('PIN was not synced');
         pinEstablished = true;
         // Saving the PIN changes the authoritative household head, so the exact source must be observed after that
         // write. Keep the freshly entered value only in this call, verify the saved PIN, and authorize without a

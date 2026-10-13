@@ -40,3 +40,16 @@ test('recovery observes and binds its own source before the fresh Owner PIN', as
       `recover:0123456789abcdef0123456789abcdef:${'f'.repeat(32)}:7:${'a'.repeat(64)}`,
     ]);
 });
+
+test('a queued new Owner PIN never observes or enables profiles', async ({ page }) => {
+  await page.goto(`${E2E_ORIGIN}/test/profiles-settings.html?queued`);
+  await page.getByRole('button', { name: 'Enable Profiles' }).click();
+  await page.locator('#profiles-owner-pin').fill('1234');
+
+  await expect(
+    page.getByText('Profiles couldn’t be enabled. Enter your PIN and try again.'),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.profileSettingsEvents()))
+    .toEqual(['set:1234']);
+});
