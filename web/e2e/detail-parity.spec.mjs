@@ -186,7 +186,17 @@ async function setup(
     if (path.includes('combined_credits'))
       return r.fulfill({
         json: {
-          cast: [film(20, 'Latest acting', 2025), film(21, 'Earlier acting', 2010)],
+          cast: [
+            film(20, 'Latest acting', 2025),
+            film(21, 'Earlier acting', 2010),
+            {
+              id: 22,
+              media_type: 'tv',
+              name: 'Guest Series',
+              first_air_date: '2024-01-01',
+              poster_path: '/poster.jpg',
+            },
+          ],
           crew: [
             { ...film(30, 'New Director Film', 2026), department: 'Directing', job: 'Director' },
             { ...film(31, 'Old Director Film', 2001), department: 'Directing', job: 'Director' },
@@ -390,6 +400,14 @@ test('season requests cannot overwrite a newer selection and retained detail and
     });
     await expect(personHeading).toHaveAttribute('href', '/person/7-a-person');
     await active().getByRole('link', { name: 'A Person Detective', exact: true }).click();
+    await expect(active().getByRole('tab', { name: 'Movies' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await active().getByRole('tab', { name: 'Series' }).click();
+    await expect(active().getByRole('link', { name: 'Guest Series 2024' })).toBeVisible();
+    await expect(active().getByRole('link', { name: 'Latest acting 2025' })).toHaveCount(0);
+    await active().getByRole('tab', { name: 'Movies' }).click();
     await expect(active().getByRole('tab', { name: 'Directing' })).toHaveAttribute(
       'aria-selected',
       'true',

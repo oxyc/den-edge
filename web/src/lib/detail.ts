@@ -348,6 +348,12 @@ export interface FilmCredit {
   role?: string;
 }
 
+/** The media lanes a person's credits can show, in the same order on every client. */
+export function filmographyMediaTypes(credits: FilmCredit[]): MediaType[] {
+  const present = new Set(credits.map((credit) => credit.title.type));
+  return (['movie', 'tv'] as const).filter((type) => present.has(type));
+}
+
 /** Full credits, unlike search's deliberately short notable-films expansion. */
 export function parseFilmography(body: Json): FilmCredit[] {
   return [
