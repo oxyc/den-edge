@@ -213,6 +213,8 @@ describe('Owner split HTTP provider', () => {
       })),
     };
     const secure: OwnerSplitSecureWorker = {
+      prepareAuthorization: vi.fn(),
+      bindAuthorization: vi.fn(),
       allocateCandidate: vi.fn(),
       verifyBackup: vi.fn(),
       copyAndAuthenticateOwner: vi.fn(),

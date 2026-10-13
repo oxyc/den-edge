@@ -74,13 +74,26 @@ export interface MigrationAuthorizationFingerprint {
   readonly memberHash: string | null;
 }
 
+export interface ProfileMigrationAuthorization {
+  readonly intent: {
+    readonly version: 1;
+    readonly action: 'enable-profiles';
+    readonly attempt: string;
+    readonly householdId: string;
+    readonly source: { readonly generation: number; readonly head: string };
+  };
+  readonly intentDigest: string;
+  readonly commitBinding: string | null;
+}
+
 export type ProfileMigrationEffect =
   | 'no-op'
   | 'acquire-fence'
   | 'create-backup'
   | 'create-owner-library'
   | 'verify-owner-library'
-  | 'await-final-confirmation'
+  | 'record-commit-binding'
+  | 'invalidate-authorization'
   | 'commit-fenced-household'
   | 'lookup-attempt'
   | 'read-household'
@@ -207,6 +220,26 @@ export function profileMigrationAuthorizationFingerprint(input: {
 }): MigrationAuthorizationFingerprint {
   return syncPolicy<MigrationAuthorizationFingerprint>({
     op: 'profiles_migration_authorization_fingerprint',
+    input,
+  });
+}
+
+/** Build or bind the exact one-shot Enable Profiles authorization. PIN verification remains a client effect. */
+export function profileMigrationAuthorization(input: {
+  readonly intent: ProfileMigrationAuthorization['intent'];
+  readonly evidence: null | {
+    readonly attempt: string;
+    readonly householdId: string;
+    readonly fence: { readonly generation: number; readonly head: string };
+    readonly backupDigest: string;
+    readonly candidateKey: string;
+    readonly candidateHead: string;
+    readonly stagedDigest: string;
+    readonly wireMin: 5;
+  };
+}): ProfileMigrationAuthorization {
+  return syncPolicy<ProfileMigrationAuthorization>({
+    op: 'profiles_migration_authorization',
     input,
   });
 }

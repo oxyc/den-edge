@@ -8,6 +8,17 @@ const ATTEMPT = 'a'.repeat(32);
 const OTHER_ATTEMPT = 'b'.repeat(32);
 const DIGEST = 'd'.repeat(64);
 const SOURCE = { generation: 1, head: DIGEST };
+const authorization = (attempt = ATTEMPT) => ({
+  intent: {
+    version: 1 as const,
+    action: 'enable-profiles' as const,
+    attempt,
+    householdId: HOUSEHOLD,
+    source: SOURCE,
+  },
+  intentDigest: DIGEST,
+  commitBinding: null,
+});
 
 class MemoryWorkerVault implements OwnerSplitWorkerVault {
   constructor(
@@ -39,15 +50,17 @@ class MemoryWorkerVault implements OwnerSplitWorkerVault {
 }
 
 const idle = (): OwnerSplitJournal => ({
-  version: 5,
+  version: 6,
   attempt: ATTEMPT,
   explicitIntent: true,
+  householdId: HOUSEHOLD,
   state: 'idle',
   source: SOURCE,
+  splitAuthorization: authorization(),
 });
 
 const ready = (): OwnerSplitJournal & { readonly state: 'ready-to-commit' } => ({
-  version: 5,
+  version: 6,
   attempt: ATTEMPT,
   explicitIntent: true,
   state: 'ready-to-commit',
@@ -55,6 +68,7 @@ const ready = (): OwnerSplitJournal & { readonly state: 'ready-to-commit' } => (
   fence: { generation: 1, base: 4, head: DIGEST, rewrite: 'rewrite-1' },
   backup: { id: 'backup-1', digest: DIGEST },
   householdId: HOUSEHOLD,
+  splitAuthorization: { ...authorization(), commitBinding: DIGEST },
   candidate: {
     profileId: '3'.repeat(32),
     libraryId: '4'.repeat(32),
@@ -68,23 +82,14 @@ const ready = (): OwnerSplitJournal & { readonly state: 'ready-to-commit' } => (
 });
 
 describe('OwnerSplit Worker durable store', () => {
-  it('reopens its schema-validated journal and atomically bound commit authorization', async () => {
+  it('reopens its schema-validated journal with its atomically bound authorization', async () => {
     const vault = new MemoryWorkerVault(HOUSEHOLD);
     const first = new OwnerSplitWorkerStore(vault);
     await first.save(ready());
-    await first.authorizeCommit(ready(), {
-      version: 1,
-      attempt: ATTEMPT,
-      ownerHead: DIGEST,
-      stagedDigest: DIGEST,
-      commitAuthorized: true,
-    });
-
     const restarted = new OwnerSplitWorkerStore(vault);
-    await expect(restarted.load()).resolves.toMatchObject({ state: 'ready-to-commit' });
-    await expect(restarted.loadCommitAuthorization(ATTEMPT)).resolves.toMatchObject({
-      commitAuthorized: true,
-      attempt: ATTEMPT,
+    await expect(restarted.load()).resolves.toMatchObject({
+      state: 'ready-to-commit',
+      splitAuthorization: { commitBinding: DIGEST },
     });
   });
 
@@ -107,17 +112,13 @@ describe('OwnerSplit Worker durable store', () => {
   it('never carries authorization or recovery evidence into another attempt', async () => {
     const store = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
     await store.save(ready());
-    await store.authorizeCommit(ready(), {
-      version: 1,
-      attempt: ATTEMPT,
-      ownerHead: DIGEST,
-      stagedDigest: DIGEST,
-      commitAuthorized: true,
+    await store.save({
+      ...idle(),
+      attempt: OTHER_ATTEMPT,
+      splitAuthorization: authorization(OTHER_ATTEMPT),
     });
-    await store.save({ ...idle(), attempt: OTHER_ATTEMPT });
 
     await expect(store.load()).resolves.toMatchObject({ attempt: OTHER_ATTEMPT, state: 'idle' });
-    await expect(store.loadCommitAuthorization(OTHER_ATTEMPT)).resolves.toBeNull();
   });
 
   it('binds candidate credentials to household and attempt across restart', async () => {

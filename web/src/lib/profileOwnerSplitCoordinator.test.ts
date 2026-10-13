@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import fixture from '../vendor/den-core/profiles-v1.json';
-import { profileMigrationDigest } from './profileMigrationCore';
+import { profileMigrationAuthorization, profileMigrationDigest } from './profileMigrationCore';
 import {
   DormantOwnerSplitCoordinator,
-  type OwnerSplitCommitAuthorization,
   type OwnerSplitJournal,
   type OwnerSplitJournalStore,
   type OwnerSplitRecoveryIntent,
@@ -51,10 +50,20 @@ const candidate = {
   keyRef: 'secure-owner-key',
   keyFingerprint: 'e'.repeat(64),
 };
+const preparedAuthorization = (attempt = ATTEMPT, observed = source) =>
+  profileMigrationAuthorization({
+    intent: {
+      version: 1,
+      action: 'enable-profiles',
+      attempt,
+      householdId: HOUSEHOLD,
+      source: observed,
+    },
+    evidence: null,
+  });
 
 class MemoryJournalStore implements OwnerSplitJournalStore {
   journal: OwnerSplitJournal | null = null;
-  authorization: OwnerSplitCommitAuthorization | null = null;
   recovery: OwnerSplitRecoveryIntent | null = null;
 
   async load(): Promise<OwnerSplitJournal | null> {
@@ -62,16 +71,6 @@ class MemoryJournalStore implements OwnerSplitJournalStore {
   }
   async save(journal: OwnerSplitJournal): Promise<void> {
     this.journal = structuredClone(journal);
-  }
-  async authorizeCommit(
-    journal: OwnerSplitJournal & { readonly state: 'ready-to-commit' },
-    authorization: OwnerSplitCommitAuthorization,
-  ): Promise<void> {
-    this.authorization = structuredClone(authorization);
-    this.journal = structuredClone(journal);
-  }
-  async loadCommitAuthorization(attempt: string): Promise<OwnerSplitCommitAuthorization | null> {
-    return this.authorization?.attempt === attempt ? structuredClone(this.authorization) : null;
   }
   async authorizeRecovery(intent: OwnerSplitRecoveryIntent): Promise<void> {
     this.recovery = structuredClone(intent);
@@ -81,7 +80,6 @@ class MemoryJournalStore implements OwnerSplitJournalStore {
   }
   async clear(attempt: string): Promise<void> {
     if (this.journal?.attempt === attempt) this.journal = null;
-    if (this.authorization?.attempt === attempt) this.authorization = null;
     if (this.recovery?.attempt === attempt) this.recovery = null;
   }
 }
@@ -216,6 +214,9 @@ function harness(
     })),
   };
   const secure: OwnerSplitSecureWorker = {
+    prepareAuthorization: vi.fn(async ({ attempt, source: observed }) =>
+      preparedAuthorization(attempt, observed),
+    ),
     allocateCandidate: vi.fn(async () => candidate),
     verifyBackup: vi.fn(async () => {}),
     copyAndAuthenticateOwner: vi.fn(async () => ({
@@ -223,6 +224,21 @@ function harness(
       householdWrites: [WRITE],
     })),
     verifyOwnerLibrary: vi.fn(async () => {}),
+    bindAuthorization: vi.fn(async ({ authorization, evidence, stagedDigest }) =>
+      profileMigrationAuthorization({
+        intent: authorization.intent,
+        evidence: {
+          attempt: evidence.attempt,
+          householdId: evidence.householdId,
+          fence: { generation: evidence.fence.generation, head: evidence.fence.head },
+          backupDigest: evidence.backup.digest,
+          candidateKey: OWNER_KEY,
+          candidateHead: evidence.ownerHead,
+          stagedDigest,
+          wireMin: 5,
+        },
+      }),
+    ),
     planNext: vi.fn(async (evidence) =>
       planOwnerSplitWithCore(evidence, evidence.candidate ? OWNER_KEY : undefined),
     ),
@@ -254,8 +270,8 @@ function harness(
     store,
     provider,
     secure,
-    coordinator: new DormantOwnerSplitCoordinator(effects, store),
-    newCoordinator: () => new DormantOwnerSplitCoordinator(effects, store),
+    coordinator: new DormantOwnerSplitCoordinator(effects, store, HOUSEHOLD),
+    newCoordinator: () => new DormantOwnerSplitCoordinator(effects, store, HOUSEHOLD),
     setHousehold(value: OwnerSplitHouseholdObservation) {
       household = value;
     },
@@ -317,10 +333,14 @@ describe('dormant full Owner split coordinator', () => {
     const transport = new OwnerSplitWorkerTransport(network, store);
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
     const secure: OwnerSplitSecureWorker = {
+      prepareAuthorization: vi.fn(async ({ attempt, source: observed }) =>
+        preparedAuthorization(attempt, observed),
+      ),
       allocateCandidate: vi.fn(),
       verifyBackup: vi.fn(),
       copyAndAuthenticateOwner: vi.fn(),
       verifyOwnerLibrary: vi.fn(),
+      bindAuthorization: vi.fn(),
       planNext: vi.fn(async (evidence) =>
         planOwnerSplitWithCore(evidence, evidence.candidate ? OWNER_KEY : undefined),
       ),
@@ -333,10 +353,12 @@ describe('dormant full Owner split coordinator', () => {
     const coordinator = new DormantOwnerSplitCoordinator(
       new DormantOwnerSplitEffectExecutor({ provider, secureWorker: secure, enabled: true }),
       store,
+      HOUSEHOLD,
     );
 
-    await expect(coordinator.prepare(ATTEMPT)).rejects.toThrow('stop after durable open');
-    expect(openSawJournal).toMatchObject({ version: 5, state: 'idle', attempt: ATTEMPT, source });
+    const observed = await coordinator.observeSource();
+    await expect(coordinator.prepare(ATTEMPT, observed)).rejects.toThrow('stop after durable open');
+    expect(openSawJournal).toMatchObject({ version: 6, state: 'idle', attempt: ATTEMPT, source });
     expect(requests).toEqual([
       { method: 'GET', path: `/lib/${HOUSEHOLD}/profile-migration/source` },
       {
@@ -349,35 +371,14 @@ describe('dormant full Owner split coordinator', () => {
     expect(readHousehold).toHaveBeenCalledOnce();
   });
 
-  it('prepares only, survives reload without committing, then commits only after durable authorization', async () => {
+  it('binds and commits the exact attempt without a second authorization action', async () => {
     const value = harness();
-    await expect(value.coordinator.prepare(ATTEMPT)).resolves.toEqual({
-      kind: 'awaiting-confirmation',
-      attempt: ATTEMPT,
-      ownerHead: OWNER_HEAD,
-    });
-    expect(value.provider.commit).not.toHaveBeenCalled();
-    expect(value.provider.observeSource).toHaveBeenCalledOnce();
-    expect(value.provider.open).toHaveBeenCalledWith(ATTEMPT, 'split', source);
-    expect(vi.mocked(value.provider.open).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(value.provider.readHousehold).mock.invocationCallOrder[0]!,
-    );
-    await expect(value.newCoordinator().resume()).resolves.toMatchObject({
-      kind: 'awaiting-confirmation',
-    });
-    expect(value.provider.commit).not.toHaveBeenCalled();
-
-    await value.coordinator.authorizeCommit(ATTEMPT);
-    expect(value.store.authorization).toMatchObject({
-      attempt: ATTEMPT,
-      ownerHead: OWNER_HEAD,
-      stagedDigest: STAGED,
-      commitAuthorized: true,
-    });
-    await expect(value.newCoordinator().resume()).resolves.toEqual({
+    const observed = await value.coordinator.observeSource();
+    await expect(value.coordinator.prepare(ATTEMPT, observed)).resolves.toEqual({
       kind: 'active',
       attempt: ATTEMPT,
     });
+    expect(value.secure.bindAuthorization).toHaveBeenCalledOnce();
     expect(value.provider.commit).toHaveBeenCalledOnce();
     expect(value.secure.adoptWinner).toHaveBeenCalledOnce();
     expect(value.store.journal).toBeNull();
@@ -385,9 +386,10 @@ describe('dormant full Owner split coordinator', () => {
 
   it('recovers commit-unknown after response loss without issuing another commit', async () => {
     const value = harness({ crashCommit: true });
-    await value.coordinator.prepare(ATTEMPT);
-    await value.coordinator.authorizeCommit(ATTEMPT);
-    await expect(value.coordinator.resume()).rejects.toThrow('simulated response loss');
+    const observed = await value.coordinator.observeSource();
+    await expect(value.coordinator.prepare(ATTEMPT, observed)).rejects.toThrow(
+      'simulated response loss',
+    );
     expect(value.store.journal?.state).toBe('commit-unknown');
     await expect(value.newCoordinator().resume()).resolves.toEqual({
       kind: 'active',
@@ -398,23 +400,25 @@ describe('dormant full Owner split coordinator', () => {
 
   it('replays a response-lost open with only its durable source even after the live source changes', async () => {
     const value = harness({ crashOpen: true });
-    await expect(value.coordinator.prepare(ATTEMPT)).rejects.toThrow(
+    const observed = await value.coordinator.observeSource();
+    await expect(value.coordinator.prepare(ATTEMPT, observed)).rejects.toThrow(
       'simulated open response loss',
     );
     expect(value.store.journal).toMatchObject({ state: 'idle', source });
     value.setSource({ generation: 7, head: '9'.repeat(64) });
 
-    await expect(value.newCoordinator().resume()).resolves.toMatchObject({
-      kind: 'awaiting-confirmation',
-    });
+    await expect(value.newCoordinator().resume()).resolves.toMatchObject({ kind: 'active' });
     expect(value.provider.observeSource).toHaveBeenCalledOnce();
     expect(value.provider.open).toHaveBeenLastCalledWith(ATTEMPT, 'split', source);
   });
 
   it('does not replace a durably observed source when the source changes before open', async () => {
     const value = harness({ changeSourceAfterObserve: true });
-    await expect(value.coordinator.prepare(ATTEMPT)).rejects.toThrow('migration_source_changed');
-    expect(value.store.journal).toMatchObject({ state: 'idle', source });
+    const observed = await value.coordinator.observeSource();
+    await expect(value.coordinator.prepare(ATTEMPT, observed)).resolves.toEqual({
+      kind: 'restart-required',
+    });
+    expect(value.store.journal).toBeNull();
     expect(value.provider.observeSource).toHaveBeenCalledOnce();
     expect(value.provider.open).toHaveBeenCalledOnce();
     expect(value.provider.open).toHaveBeenCalledWith(ATTEMPT, 'split', source);
@@ -423,7 +427,16 @@ describe('dormant full Owner split coordinator', () => {
 
   it('durably aborts a cancelled prepared attempt before any conditional cleanup', async () => {
     const value = harness();
-    await value.coordinator.prepare(ATTEMPT);
+    value.store.journal = {
+      version: 6,
+      attempt: ATTEMPT,
+      explicitIntent: true,
+      householdId: HOUSEHOLD,
+      state: 'fenced',
+      source,
+      splitAuthorization: preparedAuthorization(),
+      fence,
+    };
     await expect(value.coordinator.cancel(ATTEMPT)).resolves.toEqual({ kind: 'cancelled' });
     expect(value.provider.abort).toHaveBeenCalledOnce();
     expect(value.provider.lookup).toHaveBeenCalled();
@@ -434,9 +447,11 @@ describe('dormant full Owner split coordinator', () => {
 
   it('verifies a racing winner, conditionally retires only the loser, then adopts', async () => {
     const value = harness({ superseded: true });
-    await value.coordinator.prepare(ATTEMPT);
-    await value.coordinator.authorizeCommit(ATTEMPT);
-    await expect(value.coordinator.resume()).resolves.toEqual({ kind: 'active', attempt: ATTEMPT });
+    const observed = await value.coordinator.observeSource();
+    await expect(value.coordinator.prepare(ATTEMPT, observed)).resolves.toEqual({
+      kind: 'active',
+      attempt: ATTEMPT,
+    });
     expect(value.secure.verifyDirectoryWinner).toHaveBeenCalled();
     expect(value.provider.retireCandidate).toHaveBeenCalledOnce();
     expect(value.secure.forgetCandidate).toHaveBeenCalledWith(candidate.keyRef);
@@ -446,11 +461,13 @@ describe('dormant full Owner split coordinator', () => {
   it('requires separately durable recovery intent before executing restore', async () => {
     const value = harness();
     value.store.journal = {
-      version: 5,
+      version: 6,
       attempt: ATTEMPT,
       explicitIntent: true,
+      householdId: HOUSEHOLD,
       state: 'restore-required',
       source,
+      splitAuthorization: preparedAuthorization(),
       fence,
       backup: { id: backup.id, digest: backup.digest },
     };
@@ -461,7 +478,12 @@ describe('dormant full Owner split coordinator', () => {
       attempt: ATTEMPT,
     });
     expect(value.provider.restore).not.toHaveBeenCalled();
-    await expect(value.coordinator.authorizeRecovery(ATTEMPT, RECOVERY)).resolves.toEqual({
+    await expect(
+      value.coordinator.authorizeRecovery(ATTEMPT, RECOVERY, {
+        generation: 8,
+        head: 'f'.repeat(64),
+      }),
+    ).resolves.toEqual({
       kind: 'restored',
       attempt: ATTEMPT,
     });
@@ -475,14 +497,15 @@ describe('dormant full Owner split coordinator', () => {
   it('rejects malformed durable evidence before invoking provider or secure effects', async () => {
     const value = harness();
     value.store.journal = {
-      version: 5,
+      version: 6,
       attempt: ATTEMPT,
       explicitIntent: true,
+      householdId: HOUSEHOLD,
       state: 'owner-copied',
       source,
+      splitAuthorization: preparedAuthorization(),
       fence,
       backup: { id: backup.id, digest: backup.digest },
-      householdId: HOUSEHOLD,
       candidate: { ...candidate, keyFingerprint: 'not-a-digest' },
       ownerHead: OWNER_HEAD,
       householdWrites: [WRITE],

@@ -271,6 +271,8 @@ test('preview Kid and Visitor Settings are personal while household administrati
   await expect(page.getByRole('link', { name: 'Content', exact: true }).first()).toBeVisible();
   await expect(page.getByRole('link', { name: 'About', exact: true }).first()).toBeVisible();
   await expect(page.getByRole('link', { name: 'Connections', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Profiles', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Profiles', level: 2 })).toHaveCount(0);
   await expect(page.getByText('Up to age 12 · managed by Owner')).toBeVisible();
   await page.getByRole('button', { name: 'Streaming household Finland' }).click();
   await expect(page.getByText('Region: Finland · 1 shared service')).toBeVisible();

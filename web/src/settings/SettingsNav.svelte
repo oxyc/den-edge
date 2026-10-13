@@ -4,6 +4,7 @@
   const ALL_SECTIONS = [
     { id: 'playback', label: 'Playback' },
     { id: 'content', label: 'Content' },
+    { id: 'profiles', label: 'Profiles' },
     { id: 'connections', label: 'Connections' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'assistants', label: 'Assistants' },
@@ -170,6 +171,10 @@
   @media (760px <= width < 1100px) {
     .tabs {
       display: flex;
+      width: 100%;
+      overflow-x: auto;
+      box-sizing: border-box;
+      scrollbar-width: none;
     }
   }
 

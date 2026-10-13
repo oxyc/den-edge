@@ -1,7 +1,6 @@
 import { profileMigrationAuthorizationFingerprint } from './profileMigrationCore';
 import {
   checkedOwnerSplitJournal,
-  type OwnerSplitCommitAuthorization,
   type OwnerSplitJournal,
   type OwnerSplitJournalStore,
   type OwnerSplitRecoveryIntent,
@@ -45,7 +44,6 @@ interface DurableOwnerSplitState {
   readonly version: 1;
   readonly householdId: string;
   readonly journal: OwnerSplitJournal;
-  readonly authorization?: OwnerSplitCommitAuthorization;
   readonly recovery?: OwnerSplitRecoveryIntent;
 }
 
@@ -161,51 +159,11 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
           version: 1,
           householdId: this.#vault.libraryId,
           journal: checked,
-          ...(sameAttempt && current?.authorization
-            ? { authorization: checkedCommitAuthorization(current.authorization, checked) }
-            : {}),
           ...(sameAttempt && current?.recovery ? { recovery: current.recovery } : {}),
         } satisfies DurableOwnerSplitState,
         this.#stateBinding(),
       );
     });
-  }
-
-  async authorizeCommit(
-    journal: OwnerSplitJournal & { readonly state: 'ready-to-commit' },
-    authorization: OwnerSplitCommitAuthorization,
-  ): Promise<void> {
-    const checked = checkedOwnerSplitJournal(journal);
-    checkedCommitAuthorization(authorization, journal);
-    if (checked?.state !== 'ready-to-commit') throw new Error('Owner split is not ready to commit');
-    await this.#locked(async () => {
-      const current = await this.#state();
-      if (
-        current?.journal.attempt !== journal.attempt ||
-        canonical(current.journal) !== canonical(checked)
-      )
-        throw new Error('Owner split journal changed before authorization');
-      // One AES-GCM envelope/one Vault put makes the ready journal and its separately typed authorization durable
-      // together. The coordinator still requires both independently bound members before it may commit.
-      await this.#vault.keepRequired(
-        this.#stateName(),
-        {
-          version: 1,
-          householdId: this.#vault.libraryId,
-          journal: checked,
-          authorization,
-          ...(current.recovery ? { recovery: current.recovery } : {}),
-        } satisfies DurableOwnerSplitState,
-        this.#stateBinding(),
-      );
-    });
-  }
-
-  async loadCommitAuthorization(attempt: string): Promise<OwnerSplitCommitAuthorization | null> {
-    checkedAttempt(attempt);
-    const value = (await this.#state())?.authorization;
-    if (value === undefined) return null;
-    return checkedCommitAuthorization(value, { attempt });
   }
 
   async authorizeRecovery(intent: OwnerSplitRecoveryIntent): Promise<void> {
@@ -249,10 +207,6 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
       throw new Error('Owner split durable state is unavailable or corrupt');
     const journal = checkedOwnerSplitJournal(value.journal as OwnerSplitJournal);
     if (journal === null) throw new Error('Owner split durable state is unavailable or corrupt');
-    const authorization =
-      value.authorization === undefined
-        ? undefined
-        : checkedCommitAuthorization(value.authorization, journal);
     const recovery =
       value.recovery === undefined ? undefined : checkedRecoveryIntent(value.recovery);
     if (recovery !== undefined && recovery.attempt !== journal.attempt)
@@ -261,7 +215,6 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
       version: 1,
       householdId: this.#vault.libraryId,
       journal,
-      ...(authorization ? { authorization } : {}),
       ...(recovery ? { recovery } : {}),
     };
   }
@@ -310,27 +263,6 @@ function checkedCandidateCredential(value: unknown): SealedCandidateCredential {
   )
     throw new Error('Candidate credential is unavailable or corrupt');
   return value as unknown as SealedCandidateCredential;
-}
-
-function checkedCommitAuthorization(
-  value: unknown,
-  journal: Pick<OwnerSplitJournal, 'attempt'> &
-    Partial<Pick<OwnerSplitJournal, 'ownerHead' | 'stagedDigest'>>,
-): OwnerSplitCommitAuthorization {
-  if (
-    !record(value) ||
-    value.version !== 1 ||
-    value.commitAuthorized !== true ||
-    value.attempt !== journal.attempt ||
-    typeof value.ownerHead !== 'string' ||
-    !DIGEST.test(value.ownerHead) ||
-    typeof value.stagedDigest !== 'string' ||
-    !DIGEST.test(value.stagedDigest) ||
-    (journal.ownerHead !== undefined && value.ownerHead !== journal.ownerHead) ||
-    (journal.stagedDigest !== undefined && value.stagedDigest !== journal.stagedDigest)
-  )
-    throw new Error('Commit authorization is unavailable or corrupt');
-  return value as unknown as OwnerSplitCommitAuthorization;
 }
 
 function checkedRecoveryIntent(value: unknown): OwnerSplitRecoveryIntent {
@@ -389,14 +321,4 @@ function fromBase64(value: string): Uint8Array<ArrayBuffer> | null {
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (record(value))
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
-      .join(',')}}`;
-  return JSON.stringify(value) ?? 'null';
 }

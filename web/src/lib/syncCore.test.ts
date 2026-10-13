@@ -74,10 +74,18 @@ describe('shared Rust WASM sync policy', () => {
 
   it('fails closed when profile migration planner evidence is missing or malformed', () => {
     const fence = { generation: 7, head: 'a'.repeat(64) };
+    const authorization = profileFixtures.migrationAuthorization.prepared;
+    const authorized = {
+      attempt: authorization.intent.attempt,
+      householdId: authorization.intent.householdId,
+      source: authorization.intent.source,
+      splitAuthorization: authorization,
+    };
     const cases: Array<[Record<string, unknown>, string]> = [
-      [{ state: 'fenced', observed: 'legacy', fence }, 'invalid_migration_fence'],
+      [{ state: 'fenced', observed: 'legacy', fence }, 'migration_authorization_required'],
       [
         {
+          ...authorized,
           state: 'fenced',
           observed: 'legacy',
           fence,
@@ -88,6 +96,7 @@ describe('shared Rust WASM sync policy', () => {
       [{ state: 'adopting', observed: 'committed' }, 'committed_directory_missing'],
       [
         {
+          ...authorized,
           state: 'owner-copied',
           observed: 'legacy',
           fence,

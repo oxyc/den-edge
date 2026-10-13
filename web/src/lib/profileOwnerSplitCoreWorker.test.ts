@@ -4,9 +4,11 @@ import {
   constructOwnerDirectoryWithCore,
   planOwnerSplitWithCore,
 } from './profileOwnerSplitCoreWorker';
+import { profileMigrationAuthorization } from './profileMigrationCore';
 import type { OwnerSplitPlannerEvidence } from './profileOwnerSplitEngine';
 
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
+const HOUSEHOLD = '00112233445566778899aabbccddeeff';
 const CANDIDATE_KEY = 'REREREREREREREREREREREREREREREREREREREREREQ=';
 const fence = {
   generation: 7,
@@ -14,8 +16,20 @@ const fence = {
   head: 'a'.repeat(64),
   rewrite: 'rewrite-7',
 };
+const splitAuthorization = profileMigrationAuthorization({
+  intent: {
+    version: 1,
+    action: 'enable-profiles',
+    attempt: ATTEMPT,
+    householdId: HOUSEHOLD,
+    source: { generation: 7, head: 'a'.repeat(64) },
+  },
+  evidence: null,
+});
 
 const evidence = (values: Partial<OwnerSplitPlannerEvidence>): OwnerSplitPlannerEvidence => ({
+  attempt: ATTEMPT,
+  householdId: HOUSEHOLD,
   state: 'idle',
   explicitIntent: true,
   backupVerified: false,
@@ -28,6 +42,7 @@ const evidence = (values: Partial<OwnerSplitPlannerEvidence>): OwnerSplitPlanner
   householdFresh: false,
   recoveryIntent: false,
   household: { kind: 'legacy', generation: 7, base: 4, head: 'a'.repeat(64) },
+  splitAuthorization,
   ...values,
 });
 
@@ -49,10 +64,12 @@ describe('Owner split worker den-core adapter', () => {
           },
           candidateAttempt: ATTEMPT,
           candidateHead: 'c'.repeat(64),
+          backupDigest: 'd'.repeat(64),
+          stagedDigest: 'e'.repeat(64),
         }),
         CANDIDATE_KEY,
       ),
-    ).toBe('await-final-confirmation');
+    ).toBe('record-commit-binding');
   });
 
   it('never permits a candidate evidence record without resolving its worker-owned key', () => {

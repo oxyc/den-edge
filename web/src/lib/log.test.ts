@@ -217,11 +217,23 @@ describe('LibraryLog', () => {
     const store = new OwnerSplitWorkerStore(log);
     await expect(store.load()).resolves.toBeNull();
     await store.save({
-      version: 5,
+      version: 6,
       attempt: '0123456789abcdef0123456789abcdef',
       explicitIntent: true,
+      householdId: log.libraryId,
       state: 'idle',
       source: { generation: 1, head: 'a'.repeat(64) },
+      splitAuthorization: {
+        intent: {
+          version: 1,
+          action: 'enable-profiles',
+          attempt: '0123456789abcdef0123456789abcdef',
+          householdId: log.libraryId,
+          source: { generation: 1, head: 'a'.repeat(64) },
+        },
+        intentDigest: 'b'.repeat(64),
+        commitBinding: null,
+      },
     });
     const name = `${log.libraryId}:profile-migration/v1/state`;
     const sealed = data.get(name)!;

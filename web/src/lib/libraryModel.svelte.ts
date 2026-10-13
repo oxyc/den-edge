@@ -415,6 +415,57 @@ export class LibraryModel {
     return result.matches;
   }
 
+  async profileMigrationStatus() {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'profile-migration.status' });
+    if (result.kind !== 'profile-migration.status')
+      throw wrongQueryResult('profile migration status');
+    return result;
+  }
+
+  async observeProfileMigration() {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'profile-migration.observe' });
+    if (result.kind !== 'profile-migration.observe')
+      throw wrongQueryResult('profile migration observation');
+    return result;
+  }
+
+  async observeProfileRecovery(attempt: string) {
+    this.#assertOpen();
+    const { result } = await this.service.query({
+      kind: 'profile-migration.observe-recovery',
+      attempt,
+    });
+    if (result.kind !== 'profile-migration.observe-recovery')
+      throw wrongQueryResult('profile migration recovery observation');
+    return result;
+  }
+
+  enableProfiles(
+    attempt: string,
+    source: { generation: number; head: string },
+    operationId?: string,
+  ) {
+    return this.task({ kind: 'profile-migration.enable', attempt, source }, operationId);
+  }
+
+  cancelProfileMigration(attempt: string, operationId?: string) {
+    return this.task({ kind: 'profile-migration.cancel', attempt }, operationId);
+  }
+
+  recoverProfileMigration(
+    attempt: string,
+    recoveryAttempt: string,
+    source: { generation: number; head: string },
+    operationId?: string,
+  ) {
+    return this.task(
+      { kind: 'profile-migration.recover', attempt, recoveryAttempt, source },
+      operationId,
+    );
+  }
+
   setRemoteAccess(
     credentials: { clientId: string; clientSecret: string } | null,
     operationId?: string,

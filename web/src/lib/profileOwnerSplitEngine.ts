@@ -1,6 +1,7 @@
 import type {
   MigrationSealedRow,
   MigrationSnapshotRow,
+  ProfileMigrationAuthorization,
   ProfileMigrationEffect,
 } from './profileMigrationCore';
 
@@ -138,6 +139,11 @@ export interface OwnerSplitProvider {
  * There is intentionally no localStorage/IndexedDB implementation.
  */
 export interface OwnerSplitSecureWorker {
+  prepareAuthorization(input: {
+    readonly attempt: string;
+    readonly householdId: string;
+    readonly source: OwnerSplitSource;
+  }): Promise<ProfileMigrationAuthorization>;
   allocateCandidate(attempt: string): Promise<OwnerSplitCandidateHandle>;
   verifyBackup(input: {
     readonly attempt: string;
@@ -158,6 +164,11 @@ export interface OwnerSplitSecureWorker {
     readonly candidate: OwnerSplitCandidateHandle;
     readonly expectedHead: string;
   }): Promise<void>;
+  bindAuthorization(input: {
+    readonly authorization: ProfileMigrationAuthorization;
+    readonly evidence: OwnerSplitDurableEvidence;
+    readonly stagedDigest: string;
+  }): Promise<ProfileMigrationAuthorization>;
   /** Resolve opaque key refs and invoke den-core `profiles_migration_next`; no lifecycle policy lives in TS. */
   planNext(input: OwnerSplitPlannerEvidence): Promise<ProfileMigrationEffect>;
   verifyCommittedWinner(input: {
@@ -220,6 +231,11 @@ export interface OwnerSplitPlannerEvidence {
   /** Pre-fence authenticated source; den-core consumes it as the legacy observation without a household read. */
   readonly source?: OwnerSplitSource;
   readonly household?: OwnerSplitHouseholdObservation;
+  readonly attempt: string;
+  readonly householdId: string;
+  readonly backupDigest?: string;
+  readonly stagedDigest?: string;
+  readonly splitAuthorization: ProfileMigrationAuthorization;
 }
 
 export type OwnerSplitJournalState =
@@ -282,6 +298,18 @@ export class DormantOwnerSplitEffectExecutor {
     const source = await this.#provider.observeSource();
     checkedSource(source);
     return source;
+  }
+
+  prepareAuthorization(input: {
+    readonly attempt: string;
+    readonly householdId: string;
+    readonly source: OwnerSplitSource;
+  }): Promise<ProfileMigrationAuthorization> {
+    this.#requireEnabled();
+    checkedAttempt(input.attempt);
+    if (!ID.test(input.householdId)) throw new Error('Invalid household library identity');
+    checkedSource(input.source);
+    return this.#secure.prepareAuthorization(input);
   }
 
   open(
@@ -374,6 +402,17 @@ export class DormantOwnerSplitEffectExecutor {
       candidate: input.evidence.candidate,
       expectedHead: input.evidence.ownerHead,
     });
+  }
+
+  bindAuthorization(input: {
+    readonly authorization: ProfileMigrationAuthorization;
+    readonly evidence: OwnerSplitDurableEvidence;
+    readonly stagedDigest: string;
+  }): Promise<ProfileMigrationAuthorization> {
+    this.#requireEnabled();
+    checkedEvidence(input.evidence);
+    checkedDigest(input.stagedDigest);
+    return this.#secure.bindAuthorization(input);
   }
 
   async stageHousehold(input: { readonly evidence: OwnerSplitDurableEvidence }): Promise<string> {
