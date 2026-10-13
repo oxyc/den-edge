@@ -11,9 +11,13 @@ import { ProfileMigrationParticipant } from './profileMigration';
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
 const OWNER = '00112233445566778899aabbccddeeff';
 const KID = '11112222333344445555666677778888';
-const HOUSEHOLD_KEY = 'household-key';
-const CANDIDATE_KEY = 'candidate-key';
-const WINNER_KEY = 'winner-key';
+const key = (fill: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(fill)));
+const HOUSEHOLD_KEY = key(1);
+const CANDIDATE_KEY = key(2);
+const WINNER_KEY = key(3);
+const KID_KEY = key(4);
+const CANDIDATE_ID = '11223344556677889900aabbccddeeff';
+const SOURCE_HEAD = 'a'.repeat(64);
 
 function memoryStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial));
@@ -29,7 +33,7 @@ function memoryStorage(initial: Record<string, string> = {}): Storage {
   };
 }
 
-function directory(ownerKey = WINNER_KEY, kidKey = 'kid-key'): ProfilesDirectory {
+function directory(ownerKey = WINNER_KEY, kidKey = KID_KEY): ProfilesDirectory {
   return {
     format: 4,
     kind: 'profiles',
@@ -75,7 +79,7 @@ function fixture(
     ),
     acquireFence: vi.fn(async () => {
       calls.push('fence');
-      return { generation: 'generation-a', base: 7, rewrite: 'rewrite-a' };
+      return { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' };
     }),
     createAndVerifyBackup: vi.fn(async () => {
       calls.push('backup');
@@ -83,7 +87,7 @@ function fixture(
     }),
     createOwnerCandidate: vi.fn(async () => {
       calls.push('candidate');
-      return { profileId: OWNER, libraryId: 'candidate-id', libraryKey: CANDIDATE_KEY };
+      return { profileId: OWNER, libraryId: CANDIDATE_ID, libraryKey: CANDIDATE_KEY };
     }),
     copyOwnerPartition: vi.fn(async () => void calls.push('copy')),
     verifyOwnerLibrary: vi.fn(async () => {
@@ -151,6 +155,26 @@ describe('ProfileMigrationParticipant', () => {
     });
     expect(executor.observe).not.toHaveBeenCalled();
     expect(() => participant.beginExplicitOwnerAction(true)).toThrow('requires recovery');
+  });
+
+  it('never sends a non-canonical persisted candidate to the mandatory observation', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 1,
+        attempt: ATTEMPT,
+        state: 'owner-copied',
+        fence: { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' },
+        backup: { id: 'backup-a', digest: 'backup-digest' },
+        candidate: { profileId: OWNER, libraryId: 'not-an-id', libraryKey: 'arbitrary-key' },
+      }),
+    });
+    const { participant, executor } = fixture({ storage });
+
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'invalid-journal',
+    });
+    expect(executor.observe).not.toHaveBeenCalled();
   });
 
   it('blocks a prepared rewrite attached to an idle journal', async () => {
@@ -339,11 +363,11 @@ describe('ProfileMigrationParticipant', () => {
         version: 1,
         attempt: ATTEMPT,
         state: 'owner-copied',
-        fence: { generation: 'generation-a', base: 7, rewrite: 'rewrite-a' },
+        fence: { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' },
         backup: { id: 'backup-a', digest: 'backup-digest' },
         candidate: {
           profileId: OWNER,
-          libraryId: 'candidate-id',
+          libraryId: CANDIDATE_ID,
           libraryKey: CANDIDATE_KEY,
         },
       }),
@@ -409,7 +433,7 @@ describe('ProfileMigrationParticipant', () => {
   });
 
   it('proves cleanup cannot target the Owner, another live profile, or the household', async () => {
-    for (const protectedKey of [WINNER_KEY, 'kid-key', HOUSEHOLD_KEY]) {
+    for (const protectedKey of [WINNER_KEY, KID_KEY, HOUSEHOLD_KEY]) {
       const storage = memoryStorage();
       const seeded = fixture({ storage });
       seeded.participant.beginExplicitOwnerAction(true);
@@ -420,7 +444,7 @@ describe('ProfileMigrationParticipant', () => {
         'den.profile.migration.v1:household-id',
         JSON.stringify({
           ...journal,
-          candidate: { profileId: OWNER, libraryId: 'candidate-id', libraryKey: protectedKey },
+          candidate: { profileId: OWNER, libraryId: CANDIDATE_ID, libraryKey: protectedKey },
           state: 'owner-copied',
         }),
       );
