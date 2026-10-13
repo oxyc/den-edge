@@ -368,6 +368,29 @@ describe('ProfileModeCoordinator', () => {
     },
   );
 
+  it.each([null, '{broken', JSON.stringify({ mode: 'unknown' })])(
+    'purges orphan Visitor data after PIN proof and before recovered Owner becomes active (%s)',
+    async (marker) => {
+      const storage = memoryStorage();
+      if (marker !== null) storage.setItem('den.profile.active.v1', marker);
+      const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      storage.setItem(`den.profile.visitor.v1:${orphan}:activity`, 'private visit');
+      storage.setItem(`den.profile.visitor.v1:${orphan}:preferences`, 'private preferences');
+      storage.setItem('den.profile.personal.v1:activity', 'personal');
+      const first = owner(storage);
+
+      await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+      expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBe('private visit');
+      expect(first.coordinator.session).toBeNull();
+
+      await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+      expect(first.coordinator.mode).toBe('owner');
+      expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBeNull();
+      expect(storage.getItem(`den.profile.visitor.v1:${orphan}:preferences`)).toBeNull();
+      expect(storage.getItem('den.profile.personal.v1:activity')).toBe('personal');
+    },
+  );
+
   it('establishes and persists Owner directly when no PIN is configured', () => {
     const storage = memoryStorage();
     const first = owner(storage, false);
@@ -376,6 +399,54 @@ describe('ProfileModeCoordinator', () => {
     expect(first.coordinator.establishUnprotectedOwner()).toBe(true);
     expect(first.coordinator.mode).toBe('owner');
     expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
+  });
+
+  it('keeps an unprotected Owner behind the explicit gate until orphan cleanup finishes', async () => {
+    const storage = memoryStorage();
+    const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    storage.setItem(`den.profile.visitor.v1:${orphan}:activity`, 'private visit');
+    const first = owner(storage, false);
+
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    expect(first.coordinator.session).toBeNull();
+    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('owner');
+    expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBeNull();
+  });
+
+  it('never publishes recovered Owner when orphan Visitor deletion fails', async () => {
+    const base = memoryStorage();
+    const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const orphanKey = `den.profile.visitor.v1:${orphan}:activity`;
+    base.setItem('den.profile.active.v1', '{broken');
+    base.setItem(orphanKey, 'private visit');
+    let refuseDeletion = true;
+    const storage: Storage = {
+      get length() {
+        return base.length;
+      },
+      clear: () => base.clear(),
+      getItem: (key) => base.getItem(key),
+      key: (index) => base.key(index),
+      removeItem(key) {
+        if (refuseDeletion && key === orphanKey) throw new Error('storage refused deletion');
+        base.removeItem(key);
+      },
+      setItem: (key, value) => base.setItem(key, value),
+    };
+    const first = owner(storage);
+
+    await expect(first.coordinator.switchToOwner('1234')).rejects.toThrow(
+      'storage refused deletion',
+    );
+    expect(first.coordinator.session).toBeNull();
+    expect(storage.getItem('den.profile.active.v1')).toBe('{broken');
+    expect(storage.getItem(orphanKey)).toBe('private visit');
+
+    refuseDeletion = false;
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    expect(first.coordinator.mode).toBe('owner');
+    expect(storage.getItem(orphanKey)).toBeNull();
   });
 
   it('denies a wrong configured PIN and ends only the active visit after the right PIN', async () => {

@@ -12,7 +12,9 @@ import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolic
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
 import {
   crossTabVisitorActivityLock,
+  purgeOrphanVisitorNamespaces,
   randomVisitorVisitId,
+  visitorNamespaceIds,
   visitorProfileSession,
   type VisitorActivityLock,
   type VisitorProfileSession,
@@ -316,6 +318,9 @@ export class ProfileModeCoordinator {
     if (this.requiresPin('owner') && !(await this.#verifyPin(pin))) return false;
 
     const previous = this.#session;
+    // With no selected session, this is explicit recovery from missing/corrupt/unsupported selection state. Its
+    // Visitor object no longer exists, so retire every exact orphan namespace before Owner can open or record.
+    if (!previous) await purgeOrphanVisitorNamespaces(this.#storage, this.#visitorLock);
     const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
     const nextPersistent =
       this.#profileModels && ownerChoice ? await this.#preparePersistent(ownerChoice) : null;
@@ -392,6 +397,9 @@ export class ProfileModeCoordinator {
   /** Establishes an absent/corrupt marker only after proving this household has no Owner PIN. */
   establishUnprotectedOwner(): boolean {
     if (this.#session) return true;
+    // Namespace retirement is asynchronous and lock-protected. Leave the Owner gate visible so its explicit
+    // `switchToOwner` path performs that cleanup before publishing Owner, even where no PIN exists.
+    if (visitorNamespaceIds(this.#storage).length) return false;
     // A real Owner must open its own encrypted activity library asynchronously; never reveal the household model.
     if (this.#profileModels) {
       const saved = readActiveProfile(this.#storage);

@@ -4,7 +4,9 @@ import type { LibraryModel } from './libraryModel.svelte';
 import { visitorVisitId } from './profileIdentity';
 import {
   NoSyncVisitorWriter,
+  purgeOrphanVisitorNamespaces,
   randomVisitorVisitId,
+  visitorNamespaceIds,
   visitorProfileSession,
   type VisitorActivityLock,
 } from './visitorProfileSession.svelte';
@@ -30,6 +32,39 @@ function memoryStorage(): Storage {
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
 
 describe('VisitorProfileSession', () => {
+  it('discovers and purges only exact orphan Visitor namespaces under their visit locks', async () => {
+    const storage = memoryStorage();
+    storage.setItem(`den.profile.visitor.v1:${FIRST}:activity`, 'one');
+    storage.setItem(`den.profile.visitor.v1:${FIRST}:preferences`, 'prefs');
+    storage.setItem(`den.profile.visitor.v1:${SECOND}:activity`, 'two');
+    storage.setItem('den.profile.visitor.v1:not-a-visit:activity', 'future');
+    storage.setItem('den.profile.kid.v1:11111111111111111111111111111111:activity', 'kid');
+    storage.setItem('den.profile.active.v1', '{broken');
+    storage.setItem('den.owner.untouched', 'owner');
+    const locked: string[] = [];
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(name: string, work: () => Promise<T> | T): Promise<T> {
+        locked.push(name);
+        return work();
+      },
+    };
+
+    expect(visitorNamespaceIds(storage)).toEqual([FIRST, SECOND]);
+    await purgeOrphanVisitorNamespaces(storage, lock);
+
+    expect(locked).toEqual([`den:visitor:${FIRST}`, `den:visitor:${SECOND}`]);
+    expect(storage.getItem(`den.profile.visitor.v1:${FIRST}:activity`)).toBeNull();
+    expect(storage.getItem(`den.profile.visitor.v1:${FIRST}:preferences`)).toBeNull();
+    expect(storage.getItem(`den.profile.visitor.v1:${SECOND}:activity`)).toBeNull();
+    expect(storage.getItem('den.profile.visitor.v1:not-a-visit:activity')).toBe('future');
+    expect(storage.getItem('den.profile.kid.v1:11111111111111111111111111111111:activity')).toBe(
+      'kid',
+    );
+    expect(storage.getItem('den.profile.active.v1')).toBe('{broken');
+    expect(storage.getItem('den.owner.untouched')).toBe('owner');
+  });
+
   it('shares an in-flight disposal and remains retryable when acquiring its lock fails', async () => {
     const storage = memoryStorage();
     const household = new HouseholdSession(
