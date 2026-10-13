@@ -3,7 +3,7 @@ import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
 import type { ConnectionsView } from './libraryServiceProtocol';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
-import type { ProfileMigrationParticipant } from './profileMigration';
+import type { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { SessionServices } from './sessionServices.svelte';
 
 export type HouseholdIdentity =
@@ -37,7 +37,7 @@ export class HouseholdSession {
     readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
     /** Default-off initial-split participant. No production path supplies one or starts an attempt yet. */
-    readonly profileMigration: ProfileMigrationParticipant | null = null,
+    readonly profileMigration: DormantOwnerSplitEffectExecutor | null = null,
   ) {
     this.#identity = identity;
     this.#model = model;

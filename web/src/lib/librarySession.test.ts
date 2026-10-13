@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
-import type { ProfileMigrationParticipant } from './profileMigration';
+import type { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { persistentProfileIdentity } from './profileIdentity';
 import { activeProfileSession, legacyProfileSession } from './profileSession.svelte';
 
@@ -71,8 +71,8 @@ describe('ProfileSession presentation state', () => {
   });
 
   it('can carry a dormant migration participant without starting or resuming it', () => {
-    const resume = vi.fn();
-    const migration = { resume } as unknown as ProfileMigrationParticipant;
+    const open = vi.fn();
+    const migration = { open } as unknown as DormantOwnerSplitEffectExecutor;
     const household = new HouseholdSession(
       { kind: 'legacy', libraryKey: 'household-key', configurationOnly: false },
       null,
@@ -86,7 +86,7 @@ describe('ProfileSession presentation state', () => {
     household.close();
 
     expect(household.profileMigration).toBe(migration);
-    expect(resume).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it('promotes only the same open household into a configuration-only profiles control plane', () => {
