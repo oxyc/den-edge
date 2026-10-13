@@ -137,6 +137,130 @@ const unavailable = (message: string): LibraryServiceFailure => ({
   retryable: true,
 });
 
+const updateRequired = (requiredWire: number): LibraryServiceFailure => ({
+  code: 'update-required',
+  message: 'update required',
+  retryable: false,
+  requiredWire,
+});
+
+it('reopens the same authenticated legacy key at wire 5 only after real-profile host approval', async () => {
+  const first = new FakeClient();
+  first.openFailure = updateRequired(5);
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const queue = [first, second];
+  const profileHouseholdEnabled = vi.fn(async () => true);
+  const supervisor = new LibraryServiceSupervisor(() => queue.shift()!, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled,
+  });
+
+  await expect(
+    supervisor.open({
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 4,
+      bootstrapProfileHousehold: true,
+    }),
+  ).resolves.toMatchObject({ instance: 'worker-2' });
+  expect(profileHouseholdEnabled).toHaveBeenCalledOnce();
+  expect(first.opened).toEqual([
+    {
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 4,
+      bootstrapProfileHousehold: true,
+    },
+  ]);
+  expect(second.opened).toEqual([
+    {
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 5,
+      bootstrapProfileHousehold: false,
+    },
+  ]);
+  supervisor.close();
+});
+
+it.each([
+  ['a newer wire', updateRequired(6), true],
+  ['a profile activity log', updateRequired(5), false],
+] as const)('does not bootstrap wire 5 for %s', async (_name, failure, bootstrap) => {
+  const first = new FakeClient();
+  first.openFailure = failure;
+  const profileHouseholdEnabled = vi.fn(async () => true);
+  const supervisor = new LibraryServiceSupervisor(() => first, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled,
+  });
+
+  await expect(
+    supervisor.open({
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 4,
+      bootstrapProfileHousehold: bootstrap,
+    }),
+  ).rejects.toMatchObject({ failure });
+  expect(profileHouseholdEnabled).not.toHaveBeenCalled();
+  expect(first.opened).toHaveLength(1);
+});
+
+it('keeps the authenticated 426 when real-profile host discovery fails closed', async () => {
+  const first = new FakeClient();
+  first.openFailure = updateRequired(5);
+  const profileHouseholdEnabled = vi.fn(async () => false);
+  const supervisor = new LibraryServiceSupervisor(() => first, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled,
+  });
+
+  await expect(
+    supervisor.open({
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 4,
+      bootstrapProfileHousehold: true,
+    }),
+  ).rejects.toMatchObject({ failure: updateRequired(5) });
+  expect(profileHouseholdEnabled).toHaveBeenCalledOnce();
+  expect(first.opened).toHaveLength(1);
+});
+
+it('bootstraps a cached wire-4 household when an authenticated 426 arrives after open', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  const queue = [first, second];
+  const profileHouseholdEnabled = vi.fn(async () => true);
+  const supervisor = new LibraryServiceSupervisor(() => queue.shift()!, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled,
+  });
+
+  await supervisor.open({
+    libraryKey: 'library-1',
+    mode: 'online',
+    wire: 4,
+    bootstrapProfileHousehold: true,
+  });
+  first.fail(updateRequired(5));
+
+  await vi.waitFor(() => expect(second.opened).toHaveLength(1));
+  expect(profileHouseholdEnabled).toHaveBeenCalledOnce();
+  expect(second.opened).toEqual([
+    {
+      libraryKey: 'library-1',
+      mode: 'online',
+      wire: 5,
+      bootstrapProfileHousehold: false,
+    },
+  ]);
+  supervisor.close();
+});
+
 it('replays an in-flight task with its original operation ID after a lost reply', async () => {
   const first = new FakeClient();
   const second = new FakeClient();
@@ -281,7 +405,7 @@ it('replays an in-flight command with the same operation ID and preserves stale 
     version: { instance: 'worker-1' },
   });
   expect(first.close).toHaveBeenCalledOnce();
-  expect(second.opened).toEqual([openOptions]);
+  expect(second.opened).toEqual([{ ...openOptions, wire: 4 }]);
   expect(second.subscriptions[0]?.selection).toEqual({ kind: 'continue' });
   expect(second.commands).toHaveLength(1);
   supervisor.close();

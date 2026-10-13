@@ -55,8 +55,18 @@ const context = {
 
 function directory(ownerKey = CANDIDATE_KEY): ProfilesDirectory {
   return {
+    format: 4,
+    kind: 'profiles',
+    schema: 1,
     owner: OWNER,
-    migration: { attempt: ATTEMPT },
+    migration: {
+      version: 1,
+      attempt: ATTEMPT,
+      source: { generation: 7, head: HEAD },
+      backup: { id: 'backup-a', digest: DIGEST },
+      ownerProfile: OWNER,
+      ownerHead: HEAD,
+    },
     profiles: {
       [OWNER]: { library: { value: { key: ownerKey } }, deleted: { value: false } },
       [KID_ID]: { library: { value: { key: KID_KEY } }, deleted: { value: false } },
@@ -87,7 +97,7 @@ function fixture(options: { enabled?: boolean } = {}) {
   const storage: OwnerSplitStorage = {
     observe: vi.fn(async (): Promise<HouseholdMigrationObservation> => ({
       kind: 'legacy',
-      fence: 'same',
+      observedFence: { generation: 7, head: SOURCE_HEAD },
     })),
     acquireFence: vi.fn(async () => fence),
     createBackup: vi.fn(async () => {
@@ -290,8 +300,9 @@ describe('DormantOwnerSplitExecutor', () => {
     const { executor, storage } = fixture({ enabled: true });
     await expect(
       executor.observe({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'owner-copied',
         fence,
         backup,
@@ -303,7 +314,7 @@ describe('DormantOwnerSplitExecutor', () => {
 
   it('binds every storage operation to the same canonical attempt and household context', async () => {
     const { executor, storage } = fixture({ enabled: true });
-    await executor.observe({ version: 1, attempt: ATTEMPT, state: 'idle' });
+    await executor.observe({ version: 2, attempt: ATTEMPT, explicitIntent: true, state: 'idle' });
     await executor.acquireFence(ATTEMPT);
     const verified = await executor.createAndVerifyBackup(ATTEMPT, fence);
     await executor.createOwnerCandidate(ATTEMPT);

@@ -25,7 +25,14 @@ const directory = (ownerKey: string) =>
     kind: 'profiles',
     schema: 1,
     owner: OWNER,
-    migration: { attempt: ATTEMPT },
+    migration: {
+      version: 1,
+      attempt: ATTEMPT,
+      source: { generation: 7, head: SOURCE_HEAD },
+      backup: { id: 'fixture-backup', digest: BACKUP_DIGEST },
+      ownerProfile: OWNER,
+      ownerHead: OWNER_HEAD,
+    },
     profiles: {
       [OWNER]: {
         library: { value: { key: ownerKey } },
@@ -39,7 +46,7 @@ const executor: ProfileMigrationExecutor = {
     const winner = localStorage.getItem('fixture.profileMigration.winner');
     return winner
       ? { kind: 'committed', directory: directory(winner) }
-      : { kind: 'legacy', fence: 'same' };
+      : { kind: 'legacy', observedFence: { generation: 7, head: SOURCE_HEAD } };
   },
   acquireFence: async () => {
     calls.push('fence');
@@ -75,11 +82,9 @@ const executor: ProfileMigrationExecutor = {
 
 const planner = (input: Record<string, unknown>): ProfileMigrationDecision => {
   if (input.observed === 'committed') {
-    if (
-      input.candidateLibrary &&
-      input.candidateLibrary !== input.winnerLibrary &&
-      !input.candidateRetired
-    )
+    const committed = input.directory as ProfilesDirectory;
+    const ownerKey = committed.profiles[committed.owner]?.library.value.key;
+    if (input.candidateKey && input.candidateKey !== ownerKey && !input.candidateRetired)
       return 'retire-losing-candidate';
     if (!input.winnerVerified) return 'verify-winner';
     return 'activate';
@@ -90,6 +95,7 @@ const planner = (input: Record<string, unknown>): ProfileMigrationDecision => {
     'backed-up': 'create-owner-library',
     'owner-copied': 'verify-owner-library',
     'ready-to-commit': 'commit-fenced-household',
+    'commit-unknown': 'read-household',
   };
   const decision = next[input.state as string];
   if (!decision) throw new Error('unexpected fixture state');

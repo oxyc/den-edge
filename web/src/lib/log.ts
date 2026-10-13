@@ -46,6 +46,7 @@ import { trackerEvent } from './trackerEvents';
 import { ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
+import type { LibraryWire } from './libraryServiceProtocol';
 
 interface Entry {
   seq: number;
@@ -435,6 +436,8 @@ export class LibraryLog {
     /** A library that lives only in this browser (`openLocal`): nothing is asked of den-edge, or sent to it. */
     private readonly offline = false,
     vault: Vault | null = local?.vault ?? null,
+    /** Per-instance protocol capability. Wire 5 still carries library-v4 encrypted rows. */
+    private readonly instanceWire: LibraryWire = WIRE,
   ) {
     this.runtimeVault = vault;
   }
@@ -567,7 +570,7 @@ export class LibraryLog {
     this.observed = stored.get(this.metaKey('observed'));
     const remembered = Number(stored.get(this.metaKey('wireMin')));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
-    if (this.wireMin > WIRE) this.upgradeRequired = this.wireMin;
+    if (this.wireMin > this.instanceWire) this.upgradeRequired = this.wireMin;
     try {
       const compacted = stored.get(this.metaKey('compacted'));
       if (compacted) for (const key of JSON.parse(compacted) as string[]) this.compacted.add(key);
@@ -591,7 +594,7 @@ export class LibraryLog {
           const minimum = Number(value);
           if (Number.isInteger(minimum) && minimum > this.wireMin) {
             this.wireMin = minimum;
-            if (minimum > WIRE) this.upgradeRequired = minimum;
+            if (minimum > this.instanceWire) this.upgradeRequired = minimum;
           }
         } else if (key === this.metaKey('compacted') && value) {
           try {
@@ -708,8 +711,9 @@ export class LibraryLog {
     vault: Vault | null = libraryVault,
     // Kept for `moveTo`, which asks den-edge once the library is being handed to a TV's.
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    wire: LibraryWire = WIRE,
   ): Promise<LibraryLog | null> {
-    return this.openLocalFromVault(libraryKey, vault, fetchImpl, true);
+    return this.openLocalFromVault(libraryKey, vault, fetchImpl, true, wire);
   }
 
   /** Open only a browser-local library that was previously created in this vault. */
@@ -717,8 +721,9 @@ export class LibraryLog {
     libraryKey: string,
     vault: Vault | null = libraryVault,
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    wire: LibraryWire = WIRE,
   ): Promise<LibraryLog | null> {
-    return this.openLocalFromVault(libraryKey, vault, fetchImpl, false);
+    return this.openLocalFromVault(libraryKey, vault, fetchImpl, false, wire);
   }
 
   private static async openLocalFromVault(
@@ -726,6 +731,7 @@ export class LibraryLog {
     vault: Vault | null,
     fetchImpl: typeof fetch,
     create: boolean,
+    wire: LibraryWire,
   ): Promise<LibraryLog | null> {
     if (!vault) return null;
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
@@ -741,6 +747,7 @@ export class LibraryLog {
       { vault, key: await localKey(raw) },
       true,
       vault,
+      wire,
     );
     await log.initializeRuntime();
     await ensureSyncPolicy();
@@ -764,7 +771,7 @@ export class LibraryLog {
     const form = saved?.wireMin;
     if (!Number.isInteger(form) || form! <= this.wireMin) return false;
     this.wireMin = form!;
-    if (this.wireMin > WIRE) this.upgradeRequired = this.wireMin;
+    if (this.wireMin > this.instanceWire) this.upgradeRequired = this.wireMin;
     this.entries.clear();
     this.acknowledged.clear();
     return true;
@@ -1660,6 +1667,7 @@ export class LibraryLog {
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
     vault: Vault | null = libraryVault,
+    wire: LibraryWire = WIRE,
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
@@ -1670,6 +1678,7 @@ export class LibraryLog {
       vault && { vault, key: await localKey(raw) },
       false,
       vault,
+      wire,
     );
     await log.initializeRuntime();
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
@@ -2866,7 +2875,7 @@ export class LibraryLog {
   private headers(): Record<string, string> {
     return {
       'x-den-library-token': this.keys.token,
-      'x-den-wire': String(WIRE),
+      'x-den-wire': String(this.instanceWire),
       'x-den-generation': this.writeGeneration ?? this.generation ?? '0',
     };
   }
@@ -2875,7 +2884,7 @@ export class LibraryLog {
     const minimum = Number(res.headers.get('x-den-wire-min'));
     if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
     this.wireMin = minimum;
-    if (minimum > WIRE) this.upgradeRequired = minimum;
+    if (minimum > this.instanceWire) this.upgradeRequired = minimum;
     // Another device switched it: what kept this browser from writing a v3 library no longer applies.
     if (minimum >= WIRE) {
       this.switchFailure = null;

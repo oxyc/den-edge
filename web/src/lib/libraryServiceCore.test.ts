@@ -79,6 +79,7 @@ const hello = {
   requestId: 'hello-1',
   clientId: 'tab-1',
   libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  wire: 4 as const,
   mode: 'online' as const,
 };
 

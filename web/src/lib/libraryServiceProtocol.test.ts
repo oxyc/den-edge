@@ -17,6 +17,7 @@ describe('library service client protocol', () => {
         requestId: 'request-1',
         clientId: 'tab-1',
         libraryKey,
+        wire: 4,
         mode: 'online',
         legacyClock: {
           device: '0123456789abcdef',
@@ -64,6 +65,23 @@ describe('library service client protocol', () => {
       ).toMatchObject({ ok: true });
     }
   });
+
+  it.each([undefined, 3, 6, 4.5])(
+    'rejects a hello without an exact supported wire (%s)',
+    (wire) => {
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'hello',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-wire',
+          clientId: 'tab-1',
+          libraryKey,
+          ...(wire === undefined ? {} : { wire }),
+          mode: 'online',
+        }),
+      ).toMatchObject({ ok: false });
+    },
+  );
 
   it('accepts domain subscriptions without exposing durable rows', () => {
     const decoded = decodeLibraryServiceClientMessage({

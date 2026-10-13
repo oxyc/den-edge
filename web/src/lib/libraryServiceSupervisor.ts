@@ -74,6 +74,8 @@ interface ActiveClient {
 export interface LibraryServiceSupervisorOptions {
   /** Consecutive replacement workers allowed before an explicit retry. */
   maxAutomaticRestarts?: number;
+  /** Host-scoped, fail-closed authorization for the one legacy-wire-4 to household-wire-5 bootstrap. */
+  profileHouseholdEnabled?: () => Promise<boolean>;
 }
 
 /**
@@ -85,6 +87,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   readonly #observations = new Map<string, LibraryObservation>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   readonly #maxAutomaticRestarts: number;
+  readonly #profileHouseholdEnabled: () => Promise<boolean>;
   #automaticRestartsLeft: number;
   #nextSubscription = 0;
   #nextToken = 0;
@@ -105,6 +108,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       throw new RangeError('maxAutomaticRestarts must be a non-negative integer');
     this.#maxAutomaticRestarts = maxAutomaticRestarts;
     this.#automaticRestartsLeft = maxAutomaticRestarts;
+    this.#profileHouseholdEnabled = options.profileHouseholdEnabled ?? (async () => false);
   }
 
   static forTransport(
@@ -124,7 +128,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           retryable: false,
         }),
       );
-    this.#openOptions = structuredClone(options);
+    this.#openOptions = structuredClone({ ...options, wire: options.wire ?? 4 });
     if (this.#phase === 'ready') return Promise.resolve(this.#version!);
     if (this.#connecting) return this.#connecting;
     if (this.#phase === 'failed') return Promise.reject(new LibraryServiceError(this.#failure!));
@@ -303,6 +307,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         const failure = failureFrom(error);
         this.#disposeActive();
         if (this.#phase === 'closed') throw new LibraryServiceError(failure);
+        if (await this.#bootstrapProfileHousehold(failure)) continue;
         if (!failure.retryable || this.#automaticRestartsLeft === 0) {
           this.#setFailed(failure);
           throw new LibraryServiceError(failure);
@@ -442,6 +447,17 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       active.failure = status.error;
       if (this.#phase === 'connecting' || this.#phase === 'reconnecting') return;
       this.#disposeActive();
+      if (this.#canBootstrapProfileHousehold(status.error)) {
+        this.#phase = 'reconnecting';
+        this.#markSubscriptions('reconnecting');
+        this.#emitStatus({ kind: 'reconnecting', version: this.#version ?? null });
+        void this.#bootstrapProfileHousehold(status.error).then((enabled) => {
+          if (this.#phase === 'closed') return;
+          if (enabled) void this.#beginConnection(true).catch(() => undefined);
+          else this.#setFailed(status.error);
+        });
+        return;
+      }
       if (!status.error.retryable || this.#automaticRestartsLeft === 0) {
         this.#setFailed(status.error);
         return;
@@ -458,6 +474,35 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     if (status.kind === 'reconnecting') this.#markSubscriptions('reconnecting');
     if (status.kind === 'ready') this.#markSubscriptionsReady();
     this.#emitStatus(status);
+  }
+
+  #canBootstrapProfileHousehold(failure: LibraryServiceFailure): boolean {
+    return (
+      failure.code === 'update-required' &&
+      failure.retryable === false &&
+      failure.requiredWire === 5 &&
+      this.#openOptions?.mode === 'online' &&
+      (this.#openOptions.wire ?? 4) === 4 &&
+      this.#openOptions.bootstrapProfileHousehold === true
+    );
+  }
+
+  async #bootstrapProfileHousehold(failure: LibraryServiceFailure): Promise<boolean> {
+    if (!this.#canBootstrapProfileHousehold(failure)) return false;
+    let enabled = false;
+    try {
+      enabled = await this.#profileHouseholdEnabled();
+    } catch {
+      // Host capability discovery is fail-closed. The original authenticated 426 remains authoritative.
+    }
+    if (!enabled || !this.#openOptions) return false;
+    this.#openOptions = {
+      ...this.#openOptions,
+      wire: 5,
+      bootstrapProfileHousehold: false,
+    };
+    this.#automaticRestartsLeft = this.#maxAutomaticRestarts;
+    return true;
   }
 
   #disposeActive(): void {
@@ -622,7 +667,13 @@ function sameOpenOptions(
   left: LibraryServiceOpenOptions,
   right: LibraryServiceOpenOptions,
 ): boolean {
-  if (left.libraryKey !== right.libraryKey || left.mode !== right.mode) return false;
+  if (
+    left.libraryKey !== right.libraryKey ||
+    left.mode !== right.mode ||
+    (left.wire ?? 4) !== (right.wire ?? 4) ||
+    left.bootstrapProfileHousehold !== right.bootstrapProfileHousehold
+  )
+    return false;
   if ((left.legacyClock === undefined) !== (right.legacyClock === undefined)) return false;
   if (left.legacyClock?.device !== right.legacyClock?.device) return false;
   const leftLast = left.legacyClock?.last;

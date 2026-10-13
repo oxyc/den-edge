@@ -40,6 +40,7 @@ const hello = (requestId: string): LibraryServiceClientMessage => ({
   requestId,
   clientId: 'tab-1',
   libraryKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  wire: 4,
   mode: 'online' as const,
 });
 

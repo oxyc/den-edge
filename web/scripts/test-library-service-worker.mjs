@@ -98,12 +98,12 @@ try {
     const message = (body) => ({ protocol, requestId: `request-${++request}`, ...body });
     const first = open();
     const mismatch = await first.send(
-      message({ type: 'hello', clientId: 'protocol-probe', libraryKey, mode: 'local' }),
+      message({ type: 'hello', clientId: 'protocol-probe', libraryKey, wire: 4, mode: 'local' }),
       'error',
     );
     protocol = mismatch.error.expectedProtocol;
     await first.send(
-      message({ type: 'hello', clientId: 'seed', libraryKey, mode: 'local' }),
+      message({ type: 'hello', clientId: 'seed', libraryKey, wire: 4, mode: 'local' }),
       'ready',
     );
     const command = (operationId, command) =>
@@ -144,7 +144,7 @@ try {
 
     const reopened = open();
     await reopened.send(
-      message({ type: 'hello', clientId: 'reader', libraryKey, mode: 'local' }),
+      message({ type: 'hello', clientId: 'reader', libraryKey, wire: 4, mode: 'local' }),
       'ready',
     );
     for (const kind of ['overview', 'continue', 'settings', 'history']) {

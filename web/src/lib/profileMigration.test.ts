@@ -18,6 +18,9 @@ const WINNER_KEY = key(3);
 const KID_KEY = key(4);
 const CANDIDATE_ID = '11223344556677889900aabbccddeeff';
 const SOURCE_HEAD = 'a'.repeat(64);
+const OWNER_HEAD = 'c'.repeat(64);
+const BACKUP_DIGEST = 'b'.repeat(64);
+const PREPARED_DIGEST = 'd'.repeat(64);
 
 function memoryStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial));
@@ -39,7 +42,14 @@ function directory(ownerKey = WINNER_KEY, kidKey = KID_KEY): ProfilesDirectory {
     kind: 'profiles',
     schema: 1,
     owner: OWNER,
-    migration: {},
+    migration: {
+      version: 1,
+      attempt: ATTEMPT,
+      source: { generation: 7, head: SOURCE_HEAD },
+      backup: { id: 'backup-a', digest: BACKUP_DIGEST },
+      ownerProfile: OWNER,
+      ownerHead: OWNER_HEAD,
+    },
     profiles: {
       [OWNER]: {
         library: { value: { key: ownerKey } },
@@ -59,6 +69,7 @@ const effects: Record<string, ProfileMigrationDecision> = {
   'backed-up': 'create-owner-library',
   'owner-copied': 'verify-owner-library',
   'ready-to-commit': 'commit-fenced-household',
+  'commit-unknown': 'read-household',
 };
 
 function fixture(
@@ -74,7 +85,7 @@ function fixture(
       options.observe ??
         (async (): Promise<HouseholdMigrationObservation> => ({
           kind: 'legacy',
-          fence: 'same',
+          observedFence: { generation: 7, head: SOURCE_HEAD },
         })),
     ),
     acquireFence: vi.fn(async () => {
@@ -83,7 +94,7 @@ function fixture(
     }),
     createAndVerifyBackup: vi.fn(async () => {
       calls.push('backup');
-      return { id: 'backup-a', digest: 'backup-digest' };
+      return { id: 'backup-a', digest: BACKUP_DIGEST };
     }),
     createOwnerCandidate: vi.fn(async () => {
       calls.push('candidate');
@@ -92,11 +103,11 @@ function fixture(
     copyOwnerPartition: vi.fn(async () => void calls.push('copy')),
     verifyOwnerLibrary: vi.fn(async () => {
       calls.push('verify-owner');
-      return { head: 'owner-head' };
+      return { head: OWNER_HEAD };
     }),
     prepareHouseholdRewrite: vi.fn(async () => {
       calls.push('prepare');
-      return { digest: 'prepared-digest' };
+      return { digest: PREPARED_DIGEST };
     }),
     verifyWinner: vi.fn(async () => {
       calls.push('verify-winner');
@@ -113,8 +124,11 @@ function fixture(
     ((input: Record<string, unknown>) => {
       if (input.observed === 'committed') {
         if (
-          input.candidateLibrary &&
-          input.candidateLibrary !== input.winnerLibrary &&
+          input.candidateKey &&
+          input.candidateKey !==
+            (input.directory as ProfilesDirectory).profiles[
+              (input.directory as ProfilesDirectory).owner
+            ]?.library.value.key &&
           !input.candidateRetired
         )
           return 'retire-losing-candidate';
@@ -138,11 +152,30 @@ function fixture(
 }
 
 describe('ProfileMigrationParticipant', () => {
-  it('blocks a damaged durable journal instead of discarding possible cleanup evidence', async () => {
+  it('blocks an otherwise executable version-1 journal instead of interpreting stale evidence', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
         version: 1,
         attempt: ATTEMPT,
+        state: 'fenced',
+        fence: { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' },
+      }),
+    });
+    const { participant, executor } = fixture({ storage });
+
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'invalid-journal',
+    });
+    expect(executor.observe).not.toHaveBeenCalled();
+  });
+
+  it('blocks a damaged durable journal instead of discarding possible cleanup evidence', async () => {
+    const storage = memoryStorage({
+      'den.profile.migration.v1:household-id': JSON.stringify({
+        version: 2,
+        attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'cleaning-loser',
         candidate: { libraryKey: WINNER_KEY },
       }),
@@ -160,11 +193,12 @@ describe('ProfileMigrationParticipant', () => {
   it('never sends a non-canonical persisted candidate to the mandatory observation', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'owner-copied',
         fence: { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' },
-        backup: { id: 'backup-a', digest: 'backup-digest' },
+        backup: { id: 'backup-a', digest: BACKUP_DIGEST },
         candidate: { profileId: OWNER, libraryId: 'not-an-id', libraryKey: 'arbitrary-key' },
       }),
     });
@@ -180,10 +214,11 @@ describe('ProfileMigrationParticipant', () => {
   it('blocks a prepared rewrite attached to an idle journal', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'idle',
-        prepared: { digest: 'prepared-digest' },
+        prepared: { digest: PREPARED_DIGEST },
       }),
     });
     const { participant, executor } = fixture({ storage });
@@ -198,8 +233,9 @@ describe('ProfileMigrationParticipant', () => {
   it('blocks an active journal without proof for its winner key', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'active',
         winnerLibraryKey: WINNER_KEY,
       }),
@@ -225,11 +261,57 @@ describe('ProfileMigrationParticipant', () => {
     expect(calls).toEqual(['fence', 'backup', 'candidate', 'copy', 'verify-owner']);
     await expect(participant.resume()).resolves.toEqual({
       kind: 'ready-to-commit',
-      prepared: { digest: 'prepared-digest' },
+      prepared: { digest: PREPARED_DIGEST },
     });
     expect(calls).toEqual(['fence', 'backup', 'candidate', 'copy', 'verify-owner', 'prepare']);
     await participant.resume();
     expect(calls.at(-1)).toBe('prepare');
+  });
+
+  it('passes only the profiles-v1 planner evidence shape at each legacy step', async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const { participant } = fixture({
+      planner: (input) => {
+        inputs.push(structuredClone(input));
+        return input.state === 'idle' ? 'acquire-fence' : 'create-backup';
+      },
+    });
+    participant.beginExplicitOwnerAction(true);
+
+    await participant.resume();
+    await participant.resume();
+
+    expect(inputs).toEqual([
+      { state: 'idle', observed: 'legacy', explicitIntent: true },
+      {
+        state: 'fenced',
+        observed: 'legacy',
+        fence: { generation: 7, head: SOURCE_HEAD },
+        observedFence: { generation: 7, head: SOURCE_HEAD },
+      },
+    ]);
+  });
+
+  it('executes the real vendored den-core planner through a prepared legacy retry', async () => {
+    const seeded = fixture();
+    const participant = new ProfileMigrationParticipant({
+      householdId: 'household-id',
+      householdLibraryKey: HOUSEHOLD_KEY,
+      storage: memoryStorage(),
+      executor: seeded.executor,
+      randomAttempt: () => ATTEMPT,
+    });
+    participant.beginExplicitOwnerAction(true);
+
+    for (let step = 0; step < 5; step++) await participant.resume();
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'ready-to-commit',
+      prepared: { digest: PREPARED_DIGEST },
+    });
+    await expect(participant.resume()).resolves.toEqual({
+      kind: 'ready-to-commit',
+      prepared: { digest: PREPARED_DIGEST },
+    });
   });
 
   it('persists the candidate before its first write and retries that same candidate', async () => {
@@ -256,14 +338,14 @@ describe('ProfileMigrationParticipant', () => {
     for (let step = 0; step < 5; step++) await seeded.participant.resume();
     expect(seeded.participant.journal).toMatchObject({
       state: 'commit-unknown',
-      prepared: { digest: 'prepared-digest' },
+      prepared: { digest: PREPARED_DIGEST },
     });
 
     const recovered = fixture({
       storage,
       observe: async () => ({ kind: 'committed', directory: directory() }),
       planner: (input) => {
-        if (input.candidateLibrary && !input.candidateRetired) return 'retire-losing-candidate';
+        if (input.candidateKey && !input.candidateRetired) return 'retire-losing-candidate';
         if (!input.winnerVerified) return 'verify-winner';
         return 'activate';
       },
@@ -308,10 +390,13 @@ describe('ProfileMigrationParticipant', () => {
   it('re-verifies when the observed winner key changes after an earlier verification', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'adopting',
-        winnerLibraryKey: 'earlier-winner-key',
+        winnerLibraryKey: key(5),
+        winnerAttempt: ATTEMPT,
+        winnerHead: 'd'.repeat(64),
         winnerVerified: true,
       }),
     });
@@ -343,14 +428,14 @@ describe('ProfileMigrationParticipant', () => {
     for (let step = 0; step < 5; step++) await seeded.participant.resume();
     expect(seeded.participant.journal).toMatchObject({
       state: 'commit-unknown',
-      prepared: { digest: 'prepared-digest' },
-      ownerVerification: { head: 'owner-head' },
+      prepared: { digest: PREPARED_DIGEST },
+      ownerVerification: { head: OWNER_HEAD },
     });
 
     const recovered = fixture({ storage });
     await expect(recovered.participant.resume()).resolves.toEqual({
       kind: 'ready-to-commit',
-      prepared: { digest: 'prepared-digest' },
+      prepared: { digest: PREPARED_DIGEST },
     });
     expect(recovered.executor.observe).toHaveBeenCalledOnce();
     expect(recovered.calls).toEqual([]);
@@ -360,11 +445,12 @@ describe('ProfileMigrationParticipant', () => {
   it('retires a candidate after a changed legacy fence, then discards the completed attempt', async () => {
     const storage = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'owner-copied',
         fence: { generation: 7, head: SOURCE_HEAD, base: 7, rewrite: 'rewrite-a' },
-        backup: { id: 'backup-a', digest: 'backup-digest' },
+        backup: { id: 'backup-a', digest: BACKUP_DIGEST },
         candidate: {
           profileId: OWNER,
           libraryId: CANDIDATE_ID,
@@ -374,20 +460,17 @@ describe('ProfileMigrationParticipant', () => {
     });
     const recovered = fixture({
       storage,
-      observe: async () => ({ kind: 'legacy', fence: 'changed' }),
+      observe: async () => ({
+        kind: 'legacy',
+        observedFence: { generation: 8, head: 'b'.repeat(64) },
+      }),
       planner: (input) =>
-        input.candidateLibrary && !input.candidateRetired ? 'retire-losing-candidate' : 'restart',
+        input.candidateKey && !input.candidateRetired ? 'retire-losing-candidate' : 'restart',
     });
 
     await expect(recovered.participant.resume()).resolves.toEqual({
-      kind: 'progress',
-      state: 'idle',
+      kind: 'inactive',
     });
-    expect(recovered.participant.journal).toMatchObject({
-      state: 'idle',
-      candidateRetired: true,
-    });
-    await expect(recovered.participant.resume()).resolves.toEqual({ kind: 'inactive' });
     expect(recovered.calls).toEqual(['retire']);
     expect(recovered.participant.journal).toBeNull();
   });
@@ -395,10 +478,13 @@ describe('ProfileMigrationParticipant', () => {
   it('retries deletion of a seeded active journal before returning active', async () => {
     const backing = memoryStorage({
       'den.profile.migration.v1:household-id': JSON.stringify({
-        version: 1,
+        version: 2,
         attempt: ATTEMPT,
+        explicitIntent: true,
         state: 'active',
         winnerLibraryKey: WINNER_KEY,
+        winnerAttempt: ATTEMPT,
+        winnerHead: OWNER_HEAD,
         winnerVerified: true,
       }),
     });

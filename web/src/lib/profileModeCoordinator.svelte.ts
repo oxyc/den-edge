@@ -150,7 +150,7 @@ const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void =
  */
 export class ProfileModeCoordinator {
   #session = $state.raw<ProfileSession | null>(null);
-  readonly #ownerModel;
+  readonly #ownerActivityModel;
   readonly #ownerIdentity;
   readonly #household;
   readonly #local;
@@ -178,14 +178,14 @@ export class ProfileModeCoordinator {
     if (!owner.model || owner.identity.libraryKey === null)
       throw new TypeError('Profiles require an open Owner library');
     owner.relinquishHouseholdOwnership();
-    this.#ownerModel = owner.model;
+    this.#ownerActivityModel = owner.model;
     this.#ownerIdentity = owner.identity;
     this.#household = owner.household;
     this.#local = owner.local;
     this.#storage = storage;
     this.#events = events;
     this.#visitorLock = visitorLock;
-    this.#connections = owner.model.connections();
+    this.#connections = this.#household.controlConnections();
     this.#directory = directory;
     this.#profileModels = profileModels;
     this.#preview = directory !== null && profileModels === null;
@@ -341,7 +341,7 @@ export class ProfileModeCoordinator {
       }
     }
     const next = nextPersistent ?? this.#pendingOwner ?? this.#newOwner();
-    this.#pendingOwner = null;
+    this.#releasePendingOwner(next);
     this.#session = next;
     previous?.close();
     return true;
@@ -382,7 +382,9 @@ export class ProfileModeCoordinator {
         throw error;
       }
     }
-    this.#session = nextPersistent ?? this.#newKid(kid);
+    const next = nextPersistent ?? this.#newKid(kid);
+    this.#releasePendingOwner(next);
+    this.#session = next;
     previous?.close();
     return true;
   }
@@ -396,6 +398,16 @@ export class ProfileModeCoordinator {
       if (saved?.mode === 'persistent' && this.#choice(saved.profileId)) return false;
       if (saved?.mode === 'owner' || saved?.mode === 'visitor') return false;
       if (this.parentalPinConfigured !== false) return false;
+      if (this.#pendingOwner) {
+        try {
+          keepActiveProfile(this.#storage, this.#ownerMarker());
+        } catch {
+          return false;
+        }
+        this.#session = this.#pendingOwner;
+        this.#pendingOwner = null;
+        return true;
+      }
       void this.switchToOwner();
       return false;
     }
@@ -439,7 +451,9 @@ export class ProfileModeCoordinator {
       if (selected) void this.#restorePersistent(selected);
       else if (saved?.mode === 'visitor' && directory && this.#visitorLock.available()) {
         const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
-        this.#session = this.#newVisitor(visitorVisitId(visitId));
+        const next = this.#newVisitor(visitorVisitId(visitId));
+        this.#releasePendingOwner(next);
+        this.#session = next;
       }
       return;
     }
@@ -465,7 +479,7 @@ export class ProfileModeCoordinator {
         ? this.#ownerIdentity
         : legacyProfileIdentity(this.#ownerIdentity.libraryKey, this.#local),
       this.#household,
-      this.#ownerModel,
+      this.#ownerActivityModel,
       this.#local,
       false,
     );
@@ -627,6 +641,7 @@ export class ProfileModeCoordinator {
         next.close();
         return;
       }
+    this.#releasePendingOwner(next);
     this.#session = next;
   }
 
@@ -671,6 +686,12 @@ export class ProfileModeCoordinator {
     this.#openingModels.clear();
   }
 
+  #releasePendingOwner(selected: ProfileSession): void {
+    const pending = this.#pendingOwner;
+    this.#pendingOwner = null;
+    if (pending && pending !== selected) pending.close();
+  }
+
   #newKid(choice: ProfileChoice): ProfileSession {
     if (!choice.id) throw new TypeError('Kid profile is missing its id');
     const identity = persistentProfileIdentity(choice.id, `preview:${choice.id}`);
@@ -703,7 +724,7 @@ export class ProfileModeCoordinator {
     if (this.#preview) return pin === '1234';
     const configured = this.parentalPinConfigured;
     if (configured === undefined) return false;
-    return !configured || (!!pin && (await this.#ownerModel.verifyParentalPin(pin)));
+    return !configured || (!!pin && (await this.#household.verifyParentalPin(pin)));
   }
 
   #policyIsLooser(
