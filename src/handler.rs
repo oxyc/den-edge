@@ -95,12 +95,13 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     // In the answer and in the log line, so a device's report can be matched to this request.
     let rid = crate::hex(&crate::random_bytes::<8>());
     let method = req.method().clone();
-    let path = req.uri().path();
+    let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
-    let migration_disabled = !state.profile_migration_enabled && profile_migration_path(path);
+    let migration_path = profile_migration_path(&path);
+    let globally_disabled = migration_path && !state.profile_migration_enabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
-    let route = if migration_disabled { "other" } else { route_label(path) };
+    let route = if globally_disabled { "other" } else { route_label(&path) };
     let origin = allowed_origin(&state, &req);
     let bulk = !is_control(route);
     let admission = admit(&state, bulk)
@@ -109,6 +110,14 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     if admission.is_err() {
         state.metrics.request_refused(bulk);
     }
+    // Per-household `off` is as absent as the global emergency kill. Resolve it inside admission, because reading
+    // opaque protocol metadata may open a library database; an unauthenticated request must not bypass resource
+    // bounds. This still precedes method, body, preflight, wire and authentication distinctions.
+    let migration_disabled = globally_disabled
+        || migration_path
+            && admission.is_ok()
+            && !crate::library::profile_migration_available(&state, &path).await;
+    let route = if migration_disabled { "other" } else { route };
     let mut resp = match admission.as_ref() {
         Err(()) => busy(),
         Ok(slot) => match &origin {
@@ -884,6 +893,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid/code",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
+        p if p.starts_with("/lib/") && p.ends_with("/profile-capability") => "/lib/:id/profile-capability",
         p if p.starts_with("/lib/") && p.ends_with("/profile-migration") => "/lib/:id/profile-migration",
         p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/backup") => {
             "/lib/:id/profile-migration/:attempt/backup"
@@ -978,6 +988,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/config"
         | "/capabilities/profiles"
         | "/metrics"
+        | "/lib/:id/profile-capability"
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
@@ -1279,6 +1290,14 @@ pub mod tests {
         for face in [Face::Api, Face::Both, Face::Invalid] {
             assert!(!face.serves("/capabilities/profiles"), "{face:?}");
         }
+    }
+
+    #[test]
+    fn household_profile_capability_is_an_authenticated_get_route() {
+        let route = "/lib/0123456789abcdef0123456789abcdef/profile-capability";
+        assert_eq!(route_label(route), "/lib/:id/profile-capability");
+        assert_eq!(allowed_methods(route_label(route)), Some(&[Method::GET][..]));
+        assert!(!is_control(route_label(route)), "unknown household reads stay inside bulk admission");
     }
 
     #[test]
