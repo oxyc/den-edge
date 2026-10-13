@@ -170,6 +170,14 @@ pub(super) enum MigrationResultKind {
     Restored,
 }
 
+fn profile_migration_attempt_key(attempt: &str) -> String {
+    format!("profile-migration-attempt:{attempt}")
+}
+
+fn profile_migration_generation_key(expected_generation: u64) -> String {
+    format!("profile-migration-generation:{expected_generation}")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
@@ -223,7 +231,13 @@ pub(super) trait LibraryStore: Send + Sync {
     fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError>;
     fn protocol(&self) -> Result<Protocol, StoreError>;
     fn snapshot(&self) -> Result<LibrarySnapshot, StoreError>;
-    fn migration_winner(&self) -> Result<Option<MigrationCommit>, StoreError>;
+    /// Return durable terminal evidence for one attempt. A matching attempt record proves that attempt won;
+    /// otherwise the generation record identifies the attempt that won the same fence and proves this one lost.
+    fn migration_result(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+    ) -> Result<Option<MigrationCommit>, StoreError>;
     fn rewrite(
         &self,
         base: u64,
@@ -1013,19 +1027,30 @@ impl LibraryStore for RedbLibrary {
         Ok(LibrarySnapshot { protocol: Protocol { head, wire_min, generation, migration_generation }, rows })
     }
 
-    fn migration_winner(&self) -> Result<Option<MigrationCommit>, StoreError> {
+    fn migration_result(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+    ) -> Result<Option<MigrationCommit>, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
         let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-        metadata
-            .get("profile-migration-winner")
-            .map_err(StoreError::redb)?
-            .map(|value| {
-                serde_json::from_slice(value.value()).map_err(|error| {
-                    StoreError::Invalid(format!("invalid profile migration winner: {error}"))
-                })
-            })
-            .transpose()
+        let attempt_key = profile_migration_attempt_key(attempt);
+        let generation_key = profile_migration_generation_key(expected_generation);
+        for key in [attempt_key.as_str(), generation_key.as_str(), "profile-migration-winner"] {
+            let Some(value) = metadata.get(key).map_err(StoreError::redb)? else {
+                continue;
+            };
+            let terminal: MigrationCommit = serde_json::from_slice(value.value()).map_err(|error| {
+                StoreError::Invalid(format!("invalid profile migration terminal: {error}"))
+            })?;
+            if terminal.expected_generation == expected_generation
+                && (key != attempt_key.as_str() || terminal.attempt == attempt)
+            {
+                return Ok(Some(terminal));
+            }
+        }
+        Ok(None)
     }
 
     fn rewrite(
@@ -1133,11 +1158,17 @@ impl LibraryStore for RedbLibrary {
             if let Some(commit) = migration {
                 let winner =
                     serde_json::to_vec(commit).map_err(|error| StoreError::Failed(error.to_string()))?;
-                transaction
-                    .open_table(META_BYTES)
-                    .map_err(StoreError::redb)?
-                    .insert("profile-migration-winner", winner.as_slice())
+                let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+                metadata
+                    .insert(profile_migration_attempt_key(&commit.attempt).as_str(), winner.as_slice())
                     .map_err(StoreError::redb)?;
+                metadata
+                    .insert(
+                        profile_migration_generation_key(commit.expected_generation).as_str(),
+                        winner.as_slice(),
+                    )
+                    .map_err(StoreError::redb)?;
+                metadata.insert("profile-migration-winner", winner.as_slice()).map_err(StoreError::redb)?;
             }
         }
         transaction.commit().map_err(StoreError::redb)?;
@@ -1249,6 +1280,15 @@ impl LibraryStore for RedbLibrary {
             }
             let winner =
                 serde_json::to_vec(migration).map_err(|error| StoreError::Failed(error.to_string()))?;
+            metadata
+                .insert(profile_migration_attempt_key(&migration.attempt).as_str(), winner.as_slice())
+                .map_err(StoreError::redb)?;
+            metadata
+                .insert(
+                    profile_migration_generation_key(migration.expected_generation).as_str(),
+                    winner.as_slice(),
+                )
+                .map_err(StoreError::redb)?;
             metadata.insert("profile-migration-winner", winner.as_slice()).map_err(StoreError::redb)?;
         }
         transaction.commit().map_err(StoreError::redb)?;
@@ -1429,8 +1469,12 @@ impl LibraryStore for StoreLease {
         self.store.snapshot()
     }
 
-    fn migration_winner(&self) -> Result<Option<MigrationCommit>, StoreError> {
-        self.store.migration_winner()
+    fn migration_result(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+    ) -> Result<Option<MigrationCommit>, StoreError> {
+        self.store.migration_result(attempt, expected_generation)
     }
 
     fn rewrite(

@@ -276,10 +276,13 @@ impl<'a> ProfileMigrationStorage<'a> {
                 return Err(MigrationError::Invalid("migration attempt purpose changed"));
             }
             let read_store = Arc::clone(&store);
-            let winner = tokio::task::spawn_blocking(move || read_store.migration_winner())
-                .await
-                .map_err(io::Error::other)??;
-            let winner = winner.filter(|winner| winner.expected_generation == opened.fence.generation);
+            let lookup_attempt = opened.attempt.clone();
+            let expected_generation = opened.fence.generation;
+            let winner = tokio::task::spawn_blocking(move || {
+                read_store.migration_result(&lookup_attempt, expected_generation)
+            })
+            .await
+            .map_err(io::Error::other)??;
             if opened.state == AttemptState::Open {
                 if let Some(winner) = winner.as_ref() {
                     opened.state = if winner.attempt == opened.attempt {
@@ -470,8 +473,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         self.load_verified_backup(household_id, &source, reference).await
     }
 
-    /// Durable lookup after a response is lost during commit. The winner marker shares the redb transaction with
-    /// the rewrite, so this also repairs a terminal sidecar that the process died before updating.
+    /// Durable lookup after a response is lost during commit. Attempt- and generation-scoped terminal records share
+    /// the redb transaction with the rewrite, so this also repairs a sidecar that the process died before updating.
     pub(crate) async fn lookup_attempt(
         &self,
         household_id: &str,
@@ -482,10 +485,12 @@ impl<'a> ProfileMigrationStorage<'a> {
         let mut durable = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
         self.resolve_terminal(household_id, token_hash, &mut durable).await?;
         let store = self.state.library_v3.existing_library(household_id, token_hash)?;
-        let winner = tokio::task::spawn_blocking(move || store.migration_winner())
-            .await
-            .map_err(io::Error::other)??;
-        let winner = winner.filter(|winner| winner.expected_generation == durable.fence.generation);
+        let lookup_attempt = durable.attempt.clone();
+        let expected_generation = durable.fence.generation;
+        let winner =
+            tokio::task::spawn_blocking(move || store.migration_result(&lookup_attempt, expected_generation))
+                .await
+                .map_err(io::Error::other)??;
         Ok(AttemptEvidence {
             attempt: durable.attempt,
             state: durable.state,
@@ -512,10 +517,13 @@ impl<'a> ProfileMigrationStorage<'a> {
             .ok_or(MigrationError::NotFound)?;
         let mut durable = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
         let read_store = Arc::clone(&store);
-        let winner = tokio::task::spawn_blocking(move || read_store.migration_winner())
-            .await
-            .map_err(io::Error::other)??;
-        let winner = winner.filter(|winner| winner.expected_generation == durable.fence.generation);
+        let lookup_attempt = durable.attempt.clone();
+        let expected_generation = durable.fence.generation;
+        let winner = tokio::task::spawn_blocking(move || {
+            read_store.migration_result(&lookup_attempt, expected_generation)
+        })
+        .await
+        .map_err(io::Error::other)??;
         if durable.state == AttemptState::Open {
             durable.state = match winner.as_ref() {
                 Some(winner) if winner.attempt == durable.attempt => match winner.kind {
@@ -951,11 +959,13 @@ impl<'a> ProfileMigrationStorage<'a> {
             return Ok(());
         }
         let store = self.state.library_v3.existing_library(household_id, token_hash)?;
-        let winner = tokio::task::spawn_blocking(move || store.migration_winner())
-            .await
-            .map_err(io::Error::other)??;
-        let Some(winner) = winner.filter(|winner| winner.expected_generation == attempt.fence.generation)
-        else {
+        let lookup_attempt = attempt.attempt.clone();
+        let expected_generation = attempt.fence.generation;
+        let winner =
+            tokio::task::spawn_blocking(move || store.migration_result(&lookup_attempt, expected_generation))
+                .await
+                .map_err(io::Error::other)??;
+        let Some(winner) = winner else {
             return Ok(());
         };
         attempt.state = if winner.attempt == attempt.attempt {
@@ -1452,6 +1462,76 @@ mod tests {
         let lookup = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT3).await.unwrap();
         assert_eq!(lookup.state, AttemptState::Restored);
         assert_eq!(lookup.winner, Some(restored));
+    }
+
+    #[tokio::test]
+    async fn attempt_terminals_survive_a_lost_sidecar_later_restore_and_restart() {
+        let h = Harness::new();
+        let dir = h.dir.clone();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy-activity", HOUSEHOLD_TOKEN).await;
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let source = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let loser_source = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        assert_eq!(loser_source.generation, source.generation);
+        let winner_open = storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().unwrap();
+        let backup = storage
+            .create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &source)
+            .await
+            .unwrap();
+        let split_rows = [
+            RewriteRow { key: CONFIG.into(), value: "configuration".into() },
+            RewriteRow { key: DIRECTORY.into(), value: "invalid-directory".into() },
+        ];
+        storage
+            .rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &source, &backup, &split_rows)
+            .await
+            .unwrap();
+
+        // Model a process death after redb committed but before the attempt sidecar recorded the response.
+        // The loser also remains open because it never observed the winning response.
+        storage.save_attempt(&winner_open).await.unwrap();
+        assert_eq!(
+            storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().unwrap().state,
+            AttemptState::Open
+        );
+        assert_eq!(
+            storage.load_attempt(HOUSEHOLD, ATTEMPT2).await.unwrap().unwrap().state,
+            AttemptState::Open
+        );
+
+        let recovery = storage
+            .open_attempt(ATTEMPT3, AttemptPurpose::Restore, HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
+        let current = storage.locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let profiles = find_row(&current, DIRECTORY).unwrap().unwrap();
+        let request = RestoreRequest {
+            backup,
+            fence: recovery.fence,
+            wire_minimum: recovery.wire_minimum,
+            profiles_row: ProfilesRowEvidence {
+                present: true,
+                seq: Some(profiles.sequence),
+                digest: Some(hex_digest(profiles.value.as_bytes())),
+            },
+            directory_state: DirectoryState::Invalid,
+            planner_decision: "restore-backup".into(),
+        };
+        storage.restore_backup(ATTEMPT3, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &request).await.unwrap();
+        drop(h);
+
+        let restarted = Harness::in_dir(dir);
+        let storage = ProfileMigrationStorage::new(&restarted.state);
+        let winner = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap();
+        assert_eq!(winner.state, AttemptState::Committed);
+        let winning_terminal = winner.winner.unwrap();
+        assert_eq!(winning_terminal.attempt, ATTEMPT);
+        assert_eq!(winning_terminal.kind, MigrationResultKind::Committed);
+        assert_eq!(winning_terminal.expected_generation, source.generation);
+
+        let loser = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap();
+        assert_eq!(loser.state, AttemptState::Superseded);
+        assert_eq!(loser.winner, Some(winning_terminal));
     }
 
     #[tokio::test]
