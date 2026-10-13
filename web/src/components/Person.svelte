@@ -3,9 +3,14 @@
   import DetailTabs from './DetailTabs.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
-  import { groupFilmography, type FilmCredit, type PersonDetail } from '../lib/detail';
+  import {
+    filmographyMediaTypes,
+    groupFilmography,
+    type FilmCredit,
+    type PersonDetail,
+  } from '../lib/detail';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
-  import type { Title } from '../lib/library';
+  import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
 
@@ -20,12 +25,15 @@
     shown?: (title: Title) => boolean;
   } = $props();
   const panel = $props.id();
+  const mediaPanel = `${panel}-media`;
+  const departmentPanel = `${panel}-department`;
   let person = $state<PersonDetail | null | undefined>();
   // The page names itself once it knows whose it is; until then the address is all anything has to go on.
   nameTab(() => (active && person?.name ? named(person.name) : null));
   let films = $state<FilmCredit[] | null | undefined>();
   let expanded = $state(false);
   let department = $state<string | null>(null);
+  let media = $state<MediaType | null>(null);
   let counts = $state<Record<string, number>>({});
   let personRetry = $state(0),
     filmsRetry = $state(0);
@@ -33,6 +41,7 @@
     void id;
     expanded = false;
     department = null;
+    media = null;
     counts = {};
   });
   $effect(() => {
@@ -69,17 +78,25 @@
   });
 
   // Explicit person pages include their full career, just as on TV; discovery hide rules must not erase credits.
-  const groups = $derived(groupFilmography((films ?? []).filter((c) => !c.title.adult)));
+  const safeCredits = $derived((films ?? []).filter((credit) => !credit.title.adult));
+  const mediaTypes = $derived(filmographyMediaTypes(safeCredits));
+  const selectedMedia = $derived(
+    mediaTypes.includes(media as MediaType) ? media! : (mediaTypes[0] ?? 'movie'),
+  );
+  const groups = $derived(
+    groupFilmography(safeCredits.filter((credit) => credit.title.type === selectedMedia)),
+  );
   const selected = $derived(
-    department ??
-      (groups.some((g) => g.department === person?.knownFor)
+    (groups.some((group) => group.department === department) ? department! : null) ??
+      (groups.some((group) => group.department === person?.knownFor)
         ? person!.knownFor!
         : (groups[0]?.department ?? 'Acting')),
   );
   const credits = $derived(groups.find((g) => g.department === selected)?.films ?? []);
-  const visibleCount = $derived(counts[selected] ?? 20);
+  const countKey = $derived(`${selectedMedia}:${selected}`);
+  const visibleCount = $derived(counts[countKey] ?? 20);
   function more() {
-    counts = { ...counts, [selected]: visibleCount + 20 };
+    counts = { ...counts, [countKey]: visibleCount + 20 };
   }
   function reachEnd(node: HTMLElement) {
     $effect(() => {
@@ -126,47 +143,67 @@
   </header>
   <section aria-label="Filmography">
     <h2>Filmography</h2>
-    {#if groups.length > 1}
+    {#if mediaTypes.length > 1}
       <DetailTabs
-        tabs={groups.map((g) => ({ value: g.department, label: g.department }))}
-        value={selected}
-        label="Credits"
-        {panel}
-        onchange={(value) => (department = value)}
+        tabs={mediaTypes.map((type) => ({
+          value: type,
+          label: type === 'movie' ? 'Movies' : 'Series',
+        }))}
+        value={selectedMedia}
+        label="Media type"
+        panel={mediaPanel}
+        onchange={(value) => (media = value as MediaType)}
       />
     {/if}
     <div
-      id={panel}
-      role={groups.length > 1 ? 'tabpanel' : undefined}
-      aria-labelledby={groups.length > 1
-        ? `${panel}-tab-${groups.findIndex((g) => g.department === selected)}`
+      id={mediaPanel}
+      role={mediaTypes.length > 1 ? 'tabpanel' : undefined}
+      aria-labelledby={mediaTypes.length > 1
+        ? `${mediaPanel}-tab-${mediaTypes.indexOf(selectedMedia)}`
         : undefined}
     >
-      {#if films === undefined}<Loading label="Loading filmography" />
-      {:else if films === null}<p class="note">Couldn’t load the filmography.</p>
-        <button class="more" onclick={() => filmsRetry++}>Try again</button>
-      {:else if !credits.length}<p class="note">No credits available yet.</p>
-      {:else}
-        <div class="films">
-          {#each credits.slice(0, visibleCount) as c (`${c.title.type}:${c.title.id}`)}
-            <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
+      {#if groups.length > 1}
+        <DetailTabs
+          tabs={groups.map((group) => ({ value: group.department, label: group.department }))}
+          value={selected}
+          label="Credits"
+          panel={departmentPanel}
+          onchange={(value) => (department = value)}
+        />
+      {/if}
+      <div
+        id={departmentPanel}
+        role={groups.length > 1 ? 'tabpanel' : undefined}
+        aria-labelledby={groups.length > 1
+          ? `${departmentPanel}-tab-${groups.findIndex((group) => group.department === selected)}`
+          : undefined}
+      >
+        {#if films === undefined}<Loading label="Loading filmography" />
+        {:else if films === null}<p class="note">Couldn’t load the filmography.</p>
+          <button class="more" onclick={() => filmsRetry++}>Try again</button>
+        {:else if !credits.length}<p class="note">No credits available yet.</p>
+        {:else}
+          <div class="films">
+            {#each credits.slice(0, visibleCount) as c (`${c.title.type}:${c.title.id}`)}
+              <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
                  which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
                  corner button made the two disagree by a few stray pixels (focus/hover state the clone doesn't
                  carry the same way), without changing either page's actual content. -->
-            <PosterCard
-              title={c.title}
-              caption={c.title.year ? String(c.title.year) : undefined}
-              href={titleHref(c.title)}
-              menu={false}
-            />
-          {/each}
-        </div>
-        {#if visibleCount < credits.length}
-          <button class="more load-more" use:reachEnd onclick={more}
-            >Show more ({credits.length - visibleCount})</button
-          >
+              <PosterCard
+                title={c.title}
+                caption={c.title.year ? String(c.title.year) : undefined}
+                href={titleHref(c.title)}
+                menu={false}
+              />
+            {/each}
+          </div>
+          {#if visibleCount < credits.length}
+            <button class="more load-more" use:reachEnd onclick={more}
+              >Show more ({credits.length - visibleCount})</button
+            >
+          {/if}
         {/if}
-      {/if}
+      </div>
     </div>
   </section>
 {/if}

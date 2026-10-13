@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { groupFilmography, parseDetail, parseFilmography, parseSeason } from './detail';
+import {
+  filmographyMediaTypes,
+  groupFilmography,
+  parseDetail,
+  parseFilmography,
+  parseSeason,
+} from './detail';
 import {
   airDate,
   billboardFacts,
@@ -327,6 +333,10 @@ describe('full actor filmography', () => {
       'movie:1',
     ]);
     expect(groups[2]!.films[0]!.title.id).toBe(1);
+    expect(filmographyMediaTypes(parsed)).toEqual(['movie', 'tv']);
+    expect(
+      groupFilmography(parsed.filter((credit) => credit.title.type === 'tv'))[0]!.films,
+    ).toHaveLength(1);
   });
 });
 
