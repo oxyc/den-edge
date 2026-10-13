@@ -33,7 +33,7 @@ mod tmdb;
 mod warnings;
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -125,6 +125,10 @@ pub struct AppState {
     /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
     /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
     pub profile_migration_enabled: bool,
+    /// Exact household library ids enrolled for profiles-v1 preparation (env `PROFILE_PREPARE_HOUSEHOLDS`).
+    /// This is transport authority, not runtime truth: committed runtime is derived by a client only after it
+    /// decrypts and validates the stored directory. An empty set keeps every legacy household off.
+    pub profile_prepare_households: HashSet<String>,
     /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
@@ -338,6 +342,7 @@ impl AppState {
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
+            profile_prepare_households: HashSet::new(),
             relays: Vec::new(),
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
@@ -455,6 +460,14 @@ async fn main() {
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
     state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
+    state.profile_prepare_households = env_opt("PROFILE_PREPARE_HOUSEHOLDS")
+        .map(|value| {
+            parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", &value).unwrap_or_else(|reason| {
+                eprintln!("{reason}");
+                std::process::exit(1);
+            })
+        })
+        .unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
@@ -609,6 +622,20 @@ fn parse_hosts(var: &str, value: &str) -> Vec<String> {
             ok
         })
         .collect()
+}
+
+/// A protected exact-household enrollment list. Unlike host discovery, a malformed id must stop startup: silently
+/// dropping one could leave the operator believing a household can recover while every migration route is hidden.
+fn parse_library_ids(var: &str, value: &str) -> Result<HashSet<String>, String> {
+    value.split(',').map(str::trim).filter(|id| !id.is_empty()).try_fold(HashSet::new(), |mut ids, id| {
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+            return Err(format!("{var}: {id:?} is not an exact lowercase 32-hex library id"));
+        }
+        if !ids.insert(id.to_owned()) {
+            return Err(format!("{var}: duplicate household {id:?}"));
+        }
+        Ok(ids)
+    })
 }
 
 /// `ADDON_RELAY`: comma-separated `/<prefix>=<origin>` pairs — one path segment, a plain http(s) origin. A malformed
@@ -939,6 +966,23 @@ mod tests {
             socket.recv_buffer_size().unwrap() <= CONNECTION_RECV_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
         );
         drop(client);
+    }
+
+    #[test]
+    fn profile_prepare_enrollment_accepts_only_exact_unique_household_ids() {
+        let first = "0123456789abcdef0123456789abcdef";
+        let second = "fedcba9876543210fedcba9876543210";
+        let ids = parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", &format!(" {first}, {second} ")).unwrap();
+        assert_eq!(ids, HashSet::from([first.to_owned(), second.to_owned()]));
+        assert!(parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", "").unwrap().is_empty());
+        for invalid in [
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdef,0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", invalid).is_err(), "{invalid}");
+        }
     }
 
     /// A client that sends half a request head must not hold shutdown open past the grace.

@@ -1765,6 +1765,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unenrolled_legacy_household_is_uniformly_absent_while_an_enrolled_neighbor_prepares() {
+        let mut h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.web_origins = vec!["https://app.example".into()];
+        });
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "enrolled", HOUSEHOLD_TOKEN).await;
+        write(&h, CANDIDATE, ACTIVITY, 0, "off", CANDIDATE_TOKEN).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+
+        let enrolled = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let off = format!("/lib/{CANDIDATE}/profile-migration");
+        let body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+        assert_eq!(
+            migration_request(&h, "POST", &enrolled, Some(body), Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
+        for method in ["POST", "PATCH"] {
+            assert_disabled(
+                h.send(
+                    method,
+                    &off,
+                    Some("{}".into()),
+                    &[("x-den-wire", "5"), ("x-den-library-token", CANDIDATE_TOKEN)],
+                )
+                .await,
+            )
+            .await;
+        }
+        assert_disabled(
+            h.send("POST", &off, Some("{}".into()), &[("content-length", "18446744073709551615")]).await,
+        )
+        .await;
+        let preflight = h
+            .send(
+                "OPTIONS",
+                &off,
+                None,
+                &[
+                    ("origin", "https://app.example"),
+                    ("access-control-request-method", "POST"),
+                    ("access-control-request-headers", "x-den-candidate-library-token"),
+                ],
+            )
+            .await;
+        assert!(!preflight.headers().contains_key("access-control-allow-methods"));
+        assert_disabled(preflight).await;
+    }
+
+    #[tokio::test]
+    async fn household_capability_reports_transport_inputs_not_runtime_and_requires_wire_five_auth() {
+        let mut h = Harness::new();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "enrolled", HOUSEHOLD_TOKEN).await;
+        write(&h, CANDIDATE, ACTIVITY, 0, "off", CANDIDATE_TOKEN).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+
+        let enrolled = format!("/lib/{HOUSEHOLD}/profile-capability");
+        let off = format!("/lib/{CANDIDATE}/profile-capability");
+        let prepared = body_json(
+            h.send("GET", &enrolled, None, &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)])
+                .await,
+        )
+        .await;
+        assert_eq!(
+            prepared,
+            json!({
+                "enrollment": "prepare", "wireMin": 2, "migrationWire": 5,
+                "runtimeHouseholdWire": 5, "runtimeProfileWire": 4,
+            })
+        );
+        assert!(prepared.get("runtime").is_none(), "edge cannot validate an encrypted directory");
+        assert_eq!(
+            body_json(
+                h.send("GET", &off, None, &[("x-den-wire", "5"), ("x-den-library-token", CANDIDATE_TOKEN)],)
+                    .await,
+            )
+            .await["enrollment"],
+            "off"
+        );
+        assert_eq!(
+            h.send("GET", &enrolled, None, &[("x-den-wire", "5"), ("x-den-library-token", "wrong")],)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            h.send("GET", &enrolled, None, &[("x-den-wire", "5")]).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            h.send("GET", &enrolled, None, &[("x-den-wire", "4"), ("x-den-library-token", HOUSEHOLD_TOKEN)],)
+                .await
+                .status(),
+            StatusCode::UPGRADE_REQUIRED
+        );
+
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = false;
+        assert_eq!(
+            body_json(
+                h.send(
+                    "GET",
+                    &enrolled,
+                    None,
+                    &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+                )
+                .await,
+            )
+            .await["enrollment"],
+            "off"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_transport_uses_exact_wire_five_and_newer_household_minimum_wins() {
+        let mut h = Harness::new();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        let path = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+        for wire in ["4", "6"] {
+            let response = h
+                .send(
+                    "POST",
+                    &path,
+                    Some(body.clone()),
+                    &[("x-den-wire", wire), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED, "wire {wire}");
+            assert_eq!(body_json(response).await["min"], 5, "wire {wire}");
+        }
+
+        let newer = "99999999999999999999999999999999";
+        let created = h
+            .send(
+                "POST",
+                &format!("/lib/{newer}/batch"),
+                Some(json!({ "writes": [{ "k": ACTIVITY, "base": 0, "v": "newer" }] }).to_string()),
+                &[
+                    ("x-den-wire", "6"),
+                    ("x-den-wire-min", "6"),
+                    ("x-den-generation", "0"),
+                    ("x-den-library-token", CANDIDATE_TOKEN),
+                ],
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        for wire in ["5", "6"] {
+            let response = h
+                .send(
+                    "POST",
+                    &format!("/lib/{newer}/profile-migration"),
+                    Some(body.clone()),
+                    &[("x-den-wire", wire), ("x-den-library-token", CANDIDATE_TOKEN)],
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED, "wire {wire}");
+            assert_eq!(body_json(response).await["min"], 6, "wire {wire}");
+        }
+    }
+
+    #[tokio::test]
     async fn http_adapter_is_default_off_wire_five_authenticated_and_restart_durable() {
         let mut h = Harness::new();
         let dir = h.dir.clone();
@@ -1779,6 +1945,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
         assert_eq!(
             h.send("POST", &base, Some(open_body.clone()), &[("x-den-library-token", HOUSEHOLD_TOKEN)],)
                 .await
@@ -1923,6 +2090,12 @@ mod tests {
                 .await;
         assert_eq!(original["state"], "committed", "restore retains the earlier terminal");
 
+        Arc::get_mut(&mut restarted.state).unwrap().profile_migration_enabled = false;
+        assert_disabled(
+            migration_request(&restarted, "GET", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+
         let unknown = format!("/lib/{CANDIDATE}/profile-migration");
         assert_eq!(
             migration_request(
@@ -1997,6 +2170,7 @@ mod tests {
     async fn retirement_route_requires_a_separate_candidate_header_and_fresh_authority() {
         let mut h = Harness::new();
         Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
         write(&h, CANDIDATE, ACTIVITY, 0, "candidate", CANDIDATE_TOKEN).await;
         let base = format!("/lib/{HOUSEHOLD}/profile-migration");
