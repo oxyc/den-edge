@@ -150,7 +150,12 @@ export class LibraryServiceCore {
   #authority?: LibraryServiceAuthority;
   #relayMembership: { libraryId: string; memberToken: string } | null = null;
   #stopAuthority?: () => void;
-  #client?: { id: string; libraryKey: string; mode: LibraryServiceHello['mode'] };
+  #client?: {
+    id: string;
+    libraryKey: string;
+    mode: LibraryServiceHello['mode'];
+    wire: LibraryServiceHello['wire'];
+  };
   #revision = 0;
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
@@ -300,7 +305,8 @@ export class LibraryServiceCore {
       if (
         this.#client.id !== request.clientId ||
         this.#client.libraryKey !== request.libraryKey ||
-        this.#client.mode !== request.mode
+        this.#client.mode !== request.mode ||
+        this.#client.wire !== request.wire
       )
         return [
           errorReply(
@@ -326,7 +332,12 @@ export class LibraryServiceCore {
           errorReply(failure('not-found', 'library could not be opened', true), request.requestId),
         ];
       this.#authority = authority;
-      this.#client = { id: request.clientId, libraryKey: request.libraryKey, mode: request.mode };
+      this.#client = {
+        id: request.clientId,
+        libraryKey: request.libraryKey,
+        mode: request.mode,
+        wire: request.wire,
+      };
       this.#stopAuthority = authority.listen?.((event) => this.#enqueueAuthorityEvent(event));
       const membership = await authority.query({ kind: 'relay.membership' }).catch(() => null);
       this.#relayMembership =

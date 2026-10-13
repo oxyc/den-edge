@@ -1908,7 +1908,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
 function failure(value: unknown): value is LibraryServiceFailure {
   return (
     record(value) &&
-    exact(value, ['code', 'message', 'retryable', 'expectedProtocol']) &&
+    exact(value, ['code', 'message', 'retryable', 'expectedProtocol', 'requiredWire']) &&
     (value.code === 'protocol-mismatch' ||
       value.code === 'invalid-request' ||
       value.code === 'not-ready' ||
@@ -1925,7 +1925,8 @@ function failure(value: unknown): value is LibraryServiceFailure {
       value.code === 'internal') &&
     text(value.message) &&
     bool(value.retryable) &&
-    optional(value.expectedProtocol, integer)
+    optional(value.expectedProtocol, integer) &&
+    optional(value.requiredWire, integer)
   );
 }
 
@@ -1979,11 +1980,13 @@ export function decodeLibraryServiceClientMessage(
           'requestId',
           'clientId',
           'libraryKey',
+          'wire',
           'mode',
           'legacyClock',
         ]) ||
         !text(input.clientId) ||
         !libraryKey(input.libraryKey) ||
+        (input.wire !== 4 && input.wire !== 5) ||
         (input.mode !== 'online' && input.mode !== 'local') ||
         !optional(input.legacyClock, legacyClock)
       )

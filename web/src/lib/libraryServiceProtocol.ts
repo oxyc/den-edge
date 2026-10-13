@@ -23,6 +23,8 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
 } as const;
 
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
+/** Library-v4 rows use wire 4. A profile-aware configuration-only household uses wire 5. */
+export type LibraryWire = 4 | 5;
 export type MediaType = 'movie' | 'tv';
 export type Reaction = 'seen' | 'dislike' | 'like' | 'love';
 export type Standing = 'watchlist' | 'in-progress' | 'watched';
@@ -754,6 +756,7 @@ export interface LibraryServiceHello extends ClientMessage {
   requestId: string;
   clientId: string;
   libraryKey: string;
+  wire: LibraryWire;
   mode: 'online' | 'local';
   /** One-time migration seed from the page's legacy localStorage clock. */
   legacyClock?: {
@@ -832,6 +835,7 @@ export interface LibraryServiceFailure {
   message: string;
   retryable: boolean;
   expectedProtocol?: number;
+  requiredWire?: number;
 }
 
 interface ServerMessage {

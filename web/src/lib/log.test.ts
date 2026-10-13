@@ -484,6 +484,25 @@ describe('LibraryLog', () => {
     for (const request of requests) expect(request.headers).toMatchObject({ 'x-den-wire': '4' });
   });
 
+  it('opens a configuration-only household with wire 5 while retaining v4 rows', async () => {
+    const server = await edge([row(1)]);
+    const requests: RequestInit[] = [];
+    const household: typeof fetch = async (input, init = {}) => {
+      requests.push(init);
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '5');
+      return new Response(response.body, { status: response.status, headers });
+    };
+
+    const log = (await LibraryLog.open(LIBRARY_KEY, household, undefined, null, 5))!;
+    expect(log.wireMinimum).toBe(5);
+    expect(log.upgradeRequired).toBeNull();
+    expect(log.readOnly).toBe(false);
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests) expect(request.headers).toMatchObject({ 'x-den-wire': '5' });
+  });
+
   it('keeps a settings-style row across a generation or rewrite refusal', async () => {
     const server = await edge([row(1)]);
     const { storage } = memoryStorage();

@@ -45,6 +45,7 @@ const hello = (legacyClock?: LibraryServiceHello['legacyClock']): LibraryService
   requestId: 'open-1',
   clientId: 'tab-1',
   libraryKey: KEY,
+  wire: 4,
   mode: 'local',
   ...(legacyClock ? { legacyClock } : {}),
 });

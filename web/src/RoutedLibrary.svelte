@@ -7,7 +7,11 @@
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
+  import {
+    activeProfileSession,
+    legacyProfileSession,
+    type ProfileSession,
+  } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
@@ -34,6 +38,7 @@
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
+  import { persistentProfileIdentity } from './lib/profileIdentity';
   import {
     allowsImplicitAssistant,
     ProfileModeCoordinator,
@@ -86,16 +91,22 @@
     }
   }
 
+  const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
+
   const open = (key: string | null, local: boolean) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
-    const services = createWorkerServiceSession();
+    const services = createWorkerServiceSession({
+      supervisor: { profileHouseholdEnabled: realProfilesHost },
+    });
     if (!key)
       return legacyProfileSession(null, false, null, services.content, () => services.close());
     const clock = legacyClock();
     const model = new LibraryModel(services.library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
+      wire: 4,
+      bootstrapProfileHousehold: !local,
       ...(clock ? { legacyClock: clock } : {}),
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
@@ -110,6 +121,8 @@
     untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
   );
   let profileControlPublished = false;
+  let openingCommittedProfiles = false;
+  let committedProfilesOpen = 0;
   const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
   const profileActivityReady = $derived(
     profileCapability === 'disabled' ||
@@ -128,8 +141,15 @@
   });
 
   const openProfileActivity: ProfileActivityModelFactory = (libraryKey) => {
-    const services = createWorkerServiceSession();
-    const model = new LibraryModel(services.library, { libraryKey, mode: 'online' });
+    const services = createWorkerServiceSession({
+      supervisor: { profileHouseholdEnabled: realProfilesHost },
+    });
+    const model = new LibraryModel(services.library, {
+      libraryKey,
+      mode: 'online',
+      wire: 4,
+      bootstrapProfileHousehold: false,
+    });
     void model.ready.catch(() => {});
     let closed = false;
     return {
@@ -171,6 +191,7 @@
     });
     return () => {
       current = false;
+      committedProfilesOpen++;
       const coordinator = profileCoordinator;
       profileCoordinator = null;
       profileDirectoryLease?.release();
@@ -187,15 +208,52 @@
     if (!projected) return;
     const directory = profileDirectoryChoices(projected as ProfileDirectoryView);
     if (!profileCoordinator) {
-      if (!directory) return;
-      profileCoordinator = new ProfileModeCoordinator(
-        session,
-        localStorage,
-        window,
-        undefined,
-        directory,
-        openProfileActivity,
+      if (!directory || openingCommittedProfiles || !libraryIdentity) return;
+      const owner = directory.profiles.find(
+        (choice) => choice.id === directory.owner && choice.role === 'owner',
       );
+      if (!owner?.id || !owner.libraryKey) {
+        profileCapability = 'indeterminate';
+        return;
+      }
+      const legacy = session;
+      const opening = ++committedProfilesOpen;
+      const activity = openProfileActivity(owner.libraryKey);
+      openingCommittedProfiles = true;
+      void activity.model.ready
+        .then(
+          () => {
+            if (opening !== committedProfilesOpen || profileCoordinator || session !== legacy) {
+              activity.close();
+              return;
+            }
+            legacy.household.commitProfiles(libraryIdentity!);
+            const ownerSession = activeProfileSession(
+              persistentProfileIdentity(owner.id!, owner.libraryKey!),
+              legacy.household,
+              activity.model,
+              activity.close,
+              owner.policy ?? null,
+            );
+            legacy.relinquishHouseholdOwnership();
+            legacy.close();
+            profileCoordinator = new ProfileModeCoordinator(
+              ownerSession,
+              localStorage,
+              window,
+              undefined,
+              directory,
+              openProfileActivity,
+            );
+          },
+          () => {
+            activity.close();
+            if (opening === committedProfilesOpen) profileCapability = 'indeterminate';
+          },
+        )
+        .finally(() => {
+          if (opening === committedProfilesOpen) openingCommittedProfiles = false;
+        });
     } else profileCoordinator.updateDirectory(directory);
   });
 

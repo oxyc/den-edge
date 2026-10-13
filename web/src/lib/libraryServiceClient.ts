@@ -27,7 +27,11 @@ export interface LibraryServiceTransport {
 export type LibraryServiceOpenOptions = Pick<
   LibraryServiceHello,
   'libraryKey' | 'mode' | 'legacyClock'
->;
+> &
+  Partial<Pick<LibraryServiceHello, 'wire'>> & {
+    /** Local supervisor authority to retry this legacy key as a wire-5 household after the guarded 426 path. */
+    bootstrapProfileHousehold?: boolean;
+  };
 
 type Pending = {
   request: LibraryServiceClientMessage;
@@ -88,7 +92,10 @@ export class LibraryServiceClient {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId,
         clientId: this.clientId,
-        ...options,
+        libraryKey: options.libraryKey,
+        mode: options.mode,
+        wire: options.wire ?? 4,
+        ...(options.legacyClock ? { legacyClock: options.legacyClock } : {}),
       },
       this.startupTimeoutMs,
     );

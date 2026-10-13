@@ -338,6 +338,7 @@ function logStatus(log: LibraryLog): LibraryAuthorityStatus {
         code: 'update-required',
         message: 'A newer version of Den is required to open this library.',
         retryable: false,
+        requiredWire: log.upgradeRequired,
       },
     };
   if (log.predatesV3) return { kind: 'read-only', reason: 'Library backup predates v3' };

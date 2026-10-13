@@ -78,14 +78,15 @@ export async function openLibraryServiceAuthority(
   try {
     log =
       request.mode === 'local'
-        ? await LibraryLog.openLocal(request.libraryKey, vault)
-        : await LibraryLog.open(request.libraryKey, undefined, undefined, vault);
+        ? await LibraryLog.openLocal(request.libraryKey, vault, undefined, request.wire)
+        : await LibraryLog.open(request.libraryKey, undefined, undefined, vault, request.wire);
   } catch (error) {
     if (error instanceof LibraryUpdateRequiredError)
       throw new LibraryServiceAuthorityError({
         code: 'update-required',
         message: error.message,
         retryable: false,
+        requiredWire: error.requiredWire,
       });
     throw error;
   }

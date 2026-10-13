@@ -396,6 +396,16 @@ export class ProfileModeCoordinator {
       if (saved?.mode === 'persistent' && this.#choice(saved.profileId)) return false;
       if (saved?.mode === 'owner' || saved?.mode === 'visitor') return false;
       if (this.parentalPinConfigured !== false) return false;
+      if (this.#pendingOwner) {
+        try {
+          keepActiveProfile(this.#storage, this.#ownerMarker());
+        } catch {
+          return false;
+        }
+        this.#session = this.#pendingOwner;
+        this.#pendingOwner = null;
+        return true;
+      }
       void this.switchToOwner();
       return false;
     }

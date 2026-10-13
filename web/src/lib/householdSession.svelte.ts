@@ -28,18 +28,35 @@ export class HouseholdSession {
   readonly #model: LibraryModel | null;
   #closed = false;
   #foregroundReady = false;
+  #identity: HouseholdIdentity;
 
   constructor(
-    readonly identity: HouseholdIdentity,
+    identity: HouseholdIdentity,
     model: LibraryModel | null,
     readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
     /** Default-off initial-split participant. No production path supplies one or starts an attempt yet. */
     readonly profileMigration: ProfileMigrationParticipant | null = null,
   ) {
+    this.#identity = identity;
     this.#model = model;
     this.policy = profilePolicy(model);
     this.services = new SessionServices(model, content);
+  }
+
+  get identity(): HouseholdIdentity {
+    return this.#identity;
+  }
+
+  /** Promote the already-open control log only after wire 5 yielded a validated committed directory. */
+  commitProfiles(libraryKey: string): void {
+    if (
+      this.#identity.kind !== 'legacy' ||
+      this.#identity.libraryKey !== libraryKey ||
+      this.#identity.configurationOnly
+    )
+      throw new Error('Household topology cannot be promoted from this model');
+    this.#identity = { kind: 'profiles', libraryKey, configurationOnly: true };
   }
 
   ownsModel(model: LibraryModel | null): boolean {

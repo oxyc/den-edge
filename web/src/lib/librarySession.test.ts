@@ -89,6 +89,33 @@ describe('ProfileSession presentation state', () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
+  it('promotes only the same open household into a configuration-only profiles control plane', () => {
+    const household = new HouseholdSession(
+      { kind: 'legacy', libraryKey: 'household-key', configurationOnly: false },
+      null,
+      content(),
+    );
+
+    expect(() => household.commitProfiles('different-key')).toThrow(
+      'Household topology cannot be promoted from this model',
+    );
+    expect(household.identity).toEqual({
+      kind: 'legacy',
+      libraryKey: 'household-key',
+      configurationOnly: false,
+    });
+
+    household.commitProfiles('household-key');
+    expect(household.identity).toEqual({
+      kind: 'profiles',
+      libraryKey: 'household-key',
+      configurationOnly: true,
+    });
+    expect(() => household.commitProfiles('household-key')).toThrow(
+      'Household topology cannot be promoted from this model',
+    );
+  });
+
   it('owns only transient toast and undo timing', () => {
     vi.useFakeTimers();
     const session = legacyProfileSession(null, false, null, content());

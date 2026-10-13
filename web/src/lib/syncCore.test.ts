@@ -72,6 +72,38 @@ describe('shared Rust WASM sync policy', () => {
     });
   }
 
+  it('fails closed when profile migration planner evidence is missing or malformed', () => {
+    const fence = { generation: 7, head: 'a'.repeat(64) };
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ state: 'idle', observed: 'legacy' }, 'explicit_intent_required'],
+      [{ state: 'fenced', observed: 'legacy', fence }, 'invalid_migration_fence'],
+      [
+        {
+          state: 'fenced',
+          observed: 'legacy',
+          fence,
+          observedFence: { generation: -1, head: 'a'.repeat(64) },
+        },
+        'invalid_migration_fence',
+      ],
+      [{ state: 'adopting', observed: 'committed' }, 'committed_directory_missing'],
+      [
+        {
+          state: 'owner-copied',
+          observed: 'legacy',
+          fence,
+          observedFence: fence,
+          backupVerified: true,
+          candidateKey: 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=',
+          ownerVerified: true,
+        },
+        'invalid_copy_head',
+      ],
+    ];
+    for (const [input, error] of cases)
+      expect(() => syncPolicy({ op: 'profiles_migration_next', input })).toThrow(error);
+  });
+
   it('the main module refuses an assistant op, naming the module that has it', () => {
     expect(() => syncPolicy({ op: 'assistant_grant_key', random: '00'.repeat(32) })).toThrow(
       'assistant_module',
