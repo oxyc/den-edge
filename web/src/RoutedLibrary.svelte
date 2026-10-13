@@ -585,7 +585,16 @@
   });
 </script>
 
-{#if profileCapability === 'checking'}
+{#if session.updateRequired}
+  <section class="library-update-required" aria-labelledby="library-update-required-title">
+    <h1 id="library-update-required-title">Library update required</h1>
+    <p>
+      This library was opened by a newer version of Den. Update Den on this device, then reload to
+      continue.
+    </p>
+    <button type="button" onclick={() => location.reload()}>Reload Den</button>
+  </section>
+{:else if profileCapability === 'checking'}
   <p class="profile-loading" role="status">Opening profiles…</p>
 {:else if profileCapability === 'indeterminate'}
   <section class="profile-unavailable" aria-labelledby="profile-unavailable-title">
@@ -678,7 +687,8 @@
   }
 
   .profile-loading,
-  .profile-unavailable {
+  .profile-unavailable,
+  .library-update-required {
     margin: 48px auto;
   }
 
@@ -698,7 +708,8 @@
     color: var(--muted);
   }
 
-  .profile-unavailable {
+  .profile-unavailable,
+  .library-update-required {
     display: grid;
     gap: 12px;
     max-width: 520px;
@@ -709,11 +720,32 @@
   }
 
   .profile-unavailable h1,
-  .profile-unavailable p {
+  .profile-unavailable p,
+  .library-update-required h1,
+  .library-update-required p {
     margin: 0;
   }
 
-  .profile-unavailable p {
+  .profile-unavailable p,
+  .library-update-required p {
     color: var(--muted);
+  }
+
+  .library-update-required button {
+    justify-self: start;
+    min-height: 40px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--accent-contrast, #fff);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .library-update-required button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
   }
 </style>

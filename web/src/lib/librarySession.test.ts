@@ -101,6 +101,79 @@ describe('ProfileSession presentation state', () => {
     expect(session.undo).toBeNull();
   });
 
+  it('distinguishes a wire-fenced library from generic open failures', () => {
+    const updateRequired = legacyProfileSession(
+      'newer-library',
+      false,
+      {
+        status: {
+          kind: 'failed',
+          error: {
+            code: 'update-required',
+            message: 'A newer version of Den is required to open this library.',
+            retryable: false,
+          },
+        },
+      } as unknown as LibraryModel,
+      content(),
+    );
+    expect(updateRequired.updateRequired).toBe(true);
+    expect(updateRequired.alert).toBe('Library update required');
+
+    const unavailable = legacyProfileSession(
+      'offline-library',
+      false,
+      {
+        status: {
+          kind: 'failed',
+          error: { code: 'unavailable', message: 'offline', retryable: true },
+        },
+      } as unknown as LibraryModel,
+      content(),
+    );
+    expect(unavailable.updateRequired).toBe(false);
+    expect(unavailable.alert).toBeNull();
+
+    const retryableImposter = legacyProfileSession(
+      'retryable-library',
+      false,
+      {
+        status: {
+          kind: 'failed',
+          error: { code: 'update-required', message: 'temporary', retryable: true },
+        },
+      } as unknown as LibraryModel,
+      content(),
+    );
+    expect(retryableImposter.updateRequired).toBe(false);
+  });
+
+  it('keeps a household wire fence visible through a distinct active profile model', () => {
+    const householdModel = {
+      status: {
+        kind: 'failed',
+        error: { code: 'update-required', message: 'new wire', retryable: false },
+      },
+    } as unknown as LibraryModel;
+    const profileModel = {
+      status: { kind: 'ready' },
+    } as unknown as LibraryModel;
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household', configurationOnly: true },
+      householdModel,
+      content(),
+    );
+    const profile = activeProfileSession(
+      persistentProfileIdentity(KID_ID, 'kid-key'),
+      household,
+      profileModel,
+    );
+
+    expect(household.updateRequired).toBe(true);
+    expect(profile.updateRequired).toBe(true);
+    expect(profile.alert).toBe('Library update required');
+  });
+
   it('replaces a future active profile without closing the configuration-only household', () => {
     const householdClose = vi.fn();
     const profileClose = vi.fn();

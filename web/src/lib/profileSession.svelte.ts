@@ -4,6 +4,7 @@ import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
 import type { LibraryModel } from './libraryModel.svelte';
+import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfileContentPolicy, type ProfilePolicy } from './profilePolicy';
 import {
   legacyProfileIdentity,
@@ -60,9 +61,15 @@ export class ProfileSession {
 
   get alert(): string | null {
     const status = this.model?.status;
+    if (this.updateRequired) return 'Library update required';
     if (status?.kind === 'read-only') return status.reason;
     if (status?.kind === 'moved') return 'This library moved to a new key';
     return null;
+  }
+
+  /** A real den-edge wire fence, distinct from an unreachable or retryable library failure. */
+  get updateRequired(): boolean {
+    return this.household.updateRequired || libraryUpdateRequired(this.model);
   }
 
   configureServices(): void {
