@@ -49,6 +49,10 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 pub(crate) mod v3;
+// The wire adapter and feature switch are intentionally absent. Keep the §8.1 storage layer compiled and tested
+// without making a partially reviewed household rewrite reachable in production.
+#[allow(dead_code)]
+mod profile_migration;
 #[cfg(test)]
 mod v3_model;
 
@@ -795,7 +799,9 @@ async fn rewrite_commit(
         stage.rows.iter().map(|row| v3::RewriteRow { key: row.k.clone(), value: row.v.clone() }).collect();
     let live_cap = state.library_limits.stored_bytes;
     let write_store = Arc::clone(&store);
-    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap)).await {
+    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap, None))
+        .await
+    {
         Ok(Ok(protocol)) => {
             // Committed whatever the cleanup does: a held reader learns of the new rows and generation now.
             state.library_holds.wake(id);
@@ -952,6 +958,21 @@ async fn forget(
             return json_reply(StatusCode::CONFLICT, &error("head_changed"));
         }
     }
+    retire_owned_locked(state, id, &slot, &mut library, selected_v3, successor, recovery).await
+}
+
+/// Publish retirement after the caller has authenticated the owner and, where applicable, checked its fence while
+/// holding `library` and `recovery`. Profile migration also uses this tail while it keeps the household directory
+/// locked, so no ordinary write can invalidate its fresh exclusion proof before the candidate marker lands.
+async fn retire_owned_locked(
+    state: &AppState,
+    id: &str,
+    slot: &Arc<LibrarySlot>,
+    library: &mut Option<Library>,
+    selected_v3: bool,
+    successor: Option<&str>,
+    recovery: tokio::sync::MutexGuard<'_, ()>,
+) -> Response {
     // The owner's guests go with the token that vouched for them.
     let revoked = match crate::grants::revoke_host(state, id).await {
         Ok(gids) => gids,
@@ -997,14 +1018,13 @@ async fn forget(
     let charged = library.take().map_or(0, |library| library.bytes);
     state
         .libraries
-        .reserve(id, &slot, charged, 0, state.library_limits)
+        .reserve(id, slot, charged, 0, state.library_limits)
         .expect("a deleted library always releases its cache charge")
         .commit();
     // So the retirement cannot be undone by a power loss. Both are done; a failure is reported, not answered.
     if let Err(e) = state.store.sync_dir(NS).await {
         eprintln!("library retire: {e}");
     }
-    drop(library);
     for gid in revoked {
         crate::grants::end_sessions(state, &gid).await;
     }
@@ -2318,6 +2338,7 @@ mod tests {
                 &[super::v3::RewriteRow { key: K2.to_owned(), value: "after".to_owned() }],
                 3,
                 h.state.library_limits.stored_bytes,
+                None,
             )
             .unwrap();
         drop(store);
@@ -2340,6 +2361,12 @@ mod tests {
         assert!(!generation.ends_with(&switched.generation));
         let body = body_json(response).await;
         assert_eq!(body["entries"], json!([{ "k": K1, "seq": 1, "v": "before" }]));
+        let restored_protocol =
+            restored.state.library_v3.existing_library(LIB, token_hash).unwrap().protocol().unwrap();
+        assert!(
+            restored_protocol.migration_generation > switched.migration_generation,
+            "a restored database cannot reuse an already observed profile-migration fence"
+        );
     }
 
     #[tokio::test]
@@ -2404,7 +2431,7 @@ mod tests {
         let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
         let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let protocol = member_store.protocol().unwrap();
-        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes).unwrap();
+        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes, None).unwrap();
 
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "new" }] }).to_string();
         let member = format!("{LIB}:{TOKEN}");
@@ -2586,11 +2613,11 @@ mod tests {
         let cap = h.state.library_limits.stored_bytes;
         let rows = [super::v3::RewriteRow { key: K2.to_owned(), value: "a".repeat(super::MAX_VALUE_V4) }];
         let head = store.protocol().unwrap().head;
-        assert!(matches!(store.rewrite(head, &rows, 3, cap), Err(super::v3::StoreError::TooLarge)));
-        assert_eq!(store.rewrite(head, &rows, 4, cap).unwrap().wire_min, 4);
+        assert!(matches!(store.rewrite(head, &rows, 3, cap, None), Err(super::v3::StoreError::TooLarge)));
+        assert_eq!(store.rewrite(head, &rows, 4, cap, None).unwrap().wire_min, 4);
         // At 4 already, a commit naming a lower minimum keeps 4, and its cap.
         let head = store.protocol().unwrap().head;
-        assert_eq!(store.rewrite(head, &rows, 3, cap).unwrap().wire_min, 4);
+        assert_eq!(store.rewrite(head, &rows, 3, cap, None).unwrap().wire_min, 4);
     }
 
     async fn changes_at(h: &Harness, wire: &str, generation: &str) -> (StatusCode, Value) {
@@ -2907,7 +2934,7 @@ mod tests {
         h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, super::FORMAT_V3).await.unwrap();
         let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let kept = [super::v3::RewriteRow { key: K1.to_owned(), value: "kept".to_owned() }];
-        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes).unwrap();
+        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes, None).unwrap();
         let path = h.state.library_v3.path(LIB);
         let sparse = std::fs::metadata(&path).unwrap().len();
 
