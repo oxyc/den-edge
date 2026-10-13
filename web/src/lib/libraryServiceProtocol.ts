@@ -665,7 +665,8 @@ export type LibraryQuery =
   | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope }
   | { kind: 'library.metadata'; titles: TitleRef[] }
   /** The grants the library's row holds, whatever their state, for Settings › Assistants. */
-  | { kind: 'assistant.grants' };
+  | { kind: 'assistant.grants' }
+  | { kind: 'profile-migration.status' };
 
 export type LibraryQueryResult =
   | {
@@ -684,6 +685,18 @@ export type LibraryQueryResult =
       retryAfterMs?: number;
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
+  | {
+      kind: 'profile-migration.status';
+      phase:
+        | 'off'
+        | 'available'
+        | 'preparing'
+        | 'ready'
+        | 'reconciling'
+        | 'enabled'
+        | 'recovery-required';
+      attempt?: string;
+    }
   | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }
   | { kind: 'recovery.seal'; sealed: string }
   | { kind: 'pairing.handover'; sealed: string; linkKey: string; inboxKey: string }

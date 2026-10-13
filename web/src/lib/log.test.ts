@@ -11,6 +11,7 @@ import {
   type Library,
 } from './library';
 import { LibraryLog, LibraryUpdateRequiredError } from './log';
+import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
 import { deliverSimkl } from './simklDelivery';
@@ -181,6 +182,34 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('seals migration credentials under the worker-only household key and reopens them after restart', async () => {
+    const server = await edge();
+    const { data, vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    const store = new OwnerSplitWorkerStore(log);
+    const attempt = '0123456789abcdef0123456789abcdef';
+    const handle = await store.allocateCandidate(attempt);
+    const opened = await store.resolveCandidate(handle.keyRef, attempt);
+    const rawKey = opened.libraryKey;
+
+    const persisted = data.get(`${log.libraryId}:profile-migration/v1/candidate/${handle.keyRef}`);
+    expect(persisted).toBeDefined();
+    expect(new TextDecoder().decode(persisted)).not.toContain(rawKey);
+
+    const restarted = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    await expect(
+      new OwnerSplitWorkerStore(restarted).resolveCandidate(handle.keyRef, attempt),
+    ).resolves.toMatchObject({ handle, libraryKey: rawKey });
+  });
+
+  it('fails closed when migration secure storage is unavailable', async () => {
+    const server = await edge();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    await expect(
+      new OwnerSplitWorkerStore(log).allocateCandidate('0123456789abcdef0123456789abcdef'),
+    ).rejects.toThrow(/Encrypted library storage is unavailable/);
+  });
+
   it('reads the validated profile directory beside, never as, profile activity', async () => {
     const server = await edge([], [await sealedProfileDirectory()]);
     const { vault } = memoryVault();

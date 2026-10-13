@@ -100,6 +100,42 @@ function authority(
 }
 
 describe('LibraryLogAuthority', () => {
+  it('queries the authenticated profile capability without starting a migration', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input, init) => {
+        requests.push({ url: String(input), init });
+        return new Response(
+          JSON.stringify({
+            enrollment: 'prepare',
+            wireMin: 4,
+            migrationWire: 5,
+            runtimeHouseholdWire: 5,
+            runtimeProfileWire: 4,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    try {
+      const { authority } = await localAuthority();
+      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
+        kind: 'profile-migration.status',
+        phase: 'available',
+      });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toMatch(/\/profile-capability$/);
+      expect(requests[0]?.init?.method).toBe('GET');
+      const headers = requests[0]?.init?.headers as Record<string, string>;
+      expect(headers['x-den-library-token']).toBeTruthy();
+      expect(headers['x-den-wire']).toBe('5');
+      expect(JSON.stringify(requests)).not.toContain(KEY);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('owns minimal runtime discovery and the named retained Home values', async () => {
     const { log, authority } = await localAuthority();
     await expect(authority.select({ kind: 'profiles' })).resolves.toEqual({

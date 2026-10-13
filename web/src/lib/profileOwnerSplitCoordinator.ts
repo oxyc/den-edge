@@ -124,7 +124,7 @@ export class DormantOwnerSplitCoordinator {
 
   /** A separate explicit action. The store must atomically persist the ready state and bound authorization record. */
   async authorizeCommit(attempt: string): Promise<void> {
-    const journal = checkedJournal(await this.#store.load());
+    const journal = checkedOwnerSplitJournal(await this.#store.load());
     if (
       journal === null ||
       journal.attempt !== attempt ||
@@ -144,7 +144,7 @@ export class DormantOwnerSplitCoordinator {
   }
 
   async cancel(attempt: string): Promise<OwnerSplitRunResult> {
-    const journal = checkedJournal(await this.#store.load());
+    const journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null || journal.attempt !== attempt)
       throw new Error('Owner split attempt is absent');
     await this.#store.save({ ...journal, cancelRequested: true });
@@ -153,7 +153,7 @@ export class DormantOwnerSplitCoordinator {
 
   async authorizeRecovery(attempt: string, recoveryAttempt: string): Promise<OwnerSplitRunResult> {
     checkedAttempt(recoveryAttempt);
-    const journal = checkedJournal(await this.#store.load());
+    const journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null || journal.attempt !== attempt || journal.state !== 'restore-required')
       throw new Error('Owner split recovery is not required');
     await this.#store.authorizeRecovery({
@@ -166,7 +166,7 @@ export class DormantOwnerSplitCoordinator {
   }
 
   async #drive(allowCommit: boolean): Promise<OwnerSplitRunResult> {
-    let journal = checkedJournal(await this.#store.load());
+    let journal = checkedOwnerSplitJournal(await this.#store.load());
     if (journal === null) return { kind: 'inactive' };
     let lookup: OwnerSplitAttemptLookup | undefined;
     let household: OwnerSplitHouseholdObservation | undefined;
@@ -386,14 +386,17 @@ export class DormantOwnerSplitCoordinator {
   }
 
   async #save(journal: OwnerSplitJournal): Promise<OwnerSplitJournal> {
-    const checked = checkedJournal(journal);
+    const checked = checkedOwnerSplitJournal(journal);
     if (checked === null) throw new Error('Refusing invalid Owner split journal');
     await this.#store.save(checked);
     return checked;
   }
 }
 
-function checkedJournal(value: OwnerSplitJournal | null): OwnerSplitJournal | null {
+/** Strict durable boundary shared by the Worker store and coordinator. */
+export function checkedOwnerSplitJournal(
+  value: OwnerSplitJournal | null,
+): OwnerSplitJournal | null {
   if (value === null) return null;
   if (
     value.version !== 4 ||
