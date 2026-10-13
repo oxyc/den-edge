@@ -3,6 +3,7 @@
 // checks it against den-spec's vectors, which the TV checks itself against too.
 
 import { hex, hkdf } from './crypto';
+import { validateProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import { syncPolicy } from './syncCore';
 
 const utf8 = new TextEncoder();
@@ -304,6 +305,8 @@ export function encodeDocument(
  */
 export type Opened =
   | { row: Row; newer?: true; dropped?: unknown[] }
+  | { profileDirectory: ProfileDirectoryDocument }
+  | { invalidProfileDirectory: true }
   | { unknown: Record<string, unknown> }
   | { newerFraming: true }
   | { unreadable: string; json?: Record<string, unknown> };
@@ -362,7 +365,19 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
   }>({ op: 'doc_decode', plaintext: toBase64url(plain) });
   if (decoded.status === 'unreadable') return { unreadable: decoded.reason ?? 'unreadable' };
   if (decoded.status === 'newer' && !decoded.document) return { newerFraming: true };
-  if (decoded.status === 'row') return { unknown: decoded.row ?? {} };
+  if (decoded.status === 'row') {
+    const row = decoded.row ?? {};
+    if (row.kind !== 'profiles') return { unknown: row };
+    if (!(await named('profiles'))) return { unreadable: 'identity' };
+    try {
+      return { profileDirectory: validateProfileDirectory(row) };
+    } catch {
+      // It opened under the correct logical name, so report an invalid control document distinctly. Treating a
+      // contract violation as cryptographic damage would let ordinary unreadable-row compaction delete it, while
+      // ignoring it would leave an older, less restrictive directory active.
+      return { invalidProfileDirectory: true };
+    }
+  }
   if (!(await named(decoded.name))) return { unreadable: 'identity' };
   if (decoded.dropped?.length)
     console.warn(`den: ${decoded.name} read without its malformed parts`, decoded.dropped);

@@ -19,6 +19,7 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   routeServices: 64,
   routeEntries: 32,
   libraryMetadataTitles: 512,
+  profileEntries: 64,
 } as const;
 
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
@@ -300,7 +301,23 @@ export type LibrarySelection =
   | { kind: 'simkl' }
   | { kind: 'recovery' }
   | { kind: 'runtime' }
+  | { kind: 'profiles' }
   | { kind: 'downloads' };
+
+export interface ProfileDirectoryView {
+  kind: 'profiles';
+  owner: string | null;
+  profiles: Array<{
+    id: string;
+    role: 'owner' | 'kid' | 'adult';
+    name: string;
+    avatar?: string;
+    libraryKey: string;
+    keyVersion: number;
+    policy: { maximumAge: number | null; unknownRatings: 'allow' | 'block' };
+    deleted: boolean;
+  }>;
+}
 
 export interface LibraryOverviewView {
   kind: 'overview';
@@ -526,6 +543,7 @@ export type LibrarySelectionValue =
   | SimklView
   | RecoveryView
   | RuntimeDiscoveryView
+  | ProfileDirectoryView
   | DownloadsView;
 
 export interface HistoryImportItem {

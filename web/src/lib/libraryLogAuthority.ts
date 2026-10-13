@@ -533,6 +533,8 @@ export class LibraryLogAuthority {
         return this.#administration().recoveryView();
       case 'runtime':
         return this.#runtime();
+      case 'profiles':
+        return this.#profiles();
       case 'downloads':
         return this.#downloads();
     }
@@ -1257,6 +1259,28 @@ export class LibraryLogAuthority {
         .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
         .slice(0, 10_000),
       privateRemuxUrl: remux ?? null,
+    };
+  }
+
+  #profiles(): Extract<LibrarySelectionValue, { kind: 'profiles' }> {
+    const directory = this.#log.profileDirectory();
+    if (!directory) return { kind: 'profiles', owner: null, profiles: [] };
+    return {
+      kind: 'profiles',
+      owner: directory.owner,
+      profiles: Object.values(directory.profiles).map((profile) => ({
+        id: profile.id,
+        role: profile.role,
+        name: profile.display.value.name,
+        ...(profile.display.value.avatar ? { avatar: profile.display.value.avatar } : {}),
+        libraryKey: profile.library.value.key,
+        keyVersion: profile.library.value.keyVersion,
+        policy: {
+          maximumAge: profile.policy.value.maximumAge,
+          unknownRatings: profile.policy.value.unknownRatings,
+        },
+        deleted: profile.deleted.value,
+      })),
     };
   }
 

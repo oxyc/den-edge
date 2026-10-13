@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { deflateRawSync } from 'node:zlib';
 import { addToWatchlist, blankTitle, react } from './actions';
 import type { Vault } from './localVault';
 import {
@@ -18,6 +19,7 @@ import {
   deriveKeys,
   open,
   seal,
+  sealPlaintext,
   type EpisodeRow,
   type Row,
   type SettingsRow,
@@ -27,6 +29,41 @@ import {
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 const at = (t: number, device = 'tv01'): Stamp => [t, 0, device];
+
+const OWNER_ID = '00112233445566778899aabbccddeeff';
+const OWNER_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(17)));
+const profileAt = (t: number): Stamp => [t, 0, 'a1b2c3d4e5f60718'];
+const profileDirectory = (name = 'Cindy') => ({
+  format: 4 as const,
+  kind: 'profiles' as const,
+  schema: 1 as const,
+  owner: OWNER_ID,
+  profiles: {
+    [OWNER_ID]: {
+      id: OWNER_ID,
+      role: 'owner' as const,
+      display: { value: { name }, at: profileAt(1) },
+      library: { value: { keyVersion: 1, key: OWNER_KEY }, at: profileAt(2) },
+      policy: {
+        value: { maximumAge: null, unknownRatings: 'allow' as const },
+        at: profileAt(3),
+      },
+      deleted: { value: false, at: profileAt(4) },
+    },
+  },
+});
+
+async function sealedProfileDirectory(name = 'Cindy') {
+  const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+  const compressed = deflateRawSync(JSON.stringify(profileDirectory(name)));
+  return sealPlaintext(keys, 'profiles', new Uint8Array([0, ...compressed]));
+}
+
+async function sealedDirectoryAs(logicalName: string, document: unknown) {
+  const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+  const compressed = deflateRawSync(JSON.stringify(document));
+  return sealPlaintext(keys, logicalName, new Uint8Array([0, ...compressed]));
+}
 
 function row(id: number, overrides: Partial<TitleRow> = {}): TitleRow {
   return {
@@ -49,9 +86,14 @@ function row(id: number, overrides: Partial<TitleRow> = {}): TitleRow {
  * den-edge's `/lib` in memory, with library.rs's rules: `changes` paged in sequence order (two a page, so paging
  * is exercised), and `batch` with compare-and-set on each row's sequence.
  */
-async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
+async function edge(
+  rows: Row[] = [],
+  extra: { k: string; v: string }[] = [],
+  initialGeneration?: string,
+) {
   const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
   let head = 0;
+  let generation = initialGeneration;
   const stored = new Map<string, { k: string; seq: number; v: string }>();
   for (const entry of [...(await Promise.all(rows.map((r) => seal(keys, r)))), ...extra]) {
     stored.set(entry.k, { ...entry, seq: ++head });
@@ -82,20 +124,23 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
     const since = Number(new URL(String(input), 'https://den.example').searchParams.get('since'));
     const newer = [...stored.values()].filter((e) => e.seq > since).sort((a, b) => a.seq - b.seq);
     return new Response(
-      JSON.stringify({ entries: newer.slice(0, 2), head, more: newer.length > 2 }),
+      JSON.stringify({ entries: newer.slice(0, 2), head, more: newer.length > 2, generation }),
       { status: 200 },
     );
   };
-  const rewrite = (entries: { k: string; v: string }[]) => {
+  const rewrite = (entries: { k: string; v: string }[], nextGeneration = generation) => {
     stored.clear();
     head = 0;
+    generation = nextGeneration;
     for (const entry of entries) stored.set(entry.k, { ...entry, seq: ++head });
   };
   const append = async (row: Row) => {
     const entry = await seal(keys, row);
     stored.set(entry.k, { ...entry, seq: ++head });
   };
-  return { fetchImpl, stored, rewrite, append, head: () => head };
+  const appendSealed = (entry: { k: string; v: string }) =>
+    void stored.set(entry.k, { ...entry, seq: ++head });
+  return { fetchImpl, stored, rewrite, append, appendSealed, head: () => head };
 }
 
 function memoryVault() {
@@ -128,6 +173,118 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('reads the validated profile directory beside, never as, profile activity', async () => {
+    const server = await edge([], [await sealedProfileDirectory()]);
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+
+    expect(log.rows()).toEqual([]);
+    expect(log.documents()).toEqual([]);
+    expect(log.profileDirectory()).toMatchObject({
+      owner: OWNER_ID,
+      profiles: { [OWNER_ID]: { display: { value: { name: 'Cindy' } } } },
+    });
+
+    server.appendSealed(await sealedProfileDirectory('Owner'));
+    await log.refresh();
+    expect(log.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Owner');
+    await vi.waitFor(async () => {
+      const cached = (await LibraryLog.open(
+        LIBRARY_KEY,
+        async () => Promise.reject(new TypeError('offline')),
+        undefined,
+        vault,
+      ))!;
+      expect(cached.fromCache).toBe(true);
+      expect(cached.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Owner');
+    });
+  });
+
+  it('fails closed for invalid or misnamed profile directories', async () => {
+    const invalid = profileDirectory();
+    invalid.profiles[OWNER_ID]!.deleted.value = true;
+    const invalidServer = await edge([], [await sealedDirectoryAs('profiles', invalid)]);
+    const invalidLog = (await LibraryLog.open(
+      LIBRARY_KEY,
+      invalidServer.fetchImpl,
+      undefined,
+      null,
+    ))!;
+    expect(invalidLog.profileDirectory()).toBeNull();
+    expect(invalidLog.unreadable.size).toBe(0);
+
+    const misnamedServer = await edge(
+      [],
+      [await sealedDirectoryAs('profiles-shadow', profileDirectory())],
+    );
+    const misnamed = (await LibraryLog.open(
+      LIBRARY_KEY,
+      misnamedServer.fetchImpl,
+      undefined,
+      null,
+    ))!;
+    expect(misnamed.profileDirectory()).toBeNull();
+    expect([...misnamed.unreadable.values()]).toContain('identity');
+  });
+
+  it('deactivates a valid and cached directory when a newer profiles row is invalid', async () => {
+    const server = await edge([], [await sealedProfileDirectory()]);
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(log.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Cindy');
+
+    let online = false;
+    const fetchImpl: typeof fetch = (input, init) =>
+      online ? server.fetchImpl(input, init) : Promise.reject(new TypeError('offline'));
+    const cached = await vi.waitFor(async () => {
+      const candidate = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+      expect(candidate.fromCache).toBe(true);
+      expect(candidate.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Cindy');
+      return candidate;
+    });
+
+    const invalid = profileDirectory('Invalid');
+    invalid.profiles[OWNER_ID]!.deleted.value = true;
+    server.appendSealed(await sealedDirectoryAs('profiles', invalid));
+    online = true;
+    expect(await cached.refresh()).toBe(true);
+    expect(cached.profileDirectory()).toBeNull();
+    expect(cached.unreadable.size).toBe(0);
+
+    await vi.waitFor(async () => {
+      const reopened = (await LibraryLog.open(
+        LIBRARY_KEY,
+        async () => Promise.reject(new TypeError('offline')),
+        undefined,
+        vault,
+      ))!;
+      expect(reopened.fromCache).toBe(true);
+      expect(reopened.profileDirectory()).toBeNull();
+    });
+  });
+
+  it('forgets directory sequence across a generation reset and accepts a lower replacement', async () => {
+    const server = await edge([row(1)], [await sealedProfileDirectory('Before')], 'generation-1');
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(log.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Before');
+
+    server.rewrite([await sealedProfileDirectory('After')], 'generation-2');
+    expect(await log.refresh()).toBe(true);
+    expect(log.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('After');
+  });
+
+  it('deactivates the directory when the replacement generation has none', async () => {
+    const server = await edge([], [await sealedProfileDirectory()], 'generation-1');
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(log.profileDirectory()).not.toBeNull();
+
+    server.rewrite([], 'generation-2');
+    expect(await log.refresh()).toBe(true);
+    expect(log.profileDirectory()).toBeNull();
+  });
+
   it('listens for runtime changes in a Worker global without window', async () => {
     const opened: string[] = [];
     class WorkerChannel {

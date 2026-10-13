@@ -102,6 +102,11 @@ function authority(
 describe('LibraryLogAuthority', () => {
   it('owns minimal runtime discovery and the named retained Home values', async () => {
     const { log, authority } = await localAuthority();
+    await expect(authority.select({ kind: 'profiles' })).resolves.toEqual({
+      kind: 'profiles',
+      owner: null,
+      profiles: [],
+    });
     await expect(authority.select({ kind: 'runtime' })).resolves.toMatchObject({
       kind: 'runtime',
       pluginManifestUrls: [],
