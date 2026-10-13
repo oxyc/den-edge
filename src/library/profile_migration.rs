@@ -1658,6 +1658,96 @@ mod tests {
         h.send(method, path, body, &headers).await
     }
 
+    async fn assert_disabled(response: Response) {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(response).await, json!({ "error": "not_found" }));
+    }
+
+    #[tokio::test]
+    async fn disabled_adapter_is_uniformly_unreachable_before_global_routing() {
+        let h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.web_origins = vec!["https://app.example".into()];
+        });
+        assert_eq!(
+            write(&h, HOUSEHOLD, ACTIVITY, 0, "sealed-activity", HOUSEHOLD_TOKEN).await,
+            StatusCode::OK
+        );
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let before = storage.locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt = format!("{base}/{ATTEMPT}");
+        let routes = [
+            (base, "POST"),
+            (attempt.clone(), "GET"),
+            (format!("{attempt}/backup"), "POST"),
+            (format!("{attempt}/rows"), "POST"),
+            (format!("{attempt}/commit"), "POST"),
+            (format!("{attempt}/restore"), "POST"),
+            (format!("{attempt}/retire-candidate"), "POST"),
+        ];
+
+        for (path, correct_method) in &routes {
+            for method in [*correct_method, "PATCH"] {
+                assert_disabled(
+                    h.send(
+                        method,
+                        path,
+                        Some("{}".into()),
+                        &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+                    )
+                    .await,
+                )
+                .await;
+            }
+
+            assert_disabled(
+                h.send(
+                    correct_method,
+                    path,
+                    Some("{}".into()),
+                    &[("content-length", "18446744073709551615")],
+                )
+                .await,
+            )
+            .await;
+
+            let preflight = h
+                .send(
+                    "OPTIONS",
+                    path,
+                    None,
+                    &[
+                        ("origin", "https://app.example"),
+                        ("access-control-request-method", correct_method),
+                        ("access-control-request-headers", "x-den-candidate-library-token"),
+                    ],
+                )
+                .await;
+            assert!(!preflight.headers().contains_key("access-control-allow-methods"));
+            assert!(!preflight.headers().contains_key("access-control-allow-headers"));
+            assert_disabled(preflight).await;
+        }
+
+        let after = storage.locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        assert_eq!(after, before, "a disabled route may not mutate the household");
+        assert!(storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().is_none());
+        for extension in ["json", BACKUP_EXT, STAGE_EXT] {
+            assert!(
+                h.state
+                    .store
+                    .get_file(NS, &attempt_key(HOUSEHOLD, ATTEMPT), extension)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a disabled route created {extension} state"
+            );
+        }
+        assert!(
+            !h.state.metrics.render().contains("profile-migration"),
+            "disabled route names must not become metric labels"
+        );
+    }
+
     #[tokio::test]
     async fn http_adapter_is_default_off_wire_five_authenticated_and_restart_durable() {
         let mut h = Harness::new();

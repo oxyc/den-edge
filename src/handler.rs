@@ -95,8 +95,12 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     // In the answer and in the log line, so a device's report can be matched to this request.
     let rid = crate::hex(&crate::random_bytes::<8>());
     let method = req.method().clone();
-    let route = route_label(req.uri().path());
-    let library_request = req.uri().path().starts_with("/lib/");
+    let path = req.uri().path();
+    let library_request = path.starts_with("/lib/");
+    let migration_disabled = !state.profile_migration_enabled && profile_migration_path(path);
+    // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
+    // let the generic preflight answer advertise its private candidate-token header.
+    let route = if migration_disabled { "other" } else { route_label(path) };
     let origin = allowed_origin(&state, &req);
     let bulk = !is_control(route);
     let admission = admit(&state, bulk)
@@ -110,13 +114,14 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
         Ok(slot) => match &origin {
             Some(_)
                 if method == Method::OPTIONS
+                    && !migration_disabled
                     && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
             {
                 preflight()
             }
             _ => {
                 req.extensions_mut().insert(slot.clone());
-                dispatch(&state, req, route, &rid).await
+                dispatch(&state, req, route, &rid, migration_disabled).await
             }
         },
     };
@@ -474,7 +479,18 @@ fn preflight() -> Response {
 /// `rid` is this request's id, the one the log line and the answer both carry. It travels on to an addon the
 /// relay asks, so a line here and a line there can be put side by side — without it the two halves of one
 /// request were two unrelated entries in two journals.
-async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid: &str) -> Response {
+async fn dispatch(
+    state: &Arc<AppState>,
+    req: Request,
+    route: &'static str,
+    rid: &str,
+    migration_disabled: bool,
+) -> Response {
+    // This precedes method validation and declared/body length checks so every shape of the dormant surface is
+    // uniformly absent. `handle` also labels it as `other` and suppresses preflight before reaching here.
+    if migration_disabled {
+        return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
+    }
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
@@ -642,6 +658,16 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
     }
+}
+
+fn profile_migration_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/lib/") else {
+        return false;
+    };
+    let Some((_, action)) = rest.split_once('/') else {
+        return false;
+    };
+    action == "profile-migration" || action.starts_with("profile-migration/")
 }
 
 /// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind
