@@ -443,6 +443,12 @@ export class ProfileModeCoordinator {
 
 export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indeterminate';
 
+/** Cache-Control is a comma-separated directive list. Substring matching would accept made-up, cacheable
+ * directives such as `x-no-store` or `no-store-if`; only the actual no-store directive makes the capability
+ * safe to use without surviving a host-gate rollback. */
+const hasNoStore = (value: string | null): boolean =>
+  value?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store') === true;
+
 export const previewProfileDirectory = (): PreviewProfileDirectory => {
   const owner = profileId('00000000000000000000000000000001');
   return {
@@ -476,8 +482,7 @@ export async function profilesCapability(
       cache: 'no-store',
       credentials: 'same-origin',
     });
-    if (!response.headers.get('cache-control')?.toLowerCase().includes('no-store'))
-      return 'indeterminate';
+    if (!hasNoStore(response.headers.get('cache-control'))) return 'indeterminate';
     const value: unknown = await response.json();
     const disabled =
       response.status === 404 &&
