@@ -95,6 +95,7 @@ import { OwnerSplitWorkerTransport } from './profileOwnerSplitWorkerTransport';
 import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
 import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
+import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
@@ -377,6 +378,7 @@ export class LibraryLogAuthority {
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
   #ownerSplit?: OwnerSplitWorkerController;
+  #kidCreate?: ProfileKidCreateCoordinator;
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
     this.#log = log;
@@ -668,6 +670,12 @@ export class LibraryLogAuthority {
           ...observation,
         };
       }
+      case 'profile-create.status': {
+        const result = await this.#profileKidCreate().resume();
+        return result
+          ? { kind: 'profile-create.status', phase: 'created', ...result }
+          : { kind: 'profile-create.status', phase: 'idle' };
+      }
       case 'relay.membership':
         return { kind: 'relay.membership', capability: await this.#log.relayMembership() };
       case 'key-reset.prepare':
@@ -774,7 +782,28 @@ export class LibraryLogAuthority {
     return this.#ownerSplit;
   }
 
-  task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
+  #profileKidCreate(): ProfileKidCreateCoordinator {
+    if (this.#kidCreate) return this.#kidCreate;
+    const store = new ProfileKidCreateStore(this.#log);
+    this.#kidCreate = new ProfileKidCreateCoordinator(this.#log.libraryId, store, {
+      hasActiveOwner: () => {
+        const directory = this.#log.profileDirectory();
+        const owner = directory?.profiles[directory.owner];
+        return owner?.role === 'owner' && !owner.deleted.value;
+      },
+      readDirectory: () => this.#log.readKidProfileDirectory(),
+      createAndVerifyProfileLibrary: (journal) =>
+        this.#log.createAndVerifyKidProfileLibrary(journal),
+      casDirectory: (authority, directory) =>
+        this.#log.casKidProfileDirectory(authority, directory),
+      retireProfileLibrary: (journal) => this.#log.retireKidProfileLibrary(journal),
+      adoptDirectory: (directory) => this.#log.adoptKidProfileDirectory(directory),
+      proveProfileResult: (result) => this.#log.proveKidProfileResult(result),
+    });
+    return this.#kidCreate;
+  }
+
+  async task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
     if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
@@ -784,6 +813,14 @@ export class LibraryLogAuthority {
       task.kind === 'profile-migration.recover'
     )
       return this.#profileMigrationTask(task);
+    if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
+    if (task.kind === 'profile.create.ack') {
+      await this.#profileKidCreate().acknowledge(task.receipt);
+      return {
+        result: { kind: 'profile.create.ack', outcome: 'acknowledged' },
+        affected: [],
+      };
+    }
     if (
       ((task.kind === 'key-reset.move' ||
         task.kind === 'key-reset.settle' ||
@@ -824,6 +861,35 @@ export class LibraryLogAuthority {
         ...('attempt' in result ? { attempt: result.attempt } : {}),
       },
       affected: [],
+    };
+  }
+
+  async #profileCreateTask(
+    task: Extract<LibraryTask, { kind: 'profile.create' }>,
+    operationId: string,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    if (
+      this.#parentalPinDelivery() !== 'synced' ||
+      !stored ||
+      !(await pinMatches(stored, task.pin))
+    )
+      throw authorityError('unauthorized', 'Owner PIN is required to create a Kid profile');
+    const stamps = [
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+    ] as const;
+    const result = await this.#profileKidCreate().begin(
+      operationId,
+      task.name,
+      task.maximumAge,
+      stamps,
+    );
+    return {
+      result: { kind: 'profile.create', outcome: 'created', ...result },
+      affected: [{ kind: 'profiles' }],
     };
   }
 

@@ -8,9 +8,10 @@
   const recovering = new URLSearchParams(location.search).has('recovery');
   const queued = new URLSearchParams(location.search).has('queued');
   const reloadedPending = new URLSearchParams(location.search).has('reloaded-pending');
-  let phase = (recovering ? 'recovery-required' : 'available') as
+  const enabled = new URLSearchParams(location.search).has('enabled');
+  let phase = (recovering ? 'recovery-required' : enabled ? 'enabled' : 'available') as
     'available' | 'enabled' | 'recovery-required';
-  let savedPin = recovering ? '1234' : '';
+  let savedPin = recovering || enabled ? '1234' : '';
 
   const model = {
     profileMigrationStatus: async () => ({
@@ -50,6 +51,24 @@
     cancelProfileMigration: async () => {
       throw new Error('not preparing');
     },
+    profileCreateStatus: async () => ({
+      kind: 'profile-create.status' as const,
+      phase: 'idle' as const,
+    }),
+    createKidProfile: async (name: string, maximumAge: number, pin: string) => {
+      events.push(`create:${name}:${maximumAge}:${pin}`);
+      return {
+        result: {
+          kind: 'profile.create' as const,
+          outcome: 'created' as const,
+          profile: 'b'.repeat(32),
+          name,
+          maximumAge,
+          receipt: 'fixture-profile-create',
+        },
+        affected: [],
+      };
+    },
   } as unknown as LibraryModel;
 
   (globalThis as { profileSettingsEvents?: () => string[] }).profileSettingsEvents = () => [
@@ -60,7 +79,7 @@
 <main style="max-width:760px;margin:40px auto">
   <ProfilesSection
     {model}
-    pinConfigured={recovering || reloadedPending}
+    pinConfigured={recovering || reloadedPending || enabled}
     pinDelivery={reloadedPending ? 'queued' : 'synced'}
     savePin={async (pin) => {
       events.push(`set:${pin}`);

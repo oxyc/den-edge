@@ -592,7 +592,9 @@ export type LibraryTask =
       attempt: string;
       recoveryAttempt: string;
       source: { generation: number; head: string };
-    };
+    }
+  | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
+  | { kind: 'profile.create.ack'; receipt: string };
 
 /** A grant as the library's grants row holds it (`assistant_grants`), for Settings. */
 export interface AssistantGrantView {
@@ -658,7 +660,16 @@ export type LibraryTaskResult =
         | 'source-changed'
         | 'cancelled';
       attempt?: string;
-    };
+    }
+  | {
+      kind: 'profile.create';
+      outcome: 'created';
+      profile: string;
+      name: string;
+      maximumAge: number;
+      receipt: string;
+    }
+  | { kind: 'profile.create.ack'; outcome: 'acknowledged' };
 
 export type LibraryQuery =
   | {
@@ -693,7 +704,8 @@ export type LibraryQuery =
   | { kind: 'assistant.grants' }
   | { kind: 'profile-migration.status' }
   | { kind: 'profile-migration.observe' }
-  | { kind: 'profile-migration.observe-recovery'; attempt: string };
+  | { kind: 'profile-migration.observe-recovery'; attempt: string }
+  | { kind: 'profile-create.status' };
 
 export type LibraryQueryResult =
   | {
@@ -734,6 +746,14 @@ export type LibraryQueryResult =
       attempt: string;
       recoveryAttempt: string;
       source: { generation: number; head: string };
+    }
+  | {
+      kind: 'profile-create.status';
+      phase: 'idle' | 'created';
+      profile?: string;
+      name?: string;
+      maximumAge?: number;
+      receipt?: string;
     }
   | { kind: 'key-reset.prepare'; destinationLibraryKey: string; device: string }
   | { kind: 'recovery.seal'; sealed: string }

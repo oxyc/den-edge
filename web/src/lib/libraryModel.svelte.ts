@@ -466,6 +466,27 @@ export class LibraryModel {
     );
   }
 
+  async profileCreateStatus() {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'profile-create.status' });
+    if (result.kind !== 'profile-create.status') throw wrongQueryResult('profile create status');
+    if (result.phase === 'created') await this.#ackProfileCreate(result.receipt!);
+    return result;
+  }
+
+  async createKidProfile(name: string, maximumAge: number, pin: string, operationId?: string) {
+    const created = await this.task({ kind: 'profile.create', name, maximumAge, pin }, operationId);
+    if (created.result.kind !== 'profile.create') throw wrongQueryResult('profile create');
+    await this.#ackProfileCreate(created.result.receipt);
+    return created;
+  }
+
+  async #ackProfileCreate(receipt: string): Promise<void> {
+    const acknowledged = await this.task({ kind: 'profile.create.ack', receipt });
+    if (acknowledged.result.kind !== 'profile.create.ack')
+      throw wrongQueryResult('profile create acknowledgement');
+  }
+
   setRemoteAccess(
     credentials: { clientId: string; clientSecret: string } | null,
     operationId?: string,

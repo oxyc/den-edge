@@ -1,4 +1,5 @@
 import { syncPolicy } from './syncCore';
+import type { ProfileDirectoryDocument } from './profileDirectory';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const LIBRARY_ID = /^[0-9a-f]{32}$/;
@@ -129,6 +130,45 @@ export interface ProfileCapabilityDecision {
   readonly requiredWire?: number;
 }
 
+export interface ProfileCreateJournal {
+  readonly version: 1;
+  readonly profile: string;
+  /** Base64 profile key. It is valid only inside the household-sealed Worker journal. */
+  readonly key: string;
+  readonly display: {
+    readonly value: { readonly name: string; readonly avatar?: string };
+    readonly at: readonly [number, number, string];
+  };
+  readonly libraryAt: readonly [number, number, string];
+  readonly maximumAge: number;
+  readonly policyAt: readonly [number, number, string];
+  readonly deletedAt: readonly [number, number, string];
+}
+
+export type ProfileCreateEffect =
+  | { readonly effect: 'no-op' | 'persist-journal' | 'read-directory' | 'discard-journal' }
+  | {
+      readonly effect: 'create-profile-library' | 'retire-profile-library';
+      readonly profile: string;
+      readonly key: string;
+    }
+  | { readonly effect: 'apply-create'; readonly profile: string; readonly entry: unknown }
+  | {
+      readonly effect: 'cas-directory';
+      readonly base: number;
+      readonly generation: string;
+      readonly directory: unknown;
+    }
+  | { readonly effect: 'adopt'; readonly directory: unknown };
+
+export interface ProfileDirectoryMaterialization {
+  readonly directory: ProfileDirectoryDocument;
+  /** RFC 8785 directory bytes, base64url without padding. */
+  readonly jcs: string;
+  /** Exact compressed library-v4 plaintext, base64url without padding. */
+  readonly plaintext: string;
+}
+
 /**
  * The only migration-digest boundary used by Web. Validation, raw-key ordering, RFC 8785 JCS and hashing stay in
  * den-core; callers cannot accidentally substitute JSON.stringify or a locale-sensitive sort.
@@ -242,6 +282,39 @@ export function profileMigrationAuthorization(input: {
     op: 'profiles_migration_authorization',
     input,
   });
+}
+
+/** The only seal-ready representation of a committed profile directory. */
+export function profilesMaterialize(document: unknown): ProfileDirectoryMaterialization {
+  return syncPolicy<ProfileDirectoryMaterialization>({ op: 'profiles_materialize', document });
+}
+
+/** Apply the journal-derived Kid entry. den-core forces unknown ratings closed and validates the complete result. */
+export function profilesApplyCreate(input: {
+  readonly document: ProfileDirectoryDocument;
+  readonly profile: string;
+  readonly entry: unknown;
+}): ProfileDirectoryDocument {
+  return syncPolicy<ProfileDirectoryDocument>({
+    op: 'profiles_apply',
+    document: input.document,
+    operation: 'create',
+    profile: input.profile,
+    entry: input.entry,
+  });
+}
+
+/** Merge two authenticated directory observations using the one shared CRDT rule. */
+export function profilesMerge(
+  left: ProfileDirectoryDocument,
+  right: ProfileDirectoryDocument,
+): ProfileDirectoryDocument {
+  return syncPolicy<ProfileDirectoryDocument>({ op: 'profiles_merge', left, right });
+}
+
+/** Pure crash/retry/concurrency planner for one explicitly requested persistent Kid profile. */
+export function profilesCreateNext(input: Record<string, unknown>): ProfileCreateEffect {
+  return syncPolicy<ProfileCreateEffect>({ op: 'profiles_create_next', input });
 }
 
 /** Narrow early so malformed network evidence never reaches crypto or den-core as trusted state. */
