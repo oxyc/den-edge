@@ -2025,11 +2025,14 @@ mod tests {
 
     const HOUSEHOLD: &str = "0123456789abcdef0123456789abcdef";
     const CANDIDATE: &str = "fedcba9876543210fedcba9876543210";
+    const LOSER_CANDIDATE: &str = "dddddddddddddddddddddddddddddddd";
     const HOUSEHOLD_TOKEN: &str = "household-key";
     const CANDIDATE_TOKEN: &str = "candidate-key";
+    const LOSER_CANDIDATE_TOKEN: &str = "loser-candidate-key";
     const ACTIVITY: &str = "aaaaaaaaaaaaaaaa";
     const CONFIG: &str = "bbbbbbbbbbbbbbbb";
     const DIRECTORY: &str = "cccccccccccccccc";
+    const DELIVERY: &str = "dddddddddddddddd";
     const ATTEMPT: &str = "11111111111111111111111111111111";
     const ATTEMPT2: &str = "22222222222222222222222222222222";
     const ATTEMPT3: &str = "33333333333333333333333333333333";
@@ -2754,6 +2757,365 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND,
             "opening a migration must never auto-start a library"
+        );
+    }
+
+    /// Launch rehearsal through the actual request router and durable local stores. All ids, credentials and row
+    /// values are fresh constants scoped to the temporary Harness directory; there is no network client, production
+    /// material or mocked migration backend in this test. Dropping a completed commit response models the only part
+    /// outside the in-process server: a proxy or client losing the response after the server durably committed it.
+    #[tokio::test]
+    async fn synthetic_server_rehearsal_covers_split_race_cleanup_lost_response_and_restore() {
+        let mut h = Harness::new();
+        let dir = h.dir.clone();
+        for (key, value) in [
+            (ACTIVITY, "synthetic-owner-activity"),
+            (CONFIG, "synthetic-household-config"),
+            (DELIVERY, "synthetic-delivery-state"),
+        ] {
+            assert_eq!(write(&h, HOUSEHOLD, key, 0, value, HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        }
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let source = body_json(
+            migration_request(&h, "GET", &format!("{base}/source"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await["source"]
+            .clone();
+        let open = |attempt: &str| {
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(json!({ "attempt": attempt, "purpose": "split", "expectedSource": source }).to_string()),
+                Some(HOUSEHOLD_TOKEN),
+            )
+        };
+        let winner_open = body_json(open(ATTEMPT).await).await;
+        let loser_open = body_json(open(ATTEMPT2).await).await;
+        assert_eq!(winner_open["fence"]["generation"], loser_open["fence"]["generation"]);
+        assert_eq!(winner_open["fence"]["base"], loser_open["fence"]["base"]);
+        assert_eq!(winner_open["fence"]["head"], loser_open["fence"]["head"]);
+
+        let winner_path = format!("{base}/{ATTEMPT}");
+        let loser_path = format!("{base}/{ATTEMPT2}");
+        let winner_backup = body_json(
+            migration_request(&h, "POST", &format!("{winner_path}/backup"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        let loser_backup = body_json(
+            migration_request(&h, "POST", &format!("{loser_path}/backup"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        let backup_artifact = body_json(
+            migration_request(&h, "GET", &format!("{winner_path}/backup"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        assert_eq!(backup_artifact["digest"], winner_backup["digest"]);
+        assert_eq!(backup_artifact["rows"].as_array().unwrap().len(), 3);
+
+        // Copy the profile-owned rows from the verified backup into each independently authenticated candidate,
+        // then read them back over the normal wire-4 library API before touching the household.
+        let copied_rows = backup_artifact["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["k"] == ACTIVITY || row["k"] == DELIVERY)
+            .map(|row| json!({ "k": row["k"], "base": 0, "v": row["v"] }))
+            .collect::<Vec<_>>();
+        for (candidate, candidate_token) in
+            [(CANDIDATE, CANDIDATE_TOKEN), (LOSER_CANDIDATE, LOSER_CANDIDATE_TOKEN)]
+        {
+            let created = h
+                .send(
+                    "POST",
+                    &format!("/lib/{candidate}/batch"),
+                    Some(json!({ "writes": copied_rows }).to_string()),
+                    &[
+                        ("x-den-wire", "4"),
+                        ("x-den-wire-min", "4"),
+                        ("x-den-generation", "0"),
+                        ("x-den-library-token", candidate_token),
+                    ],
+                )
+                .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let readback = body_json(
+                h.send(
+                    "GET",
+                    &format!("/lib/{candidate}/changes"),
+                    None,
+                    &[("x-den-wire", "4"), ("x-den-library-token", candidate_token)],
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(readback["entries"].as_array().unwrap().len(), 2);
+            assert_eq!(readback["head"], 2);
+        }
+
+        let winner_stage = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{winner_path}/rows"),
+                Some(
+                    json!({
+                        "fence": winner_open["fence"],
+                        "backup": { "id": winner_backup["id"], "digest": winner_backup["digest"] },
+                        "writes": [
+                            { "k": CONFIG, "v": "synthetic-household-config" },
+                            { "k": DIRECTORY, "v": format!("synthetic-directory-owner:{CANDIDATE}") },
+                        ],
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        let loser_stage = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{loser_path}/rows"),
+                Some(
+                    json!({
+                        "fence": loser_open["fence"],
+                        "backup": { "id": loser_backup["id"], "digest": loser_backup["digest"] },
+                        "writes": [
+                            { "k": CONFIG, "v": "synthetic-household-config" },
+                            {
+                                "k": DIRECTORY,
+                                "v": format!("synthetic-directory-owner:{LOSER_CANDIDATE}"),
+                            },
+                        ],
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+
+        // The server commits, but the caller deliberately discards the terminal body. A lookup must be sufficient
+        // to resume; issuing the competing commit then deterministically identifies the same winner.
+        let lost = migration_request(
+            &h,
+            "POST",
+            &format!("{winner_path}/commit"),
+            Some(
+                json!({
+                    "fence": winner_open["fence"],
+                    "backup": { "id": winner_backup["id"], "digest": winner_backup["digest"] },
+                    "stagedDigest": winner_stage["stagedDigest"],
+                    "wireMin": 5,
+                })
+                .to_string(),
+            ),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(lost.status(), StatusCode::OK);
+        drop(lost);
+        let winner =
+            body_json(migration_request(&h, "GET", &winner_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(winner["state"], "committed");
+
+        let loser_commit = migration_request(
+            &h,
+            "POST",
+            &format!("{loser_path}/commit"),
+            Some(
+                json!({
+                    "fence": loser_open["fence"],
+                    "backup": { "id": loser_backup["id"], "digest": loser_backup["digest"] },
+                    "stagedDigest": loser_stage["stagedDigest"],
+                    "wireMin": 5,
+                })
+                .to_string(),
+            ),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(loser_commit.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(loser_commit).await, json!({ "error": "migration_fence_moved" }));
+        let loser =
+            body_json(migration_request(&h, "GET", &loser_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(loser["state"], "superseded");
+        assert_eq!(loser["winner"]["attempt"], ATTEMPT);
+
+        let old_wire = h
+            .send(
+                "GET",
+                &format!("/lib/{HOUSEHOLD}/changes"),
+                None,
+                &[("x-den-wire", "4"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+            )
+            .await;
+        assert_eq!(old_wire.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body_json(old_wire).await, json!({ "error": "upgrade_required", "min": 5 }));
+        let current = body_json(
+            h.send(
+                "GET",
+                &format!("/lib/{HOUSEHOLD}/changes"),
+                None,
+                &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+            )
+            .await,
+        )
+        .await;
+        let profiles =
+            current["entries"].as_array().unwrap().iter().find(|row| row["k"] == DIRECTORY).unwrap().clone();
+
+        let retired = body_json(
+            h.send(
+                "POST",
+                &format!("{loser_path}/retire-candidate"),
+                Some(
+                    json!({
+                        "source": loser_open["fence"],
+                        "authority": {
+                            "generation": winner["generation"],
+                            "base": winner["base"],
+                            "head": winner["head"],
+                            "kind": "committed",
+                        },
+                        "profilesRow": profiles,
+                        "protectedLibraryIds": [HOUSEHOLD, CANDIDATE],
+                        "candidateLibraryId": LOSER_CANDIDATE,
+                    })
+                    .to_string(),
+                ),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                    ("x-den-candidate-library-token", LOSER_CANDIDATE_TOKEN),
+                ],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(retired, json!({ "result": "retired" }));
+        assert_eq!(
+            h.send(
+                "GET",
+                &format!("/lib/{LOSER_CANDIDATE}/changes"),
+                None,
+                &[("x-den-wire", "4"), ("x-den-library-token", LOSER_CANDIDATE_TOKEN)],
+            )
+            .await
+            .status(),
+            StatusCode::GONE
+        );
+
+        let recovery_source = body_json(
+            migration_request(&h, "GET", &format!("{base}/source"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        let recovery = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(
+                    json!({
+                        "attempt": ATTEMPT3,
+                        "purpose": "restore",
+                        "expectedSource": recovery_source["source"],
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        let restored = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{base}/{ATTEMPT3}/restore"),
+                Some(
+                    json!({
+                        "backup": {
+                            "attempt": ATTEMPT,
+                            "id": winner_backup["id"],
+                            "digest": winner_backup["digest"],
+                        },
+                        "fence": recovery["fence"],
+                        "wireMin": recovery["wireMin"],
+                        "profilesRow": {
+                            "present": true,
+                            "seq": profiles["seq"],
+                            "digest": hex_digest(profiles["v"].as_str().unwrap().as_bytes()),
+                        },
+                        "directoryState": "invalid",
+                        "plannerDecision": "restore-backup",
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(restored["state"], "restored");
+        assert_eq!(restored["wireMin"], 5);
+        drop(h);
+
+        let mut restarted = Harness::in_dir(dir);
+        Arc::get_mut(&mut restarted.state).unwrap().profile_migration_enabled = true;
+        let restored_lookup = body_json(
+            migration_request(&restarted, "GET", &format!("{base}/{ATTEMPT3}"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(restored_lookup["state"], "restored");
+        let household = body_json(
+            restarted
+                .send(
+                    "GET",
+                    &format!("/lib/{HOUSEHOLD}/changes"),
+                    None,
+                    &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(household["head"], 3);
+        assert!(household["entries"].as_array().unwrap().iter().all(|row| row["k"] != DIRECTORY));
+        assert_eq!(
+            restarted
+                .send(
+                    "GET",
+                    &format!("/lib/{CANDIDATE}/changes"),
+                    None,
+                    &[("x-den-wire", "4"), ("x-den-library-token", CANDIDATE_TOKEN)],
+                )
+                .await
+                .status(),
+            StatusCode::OK,
+            "restoring the household does not retire the verified Owner library"
+        );
+        assert_eq!(
+            restarted
+                .send(
+                    "GET",
+                    &format!("/lib/{LOSER_CANDIDATE}/changes"),
+                    None,
+                    &[("x-den-wire", "4"), ("x-den-library-token", LOSER_CANDIDATE_TOKEN)],
+                )
+                .await
+                .status(),
+            StatusCode::GONE,
+            "loser retirement is durable across restart"
         );
     }
 
