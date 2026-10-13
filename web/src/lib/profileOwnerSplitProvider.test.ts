@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DormantOwnerSplitEffectExecutor,
+  type OwnerSplitDurableEvidence,
+  type OwnerSplitSecureWorker,
+} from './profileOwnerSplitEngine';
+import {
   HttpOwnerSplitProvider,
   type OwnerSplitMigrationTransport,
 } from './profileOwnerSplitProvider';
@@ -165,6 +170,71 @@ describe('Owner split HTTP provider', () => {
       path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`,
       body: undefined,
     });
+  });
+
+  it('executes aborted unchanged-source cleanup through the real provider without client-asserted authority', async () => {
+    let state: 'open' | 'aborted' = 'open';
+    const calls: Array<{
+      method: string;
+      path: string;
+      body?: unknown;
+      candidateKeyRef?: string;
+    }> = [];
+    const transport: OwnerSplitMigrationTransport = {
+      request: vi.fn(async (input) => {
+        calls.push(input);
+        if (input.path.endsWith('/retire-candidate')) return { result: 'retired' };
+        if (input.method === 'DELETE') state = 'aborted';
+        return { state, attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence };
+      }),
+      readHousehold: vi.fn(async () => ({
+        kind: 'legacy' as const,
+        generation: fence.generation,
+        base: fence.base,
+        head: fence.head,
+      })),
+    };
+    const secure: OwnerSplitSecureWorker = {
+      allocateCandidate: vi.fn(),
+      verifyBackup: vi.fn(),
+      copyAndAuthenticateOwner: vi.fn(),
+      verifyOwnerLibrary: vi.fn(),
+      planNext: vi.fn(),
+      verifyCommittedWinner: vi.fn(),
+      inspectCommittedDirectory: vi.fn(),
+      verifyDirectoryWinner: vi.fn(),
+      adoptWinner: vi.fn(),
+      forgetCandidate: vi.fn(async () => {}),
+    };
+    const executor = new DormantOwnerSplitEffectExecutor({
+      provider: new HttpOwnerSplitProvider(HOUSEHOLD, transport),
+      secureWorker: secure,
+      enabled: true,
+    });
+    const evidence: OwnerSplitDurableEvidence = {
+      attempt: ATTEMPT,
+      householdId: HOUSEHOLD,
+      fence,
+      backup: { id: 'backup-7', digest: DIGEST },
+      candidate: {
+        profileId: HOUSEHOLD,
+        libraryId: CANDIDATE,
+        keyRef: 'secure-candidate-slot',
+        keyFingerprint: DIGEST,
+      },
+      ownerHead: DIGEST,
+      householdWrites: [{ k: DIGEST, v: 'sealed' }],
+    };
+
+    const authority = await executor.abortWithFreshAuthority(ATTEMPT);
+    await expect(
+      executor.retireLoser(evidence, authority.household, authority.lookup),
+    ).resolves.toBe('retired');
+    const retirement = calls.at(-1)!;
+    expect(retirement.path).toBe(`/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/retire-candidate`);
+    expect(retirement.candidateKeyRef).toBe('secure-candidate-slot');
+    expect(retirement.body).not.toHaveProperty('attemptState');
+    expect(retirement.body).not.toHaveProperty('aborted');
   });
 
   it.each([
