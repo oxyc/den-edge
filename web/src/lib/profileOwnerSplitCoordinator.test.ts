@@ -16,6 +16,12 @@ import {
   type OwnerSplitProvider,
   type OwnerSplitSecureWorker,
 } from './profileOwnerSplitEngine';
+import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
+import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
+import {
+  OwnerSplitWorkerTransport,
+  type OwnerSplitWorkerNetwork,
+} from './profileOwnerSplitWorkerTransport';
 
 const ATTEMPT = '0123456789abcdef0123456789abcdef';
 const RECOVERY = 'fedcba9876543210fedcba9876543210';
@@ -28,6 +34,7 @@ const BACKUP_DIGEST = 'b'.repeat(64);
 const WRITE = { k: 'd'.repeat(64), v: 'sealed-household' };
 const STAGED = profileMigrationDigest('staged', { rows: [WRITE] });
 const fence = { generation: 7, base: 4, head: HEAD, rewrite: 'rewrite-7' };
+const source = { generation: 7, head: HEAD };
 const backup = {
   id: 'backup-7',
   digest: BACKUP_DIGEST,
@@ -79,7 +86,14 @@ class MemoryJournalStore implements OwnerSplitJournalStore {
   }
 }
 
-function harness(options: { crashCommit?: boolean; superseded?: boolean } = {}) {
+function harness(
+  options: {
+    crashCommit?: boolean;
+    superseded?: boolean;
+    crashOpen?: boolean;
+    changeSourceAfterObserve?: boolean;
+  } = {},
+) {
   const store = new MemoryJournalStore();
   let household: OwnerSplitHouseholdObservation = {
     kind: 'legacy',
@@ -88,7 +102,10 @@ function harness(options: { crashCommit?: boolean; superseded?: boolean } = {}) 
     head: HEAD,
   };
   let commitCalls = 0;
+  let openCalls = 0;
   let aborted = false;
+  let currentSource = source;
+  const openedSources = new Map<string, typeof source>();
   const splitOpen: OwnerSplitAttemptLookup = {
     state: 'open',
     attempt: ATTEMPT,
@@ -97,13 +114,35 @@ function harness(options: { crashCommit?: boolean; superseded?: boolean } = {}) 
     fence,
   };
   const provider: OwnerSplitProvider = {
-    open: vi.fn(async (attempt, purpose) => ({
-      state: 'open' as const,
-      attempt,
-      purpose,
-      wireMin: purpose === 'restore' ? 5 : 4,
-      fence,
-    })),
+    observeSource: vi.fn(async () => {
+      const observed = currentSource;
+      if (options.changeSourceAfterObserve)
+        currentSource = { generation: observed.generation, head: '9'.repeat(64) };
+      return observed;
+    }),
+    open: vi.fn(async (attempt, purpose, expectedSource) => {
+      openCalls += 1;
+      const opened = openedSources.get(attempt);
+      if (opened) {
+        if (expectedSource.generation !== opened.generation || expectedSource.head !== opened.head)
+          throw new Error('migration_attempt_mismatch');
+      } else {
+        if (
+          expectedSource.generation !== currentSource.generation ||
+          expectedSource.head !== currentSource.head
+        )
+          throw new Error('migration_source_changed');
+        openedSources.set(attempt, expectedSource);
+      }
+      if (options.crashOpen && openCalls === 1) throw new Error('simulated open response loss');
+      return {
+        state: 'open' as const,
+        attempt,
+        purpose,
+        wireMin: purpose === 'restore' ? 5 : 4,
+        fence,
+      };
+    }),
     lookup: vi.fn(async () => {
       if (aborted) return { ...splitOpen, state: 'aborted' as const };
       if (household.kind !== 'committed') return splitOpen;
@@ -220,10 +259,96 @@ function harness(options: { crashCommit?: boolean; superseded?: boolean } = {}) 
     setHousehold(value: OwnerSplitHouseholdObservation) {
       household = value;
     },
+    setSource(value: typeof source) {
+      currentSource = value;
+    },
   };
 }
 
 describe('dormant full Owner split coordinator', () => {
+  it('composes source GET, durable binding and exact open before any household read', async () => {
+    const values = new Map<string, unknown>();
+    const bindings = new Map<string, string>();
+    const store = new OwnerSplitWorkerStore({
+      libraryId: HOUSEHOLD,
+      keepRequired: async (name, value, binding = '') => {
+        values.set(name, structuredClone(value));
+        bindings.set(name, binding);
+      },
+      keptRequired: async <T>(name: string, binding = '') => {
+        const value = values.get(name);
+        if (value === undefined) return { kind: 'absent' as const };
+        if (bindings.get(name) !== binding) throw new Error('corrupt test vault');
+        return { kind: 'value' as const, value: structuredClone(value) as T };
+      },
+      discardKept: async (name) => {
+        values.delete(name);
+        bindings.delete(name);
+      },
+    });
+    let openSawJournal: OwnerSplitJournal | null = null;
+    const requests: Parameters<OwnerSplitWorkerNetwork['profileMigrationRequest']>[0][] = [];
+    const readHousehold = vi.fn(async () => {
+      throw new Error('stop after durable open');
+    });
+    const network: OwnerSplitWorkerNetwork = {
+      libraryId: HOUSEHOLD,
+      profileMigrationRequest: async (input) => {
+        requests.push(structuredClone(input));
+        if (input.path.endsWith('/profile-migration/source'))
+          return { status: 200, body: { source } };
+        if (input.path.endsWith('/profile-migration') && input.method === 'POST') {
+          openSawJournal = await store.load();
+          return {
+            status: 200,
+            body: {
+              state: 'open',
+              attempt: ATTEMPT,
+              purpose: 'split',
+              wireMin: 4,
+              fence,
+            },
+          };
+        }
+        throw new Error(`unexpected composition request ${input.method} ${input.path}`);
+      },
+      readProfileMigrationHousehold: readHousehold,
+    };
+    const transport = new OwnerSplitWorkerTransport(network, store);
+    const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
+    const secure: OwnerSplitSecureWorker = {
+      allocateCandidate: vi.fn(),
+      verifyBackup: vi.fn(),
+      copyAndAuthenticateOwner: vi.fn(),
+      verifyOwnerLibrary: vi.fn(),
+      planNext: vi.fn(async (evidence) =>
+        planOwnerSplitWithCore(evidence, evidence.candidate ? OWNER_KEY : undefined),
+      ),
+      verifyCommittedWinner: vi.fn(),
+      inspectCommittedDirectory: vi.fn(),
+      verifyDirectoryWinner: vi.fn(),
+      adoptWinner: vi.fn(),
+      forgetCandidate: vi.fn(),
+    };
+    const coordinator = new DormantOwnerSplitCoordinator(
+      new DormantOwnerSplitEffectExecutor({ provider, secureWorker: secure, enabled: true }),
+      store,
+    );
+
+    await expect(coordinator.prepare(ATTEMPT)).rejects.toThrow('stop after durable open');
+    expect(openSawJournal).toMatchObject({ version: 5, state: 'idle', attempt: ATTEMPT, source });
+    expect(requests).toEqual([
+      { method: 'GET', path: `/lib/${HOUSEHOLD}/profile-migration/source` },
+      {
+        method: 'POST',
+        path: `/lib/${HOUSEHOLD}/profile-migration`,
+        body: { attempt: ATTEMPT, purpose: 'split', expectedSource: source },
+      },
+    ]);
+    await expect(store.load()).resolves.toMatchObject({ state: 'fenced', source, fence });
+    expect(readHousehold).toHaveBeenCalledOnce();
+  });
+
   it('prepares only, survives reload without committing, then commits only after durable authorization', async () => {
     const value = harness();
     await expect(value.coordinator.prepare(ATTEMPT)).resolves.toEqual({
@@ -232,6 +357,11 @@ describe('dormant full Owner split coordinator', () => {
       ownerHead: OWNER_HEAD,
     });
     expect(value.provider.commit).not.toHaveBeenCalled();
+    expect(value.provider.observeSource).toHaveBeenCalledOnce();
+    expect(value.provider.open).toHaveBeenCalledWith(ATTEMPT, 'split', source);
+    expect(vi.mocked(value.provider.open).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(value.provider.readHousehold).mock.invocationCallOrder[0]!,
+    );
     await expect(value.newCoordinator().resume()).resolves.toMatchObject({
       kind: 'awaiting-confirmation',
     });
@@ -266,6 +396,31 @@ describe('dormant full Owner split coordinator', () => {
     expect(value.provider.commit).toHaveBeenCalledOnce();
   });
 
+  it('replays a response-lost open with only its durable source even after the live source changes', async () => {
+    const value = harness({ crashOpen: true });
+    await expect(value.coordinator.prepare(ATTEMPT)).rejects.toThrow(
+      'simulated open response loss',
+    );
+    expect(value.store.journal).toMatchObject({ state: 'idle', source });
+    value.setSource({ generation: 7, head: '9'.repeat(64) });
+
+    await expect(value.newCoordinator().resume()).resolves.toMatchObject({
+      kind: 'awaiting-confirmation',
+    });
+    expect(value.provider.observeSource).toHaveBeenCalledOnce();
+    expect(value.provider.open).toHaveBeenLastCalledWith(ATTEMPT, 'split', source);
+  });
+
+  it('does not replace a durably observed source when the source changes before open', async () => {
+    const value = harness({ changeSourceAfterObserve: true });
+    await expect(value.coordinator.prepare(ATTEMPT)).rejects.toThrow('migration_source_changed');
+    expect(value.store.journal).toMatchObject({ state: 'idle', source });
+    expect(value.provider.observeSource).toHaveBeenCalledOnce();
+    expect(value.provider.open).toHaveBeenCalledOnce();
+    expect(value.provider.open).toHaveBeenCalledWith(ATTEMPT, 'split', source);
+    expect(value.provider.readHousehold).not.toHaveBeenCalled();
+  });
+
   it('durably aborts a cancelled prepared attempt before any conditional cleanup', async () => {
     const value = harness();
     await value.coordinator.prepare(ATTEMPT);
@@ -291,14 +446,16 @@ describe('dormant full Owner split coordinator', () => {
   it('requires separately durable recovery intent before executing restore', async () => {
     const value = harness();
     value.store.journal = {
-      version: 4,
+      version: 5,
       attempt: ATTEMPT,
       explicitIntent: true,
       state: 'restore-required',
+      source,
       fence,
       backup: { id: backup.id, digest: backup.digest },
     };
     value.setHousehold({ kind: 'corrupt', generation: 8, base: 5, head: 'f'.repeat(64) });
+    value.setSource({ generation: 8, head: 'f'.repeat(64) });
     await expect(value.coordinator.resume()).resolves.toEqual({
       kind: 'recovery-blocked',
       attempt: ATTEMPT,
@@ -308,17 +465,21 @@ describe('dormant full Owner split coordinator', () => {
       kind: 'restored',
       attempt: ATTEMPT,
     });
-    expect(value.provider.open).toHaveBeenLastCalledWith(RECOVERY, 'restore');
+    expect(value.provider.open).toHaveBeenLastCalledWith(RECOVERY, 'restore', {
+      generation: 8,
+      head: 'f'.repeat(64),
+    });
     expect(value.provider.restore).toHaveBeenCalledOnce();
   });
 
   it('rejects malformed durable evidence before invoking provider or secure effects', async () => {
     const value = harness();
     value.store.journal = {
-      version: 4,
+      version: 5,
       attempt: ATTEMPT,
       explicitIntent: true,
       state: 'owner-copied',
+      source,
       fence,
       backup: { id: backup.id, digest: backup.digest },
       householdId: HOUSEHOLD,

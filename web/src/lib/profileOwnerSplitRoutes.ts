@@ -2,6 +2,7 @@ const ID = '[0-9a-f]{32}';
 
 export type OwnerSplitWorkerRoute =
   | { readonly kind: 'capability' }
+  | { readonly kind: 'source' }
   | { readonly kind: 'open' }
   | { readonly kind: 'lookup' | 'abort'; readonly attempt: string }
   | {
@@ -18,6 +19,8 @@ export function ownerSplitWorkerRoute(
   if (!new RegExp(`^${ID}$`).test(householdId)) return null;
   if (method === 'GET' && path === `/lib/${householdId}/profile-capability`)
     return { kind: 'capability' };
+  if (method === 'GET' && path === `/lib/${householdId}/profile-migration/source`)
+    return { kind: 'source' };
   if (method === 'POST' && path === `/lib/${householdId}/profile-migration`)
     return { kind: 'open' };
   const match = new RegExp(

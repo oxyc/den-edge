@@ -43,6 +43,16 @@ pub(crate) struct MigrationFence {
     pub rewrite: String,
 }
 
+/// The exact authenticated source a person saw before authorizing migration. This deliberately omits the public
+/// generation, row base and rewrite nonce: den-core binds consent to the durable migration generation and the
+/// canonical authenticated snapshot head.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MigrationSource {
+    pub generation: u64,
+    pub head: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BackupReference {
@@ -151,6 +161,7 @@ pub(crate) enum RetirementResult {
 pub(crate) enum MigrationError {
     Invalid(&'static str),
     FenceChanged,
+    SourceChanged,
     BackupMissing,
     BackupCorrupt,
     SameLegacyFence,
@@ -268,10 +279,45 @@ impl<'a> ProfileMigrationStorage<'a> {
         &self,
         attempt: &str,
         purpose: AttemptPurpose,
+        expected_source: &MigrationSource,
         household_id: &str,
         token_hash: [u8; 32],
+        allow_new_split: bool,
     ) -> Result<AttemptEvidence, MigrationError> {
         valid_attempt(attempt)?;
+        valid_source(expected_source)?;
+        self.authenticate_household(household_id, token_hash).await?;
+        // Idempotent replay is a durable lookup first. It must not depend on the current household being readable
+        // or unchanged: the exact stored attempt is already bound to its immutable source and purpose.
+        if let Some(opened) = self.load_attempt(household_id, attempt).await? {
+            if opened.purpose != purpose || source_from_fence(&opened.fence) != *expected_source {
+                return Err(MigrationError::Invalid("migration attempt mismatch"));
+            }
+            let mut resolved = opened.clone();
+            // The redb terminal may be newer than the sidecar after a crash. Repair it when possible, but an exact
+            // replay still returns its stored result if current storage cannot be consulted.
+            if self.resolve_terminal(household_id, token_hash, &mut resolved).await.is_ok() {
+                return Ok(AttemptEvidence {
+                    attempt: resolved.attempt,
+                    state: resolved.state,
+                    purpose: resolved.purpose,
+                    wire_minimum: resolved.wire_minimum,
+                    fence: resolved.fence,
+                    winner: resolved.terminal,
+                });
+            }
+            return Ok(AttemptEvidence {
+                attempt: opened.attempt,
+                state: opened.state,
+                purpose: opened.purpose,
+                wire_minimum: opened.wire_minimum,
+                fence: opened.fence,
+                winner: opened.terminal,
+            });
+        }
+        if purpose == AttemptPurpose::Split && !allow_new_split {
+            return Err(MigrationError::NotFound);
+        }
         let slot = self.state.libraries.slot(household_id, self.state.now());
         let mut library = slot.library.lock().await;
         if load_rewrite(self.state, household_id).await?.is_some() {
@@ -281,31 +327,11 @@ impl<'a> ProfileMigrationStorage<'a> {
             .await
             .map_err(|_| MigrationError::Forbidden)?
             .ok_or(MigrationError::NotFound)?;
-        if let Some(mut opened) = self.load_attempt(household_id, attempt).await? {
-            if opened.purpose != purpose {
-                return Err(MigrationError::Invalid("migration attempt purpose changed"));
-            }
-            let read_store = Arc::clone(&store);
-            let lookup_attempt = opened.attempt.clone();
-            let expected_generation = opened.fence.generation;
-            let winner = tokio::task::spawn_blocking(move || {
-                read_store.migration_result(&lookup_attempt, expected_generation)
-            })
-            .await
-            .map_err(io::Error::other)??;
-            if opened.state == AttemptState::Open {
-                if let Some(winner) = winner.as_ref() {
-                    opened.state = if winner.attempt == opened.attempt {
-                        match winner.kind {
-                            MigrationResultKind::Committed => AttemptState::Committed,
-                            MigrationResultKind::Restored => AttemptState::Restored,
-                        }
-                    } else {
-                        AttemptState::Superseded
-                    };
-                    opened.terminal = Some(winner.clone());
-                    self.save_attempt(&opened).await?;
-                }
+        // Another opener may have won after the lookup-first fast path but before this task acquired the household
+        // lock. Re-read the sidecar under that lock so one attempt can never receive two rewrite handles.
+        if let Some(opened) = self.load_attempt(household_id, attempt).await? {
+            if opened.purpose != purpose || source_from_fence(&opened.fence) != *expected_source {
+                return Err(MigrationError::Invalid("migration attempt mismatch"));
             }
             return Ok(AttemptEvidence {
                 attempt: opened.attempt,
@@ -313,12 +339,15 @@ impl<'a> ProfileMigrationStorage<'a> {
                 purpose: opened.purpose,
                 wire_minimum: opened.wire_minimum,
                 fence: opened.fence,
-                winner: opened.terminal.or(winner),
+                winner: opened.terminal,
             });
         }
         let read_store = Arc::clone(&store);
         let snapshot =
             tokio::task::spawn_blocking(move || read_store.snapshot()).await.map_err(io::Error::other)??;
+        if migration_source(household_id, &snapshot)? != *expected_source {
+            return Err(MigrationError::SourceChanged);
+        }
         let opened = DurableAttempt {
             version: BACKUP_VERSION,
             household_id: household_id.to_owned(),
@@ -341,6 +370,27 @@ impl<'a> ProfileMigrationStorage<'a> {
         })
     }
 
+    /// Read the migration-authoritative source without creating an attempt. A later open must present this exact
+    /// value and rechecks it while holding the same household lock, closing the consent-to-open race.
+    pub(crate) async fn observe_source(
+        &self,
+        household_id: &str,
+        token_hash: [u8; 32],
+    ) -> Result<MigrationSource, MigrationError> {
+        let slot = self.state.libraries.slot(household_id, self.state.now());
+        let mut library = slot.library.lock().await;
+        if load_rewrite(self.state, household_id).await?.is_some() {
+            return Err(MigrationError::Invalid("another rewrite is staged"));
+        }
+        let store = library_store_locked(self.state, household_id, token_hash, &slot, &mut library)
+            .await
+            .map_err(|_| MigrationError::Forbidden)?
+            .ok_or(MigrationError::NotFound)?;
+        let snapshot =
+            tokio::task::spawn_blocking(move || store.snapshot()).await.map_err(io::Error::other)??;
+        migration_source(household_id, &snapshot)
+    }
+
     #[cfg(test)]
     async fn acquire_fence(
         &self,
@@ -348,7 +398,11 @@ impl<'a> ProfileMigrationStorage<'a> {
         household_id: &str,
         token_hash: [u8; 32],
     ) -> Result<MigrationFence, MigrationError> {
-        Ok(self.open_attempt(attempt, AttemptPurpose::Split, household_id, token_hash).await?.fence)
+        let source = self.observe_source(household_id, token_hash).await?;
+        Ok(self
+            .open_attempt(attempt, AttemptPurpose::Split, &source, household_id, token_hash, true)
+            .await?
+            .fence)
     }
 
     /// Persist and read back the source snapshot. The attempt-scoped file is idempotent only for the same source;
@@ -1022,6 +1076,23 @@ impl<'a> ProfileMigrationStorage<'a> {
         serde_json::from_slice(&bytes).map(Some).map_err(|_| MigrationError::BackupCorrupt)
     }
 
+    async fn authenticate_household(
+        &self,
+        household_id: &str,
+        token_hash: [u8; 32],
+    ) -> Result<(), MigrationError> {
+        let manager = Arc::clone(&self.state.library_v3);
+        let household_id = household_id.to_owned();
+        let credentials = tokio::task::spawn_blocking(move || manager.credentials(&household_id))
+            .await
+            .map_err(io::Error::other)??;
+        match credentials {
+            Some((stored, _)) if constant_time_eq(&stored, &token_hash) => Ok(()),
+            Some(_) => Err(MigrationError::Forbidden),
+            None => Err(MigrationError::NotFound),
+        }
+    }
+
     async fn save_attempt(&self, attempt: &DurableAttempt) -> Result<(), MigrationError> {
         let bytes = serde_json::to_vec(attempt).map_err(io::Error::other)?;
         self.state
@@ -1259,6 +1330,27 @@ fn fence(
     })
 }
 
+fn migration_source(library_id: &str, snapshot: &LibrarySnapshot) -> Result<MigrationSource, MigrationError> {
+    let source = MigrationSource {
+        generation: snapshot.protocol.migration_generation,
+        head: authenticated_head(library_id, snapshot)?,
+    };
+    valid_source(&source)?;
+    Ok(source)
+}
+
+fn source_from_fence(fence: &MigrationFence) -> MigrationSource {
+    MigrationSource { generation: fence.generation, head: fence.authenticated_head.clone() }
+}
+
+fn valid_source(source: &MigrationSource) -> Result<(), MigrationError> {
+    if source.generation <= MAX_SAFE_INTEGER && valid_digest(&source.head) {
+        Ok(())
+    } else {
+        Err(MigrationError::Invalid("invalid migration source"))
+    }
+}
+
 fn ensure_fence(
     library_id: &str,
     snapshot: &LibrarySnapshot,
@@ -1335,6 +1427,8 @@ fn attempt_key(household_id: &str, attempt: &str) -> String {
 struct OpenRequest {
     attempt: String,
     purpose: AttemptPurpose,
+    #[serde(rename = "expectedSource")]
+    expected_source: MigrationSource,
 }
 
 #[derive(Deserialize)]
@@ -1422,7 +1516,7 @@ fn attempt_json(evidence: AttemptEvidence) -> Value {
 
 fn migration_error(error_value: MigrationError) -> Response {
     match error_value {
-        MigrationError::Invalid("migration attempt purpose changed")
+        MigrationError::Invalid("migration attempt mismatch")
         | MigrationError::Invalid("restore request changed")
         | MigrationError::Invalid("recovery attempt mismatch") => {
             json_reply(StatusCode::CONFLICT, &error("migration_attempt_mismatch"))
@@ -1434,6 +1528,7 @@ fn migration_error(error_value: MigrationError) -> Response {
             json_reply(StatusCode::CONFLICT, &error("staged_digest_mismatch"))
         }
         MigrationError::FenceChanged => json_reply(StatusCode::CONFLICT, &error("migration_fence_moved")),
+        MigrationError::SourceChanged => json_reply(StatusCode::CONFLICT, &error("migration_source_changed")),
         MigrationError::BackupMissing => json_reply(StatusCode::NOT_FOUND, &error("backup_not_found")),
         MigrationError::BackupCorrupt => json_reply(StatusCode::CONFLICT, &error("backup_not_verified")),
         MigrationError::SameLegacyFence => json_reply(StatusCode::CONFLICT, &error("same_legacy_fence")),
@@ -1459,6 +1554,18 @@ pub(crate) async fn handle(
     request: Request,
 ) -> Response {
     let storage = ProfileMigrationStorage::new(state);
+    if action == "profile-migration/source" {
+        if request.method() != Method::GET {
+            return crate::handler::method_not_allowed();
+        }
+        if axum::body::to_bytes(request.into_body(), 0).await.is_err() {
+            return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+        }
+        return match storage.observe_source(household_id, token_hash).await {
+            Ok(source) => json_reply(StatusCode::OK, &json!({ "source": source })),
+            Err(reason) => migration_error(reason),
+        };
+    }
     if action == "profile-migration" {
         if request.method() != Method::POST {
             return crate::handler::method_not_allowed();
@@ -1467,7 +1574,18 @@ pub(crate) async fn handle(
             Ok(input) => input,
             Err(response) => return *response,
         };
-        return match storage.open_attempt(&input.attempt, input.purpose, household_id, token_hash).await {
+        return match storage
+            .open_attempt(
+                &input.attempt,
+                input.purpose,
+                &input.expected_source,
+                household_id,
+                token_hash,
+                input.purpose == AttemptPurpose::Restore
+                    || state.profile_prepare_households.contains(household_id),
+            )
+            .await
+        {
             Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
             Err(reason) => migration_error(reason),
         };
@@ -1674,6 +1792,20 @@ mod tests {
         h.send(method, path, body, &headers).await
     }
 
+    async fn open_body(
+        h: &Harness,
+        household_id: &str,
+        token_value: &str,
+        attempt: &str,
+        purpose: &str,
+    ) -> String {
+        let source = ProfileMigrationStorage::new(&h.state)
+            .observe_source(household_id, token(token_value))
+            .await
+            .unwrap();
+        json!({ "attempt": attempt, "purpose": purpose, "expectedSource": source }).to_string()
+    }
+
     async fn assert_disabled(response: Response) {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_json(response).await, json!({ "error": "not_found" }));
@@ -1694,6 +1826,7 @@ mod tests {
         let attempt = format!("{base}/{ATTEMPT}");
         let routes = [
             (base, "POST"),
+            (format!("/lib/{HOUSEHOLD}/profile-migration/source"), "GET"),
             (attempt.clone(), "GET"),
             (format!("{attempt}/backup"), "POST"),
             (format!("{attempt}/rows"), "POST"),
@@ -1777,7 +1910,7 @@ mod tests {
 
         let enrolled = format!("/lib/{HOUSEHOLD}/profile-migration");
         let off = format!("/lib/{CANDIDATE}/profile-migration");
-        let body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+        let body = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
         assert_eq!(
             migration_request(&h, "POST", &enrolled, Some(body), Some(HOUSEHOLD_TOKEN)).await.status(),
             StatusCode::OK
@@ -1794,6 +1927,16 @@ mod tests {
             )
             .await;
         }
+        assert_disabled(
+            h.send(
+                "GET",
+                &format!("{off}/source"),
+                None,
+                &[("x-den-wire", "5"), ("x-den-library-token", CANDIDATE_TOKEN)],
+            )
+            .await,
+        )
+        .await;
         assert_disabled(
             h.send("POST", &off, Some("{}".into()), &[("content-length", "18446744073709551615")]).await,
         )
@@ -1880,6 +2023,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_observation_and_open_bind_pre_pin_authority_without_race_side_effects() {
+        let mut h = Harness::new();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "before-pin", HOUSEHOLD_TOKEN).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        let source_path = format!("/lib/{HOUSEHOLD}/profile-migration/source");
+        let open_path = format!("/lib/{HOUSEHOLD}/profile-migration");
+
+        for (wire, token_value, status) in [
+            ("4", Some(HOUSEHOLD_TOKEN), StatusCode::UPGRADE_REQUIRED),
+            ("5", None, StatusCode::UNAUTHORIZED),
+            ("5", Some("wrong"), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                h.send(
+                    "GET",
+                    &source_path,
+                    None,
+                    &[("x-den-wire", wire), ("x-den-library-token", token_value.unwrap_or("")),],
+                )
+                .await
+                .status(),
+                status
+            );
+        }
+        assert_eq!(
+            migration_request(&h, "GET", &source_path, Some("{}".into()), Some(HOUSEHOLD_TOKEN),)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let observed_response = migration_request(&h, "GET", &source_path, None, Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(observed_response.status(), StatusCode::OK);
+        assert_eq!(observed_response.headers().get("cache-control").unwrap(), "no-store");
+        let observed = body_json(observed_response).await;
+        assert_eq!(observed.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["source"]);
+        assert!(observed["source"]["generation"].as_u64().is_some());
+        assert!(valid_digest(observed["source"]["head"].as_str().unwrap()));
+        assert!(ProfileMigrationStorage::new(&h.state)
+            .load_attempt(HOUSEHOLD, ATTEMPT)
+            .await
+            .unwrap()
+            .is_none());
+
+        let different_head = if observed["source"]["head"].as_str().unwrap().starts_with('a') {
+            "b".repeat(64)
+        } else {
+            "a".repeat(64)
+        };
+        let same_generation_other_head = json!({
+            "attempt": ATTEMPT2,
+            "purpose": "split",
+            "expectedSource": {
+                "generation": observed["source"]["generation"],
+                "head": different_head,
+            },
+        })
+        .to_string();
+        let changed_head = migration_request(
+            &h,
+            "POST",
+            &open_path,
+            Some(same_generation_other_head),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(changed_head.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(changed_head).await, json!({ "error": "migration_source_changed" }));
+        assert!(ProfileMigrationStorage::new(&h.state)
+            .load_attempt(HOUSEHOLD, ATTEMPT2)
+            .await
+            .unwrap()
+            .is_none());
+
+        // A normal household write between the pre-PIN observation and POST open changes the authenticated head
+        // without advancing the dedicated migration generation. The stale consent must create nothing.
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 1, "after-pin", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        let stale = json!({
+            "attempt": ATTEMPT,
+            "purpose": "split",
+            "expectedSource": observed["source"].clone(),
+        })
+        .to_string();
+        let raced = migration_request(&h, "POST", &open_path, Some(stale), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(raced.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(raced).await, json!({ "error": "migration_source_changed" }));
+        let storage = ProfileMigrationStorage::new(&h.state);
+        assert!(storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().is_none());
+        for extension in ["json", BACKUP_EXT, STAGE_EXT] {
+            assert!(h
+                .state
+                .store
+                .get_file(NS, &attempt_key(HOUSEHOLD, ATTEMPT), extension)
+                .await
+                .unwrap()
+                .is_none());
+        }
+
+        let current =
+            body_json(migration_request(&h, "GET", &source_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_ne!(
+            current["source"]["generation"], observed["source"]["generation"],
+            "visible row writes advance the migration generation"
+        );
+        assert_ne!(current["source"]["head"], observed["source"]["head"]);
+        let exact = json!({
+            "attempt": ATTEMPT,
+            "purpose": "split",
+            "expectedSource": current["source"].clone(),
+        })
+        .to_string();
+        assert_eq!(
+            migration_request(&h, "POST", &open_path, Some(exact.clone()), Some(HOUSEHOLD_TOKEN))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 2, "after-open", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        super::super::save_rewrite(
+            &h.state,
+            HOUSEHOLD,
+            &super::super::RewriteStage {
+                id: "unavailable-current-source".into(),
+                base: 2,
+                touched: h.state.now(),
+                rows: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            migration_request(&h, "POST", &open_path, Some(exact.clone()), Some(HOUSEHOLD_TOKEN))
+                .await
+                .status(),
+            StatusCode::OK,
+            "an exact existing attempt replay is lookup-first even when current source is unavailable"
+        );
+        h.state
+            .store
+            .delete_file(super::super::REWRITE_NS, HOUSEHOLD, super::super::REWRITE_EXT)
+            .await
+            .unwrap();
+        h.state.store.sync_dir(super::super::REWRITE_NS).await.unwrap();
+        let purpose_changed = json!({
+            "attempt": ATTEMPT,
+            "purpose": "restore",
+            "expectedSource": current["source"].clone(),
+        })
+        .to_string();
+        let purpose_response =
+            migration_request(&h, "POST", &open_path, Some(purpose_changed), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(purpose_response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(purpose_response).await, json!({ "error": "migration_attempt_mismatch" }));
+        let changed_replay = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
+        let response =
+            migration_request(&h, "POST", &open_path, Some(changed_replay), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(response).await, json!({ "error": "migration_attempt_mismatch" }));
+
+        let missing = json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string();
+        assert_eq!(
+            migration_request(&h, "POST", &open_path, Some(missing), Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_five_recovery_observation_survives_prepare_off_but_cannot_start_a_new_split() {
+        let mut h = Harness::new();
+        let created = h
+            .send(
+                "POST",
+                &format!("/lib/{HOUSEHOLD}/batch"),
+                Some(json!({ "writes": [{ "k": ACTIVITY, "base": 0, "v": "wire-five" }] }).to_string()),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-wire-min", "5"),
+                    ("x-den-generation", "0"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                ],
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        let source_path = format!("/lib/{HOUSEHOLD}/profile-migration/source");
+        let open_path = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let observed =
+            body_json(migration_request(&h, "GET", &source_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        let restore = json!({
+            "attempt": ATTEMPT3,
+            "purpose": "restore",
+            "expectedSource": observed["source"].clone(),
+        })
+        .to_string();
+        let restored_open =
+            migration_request(&h, "POST", &open_path, Some(restore), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(restored_open.status(), StatusCode::OK);
+
+        let split = json!({
+            "attempt": ATTEMPT,
+            "purpose": "split",
+            "expectedSource": observed["source"].clone(),
+        })
+        .to_string();
+        let refused = migration_request(&h, "POST", &open_path, Some(split), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(refused).await, json!({ "error": "not_found" }));
+        assert!(ProfileMigrationStorage::new(&h.state)
+            .load_attempt(HOUSEHOLD, ATTEMPT)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn migration_transport_uses_exact_wire_five_and_newer_household_minimum_wins() {
         let mut h = Harness::new();
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
@@ -1887,7 +2246,7 @@ mod tests {
         state.profile_migration_enabled = true;
         state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
         let path = format!("/lib/{HOUSEHOLD}/profile-migration");
-        let body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+        let body = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
         for wire in ["4", "6"] {
             let response = h
                 .send(
@@ -1936,10 +2295,10 @@ mod tests {
         let dir = h.dir.clone();
         write(&h, HOUSEHOLD, ACTIVITY, 0, "sealed-activity", HOUSEHOLD_TOKEN).await;
         let base = format!("/lib/{HOUSEHOLD}/profile-migration");
-        let open_body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+        let initial_open = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
 
         assert_eq!(
-            migration_request(&h, "POST", &base, Some(open_body.clone()), Some(HOUSEHOLD_TOKEN))
+            migration_request(&h, "POST", &base, Some(initial_open.clone()), Some(HOUSEHOLD_TOKEN))
                 .await
                 .status(),
             StatusCode::NOT_FOUND
@@ -1947,21 +2306,21 @@ mod tests {
         Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
         Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
         assert_eq!(
-            h.send("POST", &base, Some(open_body.clone()), &[("x-den-library-token", HOUSEHOLD_TOKEN)],)
+            h.send("POST", &base, Some(initial_open.clone()), &[("x-den-library-token", HOUSEHOLD_TOKEN)],)
                 .await
                 .status(),
             StatusCode::UPGRADE_REQUIRED
         );
         assert_eq!(
-            migration_request(&h, "POST", &base, Some(open_body.clone()), None).await.status(),
+            migration_request(&h, "POST", &base, Some(initial_open.clone()), None).await.status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            migration_request(&h, "POST", &base, Some(open_body.clone()), Some("wrong")).await.status(),
+            migration_request(&h, "POST", &base, Some(initial_open.clone()), Some("wrong")).await.status(),
             StatusCode::FORBIDDEN
         );
         let opened =
-            body_json(migration_request(&h, "POST", &base, Some(open_body), Some(HOUSEHOLD_TOKEN)).await)
+            body_json(migration_request(&h, "POST", &base, Some(initial_open), Some(HOUSEHOLD_TOKEN)).await)
                 .await;
         assert_eq!(opened["state"], "open");
         assert_eq!(opened["purpose"], "split");
@@ -2044,7 +2403,7 @@ mod tests {
                 &restarted,
                 "POST",
                 &base,
-                Some(json!({ "attempt": ATTEMPT3, "purpose": "restore" }).to_string()),
+                Some(open_body(&restarted, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT3, "restore").await),
                 Some(HOUSEHOLD_TOKEN),
             )
             .await,
@@ -2102,7 +2461,14 @@ mod tests {
                 &restarted,
                 "POST",
                 &unknown,
-                Some(json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string()),
+                Some(
+                    json!({
+                        "attempt": ATTEMPT2,
+                        "purpose": "split",
+                        "expectedSource": { "generation": 0, "head": "0".repeat(64) },
+                    })
+                    .to_string(),
+                ),
                 Some(CANDIDATE_TOKEN),
             )
             .await
@@ -2125,7 +2491,7 @@ mod tests {
                 &h,
                 "POST",
                 &base,
-                Some(json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string()),
+                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
                 Some(HOUSEHOLD_TOKEN),
             )
             .await,
@@ -2180,7 +2546,7 @@ mod tests {
                 &h,
                 "POST",
                 &base,
-                Some(json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string()),
+                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
                 Some(HOUSEHOLD_TOKEN),
             )
             .await,
@@ -2192,7 +2558,7 @@ mod tests {
                 &h,
                 "POST",
                 &base,
-                Some(json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string()),
+                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT2, "split").await),
                 Some(HOUSEHOLD_TOKEN),
             )
             .await,
@@ -2440,8 +2806,16 @@ mod tests {
             .await
             .unwrap();
 
+        let recovery_source = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let recovery = storage
-            .open_attempt(ATTEMPT3, AttemptPurpose::Restore, HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .open_attempt(
+                ATTEMPT3,
+                AttemptPurpose::Restore,
+                &recovery_source,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(recovery.state, AttemptState::Open);
@@ -2526,8 +2900,16 @@ mod tests {
             AttemptState::Open
         );
 
+        let recovery_source = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let recovery = storage
-            .open_attempt(ATTEMPT3, AttemptPurpose::Restore, HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .open_attempt(
+                ATTEMPT3,
+                AttemptPurpose::Restore,
+                &recovery_source,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                true,
+            )
             .await
             .unwrap();
         let current = storage.locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
@@ -2595,8 +2977,16 @@ mod tests {
                 .await,
             Err(MigrationError::SameLegacyFence)
         ));
+        let other_source = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let other = storage
-            .open_attempt(ATTEMPT2, AttemptPurpose::Split, HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .open_attempt(
+                ATTEMPT2,
+                AttemptPurpose::Split,
+                &other_source,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(other.state, AttemptState::Open);

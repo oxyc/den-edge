@@ -38,7 +38,15 @@ export function planOwnerSplitWithCore(
     throw new Error('Unbound candidate key');
   }
   if (evidence.candidateHead) input.candidateHead = evidence.candidateHead;
-  if (evidence.household) {
+  if (evidence.source && evidence.household)
+    throw new Error('Pre-fence source cannot replace fresh household authority');
+  if (evidence.source) {
+    input.observed = 'legacy';
+    input.observedFence = {
+      generation: evidence.source.generation,
+      head: evidence.source.head,
+    };
+  } else if (evidence.household) {
     input.observed = evidence.household.kind;
     if (evidence.household.kind === 'legacy')
       input.observedFence = {

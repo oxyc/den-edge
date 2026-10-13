@@ -68,6 +68,29 @@ describe('OwnerSplit Worker authenticated transport', () => {
     ).rejects.toThrow(/malformed/);
   });
 
+  it('allows only the exact authenticated source observation route without candidate authority', async () => {
+    const { transport, request } = harness(200, {
+      source: { generation: 7, head: 'a'.repeat(64) },
+    });
+    await expect(
+      transport.request({
+        method: 'GET',
+        path: `/lib/${HOUSEHOLD}/profile-migration/source`,
+      }),
+    ).resolves.toEqual({ source: { generation: 7, head: 'a'.repeat(64) } });
+    expect(request).toHaveBeenCalledWith({
+      method: 'GET',
+      path: `/lib/${HOUSEHOLD}/profile-migration/source`,
+    });
+    expect(request.mock.calls[0]![0]).not.toHaveProperty('candidateToken');
+    await expect(
+      transport.request({
+        method: 'POST',
+        path: `/lib/${HOUSEHOLD}/profile-migration/source`,
+      }),
+    ).rejects.toThrow(/not allowed/);
+  });
+
   it('resolves a candidate token only inside the Worker and never adds it to path or body', async () => {
     const { transport, store, request } = harness();
     const candidate = await store.allocateCandidate(ATTEMPT);

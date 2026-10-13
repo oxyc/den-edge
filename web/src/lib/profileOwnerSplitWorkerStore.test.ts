@@ -7,6 +7,7 @@ const OTHER_HOUSEHOLD = '2'.repeat(32);
 const ATTEMPT = 'a'.repeat(32);
 const OTHER_ATTEMPT = 'b'.repeat(32);
 const DIGEST = 'd'.repeat(64);
+const SOURCE = { generation: 1, head: DIGEST };
 
 class MemoryWorkerVault implements OwnerSplitWorkerVault {
   constructor(
@@ -38,17 +39,19 @@ class MemoryWorkerVault implements OwnerSplitWorkerVault {
 }
 
 const idle = (): OwnerSplitJournal => ({
-  version: 4,
+  version: 5,
   attempt: ATTEMPT,
   explicitIntent: true,
   state: 'idle',
+  source: SOURCE,
 });
 
 const ready = (): OwnerSplitJournal & { readonly state: 'ready-to-commit' } => ({
-  version: 4,
+  version: 5,
   attempt: ATTEMPT,
   explicitIntent: true,
   state: 'ready-to-commit',
+  source: SOURCE,
   fence: { generation: 1, base: 4, head: DIGEST, rewrite: 'rewrite-1' },
   backup: { id: 'backup-1', digest: DIGEST },
   householdId: HOUSEHOLD,

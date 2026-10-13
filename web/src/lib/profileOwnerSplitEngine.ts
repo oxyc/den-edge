@@ -14,6 +14,11 @@ export interface OwnerSplitFence {
   readonly rewrite: string;
 }
 
+export interface OwnerSplitSource {
+  readonly generation: number;
+  readonly head: string;
+}
+
 export interface OwnerSplitBackup {
   readonly id: string;
   readonly digest: string;
@@ -90,7 +95,12 @@ export interface OwnerSplitHouseholdObservation {
 
 /** Worker-owned provider port. Tokens are never arguments, URL members, or journal fields. */
 export interface OwnerSplitProvider {
-  open(attempt: string, purpose: 'split' | 'restore'): Promise<OwnerSplitAttemptLookup>;
+  observeSource(): Promise<OwnerSplitSource>;
+  open(
+    attempt: string,
+    purpose: 'split' | 'restore',
+    expectedSource: OwnerSplitSource,
+  ): Promise<OwnerSplitAttemptLookup>;
   lookup(attempt: string): Promise<OwnerSplitAttemptLookup>;
   abort(attempt: string): Promise<OwnerSplitAttemptLookup>;
   createBackup(attempt: string): Promise<{ readonly id: string; readonly digest: string }>;
@@ -207,6 +217,8 @@ export interface OwnerSplitPlannerEvidence {
   readonly attemptLookup?: OwnerSplitAttemptLookup['state'];
   readonly householdFresh: boolean;
   readonly recoveryIntent: boolean;
+  /** Pre-fence authenticated source; den-core consumes it as the legacy observation without a household read. */
+  readonly source?: OwnerSplitSource;
   readonly household?: OwnerSplitHouseholdObservation;
 }
 
@@ -265,10 +277,22 @@ export class DormantOwnerSplitEffectExecutor {
     };
   }
 
-  open(attempt: string, purpose: 'split' | 'restore'): Promise<OwnerSplitAttemptLookup> {
+  async observeSource(): Promise<OwnerSplitSource> {
+    this.#requireEnabled();
+    const source = await this.#provider.observeSource();
+    checkedSource(source);
+    return source;
+  }
+
+  open(
+    attempt: string,
+    purpose: 'split' | 'restore',
+    expectedSource: OwnerSplitSource,
+  ): Promise<OwnerSplitAttemptLookup> {
     this.#requireEnabled();
     checkedAttempt(attempt);
-    return this.#provider.open(attempt, purpose);
+    checkedSource(expectedSource);
+    return this.#provider.open(attempt, purpose, expectedSource);
   }
 
   async createVerifiedBackup(
@@ -503,6 +527,15 @@ export class DormantOwnerSplitEffectExecutor {
   #requireEnabled(): void {
     if (!this.#enabled) throw new OwnerSplitUnavailableError();
   }
+}
+
+function checkedSource(source: OwnerSplitSource): void {
+  if (
+    !Number.isSafeInteger(source.generation) ||
+    source.generation < 0 ||
+    !DIGEST.test(source.head)
+  )
+    throw new TypeError('Migration source is not canonical');
 }
 
 function checkedEvidence(value: OwnerSplitDurableEvidence): void {

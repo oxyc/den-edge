@@ -8,6 +8,7 @@ const root = `/lib/${HOUSEHOLD}/profile-migration`;
 describe('OwnerSplit Worker route boundary', () => {
   it.each([
     ['GET', `/lib/${HOUSEHOLD}/profile-capability`, 'capability'],
+    ['GET', `${root}/source`, 'source'],
     ['POST', root, 'open'],
     ['GET', `${root}/${ATTEMPT}`, 'lookup'],
     ['DELETE', `${root}/${ATTEMPT}`, 'abort'],
@@ -23,6 +24,8 @@ describe('OwnerSplit Worker route boundary', () => {
 
   it.each([
     ['GET', root],
+    ['POST', `${root}/source`],
+    ['GET', `${root}/source?attempt=${ATTEMPT}`],
     ['DELETE', root],
     ['POST', `${root}/${ATTEMPT}`],
     ['DELETE', `${root}/${ATTEMPT}/backup`],

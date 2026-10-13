@@ -336,12 +336,18 @@ function checkedCommitAuthorization(
 function checkedRecoveryIntent(value: unknown): OwnerSplitRecoveryIntent {
   if (
     !record(value) ||
-    value.version !== 1 ||
+    value.version !== 2 ||
     value.recoveryIntent !== true ||
     typeof value.attempt !== 'string' ||
     !ATTEMPT.test(value.attempt) ||
     typeof value.recoveryAttempt !== 'string' ||
-    !ATTEMPT.test(value.recoveryAttempt)
+    !ATTEMPT.test(value.recoveryAttempt) ||
+    !record(value.source) ||
+    !Number.isSafeInteger(value.source.generation) ||
+    Number(value.source.generation) < 0 ||
+    typeof value.source.head !== 'string' ||
+    !DIGEST.test(value.source.head) ||
+    Object.keys(value.source).some((key) => key !== 'generation' && key !== 'head')
   )
     throw new Error('Recovery intent is unavailable or corrupt');
   return value as unknown as OwnerSplitRecoveryIntent;

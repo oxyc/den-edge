@@ -60,6 +60,10 @@ function harness() {
     fence,
   };
   const provider: OwnerSplitProvider = {
+    observeSource: vi.fn(async () => ({
+      generation: observation.generation,
+      head: observation.head,
+    })),
     open: vi.fn(async () => opened),
     lookup: vi.fn(async () => opened),
     abort: vi.fn(async () => ({
@@ -136,7 +140,9 @@ describe('dormant Owner split effect executor', () => {
     expect('commitAuthorized' in executor).toBe(false);
     expect('stageHousehold' in executor).toBe(true);
     expect('restore' in executor).toBe(true);
-    expect(() => executor.open(ATTEMPT, 'split')).toThrow(OwnerSplitUnavailableError);
+    expect(() => executor.open(ATTEMPT, 'split', { generation: 7, head: HEAD })).toThrow(
+      OwnerSplitUnavailableError,
+    );
   });
 
   it('creates, rereads and verifies a backup before returning it', async () => {
