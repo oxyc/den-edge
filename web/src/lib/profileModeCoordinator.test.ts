@@ -371,12 +371,23 @@ describe('profilesCapability', () => {
     const preview = vi.fn(async () =>
       capabilityResponse(JSON.stringify({ enabled: true, preview: true })),
     );
-    await expect(profilesCapability(preview as typeof fetch, immediateLock, true)).resolves.toBe(
+    await expect(profilesCapability(preview as typeof fetch, immediateLock)).resolves.toBe(
       'preview',
     );
-    await expect(profilesCapability(preview as typeof fetch, immediateLock, false)).resolves.toBe(
-      'indeterminate',
-    );
+    await expect(
+      profilesCapability(
+        vi.fn(async () =>
+          capabilityResponse(JSON.stringify({ enabled: true, preview: true, migration: false })),
+        ) as typeof fetch,
+        immediateLock,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(preview as typeof fetch, {
+        available: () => false,
+        run: immediateLock.run,
+      }),
+    ).resolves.toBe('indeterminate');
 
     await expect(
       profilesCapability(

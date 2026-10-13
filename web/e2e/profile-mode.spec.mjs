@@ -88,6 +88,24 @@ test('RoutedLibrary keeps Owner hidden when profile discovery is indeterminate',
   await expect(page.getByRole('button', { name: /Switch profile/ })).toHaveCount(0);
 });
 
+test('RoutedLibrary accepts the exact host preview capability in production UI', async ({
+  page,
+}) => {
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+
+  await page.goto(ROUTED_FIXTURE);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(
+    page.getByText('Profile preview · filtering and household migration remain off'),
+  ).toBeVisible();
+});
+
 test('capability discovery never exposes or enables the legacy Owner UI', async ({ page }) => {
   await guardNetwork(page);
   let answerCapability;
