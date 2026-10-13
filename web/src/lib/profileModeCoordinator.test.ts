@@ -753,24 +753,32 @@ describe('ProfileModeCoordinator', () => {
     const directory = profileDirectoryChoices(realDirectoryView())!;
     const first = owner(
       storage,
-      true,
+      false,
       null,
       undefined,
       directory,
       profileModels(new Map()).factory,
+      true,
     );
     expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    expect(first.close).not.toHaveBeenCalled();
     storage.setItem(
       'den.profile.active.v1',
       JSON.stringify({ version: 1, mode: 'visitor', visitorNamespace: 'a'.repeat(32) }),
     );
     first.coordinator.updateDirectory(directory);
     expect(first.coordinator.mode).toBe('visitor');
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(first.householdClose).not.toHaveBeenCalled();
     first.coordinator.updateDirectory(null);
     expect(first.coordinator.session).toBeNull();
     first.coordinator.updateDirectory(directory);
     expect(first.coordinator.mode).toBe('visitor');
     expect(first.coordinator.session!.identity.id).toBe('a'.repeat(32));
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(first.householdClose).not.toHaveBeenCalled();
+    first.coordinator.dispose();
+    expect(first.householdClose).toHaveBeenCalledOnce();
   });
 
   it('allows implicit assistants only for the active Owner', async () => {

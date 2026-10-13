@@ -451,7 +451,9 @@ export class ProfileModeCoordinator {
       if (selected) void this.#restorePersistent(selected);
       else if (saved?.mode === 'visitor' && directory && this.#visitorLock.available()) {
         const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
-        this.#session = this.#newVisitor(visitorVisitId(visitId));
+        const next = this.#newVisitor(visitorVisitId(visitId));
+        this.#releasePendingOwner(next);
+        this.#session = next;
       }
       return;
     }
