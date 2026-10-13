@@ -17,6 +17,7 @@ const LIBRARY = '11112222333344445555666677778888';
 const HEAD = 'a'.repeat(64);
 const BACKUP = 'b'.repeat(64);
 const OWNER = 'c'.repeat(64);
+const WRITE = { k: 'd'.repeat(64), v: 'sealed-household' };
 const fence = { generation: 7, base: 4, head: HEAD, rewrite: 'rewrite-7' };
 const candidate: OwnerSplitCandidateHandle = {
   profileId: PROFILE,
@@ -41,6 +42,7 @@ const evidence: OwnerSplitDurableEvidence = {
   backup: { id: backup.id, digest: backup.digest },
   candidate,
   ownerHead: OWNER,
+  householdWrites: [WRITE],
 };
 
 function harness() {
@@ -69,6 +71,8 @@ function harness() {
     })),
     createBackup: vi.fn(async () => ({ id: backup.id, digest: backup.digest })),
     readBackup: vi.fn(async () => backup),
+    stage: vi.fn(async () => 'f'.repeat(64)),
+    commit: vi.fn(async () => opened),
     readHousehold: vi.fn(async () => observation),
     retireCandidate: vi.fn(async () => 'retired' as const),
     restore: vi.fn(async () => opened),
@@ -78,7 +82,10 @@ function harness() {
     verifyBackup: vi.fn(async () => {}),
     copyAndAuthenticateOwner: vi.fn(async () => ({
       ownerHead: OWNER,
+      householdWrites: [WRITE],
     })),
+    verifyOwnerLibrary: vi.fn(async () => {}),
+    planNext: vi.fn(async () => 'no-op' as const),
     verifyCommittedWinner: vi.fn(async () => ({
       ownerLibraryId: LIBRARY,
       protectedLibraryIds: [PROFILE, LIBRARY],
@@ -89,6 +96,13 @@ function harness() {
       ownerLibraryId: '2'.repeat(32),
       protectedLibraryIds: [PROFILE, '2'.repeat(32)],
     })),
+    verifyDirectoryWinner: vi.fn(async () => ({
+      winnerAttempt: '9'.repeat(32),
+      ownerHead: OWNER,
+      ownerLibraryId: '2'.repeat(32),
+      protectedLibraryIds: [PROFILE, '2'.repeat(32)],
+    })),
+    adoptWinner: vi.fn(async () => {}),
     forgetCandidate: vi.fn(async () => {}),
   };
   return {
@@ -115,13 +129,13 @@ describe('dormant Owner split effect executor', () => {
     expect(executor.capabilities()).toEqual({
       enabled: false,
       activatable: false,
-      lifecyclePlanner: 'unavailable',
-      householdStage: 'unavailable',
+      lifecyclePlanner: 'den-core',
+      householdStage: 'available',
       rawKeyPersistence: false,
     });
     expect('commitAuthorized' in executor).toBe(false);
-    expect('stageHousehold' in executor).toBe(false);
-    expect('restore' in executor).toBe(false);
+    expect('stageHousehold' in executor).toBe(true);
+    expect('restore' in executor).toBe(true);
     expect(() => executor.open(ATTEMPT, 'split')).toThrow(OwnerSplitUnavailableError);
   });
 
@@ -194,7 +208,8 @@ describe('dormant Owner split effect executor', () => {
       directory: { kind: 'profiles' },
     });
     const fresh = await value.provider.readHousehold();
-    expect(await value.executor.retireLoser(evidence, fresh)).toBe('retired');
+    const authority = await value.executor.lookupWithFreshAuthority(ATTEMPT);
+    expect(await value.executor.retireLoser(evidence, fresh, authority.lookup)).toBe('retired');
     expect(value.secure.inspectCommittedDirectory).toHaveBeenCalledOnce();
     expect(value.provider.retireCandidate).toHaveBeenCalledWith(
       expect.objectContaining({ protectedLibraryIds: [PROFILE, '2'.repeat(32)] }),
@@ -204,12 +219,15 @@ describe('dormant Owner split effect executor', () => {
 
   it('protects the household library during changed-legacy loser retirement', async () => {
     const value = harness();
-    await value.executor.retireLoser(evidence, {
-      kind: 'legacy',
+    const household = {
+      kind: 'legacy' as const,
       generation: fence.generation + 1,
       base: fence.base + 1,
       head: 'f'.repeat(64),
-    });
+    };
+    value.setObservation(household);
+    const authority = await value.executor.lookupWithFreshAuthority(ATTEMPT);
+    await value.executor.retireLoser(evidence, household, authority.lookup);
     expect(value.provider.retireCandidate).toHaveBeenCalledWith(
       expect.objectContaining({ protectedLibraryIds: [PROFILE] }),
     );
@@ -218,12 +236,22 @@ describe('dormant Owner split effect executor', () => {
   it('refuses retirement against unchanged legacy authority or a live candidate', async () => {
     const value = harness();
     await expect(
-      value.executor.retireLoser(evidence, {
-        kind: 'legacy',
-        generation: fence.generation,
-        base: fence.base,
-        head: fence.head,
-      }),
+      value.executor.retireLoser(
+        evidence,
+        {
+          kind: 'legacy',
+          generation: fence.generation,
+          base: fence.base,
+          head: fence.head,
+        },
+        {
+          state: 'open',
+          attempt: ATTEMPT,
+          purpose: 'split',
+          wireMin: 4,
+          fence,
+        },
+      ),
     ).rejects.toThrow('unchanged legacy');
     vi.mocked(value.secure.inspectCommittedDirectory).mockResolvedValueOnce({
       winnerAttempt: '9'.repeat(32),
@@ -232,13 +260,33 @@ describe('dormant Owner split effect executor', () => {
       protectedLibraryIds: [PROFILE, LIBRARY],
     });
     await expect(
-      value.executor.retireLoser(evidence, {
-        kind: 'committed',
-        generation: 8,
-        base: 5,
-        head: HEAD,
-        directory: { kind: 'profiles' },
-      }),
+      value.executor.retireLoser(
+        evidence,
+        {
+          kind: 'committed',
+          generation: 8,
+          base: 5,
+          head: HEAD,
+          directory: { kind: 'profiles' },
+        },
+        {
+          state: 'superseded',
+          attempt: ATTEMPT,
+          purpose: 'split',
+          wireMin: 4,
+          fence,
+          winner: {
+            state: 'committed',
+            attempt: '9'.repeat(32),
+            generation: 8,
+            base: 5,
+            head: HEAD,
+            wireMin: 5,
+            backup: { id: 'winner', digest: BACKUP },
+            stagedDigest: 'f'.repeat(64),
+          },
+        },
+      ),
     ).rejects.toThrow('live profile');
     expect(value.provider.retireCandidate).not.toHaveBeenCalled();
   });

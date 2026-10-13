@@ -1,3 +1,4 @@
+import type { MigrationSealedRow } from './profileMigrationCore';
 import type {
   OwnerSplitAttemptLookup,
   OwnerSplitBackup,
@@ -78,6 +79,37 @@ export class HttpOwnerSplitProvider implements OwnerSplitProvider {
     )
       throw new Error('Provider returned an invalid backup manifest');
     return answer as unknown as OwnerSplitBackup;
+  }
+
+  async stage(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly writes: readonly MigrationSealedRow[];
+  }): Promise<string> {
+    const answer = await this.#transport.request({
+      method: 'POST',
+      path: `${this.#attemptPath(input.attempt)}/rows`,
+      body: { fence: input.fence, backup: input.backup, writes: input.writes },
+    });
+    if (!record(answer) || !DIGEST.test(String(answer.stagedDigest)))
+      throw new Error('Provider returned an invalid staged digest');
+    return String(answer.stagedDigest);
+  }
+
+  async commit(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: { readonly id: string; readonly digest: string };
+    readonly stagedDigest: string;
+  }): Promise<OwnerSplitAttemptLookup> {
+    if (!DIGEST.test(input.stagedDigest)) throw new Error('Invalid staged digest');
+    return this.#attemptRequest('POST', input.attempt, 'commit', {
+      fence: input.fence,
+      backup: input.backup,
+      stagedDigest: input.stagedDigest,
+      wireMin: 5,
+    });
   }
 
   readHousehold(): Promise<OwnerSplitHouseholdObservation> {

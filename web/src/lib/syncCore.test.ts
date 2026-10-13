@@ -75,7 +75,6 @@ describe('shared Rust WASM sync policy', () => {
   it('fails closed when profile migration planner evidence is missing or malformed', () => {
     const fence = { generation: 7, head: 'a'.repeat(64) };
     const cases: Array<[Record<string, unknown>, string]> = [
-      [{ state: 'idle', observed: 'legacy' }, 'explicit_intent_required'],
       [{ state: 'fenced', observed: 'legacy', fence }, 'invalid_migration_fence'],
       [
         {

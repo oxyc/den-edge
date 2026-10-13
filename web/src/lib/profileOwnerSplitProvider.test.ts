@@ -17,6 +17,20 @@ describe('Owner split HTTP provider', () => {
       request: vi.fn(async (input) => {
         calls.push(input);
         if (input.path.endsWith('/retire-candidate')) return { result: 'retired' };
+        if (input.path.endsWith('/rows')) return { stagedDigest: DIGEST };
+        if (input.path.endsWith('/commit'))
+          return {
+            state: 'committed',
+            attempt: ATTEMPT,
+            purpose: 'split',
+            wireMin: 5,
+            fence,
+            generation: 8,
+            base: 5,
+            head: 'b'.repeat(64),
+            backup: { id: 'backup-7', digest: DIGEST },
+            stagedDigest: DIGEST,
+          };
         return { state: 'open', attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence };
       }),
       readHousehold: vi.fn(async () => ({
@@ -27,11 +41,25 @@ describe('Owner split HTTP provider', () => {
       })),
     };
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
-    expect('stage' in provider).toBe(false);
-    expect('commit' in provider).toBe(false);
     await provider.open(ATTEMPT, 'split');
     await provider.lookup(ATTEMPT);
     await provider.abort(ATTEMPT);
+    await expect(
+      provider.stage({
+        attempt: ATTEMPT,
+        fence,
+        backup: { id: 'backup-7', digest: DIGEST },
+        writes: [{ k: DIGEST, v: 'sealed' }],
+      }),
+    ).resolves.toBe(DIGEST);
+    await expect(
+      provider.commit({
+        attempt: ATTEMPT,
+        fence,
+        backup: { id: 'backup-7', digest: DIGEST },
+        stagedDigest: DIGEST,
+      }),
+    ).resolves.toMatchObject({ state: 'committed', wireMin: 5 });
     await provider.retireCandidate({
       attempt: ATTEMPT,
       source: fence,
@@ -58,6 +86,25 @@ describe('Owner split HTTP provider', () => {
       },
       { method: 'GET', path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`, body: undefined },
       { method: 'DELETE', path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}`, body: undefined },
+      {
+        method: 'POST',
+        path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/rows`,
+        body: {
+          fence,
+          backup: { id: 'backup-7', digest: DIGEST },
+          writes: [{ k: DIGEST, v: 'sealed' }],
+        },
+      },
+      {
+        method: 'POST',
+        path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/commit`,
+        body: {
+          fence,
+          backup: { id: 'backup-7', digest: DIGEST },
+          stagedDigest: DIGEST,
+          wireMin: 5,
+        },
+      },
       expect.objectContaining({
         method: 'POST',
         path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/retire-candidate`,

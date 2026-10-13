@@ -74,6 +74,48 @@ export interface MigrationAuthorizationFingerprint {
   readonly memberHash: string | null;
 }
 
+export type ProfileMigrationEffect =
+  | 'no-op'
+  | 'acquire-fence'
+  | 'create-backup'
+  | 'create-owner-library'
+  | 'verify-owner-library'
+  | 'await-final-confirmation'
+  | 'commit-fenced-household'
+  | 'lookup-attempt'
+  | 'read-household'
+  | 'retry-bound-commit'
+  | 'abort-attempt'
+  | 'retire-losing-candidate'
+  | 'discard-journal'
+  | 'verify-winner'
+  | 'activate'
+  | 'recovery-blocked'
+  | 'open-recovery-attempt'
+  | 'restart'
+  | 'cleanup_targets_winner';
+
+export interface MigrationDirectoryConstruction {
+  readonly directory: unknown;
+  /** RFC 8785 directory bytes, base64url without padding. */
+  readonly jcs: string;
+  /** Exact compressed library-v4 plaintext to seal, base64url without padding. */
+  readonly plaintext: string;
+}
+
+export interface ProfileCapabilityDecision {
+  readonly state?: 'off' | 'prepare' | 'runtime';
+  readonly effect:
+    | 'not-found'
+    | 'migration-wire-required'
+    | 'authentication-required'
+    | 'migration-storage'
+    | 'serve-legacy'
+    | 'serve-runtime'
+    | 'update-required';
+  readonly requiredWire?: number;
+}
+
 /**
  * The only migration-digest boundary used by Web. Validation, raw-key ordering, RFC 8785 JCS and hashing stay in
  * den-core; callers cannot accidentally substitute JSON.stringify or a locale-sensitive sort.
@@ -132,8 +174,30 @@ export function profileMigrationMaterialize(input: {
 }
 
 /** Stored Owner directory constructor; validation is performed by the same den-core operation. */
-export function profileMigrationConstructDirectory(input: Record<string, unknown>): unknown {
-  return syncPolicy({ op: 'profiles_migration_construct_directory', input });
+export function profileMigrationConstructDirectory(
+  input: Record<string, unknown>,
+): MigrationDirectoryConstruction {
+  return syncPolicy<MigrationDirectoryConstruction>({
+    op: 'profiles_migration_construct_directory',
+    input,
+  });
+}
+
+/** The only Owner split lifecycle planner. Callers execute the returned effect but encode no transition policy. */
+export function profileMigrationNext(input: Record<string, unknown>): ProfileMigrationEffect {
+  return syncPolicy<ProfileMigrationEffect>({ op: 'profiles_migration_next', input });
+}
+
+/** Pure deployment/runtime capability decision; this does not expose or call a production endpoint. */
+export function profileCapability(input: {
+  readonly enrollment: 'off' | 'prepare';
+  readonly wireMin: number;
+  readonly directory: 'absent' | 'valid' | 'invalid';
+  readonly request: 'ordinary' | 'migration';
+  readonly wire: number;
+  readonly authenticated: boolean;
+}): ProfileCapabilityDecision {
+  return syncPolicy<ProfileCapabilityDecision>({ op: 'profiles_capability', input });
 }
 
 /** Reproduce den-edge's SHA-256 credential-text authority without exposing credentials in a backup. */
