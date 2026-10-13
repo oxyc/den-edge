@@ -1,7 +1,7 @@
 <!-- Where each section of the page is, following the one in view: a rail beside the page on a wide screen, a bar of
      tabs on a tablet, and the browser's own picker on a phone, where five tabs don't fit. -->
 <script lang="ts">
-  const SECTIONS = [
+  const ALL_SECTIONS = [
     { id: 'playback', label: 'Playback' },
     { id: 'content', label: 'Content' },
     { id: 'connections', label: 'Connections' },
@@ -12,8 +12,13 @@
     { id: 'about', label: 'About' },
   ] as const;
 
-  let { variant }: { variant: 'rail' | 'bar' } = $props();
-  let current = $state<string>(SECTIONS[0].id);
+  type SectionId = (typeof ALL_SECTIONS)[number]['id'];
+  let { variant, sections }: { variant: 'rail' | 'bar'; sections?: readonly SectionId[] } =
+    $props();
+  const SECTIONS = $derived(
+    sections ? ALL_SECTIONS.filter((section) => sections.includes(section.id)) : ALL_SECTIONS,
+  );
+  let current = $state<string>('playback');
 
   $effect(() => {
     const observer = new IntersectionObserver(

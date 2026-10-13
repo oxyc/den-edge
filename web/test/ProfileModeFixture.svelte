@@ -3,6 +3,7 @@
   import ProfileOwnerGate from '../src/components/ProfileOwnerGate.svelte';
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
   import MobileProfileRow from '../src/components/MobileProfileRow.svelte';
+  import ProfileSettings from '../src/ProfileSettings.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
   import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
@@ -75,7 +76,15 @@
   const household = new HouseholdSession(
     { kind: 'legacy', libraryKey: 'fixture-household', configurationOnly: false },
     model,
-    { query: async () => ({}), onStatus: () => () => {} },
+    {
+      query: async (request) =>
+        request.kind === 'service.regions'
+          ? { regions: [{ code: 'FI', name: 'Finland' }] }
+          : request.kind === 'service.directory'
+            ? { services: [], complete: true }
+            : {},
+      onStatus: () => () => {},
+    },
   );
   const owner = new ProfileSession(
     legacyProfileIdentity('fixture-household', false),
@@ -99,6 +108,7 @@
         policyCeiling: profiles?.session?.policy?.settings.value?.preferences.maturityCeiling,
         effectivePreferences: profiles?.session?.policy?.settings.value?.preferences,
         contentPolicy: profiles?.session?.contentPolicy,
+        preferencesIdentity: profiles?.session?.preferences?.identity,
         policyKeys: profiles?.session?.policy ? Object.keys(profiles.session.policy) : [],
         policyHasWriter: profiles?.session?.policy
           ? 'commands' in profiles.session.policy || 'track' in profiles.session.policy
@@ -230,6 +240,11 @@
           <span>{entry.title.title}</span>
         {/each}
       </section>
+    {/if}
+    {#if params.has('settings') && profiles.mode !== 'owner'}
+      {#key profiles.session.identity}
+        <ProfileSettings session={profiles.session} />
+      {/key}
     {/if}
   {:else if profiles}
     <ProfileOwnerGate {profiles} />

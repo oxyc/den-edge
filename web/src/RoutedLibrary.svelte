@@ -5,6 +5,7 @@
   import LibraryStatus from './components/LibraryStatus.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
+  import ProfileSettings from './ProfileSettings.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
@@ -613,13 +614,12 @@
       {#snippet children(route, active)}
         {#if route.page === 'settings'}
           {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
-          {#if session.identity.kind === 'visitor' || session.identity.kind === 'profile'}
-            <section class="visitor-settings" aria-labelledby="visitor-settings-title">
-              <h1 id="visitor-settings-title">Owner settings</h1>
-              <p>
-                {session.identity.kind === 'visitor' ? 'Visitor' : 'Kids'} can’t manage household settings.
-                Use the profile button above to switch to Owner.
-              </p>
+          {#if profileCapability === 'preview' && (session.identity.kind === 'visitor' || session.identity.kind === 'profile')}
+            <ProfileSettings {session} />
+          {:else if session.identity.kind === 'visitor' || session.identity.kind === 'profile'}
+            <section class="profile-settings-unavailable" aria-labelledby="profile-settings-title">
+              <h1 id="profile-settings-title">Profile settings unavailable</h1>
+              <p>Switch to Owner to manage settings on this version of Den.</p>
             </section>
           {:else if link || session.local}
             {#if SettingsScreen.current}
@@ -659,7 +659,7 @@
 {/if}
 
 <style>
-  .visitor-settings {
+  .profile-settings-unavailable {
     max-width: 680px;
     margin: 24px auto;
     padding: 24px;
@@ -668,11 +668,11 @@
     background: var(--card);
   }
 
-  .visitor-settings h1 {
+  .profile-settings-unavailable h1 {
     margin-top: 0;
   }
 
-  .visitor-settings p {
+  .profile-settings-unavailable p {
     margin-bottom: 0;
     color: var(--muted);
   }

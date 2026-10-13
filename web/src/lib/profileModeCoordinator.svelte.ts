@@ -9,6 +9,7 @@ import {
 } from './profileIdentity';
 import { ProfileSession } from './profileSession.svelte';
 import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
+import { PreviewProfilePreferences } from './profilePreferences.svelte';
 import {
   crossTabVisitorActivityLock,
   randomVisitorVisitId,
@@ -331,6 +332,8 @@ export class ProfileModeCoordinator {
           );
         },
         lock: this.#visitorLock,
+        previewPreferences: this.#directory !== null,
+        events: this.#events,
       },
       this.#directory ? (this.#choice(this.#directory.owner)?.policy ?? null) : null,
     );
@@ -391,15 +394,23 @@ export class ProfileModeCoordinator {
 
   #newKid(choice: ProfileChoice): ProfileSession {
     if (!choice.id) throw new TypeError('Kid profile is missing its id');
+    const identity = persistentProfileIdentity(choice.id, `preview:${choice.id}`);
+    const householdPolicy = isolatedProfilePolicy(
+      this.#pendingOwner?.policy ?? this.#session?.policy ?? null,
+    );
+    const preferences = householdPolicy
+      ? new PreviewProfilePreferences(identity, householdPolicy, this.#storage, this.#events)
+      : null;
     return new ProfileSession(
-      persistentProfileIdentity(choice.id, `preview:${choice.id}`),
+      identity,
       this.#household,
       null,
       false,
       false,
-      isolatedProfilePolicy(this.#pendingOwner?.policy ?? this.#session?.policy ?? null),
+      preferences?.policy ?? householdPolicy,
       null,
       choice.policy ?? null,
+      preferences,
     );
   }
 

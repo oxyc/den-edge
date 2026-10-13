@@ -53,6 +53,9 @@
     save,
     savePin,
     verifyPin,
+    personalOnly = false,
+    contentPolicy = null,
+    role = 'owner',
   }: {
     prefs: SettingsPreferences;
     /** Worker-owned provider metadata boundary. */
@@ -63,6 +66,12 @@
     save: (changes: PreferenceChanges) => void;
     savePin: (pin: string | null) => Promise<boolean>;
     verifyPin: (pin: string) => Promise<boolean>;
+    personalOnly?: boolean;
+    contentPolicy?: {
+      readonly maximumAge: number | null;
+      readonly unknownRatings: 'allow' | 'block';
+    } | null;
+    role?: 'owner' | 'kid' | 'visitor';
   } = $props();
 
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
@@ -344,95 +353,109 @@
     </p>
   </SettingRow>
 
-  <SettingRow id="my-services" label="My services" value={count(effectiveServices.length, '')}>
-    <p class="summary">
-      <span
-        >{effectiveServices.length
-          ? `${effectiveServices.length} service${effectiveServices.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
-          : 'None selected'}</span
-      >
-    </p>
-    <div class="form">
-      <Select
-        label="Country"
-        value={shownCountry}
-        groups={countryGroups}
-        boxed
-        onchange={(code) => {
-          servicesCountry = code;
-          serviceFilter = '';
-        }}
-      />
-      <input
-        id="service-filter"
-        class="field"
-        type="search"
-        placeholder="Filter {countryName(shownCountry)}’s services"
-        aria-label="Filter services"
-        bind:value={serviceFilter}
-      />
-    </div>
-    {#if countriesFailed}
-      <p class="status bad">
-        Couldn’t refresh the country list. Check your TMDB key in Settings.
-        <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
-          >Try again</button
+  {#if personalOnly}
+    <SettingRow id="household-streaming" label="Streaming household" value={countryName(region)}>
+      <p class="summary">
+        Region: {countryName(region)} · {effectiveServices.length} shared service{effectiveServices.length ===
+        1
+          ? ''
+          : 's'}
+      </p>
+      <p class="foot">
+        Region and streaming services are shared by the household and managed by Owner.
+      </p>
+    </SettingRow>
+  {:else}
+    <SettingRow id="my-services" label="My services" value={count(effectiveServices.length, '')}>
+      <p class="summary">
+        <span
+          >{effectiveServices.length
+            ? `${effectiveServices.length} service${effectiveServices.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
+            : 'None selected'}</span
         >
       </p>
-    {/if}
-    {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
-      <p class="status bad">
-        {directoryLoad.status === 'partial'
-          ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
-          : `Couldn’t load ${countryName(shownCountry)}’s services.`}
-        <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
-          >Try again</button
-        >
+      <div class="form">
+        <Select
+          label="Country"
+          value={shownCountry}
+          groups={countryGroups}
+          boxed
+          onchange={(code) => {
+            servicesCountry = code;
+            serviceFilter = '';
+          }}
+        />
+        <input
+          id="service-filter"
+          class="field"
+          type="search"
+          placeholder="Filter {countryName(shownCountry)}’s services"
+          aria-label="Filter services"
+          bind:value={serviceFilter}
+        />
+      </div>
+      {#if countriesFailed}
+        <p class="status bad">
+          Couldn’t refresh the country list. Check your TMDB key in Settings.
+          <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
+            >Try again</button
+          >
+        </p>
+      {/if}
+      {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
+        <p class="status bad">
+          {directoryLoad.status === 'partial'
+            ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
+            : `Couldn’t load ${countryName(shownCountry)}’s services.`}
+          <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
+            >Try again</button
+          >
+        </p>
+      {/if}
+      {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
+        <p class="status">Loading services…</p>
+      {:else if directory.length}
+        <CheckGrid
+          legend="{countryName(shownCountry)} · most prominent first"
+          options={serviceOptions}
+          checked={(id) => {
+            const service = directory.find((s) => s.id === id);
+            return !!service && isPicked(service, shownCountry);
+          }}
+          wide
+          {disabled}
+          onchange={toggleService}
+        />
+      {:else if directoryLoad.status === 'ready'}
+        <p class="status">No services listed for {countryName(shownCountry)}</p>
+      {/if}
+      <p class="foot">
+        Services are licensed per country, so pick them by country. Each becomes a brand tile on
+        Home, opening that country’s catalogue. Every pick shares the one shelf, and a tile says
+        which country it is for when you have picked the same service twice. The “where to watch”
+        badges on individual titles still follow your own region.
       </p>
-    {/if}
-    {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
-      <p class="status">Loading services…</p>
-    {:else if directory.length}
-      <CheckGrid
-        legend="{countryName(shownCountry)} · most prominent first"
-        options={serviceOptions}
-        checked={(id) => {
-          const service = directory.find((s) => s.id === id);
-          return !!service && isPicked(service, shownCountry);
-        }}
-        wide
-        {disabled}
-        onchange={toggleService}
-      />
-    {:else if directoryLoad.status === 'ready'}
-      <p class="status">No services listed for {countryName(shownCountry)}</p>
-    {/if}
-    <p class="foot">
-      Services are licensed per country, so pick them by country. Each becomes a brand tile on Home,
-      opening that country’s catalogue. Every pick shares the one shelf, and a tile says which
-      country it is for when you have picked the same service twice. The “where to watch” badges on
-      individual titles still follow your own region.
-    </p>
-    <p class="foot">Streaming availability by JustWatch.</p>
-  </SettingRow>
+      <p class="foot">Streaming availability by JustWatch.</p>
+    </SettingRow>
 
-  <SettingRow id="region" label="Region">
-    {#snippet control()}
-      <Select
-        labelledby="region-label"
-        value={prefs.watchRegion ?? ''}
-        options={[
-          { value: '', label: `Automatic (${countryName(deviceRegion)})` },
-          ...(countries ?? []).map((c) => ({ value: c.code, label: c.name })),
-          ...(prefs.watchRegion && !countries?.some((c) => c.code === prefs.watchRegion)
-            ? [{ value: prefs.watchRegion, label: countryName(prefs.watchRegion) }]
-            : []),
-        ]}
-        {disabled}
-        onchange={(code) => save(change.watchRegion(code || undefined))}
-      />
-    {/snippet}
-  </SettingRow>
+    <SettingRow id="region" label="Region">
+      {#snippet control()}
+        <Select
+          labelledby="region-label"
+          value={prefs.watchRegion ?? ''}
+          options={[
+            { value: '', label: `Automatic (${countryName(deviceRegion)})` },
+            ...(countries ?? []).map((c) => ({ value: c.code, label: c.name })),
+            ...(prefs.watchRegion && !countries?.some((c) => c.code === prefs.watchRegion)
+              ? [{ value: prefs.watchRegion, label: countryName(prefs.watchRegion) }]
+              : []),
+          ]}
+          {disabled}
+          onchange={(code) => save(change.watchRegion(code || undefined))}
+        />
+      {/snippet}
+    </SettingRow>
+  {/if}
 
   <SettingRow id="minimum-year" label="Minimum year">
     {#snippet control()}
@@ -545,81 +568,99 @@
     </p>
   </SettingRow>
 
-  <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>
-    <h3 id="maturity-ceiling">Maturity ceiling</h3>
-    <Segmented
-      name="maturity-ceiling"
-      labelledby="maturity-ceiling"
-      options={[
-        { value: 'none', label: 'None' },
-        { value: 'pg13', label: 'PG-13' },
-        { value: 'r', label: 'R' },
-      ]}
-      value={prefs.maturityCeiling ?? 'none'}
-      disabled={disabled || !canChangeLimit}
-      onchange={(v) => save(change.maturityCeiling(v === 'pg13' || v === 'r' ? v : undefined))}
-    />
-    {#if pinConfigured && !unlocked}
-      <form
-        bind:this={unlockForm}
-        class="form"
-        onsubmit={(event) => {
-          event.preventDefault();
-          unlock();
-        }}
-      >
-        <PinInput
-          id="parental-pin"
-          label="Parental PIN"
-          bind:value={pinEntry}
-          invalid={pinWrong}
-          onvalue={() => (pinWrong = false)}
-          oncomplete={() => void unlock()}
-        />
-        <Button type="submit" variant="primary" label="Unlock" disabled={pinEntry.length < 4} />
-      </form>
-      {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
-      <p class="foot">A PIN protects the maturity ceiling. Enter it to change the ceiling.</p>
-    {:else}
-      <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
-      <form
-        bind:this={newPinForm}
-        class="form"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void setPin();
-        }}
-      >
-        <PinInput
-          id="new-parental-pin"
-          label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
-          bind:value={newPin}
-          autocomplete="new-password"
-          oncomplete={() => void setPin()}
-        />
-        <Button
-          type="submit"
-          variant="primary"
-          label={pinConfigured ? 'Change PIN' : 'Set PIN'}
-          disabled={disabled || !/^\d{4}$/.test(newPin)}
-        />
-        {#if pinConfigured}
-          <Confirm
-            label="Remove PIN"
-            question="Remove the parental PIN?"
-            detail="Anyone could then change the maturity ceiling, on every device."
-            confirmLabel="Remove"
-            {disabled}
-            onconfirm={() => void savePin(null)}
-          />
-        {/if}
-      </form>
+  {#if personalOnly}
+    <SettingRow
+      id="profile-policy"
+      label="Content limit"
+      value={contentPolicy?.maximumAge === null
+        ? 'No age limit · managed by Owner'
+        : contentPolicy?.maximumAge !== undefined
+          ? `Up to age ${contentPolicy.maximumAge} · managed by Owner`
+          : 'Managed by Owner'}
+    >
       <p class="foot">
-        A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a
-        looser ceiling set here waits on each Apple TV until someone enters the PIN there.
+        {role === 'kid'
+          ? 'Only Owner can change this profile’s age limit and unrated-title policy.'
+          : 'Visitor follows the content policy chosen by Owner.'}
       </p>
-    {/if}
-  </SettingRow>
+    </SettingRow>
+  {:else}
+    <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>
+      <h3 id="maturity-ceiling">Maturity ceiling</h3>
+      <Segmented
+        name="maturity-ceiling"
+        labelledby="maturity-ceiling"
+        options={[
+          { value: 'none', label: 'None' },
+          { value: 'pg13', label: 'PG-13' },
+          { value: 'r', label: 'R' },
+        ]}
+        value={prefs.maturityCeiling ?? 'none'}
+        disabled={disabled || !canChangeLimit}
+        onchange={(v) => save(change.maturityCeiling(v === 'pg13' || v === 'r' ? v : undefined))}
+      />
+      {#if pinConfigured && !unlocked}
+        <form
+          bind:this={unlockForm}
+          class="form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            unlock();
+          }}
+        >
+          <PinInput
+            id="parental-pin"
+            label="Parental PIN"
+            bind:value={pinEntry}
+            invalid={pinWrong}
+            onvalue={() => (pinWrong = false)}
+            oncomplete={() => void unlock()}
+          />
+          <Button type="submit" variant="primary" label="Unlock" disabled={pinEntry.length < 4} />
+        </form>
+        {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
+        <p class="foot">A PIN protects the maturity ceiling. Enter it to change the ceiling.</p>
+      {:else}
+        <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
+        <form
+          bind:this={newPinForm}
+          class="form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void setPin();
+          }}
+        >
+          <PinInput
+            id="new-parental-pin"
+            label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
+            bind:value={newPin}
+            autocomplete="new-password"
+            oncomplete={() => void setPin()}
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            label={pinConfigured ? 'Change PIN' : 'Set PIN'}
+            disabled={disabled || !/^\d{4}$/.test(newPin)}
+          />
+          {#if pinConfigured}
+            <Confirm
+              label="Remove PIN"
+              question="Remove the parental PIN?"
+              detail="Anyone could then change the maturity ceiling, on every device."
+              confirmLabel="Remove"
+              {disabled}
+              onconfirm={() => void savePin(null)}
+            />
+          {/if}
+        </form>
+        <p class="foot">
+          A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a
+          looser ceiling set here waits on each Apple TV until someone enters the PIN there.
+        </p>
+      {/if}
+    </SettingRow>
+  {/if}
 </SettingsSection>
 
 <style>
