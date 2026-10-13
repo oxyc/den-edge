@@ -13,12 +13,36 @@ import { VisitorActivityProjection } from './visitorActivity.svelte';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
 
 const VISITOR_STORAGE_PREFIX = 'den.profile.visitor.v1:';
+const VISITOR_NAMESPACE_KEY = /^den\.profile\.visitor\.v1:([0-9a-f]{32}):/;
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise mutex bookkeeping is not presentation state.
 const localLocks = new Map<string, Promise<void>>();
 
 export interface VisitorActivityLock {
   available(): boolean;
   run<T>(name: string, work: () => Promise<T> | T): Promise<T>;
+}
+
+/** Exact valid Visitor namespaces present on this browser. Similar-looking personal/future keys are not visits. */
+export function visitorNamespaceIds(storage: Storage): VisitorVisitId[] {
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- One synchronous immutable discovery result.
+  const ids = new Set<VisitorVisitId>();
+  for (let index = 0; index < storage.length; index++) {
+    const id = VISITOR_NAMESPACE_KEY.exec(storage.key(index) ?? '')?.[1];
+    if (id) ids.add(visitorVisitId(id));
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Missing/corrupt-selection recovery has no active Visitor object to retire. Delete every exact orphan namespace
+ * under the same per-visit lock used by activity writes, so another tab cannot resurrect a key during recovery.
+ */
+export async function purgeOrphanVisitorNamespaces(
+  storage: Storage,
+  lock: VisitorActivityLock = crossTabVisitorActivityLock,
+): Promise<void> {
+  for (const id of visitorNamespaceIds(storage))
+    await new VisitorActivityNamespace(id, storage, () => false, lock).dispose();
 }
 
 const fallbackLock: VisitorActivityLock = {

@@ -150,11 +150,29 @@ test('missing active mode requires the configured Owner PIN and persists success
 });
 
 test('a corrupt active marker cannot expose Owner without its PIN', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('den.profile.active.v1', '{broken'));
+  const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  await page.addInitScript((visit) => {
+    localStorage.setItem('den.profile.active.v1', '{broken');
+    localStorage.setItem(`den.profile.visitor.v1:${visit}:activity`, 'private visit');
+    localStorage.setItem('den.profile.personal.v1:activity', 'personal');
+  }, orphan);
   await open(page, true, '?pin=1234');
 
   await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
   await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (visit) => ({
+          visitor: localStorage.getItem(`den.profile.visitor.v1:${visit}:activity`),
+          personal: localStorage.getItem('den.profile.personal.v1:activity'),
+        }),
+        orphan,
+      ),
+    )
+    .toEqual({ visitor: null, personal: 'personal' });
 });
 
 test('preview directory switches sticky Kids and Visitor without a launch picker', async ({
