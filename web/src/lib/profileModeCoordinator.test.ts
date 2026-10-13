@@ -36,8 +36,8 @@ const immediateLock: VisitorActivityLock = {
     return work();
   },
 };
-const capabilityResponse = (body: string, status = 200): Response =>
-  new Response(body, { status, headers: { 'cache-control': 'no-store' } });
+const capabilityResponse = (body: string, status = 200, cacheControl = 'no-store'): Response =>
+  new Response(body, { status, headers: { 'cache-control': cacheControl } });
 
 function storageEvent(key: string): Event {
   const event = new Event('storage');
@@ -789,12 +789,44 @@ describe('profilesCapability', () => {
     const preview = vi.fn(async () =>
       capabilityResponse(JSON.stringify({ enabled: true, preview: true })),
     );
-    await expect(profilesCapability(preview as typeof fetch, immediateLock, true)).resolves.toBe(
+    await expect(profilesCapability(preview as typeof fetch, immediateLock)).resolves.toBe(
       'preview',
     );
-    await expect(profilesCapability(preview as typeof fetch, immediateLock, false)).resolves.toBe(
-      'indeterminate',
-    );
+    await expect(
+      profilesCapability(
+        vi.fn(async () =>
+          capabilityResponse(JSON.stringify({ enabled: true, preview: true }), 200, '  NO-STORE  '),
+        ) as typeof fetch,
+        immediateLock,
+      ),
+    ).resolves.toBe('preview');
+    for (const cacheControl of [
+      'public, max-age=86400, x-no-store=1',
+      'public, max-age=86400, no-store-if="preview"',
+    ]) {
+      await expect(
+        profilesCapability(
+          vi.fn(async () =>
+            capabilityResponse(JSON.stringify({ enabled: true, preview: true }), 200, cacheControl),
+          ) as typeof fetch,
+          immediateLock,
+        ),
+      ).resolves.toBe('indeterminate');
+    }
+    await expect(
+      profilesCapability(
+        vi.fn(async () =>
+          capabilityResponse(JSON.stringify({ enabled: true, preview: true, migration: false })),
+        ) as typeof fetch,
+        immediateLock,
+      ),
+    ).resolves.toBe('indeterminate');
+    await expect(
+      profilesCapability(preview as typeof fetch, {
+        available: () => false,
+        run: immediateLock.run,
+      }),
+    ).resolves.toBe('indeterminate');
 
     await expect(
       profilesCapability(

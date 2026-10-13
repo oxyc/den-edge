@@ -761,14 +761,15 @@ fn request_host(req: &Request) -> Result<Option<String>, ()> {
 }
 
 fn profile_capability(state: &AppState, req: &Request, face: Face) -> Response {
-    let enabled = face == Face::Web
-        && request_host(req).ok().flatten().is_some_and(|host| {
-            state
-                .profiles_hosts
-                .iter()
-                .any(|allowed| allowed.trim_end_matches('.').eq_ignore_ascii_case(&host))
-        });
-    if enabled {
+    let host = (face == Face::Web).then(|| request_host(req).ok().flatten()).flatten();
+    let allowed = |hosts: &[String]| {
+        host.as_ref().is_some_and(|host| {
+            hosts.iter().any(|allowed| allowed.trim_end_matches('.').eq_ignore_ascii_case(host))
+        })
+    };
+    if allowed(&state.profiles_preview_hosts) {
+        bare_json(StatusCode::OK, &json!({ "enabled": true, "preview": true }))
+    } else if allowed(&state.profiles_hosts) {
         bare_json(StatusCode::OK, &json!({ "enabled": true }))
     } else {
         bare_json(StatusCode::NOT_FOUND, &error("not_found"))
@@ -1498,6 +1499,33 @@ pub mod tests {
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}");
             assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{host}");
             assert_ne!(body_json(resp).await.get("enabled"), Some(&Value::Bool(true)), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profiles_preview_is_uncached_web_only_and_wins_over_real_mode() {
+        let mut h = split_harness();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi,other.oxy.fi");
+        state.profiles_hosts = crate::parse_hosts("PROFILES_HOSTS", "d.oxy.fi,other.oxy.fi");
+        state.profiles_preview_hosts =
+            crate::parse_hosts("PROFILES_PREVIEW_HOSTS", "D.OXY.FI,not-a-web-host.example");
+
+        for host in ["d.oxy.fi", "D.OXY.FI.:443"] {
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", host)]).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{host}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{host}");
+            for header in [header::ETAG.as_str(), "cdn-cache-control", "cache-tag"] {
+                assert!(!resp.headers().contains_key(header), "{header} on {host}");
+            }
+            assert_eq!(body_json(resp).await, json!({ "enabled": true, "preview": true }), "{host}");
+        }
+
+        let real = h.send("GET", "/capabilities/profiles", None, &[("host", "other.oxy.fi")]).await;
+        assert_eq!(body_json(real).await, json!({ "enabled": true }));
+        for host in ["d-api.oxy.fi", "192.168.86.193:8094", "not-a-web-host.example"] {
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", host)]).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}");
         }
     }
 

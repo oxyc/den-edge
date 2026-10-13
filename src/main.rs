@@ -117,9 +117,11 @@ pub struct AppState {
     /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
     /// device routes and never the web app — which would otherwise be handed out past Access.
     pub api_hosts: Vec<String>,
-    /// Web host names allowed to discover the profiles canary (env `PROFILES_HOSTS`). Empty keeps the capability
-    /// absent everywhere; an entry that is not also in `WEB_HOSTS` enables nothing.
+    /// Web host names allowed to discover real profiles (env `PROFILES_HOSTS`). Empty keeps real mode off.
     pub profiles_hosts: Vec<String>,
+    /// Web host names allowed to use only the synthetic, non-migrating profiles preview
+    /// (env `PROFILES_PREVIEW_HOSTS`). Preview wins if a host is accidentally present in both lists.
+    pub profiles_preview_hosts: Vec<String>,
     /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
@@ -331,6 +333,7 @@ impl AppState {
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),
             profiles_hosts: Vec::new(),
+            profiles_preview_hosts: Vec::new(),
             relays: Vec::new(),
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
@@ -444,6 +447,9 @@ async fn main() {
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
     state.profiles_hosts =
         env_opt("PROFILES_HOSTS").map(|v| parse_hosts("PROFILES_HOSTS", &v)).unwrap_or_default();
+    state.profiles_preview_hosts = env_opt("PROFILES_PREVIEW_HOSTS")
+        .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
+        .unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));

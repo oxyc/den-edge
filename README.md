@@ -17,7 +17,7 @@ See [Architecture](ARCHITECTURE.md) for the current request and storage flows an
 | `GET /health` | `{"status":"ok"}` |
 | `GET /version` | `{"version"}` |
 | `GET /config` | the TV's kill-switch and update gate. Addresses live in `/routes` alone (den #16) |
-| `GET /capabilities/profiles` | `{"enabled":true}` only on a web host named in `PROFILES_HOSTS`; otherwise `404`. Always `no-store`; this is only a deployment canary for [den#234](https://github.com/oxyc/den/issues/234), not profile storage, migration or UI |
+| `GET /capabilities/profiles` | `{"enabled":true,"preview":true}` on a web host named in `PROFILES_PREVIEW_HOSTS`, `{"enabled":true}` on one named only in `PROFILES_HOSTS`, otherwise `404`. Always `no-store`; preview wins if a host is accidentally in both lists |
 | `GET /routes` | every address for each service, in order — LAN, tailnet, public (`ROUTES`, [den-spec routes-v1](https://github.com/oxyc/den-spec/blob/main/wire/routes-v1.md)) — the whole table on every name, since a client away from home still matches its LAN install URLs against it |
 | `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
 | `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes). An address holds at most 10 live sessions (`429` with `Retry-After` past that) — the visitor's address, which behind a proxy is only what `TRUSTED_PROXIES` makes it: with that unset or wrong, every visitor through the proxy has the proxy's address and all of them share the 10 |
@@ -131,7 +131,8 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
 | `WEB_HOSTS` | unset | the web app's public names (comma-separated, e.g. `d.oxy.fi`; public, so a shared link opens without an account). A request for one gets the web app, `/health`/`/version`, `/routes`, `/config`, the routes the web app calls (`/pair/…`, `/lib/…`, `/grant/…`, `/inbox/append`, `/inbox/drain`) and the MCP connector (`/mcp`, `/oauth/…`, `/.well-known/oauth-…`) — never what only a TV does (unlinking, `/sync`) or `/metrics` |
 | `API_HOSTS` | unset | the device API's public names (e.g. `d-api.oxy.fi`, Access bypassed). A request for one gets the device routes and never the web app, which would otherwise be served past Access. A name in neither list (the LAN address, the tailnet's) serves both halves |
-| `PROFILES_HOSTS` | unset | exact web host names allowed to discover the profiles canary at `GET /capabilities/profiles`. Unset or empty is off everywhere. Every entry must also be in `WEB_HOSTS`; API hosts, LAN/tailnet/unknown names, and other web hosts receive `404`. This does not enable profiles, migrate a household or change its wire minimum |
+| `PROFILES_HOSTS` | unset | exact web host names allowed to discover real profiles at `GET /capabilities/profiles`. Unset or empty keeps real mode off everywhere. Every entry must also be in `WEB_HOSTS`; API hosts, LAN/tailnet/unknown names, and other web hosts receive `404` |
+| `PROFILES_PREVIEW_HOSTS` | unset | exact web host names allowed to use only the synthetic Owner/Kids/Visitor preview. Preview wins over `PROFILES_HOSTS`; keep real mode unset during this canary. An entry not also in `WEB_HOSTS` enables nothing |
 | `ADDON_RELAY` | unset | `/<prefix>=<LAN origin>` pairs, comma-separated (`/scout=http://192.168.86.193:8080,/atlas=http://192.168.86.193:8081`). The web app asks its addons at `/<prefix>/…` on its own origin and den-edge fetches them at the LAN address: JSON only (GET, HEAD, POST), without the browser's cookies or headers, not on the `API_HOSTS` names. So the browser never holds the Access token, and needs no CORS past Access |
 | `ROUTES` | unset | every address for each service, in order: `<service>=<entry> <entry> …;<service>=…`, an entry `[access:]http(s)://host[:port][/path]` (`access:` marks a name behind Cloudflare Access). Served as `GET /routes`; den-remux's https entries are allowed in the web app's `connect-src` and `media-src`. den's `render-env.sh` builds it from four facts (oxyc/den#16) |
 | `NEW_LIBRARIES` | `open` | who may start a library. `open`: any first write. `members`: only a device that proves it holds another library here, with `x-den-library-member: <id>:<token>` on its first write, as a TV moving its library to a new key does, or the one library a live guest grant reserved for that library's own key (`POST /grant/library`). So a stranger reaching the public device API can't use den-edge as storage, and neither can a new household (den #21). A store that lost its data needs `open` again for its TVs to write their libraries back |
@@ -166,6 +167,20 @@ See [web development and CSS conventions](web/README.md) for formatting and lint
 The library's wire format lives in [den-spec](https://github.com/oxyc/den-spec), checked out at `spec/`
 (`git submodule update --init`). `web/src/lib/wire.ts` implements it and its tests load den-spec's vectors,
 the same ones the Apple TV app checks itself against.
+
+### Synthetic profile preview canary
+
+Set only `PROFILES_PREVIEW_HOSTS=d.oxy.fi` to serve the synthetic Owner/Kids/Visitor UI on that web host. Keep
+`PROFILES_HOSTS` unset: its real-directory mode is a separate capability and is not part of this canary. The
+production web bundle accepts preview only from the exact, uncached `{"enabled":true,"preview":true}` answer;
+malformed, cacheable or unavailable answers fail closed.
+
+This preview does not read a real profile directory, create a profile library, start or resume household migration,
+raise the wire minimum, or filter the catalogue. Kids has no activity library model, Visitor activity is namespaced
+to local storage and deleted on its explicit end, and preview preferences remain local. Owner is still the existing
+live Owner session, so ordinary Owner actions continue to write the legacy library exactly as they do without the
+preview. The preview PIN is `1234`; it is an interaction demo, not a parental-control boundary. An unavailable
+cross-tab lock also fails closed instead of entering preview.
 
 ## Run
 

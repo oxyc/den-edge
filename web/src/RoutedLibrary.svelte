@@ -662,7 +662,9 @@
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
   {#if profileCapability === 'preview'}
-    <p class="profile-preview" role="status">Local profile preview · production remains off</p>
+    <p class="profile-preview" role="status">
+      Profile preview · filtering and household migration remain off
+    </p>
   {/if}
   {#key session.identity}
     <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />

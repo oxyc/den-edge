@@ -729,6 +729,12 @@ export function allowsImplicitAssistant(
 
 export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indeterminate';
 
+/** Cache-Control is a comma-separated directive list. Substring matching would accept made-up, cacheable
+ * directives such as `x-no-store` or `no-store-if`; only the actual no-store directive makes the capability
+ * safe to use without surviving a host-gate rollback. */
+const hasNoStore = (value: string | null): boolean =>
+  value?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store') === true;
+
 export const previewProfileDirectory = (): PreviewProfileDirectory => {
   const owner = profileId('00000000000000000000000000000001');
   return {
@@ -756,27 +762,29 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
 export async function profilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
-  allowPreview = import.meta.env.DEV,
 ): Promise<ProfilesCapability> {
   try {
     const response = await fetchImpl('/capabilities/profiles', {
       cache: 'no-store',
       credentials: 'same-origin',
     });
-    if (!response.headers.get('cache-control')?.toLowerCase().includes('no-store'))
-      return 'indeterminate';
+    if (!hasNoStore(response.headers.get('cache-control'))) return 'indeterminate';
     const value: unknown = await response.json();
-    if (
+    const disabled =
       response.status === 404 &&
       value &&
       typeof value === 'object' &&
       Object.keys(value).length === 1 &&
       'error' in value &&
-      value.error === 'not_found'
-    )
-      return 'disabled';
+      value.error === 'not_found';
+    const enabled =
+      response.ok &&
+      value &&
+      typeof value === 'object' &&
+      Object.keys(value).length === 1 &&
+      'enabled' in value &&
+      value.enabled === true;
     const preview =
-      allowPreview &&
       response.ok &&
       value &&
       typeof value === 'object' &&
@@ -785,12 +793,11 @@ export async function profilesCapability(
       value.enabled === true &&
       'preview' in value &&
       value.preview === true;
+    if (disabled && !preview) return 'disabled';
     if (
-      !response.ok ||
+      (!response.ok && !preview) ||
       !(value && typeof value === 'object') ||
-      (!preview && Object.keys(value).length !== 1) ||
-      !('enabled' in value) ||
-      value.enabled !== true ||
+      (!preview && !enabled) ||
       !visitorLock.available()
     )
       return 'indeterminate';
