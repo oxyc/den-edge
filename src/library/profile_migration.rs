@@ -871,14 +871,7 @@ impl<'a> ProfileMigrationStorage<'a> {
         candidate_token_hash: [u8; 32],
         request: RetirementRequest<'_>,
     ) -> Result<RetirementResult, MigrationError> {
-        let RetirementRequest {
-            attempt,
-            source,
-            authority,
-            profiles_row,
-            protected,
-            candidate_id,
-        } = request;
+        let RetirementRequest { attempt, source, authority, profiles_row, protected, candidate_id } = request;
         valid_attempt(attempt)?;
         if household_id == candidate_id
             || !super::valid_hex_id(household_id)
@@ -930,10 +923,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         // The attempt is server-owned durable authority, not a client assertion. In particular, an unchanged
         // legacy source is safe to clean up only after this exact split attempt reached the terminal Aborted state.
         // An abort cannot race a commit here: abort establishes its state while holding the same household lock.
-        let cleanup_attempt = self
-            .load_attempt(household_id, attempt)
-            .await?
-            .ok_or(MigrationError::NotFound)?;
+        let cleanup_attempt =
+            self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
         if cleanup_attempt.household_id != household_id
             || cleanup_attempt.attempt != attempt
             || cleanup_attempt.purpose != AttemptPurpose::Split
@@ -1995,10 +1986,9 @@ mod tests {
         };
 
         assert_eq!(retire(body.clone()).await.status(), StatusCode::CONFLICT);
-        let aborted = body_json(
-            migration_request(&h, "DELETE", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await,
-        )
-        .await;
+        let aborted =
+            body_json(migration_request(&h, "DELETE", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
         assert_eq!(aborted["state"], "aborted");
         assert_eq!(body_json(retire(body).await).await["result"], "retired");
     }
