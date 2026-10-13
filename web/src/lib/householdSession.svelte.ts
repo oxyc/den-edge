@@ -1,5 +1,6 @@
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { LibraryModel } from './libraryModel.svelte';
+import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
 import type { ProfileMigrationParticipant } from './profileMigration';
 import { SessionServices } from './sessionServices.svelte';
@@ -43,6 +44,10 @@ export class HouseholdSession {
 
   ownsModel(model: LibraryModel | null): boolean {
     return model === this.#model;
+  }
+
+  get updateRequired(): boolean {
+    return libraryUpdateRequired(this.#model);
   }
 
   configureServices(): void {

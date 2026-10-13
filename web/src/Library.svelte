@@ -35,6 +35,7 @@
     type Sighting,
   } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
+  import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { isHidden } from './lib/prefs';
@@ -231,7 +232,7 @@
   const serviceFailed = $derived(
     !!model && model.connection === 'failed' && model.overview.value === undefined,
   );
-  const updateRequired = $derived(model?.openFailure?.code === 'update-required');
+  const updateRequired = $derived(libraryUpdateRequired(model));
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
