@@ -1,10 +1,6 @@
 <script lang="ts">
   import { flushSync, onMount, tick } from 'svelte';
-  import type {
-    ActiveProfileMode,
-    ProfileChoice,
-    ProfileModeCoordinator,
-  } from '../lib/profileModeCoordinator.svelte';
+  import type { ProfileChoice, ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
   import PinInput from './PinInput.svelte';
   import ProfileAvatar from './ProfileAvatar.svelte';
@@ -50,17 +46,20 @@
     onProfileSwitcherRequest(({ trigger: opener, restoreFocus }) => show(opener, restoreFocus)),
   );
 
-  async function switchTo(target: ActiveProfileMode) {
+  const choiceKey = (choice: ProfileChoice | null) =>
+    choice?.role === 'visitor' ? 'visitor' : choice?.id;
+
+  async function switchTo(choice: ProfileChoice) {
     if (switching) return;
     switching = true;
     denied = false;
     failed = false;
     try {
       const switched =
-        target === 'owner'
+        choice.role === 'owner'
           ? await profiles.switchToOwner(pin)
-          : target === 'kid'
-            ? await profiles.switchToKid(pin)
+          : choice.role === 'kid' && choice.id
+            ? await profiles.switchToPersistent(choice.id, pin)
             : await profiles.switchToVisitor(pin);
       if (switched) {
         dialog?.close();
@@ -80,12 +79,12 @@
   async function choose(choice: ProfileChoice) {
     denied = false;
     failed = false;
-    if (choice.role === profiles.mode) {
+    if (choiceKey(choice) === choiceKey(active)) {
       dialog?.close();
       return;
     }
     if (!profiles.requiresPin(choice.role) || profiles.parentalPinConfigured === false)
-      return switchTo(choice.role);
+      return switchTo(choice);
     // iOS opens its numeric keyboard only while this original tap still owns user activation. Render the PIN
     // synchronously, then focus it before returning from the choice's click handler.
     flushSync(() => (pending = choice));
@@ -138,7 +137,7 @@
     method="dialog"
     onsubmit={(event) => {
       event.preventDefault();
-      if (pending && /^\d{4}$/.test(pin)) void switchTo(pending.role);
+      if (pending && /^\d{4}$/.test(pin)) void switchTo(pending);
     }}
   >
     <h2 id="profile-switcher-title">Who’s watching?</h2>
@@ -165,7 +164,7 @@
           bind:value={pin}
           invalid={denied}
           onvalue={() => (denied = false)}
-          oncomplete={() => pending && void switchTo(pending.role)}
+          oncomplete={() => pending && void switchTo(pending)}
         />
         {#if profiles.preview}<p class="preview-pin">Preview PIN: <strong>1234</strong></p>{/if}
         {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
@@ -177,7 +176,7 @@
           disabled={profiles.parentalPinConfigured === undefined ||
             switching ||
             (profiles.parentalPinConfigured === true && !/^\d{4}$/.test(pin))}
-          onclick={() => void switchTo(pending!.role)}
+          onclick={() => void switchTo(pending!)}
           >{switching ? 'Switching…' : `Use ${pending.name}`}</button
         >
         <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
@@ -185,10 +184,10 @@
     {:else}
       <p class="intro">Choose once. Den opens here next time until you switch again.</p>
       <div class="profiles" aria-label="Profiles">
-        {#each profiles.choices as choice (choice.role)}
+        {#each profiles.choices as choice (choice.role === 'visitor' ? 'visitor' : choice.id)}
           <button
             class="profile-choice"
-            class:current={choice.role === profiles.mode}
+            class:current={choiceKey(choice) === choiceKey(active)}
             type="button"
             disabled={switching}
             aria-label={`Use ${choice.name}`}
@@ -207,7 +206,8 @@
                     : 'Your library and household settings'}
               </small>
             </span>
-            {#if choice.role === profiles.mode}<span class="current-label">Current</span>{/if}
+            {#if choiceKey(choice) === choiceKey(active)}<span class="current-label">Current</span
+              >{/if}
           </button>
         {/each}
       </div>

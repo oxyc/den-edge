@@ -1,5 +1,5 @@
-import type { LibraryModelLease } from './libraryModel.svelte';
-import type { ConnectionsView } from './libraryServiceProtocol';
+import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
+import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProtocol';
 import {
   legacyProfileIdentity,
   persistentProfileIdentity,
@@ -7,7 +7,7 @@ import {
   visitorVisitId,
   type ProfileId,
 } from './profileIdentity';
-import { ProfileSession } from './profileSession.svelte';
+import { activeProfileSession, ProfileSession } from './profileSession.svelte';
 import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
 import {
@@ -28,11 +28,61 @@ export interface ProfileChoice {
   readonly name: string;
   readonly avatar: string;
   readonly policy?: ProfileContentPolicy;
+  /** Present only for a den-core-validated real directory; never returned by `choices`. */
+  readonly libraryKey?: string;
+  readonly keyVersion?: number;
 }
 
 export interface PreviewProfileDirectory {
   readonly owner: ProfileId;
-  readonly profiles: readonly [ProfileChoice, ProfileChoice];
+  readonly profiles: readonly ProfileChoice[];
+}
+
+export interface ProfileActivityModelHandle {
+  readonly model: LibraryModel;
+  close(): void;
+}
+
+export type ProfileActivityModelFactory = (libraryKey: string) => ProfileActivityModelHandle;
+
+/** Convert the service's already den-core-validated projection without allowing deleted or keyless sessions. */
+export function profileDirectoryChoices(
+  view: ProfileDirectoryView,
+): PreviewProfileDirectory | null {
+  if (!view.owner) return null;
+  const active = view.profiles.filter((profile) => !profile.deleted);
+  const owner = active.find((profile) => profile.id === view.owner && profile.role === 'owner');
+  const supported = active.filter((profile) => profile.role === 'owner' || profile.role === 'kid');
+  if (
+    !owner ||
+    supported.some(
+      (profile) =>
+        !profile.libraryKey || !Number.isSafeInteger(profile.keyVersion) || profile.keyVersion < 1,
+    )
+  )
+    return null;
+  try {
+    const choice = (
+      profile: ProfileDirectoryView['profiles'][number],
+      role: 'owner' | 'kid',
+    ): ProfileChoice => ({
+      id: profileId(profile.id),
+      role,
+      name: profile.name,
+      avatar: profile.avatar ?? profile.role,
+      policy: profile.policy,
+      libraryKey: profile.libraryKey,
+      keyVersion: profile.keyVersion,
+    });
+    return {
+      owner: profileId(owner.id),
+      profiles: supported.map((profile) =>
+        choice(profile, profile.role === 'owner' ? 'owner' : 'kid'),
+      ),
+    };
+  } catch {
+    return null;
+  }
 }
 
 type StorageEvents = Pick<Window, 'addEventListener' | 'removeEventListener'>;
@@ -108,8 +158,13 @@ export class ProfileModeCoordinator {
   readonly #events: StorageEvents | null;
   readonly #visitorLock: VisitorActivityLock;
   readonly #connections: LibraryModelLease<ConnectionsView>;
-  readonly #directory: PreviewProfileDirectory | null;
+  #directory: PreviewProfileDirectory | null;
+  readonly #profileModels: ProfileActivityModelFactory | null;
+  readonly #preview: boolean;
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Ownership bookkeeping; UI observes session only.
+  readonly #openingModels = new Set<ProfileActivityModelHandle>();
   #pendingOwner: ProfileSession | null;
+  #transition = 0;
   #disposed = false;
 
   constructor(
@@ -118,6 +173,7 @@ export class ProfileModeCoordinator {
     events: StorageEvents | null = typeof window === 'undefined' ? null : window,
     visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
     directory: PreviewProfileDirectory | null = null,
+    profileModels: ProfileActivityModelFactory | null = null,
   ) {
     if (!owner.model || owner.identity.libraryKey === null)
       throw new TypeError('Profiles require an open Owner library');
@@ -131,6 +187,8 @@ export class ProfileModeCoordinator {
     this.#visitorLock = visitorLock;
     this.#connections = owner.model.connections();
     this.#directory = directory;
+    this.#profileModels = profileModels;
+    this.#preview = directory !== null && profileModels === null;
     this.#pendingOwner = owner;
 
     const saved = readActiveProfile(storage);
@@ -146,17 +204,28 @@ export class ProfileModeCoordinator {
       owner.close();
     } else if (saved?.mode === 'persistent' && directory) {
       const choice = this.#choice(saved.profileId);
-      if (choice?.role === 'owner') {
+      if (choice?.role === 'owner' && !this.#profileModels) {
         this.#session = owner;
         this.#pendingOwner = null;
-      } else if (choice?.role === 'kid') {
+      } else if (choice?.role === 'kid' && !this.#profileModels) {
         this.#session = this.#newKid(choice);
         this.#pendingOwner = null;
         owner.close();
+      } else if (choice && this.#profileModels) {
+        owner.close();
+        this.#pendingOwner = null;
+        void this.#restorePersistent(choice);
       }
     } else if (saved?.mode === 'owner') {
-      this.#session = owner;
-      this.#pendingOwner = null;
+      if (this.#profileModels && directory) {
+        const choice = this.#choice(directory.owner);
+        owner.close();
+        this.#pendingOwner = null;
+        if (choice) void this.#restorePersistent(choice, true);
+      } else {
+        this.#session = owner;
+        this.#pendingOwner = null;
+      }
     }
     this.#events?.addEventListener('storage', this.#storageChanged);
   }
@@ -167,39 +236,41 @@ export class ProfileModeCoordinator {
 
   get mode(): ActiveProfileMode | null {
     if (this.session?.identity.kind === 'visitor') return 'visitor';
-    if (this.session?.identity.kind === 'profile') return 'kid';
+    if (this.session?.identity.kind === 'profile')
+      return this.#choice(this.session.identity.id)?.role === 'owner' ? 'owner' : 'kid';
     return this.session ? 'owner' : null;
   }
 
   get choices(): readonly ProfileChoice[] {
-    return this.#directory
+    const choices: readonly ProfileChoice[] = this.#directory
       ? [
           ...this.#directory.profiles,
           { id: null, role: 'visitor' as const, name: 'Visitor', avatar: 'visitor' },
         ]
       : [
-          { id: null, role: 'owner', name: 'Owner', avatar: 'owner' },
-          { id: null, role: 'visitor', name: 'Visitor', avatar: 'visitor' },
+          { id: null, role: 'owner' as const, name: 'Owner', avatar: 'owner' },
+          { id: null, role: 'visitor' as const, name: 'Visitor', avatar: 'visitor' },
         ];
+    return choices.map((choice) => this.#publicChoice(choice)!);
   }
 
   get activeChoice(): ProfileChoice | null {
     if (this.mode === 'visitor')
       return { id: null, role: 'visitor', name: 'Visitor', avatar: 'visitor' };
     if (this.mode === 'owner' && this.#directory)
-      return this.#choice(this.#directory.owner) ?? null;
+      return this.#publicChoice(this.#choice(this.#directory.owner));
     const id = this.session?.identity.id;
-    return this.#directory && id ? (this.#choice(id) ?? null) : (this.choices[0] ?? null);
+    return this.#directory && id ? this.#publicChoice(this.#choice(id)) : (this.choices[0] ?? null);
   }
 
   /** Undefined only while the existing Settings-owned connection view is opening. */
   get parentalPinConfigured(): boolean | undefined {
-    if (this.#directory) return true;
+    if (this.#preview) return true;
     return this.#connections.snapshot.value?.parentalPinConfigured;
   }
 
   get preview(): boolean {
-    return this.#directory !== null;
+    return this.#preview;
   }
 
   requiresPin(target: ActiveProfileMode): boolean {
@@ -245,44 +316,89 @@ export class ProfileModeCoordinator {
     if (this.requiresPin('owner') && !(await this.#verifyPin(pin))) return false;
 
     const previous = this.#session;
+    const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+    const nextPersistent =
+      this.#profileModels && ownerChoice ? await this.#preparePersistent(ownerChoice) : null;
+    if (this.#profileModels && !nextPersistent) return false;
+    const preparedAt = this.#transition;
     // Revocation and deletion take the same visit-wide lock as writes. A write wins before deletion or observes the
     // Owner marker afterward; no interleaving can recreate the namespace after the visit ends.
     if (previous?.identity.kind === 'visitor')
-      await (previous as VisitorProfileSession).endVisit(() =>
-        keepActiveProfile(this.#storage, this.#ownerMarker()),
-      );
+      try {
+        await (previous as VisitorProfileSession).endVisit(() =>
+          this.#commitPrepared(preparedAt, previous, this.#ownerMarker()),
+        );
+      } catch (error) {
+        nextPersistent?.close();
+        throw error;
+      }
     else {
-      keepActiveProfile(this.#storage, this.#ownerMarker());
-      this.#session?.close();
+      try {
+        this.#commitPrepared(preparedAt, previous, this.#ownerMarker());
+      } catch (error) {
+        nextPersistent?.close();
+        throw error;
+      }
     }
-    const next = this.#pendingOwner ?? this.#newOwner();
+    const next = nextPersistent ?? this.#pendingOwner ?? this.#newOwner();
     this.#pendingOwner = null;
     this.#session = next;
+    previous?.close();
     return true;
   }
 
   async switchToKid(pin?: string): Promise<boolean> {
     this.#assertOpen();
     const kid = this.#directory?.profiles.find((choice) => choice.role === 'kid');
-    if (!kid?.id || this.mode === 'kid') return kid?.id !== null && this.mode === 'kid';
+    return kid?.id ? this.switchToPersistent(kid.id, pin) : false;
+  }
+
+  async switchToPersistent(target: ProfileId, pin?: string): Promise<boolean> {
+    this.#assertOpen();
+    const kid = this.#choice(target);
+    if (!kid?.id || kid.role !== 'kid') return false;
+    if (this.session?.identity.kind === 'profile' && this.session.identity.id === kid.id)
+      return true;
     if (this.requiresPin('kid') && !(await this.#verifyPin(pin))) return false;
     const previous = this.#session;
     const marker = { version: 1 as const, mode: 'persistent' as const, profileId: kid.id };
+    const nextPersistent = this.#profileModels ? await this.#preparePersistent(kid) : null;
+    if (this.#profileModels && !nextPersistent) return false;
+    const preparedAt = this.#transition;
     if (previous?.identity.kind === 'visitor')
-      await (previous as VisitorProfileSession).endVisit(() =>
-        keepActiveProfile(this.#storage, marker),
-      );
+      try {
+        await (previous as VisitorProfileSession).endVisit(() =>
+          this.#commitPrepared(preparedAt, previous, marker),
+        );
+      } catch (error) {
+        nextPersistent?.close();
+        throw error;
+      }
     else {
-      keepActiveProfile(this.#storage, marker);
-      previous?.close();
+      try {
+        this.#commitPrepared(preparedAt, previous, marker);
+      } catch (error) {
+        nextPersistent?.close();
+        throw error;
+      }
     }
-    this.#session = this.#newKid(kid);
+    this.#session = nextPersistent ?? this.#newKid(kid);
+    previous?.close();
     return true;
   }
 
   /** Establishes an absent/corrupt marker only after proving this household has no Owner PIN. */
   establishUnprotectedOwner(): boolean {
     if (this.#session) return true;
+    // A real Owner must open its own encrypted activity library asynchronously; never reveal the household model.
+    if (this.#profileModels) {
+      const saved = readActiveProfile(this.#storage);
+      if (saved?.mode === 'persistent' && this.#choice(saved.profileId)) return false;
+      if (saved?.mode === 'owner' || saved?.mode === 'visitor') return false;
+      if (this.parentalPinConfigured !== false) return false;
+      void this.switchToOwner();
+      return false;
+    }
     if (this.parentalPinConfigured !== false) return false;
     try {
       keepActiveProfile(this.#storage, this.#ownerMarker());
@@ -299,11 +415,48 @@ export class ProfileModeCoordinator {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#cancelOpenings();
     this.#events?.removeEventListener('storage', this.#storageChanged);
     this.#connections.release();
     this.#session?.close();
     this.#pendingOwner?.close();
     this.#household.close();
+  }
+
+  /** Replace the validated control-plane projection. A changed/removed active entry is never kept alive. */
+  updateDirectory(directory: PreviewProfileDirectory | null): void {
+    this.#assertOpen();
+    const current = this.#session;
+    const previousChoice =
+      current?.identity.kind === 'profile' ? this.#choice(current.identity.id) : undefined;
+    const previousOwner = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+    this.#directory = directory;
+    if (!this.#profileModels) return;
+    this.#cancelOpenings();
+    if (!current) {
+      const saved = readActiveProfile(this.#storage);
+      const selected = saved?.mode === 'persistent' ? this.#choice(saved.profileId) : undefined;
+      if (selected) void this.#restorePersistent(selected);
+      else if (saved?.mode === 'visitor' && directory && this.#visitorLock.available()) {
+        const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
+        this.#session = this.#newVisitor(visitorVisitId(visitId));
+      }
+      return;
+    }
+    if (current?.identity.kind === 'visitor') {
+      const nextOwner = directory ? this.#choice(directory.owner) : undefined;
+      if (directory && this.#sameContentPolicy(previousOwner?.policy, nextOwner?.policy)) return;
+      const visit = current.identity.id;
+      current.close();
+      this.#session = directory ? this.#newVisitor(visitorVisitId(visit)) : null;
+      return;
+    }
+    if (current?.identity.kind !== 'profile') return;
+    const nextChoice = this.#choice(current.identity.id);
+    if (this.#samePersistentChoice(previousChoice, nextChoice)) return;
+    current.close();
+    this.#session = null;
+    if (nextChoice) void this.#restorePersistent(nextChoice);
   }
 
   #newOwner(): ProfileSession {
@@ -332,7 +485,7 @@ export class ProfileModeCoordinator {
           );
         },
         lock: this.#visitorLock,
-        previewPreferences: this.#directory !== null,
+        previewPreferences: this.#preview,
         events: this.#events,
       },
       this.#directory ? (this.#choice(this.#directory.owner)?.policy ?? null) : null,
@@ -352,7 +505,10 @@ export class ProfileModeCoordinator {
     }
     const saved = readActiveProfile(this.#storage);
     if (saved?.mode === 'visitor') {
-      if (!this.#visitorLock.available()) return;
+      if (!this.#visitorLock.available()) {
+        this.#neutralize(current);
+        return;
+      }
       const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
       if (current?.identity.kind === 'visitor' && current.identity.id === visitId) {
         (current as VisitorProfileSession).reloadActivity();
@@ -367,7 +523,27 @@ export class ProfileModeCoordinator {
     const persistent = saved?.mode === 'persistent' ? this.#choice(saved.profileId) : null;
     const ownerSelected = saved?.mode === 'owner' || persistent?.role === 'owner';
     const kidSelected = persistent?.role === 'kid' ? persistent : null;
-    if (!ownerSelected && !kidSelected) return;
+    if (!ownerSelected && !kidSelected) {
+      this.#neutralize(current);
+      return;
+    }
+    const realChoice = persistent ?? (this.#directory ? this.#choice(this.#directory.owner) : null);
+    if (this.#profileModels) {
+      this.#cancelOpenings();
+      const restore = () => {
+        if (this.#disposed || this.#session !== current) return;
+        current?.close();
+        this.#session = null;
+        if (realChoice) void this.#restorePersistent(realChoice, saved?.mode === 'owner');
+      };
+      if (current?.identity.kind === 'visitor')
+        void (current as VisitorProfileSession)
+          .endVisit()
+          .then(restore)
+          .catch(() => {});
+      else restore();
+      return;
+    }
     const activate = () => {
       if (this.#disposed || this.#session !== current) return;
       this.#session = kidSelected
@@ -390,6 +566,108 @@ export class ProfileModeCoordinator {
 
   #choice(id: string): ProfileChoice | undefined {
     return this.#directory?.profiles.find((choice) => choice.id === id);
+  }
+
+  #publicChoice(choice: ProfileChoice | undefined): ProfileChoice | null {
+    if (!choice) return null;
+    const { id, role, name, avatar, policy } = choice;
+    return { id, role, name, avatar, ...(policy ? { policy } : {}) };
+  }
+
+  async #preparePersistent(choice: ProfileChoice): Promise<ProfileSession | null> {
+    if (!choice.id || !choice.libraryKey || !this.#profileModels) return null;
+    this.#cancelOpenings();
+    const token = this.#transition;
+    const key = choice.libraryKey;
+    const handle = this.#profileModels(key);
+    this.#openingModels.add(handle);
+    try {
+      await handle.model.ready;
+    } catch {
+      if (this.#openingModels.delete(handle)) handle.close();
+      return null;
+    }
+    if (!this.#openingModels.delete(handle)) return null;
+    const current = this.#choice(choice.id);
+    if (
+      this.#disposed ||
+      token !== this.#transition ||
+      !current ||
+      current.libraryKey !== key ||
+      current.keyVersion !== choice.keyVersion
+    ) {
+      handle.close();
+      return null;
+    }
+    return activeProfileSession(
+      persistentProfileIdentity(choice.id, key),
+      this.#household,
+      handle.model,
+      () => handle.close(),
+      current.policy ?? null,
+    );
+  }
+
+  async #restorePersistent(choice: ProfileChoice, acceptLegacyOwner = false): Promise<void> {
+    const next = await this.#preparePersistent(choice);
+    if (!next || this.#disposed) return;
+    const saved = readActiveProfile(this.#storage);
+    const selected =
+      (saved?.mode === 'persistent' && saved.profileId === choice.id) ||
+      (acceptLegacyOwner && saved?.mode === 'owner' && choice.role === 'owner');
+    if (!selected || this.#session !== null) {
+      next.close();
+      return;
+    }
+    if (saved?.mode === 'owner')
+      try {
+        keepActiveProfile(this.#storage, this.#ownerMarker());
+      } catch {
+        next.close();
+        return;
+      }
+    this.#session = next;
+  }
+
+  #samePersistentChoice(a: ProfileChoice | undefined, b: ProfileChoice | undefined): boolean {
+    return (
+      !!a &&
+      !!b &&
+      a.id === b.id &&
+      a.libraryKey === b.libraryKey &&
+      a.keyVersion === b.keyVersion &&
+      this.#sameContentPolicy(a.policy, b.policy)
+    );
+  }
+
+  #sameContentPolicy(
+    a: ProfileContentPolicy | undefined,
+    b: ProfileContentPolicy | undefined,
+  ): boolean {
+    if (!a || !b) return a === b;
+    return a.maximumAge === b.maximumAge && a.unknownRatings === b.unknownRatings;
+  }
+
+  #neutralize(current: ProfileSession | null): void {
+    this.#cancelOpenings();
+    current?.close();
+    this.#session = null;
+  }
+
+  #commitPrepared(
+    preparedAt: number,
+    previous: ProfileSession | null,
+    marker: StoredActiveProfile,
+  ): void {
+    if (this.#disposed || preparedAt !== this.#transition || this.#session !== previous)
+      throw new Error('Profile selection changed while its activity library was opening');
+    keepActiveProfile(this.#storage, marker);
+  }
+
+  #cancelOpenings(): void {
+    ++this.#transition;
+    for (const handle of this.#openingModels) handle.close();
+    this.#openingModels.clear();
   }
 
   #newKid(choice: ProfileChoice): ProfileSession {
@@ -421,7 +699,7 @@ export class ProfileModeCoordinator {
   }
 
   async #verifyPin(pin?: string): Promise<boolean> {
-    if (this.#directory) return pin === '1234';
+    if (this.#preview) return pin === '1234';
     const configured = this.parentalPinConfigured;
     if (configured === undefined) return false;
     return !configured || (!!pin && (await this.#ownerModel.verifyParentalPin(pin)));
@@ -439,6 +717,14 @@ export class ProfileModeCoordinator {
   #assertOpen(): void {
     if (this.#disposed) throw new Error('Profile mode coordinator is disposed');
   }
+}
+
+/** Implicit assistant work is always Owner-only, even when Kid has a real writable activity model. */
+export function allowsImplicitAssistant(
+  coordinator: Pick<ProfileModeCoordinator, 'mode' | 'session'> | null,
+  session: ProfileSession,
+): boolean {
+  return !coordinator || (coordinator.session === session && coordinator.mode === 'owner');
 }
 
 export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indeterminate';

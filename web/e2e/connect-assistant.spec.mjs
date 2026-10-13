@@ -210,6 +210,14 @@ async function linkingContexts(browser, { expired = false, write = false, read =
       return route.fulfill({ status: 204 });
     }
     if (url.pathname === '/assistant/drain') return json(200, { messages: [] });
+    // This legacy-library fixture explicitly opts out of profiles. The consent dialog may already be open when
+    // discovery resolves; RoutedLibrary must then publish its member model reactively.
+    if (url.pathname === '/capabilities/profiles')
+      return route.fulfill({
+        status: 404,
+        headers: { 'cache-control': 'no-store' },
+        json: { error: 'not_found' },
+      });
     if (/^\/lib\/[0-9a-f]+\/batch$/.test(url.pathname) && request.method() === 'POST') {
       const applied = [];
       for (const w of body.writes) {

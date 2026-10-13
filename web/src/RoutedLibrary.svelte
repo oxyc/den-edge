@@ -9,7 +9,7 @@
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { legacyProfileSession, type ProfileSession } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
-  import { LibraryModel } from './lib/libraryModel.svelte';
+  import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import {
@@ -28,16 +28,19 @@
     rememberLocalLibraryMerge,
     settleLocalLibraryMerge,
   } from './lib/localLibrary';
-  import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
+  import type { KeyResetOutcome, ProfileDirectoryView } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { libraryCredentialId } from './lib/relayFetch';
   import {
+    allowsImplicitAssistant,
     ProfileModeCoordinator,
     previewProfileDirectory,
+    profileDirectoryChoices,
     profilesCapability,
+    type ProfileActivityModelFactory,
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
 
@@ -101,10 +104,42 @@
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
+  let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
     untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
   );
   let profileControlPublished = false;
+  const profileActivityReady = $derived(
+    profileCapability === 'disabled' ||
+      profileCapability === 'preview' ||
+      (profileCapability === 'enabled' && profileCoordinator?.session === session),
+  );
+  const implicitAssistantModel = $derived.by(() => {
+    const current = session;
+    if (!link || current.local || !current.model) return null;
+    // A legacy host becomes eligible reactively once discovery explicitly says profiles are disabled, even when
+    // the global consent dialog opened first. Enabled hosts remain fail-closed and expose only an active Owner.
+    if (profileCapability === 'disabled') return current.model;
+    return profileActivityReady && allowsImplicitAssistant(profileCoordinator, current)
+      ? current.model
+      : null;
+  });
+
+  const openProfileActivity: ProfileActivityModelFactory = (libraryKey) => {
+    const services = createWorkerServiceSession();
+    const model = new LibraryModel(services.library, { libraryKey, mode: 'online' });
+    void model.ready.catch(() => {});
+    let closed = false;
+    return {
+      model,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        model.close();
+        services.close();
+      },
+    };
+  };
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
   // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
@@ -121,24 +156,45 @@
         profileCapability = capability;
         return;
       }
-      const coordinator = new ProfileModeCoordinator(
-        session,
-        localStorage,
-        window,
-        undefined,
-        capability === 'preview' ? previewProfileDirectory() : null,
-      );
-      profileCoordinator = coordinator;
+      if (capability === 'preview')
+        profileCoordinator = new ProfileModeCoordinator(
+          session,
+          localStorage,
+          window,
+          undefined,
+          previewProfileDirectory(),
+        );
+      else profileDirectoryLease = session.model.profiles();
       profileCapability = capability;
     });
     return () => {
       current = false;
       const coordinator = profileCoordinator;
       profileCoordinator = null;
+      profileDirectoryLease?.release();
+      profileDirectoryLease = null;
       profileControlPublished = false;
       onprofilecontrol(null);
       coordinator?.dispose();
     };
+  });
+
+  $effect(() => {
+    if (profileCapability !== 'enabled') return;
+    const projected = profileDirectoryLease?.snapshot.value;
+    if (!projected) return;
+    const directory = profileDirectoryChoices(projected as ProfileDirectoryView);
+    if (!profileCoordinator) {
+      if (!directory) return;
+      profileCoordinator = new ProfileModeCoordinator(
+        session,
+        localStorage,
+        window,
+        undefined,
+        directory,
+        openProfileActivity,
+      );
+    } else profileCoordinator.updateDirectory(directory);
   });
 
   $effect(() => {
@@ -389,9 +445,8 @@
   // Assistants (den-spec wire/assistant-v1.md): while a member's library is open here, the consent dialog may write
   // grants into it. A library kept only in this browser is no member's on den-edge, and has none.
   $effect(() => {
-    const current = session;
-    const model = current.model;
-    if (!model || current.local || !link) return;
+    const model = implicitAssistantModel;
+    if (!model) return;
     let open = true;
     void model.ready.then(
       () => {
@@ -410,7 +465,7 @@
   // the tap path and told in a quiet toast; with a live read record, the projection is published (§15); with either,
   // grants den-edge still lists are renewed. Each starts and stops as consent or revocation, here or on another
   // device, changes the rows. The code itself is fetched only then.
-  const memberModel = $derived(!session.local && link ? session.model : null);
+  const memberModel = $derived(implicitAssistantModel);
   const drainNeeded = $derived(memberModel?.settings.value?.assistant.write ?? false);
   const publishNeeded = $derived(memberModel?.settings.value?.assistant.read ?? false);
   const renewNeeded = $derived(drainNeeded || publishNeeded);
@@ -601,6 +656,8 @@
     <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
     <p>The Owner library remains hidden. Reload Den to try again.</p>
   </section>
+{:else if profileCapability === 'enabled' && !profileCoordinator}
+  <p class="profile-loading" role="status">Opening profile directory…</p>
 {:else if profileCoordinator && !profileCoordinator.session}
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
