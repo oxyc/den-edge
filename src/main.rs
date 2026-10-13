@@ -122,6 +122,9 @@ pub struct AppState {
     /// Web host names allowed to use only the synthetic, non-migrating profiles preview
     /// (env `PROFILES_PREVIEW_HOSTS`). Preview wins if a host is accidentally present in both lists.
     pub profiles_preview_hosts: Vec<String>,
+    /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
+    /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
+    pub profile_migration_enabled: bool,
     /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
@@ -334,6 +337,7 @@ impl AppState {
             api_hosts: Vec::new(),
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
+            profile_migration_enabled: false,
             relays: Vec::new(),
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
@@ -450,6 +454,7 @@ async fn main() {
     state.profiles_preview_hosts = env_opt("PROFILES_PREVIEW_HOSTS")
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
+    state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));

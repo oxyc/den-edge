@@ -48,11 +48,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-pub(crate) mod v3;
-// The wire adapter and feature switch are intentionally absent. Keep the §8.1 storage layer compiled and tested
-// without making a partially reviewed household rewrite reachable in production.
-#[allow(dead_code)]
 mod profile_migration;
+pub const PROFILE_MIGRATION_BODY_BYTES: usize = profile_migration::BODY_BYTES;
+pub(crate) mod v3;
 #[cfg(test)]
 mod v3_model;
 
@@ -524,6 +522,10 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             None,
         );
     }
+    let migration_action = action == "profile-migration" || action.starts_with("profile-migration/");
+    if migration_action && !state.profile_migration_enabled {
+        return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
+    }
     let protocol = match protocol_for(state, id).await {
         Ok(protocol) => protocol,
         Err(reason) => return with_wire_headers(state, read_error(reason), None),
@@ -536,6 +538,11 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         && query_param(&req, "since").as_deref() == Some("0")
         && query_param(&req, "limit").as_deref() == Some("1");
     let minimum = protocol.as_ref().map_or(2, |value| value.wire_min);
+    if migration_action && wire.unwrap_or(0) < 5 {
+        let response =
+            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": 5 }));
+        return with_wire_headers(state, response, protocol.as_ref());
+    }
     if minimum >= 3 && wire.unwrap_or(0) < minimum && !home_check {
         let response =
             json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }));
@@ -594,7 +601,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
-    if is_write && wire.is_some() {
+    if is_write && wire.is_some() && !migration_action {
         let current = protocol
             .as_ref()
             .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
@@ -609,7 +616,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             return with_wire_headers(state, response, protocol.as_ref());
         }
     }
-    if is_write && !action.starts_with("rewrite") {
+    if is_write && !action.starts_with("rewrite") && !migration_action {
         match load_rewrite(state, id).await {
             Ok(Some(_)) => {
                 let response = crate::handler::retry_after(
@@ -624,6 +631,9 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         }
     }
     let response = match (action, req.method().clone()) {
+        (action, _) if action == "profile-migration" || action.starts_with("profile-migration/") => {
+            profile_migration::handle(state, id, token_hash, action, req).await
+        }
         ("batch", Method::POST) => batch(state, id, token_hash, req).await,
         ("changes", Method::GET | Method::HEAD) => {
             let since = query_param(&req, "since").and_then(|s| s.parse().ok()).unwrap_or(0);

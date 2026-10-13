@@ -1,7 +1,7 @@
 //! Dormant storage primitives for the one-time household/Owner split.
 //!
-//! There is deliberately no HTTP route or application caller in this module. These primitives implement the
-//! storage guarantees beneath den-spec profiles-v1 §8.1 while keeping the feature unreachable: one-transaction
+//! These primitives implement the storage guarantees beneath den-spec profiles-v1 §8.1. The HTTP adapter at the
+//! bottom of this module remains behind a separate default-off feature gate: one-transaction
 //! source snapshots, a durable/read-back-verified backup before any destination write, an exact
 //! generation/base/digest fenced in-place rewrite, and retirement while the freshly checked household authority
 //! remains locked.
@@ -11,9 +11,13 @@ use super::v3::{
     StoreError,
 };
 use super::{library_store_locked, load_rewrite, owned, retire_owned_locked, v3_io};
-use crate::handler::constant_time_eq;
+use crate::handler::{constant_time_eq, error, internal, json_reply, read_json};
 use crate::AppState;
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io;
@@ -25,8 +29,10 @@ const STAGE_EXT: &str = "rows";
 const BACKUP_VERSION: u64 = 1;
 const PROFILE_WIRE_MINIMUM: u64 = 5;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub(crate) const BODY_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MigrationFence {
     /// Durable per-household migration counter, deliberately unrelated to public `x-den-generation`.
     pub generation: u64,
@@ -38,6 +44,7 @@ pub(crate) struct MigrationFence {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BackupReference {
     pub attempt: String,
     pub id: String,
@@ -61,6 +68,7 @@ pub(crate) struct RetirementRequest<'a> {
 /// Fresh household authority supplied by the client. `kind` participates in the compare-and-swap so a committed
 /// directory cannot be cleaned up through the looser changed-legacy branch.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RetirementAuthority {
     pub generation: u64,
     pub base: u64,
@@ -78,6 +86,7 @@ pub(crate) enum AuthorityKind {
 
 /// Opaque identity of the exact sealed `profiles` row authenticated by the client. den-edge receives no keys.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SealedProfilesRow {
     #[serde(rename = "k")]
     pub key: String,
@@ -88,7 +97,7 @@ pub(crate) struct SealedProfilesRow {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProfilesRowEvidence {
     pub present: bool,
     pub seq: Option<u64>,
@@ -103,7 +112,7 @@ pub(crate) enum DirectoryState {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RestoreRequest {
     pub backup: BackupReference,
     pub fence: MigrationFence,
@@ -331,6 +340,7 @@ impl<'a> ProfileMigrationStorage<'a> {
         })
     }
 
+    #[cfg(test)]
     async fn acquire_fence(
         &self,
         attempt: &str,
@@ -449,6 +459,44 @@ impl<'a> ProfileMigrationStorage<'a> {
         Ok(backup.manifest)
     }
 
+    async fn verified_backup_json(
+        &self,
+        household_id: &str,
+        expected: &MigrationFence,
+        reference: &BackupReference,
+    ) -> Result<Value, MigrationError> {
+        let manifest = self.load_verified_backup(household_id, expected, reference).await?;
+        let mut value = serde_json::to_value(&manifest).map_err(io::Error::other)?;
+        value
+            .as_object_mut()
+            .ok_or(MigrationError::BackupCorrupt)?
+            .insert("digest".into(), Value::String(reference.digest.clone()));
+        Ok(value)
+    }
+
+    async fn backup_reference(
+        &self,
+        household_id: &str,
+        attempt: &str,
+    ) -> Result<BackupReference, MigrationError> {
+        let bytes = self
+            .state
+            .store
+            .get_file(NS, &attempt_key(household_id, attempt), BACKUP_EXT)
+            .await?
+            .ok_or(MigrationError::BackupMissing)?;
+        let backup: DurableBackup =
+            serde_json::from_slice(&bytes).map_err(|_| MigrationError::BackupCorrupt)?;
+        if backup.version != BACKUP_VERSION
+            || backup.manifest.household_id != household_id
+            || backup.manifest.attempt != attempt
+        {
+            return Err(MigrationError::BackupCorrupt);
+        }
+        let digest = hex_digest(&canonical_json(&backup.manifest)?);
+        Ok(BackupReference { attempt: attempt.to_owned(), id: backup.manifest.id, digest })
+    }
+
     async fn load_backup_for_restore(
         &self,
         household_id: &str,
@@ -548,6 +596,7 @@ impl<'a> ProfileMigrationStorage<'a> {
 
     /// Replace the mixed household in place. The same id and key are used; all three source authorities must still
     /// match the backup: database generation, numeric base and authenticated current-row digest.
+    #[cfg(test)]
     pub(super) async fn rewrite_household(
         &self,
         household_id: &str,
@@ -568,6 +617,53 @@ impl<'a> ProfileMigrationStorage<'a> {
         }
         self.verify_backup(household_id, expected, backup).await?;
         let staged_digest = self.stage_rows(household_id, expected, backup, rows).await?;
+        self.commit_household(household_id, token_hash, expected, backup, &staged_digest).await
+    }
+
+    pub(crate) async fn stage_household_rows(
+        &self,
+        household_id: &str,
+        expected: &MigrationFence,
+        backup: &BackupReference,
+        rows: &[RewriteRow],
+    ) -> Result<String, MigrationError> {
+        let mut keys = HashSet::with_capacity(rows.len());
+        if rows.is_empty()
+            || rows.len() > super::MAX_ROWS
+            || rows.iter().any(|row| {
+                !super::valid_hex_id(&row.key)
+                    || !keys.insert(row.key.as_str())
+                    || row.value.len() > super::MAX_VALUE_V4
+            })
+        {
+            return Err(MigrationError::Invalid("invalid staged rows"));
+        }
+        let opened = self
+            .load_attempt(household_id, &backup.attempt)
+            .await?
+            .ok_or(MigrationError::Invalid("attempt is absent"))?;
+        if opened.state != AttemptState::Open
+            || opened.purpose != AttemptPurpose::Split
+            || opened.fence != *expected
+        {
+            return Err(MigrationError::FenceChanged);
+        }
+        self.stage_rows(household_id, expected, backup, rows).await
+    }
+
+    pub(crate) async fn commit_household(
+        &self,
+        household_id: &str,
+        token_hash: [u8; 32],
+        expected: &MigrationFence,
+        backup: &BackupReference,
+        requested_staged_digest: &str,
+    ) -> Result<Protocol, MigrationError> {
+        self.verify_backup(household_id, expected, backup).await?;
+        let (rows, staged_digest) = self.load_staged_rows(household_id, &backup.attempt).await?;
+        if !constant_time_eq(staged_digest.as_bytes(), requested_staged_digest.as_bytes()) {
+            return Err(MigrationError::Invalid("staged digest changed"));
+        }
         let slot = self.state.libraries.slot(household_id, self.state.now());
         let mut library = slot.library.lock().await;
         if load_rewrite(self.state, household_id).await?.is_some() {
@@ -594,15 +690,16 @@ impl<'a> ProfileMigrationStorage<'a> {
             self.set_attempt_state(household_id, &backup.attempt, AttemptState::Superseded).await?;
             return Err(MigrationError::FenceChanged);
         }
-        let owned_rows = rows.to_vec();
+        let owned_rows = rows;
         let live_cap = self.state.library_limits.stored_bytes;
         let base = expected.base;
         let resulting_generation = expected
             .generation
             .checked_add(1)
             .ok_or(MigrationError::Invalid("migration generation exhausted"))?;
-        let resulting_base =
-            base.checked_add(rows.len() as u64).ok_or(MigrationError::Invalid("migration base exhausted"))?;
+        let resulting_base = base
+            .checked_add(owned_rows.len() as u64)
+            .ok_or(MigrationError::Invalid("migration base exhausted"))?;
         let resulting_wire_minimum = snapshot.protocol.wire_min.max(PROFILE_WIRE_MINIMUM);
         let commit = MigrationCommit {
             kind: MigrationResultKind::Committed,
@@ -614,7 +711,7 @@ impl<'a> ProfileMigrationStorage<'a> {
                 resulting_generation,
                 resulting_base,
                 resulting_wire_minimum,
-                rows,
+                &owned_rows,
             )?,
             wire_minimum: resulting_wire_minimum,
             attempt: backup.attempt.clone(),
@@ -877,6 +974,7 @@ impl<'a> ProfileMigrationStorage<'a> {
         }
     }
 
+    #[cfg(test)]
     async fn locked_snapshot(
         &self,
         id: &str,
@@ -1002,6 +1100,24 @@ impl<'a> ProfileMigrationStorage<'a> {
             self.state.store.sync_dir(NS).await?;
         }
         Ok(digest)
+    }
+
+    async fn load_staged_rows(
+        &self,
+        household_id: &str,
+        attempt: &str,
+    ) -> Result<(Vec<RewriteRow>, String), MigrationError> {
+        let bytes = self
+            .state
+            .store
+            .get_file(NS, &attempt_key(household_id, attempt), STAGE_EXT)
+            .await?
+            .ok_or(MigrationError::Invalid("staged rows are absent"))?;
+        let pairs: Vec<(String, String)> =
+            serde_json::from_slice(&bytes).map_err(|_| MigrationError::BackupCorrupt)?;
+        let rows = pairs.into_iter().map(|(key, value)| RewriteRow { key, value }).collect::<Vec<_>>();
+        let digest = staged_digest(&rows)?;
+        Ok((rows, digest))
     }
 }
 
@@ -1199,10 +1315,305 @@ fn attempt_key(household_id: &str, attempt: &str) -> String {
     format!("{household_id}:{attempt}")
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenRequest {
+    attempt: String,
+    purpose: AttemptPurpose,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupInput {
+    id: String,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageRequest {
+    fence: MigrationFence,
+    backup: BackupInput,
+    writes: Vec<StageRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageRow {
+    k: String,
+    v: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommitRequest {
+    fence: MigrationFence,
+    backup: BackupInput,
+    staged_digest: String,
+    #[serde(rename = "wireMin")]
+    wire_minimum: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetireRequest {
+    source: MigrationFence,
+    authority: RetirementAuthority,
+    profiles_row: Option<SealedProfilesRow>,
+    protected_library_ids: Vec<String>,
+    candidate_library_id: String,
+}
+
+fn backup_reference(attempt: &str, input: BackupInput) -> BackupReference {
+    BackupReference { attempt: attempt.to_owned(), id: input.id, digest: input.digest }
+}
+
+fn attempt_json(evidence: AttemptEvidence) -> Value {
+    let AttemptEvidence { attempt, state, purpose, wire_minimum, fence, winner } = evidence;
+    let mut answer = json!({
+        "attempt": attempt,
+        "state": state,
+        "purpose": purpose,
+        "wireMin": wire_minimum,
+        "fence": fence,
+    });
+    if let Some(terminal) = winner {
+        let terminal_json = json!({
+            "attempt": terminal.attempt,
+            "state": terminal.kind,
+            "generation": terminal.resulting_generation,
+            "base": terminal.resulting_base,
+            "head": terminal.resulting_head,
+            "wireMin": terminal.wire_minimum,
+            "backup": { "id": terminal.backup_id, "digest": terminal.backup_digest },
+            "stagedDigest": terminal.staged_digest,
+        });
+        if terminal.attempt == attempt {
+            // Successful commit/restore responses use den-spec's flat terminal shape. Keeping these fields at
+            // the top level also lets a client resume from lookup without understanding an edge-only wrapper.
+            answer["generation"] = terminal_json["generation"].clone();
+            answer["base"] = terminal_json["base"].clone();
+            answer["head"] = terminal_json["head"].clone();
+            answer["wireMin"] = terminal_json["wireMin"].clone();
+            answer["backup"] = terminal_json["backup"].clone();
+            answer["stagedDigest"] = terminal_json["stagedDigest"].clone();
+        } else {
+            // A superseded attempt still needs to identify the durable winner that makes cleanup safe.
+            answer["winner"] = terminal_json;
+        }
+    }
+    answer
+}
+
+fn migration_error(error_value: MigrationError) -> Response {
+    match error_value {
+        MigrationError::Invalid("migration attempt purpose changed")
+        | MigrationError::Invalid("restore request changed")
+        | MigrationError::Invalid("recovery attempt mismatch") => {
+            json_reply(StatusCode::CONFLICT, &error("migration_attempt_mismatch"))
+        }
+        MigrationError::Invalid("another rewrite is staged") => {
+            json_reply(StatusCode::CONFLICT, &error("rewrite_in_progress"))
+        }
+        MigrationError::Invalid("staged digest changed") => {
+            json_reply(StatusCode::CONFLICT, &error("staged_digest_mismatch"))
+        }
+        MigrationError::FenceChanged => json_reply(StatusCode::CONFLICT, &error("migration_fence_moved")),
+        MigrationError::BackupMissing => json_reply(StatusCode::NOT_FOUND, &error("backup_not_found")),
+        MigrationError::BackupCorrupt => json_reply(StatusCode::CONFLICT, &error("backup_not_verified")),
+        MigrationError::SameLegacyFence => json_reply(StatusCode::CONFLICT, &error("same_legacy_fence")),
+        MigrationError::ProtectedCandidate => json_reply(StatusCode::CONFLICT, &error("protected_library")),
+        MigrationError::NotFound => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        MigrationError::Forbidden => json_reply(StatusCode::FORBIDDEN, &error("forbidden")),
+        MigrationError::Invalid(_) => json_reply(StatusCode::BAD_REQUEST, &error("bad_request")),
+        MigrationError::Storage(reason) => internal("profile migration", reason),
+    }
+}
+
+async fn typed<T: for<'de> Deserialize<'de>>(request: Request, cap: usize) -> Result<T, Response> {
+    let value = read_json(request, cap).await.map_err(|response| *response)?;
+    serde_json::from_value(value).map_err(|_| json_reply(StatusCode::BAD_REQUEST, &error("bad_request")))
+}
+
+pub(crate) async fn handle(
+    state: &AppState,
+    household_id: &str,
+    token_hash: [u8; 32],
+    action: &str,
+    request: Request,
+) -> Response {
+    let storage = ProfileMigrationStorage::new(state);
+    if action == "profile-migration" {
+        if request.method() != Method::POST {
+            return crate::handler::method_not_allowed();
+        }
+        let input: OpenRequest = match typed(request, BODY_BYTES).await {
+            Ok(input) => input,
+            Err(response) => return response,
+        };
+        return match storage.open_attempt(&input.attempt, input.purpose, household_id, token_hash).await {
+            Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
+            Err(reason) => migration_error(reason),
+        };
+    }
+
+    let Some(rest) = action.strip_prefix("profile-migration/") else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    let mut segments = rest.split('/');
+    let attempt = segments.next().unwrap_or_default();
+    let operation = segments.next();
+    if attempt.is_empty() || segments.next().is_some() {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    }
+
+    match (operation, request.method().clone()) {
+        (None, Method::GET) => match storage.lookup_attempt(household_id, token_hash, attempt).await {
+            Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
+            Err(reason) => migration_error(reason),
+        },
+        (None, Method::DELETE) => match storage.abort_attempt(household_id, token_hash, attempt).await {
+            Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
+            Err(reason) => migration_error(reason),
+        },
+        (Some("backup"), Method::POST) => {
+            if axum::body::to_bytes(request.into_body(), 0).await.is_err() {
+                return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+            }
+            let evidence = match storage.lookup_attempt(household_id, token_hash, attempt).await {
+                Ok(evidence) => evidence,
+                Err(reason) => return migration_error(reason),
+            };
+            match storage.create_verified_backup(attempt, household_id, token_hash, &evidence.fence).await {
+                Ok(reference) => json_reply(
+                    StatusCode::OK,
+                    &json!({ "id": reference.id, "digest": reference.digest, "source": evidence.fence }),
+                ),
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("backup"), Method::GET) => {
+            let evidence = match storage.lookup_attempt(household_id, token_hash, attempt).await {
+                Ok(evidence) => evidence,
+                Err(reason) => return migration_error(reason),
+            };
+            let reference = match storage.backup_reference(household_id, attempt).await {
+                Ok(reference) => reference,
+                Err(reason) => return migration_error(reason),
+            };
+            match storage.verified_backup_json(household_id, &evidence.fence, &reference).await {
+                Ok(backup) => json_reply(StatusCode::OK, &backup),
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("rows"), Method::POST) => {
+            let input: StageRequest = match typed(request, super::BATCH_MAX_BODY_BYTES).await {
+                Ok(input) => input,
+                Err(response) => return response,
+            };
+            let backup = backup_reference(attempt, input.backup);
+            let rows = input
+                .writes
+                .into_iter()
+                .map(|row| RewriteRow { key: row.k, value: row.v })
+                .collect::<Vec<_>>();
+            match storage.stage_household_rows(household_id, &input.fence, &backup, &rows).await {
+                Ok(digest) => json_reply(StatusCode::OK, &json!({ "stagedDigest": digest })),
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("commit"), Method::POST) => {
+            let input: CommitRequest = match typed(request, BODY_BYTES).await {
+                Ok(input) => input,
+                Err(response) => return response,
+            };
+            if input.wire_minimum != PROFILE_WIRE_MINIMUM || !valid_digest(&input.staged_digest) {
+                return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+            }
+            let backup = backup_reference(attempt, input.backup);
+            match storage
+                .commit_household(household_id, token_hash, &input.fence, &backup, &input.staged_digest)
+                .await
+            {
+                Ok(_) => match storage.lookup_attempt(household_id, token_hash, attempt).await {
+                    Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
+                    Err(reason) => migration_error(reason),
+                },
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("restore"), Method::POST) => {
+            let input: RestoreRequest = match typed(request, BODY_BYTES).await {
+                Ok(input) => input,
+                Err(response) => return response,
+            };
+            match storage.restore_backup(attempt, household_id, token_hash, &input).await {
+                Ok(_) => match storage.lookup_attempt(household_id, token_hash, attempt).await {
+                    Ok(evidence) => json_reply(StatusCode::OK, &attempt_json(evidence)),
+                    Err(reason) => migration_error(reason),
+                },
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("retire-candidate"), Method::POST) => {
+            let candidate = match request
+                .headers()
+                .get("x-den-candidate-library-token")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+            {
+                Some(candidate) => candidate.to_owned(),
+                None => return json_reply(StatusCode::UNAUTHORIZED, &error("missing_candidate_token")),
+            };
+            let input: RetireRequest = match typed(request, BODY_BYTES).await {
+                Ok(input) => input,
+                Err(response) => return response,
+            };
+            let evidence = match storage.lookup_attempt(household_id, token_hash, attempt).await {
+                Ok(evidence) => evidence,
+                Err(reason) => return migration_error(reason),
+            };
+            if evidence.fence != input.source || input.protected_library_ids.len() > 64 {
+                return json_reply(StatusCode::CONFLICT, &error("migration_fence_moved"));
+            }
+            let protected_count = input.protected_library_ids.len();
+            let ids = input.protected_library_ids.into_iter().collect::<HashSet<_>>();
+            if ids.len() != protected_count {
+                return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+            }
+            let protected = ProtectedLibraries { ids };
+            let candidate_hash: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
+            match storage
+                .conditionally_retire_candidate(
+                    household_id,
+                    token_hash,
+                    candidate_hash,
+                    RetirementRequest {
+                        source: &input.source,
+                        authority: &input.authority,
+                        profiles_row: input.profiles_row.as_ref(),
+                        protected: &protected,
+                        candidate_id: &input.candidate_library_id,
+                    },
+                )
+                .await
+            {
+                Ok(RetirementResult::Retired) => json_reply(StatusCode::OK, &json!({ "result": "retired" })),
+                Ok(RetirementResult::Absent) => json_reply(StatusCode::OK, &json!({ "result": "absent" })),
+                Err(reason) => migration_error(reason),
+            }
+        }
+        (Some("backup"), _) | (Some("rows" | "commit" | "restore" | "retire-candidate"), _) | (None, _) => {
+            crate::handler::method_not_allowed()
+        }
+        _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handler::tests::Harness;
+    use crate::handler::tests::{body_json, Harness};
     use axum::http::StatusCode;
     use serde_json::json;
 
@@ -1230,6 +1641,286 @@ mod tests {
         )
         .await
         .status()
+    }
+
+    async fn migration_request(
+        h: &Harness,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        token_value: Option<&str>,
+    ) -> Response {
+        let mut headers = vec![("x-den-wire", "5")];
+        if let Some(token_value) = token_value {
+            headers.push(("x-den-library-token", token_value));
+        }
+        h.send(method, path, body, &headers).await
+    }
+
+    #[tokio::test]
+    async fn http_adapter_is_default_off_wire_five_authenticated_and_restart_durable() {
+        let mut h = Harness::new();
+        let dir = h.dir.clone();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "sealed-activity", HOUSEHOLD_TOKEN).await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let open_body = json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string();
+
+        assert_eq!(
+            migration_request(&h, "POST", &base, Some(open_body.clone()), Some(HOUSEHOLD_TOKEN))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        assert_eq!(
+            h.send("POST", &base, Some(open_body.clone()), &[("x-den-library-token", HOUSEHOLD_TOKEN)],)
+                .await
+                .status(),
+            StatusCode::UPGRADE_REQUIRED
+        );
+        assert_eq!(
+            migration_request(&h, "POST", &base, Some(open_body.clone()), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            migration_request(&h, "POST", &base, Some(open_body.clone()), Some("wrong")).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        let opened =
+            body_json(migration_request(&h, "POST", &base, Some(open_body), Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(opened["state"], "open");
+        assert_eq!(opened["purpose"], "split");
+
+        let attempt_path = format!("{base}/{ATTEMPT}");
+        let backup = body_json(
+            migration_request(&h, "POST", &format!("{attempt_path}/backup"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert!(valid_digest(backup["digest"].as_str().unwrap()));
+        let artifact = body_json(
+            migration_request(&h, "GET", &format!("{attempt_path}/backup"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(artifact["digest"], backup["digest"]);
+        assert_eq!(artifact["rows"][0]["v"], "sealed-activity");
+
+        let writes = json!([
+            { "k": CONFIG, "v": "household-configuration" },
+            { "k": DIRECTORY, "v": "sealed-directory" },
+        ]);
+        let staged = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{attempt_path}/rows"),
+                Some(
+                    json!({
+                        "fence": opened["fence"],
+                        "backup": { "id": backup["id"], "digest": backup["digest"] },
+                        "writes": writes,
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert!(valid_digest(staged["stagedDigest"].as_str().unwrap()));
+        let committed = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{attempt_path}/commit"),
+                Some(
+                    json!({
+                        "fence": opened["fence"],
+                        "backup": { "id": backup["id"], "digest": backup["digest"] },
+                        "stagedDigest": staged["stagedDigest"],
+                        "wireMin": 5,
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(committed["state"], "committed");
+        assert_eq!(
+            committed["generation"].as_u64(),
+            opened["fence"]["generation"].as_u64().map(|generation| generation + 1)
+        );
+        assert_eq!(committed["backup"]["id"], backup["id"]);
+        drop(h);
+
+        let mut restarted = Harness::in_dir(dir);
+        Arc::get_mut(&mut restarted.state).unwrap().profile_migration_enabled = true;
+        let looked_up =
+            body_json(migration_request(&restarted, "GET", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(looked_up["state"], "committed");
+        assert_eq!(looked_up["stagedDigest"], staged["stagedDigest"]);
+
+        let recovery = body_json(
+            migration_request(
+                &restarted,
+                "POST",
+                &base,
+                Some(json!({ "attempt": ATTEMPT3, "purpose": "restore" }).to_string()),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        let current = ProfileMigrationStorage::new(&restarted.state)
+            .locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
+        let profiles = find_row(&current, DIRECTORY).unwrap().unwrap();
+        let restore_body = json!({
+            "backup": { "attempt": ATTEMPT, "id": backup["id"], "digest": backup["digest"] },
+            "fence": recovery["fence"],
+            "wireMin": recovery["wireMin"],
+            "profilesRow": {
+                "present": true,
+                "seq": profiles.sequence,
+                "digest": hex_digest(profiles.value.as_bytes()),
+            },
+            "directoryState": "invalid",
+            "plannerDecision": "restore-backup",
+        })
+        .to_string();
+        let restore_path = format!("{base}/{ATTEMPT3}/restore");
+        for _ in 0..2 {
+            let restored = body_json(
+                migration_request(
+                    &restarted,
+                    "POST",
+                    &restore_path,
+                    Some(restore_body.clone()),
+                    Some(HOUSEHOLD_TOKEN),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(restored["state"], "restored");
+            assert_eq!(restored["attempt"], ATTEMPT3);
+            assert_eq!(restored["backup"]["id"], backup["id"]);
+        }
+        let original =
+            body_json(migration_request(&restarted, "GET", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(original["state"], "committed", "restore retains the earlier terminal");
+
+        let unknown = format!("/lib/{CANDIDATE}/profile-migration");
+        assert_eq!(
+            migration_request(
+                &restarted,
+                "POST",
+                &unknown,
+                Some(json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string()),
+                Some(CANDIDATE_TOKEN),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND,
+            "opening a migration must never auto-start a library"
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_route_requires_a_separate_candidate_header_and_fresh_authority() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
+        write(&h, CANDIDATE, ACTIVITY, 0, "candidate", CANDIDATE_TOKEN).await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let source = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(json!({ "attempt": ATTEMPT, "purpose": "split" }).to_string()),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        write(&h, HOUSEHOLD, CONFIG, 0, "changed", HOUSEHOLD_TOKEN).await;
+        let fresh = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string()),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        let body = json!({
+            "source": source["fence"],
+            "authority": {
+                "generation": fresh["fence"]["generation"],
+                "base": fresh["fence"]["base"],
+                "head": fresh["fence"]["head"],
+                "kind": "changed-legacy",
+            },
+            "profilesRow": null,
+            "protectedLibraryIds": [HOUSEHOLD],
+            "candidateLibraryId": CANDIDATE,
+        })
+        .to_string();
+        let path = format!("{base}/{ATTEMPT}/retire-candidate");
+        assert_eq!(
+            migration_request(&h, "POST", &path, Some(body.clone()), Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            h.send(
+                "POST",
+                &path,
+                Some(body.clone()),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                    ("x-den-candidate-library-token", "wrong"),
+                ],
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let retired = body_json(
+            h.send(
+                "POST",
+                &path,
+                Some(body),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                    ("x-den-candidate-library-token", CANDIDATE_TOKEN),
+                ],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(retired["result"], "retired");
+        assert_eq!(
+            h.send(
+                "GET",
+                &format!("/lib/{CANDIDATE}/changes"),
+                None,
+                &[("x-den-library-token", CANDIDATE_TOKEN)],
+            )
+            .await
+            .status(),
+            StatusCode::GONE
+        );
     }
 
     #[tokio::test]

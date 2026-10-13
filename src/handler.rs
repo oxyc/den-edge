@@ -462,7 +462,8 @@ fn preflight() -> Response {
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
-            "content-type, x-den-link, x-den-library-token, x-den-library-member, x-den-grant, \
+            "content-type, x-den-link, x-den-library-token, x-den-library-member, \
+             x-den-candidate-library-token, x-den-grant, \
              x-den-wire, x-den-wire-min, x-den-generation",
         ),
     );
@@ -857,6 +858,28 @@ pub fn route_label(path: &str) -> &'static str {
         p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid/code",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
+        p if p.starts_with("/lib/") && p.ends_with("/profile-migration") => "/lib/:id/profile-migration",
+        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/backup") => {
+            "/lib/:id/profile-migration/:attempt/backup"
+        }
+        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/rows") => {
+            "/lib/:id/profile-migration/:attempt/rows"
+        }
+        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/commit") => {
+            "/lib/:id/profile-migration/:attempt/commit"
+        }
+        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/restore") => {
+            "/lib/:id/profile-migration/:attempt/restore"
+        }
+        p if p.starts_with("/lib/")
+            && p.contains("/profile-migration/")
+            && p.ends_with("/retire-candidate") =>
+        {
+            "/lib/:id/profile-migration/:attempt/retire-candidate"
+        }
+        p if p.starts_with("/lib/") && p.contains("/profile-migration/") => {
+            "/lib/:id/profile-migration/:attempt"
+        }
         p if p.starts_with("/lib/") && p.ends_with("/rows") && p.contains("/rewrite/") => {
             "/lib/:id/rewrite/:rid/rows"
         }
@@ -912,6 +935,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/recovery/open" | "/recovery/timing" => Some(POST),
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
+        "/lib/:id/profile-migration/:attempt" => Some(&[Method::GET, Method::DELETE]),
+        "/lib/:id/profile-migration/:attempt/backup" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
         "/lib/:id/grants/:gid/code" => Some(POST),
         "/grant/redeem"
@@ -938,6 +963,11 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/rewrite"
         | "/lib/:id/rewrite/:rid/rows"
         | "/lib/:id/rewrite/:rid/commit"
+        | "/lib/:id/profile-migration"
+        | "/lib/:id/profile-migration/:attempt/rows"
+        | "/lib/:id/profile-migration/:attempt/commit"
+        | "/lib/:id/profile-migration/:attempt/restore"
+        | "/lib/:id/profile-migration/:attempt/retire-candidate"
         | "/pair/new"
         | "/pair/open" => Some(POST),
         "/metadata/title/query"
@@ -956,7 +986,15 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
 
 fn body_cap(route: &str) -> usize {
     match route {
-        "/lib/:id/batch" | "/lib/:id/rewrite/:rid/rows" => crate::library::BATCH_MAX_BODY_BYTES,
+        "/lib/:id/batch" | "/lib/:id/rewrite/:rid/rows" | "/lib/:id/profile-migration/:attempt/rows" => {
+            crate::library::BATCH_MAX_BODY_BYTES
+        }
+        "/lib/:id/profile-migration"
+        | "/lib/:id/profile-migration/:attempt/commit"
+        | "/lib/:id/profile-migration/:attempt/restore"
+        | "/lib/:id/profile-migration/:attempt/retire-candidate" => {
+            crate::library::PROFILE_MIGRATION_BODY_BYTES
+        }
         // The relay holds each atlas path to its own cap (`relay::is_recommend`); this only refuses what no atlas
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
@@ -1214,6 +1252,39 @@ pub mod tests {
         assert!(Face::Web.serves("/capabilities/profiles"));
         for face in [Face::Api, Face::Both, Face::Invalid] {
             assert!(!face.serves("/capabilities/profiles"), "{face:?}");
+        }
+    }
+
+    #[test]
+    fn profile_migration_routes_have_fixed_labels_methods_and_body_caps() {
+        let base = "/lib/0123456789abcdef0123456789abcdef/profile-migration";
+        let attempt = "0123456789abcdef0123456789abcdef";
+        assert_eq!(route_label(base), "/lib/:id/profile-migration");
+        assert_eq!(allowed_methods(route_label(base)), Some(&[Method::POST][..]));
+        assert_eq!(body_cap(route_label(base)), crate::library::PROFILE_MIGRATION_BODY_BYTES);
+
+        let cases = [
+            ("", "/lib/:id/profile-migration/:attempt", &[Method::GET, Method::DELETE][..]),
+            ("/backup", "/lib/:id/profile-migration/:attempt/backup", &[Method::GET, Method::POST][..]),
+            ("/rows", "/lib/:id/profile-migration/:attempt/rows", &[Method::POST][..]),
+            ("/commit", "/lib/:id/profile-migration/:attempt/commit", &[Method::POST][..]),
+            ("/restore", "/lib/:id/profile-migration/:attempt/restore", &[Method::POST][..]),
+            (
+                "/retire-candidate",
+                "/lib/:id/profile-migration/:attempt/retire-candidate",
+                &[Method::POST][..],
+            ),
+        ];
+        for (suffix, label, methods) in cases {
+            let route = route_label(&format!("{base}/{attempt}{suffix}"));
+            assert_eq!(route, label);
+            assert_eq!(allowed_methods(route), Some(methods));
+            let cap = body_cap(route);
+            if suffix == "/rows" {
+                assert_eq!(cap, crate::library::BATCH_MAX_BODY_BYTES);
+            } else if !suffix.is_empty() && suffix != "/backup" {
+                assert_eq!(cap, crate::library::PROFILE_MIGRATION_BODY_BYTES);
+            }
         }
     }
 
