@@ -43,6 +43,7 @@
     type ProfileActivityModelFactory,
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
+  import { profileSettingsRoute } from './lib/profileSettingsRoute';
 
   let {
     link,
@@ -109,6 +110,7 @@
     untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
   );
   let profileControlPublished = false;
+  const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
   const profileActivityReady = $derived(
     profileCapability === 'disabled' ||
       profileCapability === 'preview' ||
@@ -682,12 +684,20 @@
       {#snippet children(route, active)}
         {#if route.page === 'settings'}
           {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
-          {#if profileCapability === 'preview' && (session.identity.kind === 'visitor' || session.identity.kind === 'profile')}
+          {#if settingsRoute === 'personal'}
             <ProfileSettings {session} />
-          {:else if session.identity.kind === 'visitor' || session.identity.kind === 'profile'}
+          {:else if settingsRoute === 'unavailable'}
             <section class="profile-settings-unavailable" aria-labelledby="profile-settings-title">
-              <h1 id="profile-settings-title">Profile settings unavailable</h1>
-              <p>Switch to Owner to manage settings on this version of Den.</p>
+              <h1 id="profile-settings-title">
+                {session.identity.kind === 'visitor'
+                  ? 'Profile settings unavailable'
+                  : 'Household settings unavailable'}
+              </h1>
+              <p>
+                {session.identity.kind === 'visitor'
+                  ? 'Visitor settings couldn’t be opened. Switch profiles and try again.'
+                  : 'Owner profile settings will appear here after the household split is activated.'}
+              </p>
             </section>
           {:else if link || session.local}
             {#if SettingsScreen.current}

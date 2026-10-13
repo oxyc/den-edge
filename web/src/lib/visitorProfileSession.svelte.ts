@@ -228,7 +228,7 @@ export function visitorProfileSession(
   options: {
     active?: () => boolean;
     lock?: VisitorActivityLock;
-    previewPreferences?: boolean;
+    personalPreferences?: boolean;
     events?: Pick<Window, 'addEventListener' | 'removeEventListener'> | null;
   } = {},
   contentPolicy: ProfileContentPolicy | null = null,
@@ -237,7 +237,7 @@ export function visitorProfileSession(
   const identity = visitorProfileIdentity(visitId);
   const householdPolicy = isolatedProfilePolicy(household.policy);
   const preferences =
-    options.previewPreferences && householdPolicy
+    options.personalPreferences && householdPolicy
       ? new PreviewProfilePreferences(identity, householdPolicy, storage, options.events, activity)
       : null;
   return new VisitorProfileSession(household, activity, contentPolicy, preferences);

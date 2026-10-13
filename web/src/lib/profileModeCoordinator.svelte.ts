@@ -485,7 +485,8 @@ export class ProfileModeCoordinator {
           );
         },
         lock: this.#visitorLock,
-        previewPreferences: this.#preview,
+        // Visitor preferences belong to the disposable visit namespace in both preview and real profile mode.
+        personalPreferences: true,
         events: this.#events,
       },
       this.#directory ? (this.#choice(this.#directory.owner)?.policy ?? null) : null,
