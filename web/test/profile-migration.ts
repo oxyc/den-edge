@@ -7,6 +7,17 @@ import {
 } from '../src/lib/profileMigration';
 
 const OWNER = '00112233445566778899aabbccddeeff';
+const ATTEMPT = '0123456789abcdef0123456789abcdef';
+const HOUSEHOLD_ID = 'ffeeddccbbaa00998877665544332211';
+const CANDIDATE_ID = '11223344556677889900aabbccddeeff';
+const key = (fill: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(fill)));
+const HOUSEHOLD_KEY = key(1);
+const CANDIDATE_KEY = key(2);
+const WINNER_KEY = key(3);
+const SOURCE_HEAD = 'a'.repeat(64);
+const BACKUP_DIGEST = 'b'.repeat(64);
+const OWNER_HEAD = 'c'.repeat(64);
+const PREPARED_DIGEST = 'd'.repeat(64);
 const calls: string[] = [];
 const directory = (ownerKey: string) =>
   ({
@@ -14,7 +25,7 @@ const directory = (ownerKey: string) =>
     kind: 'profiles',
     schema: 1,
     owner: OWNER,
-    migration: {},
+    migration: { attempt: ATTEMPT },
     profiles: {
       [OWNER]: {
         library: { value: { key: ownerKey } },
@@ -32,24 +43,24 @@ const executor: ProfileMigrationExecutor = {
   },
   acquireFence: async () => {
     calls.push('fence');
-    return { generation: 'fixture-generation', base: 9, rewrite: 'fixture-rewrite' };
+    return { generation: 7, head: SOURCE_HEAD, base: 9, rewrite: 'fixture-rewrite' };
   },
   createAndVerifyBackup: async () => {
     calls.push('backup');
-    return { id: 'fixture-backup', digest: 'fixture-backup-digest' };
+    return { id: 'fixture-backup', digest: BACKUP_DIGEST };
   },
   createOwnerCandidate: async () => {
     calls.push('candidate');
-    return { profileId: OWNER, libraryId: 'candidate-id', libraryKey: 'candidate-key' };
+    return { profileId: OWNER, libraryId: CANDIDATE_ID, libraryKey: CANDIDATE_KEY };
   },
   copyOwnerPartition: async () => void calls.push('copy'),
   verifyOwnerLibrary: async () => {
     calls.push('verify-owner');
-    return { head: 'fixture-owner-head' };
+    return { head: OWNER_HEAD };
   },
   prepareHouseholdRewrite: async () => {
     calls.push('prepare');
-    return { digest: 'fixture-prepared-digest' };
+    return { digest: PREPARED_DIGEST };
   },
   verifyWinner: async () => {
     calls.push('verify-winner');
@@ -86,13 +97,13 @@ const planner = (input: Record<string, unknown>): ProfileMigrationDecision => {
 };
 
 const participant = new ProfileMigrationParticipant({
-  householdId: 'fixture-household-id',
-  householdLibraryKey: 'fixture-household-key',
+  householdId: HOUSEHOLD_ID,
+  householdLibraryKey: HOUSEHOLD_KEY,
   storage: localStorage,
   executor,
   planner,
   validateDirectory: (value) => value,
-  randomAttempt: () => '0123456789abcdef0123456789abcdef',
+  randomAttempt: () => ATTEMPT,
 });
 
 let status = participant.journal ? 'recoverable' : 'inactive';
@@ -112,10 +123,10 @@ document.querySelector('#advance')!.addEventListener('click', () => {
   });
 });
 document.querySelector('#winner')!.addEventListener('click', () => {
-  localStorage.setItem('fixture.profileMigration.winner', 'winner-key');
+  localStorage.setItem('fixture.profileMigration.winner', WINNER_KEY);
 });
 document.querySelector('#candidate-winner')!.addEventListener('click', () => {
-  localStorage.setItem('fixture.profileMigration.winner', 'candidate-key');
+  localStorage.setItem('fixture.profileMigration.winner', CANDIDATE_KEY);
 });
 
 declare global {

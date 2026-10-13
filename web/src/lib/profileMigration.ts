@@ -29,8 +29,10 @@ export type ProfileMigrationState =
   | 'restore-required';
 
 export interface ProfileMigrationFence {
-  /** den-edge store generation observed when the rewrite was opened. */
-  readonly generation: string;
+  /** den-edge's numeric store generation observed when the rewrite was opened. */
+  readonly generation: number;
+  /** Authenticated digest of every source row through `base`. */
+  readonly head: string;
   /** The existing household head which the rewrite must compare-and-set. */
   readonly base: number;
   /** Opaque rewrite handle. It may expire; the executor must resolve that idempotently. */
@@ -97,6 +99,7 @@ export interface ProfileMigrationExecutor {
   verifyOwnerLibrary(
     attempt: string,
     fence: ProfileMigrationFence,
+    backup: ProfileMigrationBackup,
     candidate: OwnerMigrationCandidate,
   ): Promise<OwnerMigrationVerification>;
   prepareHouseholdRewrite(
@@ -110,7 +113,11 @@ export interface ProfileMigrationExecutor {
   verifyWinner(directory: ProfilesDirectory, ownerLibraryKey: string): Promise<boolean>;
   adoptWinner(directory: ProfilesDirectory, ownerLibraryKey: string): Promise<void>;
   /** Retire just this candidate. The proof has already excluded the household and every live directory key. */
-  retireLosingCandidate(candidate: OwnerMigrationCandidate): Promise<'retired' | 'absent'>;
+  retireLosingCandidate(
+    attempt: string,
+    source: ProfileMigrationFence,
+    candidate: OwnerMigrationCandidate,
+  ): Promise<'retired' | 'absent'>;
 }
 
 export interface ProfileMigrationJournal {
@@ -181,6 +188,15 @@ const record = (value: unknown): value is Record<string, unknown> =>
 const optionalString = (value: unknown): boolean =>
   value === undefined || typeof value === 'string';
 
+function canonicalLibraryKey(value: string): boolean {
+  try {
+    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    return bytes.length === 32 && btoa(String.fromCharCode(...bytes)) === value;
+  } catch {
+    return false;
+  }
+}
+
 function validJournal(value: unknown): value is ProfileMigrationJournal {
   if (
     !record(value) ||
@@ -194,7 +210,10 @@ function validJournal(value: unknown): value is ProfileMigrationJournal {
   if (
     value.fence !== undefined &&
     (!record(value.fence) ||
-      typeof value.fence.generation !== 'string' ||
+      !Number.isSafeInteger(value.fence.generation) ||
+      (value.fence.generation as number) < 0 ||
+      typeof value.fence.head !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(value.fence.head) ||
       !Number.isSafeInteger(value.fence.base) ||
       (value.fence.base as number) < 0 ||
       typeof value.fence.rewrite !== 'string')
@@ -213,8 +232,9 @@ function validJournal(value: unknown): value is ProfileMigrationJournal {
       typeof value.candidate.profileId !== 'string' ||
       !ID.test(value.candidate.profileId) ||
       typeof value.candidate.libraryId !== 'string' ||
+      !ID.test(value.candidate.libraryId) ||
       typeof value.candidate.libraryKey !== 'string' ||
-      value.candidate.libraryKey.length === 0)
+      !canonicalLibraryKey(value.candidate.libraryKey))
   )
     return false;
   if (
@@ -423,10 +443,12 @@ export class ProfileMigrationParticipant {
         return { kind: 'progress', state: 'owner-copied' };
       }
       case 'verify-owner-library': {
-        if (!journal.fence || !journal.candidate) throw new Error('Owner candidate is missing');
+        if (!journal.fence || !journal.backup || !journal.candidate)
+          throw new Error('Owner candidate evidence is missing');
         const ownerVerification = await this.#executor.verifyOwnerLibrary(
           journal.attempt,
           journal.fence,
+          journal.backup,
           journal.candidate,
         );
         this.#write({ ...journal, state: 'ready-to-commit', ownerVerification });
@@ -451,7 +473,8 @@ export class ProfileMigrationParticipant {
         this.#write({ ...journal, state: 'commit-unknown' });
         return { kind: 'progress', state: 'commit-unknown' };
       case 'retire-losing-candidate': {
-        if (!journal.candidate) throw new Error('Losing Owner candidate is missing');
+        if (!journal.fence || !journal.candidate)
+          throw new Error('Losing Owner candidate evidence is missing');
         if (
           journal.candidate.libraryKey === this.#householdLibraryKey ||
           (committed && liveLibraryKeys(committed).has(journal.candidate.libraryKey))
@@ -463,7 +486,11 @@ export class ProfileMigrationParticipant {
           winnerVerified,
           ...(winnerLibraryKey ? { winnerLibraryKey } : {}),
         });
-        await this.#executor.retireLosingCandidate(journal.candidate);
+        await this.#executor.retireLosingCandidate(
+          journal.attempt,
+          journal.fence,
+          journal.candidate,
+        );
         this.#write({
           ...journal,
           state: committed ? 'adopting' : 'idle',
