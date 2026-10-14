@@ -1,14 +1,24 @@
 // Work a page asks of the library service on its own, with no one waiting on it (the household's default Kid), can
-// meet the service between connections: not ready yet, reconnecting at another wire, or a client closed by a session
-// that was replaced. Those pass; a refusal is an answer, and is never asked again.
+// meet the service between connections: not ready yet, reopening at another wire (read-only until then), or a client
+// closed by a session that was replaced. Those pass; a refusal is an answer, and is never asked again.
 
 import { LibraryServiceError } from './libraryServiceClient';
 
-/** A failure of the service's connection rather than an answer to the request. */
+/**
+ * A failure of the service's connection rather than an answer to the request. `read-only` is one too: a household
+ * opened from this browser's copy at wire 4 is read-only until the supervisor reopens it at 5. A build that is really
+ * too old stays read-only, and the attempts run out.
+ */
 export function transientServiceFailure(error: unknown): boolean {
   if (!(error instanceof LibraryServiceError)) return false;
   const { code, retryable } = error.failure;
-  return retryable || code === 'not-ready' || code === 'cancelled' || code === 'unavailable';
+  return (
+    retryable ||
+    code === 'not-ready' ||
+    code === 'cancelled' ||
+    code === 'unavailable' ||
+    code === 'read-only'
+  );
 }
 
 const BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;

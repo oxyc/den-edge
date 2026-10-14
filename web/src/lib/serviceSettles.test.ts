@@ -8,21 +8,22 @@ const failure = (code: LibraryServiceErrorCode, retryable = false) =>
 const instant = { backoffMs: [1, 1, 1], wait: async () => {} };
 
 describe('untilServiceSettles', () => {
-  it('asks again while the service is not ready, reconnecting or its client was closed', async () => {
+  it('asks again while the service is not ready, reopening at wire 5 or its client was closed', async () => {
     const work = vi
       .fn<() => Promise<string>>()
       .mockRejectedValueOnce(failure('not-ready', true))
+      .mockRejectedValueOnce(failure('read-only'))
       .mockRejectedValueOnce(failure('cancelled'))
       .mockRejectedValueOnce(failure('unavailable', true))
       .mockResolvedValueOnce('created');
-    await expect(untilServiceSettles(work, { ...instant, backoffMs: [1, 1, 1, 1] })).resolves.toBe(
-      'created',
-    );
-    expect(work).toHaveBeenCalledTimes(4);
+    await expect(
+      untilServiceSettles(work, { ...instant, backoffMs: [1, 1, 1, 1, 1] }),
+    ).resolves.toBe('created');
+    expect(work).toHaveBeenCalledTimes(5);
   });
 
   it('never asks again after a refusal', async () => {
-    for (const code of ['unauthorized', 'refused', 'invalid-request', 'read-only'] as const) {
+    for (const code of ['unauthorized', 'refused', 'invalid-request', 'conflict'] as const) {
       const work = vi.fn(() => Promise.reject(failure(code)));
       await expect(untilServiceSettles(work, instant)).rejects.toMatchObject({
         failure: { code },
