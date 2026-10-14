@@ -211,8 +211,11 @@ const SPEED_READ_MS = 4_000;
 export const SPEED_DEADLINE_MS = 10_000;
 /** How long a measured link is trusted before a session measures it again. */
 export const LINK_TTL_MS = 10 * 60_000;
-/** The share of the measured rate a session may need: room for the link to dip, and for what else uses it. */
-const LINK_HEADROOM = 0.7;
+/**
+ * The fewest fragments hls.js has fetched before its bandwidth estimate says anything of the link: its estimate starts
+ * from a default and is an average over the fragments it has timed. Six is 36 s of media.
+ */
+export const ESTIMATE_MIN_FRAGMENTS = 6;
 
 /** Each den-remux's link, timed once and kept for LINK_TTL_MS: when it was asked, and the rate (null: not measured). */
 const links = new Map<string, { at: number; rate: Promise<number | null> }>();
@@ -285,6 +288,27 @@ export function rememberLink(
 }
 
 /**
+ * Lower the link remembered for den-remux at `base` to what playback itself got: hls.js's bandwidth estimate over
+ * the fragments it fetched. The `/speed` probe is a few seconds of one transfer; a session is minutes of the real ones,
+ * from the source den-remux reads and through whatever else the connection carries, and it was 14 Mbit/s against a
+ * measured 40. Only ever lower: an estimate is capped by what the player asked for, so it can't show a link to be
+ * faster than measured. Nothing is remembered where nothing was, or at home, or from too few fragments.
+ */
+export function lowerLink(
+  base: string,
+  estimateBps: number,
+  fragments: number,
+  now = Date.now(),
+  storage = linkStorage(),
+): void {
+  if (fragments < ESTIMATE_MIN_FRAGMENTS || !Number.isFinite(estimateBps) || estimateBps < 64_000)
+    return;
+  const kept = rememberedLink(base, now, storage);
+  if (kept?.maxBitrate === undefined || estimateBps >= kept.maxBitrate) return;
+  rememberLink(base, Math.round(estimateBps), now, storage);
+}
+
+/**
  * The `maxBitrate` a session through the public relay asks with: the one this player already measured, else the one
  * this browser remembers. Undefined only with neither — and only then is the session's link measured inside it and the
  * session perhaps replaced (`restartAfterMeasure`).
@@ -350,7 +374,7 @@ export function premeasureLink(
     ).then((rate) => {
       done = true;
       if (controller.signal.aborted) return;
-      if (rate) rememberLink(base, Math.round(rate * LINK_HEADROOM), Date.now(), storage);
+      if (rate) rememberLink(base, Math.round(rate), Date.now(), storage);
       else console.warn(`The link to ${base} could not be timed ahead of play.`);
     });
   });
@@ -462,9 +486,9 @@ async function timeTransferUrl(
 }
 
 /**
- * The `maxBitrate` a session at `base` asks for: LINK_HEADROOM of the measured link, away from home; undefined at home,
- * and wherever the link couldn't be measured — den-remux then picks as it always has. A link remembered in this browser
- * (`rememberedLink`) is taken as it is.
+ * The `maxBitrate` a session at `base` asks for: the measured link as it is, away from home — den-remux keeps its own
+ * headroom under it (`LINK_HEADROOM` there); undefined at home, and wherever the link couldn't be measured —
+ * den-remux then picks as it always has. A link remembered in this browser (`rememberedLink`) is taken as it is.
  */
 export async function linkLimit(
   base: string,
@@ -476,7 +500,7 @@ export async function linkLimit(
   const kept = rememberedLink(base, Date.now(), storage);
   if (kept) return kept.maxBitrate;
   const rate = await measureLink(base, fetchImpl, now);
-  const limit = rate ? Math.round(rate * LINK_HEADROOM) : undefined;
+  const limit = rate ? Math.round(rate) : undefined;
   if (limit !== undefined) rememberLink(base, limit, Date.now(), storage);
   return limit;
 }

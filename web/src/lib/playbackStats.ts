@@ -374,6 +374,8 @@ export interface WatchOptions {
   reportUrl: string;
   send?: (url: string, body: string) => void;
   now?: () => number;
+  /** Told, as the watcher stops, what hls.js's bandwidth estimate came to over `fragments` fetches (bits a second). */
+  onEstimate?: (bitsPerSecond: number, fragments: number) => void;
 }
 
 export interface Watcher {
@@ -408,6 +410,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
   let arrived: number | undefined;
   /** When the last `timeupdate` came, to count playing time between two of them. */
   let lastTick: number | undefined;
+  /** How many fragments hls.js has fetched, to tell an estimate it has formed from its starting guess. */
+  let fragments = 0;
   const requests = (): Pick<Stall, 'loading' | 'idleMs'> =>
     !hls
       ? { loading: null, idleMs: null }
@@ -521,6 +525,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
       if (stopped || data.frag.type === 'subtitle') return;
       if (data.frag.sn === fetching) fetching = undefined;
       arrived = now();
+      fragments += 1;
       const stats = (data.part ?? data.frag).stats;
       recorder.fragment(stats.loaded || stats.total, stats.loading);
     });
@@ -540,6 +545,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
   return {
     stop() {
       if (stopped) return;
+      const bps = hls?.instance.bandwidthEstimate;
+      if (bps && Number.isFinite(bps) && bps > 0) options.onEstimate?.(bps, fragments);
       schedule.end();
       stopped = true;
       listening.abort();

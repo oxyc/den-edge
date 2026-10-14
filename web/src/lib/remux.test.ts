@@ -4,6 +4,7 @@ import {
   describeRelease,
   downmixLabel,
   endSession,
+  ESTIMATE_MIN_FRAGMENTS,
   findRemux,
   forgetBrowserTokens,
   forgetLinks,
@@ -13,6 +14,7 @@ import {
   linkRate,
   LINK_MEMORY_MS,
   LINK_TTL_MS,
+  lowerLink,
   premeasureLink,
   relayLimit,
   rememberedLink,
@@ -617,14 +619,14 @@ describe('linkLimit', () => {
     return { clock, asked, fetchImpl, now: () => clock.now };
   };
 
-  it('asks for 70% of the link, timed past the first megabyte, as much as den-remux sends', async () => {
+  it('asks for the link as measured, timed past the first megabyte, as much as den-remux sends', async () => {
     // The first MiB is passed by the 8th 125 KB chunk (1.9 s); after it, 250 KB in 200 ms: 10 Mbit/s.
     const measured = link([
       [1_000, 50_000],
       [1_100, 50_000],
       ...Array.from({ length: 10 }, (_, i): [number, number] => [1_200 + i * 100, 125_000]),
     ]);
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(7_000_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(10_000_000);
     expect(measured.asked).toEqual([`${tailnet}/speed?bytes=${SPEED_PROBE_BYTES}`]);
     expect(SPEED_PROBE_BYTES, 'den-remux sends 8 MiB at most').toBe(8 * 1024 * 1024);
   });
@@ -634,8 +636,8 @@ describe('linkLimit', () => {
       [0, 1],
       [1_000, 125_000],
     ]);
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(700_000);
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(700_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(1_000_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(1_000_000);
     expect(measured.asked).toHaveLength(1);
     measured.clock.now += LINK_TTL_MS;
     await linkLimit(tailnet, measured.fetchImpl, measured.now);
@@ -648,7 +650,7 @@ describe('linkLimit', () => {
       [100, 500_000],
     ]);
     // The second 500 KB in the 100 ms after the first arrived: 40 Mbit/s.
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(28_000_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(40_000_000);
   });
 
   it('asks for nothing at home, or where the link can’t be timed', async () => {
@@ -685,8 +687,25 @@ describe('linkLimit', () => {
     expect(measured.asked, 'no probe for a remembered link').toEqual([]);
 
     const fresh = memoryStorage();
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, fresh)).toBe(700_000);
-    expect(rememberedLink(tailnet, Date.now(), fresh)?.maxBitrate).toBe(700_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, fresh)).toBe(1_000_000);
+    expect(rememberedLink(tailnet, Date.now(), fresh)?.maxBitrate).toBe(1_000_000);
+  });
+
+  it('lowers a remembered link to what playback got, never raises it', () => {
+    const storage = memoryStorage();
+    const kept = () => rememberedLink(tailnet, Date.now(), storage)?.maxBitrate;
+    lowerLink(tailnet, 14_000_000, ESTIMATE_MIN_FRAGMENTS, Date.now(), storage);
+    expect(kept(), 'nothing remembered: nothing to lower').toBeUndefined();
+    // Probed at 43 Mbit/s; hls.js then got 15.2 over a session.
+    rememberLink(tailnet, 43_000_000, Date.now(), storage);
+    lowerLink(tailnet, 15_162_000, ESTIMATE_MIN_FRAGMENTS - 1, Date.now(), storage);
+    expect(kept(), 'too few fragments to say').toBe(43_000_000);
+    lowerLink(tailnet, 15_162_000, ESTIMATE_MIN_FRAGMENTS, Date.now(), storage);
+    expect(kept()).toBe(15_162_000);
+    lowerLink(tailnet, 60_000_000, 50, Date.now(), storage);
+    expect(kept(), 'an estimate above the link is no news').toBe(15_162_000);
+    lowerLink(tailnet, Number.NaN, 50, Date.now(), storage);
+    expect(kept()).toBe(15_162_000);
   });
 
   it('measures as before where the browser refuses storage', async () => {
@@ -695,7 +714,7 @@ describe('linkLimit', () => {
       [0, 1],
       [1_000, 125_000],
     ]);
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, refusing)).toBe(700_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, refusing)).toBe(1_000_000);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });

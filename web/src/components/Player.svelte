@@ -31,6 +31,7 @@
     guestLimits,
     linkLimit,
     listReleases,
+    lowerLink,
     login,
     reassertGrant,
     relayLimit,
@@ -1336,7 +1337,14 @@
           );
         arriving();
       });
-      watcher = watchPlayback({ video: element, hls: { instance: hls, Hls }, reportUrl });
+      // What hls.js got from den-remux is a better account of the link than the probe was: the next session asks
+      // for no more than that.
+      watcher = watchPlayback({
+        video: element,
+        hls: { instance: hls, Hls },
+        reportUrl,
+        onEstimate: (bps, fragments) => lowerLink(route, bps, fragments),
+      });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal, and the session moves to a copy
       // this browser does decode (`switchAway`).
