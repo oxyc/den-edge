@@ -665,6 +665,14 @@ export class LibraryLogAuthority {
         return { kind: 'profile-migration.status', ...status };
       }
       case 'profile-migration.observe': {
+        // profiles-v1 §6.1: the split takes only a converted library. v2/v3 rows in it (a stray tracker event, say)
+        // are folded into its documents by the library-v4 switch first, before the source is observed.
+        if (this.#log.needsV4 && !(await this.#log.switchToV4(this.#clock.device)))
+          throw authorityError(
+            'unavailable',
+            `the library must finish its Library v4 update first${this.#log.switchFailure ? ` (${this.#log.switchFailure})` : ''}`,
+            true,
+          );
         const observation = await this.#profileMigration().observe();
         return { kind: 'profile-migration.observe', ...observation };
       }
@@ -926,7 +934,7 @@ export class LibraryLogAuthority {
           ? await control.cancel(task.attempt)
           : await control.recover(task.attempt, task.recoveryAttempt, task.source);
     if (result.kind === 'setup-in-progress') this.#log.noteMigrationLocked();
-    if (result.kind === 'released') this.#log.noteMigrationReleased();
+    if (result.kind === 'released' || result.kind === 'refused') this.#log.noteMigrationReleased();
     const outcome =
       result.kind === 'active' || result.kind === 'restored'
         ? 'enabled'
@@ -942,7 +950,9 @@ export class LibraryLogAuthority {
                   ? 'cancelled'
                   : result.kind === 'commit-unknown'
                     ? 'reconciling'
-                    : 'preparing';
+                    : result.kind === 'refused'
+                      ? 'source-refused'
+                      : 'preparing';
     return {
       result: {
         kind: task.kind,

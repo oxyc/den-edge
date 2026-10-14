@@ -99,6 +99,8 @@ export type OwnerSplitRunResult =
    */
   | { readonly kind: 'setup-in-progress' }
   | { readonly kind: 'restart-required' }
+  /** den-core refused the source before anything was staged; the attempt was aborted and the lock released. */
+  | { readonly kind: 'refused'; readonly attempt: string; readonly reason: string }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'inactive' };
 
@@ -336,6 +338,7 @@ export class DormantOwnerSplitCoordinator {
     let household: OwnerSplitHouseholdObservation | undefined;
     let householdFresh = false;
     let verifiedBackup: VerifiedOwnerSplitBackup | undefined;
+    let refused: string | null = null;
 
     for (let step = 0; step < 32; step += 1) {
       const recovery = await this.#checkedRecoveryIntent(journal);
@@ -437,12 +440,25 @@ export class DormantOwnerSplitCoordinator {
       }
       if (effect === 'create-owner-library') {
         if (verifiedBackup === undefined) throw new Error('Verified backup is absent');
-        const prepared = await this.#effects.copyAndAuthenticateCandidate({
-          attempt: journal.attempt,
-          fence: requiredFence(journal),
-          backup: verifiedBackup,
-          candidate: journal.candidate,
-        });
+        let prepared: OwnerSplitDurableEvidence;
+        try {
+          prepared = await this.#effects.copyAndAuthenticateCandidate({
+            attempt: journal.attempt,
+            fence: requiredFence(journal),
+            backup: verifiedBackup,
+            candidate: journal.candidate,
+          });
+        } catch (error) {
+          // den-core refused this frozen source (`legacy_source_row`: v2/v3 rows the library-v4 switch has not yet
+          // folded). Nothing is staged, and the same backup is refused on every retry, so the attempt is cancelled
+          // through den-core's own plan (abort, then discard), which releases the household lock.
+          const reason = coreRefusal(error);
+          if (reason === null) throw error;
+          console.error(`den: den-core refused this profile setup's source (${reason})`, error);
+          refused = reason;
+          journal = await this.#save({ ...journal, cancelRequested: true });
+          continue;
+        }
         journal = await this.#save({
           ...journal,
           state: 'owner-copied',
@@ -539,7 +555,9 @@ export class DormantOwnerSplitCoordinator {
       }
       if (effect === 'discard-journal') {
         await this.#store.clear(journal.attempt);
-        return { kind: 'cancelled' };
+        return refused === null
+          ? { kind: 'cancelled' }
+          : { kind: 'refused', attempt: journal.attempt, reason: refused };
       }
       if (effect === 'restart') {
         await this.#store.clear(journal.attempt);
@@ -825,4 +843,10 @@ function requiredDigest(value: string | undefined, name: string): string {
 
 function checkedAttempt(value: string): void {
   if (!ID.test(value)) throw new Error('Invalid Owner split attempt');
+}
+
+/** The error code den-core answered with (`syncPolicy`), or null for any other failure. */
+function coreRefusal(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  return /^Sync policy rejected the action: (.+)$/.exec(error.message)?.[1] ?? null;
 }

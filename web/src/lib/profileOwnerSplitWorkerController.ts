@@ -51,6 +51,8 @@ export class OwnerSplitWorkerController {
     if (journal !== null) return { phase: phaseOf(journal), attempt: journal.attempt };
     if (resumed.kind === 'active' || resumed.kind === 'restored') return { phase: 'enabled' };
     if (resumed.kind === 'setup-in-progress') return { phase: 'setup-in-progress' };
+    // The refused attempt was aborted: the lock this browser may have seen is gone.
+    if (resumed.kind === 'refused') this.port.migrationReleased?.();
     return this.#idleStatus(capability);
   }
 
