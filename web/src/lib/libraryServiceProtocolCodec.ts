@@ -956,6 +956,15 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile.create.ack':
       return exact(value, ['kind', 'receipt']) && boundedText(value.receipt, 256);
+    case 'profile.policy.set':
+      return (
+        exact(value, ['kind', 'profile', 'maximumAge', 'unknownRatings', 'pin']) &&
+        hexId(value.profile) &&
+        (value.maximumAge === null ||
+          (integer(value.maximumAge) && value.maximumAge >= 0 && value.maximumAge <= 18)) &&
+        (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
+        pin(value.pin)
+      );
     case 'profile-key-reset.start':
       return (
         exact(value, ['kind', 'pin', 'destinationLibraryKey']) &&
@@ -2107,6 +2116,11 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'profile.create.ack':
       return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
+    case 'profile.policy.set':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'changed' || value.outcome === 'unchanged')
+      );
     case 'profile-key-reset.start':
     case 'profile-key-reset.resume':
     case 'profile-key-reset.confirm':

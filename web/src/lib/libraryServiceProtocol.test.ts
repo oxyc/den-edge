@@ -317,6 +317,17 @@ describe('library service client protocol', () => {
     expect(
       decodeTask({ kind: 'profile.create', name: '😀'.repeat(65), maximumAge: 8, pin: '1234' }),
     ).toMatchObject({ ok: false });
+    const kid = 'a'.repeat(32);
+    for (const [maximumAge, unknownRatings, pin, ok] of [
+      [8, 'block', '1234', true],
+      [null, 'allow', '1234', true],
+      [19, 'block', '1234', false],
+      [8, 'maybe', '1234', false],
+      [8, 'block', '12', false],
+    ] as const)
+      expect(
+        decodeTask({ kind: 'profile.policy.set', profile: kid, maximumAge, unknownRatings, pin }),
+      ).toMatchObject({ ok });
     expect(decodeTask({ kind: 'profile.create.ack', receipt: 'create-sam' })).toMatchObject({
       ok: true,
     });

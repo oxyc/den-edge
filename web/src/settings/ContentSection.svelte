@@ -56,6 +56,7 @@
     personalOnly = false,
     contentPolicy = null,
     role = 'owner',
+    onpolicy,
     pinRemovable = true,
   }: {
     prefs: SettingsPreferences;
@@ -73,6 +74,11 @@
       readonly unknownRatings: 'allow' | 'block';
     } | null;
     role?: 'owner' | 'kid' | 'visitor';
+    /** Present when this Settings may change the profile's own policy (a Kid's, opened with the Owner PIN). */
+    onpolicy?: (policy: {
+      maximumAge: number | null;
+      unknownRatings: 'allow' | 'block';
+    }) => Promise<boolean>;
     /** False once profiles exist: the PIN can be changed but not removed, since it returns a Kid to Owner. */
     pinRemovable?: boolean;
   } = $props();
@@ -563,16 +569,71 @@
       id="profile-policy"
       label="Content limit"
       value={contentPolicy?.maximumAge === null
-        ? 'No age limit · managed by Owner'
+        ? 'No age limit'
         : contentPolicy?.maximumAge !== undefined
-          ? `Up to age ${contentPolicy.maximumAge} · managed by Owner`
+          ? `Up to age ${contentPolicy.maximumAge}`
           : 'Managed by Owner'}
     >
-      <p class="foot">
-        {role === 'kid'
-          ? 'Only Owner can change this profile’s age limit and unrated-title policy.'
-          : 'Visitor follows the content policy chosen by Owner.'}
-      </p>
+      {#if onpolicy && contentPolicy}
+        {@const policy = contentPolicy}
+        <div class="form">
+          <Select
+            label="Age limit"
+            value={String(policy.maximumAge ?? '')}
+            options={[
+              { value: '', label: 'No age limit' },
+              ...[
+                ...new Set([
+                  0,
+                  3,
+                  6,
+                  8,
+                  10,
+                  12,
+                  13,
+                  15,
+                  16,
+                  18,
+                  ...(policy.maximumAge === null ? [] : [policy.maximumAge]),
+                ]),
+              ]
+                .sort((a, b) => a - b)
+                .map((age) => ({ value: String(age), label: `Up to age ${age}` })),
+            ]}
+            {disabled}
+            onchange={(age) =>
+              void onpolicy({
+                maximumAge: age === '' ? null : Number(age),
+                unknownRatings: policy.unknownRatings,
+              })}
+          />
+          <Segmented
+            name="unknown-ratings"
+            labelledby="profile-policy-label"
+            options={[
+              { value: 'block', label: 'Hide unrated' },
+              { value: 'allow', label: 'Show unrated' },
+            ]}
+            value={policy.unknownRatings}
+            {disabled}
+            onchange={(unknown) =>
+              void onpolicy({
+                maximumAge: policy.maximumAge,
+                unknownRatings: unknown === 'allow' ? 'allow' : 'block',
+              })}
+          />
+        </div>
+        <p class="foot">
+          Changed with the Owner PIN you opened these settings with. It applies to this profile on
+          every device.
+        </p>
+      {:else}
+        <p class="foot">
+          {role === 'kid'
+            ? 'Only Owner can change this profile’s age limit and unrated-title policy.'
+            : 'Visitor follows the content policy chosen by Owner.'}
+        </p>
+      {/if}
     </SettingRow>
   {:else}
     <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>

@@ -32,6 +32,18 @@
     denied = !(await profiles.unlockSettings(entered));
   }
 
+  async function changePolicy(policy: {
+    maximumAge: number | null;
+    unknownRatings: 'allow' | 'block';
+  }): Promise<boolean> {
+    saving = true;
+    failure = null;
+    const changed = (await profiles?.setKidPolicy(policy)) ?? false;
+    if (!changed) failure = 'Couldn’t change that. Check your connection and try again.';
+    saving = false;
+    return changed;
+  }
+
   function save(changes: Parameters<ProfilePreferences['patch']>[0]) {
     saving = true;
     failure = null;
@@ -95,6 +107,7 @@
           personalOnly
           contentPolicy={session.contentPolicy}
           role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
+          onpolicy={profiles && session.identity.kind === 'profile' ? changePolicy : undefined}
         />
       {/if}
       <AboutSection credits={[...ATLAS_FALLBACK]} />

@@ -195,8 +195,12 @@ const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void =
  */
 export class ProfileModeCoordinator {
   #session = $state.raw<ProfileSession | null>(null);
-  /** The Kid session whose Settings the Owner PIN has opened. Held by session object, so any switch relocks. */
-  #settingsUnlocked = $state.raw<ProfileSession | null>(null);
+  /**
+   * The Kid whose Settings the Owner PIN has opened, and the switch count it was opened under: any profile switch
+   * moves the count on, so it relocks. A session the directory replaces (its policy changed) is not a switch.
+   */
+  #settingsUnlock = $state.raw<{ profile: string; epoch: number; pin: string } | null>(null);
+  #switches = $state(0);
   readonly #ownerActivityModel;
   readonly #ownerIdentity;
   readonly #household;
@@ -323,10 +327,11 @@ export class ProfileModeCoordinator {
    */
   get settingsLocked(): boolean {
     const session = this.#session;
+    const unlock = this.#settingsUnlock;
     return (
       this.mode === 'kid' &&
       this.parentalPinConfigured !== false &&
-      this.#settingsUnlocked !== session
+      !(unlock && session?.identity.id === unlock.profile && unlock.epoch === this.#switches)
     );
   }
 
@@ -337,8 +342,28 @@ export class ProfileModeCoordinator {
     if (this.mode !== 'kid' || !session) return true;
     if (!(await this.#verifyPin(pin))) return false;
     if (this.#session !== session) return false;
-    this.#settingsUnlocked = session;
+    // Kept in memory for this unlock only: changing the Kid's policy from its Settings is authorized by the same PIN.
+    this.#settingsUnlock = { profile: session.identity.id, epoch: this.#switches, pin };
     return true;
+  }
+
+  /**
+   * Change the active Kid's content policy from its unlocked Settings (profiles-v1 §5): the owner-authorized directory
+   * write, authorized by the PIN that unlocked them. False when Settings are locked or the write was refused.
+   */
+  async setKidPolicy(policy: {
+    maximumAge: number | null;
+    unknownRatings: 'allow' | 'block';
+  }): Promise<boolean> {
+    this.#assertOpen();
+    const unlock = this.#settingsUnlock;
+    if (this.mode !== 'kid' || this.settingsLocked || !unlock) return false;
+    try {
+      return await this.#household.setKidPolicy(unlock.profile, policy, unlock.pin);
+    } catch (error) {
+      console.warn('den: the Kid’s content policy could not be changed', error);
+      return false;
+    }
   }
 
   get mode(): ActiveProfileMode | null {
@@ -442,6 +467,7 @@ export class ProfileModeCoordinator {
       next.close();
       throw error;
     }
+    this.#switches += 1;
     this.#session = next;
     previous.close();
     return true;
@@ -482,6 +508,7 @@ export class ProfileModeCoordinator {
     }
     const next = nextPersistent ?? this.#pendingOwner ?? this.#newOwner();
     this.#releasePendingOwner(next);
+    this.#switches += 1;
     this.#session = next;
     previous?.close();
     return true;
@@ -529,6 +556,7 @@ export class ProfileModeCoordinator {
     }
     const next = nextPersistent ?? this.#newKid(kid);
     this.#releasePendingOwner(next);
+    this.#switches += 1;
     this.#session = next;
     previous?.close();
     return true;

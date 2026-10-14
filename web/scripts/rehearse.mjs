@@ -549,6 +549,23 @@ async function stubStreaming(ctx, asked, phase = () => '') {
   });
 }
 
+/**
+ * An atlas the page finds on its own origin: every title is rated 12+, and each request that names a policy has its
+ * `maximumAge` noted in `asked` under the `phase()` it was made in (null when the request names none).
+ */
+async function stubAtlas(ctx, asked, phase = () => '') {
+  await ctx.route(/\/atlas\//, (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } });
+    if (url.searchParams.has('unknownRatings'))
+      asked.push({ phase: phase(), maximumAge: url.searchParams.get('maximumAge') });
+    if (/\/index\/title\/(movie|series)\/\d+\.json$/.test(url.pathname))
+      return route.fulfill({ json: { minimumAge: 12 } });
+    return route.fulfill({ status: 404, json: {} });
+  });
+}
+
 /** Seal one settings row and write it to a library at the generation den-edge holds (a household that already split). */
 async function writeSettingsRow(edge, wire, keyText, name, values) {
   const library = await readLibrary(edge, wire, keyText);
@@ -608,6 +625,12 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
   const ctx = await ctxFor('profile-scoped-preferences', people.owner.id);
   await nameSyntheticTitles(ctx);
   await stubStreaming(ctx, asked, () => phase);
+  const atlasAsked = [];
+  await stubAtlas(ctx, atlasAsked, () => phase);
+  const agesIn = (name) => [
+    ...new Set(atlasAsked.filter((entry) => entry.phase === name).map((entry) => entry.maximumAge)),
+  ];
+  const refusal = () => page.getByText('This title isn’t available on this profile.');
   const page = await seedLink(ctx, edge, keyText);
   const loopErrors = [];
   page.on('pageerror', (e) => {
@@ -663,9 +686,18 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
       .catch(() => {});
   };
 
-  // 1. The Owner opens: it keeps its own region and services and is given only the key it had not decided.
+  // 1. The Owner opens: it keeps its own region and services and is given only the key it had not decided. The page
+  // is tall enough that the Services shelf is near the viewport from the first frame, so a frame drawn from the
+  // household's stale preferences would ask for its region (Sweden) at once.
+  await page.setViewportSize({ width: 1280, height: 4000 });
   await page.goto(`${edge.origin}/`);
   await page.locator('button.profile-trigger').first().waitFor({ timeout: 60_000 });
+  await sleep(4000);
+  check(
+    'no frame of a pre-repair household is drawn from its preferences',
+    regionsIn('owner-open').length > 0 && !regionsIn('owner-open').includes('SE'),
+    JSON.stringify(regionsIn('owner-open')),
+  );
   const ownerSeeded = await eventually(
     async () => (await read(people.owner.key))['den.autoplayTrailers']?.value?.bool === false,
   );
@@ -711,6 +743,18 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
     kidSeedTiles,
   );
 
+  // A film rated 12+ is within the Kid's 12-and-under limit.
+  await page.goto(`${edge.origin}/movie/603`);
+  await eventually(async () => agesIn('kid').includes('12'), 30);
+  await sleep(1500);
+  check(
+    'a title at the Kid’s age limit is not refused, and Atlas is asked under that limit',
+    !(await refusal()
+      .isVisible()
+      .catch(() => false)) && agesIn('kid').includes('12'),
+    JSON.stringify(agesIn('kid')),
+  );
+
   // 1c. Every profile is seeded, so the household's copy is repaired away (profiles-v1 §8.2): it holds no preference.
   phase = 'repair';
   await switchTo(people.owner.name, PIN);
@@ -749,8 +793,9 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
   );
   check(
     'the Owner’s requests carry the Owner’s region, never the Kid’s',
-    regionsIn('owner').includes('FI') && !regionsIn('owner').includes('SE'),
-    JSON.stringify(regionsIn('owner')),
+    [...regionsIn('owner-open'), ...regionsIn('owner')].includes('FI') &&
+      ![...regionsIn('owner-open'), ...regionsIn('owner')].includes('SE'),
+    JSON.stringify([...regionsIn('owner-open'), ...regionsIn('owner')]),
   );
 
   // 4. The Kid again.
@@ -774,7 +819,9 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
       (await page
         .locator('.settings-gate .denied')
         .isVisible()
-        .catch(() => false)) && (await page.locator('#my-services').count()) === 0,
+        .catch(() => false)) &&
+        (await page.locator('#my-services').count()) === 0 &&
+        (await page.locator('#profile-policy').count()) === 0,
     );
     await gate.fill(PIN);
   }
@@ -827,6 +874,50 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
   check(
     'neither profile’s edits touched the household’s preferences',
     JSON.stringify(householdAfter) === JSON.stringify(householdBefore),
+  );
+
+  // 7b. The Kid's age limit is the Owner's to change, from the Kid's own Settings once the Owner PIN has opened them.
+  phase = 'policy';
+  await nav('Settings').click();
+  await page.locator('#settings-gate-pin').waitFor({ state: 'visible', timeout: 30_000 });
+  check(
+    'a locked Kid Settings offers no age limit to change',
+    (await page.locator('#profile-policy').count()) === 0,
+  );
+  await page.locator('#settings-gate-pin').fill(PIN);
+  await page.locator('#profile-policy').waitFor({ timeout: 30_000 });
+  await page.locator('#profile-policy > button.row').click();
+  await page.locator('#profile-policy-panel select').first().selectOption('8');
+  const kidPolicy = async () => {
+    const household = await readLibrary(edge, wire, keyText);
+    const directory = household.rows.find((row) => row.profileDirectory)?.profileDirectory;
+    return Object.values(directory?.profiles ?? {}).find((entry) => entry.id === people.kid.id)
+      ?.policy?.value;
+  };
+  const policyChanged = await eventually(async () => (await kidPolicy())?.maximumAge === 8);
+  check(
+    'the Kid’s age limit, changed in its Settings, is written to the household directory',
+    policyChanged,
+    JSON.stringify(await kidPolicy()),
+  );
+  await page.goto(`${edge.origin}/movie/603`);
+  await eventually(
+    async () =>
+      await refusal()
+        .isVisible()
+        .catch(() => false),
+    30,
+  );
+  check(
+    'a title over the new limit is refused',
+    await refusal()
+      .isVisible()
+      .catch(() => false),
+  );
+  check(
+    'the Kid’s Atlas requests carry the new age limit',
+    agesIn('policy').includes('8') && !agesIn('policy').includes('12'),
+    JSON.stringify(agesIn('policy')),
   );
 
   // 8. Switching profile relocks the Kid's Settings.

@@ -636,6 +636,17 @@ export type LibraryTask =
     }
   | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
   | { kind: 'profile.create.ack'; receipt: string }
+  /**
+   * Change a Kid's content policy (profiles-v1 §5): an owner-authorized write to the directory, authorized by the
+   * Owner PIN like creating one. `maximumAge: null` is no age limit.
+   */
+  | {
+      kind: 'profile.policy.set';
+      profile: string;
+      maximumAge: number | null;
+      unknownRatings: 'allow' | 'block';
+      pin: string;
+    }
   /** The compound key reset (profiles-v1 §9) of a profile household, behind a fresh Owner PIN. */
   | { kind: 'profile-key-reset.start'; pin: string; destinationLibraryKey: string }
   /** Continue the journaled attempt on this device; the journal already holds the authorization. */
@@ -742,6 +753,7 @@ export type LibraryTaskResult =
       receipt: string;
     }
   | { kind: 'profile.create.ack'; outcome: 'acknowledged' }
+  | { kind: 'profile.policy.set'; outcome: 'changed' | 'unchanged' }
   | {
       kind:
         | 'profile-key-reset.start'

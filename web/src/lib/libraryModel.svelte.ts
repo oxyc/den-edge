@@ -512,6 +512,17 @@ export class LibraryModel {
     return created;
   }
 
+  /** Change a Kid's content policy behind the Owner PIN; resolves once the directory holds it. */
+  async setKidPolicy(
+    profile: string,
+    policy: { maximumAge: number | null; unknownRatings: 'allow' | 'block' },
+    pin: string,
+  ): Promise<'changed' | 'unchanged'> {
+    const { result } = await this.task({ kind: 'profile.policy.set', profile, ...policy, pin });
+    if (result.kind !== 'profile.policy.set') throw wrongQueryResult('profile policy');
+    return result.outcome;
+  }
+
   /**
    * The household's Kid when its directory has none yet; `present` when one already exists. Asked fresh each time
    * (the Kid journal makes it once): the answer also brings in a directory this page had not read yet.
