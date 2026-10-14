@@ -655,7 +655,8 @@ async fn dispatch(
             revalidated(crate::routes::to_json(table).to_string(), req.headers(), ENV_EDGE)
         }
         "/metrics" if metrics_authorized(state, &req) => {
-            let mut resp = Response::new(Body::from(state.metrics.render()));
+            let mut resp =
+                Response::new(Body::from(state.metrics.render() + &crate::library::visitor_metrics(state)));
             resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             resp.headers_mut().insert(
                 header::CONTENT_TYPE,

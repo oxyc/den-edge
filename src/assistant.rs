@@ -327,7 +327,7 @@ pub async fn delete_projection(state: &AppState, grant: &str) -> std::io::Result
 /// The library a member route's `x-den-library-member` proves, or `403 not_a_member`.
 async fn member_library(state: &AppState, headers: &HeaderMap) -> Result<String, Box<Response>> {
     let claim = headers.get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok());
-    if !crate::library::is_member(state, claim).await {
+    if !crate::library::is_household_member(state, claim).await {
         return Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("not_a_member"))));
     }
     Ok(claim.and_then(|c| c.split_once(':')).map(|(id, _)| id.to_owned()).expect("a member claim has an id"))

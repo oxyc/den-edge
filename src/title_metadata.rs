@@ -567,7 +567,7 @@ async fn query(state: &AppState, req: Request) -> Response {
 async fn publish(state: &AppState, req: Request) -> Response {
     let member =
         req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    if !crate::library::is_member(state, member.as_deref()).await {
+    if !crate::library::is_household_member(state, member.as_deref()).await {
         return json_reply(StatusCode::UNAUTHORIZED, &error("member_required"));
     }
     let value = match read_json(req, MAX_BODY).await {

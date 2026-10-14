@@ -369,7 +369,7 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
     }
     // Nothing open for this address: this is a session starting, and the only place membership is
     // asked. Once per session, never per segment — the lease remembers the answer.
-    let member = crate::library::is_member(state, claim).await;
+    let member = crate::library::is_household_member(state, claim).await;
     let slot = if member {
         None
     } else {
@@ -681,11 +681,11 @@ async fn relay_with(
             return limited(wait);
         }
         // Membership is only a meaningful public gate when strangers cannot create a library for themselves.
-        if remux && state.new_libraries != crate::library::NewLibraries::Members {
+        if remux && !state.new_libraries.gates_households() {
             return json(StatusCode::NOT_FOUND, "not_found");
         }
         let claim = member_claim(&req);
-        if !crate::library::is_member(state, claim.as_deref()).await {
+        if !crate::library::is_household_member(state, claim.as_deref()).await {
             return json(StatusCode::NOT_FOUND, "not_found");
         }
     }
@@ -788,7 +788,7 @@ async fn relay_with(
     };
     if let Some(visitor_wait) = visitor_wait {
         let member = member_claim(&req);
-        if !crate::library::is_member(state, member.as_deref()).await {
+        if !crate::library::is_household_member(state, member.as_deref()).await {
             return limited(visitor_wait);
         }
         if let Some(wait) =

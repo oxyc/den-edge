@@ -219,7 +219,9 @@ pub(crate) async fn spendable(
         return Some(Key { value: key, household: false });
     }
     let household = household?;
-    crate::library::is_member(state, member).await.then(|| Key { value: household.clone(), household: true })
+    crate::library::is_household_member(state, member)
+        .await
+        .then(|| Key { value: household.clone(), household: true })
 }
 
 pub(crate) struct Key {

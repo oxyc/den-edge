@@ -129,6 +129,15 @@ pub struct AppState {
     /// `LIBRARY_WRITE_PER_MINUTE`). A per-minute of 0 turns the budget off.
     pub library_write_burst: u32,
     pub library_write_per_minute: u32,
+    /// Under `NEW_LIBRARIES=visitors`: visitor libraries one address may start a day, and all addresses together
+    /// (env `VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX`, `VISITOR_LIBRARIES_DAILY_MAX`; 0 closes starting them).
+    pub visitor_libraries_per_address_daily: u32,
+    pub visitor_libraries_daily_max: u32,
+    /// What one visitor library may hold: live bytes and rows (env `VISITOR_LIBRARY_MAX_BYTES`,
+    /// `VISITOR_LIBRARY_MAX_ROWS`). Never above what any library may hold.
+    pub visitor_library_max_bytes: usize,
+    pub visitor_library_max_rows: usize,
+    pub visitor_day: Mutex<library::VisitorDay>,
     /// What `/config` tells the Apple TV about profiles (env `PROFILES_TV`): `Some(true)` enables them,
     /// `Some(false)` is the operator's explicit rollback, and `None` omits the key so the TV stays "unavailable".
     pub profiles_tv: Option<bool>,
@@ -354,6 +363,11 @@ impl AppState {
             profile_migration_enabled: false,
             library_write_burst: library::WRITE_BURST,
             library_write_per_minute: library::WRITE_PER_MINUTE,
+            visitor_libraries_per_address_daily: library::VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX,
+            visitor_libraries_daily_max: library::VISITOR_LIBRARIES_DAILY_MAX,
+            visitor_library_max_bytes: library::VISITOR_LIBRARY_MAX_BYTES,
+            visitor_library_max_rows: library::VISITOR_LIBRARY_MAX_ROWS,
+            visitor_day: Mutex::new(library::VisitorDay::default()),
             profiles_tv: None,
             profile_prepare_households: HashSet::new(),
             reset_sweeps: Mutex::new(HashSet::new()),
@@ -477,6 +491,14 @@ async fn main() {
     state.library_write_burst = env_number("LIBRARY_WRITE_BURST").unwrap_or(library::WRITE_BURST);
     state.library_write_per_minute =
         env_number("LIBRARY_WRITE_PER_MINUTE").unwrap_or(library::WRITE_PER_MINUTE);
+    state.visitor_libraries_per_address_daily = env_number("VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX")
+        .unwrap_or(library::VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX);
+    state.visitor_libraries_daily_max =
+        env_number("VISITOR_LIBRARIES_DAILY_MAX").unwrap_or(library::VISITOR_LIBRARIES_DAILY_MAX);
+    state.visitor_library_max_bytes =
+        env_number("VISITOR_LIBRARY_MAX_BYTES").unwrap_or(library::VISITOR_LIBRARY_MAX_BYTES);
+    state.visitor_library_max_rows =
+        env_number("VISITOR_LIBRARY_MAX_ROWS").unwrap_or(library::VISITOR_LIBRARY_MAX_ROWS);
     state.profiles_tv = env_opt("PROFILES_TV").and_then(|value| {
         parse_tri_state("PROFILES_TV", &value).unwrap_or_else(|reason| {
             eprintln!("{reason}");
@@ -516,7 +538,7 @@ async fn main() {
     });
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
-            eprintln!("NEW_LIBRARIES is {v:?}: expected open or members");
+            eprintln!("NEW_LIBRARIES is {v:?}: expected open, members or visitors");
             std::process::exit(1);
         })
     });
@@ -586,7 +608,17 @@ async fn main() {
             || "full".to_owned(),
             |t| t.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
         ),
-        state.new_libraries.as_str(),
+        if state.new_libraries == library::NewLibraries::Visitors {
+            format!(
+                "visitors(per-address {}/day, {}/day, library {}B/{}rows)",
+                state.visitor_libraries_per_address_daily,
+                state.visitor_libraries_daily_max,
+                state.visitor_library_max_bytes,
+                state.visitor_library_max_rows,
+            )
+        } else {
+            state.new_libraries.as_str().to_owned()
+        },
         match (&state.tmdb_key, state.tmdb_daily_max) {
             (None, _) => "off".to_owned(),
             (Some(_), None) => "on".to_owned(),

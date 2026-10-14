@@ -580,7 +580,7 @@ async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>, code:
         req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
     // The proof must be for the library in the path: a member of some other library here is not this host.
     let names_it = claim.as_deref().and_then(|c| c.split_once(':')).is_some_and(|(claimed, _)| claimed == id);
-    if !names_it || !crate::library::is_member(state, claim.as_deref()).await {
+    if !names_it || !crate::library::is_household_member(state, claim.as_deref()).await {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
     match (req.method().clone(), gid) {
@@ -662,10 +662,11 @@ fn apply(r: &mut Record, body: &Map<String, Value>, now: u64, creating: bool) ->
     whole.then_some(())
 }
 
-/// Grants are only meaningful when strangers cannot start a library of their own: under `NEW_LIBRARIES=open`
-/// anyone could create one and mint a guest that reaches the household's remux.
+/// Grants are only meaningful when a stranger's library is not a household's: under `NEW_LIBRARIES=open`
+/// anyone could create one and mint a guest that reaches the household's remux. Under `visitors` a stranger's library
+/// is a visitor's, which `host` refuses (`is_household_member`).
 pub fn libraries_are_members_only(state: &AppState) -> bool {
-    state.new_libraries == crate::library::NewLibraries::Members
+    state.new_libraries.gates_households()
 }
 
 async fn create(state: &AppState, host: &str, req: Request) -> Response {
@@ -3439,6 +3440,24 @@ mod tests {
             closed,
             "nor the same library under another key"
         );
+    }
+
+    /// Under `visitors` anyone starts a library, but only as a visitor's; the one a live grant reserved is the
+    /// guest's own household library, as it is under `members`.
+    #[tokio::test]
+    async fn under_visitors_a_reserved_library_is_a_households_and_any_other_a_visitors() {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Visitors;
+        let (_, header) = redeemed(&h, json!({})).await;
+        assert_eq!(reserve(&h, &header, GLIB, GTOKEN).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
+        assert_eq!(first_write(&h, GLIB2, GTOKEN).await.0, StatusCode::OK, "anyone else starts a visitor's");
+
+        let reserved = format!("{GLIB}:{GTOKEN}");
+        let other = format!("{GLIB2}:{GTOKEN}");
+        assert!(crate::library::is_household_member(&h.state, Some(&reserved)).await);
+        assert!(crate::library::is_member(&h.state, Some(&other)).await);
+        assert!(!crate::library::is_household_member(&h.state, Some(&other)).await);
     }
 
     #[tokio::test]

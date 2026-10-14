@@ -1399,7 +1399,7 @@ async fn over_allowance(state: &AppState, ip: &str, asked: &HeaderMap) -> Option
     // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
     // header therefore buys nothing, while a paired household can finish naming a large library.
     let member = asked.get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
-    if !crate::library::is_member(state, member).await {
+    if !crate::library::is_household_member(state, member).await {
         return Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait));
     }
     let wait = crate::link::throttled_per_minute(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)?;
