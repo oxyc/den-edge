@@ -213,13 +213,20 @@ const webUrl = (value: unknown): value is string => {
 const serviceBase = (value: unknown): value is string =>
   boundedText(value, 4_096) && (value.startsWith('/') || webUrl(value));
 
+/** A persistent profile's directory id, which names where its Home is kept in the household's retained state. */
+const retainedProfile = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+
 function retainedBillboardScope(value: unknown): value is RetainedBillboardScope {
   return (
     record(value) &&
-    exact(value, ['kind', 'facet', 'fresh']) &&
+    exact(value, ['kind', 'facet', 'fresh', 'profile']) &&
     (value.kind === 'shared' || value.kind === 'personal') &&
     (value.facet === null || value.facet === 'movie' || value.facet === 'tv') &&
-    bool(value.fresh)
+    bool(value.fresh) &&
+    (value.kind === 'personal'
+      ? optional(value.profile, retainedProfile)
+      : value.profile === undefined)
   );
 }
 
@@ -668,7 +675,11 @@ function command(value: unknown): value is LibraryCommand {
     case 'retained.services.set':
       return exact(value, ['kind', 'value']) && isRetainedServices(value.value);
     case 'retained.home-continue.set':
-      return exact(value, ['kind', 'present']) && bool(value.present);
+      return (
+        exact(value, ['kind', 'present', 'profile']) &&
+        bool(value.present) &&
+        optional(value.profile, retainedProfile)
+      );
     case 'retained.billboard.set':
       return (
         exact(value, ['kind', 'scope', 'value']) &&
@@ -767,8 +778,9 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'download.artwork')
     return exact(value, ['kind', 'target']) && downloadTarget(value.target);
-  if (value.kind === 'retained.services.get' || value.kind === 'retained.home-continue.get')
-    return exact(value, ['kind']);
+  if (value.kind === 'retained.services.get') return exact(value, ['kind']);
+  if (value.kind === 'retained.home-continue.get')
+    return exact(value, ['kind', 'profile']) && optional(value.profile, retainedProfile);
   if (value.kind === 'retained.billboard.get')
     return exact(value, ['kind', 'scope']) && retainedBillboardScope(value.scope);
   if (value.kind === 'library.metadata')

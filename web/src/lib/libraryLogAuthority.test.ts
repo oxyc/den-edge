@@ -520,6 +520,44 @@ describe('LibraryLogAuthority', () => {
       value: billboard,
     });
 
+    // A profile's Home is kept under its own id, beside the library's: neither answers for the other.
+    const profile = 'a'.repeat(32);
+    const profileScope = { ...scope, profile };
+    await expect(
+      authority.query({ kind: 'retained.billboard.get', scope: profileScope }),
+    ).resolves.toEqual({ kind: 'retained.billboard', scope: profileScope, value: null });
+    const profileBillboard = {
+      ...billboard,
+      titles: [{ type: 'tv' as const, id: 9, title: 'Nine' }],
+    };
+    await authority.command(
+      { kind: 'retained.billboard.set', scope: profileScope, value: profileBillboard },
+      'profile-billboard',
+    );
+    await expect(log.kept(`billboard.personal.v1.${profile}.all`)).resolves.toEqual({
+      at: billboard.at,
+      titles: profileBillboard.titles,
+    });
+    await expect(authority.query({ kind: 'retained.billboard.get', scope })).resolves.toMatchObject(
+      {
+        value: billboard,
+      },
+    );
+    await expect(authority.query({ kind: 'retained.home-continue.get', profile })).resolves.toEqual(
+      { kind: 'retained.home-continue', present: null },
+    );
+    await authority.command(
+      { kind: 'retained.home-continue.set', present: false, profile },
+      'profile-continue',
+    );
+    await expect(authority.query({ kind: 'retained.home-continue.get', profile })).resolves.toEqual(
+      { kind: 'retained.home-continue', present: false },
+    );
+    await expect(authority.query({ kind: 'retained.home-continue.get' })).resolves.toEqual({
+      kind: 'retained.home-continue',
+      present: true,
+    });
+
     const sharedScope = { kind: 'shared' as const, facet: 'movie' as const, fresh: true };
     const sharedTitles = [{ type: 'movie' as const, id: 8, title: 'Eight' }];
     await log.keep('billboard.v4.fresh.movie', sharedTitles);

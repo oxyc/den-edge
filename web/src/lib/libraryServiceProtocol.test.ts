@@ -624,6 +624,37 @@ describe('library service client protocol', () => {
         },
       }),
     ).toMatchObject({ ok: true });
+    const profile = 'b'.repeat(32);
+    const personal = { kind: 'personal', at: 1, titles: [] };
+    expect(
+      command({
+        kind: 'retained.billboard.set',
+        scope: { kind: 'personal', facet: null, fresh: false, profile },
+        value: personal,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(command({ kind: 'retained.home-continue.set', present: false, profile })).toMatchObject({
+      ok: true,
+    });
+    // A profile is a directory id, and only a ranking made for one has it.
+    for (const bad of ['not-an-id', 'B'.repeat(32), '', 7])
+      expect(
+        command({
+          kind: 'retained.billboard.set',
+          scope: { kind: 'personal', facet: null, fresh: false, profile: bad },
+          value: personal,
+        }),
+      ).toMatchObject({ ok: false });
+    expect(
+      command({
+        kind: 'retained.billboard.set',
+        scope: { kind: 'shared', facet: null, fresh: false, profile },
+        value: { kind: 'shared', titles: [] },
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      command({ kind: 'retained.home-continue.set', present: false, profile: 'nope' }),
+    ).toMatchObject({ ok: false });
     expect(command({ kind: 'cache.set', name: 'anything', value: { secret: true } })).toMatchObject(
       { ok: false },
     );

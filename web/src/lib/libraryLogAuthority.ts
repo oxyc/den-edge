@@ -143,13 +143,15 @@ type Delivery = 'synced' | 'queued' | 'local';
 
 const RETAINED_SERVICES = 'services.v1';
 const RETAINED_HOME_SHELVES = 'home.shelves.v1';
+const retainedHomeShelvesName = (profile: string | undefined) =>
+  profile ? `${RETAINED_HOME_SHELVES}.${profile}` : RETAINED_HOME_SHELVES;
 /** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
 const DEFAULT_KID_OPERATION = 'default-kid';
 const retainedBillboardName = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
 ) =>
   scope.kind === 'personal'
-    ? `billboard.personal.v1.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`
+    ? `billboard.personal.v1.${scope.profile ? `${scope.profile}.` : ''}${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`
     : `billboard.v4.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`;
 const retainedBillboardValue = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
@@ -633,7 +635,9 @@ export class LibraryLogAuthority {
       case 'retained.services.set':
         return this.#keepRetained(RETAINED_SERVICES, command.value);
       case 'retained.home-continue.set':
-        return this.#keepRetained(RETAINED_HOME_SHELVES, { continue: command.present });
+        return this.#keepRetained(retainedHomeShelvesName(command.profile), {
+          continue: command.present,
+        });
       case 'retained.billboard.set':
         return this.#keepRetained(
           retainedBillboardName(command.scope),
@@ -750,7 +754,7 @@ export class LibraryLogAuthority {
         };
       }
       case 'retained.home-continue.get': {
-        const value = await this.#log.kept<unknown>(RETAINED_HOME_SHELVES);
+        const value = await this.#log.kept<unknown>(retainedHomeShelvesName(query.profile));
         return {
           kind: 'retained.home-continue',
           present:

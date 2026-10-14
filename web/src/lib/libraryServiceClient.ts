@@ -436,7 +436,12 @@ function sameBillboardScope(
   left: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
   right: Extract<LibraryQueryResult, { kind: 'retained.billboard' }>['scope'],
 ): boolean {
-  return left.kind === right.kind && left.facet === right.facet && left.fresh === right.fresh;
+  return (
+    left.kind === right.kind &&
+    left.facet === right.facet &&
+    left.fresh === right.fresh &&
+    (left.kind === 'shared' || right.kind === 'shared' || left.profile === right.profile)
+  );
 }
 
 function queryResultKind(kind: LibraryQuery['kind']): LibraryQueryResult['kind'] {

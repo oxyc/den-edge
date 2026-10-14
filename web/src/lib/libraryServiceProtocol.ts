@@ -137,7 +137,17 @@ export interface RetainedBillboardTitle extends TitleRef {
 
 export type RetainedBillboardScope =
   | { kind: 'shared'; facet: MediaType | null; fresh: boolean }
-  | { kind: 'personal'; facet: MediaType | null; fresh: boolean };
+  | {
+      kind: 'personal';
+      facet: MediaType | null;
+      fresh: boolean;
+      /**
+       * The persistent profile whose ranking this is. A profile's Home is kept in the household's retained state, not
+       * its own library's, so the household session that stands in for it until it opens reads the very billboard it
+       * will show. Absent for a library that is its own household.
+       */
+      profile?: string;
+    };
 
 export type RetainedBillboard =
   | { kind: 'shared'; titles: RetainedBillboardTitle[] }
@@ -243,7 +253,7 @@ export type LibraryCommand =
   | { kind: 'simkl.removals.approve'; approvalId: string }
   | { kind: 'discovery.remux.remember'; url: string }
   | { kind: 'retained.services.set'; value: RetainedServices }
-  | { kind: 'retained.home-continue.set'; present: boolean }
+  | { kind: 'retained.home-continue.set'; present: boolean; profile?: string }
   | {
       kind: 'retained.billboard.set';
       scope: RetainedBillboardScope;
@@ -787,7 +797,7 @@ export type LibraryQuery =
   | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
   | { kind: 'download.artwork'; target: DownloadTarget }
   | { kind: 'retained.services.get' }
-  | { kind: 'retained.home-continue.get' }
+  | { kind: 'retained.home-continue.get'; profile?: string }
   | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope }
   | { kind: 'library.metadata'; titles: TitleRef[] }
   /** The grants the library's row holds, whatever their state, for Settings › Assistants. */

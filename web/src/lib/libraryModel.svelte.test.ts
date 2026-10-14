@@ -385,6 +385,72 @@ it('exposes named discovery and retained-Home operations without a generic cache
   model.close();
 });
 
+it('names a profile in the retained Home operations it is asked about', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const profile = 'c'.repeat(32);
+  const scope = { kind: 'personal', facet: null, fresh: false, profile } as const;
+
+  await model.retainHomeContinue(false, 'retain-continue', profile);
+  await model.retainBillboard(scope, { kind: 'personal', at: 1_000, titles: [] }, 'retain');
+  await model.retainedHomeContinue(profile);
+  await model.retainedBillboard(scope);
+
+  expect(service.commands.slice(-2).map(({ command }) => command)).toEqual([
+    { kind: 'retained.home-continue.set', present: false, profile },
+    {
+      kind: 'retained.billboard.set',
+      scope,
+      value: { kind: 'personal', at: 1_000, titles: [] },
+    },
+  ]);
+  expect(service.queries.slice(-2)).toEqual([
+    { kind: 'retained.home-continue.get', profile },
+    { kind: 'retained.billboard.get', scope },
+  ]);
+  model.close();
+});
+
+it('asks a retained read again once the service is back, not answers it as nothing kept', async () => {
+  let refusals = 2;
+  class ReconnectingService extends FakeService {
+    override async query(query: LibraryQuery) {
+      if (query.kind === 'retained.billboard.get' && refusals-- > 0) {
+        setTimeout(() => this.status({ kind: 'ready', version: version(7) }), 0);
+        throw new LibraryServiceError({
+          code: 'not-ready',
+          message: 'library service is not ready',
+          retryable: true,
+        });
+      }
+      return super.query(query);
+    }
+  }
+  const service = new ReconnectingService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const scope = { kind: 'personal', facet: null, fresh: false } as const;
+
+  await expect(model.retainedBillboard(scope)).resolves.toEqual({
+    kind: 'personal',
+    at: 1_000,
+    titles: [],
+  });
+  expect(refusals).toBe(-1);
+
+  // Any other refusal is the caller's to handle.
+  const refused = new FakeService();
+  refused.query = async () => {
+    throw new LibraryServiceError({ code: 'internal', message: 'no', retryable: true });
+  };
+  const other = new LibraryModel(refused, options);
+  await other.ready;
+  await expect(other.retainedBillboard(scope)).rejects.toThrow('no');
+  model.close();
+  other.close();
+});
+
 it('deep-copies a retained Home billboard onto the service wire', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);

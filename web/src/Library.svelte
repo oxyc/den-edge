@@ -25,7 +25,14 @@
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
-  import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
+  import {
+    episodeAfter,
+    isAired,
+    titleKey,
+    type ContinueEntry,
+    type MediaType,
+    type Title,
+  } from './lib/library';
   import type { Link } from './lib/links.svelte';
   import {
     clock as timecode,
@@ -95,6 +102,7 @@
     explore = {},
     people = {},
     watchedYear,
+    standingInFor = null,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -108,6 +116,11 @@
     people?: PeopleView;
     /** The year Watched shows, from the address as `people` is. */
     watchedYear?: string;
+    /**
+     * The remembered Owner's profile id, while this household session is drawn only until that profile's own session
+     * opens. It paints the billboard the profile keeps and neither ranks nor keeps one of its own.
+     */
+    standingInFor?: string | null;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -120,6 +133,7 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  const retained = untrack(() => session.retainedBillboards(standingInFor));
   // The download queue spends household credentials and bandwidth, so only a session that administers the household
   // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page.
   const downloadsModel = untrack(() => (session.administersHousehold ? session.model : null));
@@ -346,16 +360,19 @@
       shelvesReady = true;
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
-      void model.retainHomeContinue(plan.continue).catch(warnKeep);
+      if (!retained.model || !retained.writes) return;
+      void retained.model
+        .retainHomeContinue(plan.continue, undefined, retained.profile ?? undefined)
+        .catch(warnKeep);
     });
     return () => {
       disposed = true;
     };
   });
   $effect(() => {
-    if (!model) return;
+    if (!model || !retained.model) return;
     let current = true;
-    void model.retainedHomeContinue().then(
+    void retained.model.retainedHomeContinue(retained.profile ?? undefined).then(
       (present) => {
         if (current) retainedContinue = present === true;
       },
@@ -1240,6 +1257,14 @@
   const fresh = freshOn();
   /** A restricted profile neither reads nor writes a kept billboard: those rankings are not policy-scoped. */
   const keepsBillboard = () => !session.restricted;
+  const personalScope = (facet: MediaType | null): RetainedBillboardScope => ({
+    kind: 'personal',
+    facet,
+    fresh,
+    ...(retained.profile ? { profile: retained.profile } : {}),
+  });
+  const retainedScope = (facet: MediaType | null): RetainedBillboardScope =>
+    memberPost ? personalScope(facet) : { kind: 'shared', facet, fresh };
   /** The title on the billboard's screen, which a new ranking leaves in place. */
   let slideShown = $state<Title>();
   /**
@@ -1281,17 +1306,16 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const type = facet;
-    if (!model || !keepsBillboard()) {
+    const keeper = retained.model;
+    if (!model || !keeper || !keepsBillboard()) {
       retainedBillboardReady = true;
       return;
     }
     retainedBillboardReady = false;
-    const scope: RetainedBillboardScope = memberPost
-      ? { kind: 'personal', facet: type, fresh }
-      : { kind: 'shared', facet: type, fresh };
+    const scope = retainedScope(type);
     let current = true;
-    void model.ready
-      .then(() => (current ? model.retainedBillboard(scope) : null))
+    void keeper.ready
+      .then(() => (current ? keeper.retainedBillboard(scope) : null))
       .then(
         (saved) => {
           if (!current || !saved || featured.length) return;
@@ -1372,7 +1396,7 @@
     stagedFeatured = null;
     const lookup = lookupTitle;
     const ranked =
-      model && overview && memberPost
+      model && overview && memberPost && retained.writes
         ? recommend(
             session.content,
             recommendBody({
@@ -1385,9 +1409,10 @@
             }),
           )
         : null;
+    const keeper = retained.model;
     const kept =
-      ranked && keepsBillboard()
-        ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+      keeper && memberPost && keepsBillboard()
+        ? keeper.retainedBillboard(personalScope(type)).then(
             (saved) =>
               saved?.kind === 'personal'
                 ? (displayableKept({
@@ -1410,7 +1435,7 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
         stageFeatured(picked);
-        if (model && keepsBillboard()) {
+        if (keeper && retained.writes && keepsBillboard()) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
             session.identity.retainedScope,
@@ -1418,10 +1443,11 @@
             fresh,
             picked,
             (kept) =>
-              model.retainBillboard(
-                { kind: 'personal', facet: type, fresh },
-                { kind: 'personal', at: kept.at, titles: kept.titles },
-              ),
+              keeper.retainBillboard(personalScope(type), {
+                kind: 'personal',
+                at: kept.at,
+                titles: kept.titles,
+              }),
             keptAt,
           ).catch(warnKeep);
         }
@@ -1455,8 +1481,8 @@
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
     // forever, with its stale explanation attached.
     featured = picked;
-    if (model && keepsBillboard())
-      void model
+    if (retained.model && retained.writes && keepsBillboard())
+      void retained.model
         .retainBillboard({ kind: 'shared', facet: type, fresh }, { kind: 'shared', titles: picked })
         .catch(warnKeep);
   }
@@ -1732,7 +1758,7 @@
     onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
       void enrichPersonalBackdrop(
-        keepsBillboard() ? session.identity.retainedScope : null,
+        keepsBillboard() && retained.writes ? session.identity.retainedScope : null,
         facet,
         fresh,
         title,

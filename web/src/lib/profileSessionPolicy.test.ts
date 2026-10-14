@@ -7,7 +7,7 @@ import {
 import { CONTENT_SERVICE_PROTOCOL } from './contentServiceProtocol';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
-import { persistentProfileIdentity } from './profileIdentity';
+import { legacyProfileIdentity, persistentProfileIdentity } from './profileIdentity';
 import { ProfileSession } from './profileSession.svelte';
 
 function session(options: {
@@ -330,5 +330,69 @@ describe('the content protocol carries the policy', () => {
         result: { kind: 'title.eligibility', allowed: true },
       }).ok,
     ).toBe(false);
+  });
+});
+
+describe('where Home keeps its billboard', () => {
+  const content = {
+    query: vi.fn(),
+    onStatus: () => () => {},
+  } as unknown as ContentServiceClientPort;
+  const control = {} as LibraryModel;
+  const activity = {} as LibraryModel;
+  const owner = 'a'.repeat(32);
+  const household = () =>
+    new HouseholdSession(
+      { kind: 'legacy', libraryKey: 'household', configurationOnly: false },
+      control,
+      content,
+    );
+  const profile = () =>
+    new ProfileSession(
+      persistentProfileIdentity(owner, 'owner-key'),
+      household(),
+      activity,
+      false,
+      false,
+      undefined,
+      null,
+      null,
+      null,
+      null,
+      true,
+    );
+
+  it('keeps a profile’s in the household’s, under the profile', () => {
+    expect(profile().retainedBillboards()).toEqual({
+      model: control,
+      profile: owner,
+      writes: true,
+    });
+  });
+
+  it('reads the profile’s for the household session standing in for it, and writes nothing', () => {
+    const standIn = new ProfileSession(
+      legacyProfileIdentity('household', false),
+      household(),
+      control,
+      false,
+      false,
+    );
+    expect(standIn.retainedBillboards(owner)).toEqual({
+      model: control,
+      profile: owner,
+      writes: false,
+    });
+  });
+
+  it('leaves a library that is its own household where it always kept it', () => {
+    const own = new ProfileSession(
+      legacyProfileIdentity('household', false),
+      household(),
+      control,
+      false,
+      false,
+    );
+    expect(own.retainedBillboards()).toEqual({ model: control, profile: null, writes: true });
   });
 });

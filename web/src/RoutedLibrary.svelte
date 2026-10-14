@@ -299,6 +299,11 @@
             : profileCoordinator.restoring))),
   );
   const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  // Without the opt-in the first frame draws the household bootstrap session, which holds no activity after the split:
+  // it stands in for the remembered Owner, and paints the billboard that Owner keeps rather than one of its own.
+  const standingInFor = $derived(
+    optimistic && shown === session ? (profileHint?.profileId ?? null) : null,
+  );
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
   let optimisticShown = false;
@@ -1284,6 +1289,7 @@
             <Library
               link={shown.identity.kind === 'visitor' ? null : link}
               session={shown}
+              {standingInFor}
               {route}
               {active}
               {query}

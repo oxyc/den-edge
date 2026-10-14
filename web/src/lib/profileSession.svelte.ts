@@ -235,6 +235,29 @@ export class ProfileSession {
     return this.#displays;
   }
 
+  /**
+   * Where Home keeps its billboard for the next visit, and whether this session writes it. A persistent profile keeps
+   * it in the household's retained state under its own id: the household session that stands in for the remembered
+   * Owner while that profile opens (`standingInFor`) then reads the billboard this profile will show, instead of
+   * ranking and keeping one of its own against a library that holds no activity. A library that is its own household
+   * keeps it where it always has.
+   */
+  retainedBillboards(standingInFor: string | null = null): {
+    model: LibraryModel | null;
+    profile: string | null;
+    writes: boolean;
+  } {
+    if (standingInFor)
+      return { model: this.household.ownerSettingsModel(), profile: standingInFor, writes: false };
+    if (this.identity.kind === 'profile')
+      return {
+        model: this.household.ownerSettingsModel(),
+        profile: this.identity.id,
+        writes: true,
+      };
+    return { model: this.model, profile: null, writes: true };
+  }
+
   foregroundReady(): void {
     this.household.foreground();
     if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});

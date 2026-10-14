@@ -361,6 +361,53 @@ async function nameSyntheticTitles(ctx) {
   });
 }
 
+// The billboards atlas answers with. The shared pool is one title for everyone; every ranking asked for a library is a
+// new one (atlas ranks again as the day, the catalogue and the library move), so each session that ranks and keeps a
+// billboard keeps a different lead from the others.
+const SHARED_LEAD_ID = 9201;
+
+/** atlas on the page's own origin, answering what a billboard asks: its manifest, the shared pool and a ranking. */
+async function stubAtlas(ctx, firstLead) {
+  let lead = firstLead;
+  const slides = (first) => ({
+    slides: [first, first + 1, first + 2].map((id) => ({ type: 'movie', id })),
+  });
+  await ctx.route('**/atlas/**', async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    if (pathname === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', version: '0.0.0' } });
+    if (pathname.startsWith('/atlas/recommend/') && request.method() === 'GET')
+      return route.fulfill({ json: slides(SHARED_LEAD_ID) });
+    if (pathname === '/atlas/recommend' && request.method() === 'POST')
+      return route.fulfill({ json: slides((lead += 10)) });
+    return route.fulfill({ status: 404, json: {} });
+  });
+}
+
+/**
+ * Init script (runs in the page, from navigation start): the title on the billboard on every painted frame, kept when
+ * it changes. That is the front slide of the library's billboard, or the early copy the page draws before it; a blank
+ * frame is a title of null.
+ */
+function recordBillboard() {
+  window.__billboards = [];
+  const frame = () => {
+    const front = document.querySelector(
+      'main .billboard article.slide[aria-hidden="false"] .title-link',
+    );
+    const early = document.querySelector(
+      '[data-den-early-billboard]:not([hidden]) [data-den-early-title]',
+    );
+    const title = front?.textContent || early?.textContent || null;
+    const last = window.__billboards.at(-1);
+    if (!last || last.title !== title)
+      window.__billboards.push({ ms: Math.round(performance.now()), title });
+    if (performance.now() < 30_000) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
 // A page that answers: every round trip into its main thread within a second, from navigation start through the
 // first seconds the library is drawn and synced. The frozen tab did not answer one in 45 seconds.
 const RESPONSIVE_WINDOW_MS = 20_000;
@@ -573,6 +620,24 @@ async function main() {
     const snapshot = join(work, 'profile-snapshot');
     cpSync(warmDir, snapshot, { recursive: true });
     console.log('browser storage snapshotted before the split');
+
+    // The same browser used on Home before the split, as a household's is: its billboard is ranked against the
+    // household's activity and kept for the next visit. That copy is what the Owner's billboard check starts from.
+    const billboardDir = join(work, 'profile-owner-billboard');
+    cpSync(snapshot, billboardDir, { recursive: true });
+    ctx = await launch(billboardDir);
+    await nameSyntheticTitles(ctx);
+    await stubAtlas(ctx, 9000);
+    const homePage = await seedLink(ctx, edge, keyText);
+    await homePage.goto(`${edge.origin}/`);
+    await homePage
+      .locator('main')
+      .getByText('Continue Watching')
+      .first()
+      .waitFor({ timeout: 60_000 });
+    await sleep(5000);
+    await ctx.close();
+    console.log('a copy of it used on Home before the split');
 
     // 4. Enable Profiles with a PIN
     step('Settings › Profiles › Enable Profiles');
@@ -959,6 +1024,69 @@ async function main() {
         'the Owner library is opened by one session, not two',
         workers <= MAX_SESSION_WORKERS,
         `${workers} Workers started (the household bootstrap, the Owner library, and the directory read)`,
+      );
+      await ctx.close().catch(() => {});
+    }
+
+    // 4b''. A returning Owner's billboard. The first frame draws the household bootstrap session until the Owner's
+    // takes over, and the household library holds no activity after the split, so each ranks and keeps a billboard of
+    // its own. Whichever session the first frame draws, the lead on screen must already be the one the Owner session
+    // shows: from navigation start, once a billboard has painted its title never changes.
+    step("a returning Owner's billboard does not change under the Owner");
+    {
+      ctx = await launch(billboardDir);
+      // A remembered Owner: the marker and the hint a settled Owner session leaves, with the Owner library's key.
+      await ctx.addInitScript(
+        ([marker, hint]) => {
+          localStorage.setItem('den.profile.active.v1', marker);
+          localStorage.setItem('den.profile.hint.v1', hint);
+        },
+        [
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+          JSON.stringify({
+            version: 1,
+            profileId: directory.owner,
+            name: 'Owner',
+            avatar: 'owner',
+            libraryKey: ownerKey,
+          }),
+        ],
+      );
+      await ctx.addInitScript(recordBillboard);
+      await nameSyntheticTitles(ctx);
+      await stubAtlas(ctx, 9500);
+      const heroPage = await seedLink(ctx, edge, keyText);
+      // Two visits first: each session ranks and keeps its own billboard, and the second starts from what the first kept.
+      for (const visit of [1, 2]) {
+        await heroPage.goto(`${edge.origin}/`);
+        await heroPage
+          .locator('main')
+          .getByText('Continue Watching')
+          .first()
+          .waitFor({ timeout: 60_000 });
+        await sleep(6000);
+        console.log(
+          `billboard by painted frame, visit ${visit}: ${JSON.stringify(await heroPage.evaluate(() => window.__billboards))}`,
+        );
+      }
+      await heroPage.goto(`${edge.origin}/`);
+      await heroPage.locator('button.profile-trigger').first().waitFor({ timeout: 30_000 });
+      await heroPage
+        .locator('main')
+        .getByText('Continue Watching')
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await sleep(6000);
+      const frames = (await heroPage.evaluate(() => window.__billboards).catch(() => null)) ?? [];
+      console.log(`billboard by painted frame, visit 3: ${JSON.stringify(frames)}`);
+      const titles = frames.flatMap((f) => (f.title === null ? [] : [f.title]));
+      const blanks = frames
+        .slice(frames.findIndex((f) => f.title !== null))
+        .filter((f) => f.title === null);
+      check(
+        "a returning Owner's billboard never changes title after it first paints",
+        titles.length > 0 && new Set(titles).size === 1,
+        `${titles.length ? [...new Set(titles)].join(' -> ') : 'no billboard'} (${blanks.length} blank frames after first paint)`,
       );
       await ctx.close().catch(() => {});
     }
