@@ -123,25 +123,30 @@ export const billboardScope = (facet: MediaType | null) =>
 /**
  * atlas's billboard for everyone (`GET /recommend/<scope>.json`): no library, so one answer per scope and day, which
  * Cloudflare and the browser keep. The UTC day is in the address so each day is its own answer. Null where atlas can't
- * rank (no route, out of reach, a malformed answer).
+ * rank (no route, out of reach, a malformed answer). `fresh` is a preference, not a filter that may empty the
+ * billboard: a fresh pool with nothing in it — a Kid's, since new titles are rarely rated yet — gives way to the
+ * whole one.
  */
-export function recommendForEveryone(
+export async function recommendForEveryone(
   content: ContentServiceClientPort,
   scope: ReturnType<typeof billboardScope>,
   fresh: boolean,
   now = new Date(),
 ): Promise<Slide[] | null> {
-  return content
-    .query({
-      kind: 'atlas.recommend.shared',
-      scope,
-      fresh,
-      day: now.toISOString().slice(0, 10),
-    })
-    .then(
-      ({ slides }) => (slides.state === 'ready' ? slides.value : null),
-      () => null,
-    );
+  const ask = (onlyNew: boolean) =>
+    content
+      .query({
+        kind: 'atlas.recommend.shared',
+        scope,
+        fresh: onlyNew,
+        day: now.toISOString().slice(0, 10),
+      })
+      .then(
+        ({ slides }) => (slides.state === 'ready' ? slides.value : null),
+        () => null,
+      );
+  const slides = await ask(fresh);
+  return fresh && slides?.length === 0 ? ask(false) : slides;
 }
 
 type SwitchStorage = Pick<Storage, 'getItem' | 'setItem'> | undefined;
