@@ -396,6 +396,43 @@ describe('LibraryLog', () => {
     expect(log.profileDirectory()).toBeNull();
   });
 
+  it('refuses the single-library key move for a valid, invalid or concurrently appearing directory', async () => {
+    const device = '0123456789abcdef';
+    // A mock den-edge reports no minimum; a library a move may start from is at the current wire.
+    const movable = <T extends LibraryLog>(log: T): T => {
+      (log as unknown as { wireMin: number }).wireMin = 4;
+      return log;
+    };
+    const valid = await edge([row(1)], [await sealedProfileDirectory()]);
+    const validLog = movable(
+      (await LibraryLog.open(LIBRARY_KEY, valid.fetchImpl, undefined, null))!,
+    );
+    expect(validLog.profileTopologyPresent).toBe(true);
+    expect(await validLog.moving(device)).toEqual({ refused: 'profiles' });
+
+    const invalid = profileDirectory();
+    invalid.profiles[OWNER_ID]!.deleted.value = true;
+    const invalidServer = await edge([row(1)], [await sealedDirectoryAs('profiles', invalid)]);
+    const invalidLog = movable(
+      (await LibraryLog.open(LIBRARY_KEY, invalidServer.fetchImpl, undefined, null))!,
+    );
+    expect(invalidLog.profileDirectory()).toBeNull();
+    expect(invalidLog.profileTopologyPresent).toBe(true);
+    expect(await invalidLog.moving(device)).toEqual({ refused: 'profiles' });
+
+    for (const appeared of [
+      await sealedProfileDirectory(),
+      await sealedDirectoryAs('profiles', invalid),
+    ]) {
+      const legacy = await edge();
+      const log = movable((await LibraryLog.open(LIBRARY_KEY, legacy.fetchImpl, undefined, null))!);
+      expect(log.profileTopologyPresent).toBe(false);
+      expect(await log.moving(device)).toMatchObject({ rows: [] });
+      legacy.appendSealed(appeared);
+      expect(await log.moving(device)).toEqual({ refused: 'profiles' });
+    }
+  });
+
   it('listens for runtime changes in a Worker global without window', async () => {
     const opened: string[] = [];
     class WorkerChannel {

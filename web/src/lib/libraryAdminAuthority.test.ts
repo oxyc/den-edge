@@ -68,6 +68,37 @@ it('moves a library through one authority-owned cursor and rekeys its kept state
   expect(next.forget).not.toHaveBeenCalled();
 });
 
+it('reports a profile-aware refusal without writing the destination or retiring the library', async () => {
+  const next = {
+    libraryId: 'destination-library',
+    takeMoved: vi.fn(async () => true),
+    forget: vi.fn(async () => true),
+  };
+  const log = {
+    memberProof: 'member-proof',
+    moving: vi.fn(async () => ({ refused: 'profiles' as const })),
+    endMoved: vi.fn(async () => 'deleted' as const),
+    rekeyKept: vi.fn(async () => {}),
+  };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+    destination: async () => next as unknown as LibraryLog,
+  });
+
+  await expect(
+    authority.task({ kind: 'key-reset.move', destinationLibraryKey: DESTINATION }, 'move-1'),
+  ).resolves.toEqual({
+    result: { kind: 'key-reset.move', outcome: 'profiles-active' },
+    affected: [],
+  });
+  expect(next.takeMoved).not.toHaveBeenCalled();
+  expect(log.endMoved).not.toHaveBeenCalled();
+  expect(log.rekeyKept).not.toHaveBeenCalled();
+  expect(next.forget).toHaveBeenCalledOnce();
+});
+
 it('settles only the destination named by the retired library', async () => {
   const next = {
     libraryId: 'destination-library',

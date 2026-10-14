@@ -1369,7 +1369,8 @@ function connectionsView(value: unknown): value is ConnectionsView {
     ) &&
     unique(devices, (device) => device.id) &&
     record(diagnostics) &&
-    exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId']) &&
+    exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId', 'profileTopology']) &&
+    optional(diagnostics.profileTopology, bool) &&
     integer(diagnostics.libraryFormat) &&
     integer(diagnostics.pendingChanges) &&
     boundedText(diagnostics.selfDeviceId, 128)
@@ -1955,6 +1956,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'foreign' ||
           value.outcome === 'unknown' ||
           value.outcome === 'update-required' ||
+          value.outcome === 'profiles-active' ||
           value.outcome === 'unavailable')
       );
     case 'assistant.consent':

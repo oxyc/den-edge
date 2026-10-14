@@ -206,7 +206,7 @@ export interface Moving {
 }
 
 /** Why a move did not start: a row only a newer build can carry, or a library that can't be read or moved now. */
-export type MoveRefusal = 'update_required' | 'unavailable';
+export type MoveRefusal = 'update_required' | 'unavailable' | 'profiles';
 
 /**
  * How the end of a move went for the library it left (`endMoved`):
@@ -1895,19 +1895,28 @@ export class LibraryLog {
     if (!read) return { refused: 'unavailable' };
     const rows: Row[] = [];
     const kept: Moving['kept'] = [];
-    for (const { k, v } of read.entries) {
-      const opened = await openEntry(this.keys, k, v);
-      if ('unknown' in opened || 'newerFraming' in opened || 'invalidProfileDirectory' in opened) {
+    const entries = await Promise.all(
+      read.entries.map(async ({ k, v }) => ({ k, v, opened: await openEntry(this.keys, k, v) })),
+    );
+    // This fresh read, not an earlier projection, decides: a directory that appeared since still refuses, whatever
+    // else the log holds. The profile libraries must rotate with the household (profiles-v1 §9), never alone.
+    if (
+      entries.some(
+        ({ opened }) => 'profileDirectory' in opened || 'invalidProfileDirectory' in opened,
+      )
+    ) {
+      console.warn('den: a profile-aware household needs the compound key reset');
+      return { refused: 'profiles' };
+    }
+    for (const { k, v, opened } of entries) {
+      if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened) continue;
+      if ('unknown' in opened || 'newerFraming' in opened) {
         console.warn(`den: the library row ${k} can't be moved by this build`);
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
         // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
         console.warn(`den: the unreadable library row ${k} stays behind (${opened.unreadable})`);
-        continue;
-      }
-      if ('profileDirectory' in opened) {
-        kept.push({ name: 'profiles', plaintext: (await openPlaintext(this.keys, k, v))! });
         continue;
       }
       const row = opened.row;
@@ -2424,6 +2433,14 @@ export class LibraryLog {
   /** The den-core-validated directory, when this library is already a profile-aware household. */
   profileDirectory(): ProfileDirectoryDocument | null {
     return this.profileDirectoryEntry?.document ?? null;
+  }
+
+  /**
+   * Whether a `set:profiles` row has been seen, valid or not. An invalid authenticated replacement counts: the
+   * single-library reset must never be the recovery path for a corrupt profile topology.
+   */
+  get profileTopologyPresent(): boolean {
+    return this.profileDirectorySeq > 0;
   }
 
   private document(name: string): DocumentRow | undefined {

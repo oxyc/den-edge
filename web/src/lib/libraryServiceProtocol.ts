@@ -436,6 +436,8 @@ export interface ConnectionsView {
     libraryFormat: number;
     pendingChanges: number;
     selfDeviceId: string;
+    /** A valid or invalid `set:profiles` row exists, so only the compound profile reset may rotate keys. */
+    profileTopology?: boolean;
   };
 }
 
@@ -628,6 +630,7 @@ export type KeyResetOutcome =
   | 'foreign'
   | 'unknown'
   | 'update-required'
+  | 'profiles-active'
   | 'unavailable';
 
 export type LibraryTaskResult =
