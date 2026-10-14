@@ -433,6 +433,348 @@ describe('LibraryLog', () => {
     }
   });
 
+  describe('compound key reset primitives', () => {
+    const device = '0123456789abcdef';
+    const wired = <T extends LibraryLog>(log: T, wireMin: number): T => {
+      (log as unknown as { wireMin: number }).wireMin = wireMin;
+      return log;
+    };
+    /** A row a v4 library carries as it is; a v3 row would first need the switch. */
+    const preferences = { kind: 'set', schema: 2, name: 'prefs', values: {} } as unknown as Row;
+
+    it('moves a profile household without its directory only when the caller replaces it', async () => {
+      const server = await edge([preferences], [await sealedProfileDirectory()]);
+      const log = wired(
+        (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null, 5))!,
+        5,
+      );
+
+      expect(await log.moving(device)).toEqual({ refused: 'profiles' });
+      const moving = await log.moving(device, { replaceProfileDirectory: true });
+      expect(moving).toMatchObject({ rows: [expect.objectContaining({ kind: 'set' })], kept: [] });
+      expect('rows' in moving && moving.rows).toHaveLength(1);
+
+      // A household on the profile wire is not "too new" for a build that speaks it, but is for one that does not.
+      const narrow = wired(
+        (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null, 4))!,
+        5,
+      );
+      expect(await narrow.moving(device, { replaceProfileDirectory: true })).toEqual({
+        refused: 'update_required',
+      });
+    });
+
+    it('still refuses to move a household whose directory is invalid, even when the caller replaces it', async () => {
+      const invalid = profileDirectory();
+      invalid.profiles[OWNER_ID]!.deleted.value = true;
+      const server = await edge([preferences], [await sealedDirectoryAs('profiles', invalid)]);
+      const log = wired(
+        (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null, 5))!,
+        5,
+      );
+      expect(await log.moving(device, { replaceProfileDirectory: true })).toEqual({
+        refused: 'unavailable',
+      });
+    });
+
+    it('writes a wire-5 successor household at minimum 5, naming the library it moves from', async () => {
+      const server = await edge([preferences]);
+      const sent: Array<{ path: string; headers: Record<string, string>; body?: unknown }> = [];
+      const nextKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(8)));
+      const next = await LibraryLog.destination(
+        nextKey,
+        async (input, init) => {
+          sent.push({
+            path: String(input),
+            headers: init?.headers as Record<string, string>,
+            body: init?.body && JSON.parse(String(init.body)),
+          });
+          return new Response(JSON.stringify({ head: 1, applied: [], conflicts: [] }), {
+            status: 200,
+          });
+        },
+        undefined,
+        null,
+        5,
+      );
+      const from = wired(
+        (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null, 5))!,
+        5,
+      );
+      const moving = await from.moving(device);
+      if ('refused' in moving) throw new Error('refused');
+      await next.takeMoved(moving, from.memberProof);
+
+      expect(sent[0]!.headers['x-den-wire']).toBe('5');
+      expect(sent[0]!.headers['x-den-wire-min']).toBe('5');
+      expect(sent[0]!.headers['x-den-library-member']).toBe(from.memberProof);
+    });
+
+    it('keeps a repeated move of the successor directory idempotent and refuses a different one', async () => {
+      const nextKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(8)));
+      const nextKeys = await deriveKeys(Uint8Array.from(atob(nextKey), (c) => c.charCodeAt(0)));
+      const document = new Uint8Array([0, ...deflateRawSync(JSON.stringify(profileDirectory()))]);
+      const other = new Uint8Array([
+        0,
+        ...deflateRawSync(JSON.stringify(profileDirectory('Other'))),
+      ]);
+      const sealedHere = await sealPlaintext(nextKeys, 'profiles', document);
+      const server = {
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              head: 1,
+              applied: [],
+              conflicts: [{ k: sealedHere.k, seq: 1, v: sealedHere.v }],
+            }),
+            { status: 200 },
+          )) as unknown as typeof fetch,
+      };
+      const moving = {
+        rows: [],
+        kept: [{ name: 'profiles', plaintext: document }],
+        head: 1,
+        generation: null,
+        device,
+        revokedGrants: [],
+      };
+      const next = await LibraryLog.destination(nextKey, server.fetchImpl, undefined, null, 5);
+      expect(await next.takeMoved(moving, 'member')).toBe(true);
+      const different = await LibraryLog.destination(nextKey, server.fetchImpl, undefined, null, 5);
+      expect(
+        await different.takeMoved(
+          { ...moving, kept: [{ name: 'profiles', plaintext: other }] },
+          'member',
+        ),
+      ).toBe(false);
+    });
+
+    describe('resetRequest', () => {
+      const ATTEMPT = '0123456789abcdef0123456789abcdef';
+      const SUCCESSOR = 'c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0';
+
+      async function recorder(reply: (url: string, init: RequestInit) => Response) {
+        const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+        const sent: Array<{ url: string; init: RequestInit }> = [];
+        const log = await LibraryLog.destination(
+          LIBRARY_KEY,
+          async (input, init) => {
+            sent.push({ url: String(input), init: init! });
+            return reply(String(input), init!);
+          },
+          undefined,
+          null,
+          5,
+        );
+        return { keys, sent, log };
+      }
+
+      it('sends exactly the reset routes under the library token and its wire, never in a URL', async () => {
+        const { keys, sent, log } = await recorder(
+          () => new Response(JSON.stringify({ source: { generation: 3, head: 'a'.repeat(64) } })),
+        );
+        const reply = await log.resetRequest({
+          method: 'GET',
+          path: `/lib/${keys.id}/exclusive-operation/source`,
+        });
+
+        expect(reply).toEqual({
+          status: 200,
+          body: { source: { generation: 3, head: 'a'.repeat(64) } },
+        });
+        const headers = sent[0]!.init.headers as Record<string, string>;
+        expect(headers['x-den-library-token']).toBe(keys.token);
+        expect(headers['x-den-wire']).toBe('5');
+        expect(sent[0]!.url).not.toContain(keys.token);
+
+        await log.resetRequest({
+          method: 'POST',
+          path: `/lib/${keys.id}/exclusive-operation`,
+          body: { attempt: ATTEMPT },
+          headers: { 'x-den-successor-token': 'proof' },
+        });
+        const post = sent[1]!.init.headers as Record<string, string>;
+        expect(post['x-den-successor-token']).toBe('proof');
+        expect(post['content-type']).toBe('application/json');
+        expect(sent[1]!.init.body).toBe(JSON.stringify({ attempt: ATTEMPT }));
+      });
+
+      it.each([
+        ['an ordinary route', 'POST', (id: string) => `/lib/${id}/batch`, undefined, undefined],
+        [
+          'another library',
+          'GET',
+          () => `/lib/${'b'.repeat(32)}/exclusive-operation/source`,
+          undefined,
+          undefined,
+        ],
+        [
+          'a stray header',
+          'GET',
+          (id: string) => `/lib/${id}/exclusive-operation/source`,
+          undefined,
+          { 'x-den-library-token': 'other' },
+        ],
+        [
+          'a body on a read',
+          'GET',
+          (id: string) => `/lib/${id}/exclusive-operation/source`,
+          {},
+          undefined,
+        ],
+        [
+          'an acquire with no body',
+          'POST',
+          (id: string) => `/lib/${id}/exclusive-operation`,
+          undefined,
+          undefined,
+        ],
+        [
+          'a retirement without its attempt and successor',
+          'DELETE',
+          (id: string) => `/lib/${id}`,
+          undefined,
+          undefined,
+        ],
+      ] as const)('refuses %s', async (_name, method, path, body, headers) => {
+        const { keys, sent, log } = await recorder(() => new Response('{}'));
+        await expect(
+          log.resetRequest({
+            method,
+            path: path(keys.id),
+            ...(body === undefined ? {} : { body }),
+            ...(headers === undefined ? {} : { headers }),
+          }),
+        ).rejects.toThrow('not allowed');
+        expect(sent).toEqual([]);
+      });
+
+      it('retires with the generation it reads, and does not delete a library that already moved', async () => {
+        let moved = false;
+        const { keys, sent, log } = await recorder((url) =>
+          url.includes('/changes')
+            ? moved
+              ? new Response('{}', { status: 410 })
+              : new Response(
+                  JSON.stringify({ entries: [], head: 0, more: false, generation: 'g7' }),
+                )
+            : new Response(JSON.stringify({ deleted: true })),
+        );
+        const request = {
+          method: 'DELETE' as const,
+          path: `/lib/${keys.id}`,
+          headers: { 'x-den-exclusive-attempt': ATTEMPT, 'x-den-successor': SUCCESSOR },
+        };
+
+        await expect(log.resetRequest(request)).resolves.toEqual({
+          status: 200,
+          body: { deleted: true },
+        });
+        const del = sent.at(-1)!.init.headers as Record<string, string>;
+        expect(sent.at(-1)!.init.method).toBe('DELETE');
+        expect(del['x-den-generation']).toBe('g7');
+        expect(del['x-den-exclusive-attempt']).toBe(ATTEMPT);
+        expect(del['x-den-successor']).toBe(SUCCESSOR);
+
+        moved = true;
+        const before = sent.length;
+        await expect(log.resetRequest(request)).resolves.toEqual({
+          status: 410,
+          body: { error: 'library_moved' },
+        });
+        expect(sent.slice(before).every(({ init }) => init.method !== 'DELETE')).toBe(true);
+      });
+
+      it('passes a refusal through as a status and body, and rejects a success that is not JSON', async () => {
+        const refusal = await recorder(
+          () => new Response('{"error":"migration_in_progress"}', { status: 409 }),
+        );
+        await expect(
+          refusal.log.resetRequest({
+            method: 'GET',
+            path: `/lib/${refusal.keys.id}/exclusive-operation/${ATTEMPT}`,
+          }),
+        ).resolves.toEqual({ status: 409, body: { error: 'migration_in_progress' } });
+
+        const garbled = await recorder(() => new Response('<html>', { status: 200 }));
+        await expect(
+          garbled.log.resetRequest({
+            method: 'GET',
+            path: `/lib/${garbled.keys.id}/exclusive-operation/source`,
+          }),
+        ).rejects.toThrow('not JSON');
+      });
+    });
+
+    describe('resetSnapshot', () => {
+      it('reads every row to the head and opens each, including the directory', async () => {
+        const server = await edge([row(1), row(2), row(3)], [await sealedProfileDirectory()]);
+        const log = await LibraryLog.destination(LIBRARY_KEY, server.fetchImpl, undefined, null, 5);
+        const snapshot = await log.resetSnapshot();
+        if (snapshot === null || typeof snapshot === 'string') throw new Error('no snapshot');
+
+        expect(snapshot.base).toBe(4);
+        expect(snapshot.rows).toHaveLength(4);
+        expect(snapshot.rows.map((r) => r.k)).toEqual([...snapshot.rows.map((r) => r.k)].sort());
+        expect(snapshot.names).toHaveLength(3);
+        expect(snapshot.directory?.owner).toBe(OWNER_ID);
+      });
+
+      it.each([
+        [404, 'absent'],
+        [410, 'moved'],
+        [500, null],
+      ] as const)('answers %s as %s', async (status, expected) => {
+        const log = await LibraryLog.destination(
+          LIBRARY_KEY,
+          async () => new Response('{}', { status }),
+          undefined,
+          null,
+          5,
+        );
+        expect(await log.resetSnapshot()).toBe(expected);
+      });
+
+      it('refuses evidence it cannot authenticate', async () => {
+        const unreadable = await edge([row(1)], [{ k: 'ab'.repeat(32), v: 'AAAA' }]);
+        await expect(
+          (
+            await LibraryLog.destination(LIBRARY_KEY, unreadable.fetchImpl, undefined, null, 5)
+          ).resetSnapshot(),
+        ).rejects.toThrow('does not open');
+
+        const invalid = profileDirectory();
+        invalid.profiles[OWNER_ID]!.deleted.value = true;
+        const bad = await edge([], [await sealedDirectoryAs('profiles', invalid)]);
+        await expect(
+          (
+            await LibraryLog.destination(LIBRARY_KEY, bad.fetchImpl, undefined, null, 5)
+          ).resetSnapshot(),
+        ).rejects.toThrow('profile directory is invalid');
+      });
+    });
+
+    it('learns the library minimum from one read, registering nothing and exposing no relay credential', async () => {
+      const calls: string[] = [];
+      const log = await LibraryLog.forReset(
+        LIBRARY_KEY,
+        5,
+        async (input, init) => {
+          calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+          return new Response(JSON.stringify({ entries: [], head: 0, more: false }), {
+            status: 200,
+            headers: { 'x-den-wire-min': '5' },
+          });
+        },
+        undefined,
+        null,
+      );
+      expect(log.wireMinimum).toBe(5);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatch(/^GET \/lib\/[0-9a-f]{32}\/changes/);
+    });
+  });
+
   it('listens for runtime changes in a Worker global without window', async () => {
     const opened: string[] = [];
     class WorkerChannel {

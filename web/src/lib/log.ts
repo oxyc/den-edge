@@ -22,6 +22,7 @@ import {
   type AuthenticatedMigrationRow,
   type MigrationProjection,
   type MigrationSealedRow,
+  type MigrationSnapshotRow,
 } from './profileMigrationCore';
 import type { ProfileDirectoryAuthority } from './profileKidCreateWorker';
 import type {
@@ -31,6 +32,7 @@ import type {
   VerifiedOwnerSplitBackup,
 } from './profileOwnerSplitEngine';
 import type { ResolvedOwnerSplitCandidate } from './profileOwnerSplitWorkerStore';
+import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyResetRoutes';
 import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
@@ -1459,6 +1461,113 @@ export class LibraryLog {
     return { status: response.status, body };
   }
 
+  /**
+   * Worker-only compound key reset transport (profiles-v1 §9.1): exactly the reset routes of this library under its own
+   * token and wire. A retirement also carries the library's current generation, read here, because under a lock it
+   * cannot change and a mismatch must stop the reset rather than be papered over.
+   */
+  async resetRequest(input: {
+    readonly method: 'GET' | 'POST' | 'DELETE';
+    readonly path: string;
+    readonly body?: unknown;
+    readonly headers?: Readonly<Record<string, string>>;
+  }): Promise<{ readonly status: number; readonly body: unknown }> {
+    const headers = input.headers ?? {};
+    const route = profileResetRoute(this.keys.id, input.method, input.path);
+    if (
+      route === null ||
+      !profileResetHeadersAllowed(route, headers) ||
+      (input.body !== undefined) !== (route.kind === 'acquire' || route.kind === 'successor') ||
+      (route.kind === 'retire' &&
+        (typeof headers['x-den-exclusive-attempt'] !== 'string' ||
+          typeof headers['x-den-successor'] !== 'string'))
+    )
+      throw new Error('Profile key reset method, path or header is not allowed');
+    const extra: Record<string, string> = { ...headers };
+    if (route.kind === 'retire') {
+      const standing = await this.standing();
+      if (standing === null) throw new Error('The library generation could not be read');
+      if ('moved' in standing) return { status: 410, body: { error: 'library_moved' } };
+      extra['x-den-generation'] = standing.generation ?? '0';
+    }
+    const response = await this.send(
+      input.path,
+      {
+        method: input.method,
+        headers: {
+          ...this.headers(),
+          ...extra,
+          ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+      },
+      false,
+    );
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      if (response.ok) throw new Error('Profile key reset response is not JSON');
+    }
+    return { status: response.status, body };
+  }
+
+  /**
+   * Every row of this library to its head, each opened under its keys, for the reset's authenticated observations:
+   * `absent` when the library does not exist, `moved` when it was retired, null when it could not be read, and a throw
+   * for a row that does not open or a directory that violates its contract (a reset never proceeds on evidence it
+   * cannot authenticate).
+   */
+  async resetSnapshot(): Promise<
+    | 'absent'
+    | 'moved'
+    | {
+        readonly base: number;
+        readonly generation: string | null;
+        readonly rows: MigrationSnapshotRow[];
+        /** The names of every row this build reads. */
+        readonly names: string[];
+        readonly directory: ProfileDirectoryDocument | null;
+      }
+    | null
+  > {
+    const entries: RawEntry[] = [];
+    let since = 0;
+    let generation: string | null = null;
+    let head: number;
+    for (;;) {
+      const res = await this.send(
+        `/lib/${this.keys.id}/changes?since=${since}&limit=1000`,
+        { headers: this.headers() },
+        false,
+      );
+      if (res.status === 404) return 'absent';
+      if (res.status === 410) return 'moved';
+      if (!res.ok) return null;
+      const page = (await res.json()) as Page;
+      generation ??= page.generation ?? res.headers.get('x-den-generation');
+      if ((page.generation ?? generation) !== generation) return null;
+      entries.push(...page.entries);
+      head = page.head;
+      if (!page.more || page.entries.length === 0) break;
+      since = page.entries.at(-1)!.seq;
+    }
+    const rows = entries
+      .map(({ k, v, seq }) => ({ k, v, seq }))
+      .sort((left, right) => (left.k < right.k ? -1 : left.k > right.k ? 1 : 0));
+    const names: string[] = [];
+    let directory: ProfileDirectoryDocument | null = null;
+    for (const { k, v } of rows) {
+      const opened = await openEntry(this.keys, k, v);
+      if ('unreadable' in opened)
+        throw new Error(`Library row ${k} does not open (${opened.unreadable})`);
+      if ('invalidProfileDirectory' in opened) throw new Error('The profile directory is invalid');
+      if ('profileDirectory' in opened) directory = opened.profileDirectory;
+      else if ('row' in opened) names.push(rowName(opened.row));
+    }
+    return { base: head, generation, rows, names, directory };
+  }
+
   async verifyMigrationBackup(input: {
     readonly attempt: string;
     readonly fence: OwnerSplitFence;
@@ -1906,9 +2015,20 @@ export class LibraryLog {
    * too: a recovery code wraps the old key, and a reset ends it (recovery-code §9). `set:devices` keeps only `device`
    * (the one moving it): every other device is cut off, and lists itself again once it pairs back in.
    */
-  async moving(device: string): Promise<Moving | { refused: MoveRefusal }> {
+  async moving(
+    device: string,
+    /**
+     * The compound reset (profiles-v1 §9) moves a profile household whose valid directory row the caller replaces with
+     * the successor directory: that row is then left behind rather than refusing the move. An invalid one still stops it.
+     */
+    options: { replaceProfileDirectory?: boolean } = {},
+  ): Promise<Moving | { refused: MoveRefusal }> {
     if (this.offline || this.moved || this.wireMin < WIRE) return { refused: 'unavailable' };
-    if (this.wireMin > WIRE || this.switchFailure !== null || this.predatesV3)
+    if (
+      this.wireMin > Math.max(WIRE, this.instanceWire) ||
+      this.switchFailure !== null ||
+      this.predatesV3
+    )
       return { refused: 'update_required' };
     await ensureSyncPolicy();
     // Writes queued before the move land in the log it reads.
@@ -1928,12 +2048,14 @@ export class LibraryLog {
     // This fresh read, not an earlier projection, decides: a directory that appeared since still refuses, whatever
     // else the log holds. The profile libraries must rotate with the household (profiles-v1 §9), never alone.
     if (
-      entries.some(
-        ({ opened }) => 'profileDirectory' in opened || 'invalidProfileDirectory' in opened,
+      entries.some(({ opened }) =>
+        options.replaceProfileDirectory
+          ? 'invalidProfileDirectory' in opened
+          : 'profileDirectory' in opened || 'invalidProfileDirectory' in opened,
       )
     ) {
       console.warn('den: a profile-aware household needs the compound key reset');
-      return { refused: 'profiles' };
+      return { refused: options.replaceProfileDirectory ? 'unavailable' : 'profiles' };
     }
     for (const { k, v, opened } of entries) {
       if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened) continue;
@@ -2006,10 +2128,28 @@ export class LibraryLog {
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
     vault: Vault | null = libraryVault,
+    wire: LibraryWire = WIRE,
   ): Promise<LibraryLog> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
-    const log = new LibraryLog(await deriveKeys(raw), fetchImpl, storage, null, false, vault);
+    const log = new LibraryLog(await deriveKeys(raw), fetchImpl, storage, null, false, vault, wire);
     await log.initializeRuntime();
+    return log;
+  }
+
+  /**
+   * A library the compound key reset (profiles-v1 §9.1) reads, moves from or talks to under its own token, at the wire
+   * its role requires. Unlike `open` it registers nothing, hands no relayed service its credential and writes nothing
+   * to a library that holds a lock; one read teaches it the library's minimum so `moving` can decide.
+   */
+  static async forReset(
+    libraryKey: string,
+    wire: LibraryWire,
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+    vault: Vault | null = libraryVault,
+  ): Promise<LibraryLog> {
+    const log = await LibraryLog.destination(libraryKey, fetchImpl, storage, vault, wire);
+    await log.standing();
     return log;
   }
 
@@ -2093,7 +2233,7 @@ export class LibraryLog {
             ...this.headers(),
             'content-type': 'application/json',
             'x-den-library-member': member,
-            'x-den-wire-min': String(WIRE),
+            'x-den-wire-min': String(this.instanceWire),
           },
           body: JSON.stringify({ writes: chunk.map(({ k, base, v }) => ({ k, base, v })) }),
         });
@@ -2114,6 +2254,15 @@ export class LibraryLog {
           }
           const conflict = batch.conflicts.find(({ k }) => k === write.k);
           if (!conflict || conflict.omitted || conflict.v === null) return false;
+          if (write.name === 'profiles' && kept.has('profiles')) {
+            // A repeated move finds the successor directory already written; it is the same document or a refusal.
+            const theirs = await openPlaintext(this.keys, conflict.k, conflict.v);
+            const ours = kept.get('profiles')!;
+            if (!theirs || theirs.length !== ours.length || theirs.some((b, i) => b !== ours[i]))
+              return false;
+            kept.delete('profiles');
+            continue;
+          }
           // Another version is here: the next round merges onto it.
           const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
           if (!theirs || this.isProfileDirectory(theirs) || this.isInvalidProfileDirectory(theirs))

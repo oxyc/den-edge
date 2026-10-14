@@ -322,6 +322,66 @@ describe('library service client protocol', () => {
     expect(decodeTask({ kind: 'profile.create.ack', receipt: 'x'.repeat(257) })).toMatchObject({
       ok: false,
     });
+    const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(3)));
+    expect(
+      decodeTask({ kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: key }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({ kind: 'profile-key-reset.start', pin: '12', destinationLibraryKey: key }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({ kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: 'short' }),
+    ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'profile-key-reset.resume' })).toMatchObject({ ok: true });
+    expect(decodeTask({ kind: 'profile-key-reset.resume', pin: '1234' })).toMatchObject({
+      ok: false,
+    });
+    for (const successorKey of [null, key])
+      expect(
+        decodeTask({
+          kind: 'profile-key-reset.recover',
+          pin: '1234',
+          recoveryAttempt: 'fedcba9876543210fedcba9876543210',
+          successorKey,
+        }),
+      ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'profile-key-reset.recover',
+        pin: '1234',
+        recoveryAttempt: 'not-an-attempt',
+        successorKey: null,
+      }),
+    ).toMatchObject({ ok: false });
+    for (const outcome of [
+      'complete',
+      'aborted',
+      'waiting',
+      'none',
+      'retired',
+      'blocked',
+      'unavailable',
+    ])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'task-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-task',
+          operationId: 'operation-task',
+          result: { kind: 'profile-key-reset.resume', outcome },
+          version,
+        }),
+      ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-task',
+        operationId: 'operation-task',
+        result: { kind: 'profile-key-reset.start', outcome: 'moved' },
+        version,
+      }),
+    ).toMatchObject({ ok: false });
     expect(
       decodeLibraryServiceServerMessage({
         type: 'task-result',

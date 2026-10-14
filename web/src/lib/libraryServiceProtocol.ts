@@ -597,7 +597,18 @@ export type LibraryTask =
       source: { generation: number; head: string };
     }
   | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
-  | { kind: 'profile.create.ack'; receipt: string };
+  | { kind: 'profile.create.ack'; receipt: string }
+  /** The compound key reset (profiles-v1 §9) of a profile household, behind a fresh Owner PIN. */
+  | { kind: 'profile-key-reset.start'; pin: string; destinationLibraryKey: string }
+  /** Continue the journaled attempt on this device; the journal already holds the authorization. */
+  | { kind: 'profile-key-reset.resume' }
+  /** Journal-less recovery (§9.1) as the recovery attempt `recoveryAttempt`; `successorKey` only if this browser holds it. */
+  | {
+      kind: 'profile-key-reset.recover';
+      pin: string;
+      recoveryAttempt: string;
+      successorKey: string | null;
+    };
 
 /** A grant as the library's grants row holds it (`assistant_grants`), for Settings. */
 export interface AssistantGrantView {
@@ -675,7 +686,27 @@ export type LibraryTaskResult =
       maximumAge: number;
       receipt: string;
     }
-  | { kind: 'profile.create.ack'; outcome: 'acknowledged' };
+  | { kind: 'profile.create.ack'; outcome: 'acknowledged' }
+  | {
+      kind: 'profile-key-reset.start' | 'profile-key-reset.resume' | 'profile-key-reset.recover';
+      outcome: ProfileKeyResetOutcome;
+    };
+
+export type ProfileKeyResetOutcome =
+  /** Every old library is retired and the successor household is adopted. */
+  | 'complete'
+  /** The locks were released or den-edge rolled the attempt back; nothing changed and the journal is gone. */
+  | 'aborted'
+  /** den-edge or another device is not ready; the journal stays and the reset resumes. */
+  | 'waiting'
+  /** `resume` found no journal on this device. */
+  | 'none'
+  /** Recovery finished retirement with proof of the successor key; the caller adopts it. */
+  | 'retired'
+  /** Recovery cannot proceed here: another device must finish the reset. */
+  | 'blocked'
+  /** Profile migration is off, or the household has no profile directory. */
+  | 'unavailable';
 
 export type LibraryQuery =
   | {

@@ -96,6 +96,11 @@ import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
 import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
+import {
+  ProfileKeyResetService,
+  ProfileResetUnauthorizedError,
+  VaultResetAdoption,
+} from './profileKeyResetService';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { recordTrackerEvent } from './trackerEvents';
@@ -379,6 +384,7 @@ export class LibraryLogAuthority {
   #projection?: { rows: Row[]; home: HomeLibraryView };
   #ownerSplit?: OwnerSplitWorkerController;
   #kidCreate?: ProfileKidCreateCoordinator;
+  #keyReset?: ProfileKeyResetService;
 
   constructor(log: LibraryLog, clock: ClockStore, options: LibraryLogAuthorityOptions) {
     this.#log = log;
@@ -804,10 +810,70 @@ export class LibraryLogAuthority {
     return this.#kidCreate;
   }
 
+  /**
+   * Built only for an explicit worker task. It is dormant twice over: the page offers no control for it, and every
+   * entry first asks den-edge's profile capability (the same gate the Owner split uses) before it reads or sends.
+   */
+  #profileKeyReset(): ProfileKeyResetService {
+    if (this.#keyReset) return this.#keyReset;
+    const { libraryKey, vault } = this.#options;
+    if (!libraryKey) throw authorityError('invalid-request', 'the household key is not available');
+    const capability = new OwnerSplitWorkerTransport(
+      this.#log,
+      new OwnerSplitWorkerStore(this.#log),
+    );
+    this.#keyReset = new ProfileKeyResetService({
+      vault: this.#log,
+      householdKey: libraryKey,
+      device: this.#clock.device,
+      open: (key, wire) => LibraryLog.forReset(key, wire, this.#fetch, undefined, vault ?? null),
+      adoption: new VaultResetAdoption(this.#log, (key) =>
+        (this.#options.destination ?? ((next) => LibraryLog.destination(next, this.#fetch)))(key),
+      ),
+      gate: async () => {
+        const answer = await capability.capability();
+        return answer !== null && answer.wireMin >= answer.runtimeHouseholdWire;
+      },
+      ownerPin: (pin) => this.#ownerPinMatches(pin),
+    });
+    return this.#keyReset;
+  }
+
+  async #profileKeyResetTask(
+    task: Extract<LibraryTask, { kind: `profile-key-reset.${string}` }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    if (
+      task.kind === 'profile-key-reset.start' &&
+      task.destinationLibraryKey === this.#options.libraryKey
+    )
+      throw authorityError('invalid-request', 'source and destination library must differ');
+    const service = this.#profileKeyReset();
+    let outcome;
+    try {
+      outcome =
+        task.kind === 'profile-key-reset.start'
+          ? await service.start(task)
+          : task.kind === 'profile-key-reset.resume'
+            ? await service.resume()
+            : await service.recover(task);
+    } catch (error) {
+      if (error instanceof ProfileResetUnauthorizedError)
+        throw authorityError('unauthorized', 'Owner PIN is required to reset a profile household');
+      throw error;
+    }
+    return { result: { kind: task.kind, outcome }, affected: [{ kind: 'profiles' }] };
+  }
+
   async task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
     if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
     if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
+    if (
+      task.kind === 'profile-key-reset.start' ||
+      task.kind === 'profile-key-reset.resume' ||
+      task.kind === 'profile-key-reset.recover'
+    )
+      return this.#profileKeyResetTask(task);
     if (
       task.kind === 'profile-migration.enable' ||
       task.kind === 'profile-migration.cancel' ||
@@ -871,16 +937,17 @@ export class LibraryLogAuthority {
     };
   }
 
+  /** The Owner PIN, only once it is delivered to every device: a queued PIN is not yet the household's. */
+  async #ownerPinMatches(pin: string): Promise<boolean> {
+    const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    return this.#parentalPinDelivery() === 'synced' && !!stored && (await pinMatches(stored, pin));
+  }
+
   async #profileCreateTask(
     task: Extract<LibraryTask, { kind: 'profile.create' }>,
     operationId: string,
   ): Promise<LibraryAuthorityTaskResult> {
-    const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
-    if (
-      this.#parentalPinDelivery() !== 'synced' ||
-      !stored ||
-      !(await pinMatches(stored, task.pin))
-    )
+    if (!(await this.#ownerPinMatches(task.pin)))
       throw authorityError('unauthorized', 'Owner PIN is required to create a Kid profile');
     const stamps = [
       await this.#clock.issue(),

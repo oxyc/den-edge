@@ -34,6 +34,26 @@ export class ProfileResetError extends Error {
   }
 }
 
+/**
+ * A refusal den-edge will repeat for the same request (a moved source, a lock held by someone else, a successor that
+ * is not ready). Before the successor commit nothing irreversible has happened, so the executor releases the locks
+ * (profiles-v1 §9.1 *Abort*) and discards the journal; a retry generates entirely new keys.
+ */
+export class ProfileResetRefusedError extends Error {
+  constructor(readonly reason: string) {
+    super(`Profile key reset refused by den-edge: ${reason}`);
+    this.name = 'ProfileResetRefusedError';
+  }
+}
+
+/** den-edge ended this attempt (an abort, or a recovery's rollback): nothing was adopted, so the journal is void. */
+export class ProfileResetRolledBackError extends Error {
+  constructor() {
+    super('Profile key reset was rolled back by den-edge');
+    this.name = 'ProfileResetRolledBackError';
+  }
+}
+
 export type ProfileResetPhase =
   | 'prepared'
   | 'locked'
@@ -110,6 +130,11 @@ export interface ProfileResetLockRequest {
   readonly fence: ProfileResetFence;
   readonly household: { readonly libraryId: string; readonly key: string };
   readonly profiles: Readonly<Record<string, { readonly libraryId: string; readonly key: string }>>;
+  /** The library ids of the successor keys, which the household lock declares (§9.1 *Acquire*); ids reveal no key. */
+  readonly successors: {
+    readonly household: string;
+    readonly profiles: Readonly<Record<string, string>>;
+  };
 }
 
 export interface ProfileMoveRequest {
@@ -139,7 +164,14 @@ export interface HouseholdPublishRequest {
 export interface HouseholdObservationRequest {
   readonly attempt: string;
   readonly successorKey: string;
+  /** The directory the successor household must hold before den-edge is asked to commit it. */
+  readonly directory: ProfileDirectoryDocument;
   readonly locks: ProfileResetLockSet;
+}
+
+export interface ProfileResetAbortRequest {
+  readonly attempt: string;
+  readonly household: { readonly libraryId: string; readonly key: string };
 }
 
 export type HouseholdObservation =
@@ -191,6 +223,11 @@ export interface ProfileKeyResetBackend {
 
   /** Exclusively lock the household and every live profile library at their exact authenticated state. */
   acquireLocks(request: ProfileResetLockRequest): Promise<ProfileResetLockSet>;
+  /**
+   * Release the whole set with the one household abort commit, valid only before the successor commit. Idempotent;
+   * `committed` means den-edge refused because the successor household is already committed, so nothing was released.
+   */
+  abortReset(request: ProfileResetAbortRequest): Promise<'aborted' | 'committed'>;
   /** Idempotent for `(attempt, profile, newKey)`, including when the previous response was lost. */
   moveAndVerifyProfile(request: ProfileMoveRequest): Promise<VerifiedProfileMove>;
   /** Idempotent for the attempt and exact successor key and directory. */
@@ -219,7 +256,8 @@ export interface ProfileKeyResetOptions {
 }
 
 export interface ProfileResetStatus {
-  readonly phase: ProfileResetPhase;
+  /** `aborted`: the locks were released (or den-edge rolled the attempt back) and the journal is gone. */
+  readonly phase: ProfileResetPhase | 'aborted';
   readonly verifiedProfiles: number;
   readonly profileCount: number;
 }
@@ -264,6 +302,8 @@ export class ProfileKeyResetExecutor {
     directory: ProfileDirectoryDocument,
     householdKey: string,
     fence: ProfileResetFence,
+    /** A successor household key the caller already holds (the page's prepared key); otherwise one is generated. */
+    successorHouseholdKey?: string,
   ): Promise<ProfileResetStatus> {
     return this.locked(async () => {
       if ((await this.backend.loadJournal()) !== null)
@@ -304,7 +344,14 @@ export class ProfileKeyResetExecutor {
         }
         throw new ProfileResetError('random-key-failure');
       };
-      const newHouseholdKey = freshKey();
+      let newHouseholdKey: string;
+      if (successorHouseholdKey === undefined) newHouseholdKey = freshKey();
+      else {
+        if (!canonicalKey(successorHouseholdKey) || used.has(successorHouseholdKey))
+          throw new ProfileResetError('invalid-household-key');
+        used.add(successorHouseholdKey);
+        newHouseholdKey = successorHouseholdKey;
+      }
       const profiles = live.map((entry): ProfileResetEvidence => {
         const { keyVersion, key } = entry.library.value;
         if (!Number.isSafeInteger(keyVersion) || keyVersion >= 0xffff_ffff)
@@ -339,7 +386,7 @@ export class ProfileKeyResetExecutor {
       };
       await this.validate(journal);
       await this.persist(journal);
-      return this.drive(journal);
+      return this.guarded(journal, () => this.drive(journal));
     });
   }
 
@@ -349,8 +396,45 @@ export class ProfileKeyResetExecutor {
       const journal = await this.backend.loadJournal();
       if (!journal) return null;
       await this.validate(journal);
-      return this.drive(journal);
+      return this.guarded(journal, () => this.drive(journal));
     });
+  }
+
+  /**
+   * Ends the attempt when den-edge says it is over. A repeatable refusal before the successor commit releases the
+   * locks and discards the journal; a rollback by a recovery only discards it. Any other failure keeps the journal.
+   */
+  private async guarded(
+    journal: ProfileResetJournal,
+    work: () => Promise<ProfileResetStatus>,
+  ): Promise<ProfileResetStatus> {
+    try {
+      return await work();
+    } catch (error) {
+      if (error instanceof ProfileResetRolledBackError && journal.phase !== 'complete')
+        return this.discard(journal);
+      if (error instanceof ProfileResetRefusedError && !journal.householdCommitted) {
+        const request: ProfileResetAbortRequest = {
+          attempt: journal.attempt,
+          household: {
+            libraryId: await libraryId(journal.oldHouseholdKey),
+            key: journal.oldHouseholdKey,
+          },
+        };
+        // A lost abort response leaves the journal, so the next resume refuses again and repeats the idempotent abort.
+        if ((await this.backend.abortReset(request)) === 'aborted') return this.discard(journal);
+      }
+      throw error;
+    }
+  }
+
+  private async discard(journal: ProfileResetJournal): Promise<ProfileResetStatus> {
+    await this.backend.clearJournal(journal.attempt);
+    return {
+      phase: 'aborted',
+      verifiedProfiles: journal.profiles.filter((p) => p.verified).length,
+      profileCount: journal.profiles.length,
+    };
   }
 
   private locked<T>(work: () => Promise<T>): Promise<T> {
@@ -475,9 +559,11 @@ export class ProfileKeyResetExecutor {
         return;
       }
       case 'verify-household': {
+        if (journal.successorDirectory === null) throw new ProfileResetError('corrupt-journal');
         const observed = await this.backend.observeSuccessorHousehold({
           attempt: journal.attempt,
           successorKey: journal.newHouseholdKey,
+          directory: journal.successorDirectory,
           locks,
         });
         if (observed.kind === 'absent') {
@@ -832,11 +918,14 @@ function adoptionRequest(
 
 async function lockRequest(journal: ProfileResetJournal): Promise<ProfileResetLockRequest> {
   const profiles: Record<string, { libraryId: string; key: string }> = {};
-  for (const evidence of journal.profiles)
+  const successors: Record<string, string> = {};
+  for (const evidence of journal.profiles) {
     profiles[evidence.profile] = {
       libraryId: await libraryId(evidence.oldKey),
       key: evidence.oldKey,
     };
+    successors[evidence.profile] = await libraryId(evidence.newKey);
+  }
   return {
     attempt: journal.attempt,
     fence: journal.fence,
@@ -845,6 +934,10 @@ async function lockRequest(journal: ProfileResetJournal): Promise<ProfileResetLo
       key: journal.oldHouseholdKey,
     },
     profiles,
+    successors: {
+      household: await libraryId(journal.newHouseholdKey),
+      profiles: successors,
+    },
   };
 }
 
@@ -864,7 +957,10 @@ function latestStamp(directory: ProfileDirectoryDocument): Stamp {
   return latest;
 }
 
-function sameDirectory(left: ProfileDirectoryDocument, right: ProfileDirectoryDocument): boolean {
+export function sameDirectory(
+  left: ProfileDirectoryDocument,
+  right: ProfileDirectoryDocument,
+): boolean {
   try {
     return (
       profilesMaterialize(validateStoredProfileDirectory(left)).jcs ===
@@ -909,7 +1005,8 @@ function canonicalKey(value: unknown): value is string {
   return base64(Uint8Array.from(atob(value), (character) => character.charCodeAt(0))) === value;
 }
 
-async function libraryId(key: string): Promise<string> {
+/** The `/lib/{id}` of a canonical padded-base64 library key. */
+export async function libraryId(key: string): Promise<string> {
   const raw = Uint8Array.from(atob(key), (character) => character.charCodeAt(0));
   try {
     return (await deriveKeys(raw)).id;
