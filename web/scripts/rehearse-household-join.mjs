@@ -239,6 +239,16 @@ async function launch(name, address) {
   };
   ctx.pages().forEach(watch);
   ctx.on('page', watch);
+  // A Kid opens a title only with its age known (den-core's policy; unrated titles are blocked): this origin's atlas
+  // answers that every fixture film is for all ages, and nothing else.
+  await ctx.route('**/atlas/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } });
+    if (path.startsWith('/atlas/index/title/movie/'))
+      return route.fulfill({ json: { minimumAge: 0 } });
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
   // Every film is the fixture, under the id it was asked for.
   await ctx.route('**/tmdb/3/**', (route) => {
     const id = Number(/\/movie\/(\d+)/.exec(new URL(route.request().url()).pathname)?.[1] ?? 1002);
@@ -321,12 +331,16 @@ async function makeHousehold(
       ),
     );
   };
-  for (const [index, id] of titles.entries()) await keep(id, index ? plan.ownerKey : null);
+  // The first title makes the household; the rest are kept once its Kid is made and the page is the Owner again.
+  await keep(titles[0], null);
   if (kid) {
-    await until(
-      async () =>
-        profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory).kids.length === 1,
-    );
+    const kidMade = async () =>
+      profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory).kids.length === 1;
+    // The Owner's visit makes the household's Kid; a visit that asked too early asks again on the next.
+    if (!(await until(kidMade, 30_000))) {
+      await page.reload();
+      if (!(await until(kidMade))) throw new Error('the household’s Kid was not made');
+    }
     await openSwitcher(page);
     await page.getByRole('button', { name: 'Use Kids' }).click();
     await page.getByLabel('New Owner PIN').fill(pin);
@@ -354,6 +368,7 @@ async function makeHousehold(
       .waitFor({ timeout: 60_000 });
     await page.keyboard.press('Escape').catch(() => {});
   }
+  for (const id of titles.slice(1)) await keep(id, plan.ownerKey);
   return { ...plan, page };
 }
 
