@@ -598,6 +598,11 @@ export type LibraryTask =
     }
   /** The household's Kid, made once when its directory has none: no Owner PIN is asked, since none may exist yet. */
   | { kind: 'profile.create-default' }
+  /**
+   * This browser's own household `sourceLibraryKey` joins this one (den#295): its Owner's and Kids' activity merge in,
+   * then it is retired. `pin` is this household's Owner PIN, asked once when it has one.
+   */
+  | { kind: 'household.join'; sourceLibraryKey: string; pin?: string }
   | { kind: 'key-reset.move'; destinationLibraryKey: string }
   | { kind: 'key-reset.settle'; destinationLibraryKey: string }
   | { kind: 'key-reset.adopt'; destinationLibraryKey: string }
@@ -697,6 +702,18 @@ export type LibraryTaskResult =
       retryAfterMs?: number;
     }
   | { kind: 'profile.create-default'; outcome: 'created' | 'present' }
+  | {
+      kind: 'household.join';
+      /**
+       * `joined`: everything carried and the source retired; `owner` is this household's Owner and `kids` the Kid each
+       * source Kid became (both empty for a household without profiles). `pin-required`/`pin-wrong`: ask for the
+       * Owner PIN. `refused-kids`: this household has no profiles and a source Kid has activity. Nothing is lost on
+       * any answer but `joined`; the same task finishes it later.
+       */
+      outcome: 'joined' | 'pin-required' | 'pin-wrong' | 'refused-kids' | 'unavailable';
+      owner?: string | null;
+      kids?: Record<string, string>;
+    }
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
   | { kind: 'assistant.consent'; grant: string; key: string; readKey?: string }
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }

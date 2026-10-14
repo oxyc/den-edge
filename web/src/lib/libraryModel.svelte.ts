@@ -807,6 +807,20 @@ export class LibraryModel {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey, ...part }, operationId);
   }
 
+  /** This browser's own household joins the one this model opens (`household.join`); asked again, it finishes it. */
+  async joinHousehold(
+    sourceLibraryKey: string,
+    pin?: string,
+  ): Promise<Extract<LibraryTaskResult, { kind: 'household.join' }>> {
+    const { result } = await this.task({
+      kind: 'household.join',
+      sourceLibraryKey,
+      ...(pin === undefined ? {} : { pin }),
+    });
+    if (result.kind !== 'household.join') throw wrongQueryResult('household join');
+    return result;
+  }
+
   /** Start or finish this browser's own household (`household.create`); asked of the library kept only here. */
   async createHousehold(
     plan: Omit<Extract<LibraryTask, { kind: 'household.create' }>, 'kind'>,

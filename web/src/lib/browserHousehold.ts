@@ -232,6 +232,100 @@ export function observeKeptActions(service: ObservedService, kept: () => void): 
   };
 }
 
+/**
+ * What became of bringing this browser's library or household into another: `pin-required`/`pin-wrong`, ask for the
+ * Owner PIN of the household joined; `refused-kids`, it has no profiles for this browser's Kids.
+ */
+export type JoinAnswer = 'joined' | 'failed' | 'pin-required' | 'pin-wrong' | 'refused-kids';
+
+/** Bring this browser's library or household into the one `libraryKey` opens (`RoutedLibrary`). */
+export type JoinLibrary = (
+  libraryKey: string,
+  options?: { pin?: string; link?: JoinLink },
+) => Promise<JoinAnswer>;
+
+/** How the browser opens the household it joins: a TV it paired with, or (none) a library key kept as a link. */
+export interface JoinLink {
+  readonly inboxKey: string;
+  readonly name: string;
+  readonly linkKey: string;
+  readonly deviceId?: string;
+}
+
+/**
+ * This browser's household joining another (den#295), kept before the join starts so a reload finishes it: `source`
+ * is this browser's household, `destination` the one it joins.
+ */
+export interface HouseholdJoinPlan {
+  readonly version: 1;
+  readonly source: string;
+  readonly destination: string;
+  readonly link?: JoinLink;
+}
+
+const JOIN_KEY = 'den.household.join';
+
+export function householdJoinPlan(
+  storage: Storage | undefined = globalThis.localStorage,
+): HouseholdJoinPlan | null {
+  try {
+    const value = JSON.parse(
+      storage?.getItem(JOIN_KEY) ?? 'null',
+    ) as Partial<HouseholdJoinPlan> | null;
+    const link = value?.link;
+    if (
+      !value ||
+      value.version !== 1 ||
+      typeof value.source !== 'string' ||
+      !KEY.test(value.source) ||
+      typeof value.destination !== 'string' ||
+      !KEY.test(value.destination) ||
+      value.source === value.destination ||
+      (link !== undefined &&
+        (typeof link?.inboxKey !== 'string' ||
+          typeof link.name !== 'string' ||
+          typeof link.linkKey !== 'string' ||
+          (link.deviceId !== undefined && typeof link.deviceId !== 'string')))
+    )
+      return null;
+    return value as HouseholdJoinPlan;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep the join's plan; false when it did not stick, and the join must not start. */
+export function keepHouseholdJoin(
+  plan: HouseholdJoinPlan,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  try {
+    const text = JSON.stringify(plan);
+    storage?.setItem(JOIN_KEY, text);
+    return storage?.getItem(JOIN_KEY) === text;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The join is over. `joined`: this browser no longer points at its own household, which is retired. Otherwise it was
+ * given up before anything moved, and the browser keeps its household.
+ */
+export function settleHouseholdJoin(
+  plan: HouseholdJoinPlan,
+  joined: boolean,
+  storage: Storage | undefined = globalThis.localStorage,
+): void {
+  try {
+    if (joined && storage?.getItem(HOUSEHOLD_KEY) === plan.source)
+      storage.removeItem(HOUSEHOLD_KEY);
+    storage?.removeItem(JOIN_KEY);
+  } catch {
+    // A plan left behind is settled again on the next load.
+  }
+}
+
 /** The plan is done: the household is pointed at and the library it started from has moved into it. */
 export function settleHouseholdPlan(storage: Storage | undefined = globalThis.localStorage): void {
   try {

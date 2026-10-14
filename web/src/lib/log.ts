@@ -2180,6 +2180,94 @@ export class LibraryLog {
     }
   }
 
+  /**
+   * This household's directory as den-edge holds it now: null for a household without profiles, `gone` when den-edge
+   * holds no library under this key (never written, or retired).
+   */
+  async readDirectory(): Promise<ProfileDirectoryDocument | null | 'gone'> {
+    const standing = await this.send(`/lib/${this.keys.id}/changes?since=0&limit=1`, {
+      headers: this.headers(),
+    });
+    if (standing.status === 404 || standing.status === 410) return 'gone';
+    if (!standing.ok) throw new Error(`The household could not be read (${standing.status})`);
+    const household = await this.readBornHousehold();
+    if (household.kind === 'absent') return 'gone';
+    return household.directory ?? null;
+  }
+
+  /**
+   * Every v4 document this library holds on den-edge, read to its head: its watch history, watchlist, progress and
+   * ratings, which a household join carries into another household (den#295). `gone` when den-edge holds no library
+   * under this key; null when it couldn't be read whole. A row this build can't read as a document, or a row in an
+   * older form, also answers null: what isn't carried would be lost when the library is retired.
+   */
+  async activityDocuments(): Promise<{ documents: DocumentRow[]; head: number } | 'gone' | null> {
+    try {
+      const standing = await this.send(`/lib/${this.keys.id}/changes?since=0&limit=1`, {
+        headers: this.headers(),
+      });
+      if (standing.status === 404 || standing.status === 410) return 'gone';
+      if (!standing.ok) return null;
+      const read = await this.readAll();
+      if (!read) return null;
+      // Keyed by name, so a row read twice is carried once, as its newest.
+      const documents = new Map<string, DocumentRow>();
+      for (const { k, v } of read.entries) {
+        const opened = await openEntry(this.keys, k, v);
+        if ('unknown' in opened || 'newerFraming' in opened) return null;
+        if (!('row' in opened)) continue;
+        if (opened.newer || legacy(opened.row)) return null;
+        if (isDocument(opened.row)) documents.set(k, opened.row);
+      }
+      return { documents: [...documents.values()], head: read.head };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Merge `documents` into this library and prove den-edge holds every one of them: a fresh read of each, merged
+   * with what was sent, is what den-edge holds unchanged. Merging is den-core's, so sending them again changes nothing.
+   */
+  async takeDocuments(documents: DocumentRow[]): Promise<boolean> {
+    if (!(await this.readToHead())) return false;
+    if (documents.length && !(await this.writeRows(documents))) return false;
+    const held = await this.activityDocuments();
+    if (held === null || held === 'gone') return false;
+    const byName = new Map(held.documents.map((document) => [rowName(document), document]));
+    return documents.every((document) => {
+      const current = byName.get(rowName(document));
+      return !!current && canonical(mergeDocument(current, document)) === canonical(current);
+    });
+  }
+
+  /**
+   * Retire this library on den-edge under its own token: true once den-edge holds none under this key. With `base`,
+   * only while its head is still that one (`409 head_changed` otherwise): what was written since was not carried.
+   */
+  async retire(base?: number): Promise<boolean> {
+    try {
+      const standing = await this.send(`/lib/${this.keys.id}/changes?since=0&limit=1`, {
+        headers: this.headers(),
+      });
+      if (standing.status === 404 || standing.status === 410) return true;
+      if (!standing.ok) return false;
+      const page = (await standing.json()) as Page;
+      const generation = page.generation ?? standing.headers.get('x-den-generation');
+      if (generation) this.generation = generation;
+      const response = await this.send(`/lib/${this.keys.id}`, {
+        method: 'DELETE',
+        headers: {
+          ...this.headers(),
+          ...(base === undefined ? {} : { 'x-den-base': String(base) }),
+        },
+      });
+      return response.ok || response.status === 404 || response.status === 410;
+    } catch {
+      return false;
+    }
+  }
+
   async adoptKidProfileDirectory(directory: ProfileDirectoryDocument): Promise<void> {
     validateStoredProfileDirectory(directory);
     const current = await this.readKidProfileDirectory();
