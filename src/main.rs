@@ -583,12 +583,29 @@ async fn main() {
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = env_number("PORT").unwrap_or(8080);
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
+    // `PORT` is always served: it is the address other containers reach this one on. A socket handed over by the
+    // supervisor is served as well, and is the one that survives this process being replaced.
+    let mut listeners = Vec::new();
+    match inherited_listener() {
+        Some(Ok(l)) => {
+            eprintln!(
+                "serving on an inherited socket, {}",
+                l.local_addr().map_or("?".to_owned(), |a| a.to_string())
+            );
+            listeners.push(l);
+        }
+        Some(Err(e)) => {
+            eprintln!("inherited listening socket unusable: {e}");
+            std::process::exit(1);
+        }
+        None => {}
+    }
+    listeners.push(tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
         eprintln!("bind :{port} failed: {e}");
         std::process::exit(1);
-    });
+    }));
     let shutdown = shutdown_signal();
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    let port = listeners.last().and_then(|l| l.local_addr().ok()).map_or(port, |a| a.port());
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
@@ -639,8 +656,46 @@ async fn main() {
         on(state.oauth.as_ref().is_some_and(|o| o.write_public.is_some())),
     );
     let limits = Limits { grace: DRAIN_GRACE, header_read: HEADER_READ_TIMEOUT };
-    let outcome = serve_until(listener, app, Arc::clone(&state.metrics), shutdown, limits).await;
+    let outcome = serve_until(listeners, app, Arc::clone(&state.metrics), shutdown, limits).await;
     eprintln!("{}", outcome.describe());
+}
+
+/// The listening socket the supervisor handed over (systemd socket activation: `LISTEN_PID` is this process,
+/// `LISTEN_FDS` counts sockets starting at fd 3). The supervisor keeps the socket open across restarts, so
+/// connections queue in the kernel while a new process starts instead of being refused. `None` when nothing was
+/// handed over; the caller then binds `PORT` itself.
+#[cfg(unix)]
+fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
+    const FIRST_FD: i32 = 3;
+    let pid = std::env::var("LISTEN_PID").ok()?.parse::<u32>().ok()?;
+    let count = std::env::var("LISTEN_FDS").ok()?.parse::<i32>().ok()?;
+    if pid != std::process::id() {
+        eprintln!("LISTEN_FDS is set for process {pid}, not this one ({}); ignoring it", std::process::id());
+        return None;
+    }
+    if count < 1 {
+        return None;
+    }
+    if count > 1 {
+        return Some(Err(std::io::Error::other(format!("expected one socket, got {count}"))));
+    }
+    // SAFETY: the activation protocol hands this process sole ownership of fd 3.
+    Some(unsafe { adopt_listener(FIRST_FD) })
+}
+
+/// # Safety
+/// `fd` must be an open listening TCP socket that nothing else owns.
+#[cfg(unix)]
+unsafe fn adopt_listener(fd: i32) -> std::io::Result<tokio::net::TcpListener> {
+    use std::os::fd::FromRawFd;
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    std_listener.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(std_listener)
+}
+
+#[cfg(not(unix))]
+fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
+    None
 }
 
 /// `TRUSTED_PROXIES`: comma-separated IP addresses, the trusted ones and, second, those written `cf:<ip>` — the
@@ -850,7 +905,7 @@ const CONNECTION_READ_BUFFER: usize = 16 * 1024;
 /// hyper's HTTP/1 server directly rather than `axum::serve`, which offers no way to give hyper a timer, and
 /// without one the header read timeout is never applied.
 async fn serve_until(
-    listener: tokio::net::TcpListener,
+    listeners: Vec<tokio::net::TcpListener>,
     app: axum::Router,
     metrics: Arc<metrics::Metrics>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -886,7 +941,7 @@ async fn serve_until(
             Err(tokio::sync::TryAcquireError::Closed) => unreachable!("connection semaphore is never closed"),
         };
         let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => match accepted {
+            accepted = accept_any(&listeners) => match accepted {
                 Ok(accepted) => accepted,
                 // What `axum::serve` does: a connection reset before it was taken is that connection's
                 // business, and anything else (out of descriptors) is waited out rather than spun on.
@@ -918,7 +973,7 @@ async fn serve_until(
             let _ = conn.await;
         });
     }
-    drop(listener);
+    drop(listeners);
     tokio::select! {
         () = graceful.shutdown() => Outcome::Drained,
         () = tokio::time::sleep(limits.grace) => Outcome::DeadlineHit(format!(
@@ -926,6 +981,21 @@ async fn serve_until(
             limits.grace
         )),
     }
+}
+
+/// The next connection on any of `listeners` (one `PORT` socket, plus the supervisor's when it handed one over).
+async fn accept_any(
+    listeners: &[tokio::net::TcpListener],
+) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    std::future::poll_fn(|cx| {
+        for listener in listeners {
+            if let std::task::Poll::Ready(accepted) = listener.poll_accept(cx) {
+                return std::task::Poll::Ready(accepted);
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 // Linux reports twice the requested SO_SNDBUF/SO_RCVBUF because it includes kernel bookkeeping. These effective
@@ -1110,6 +1180,38 @@ mod tests {
         }
     }
 
+    /// A socket bound by someone else (the supervisor) serves requests, and its accepted connections still get
+    /// their kernel buffers bounded.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serves_on_an_inherited_listening_socket() {
+        use std::os::fd::IntoRawFd;
+        let owner = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = owner.local_addr().unwrap();
+        // A connection made before the "process" adopts the socket waits in the kernel queue, not refused.
+        let mut early = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let listener = unsafe { adopt_listener(owner.into_raw_fd()) }.unwrap();
+        assert_eq!(listener.local_addr().unwrap(), addr);
+        let state = Arc::new(AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        ));
+        let metrics = Arc::clone(&state.metrics);
+        let app = axum::Router::new().fallback(handler::handle).with_state(state);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let limits = Limits { grace: Duration::from_millis(300), header_read: HEADER_READ_TIMEOUT };
+        let server = tokio::spawn(async move {
+            serve_until(vec![listener], app, metrics, async { rx.await.unwrap_or(()) }, limits).await
+        });
+        early.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut reply = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut early, &mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let _ = tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    }
+
     /// A client that sends half a request head must not hold shutdown open past the grace.
     #[tokio::test]
     async fn a_client_holding_a_partial_request_cannot_hold_shutdown_open() {
@@ -1126,7 +1228,7 @@ mod tests {
         let grace = Duration::from_millis(300);
         let limits = Limits { grace, header_read: HEADER_READ_TIMEOUT };
         let server = tokio::spawn(async move {
-            serve_until(l, app, metrics, async { rx.await.unwrap_or(()) }, limits).await
+            serve_until(vec![l], app, metrics, async { rx.await.unwrap_or(()) }, limits).await
         });
 
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -1165,9 +1267,9 @@ mod tests {
         let addr = l.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let limits = Limits { grace: Duration::from_millis(100), header_read };
-        tokio::spawn(
-            async move { serve_until(l, app, metrics, async { rx.await.unwrap_or(()) }, limits).await },
-        );
+        tokio::spawn(async move {
+            serve_until(vec![l], app, metrics, async { rx.await.unwrap_or(()) }, limits).await
+        });
         (addr, tx)
     }
 
