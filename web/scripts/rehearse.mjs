@@ -300,6 +300,85 @@ async function openSettings(page, edge) {
   await page.getByRole('heading', { name: 'Settings', level: 1 }).waitFor({ timeout: 60_000 });
 }
 
+/** The `prefs` document's values in a library, by key, as `{ value, at }` entries. */
+const prefValues = (library) =>
+  library.rows.find((r) => r.row?.kind === 'set' && r.row.name === 'prefs')?.row.values ?? {};
+
+/**
+ * The Owner after the split: Settings shows the preferences the Owner library holds (the profile partition's keys) next
+ * to the household's own, and a change lands in the library its key belongs to, never in the other one.
+ */
+async function checkOwnerPreferences(page, edge, wire, keyText, ownerKey) {
+  // A control that is not there reads as '?', so a failure names what is missing.
+  const read = (read) => read().catch(() => '?');
+  const shown = async () => ({
+    subtitle: await read(() =>
+      page.locator('#subtitle-language select').inputValue({ timeout: 500 }),
+    ),
+    autoSkip: await read(() => page.locator('#auto-skip input').isChecked({ timeout: 500 })),
+    hiddenLanguages: await read(async () =>
+      (await page.locator('#hidden-languages .value').innerText({ timeout: 500 })).trim(),
+    ),
+    minYear: await read(() => page.locator('#minimum-year select').inputValue({ timeout: 500 })),
+    audio: await read(() => page.locator('#audio-language select').inputValue({ timeout: 500 })),
+    region: await read(() => page.locator('#region select').inputValue({ timeout: 500 })),
+  });
+  const wanted = {
+    subtitle: 'fi',
+    autoSkip: true,
+    hiddenLanguages: '2',
+    minYear: '1990',
+    audio: 'sv',
+    region: 'FI',
+  };
+  let seen = null;
+  for (let i = 0; i < 40; i += 1) {
+    seen = await shown().catch(() => null);
+    if (seen && JSON.stringify(seen) === JSON.stringify(wanted)) break;
+    await sleep(500);
+  }
+  check(
+    'Owner Settings shows the seeded preferences, not defaults',
+    JSON.stringify(seen) === JSON.stringify(wanted),
+    JSON.stringify(seen),
+  );
+
+  // One key of each half: the subtitle language is the Owner's, the watch region the household's.
+  await page.locator('#subtitle-language select').selectOption('de');
+  let owner;
+  let household;
+  for (let i = 0; i < 30; i += 1) {
+    owner = prefValues(await readLibrary(edge, wire, ownerKey));
+    household = prefValues(await readLibrary(edge, wire, keyText));
+    if (owner['den.preferredSubtitleLanguage']?.value?.string === 'de') break;
+    await sleep(500);
+  }
+  const subtitleOf = (values) => values['den.preferredSubtitleLanguage']?.value?.string;
+  check(
+    'a changed profile preference persists in the Owner library',
+    subtitleOf(owner) === 'de',
+    `Owner library holds ${JSON.stringify(subtitleOf(owner))}`,
+  );
+  check(
+    'a changed profile preference is not written to the household',
+    subtitleOf(household) === undefined,
+    `household holds ${JSON.stringify(subtitleOf(household))}`,
+  );
+  // "Automatic" clears the region: the household row then holds a newer null for it.
+  await page.locator('#region select').selectOption('');
+  const regionOf = (values) => values['den.watchRegion'];
+  for (let i = 0; i < 20 && regionOf(household)?.value !== null; i += 1) {
+    await sleep(500);
+    household = prefValues(await readLibrary(edge, wire, keyText));
+    owner = prefValues(await readLibrary(edge, wire, ownerKey));
+  }
+  check(
+    'a changed household preference persists in the household, not the Owner library',
+    regionOf(household)?.value === null && regionOf(owner) === undefined,
+    `household ${JSON.stringify(regionOf(household)?.value)}, Owner library ${JSON.stringify(regionOf(owner))}`,
+  );
+}
+
 async function seedLink(ctx, edge, keyText) {
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   await page.goto(`${edge.origin}/`);
@@ -570,6 +649,8 @@ async function main() {
         !!state && state.trigger && !state.modal,
         JSON.stringify(state),
       );
+      if (path === '/settings' && !DATA)
+        await checkOwnerPreferences(ownerPage, edge, wire, keyText, ownerKey);
       await ctx.close().catch(() => {});
     }
 

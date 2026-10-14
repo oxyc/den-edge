@@ -24,6 +24,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
+  import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
   import Button from './components/Button.svelte';
 
@@ -37,9 +38,16 @@
     onresetkey,
     heldReset = false,
     onadoptheld,
+    preferences = null,
   }: {
     link: Link | null;
     model: LibraryModel;
+    /**
+     * The active profile's own preferences. Once the household has split, `model` is the household's control log, which
+     * holds only the household half (region, services, maturity ceiling); everything personal is in the profile's
+     * library, so it is read from and written to here. Null while the household has no profiles.
+     */
+    preferences?: ProfilePreferences | null;
     content: ContentServiceClientPort;
     local?: boolean;
     onjoin?: (libraryKey: string) => Promise<boolean>;
@@ -62,7 +70,8 @@
   const recoveryView = $derived(
     recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
   );
-  const ready = $derived(!!settings && !!connections);
+  const effectivePreferences = $derived(preferences ? preferences.value : settings?.preferences);
+  const ready = $derived(!!settings && !!effectivePreferences && !!connections);
   const loadError = $derived(model.settings.error ?? connectionsLease.snapshot.error);
   let retrying = $state(false);
   let failure = $state<string | null>(null);
@@ -78,7 +87,7 @@
     })
     .catch(() => undefined);
 
-  const prefs = $derived(settings ? structuredClone(settings.preferences) : undefined);
+  const prefs = $derived(effectivePreferences ? structuredClone(effectivePreferences) : undefined);
   // Undefined means the encrypted Settings view is still opening. It is never presented as an empty plugin list.
   const plugins = $derived(connections ? structuredClone(connections.plugins) : undefined);
   const pluginUrls = $derived(plugins?.map((plugin) => plugin.manifestUrl) ?? []);
@@ -103,7 +112,22 @@
     }
   }
 
-  const savePrefs = (changes: PreferenceChanges) => void run(() => model.patchPreferences(changes));
+  async function patchPreferences(changes: PreferenceChanges): Promise<void> {
+    if (!preferences) {
+      await model.patchPreferences(changes);
+      return;
+    }
+    // The household's half stays on the control log; the profile's library takes the rest, and the household's write
+    // guard would drop a personal key sent there.
+    const { watchRegion, services, maturityCeiling, ...personal } = changes;
+    const household: PreferenceChanges = {};
+    if ('watchRegion' in changes) household.watchRegion = watchRegion;
+    if ('services' in changes) household.services = services;
+    if ('maturityCeiling' in changes) household.maturityCeiling = maturityCeiling;
+    if (Object.keys(household).length) await model.patchPreferences(household);
+    if (Object.keys(personal).length) await preferences.patch(personal);
+  }
+  const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
   const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own

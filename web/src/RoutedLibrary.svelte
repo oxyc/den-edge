@@ -941,6 +941,7 @@
                 <SettingsScreen.current
                   {link}
                   model={householdSettingsModel}
+                  preferences={session.preferences}
                   content={session.content}
                   local={session.local}
                   onjoin={joinLibrary}
