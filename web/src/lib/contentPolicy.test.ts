@@ -139,10 +139,10 @@ describe('policedAtlasFetch', () => {
     );
   });
 
-  it('asks a title’s own record by age policy only, never the Kid audience gate', async () => {
+  it('asks a title’s own record with the Kid’s band, which atlas needs to answer its eligibility', async () => {
     const [url] = await run({ ...kid, region: 'FI' }, '/index/title/movie/603.json');
     expect(url).toBe(
-      '/atlas/index/title/movie/603.json?maximumAge=12&unknownRatings=block&region=FI',
+      '/atlas/index/title/movie/603.json?maximumAge=12&unknownRatings=block&region=FI&kidAudience=child-or-teen',
     );
   });
 
