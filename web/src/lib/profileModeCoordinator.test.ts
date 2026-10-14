@@ -978,6 +978,7 @@ describe('ProfileModeCoordinator', () => {
       maximumAge: 12,
       unknownRatings: 'block',
       kidAudience: 'child-or-teen',
+      region: 'FI',
     });
     expect(kidSession.restricted).toBe(true);
     expect(kidSession.policyKey).toBe('12_block_-_child-or-teen');
@@ -992,6 +993,7 @@ describe('ProfileModeCoordinator', () => {
     expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
       maximumAge: 13,
       unknownRatings: 'allow',
+      region: 'FI',
     });
     expect(ownerSession.policyKey).toBe('13_allow_-_-');
     // An Owner ceiling that admits unknown ratings keeps assistants and TMDB surfaces; only fail-closed loses them.

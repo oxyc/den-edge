@@ -164,6 +164,53 @@ describe('the watch region', () => {
     };
     expect(query.mock.calls.map((call) => (call as unknown[])[2])).toEqual([sent, sent]);
   });
+
+  it('is the household’s for Kid and Owner alike, never the Kid’s own setting', async () => {
+    const query = vi.fn(async () => ({ kind: 'collection', titles: [] }));
+    const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
+    const model = {
+      ready: Promise.resolve(),
+      settings: {
+        connection: 'ready',
+        value: { kind: 'settings', preferences: { watchRegion: 'se', services: [] } },
+      },
+    } as unknown as LibraryModel;
+    const household = new HouseholdSession(
+      { kind: 'legacy', libraryKey: 'household', configurationOnly: false },
+      model,
+      content,
+    );
+    // The Kid's own projection names another region (and the Owner's names none): neither is consulted.
+    const own = (watchRegion?: string) =>
+      ({
+        settings: {
+          connection: 'ready',
+          value: { kind: 'settings', preferences: { watchRegion, services: [] } },
+        },
+      }) as unknown as typeof household.policy;
+    const open = (kid: boolean, policy: typeof household.policy) =>
+      new ProfileSession(
+        persistentProfileIdentity((kid ? 'b' : 'c').repeat(32), 'key'),
+        household,
+        null,
+        false,
+        !kid,
+        policy,
+        null,
+        kid
+          ? { maximumAge: 12, unknownRatings: 'block' }
+          : { maximumAge: 13, unknownRatings: 'allow' },
+        null,
+        null,
+        !kid,
+        kid,
+      );
+    await open(true, own('us')).content.query({ kind: 'collection', id: 1 });
+    await open(false, own(undefined)).content.query({ kind: 'collection', id: 1 });
+    expect(
+      query.mock.calls.map((call) => ((call as unknown[])[2] as { region?: string }).region),
+    ).toEqual(['SE', 'SE']);
+  });
 });
 
 describe('the content protocol carries the policy', () => {

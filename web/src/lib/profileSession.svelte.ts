@@ -89,7 +89,9 @@ export class ProfileSession {
         ]);
         clearTimeout(timer);
       }
-      return this.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
+      // Household-scoped (den#234): every profile reads it from the household control log, never from its own
+      // settings, so a Kid latches the same region as Owner.
+      return this.household.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
     })());
   }
 
