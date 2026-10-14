@@ -52,6 +52,8 @@ const META_BYTES: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata-
 /// One opaque, attempt-scoped exclusive operation owner. The generic store primitive deliberately knows
 /// nothing about profiles or household rows so a future authenticated compound reset can reuse it.
 const EXCLUSIVE_OPERATION_LOCK: &str = "exclusive-operation-lock";
+/// Present in a library that was started as a visitor's. Written by the transaction of its first commit.
+const VISITOR_MARK: &str = "visitor";
 type Credentials = ([u8; 32], Option<[u8; 32]>);
 
 /// What one live row of a v3 library counts against `Limits::stored_bytes`: the bytes its client stored, key and
@@ -263,17 +265,46 @@ struct PreparedPage {
     page: ChunkPage,
 }
 
+/// The visitor tier (`NEW_LIBRARIES=visitors`): the smaller caps a visitor library is held to, and whether a write
+/// that starts a library makes it one. The mark is written in the transaction of the library's first commit, so a
+/// library never exists without its tier: a crash leaves either nothing or a library that is marked.
+#[derive(Clone, Copy)]
+pub(super) struct VisitorTier {
+    pub mark: bool,
+    pub live_cap: usize,
+    pub max_rows: usize,
+}
+
+impl VisitorTier {
+    /// No visitor limits and no mark: how every library outside `NEW_LIBRARIES=visitors` is written.
+    #[cfg(test)]
+    pub const NONE: Self = Self { mark: false, live_cap: usize::MAX, max_rows: usize::MAX };
+}
+
 pub(super) trait LibraryStore: Send + Sync {
     #[cfg(test)]
     fn apply(&self, writes: &[Write]) -> Result<BatchResult, StoreError> {
         self.apply_bounded(writes, 8 << 20, 2)
     }
+    #[cfg(test)]
     fn apply_bounded(
         &self,
         writes: &[Write],
         live_cap: usize,
         wire_min: u64,
+    ) -> Result<BatchResult, StoreError> {
+        self.apply_tiered(writes, live_cap, wire_min, VisitorTier::NONE)
+    }
+    fn apply_tiered(
+        &self,
+        writes: &[Write],
+        live_cap: usize,
+        wire_min: u64,
+        tier: VisitorTier,
     ) -> Result<BatchResult, StoreError>;
+    /// Whether the library was started as a visitor's: the tier its first commit recorded. A library with no
+    /// mark, which is every library that predates the tier, is a member's.
+    fn visitor(&self) -> Result<bool, StoreError>;
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError>;
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
@@ -750,11 +781,20 @@ impl RedbLibrary {
 }
 
 impl LibraryStore for RedbLibrary {
-    fn apply_bounded(
+    fn visitor(&self) -> Result<bool, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+        let marked = numbers.get(VISITOR_MARK).map_err(StoreError::redb)?.is_some();
+        Ok(marked)
+    }
+
+    fn apply_tiered(
         &self,
         writes: &[Write],
         live_cap: usize,
         wire_min: u64,
+        tier: VisitorTier,
     ) -> Result<BatchResult, StoreError> {
         let mut unique = HashSet::with_capacity(writes.len());
         if writes.len() > MAX_WRITES
@@ -796,6 +836,18 @@ impl LibraryStore for RedbLibrary {
         if writes.iter().any(|write| !value_fits(&write.value, effective_min)) {
             return Err(StoreError::TooLarge);
         }
+        // Read in the same transaction as the rows it limits, so the tier a batch is held to is the tier on disk.
+        let marked = {
+            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let marked = metadata.get(VISITOR_MARK).map_err(StoreError::redb)?.is_some();
+            marked
+        };
+        let visitor = marked || (started_empty && tier.mark);
+        let (live_cap, max_rows) = if visitor {
+            (live_cap.min(tier.live_cap), MAX_ROWS.min(tier.max_rows))
+        } else {
+            (live_cap, MAX_ROWS)
+        };
         let live_rows = {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
             keys.len().map_err(StoreError::redb)?
@@ -844,7 +896,7 @@ impl LibraryStore for RedbLibrary {
                 accepted.push((write, current_sequence, head, fragment, charge));
             }
         }
-        if live_rows + accepted_new_rows > MAX_ROWS as u64
+        if live_rows + accepted_new_rows > max_rows as u64
             || live_bytes > u64::try_from(live_cap).map_err(|_| StoreError::Full)?
         {
             return Err(StoreError::Full);
@@ -868,6 +920,9 @@ impl LibraryStore for RedbLibrary {
             metadata.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
             if started_empty && !accepted.is_empty() {
                 metadata.insert("wire-min", effective_min).map_err(StoreError::redb)?;
+                if tier.mark {
+                    metadata.insert(VISITOR_MARK, 1).map_err(StoreError::redb)?;
+                }
             }
             if !accepted.is_empty() {
                 let generation = metadata
@@ -1783,15 +1838,20 @@ impl Drop for StoreLease {
 }
 
 impl LibraryStore for StoreLease {
-    fn apply_bounded(
+    fn apply_tiered(
         &self,
         writes: &[Write],
         live_cap: usize,
         wire_min: u64,
+        tier: VisitorTier,
     ) -> Result<BatchResult, StoreError> {
-        let result = self.store.apply_bounded(writes, live_cap, wire_min)?;
+        let result = self.store.apply_tiered(writes, live_cap, wire_min, tier)?;
         self.index.record(&self.id, &self.store.protocol()?)?;
         Ok(result)
+    }
+
+    fn visitor(&self) -> Result<bool, StoreError> {
+        self.store.visitor()
     }
 
     #[cfg(test)]

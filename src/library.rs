@@ -54,6 +54,8 @@ pub(crate) mod reset_lock;
 pub(crate) mod v3;
 #[cfg(test)]
 mod v3_model;
+#[cfg(test)]
+mod visitor_tests;
 
 const NS: &str = "lib";
 const EXT: &str = "log";
@@ -178,11 +180,17 @@ fn read_error(e: io::Error) -> Response {
 /// (`MEMBER_HEADER`), which is what a TV moving its library to a new key does, so a stranger reaching the public
 /// device API can't use the relay as storage (den #8), or a live guest grant that reserved this very library once
 /// (`grants::reserved_for`, den-edge#390). `Open`, the default, lets any first write start one.
+///
+/// `Visitors` lets anyone start one, as a visitor's: a library whose first write carries no proof of a library that
+/// is not a visitor's (and is not the one a grant reserved) is marked as a visitor's in that write's own transaction.
+/// A visitor's library keeps what its household writes, within smaller caps and per-address and daily limits on
+/// how many may be started, and is never a member for what is private to a household: `is_household_member`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewLibraries {
     #[default]
     Open,
     Members,
+    Visitors,
 }
 
 impl NewLibraries {
@@ -190,6 +198,7 @@ impl NewLibraries {
         match value.trim() {
             "open" => Some(Self::Open),
             "members" => Some(Self::Members),
+            "visitors" => Some(Self::Visitors),
             _ => None,
         }
     }
@@ -198,8 +207,30 @@ impl NewLibraries {
         match self {
             Self::Open => "open",
             Self::Members => "members",
+            Self::Visitors => "visitors",
         }
     }
+
+    /// Whether holding a library proves anything about the household: a stranger cannot start one that passes
+    /// `is_household_member`. Only then is a member proof a gate for what is private to the household.
+    pub fn gates_households(self) -> bool {
+        matches!(self, Self::Members | Self::Visitors)
+    }
+}
+
+/// What a visitor-tier library is held to under `NEW_LIBRARIES=visitors`, and how many may be started.
+pub const VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX: u32 = 24;
+pub const VISITOR_LIBRARIES_DAILY_MAX: u32 = 1000;
+pub const VISITOR_LIBRARY_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const VISITOR_LIBRARY_MAX_ROWS: usize = 20_000;
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Today's count of visitor libraries started, which `VISITOR_LIBRARIES_DAILY_MAX` ends. A UTC day.
+#[derive(Default)]
+pub struct VisitorDay {
+    day: u64,
+    started: u32,
+    said: bool,
 }
 
 struct Library {
@@ -909,13 +940,25 @@ async fn rewrite_rows(
         stage.rows.retain(|existing| existing.k != row.k);
         stage.rows.push(row);
     }
-    if stage.rows.len() > MAX_ROWS {
+    let visitor = match library_is_visitor(state, id).await {
+        Ok(visitor) => visitor,
+        Err(reason) => return read_error(reason),
+    };
+    let (max_rows, max_bytes) = if visitor {
+        (
+            MAX_ROWS.min(state.visitor_library_max_rows),
+            state.library_limits.stored_bytes.min(state.visitor_library_max_bytes),
+        )
+    } else {
+        (MAX_ROWS, state.library_limits.stored_bytes)
+    };
+    if stage.rows.len() > max_rows {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
     }
     // The same stored-byte charge the commit applies, so a staging that is accepted here also commits.
     let charged =
         stage.rows.iter().try_fold(0u64, |total, row| total.checked_add(v3::stored_charge(&row.k, &row.v)));
-    if charged.is_none_or(|bytes| bytes > state.library_limits.stored_bytes as u64) {
+    if charged.is_none_or(|bytes| bytes > max_bytes as u64) {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
     }
     stage.touched = state.now();
@@ -965,7 +1008,19 @@ async fn rewrite_commit(
     }
     let rows: Vec<_> =
         stage.rows.iter().map(|row| v3::RewriteRow { key: row.k.clone(), value: row.v.clone() }).collect();
-    let live_cap = state.library_limits.stored_bytes;
+    let visitor = {
+        let tier_store = Arc::clone(&store);
+        match tokio::task::spawn_blocking(move || tier_store.visitor()).await {
+            Ok(Ok(visitor)) => visitor,
+            Ok(Err(reason)) => return read_error(v3_io(reason)),
+            Err(reason) => return internal("rewrite commit task", io::Error::other(reason)),
+        }
+    };
+    let live_cap = if visitor {
+        state.library_limits.stored_bytes.min(state.visitor_library_max_bytes)
+    } else {
+        state.library_limits.stored_bytes
+    };
     let write_store = Arc::clone(&store);
     match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap, None))
         .await
@@ -1556,6 +1611,23 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         }
     }
     let new_library = !selected_v3 && library.is_none();
+    // Under `visitors` a library whose file exists but whose first commit never landed (a refused first write)
+    // is still being started: it has no tier yet, so it is decided now rather than left to fail open as a member's.
+    let starting = new_library
+        || (state.new_libraries == NewLibraries::Visitors
+            && selected_v3
+            && match protocol_for(state, id).await {
+                Ok(protocol) => protocol.is_some_and(|protocol| protocol.head == 0),
+                Err(error) => return read_error(error),
+            });
+    let part_of_a_reset = if starting {
+        match is_part_of_a_reset(state, id, member.as_deref()).await {
+            Ok(part) => part,
+            Err(error) => return read_error(error),
+        }
+    } else {
+        false
+    };
     let mut first_min = requested_min.unwrap_or(2);
     if new_library {
         match member_wire_minimum(state, id, member.as_deref()).await {
@@ -1592,15 +1664,8 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         }
         // A key reset starts one successor per live library at once. A successor its own household's live lock
         // declared, started by a holder of that household, is the reset's work and not counted against the address.
-        let part_of_a_reset = match member.as_deref().and_then(|m| m.split_once(':')) {
-            Some((household, _)) => match holds_another(state, id, member.as_deref()).await {
-                Ok(true) => reset_lock::declared_successor(state, household, id).await,
-                Ok(false) => false,
-                Err(e) => return read_error(e),
-            },
-            None => false,
-        };
-        if !part_of_a_reset {
+        // (`visitors` counts every start itself, below, with the tier it decided.)
+        if !part_of_a_reset && state.new_libraries != NewLibraries::Visitors {
             if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
                 return crate::handler::retry_after(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -1608,6 +1673,13 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
                     wait,
                 );
             }
+        }
+    }
+    let mut mark_visitor = false;
+    if starting && state.new_libraries == NewLibraries::Visitors {
+        match start_under_visitors(state, id, &token_hash, member.as_deref(), &ip, part_of_a_reset).await {
+            Ok(visitor) => mark_visitor = visitor,
+            Err(refused) => return *refused,
         }
     }
     let store = match v3_store(state, id, token_hash, &slot, &mut library, true).await {
@@ -1629,27 +1701,33 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     let live_cap = state.library_limits.stored_bytes;
     let applied_min = if was_empty { first_min } else { 2 };
     let write_store = Arc::clone(&store);
-    let result =
-        match tokio::task::spawn_blocking(move || write_store.apply_bounded(&writes, live_cap, applied_min))
-            .await
-        {
-            Ok(Ok(result)) => result,
-            Ok(Err(v3::StoreError::Full)) => {
-                return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
-            }
-            Ok(Err(v3::StoreError::Forbidden)) => {
-                return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-            }
-            // The answer a v3 client has always had for an oversized value, and one it refuses for good.
-            Ok(Err(v3::StoreError::TooLarge)) => {
-                return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
-            }
-            Ok(Err(v3::StoreError::Locked)) => {
-                return json_reply(StatusCode::CONFLICT, &error("migration_in_progress"));
-            }
-            Ok(Err(error)) => return internal("library write", v3_io(error)),
-            Err(error) => return internal("library write task", io::Error::other(error)),
-        };
+    let tier = v3::VisitorTier {
+        mark: mark_visitor,
+        live_cap: state.visitor_library_max_bytes,
+        max_rows: state.visitor_library_max_rows,
+    };
+    let result = match tokio::task::spawn_blocking(move || {
+        write_store.apply_tiered(&writes, live_cap, applied_min, tier)
+    })
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(v3::StoreError::Full)) => {
+            return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+        }
+        Ok(Err(v3::StoreError::Forbidden)) => {
+            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+        }
+        // The answer a v3 client has always had for an oversized value, and one it refuses for good.
+        Ok(Err(v3::StoreError::TooLarge)) => {
+            return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+        }
+        Ok(Err(v3::StoreError::Locked)) => {
+            return json_reply(StatusCode::CONFLICT, &error("migration_in_progress"));
+        }
+        Ok(Err(error)) => return internal("library write", v3_io(error)),
+        Err(error) => return internal("library write task", io::Error::other(error)),
+    };
     let protocol_store = Arc::clone(&store);
     let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
         Ok(Ok(protocol)) => protocol,
@@ -2003,6 +2081,146 @@ async fn holds_another(state: &AppState, id: &str, member: Option<&str>) -> io::
     Ok(header_of(state, &slot, other).await?.is_some_and(|(token_hash, member_hash)| {
         constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
     }))
+}
+
+/// Whether library `id` was started as a visitor's. A library with no v3 database is a member's.
+async fn library_is_visitor(state: &AppState, id: &str) -> io::Result<bool> {
+    let manager = Arc::clone(&state.library_v3);
+    let id = id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Some((token, _)) = manager.credentials(&id).map_err(v3_io)? else { return Ok(false) };
+        manager.existing_library(&id, token).map_err(v3_io)?.visitor().map_err(v3_io)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// `is_member`, and the library is not a visitor's. What is private to a household — the scout and remux relay,
+/// guest grants, assistant connections, the household's provider keys and its larger budgets — asks this, never
+/// `is_member`: under `NEW_LIBRARIES=visitors` anyone may hold a library, and holding one must not reach them.
+/// `is_member` itself stays what it was, for what a visitor's household needs too: its recovery codes, and the proof
+/// that starts the libraries of its profiles. A library whose tier cannot be read is not a household's.
+pub async fn is_household_member(state: &AppState, member: Option<&str>) -> bool {
+    if !is_member(state, member).await {
+        return false;
+    }
+    let Some((id, _)) = member.and_then(|m| m.split_once(':')) else { return false };
+    match library_is_visitor(state, id).await {
+        Ok(visitor) => !visitor,
+        Err(e) => {
+            eprintln!("library tier check: {e}");
+            false
+        }
+    }
+}
+
+/// A successor a key reset's live lock declared, started by a holder of that household: the reset's work.
+async fn is_part_of_a_reset(state: &AppState, id: &str, member: Option<&str>) -> io::Result<bool> {
+    let Some((household, _)) = member.and_then(|m| m.split_once(':')) else { return Ok(false) };
+    if holds_another(state, id, member).await? {
+        Ok(reset_lock::declared_successor(state, household, id).await)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Take one from today's visitor-library allowance, or the wait until the UTC day ends. Announced once a day.
+fn spend_visitor_day(state: &AppState) -> Result<(), u64> {
+    let now = state.now();
+    let day = now / DAY_MS;
+    let max = state.visitor_libraries_daily_max;
+    let mut today = crate::lock(&state.visitor_day);
+    if today.day != day {
+        *today = VisitorDay { day, started: 0, said: false };
+    }
+    if today.started >= max {
+        if !today.said {
+            today.said = true;
+            eprintln!(
+                "visitor libraries: today's {max} are started — new ones answer 503 until UTC midnight. Libraries that exist keep working."
+            );
+        }
+        return Err(DAY_MS - now % DAY_MS);
+    }
+    today.started += 1;
+    Ok(())
+}
+
+/// Visitor libraries started so far today, as a gauge.
+pub fn visitor_metrics(state: &AppState) -> String {
+    let today = crate::lock(&state.visitor_day);
+    let started = if today.day == state.now() / DAY_MS { today.started } else { 0 };
+    format!(
+        "# HELP den_edge_visitor_libraries_today Visitor-tier libraries started this UTC day.\n\
+         # TYPE den_edge_visitor_libraries_today gauge\n\
+         den_edge_visitor_libraries_today {started}\n"
+    )
+}
+
+/// The tier of a library being started under `NEW_LIBRARIES=visitors`, and the limits on starting it. `Ok(true)`: a
+/// visitor's, to be marked by the transaction of its first commit. `Ok(false)`: a member's.
+///
+/// A proof of a library that is not a visitor's starts a member's, so does the library a live guest grant reserved;
+/// anything else, including a proof of a visitor's library, starts a visitor's, which is how a visitor household's
+/// profile libraries inherit its tier. Starting is counted per address a minute (as in every mode), per address a
+/// day and over the whole day, in that order, so an address spends nothing of the day's allowance once it is over its
+/// own. A reset's successors are the reset's work and uncounted. Refused here, before the library has a file.
+async fn start_under_visitors(
+    state: &AppState,
+    id: &str,
+    token_hash: &[u8; 32],
+    member: Option<&str>,
+    ip: &str,
+    part_of_a_reset: bool,
+) -> Result<bool, Box<Response>> {
+    let read = |e| Box::new(read_error(e));
+    let mut visitor = true;
+    if holds_another(state, id, member).await.map_err(read)? {
+        let (other, _) = member.and_then(|m| m.split_once(':')).expect("a held proof names its library");
+        visitor = library_is_visitor(state, other).await.map_err(read)?;
+    }
+    if visitor && crate::grants::reserved_for(state, id, token_hash).await.map_err(read)? {
+        visitor = false;
+    }
+    let tier = if visitor { "visitor" } else { "member" };
+    if !part_of_a_reset {
+        let refuse = |outcome: &'static str, response: Response| {
+            state.metrics.record_library_creation(tier, outcome);
+            Box::new(response)
+        };
+        if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
+            return Err(refuse(
+                "rate_limited",
+                crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait),
+            ));
+        }
+        if visitor {
+            if let Some(wait) = crate::link::throttled_per_window(
+                state,
+                &format!("lib-new-day:{ip}"),
+                state.visitor_libraries_per_address_daily,
+                1,
+                DAY_MS,
+            ) {
+                return Err(refuse(
+                    "address_day",
+                    crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait),
+                ));
+            }
+            if let Err(wait) = spend_visitor_day(state) {
+                return Err(refuse(
+                    "day_cap",
+                    crate::handler::retry_after(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &error("visitor_libraries_full"),
+                        wait,
+                    ),
+                ));
+            }
+        }
+    }
+    state.metrics.record_library_creation(tier, "created");
+    Ok(visitor)
 }
 
 async fn member_wire_minimum(state: &AppState, id: &str, member: Option<&str>) -> io::Result<Option<u64>> {

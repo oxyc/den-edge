@@ -904,7 +904,7 @@ fn proofs(req: &Request) -> (Option<String>, Option<String>) {
 /// as a guest's.
 async fn who(state: &AppState, (member, grant): (Option<String>, Option<String>)) -> Option<Who> {
     if let Some(claim) = member {
-        if crate::library::is_member(state, Some(&claim)).await {
+        if crate::library::is_household_member(state, Some(&claim)).await {
             let (library, token) = claim.split_once(':')?;
             return Some(Who::Member { library: library.to_owned(), member_hash: sha(token.as_bytes()) });
         }
