@@ -1,8 +1,25 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { secretHash } from './grants';
 
 const GID = 'a1b2c3d4';
 let kept: Map<string, string>;
+
+// The first dynamic import waits on the vite server to transform the Svelte-rune modules (the worker is idle, not
+// computing) and later `vi.resetModules()` imports reuse that work. That wait is the one slow step in this file and
+// is shared across every worker asking the same server, so it is paid in a hook instead of inside the first test.
+beforeAll(async () => {
+  stubStorage();
+  await import('./guestLibrary');
+  await import('./grants.svelte');
+  await import('./links.svelte');
+  await import('./wire');
+  vi.unstubAllGlobals();
+});
+
+function stubStorage() {
+  vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  vi.stubGlobal('location', { href: 'https://den.example/', origin: 'https://den.example' });
+}
 
 beforeEach(() => {
   kept = new Map();

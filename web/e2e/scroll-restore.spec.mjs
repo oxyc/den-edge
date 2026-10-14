@@ -177,7 +177,14 @@ async function browseRestores(browser, start = '/') {
   await setup(page, start);
   await page.goto(`${E2E_ORIGIN}/test/title-scroll.html`);
   const rows = active(page).locator('section.row');
-  await expect(rows.nth(4)).toBeAttached();
+  // The page mounts two rows and adds the rest when its bottom nears the screen or the browser idles, which a busy
+  // runner can defer past any fixed wait. Scrolling to the end is the signal that adds them, so do that.
+  await expect(async () => {
+    await page.evaluate(() =>
+      scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' }),
+    );
+    await expect(rows.nth(4)).toBeAttached({ timeout: 1000 });
+  }).toPass();
   const name = await rows.nth(4).getAttribute('aria-label');
   await backRestoresRow(page, name);
   await page.close();
