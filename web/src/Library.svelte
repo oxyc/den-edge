@@ -1386,8 +1386,8 @@
           )
         : null;
     const kept =
-      ranked && keepsBillboard()
-        ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+      model && memberPost && keepsBillboard()
+        ? model.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
             (saved) =>
               saved?.kind === 'personal'
                 ? (displayableKept({
