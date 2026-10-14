@@ -1,11 +1,12 @@
 // `npm run rehearse:household`: a browser with no TV gets its own profile household (den#295), end to end. The real
-// den-edge binary serves the built web app with profiles on and `NEW_LIBRARIES=open`; real Den Web in real Chromium
-// browses, keeps a title, reloads, switches to Kid, and is killed halfway through making its household. What
-// den-edge holds is read over HTTP and decrypted with the app's own code after each step. Title data is a fixture
-// answered in the browser; every library request goes to den-edge.
+// den-edge binary serves the built web app with profiles on and `NEW_LIBRARIES=visitors`, the mode that advertises
+// households for browsers; real Den Web in real Chromium browses, keeps a title, reloads, switches to Kid, chooses Kid
+// before keeping anything, and is killed halfway through making its household. Under `members` it must send no
+// creation request at all. What den-edge holds is read over HTTP and decrypted with the app's own code after each
+// step. Title data is a fixture answered in the browser; every library request goes to den-edge.
 //
 // Needs `cargo build --locked` (or DEN_EDGE_BIN) and `npm run build` first. REHEARSE_DIST serves another build of the
-// web app, REHEARSE_NEW_LIBRARIES another den-edge creation mode (`visitors`).
+// web app.
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -66,7 +67,7 @@ const freePort = () =>
     });
   });
 
-async function startEdge(dataDir) {
+async function startEdge(dataDir, newLibraries = 'visitors') {
   const port = await freePort();
   const log = [];
   const child = spawn(BINARY, [], {
@@ -77,7 +78,7 @@ async function startEdge(dataDir) {
       WEB_DIR: DIST,
       WEB_HOSTS: '127.0.0.1',
       PROFILES_HOSTS: '127.0.0.1',
-      NEW_LIBRARIES: process.env.REHEARSE_NEW_LIBRARIES ?? 'open',
+      NEW_LIBRARIES: newLibraries,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -179,6 +180,11 @@ async function launch(profileDir) {
   };
   ctx.pages().forEach(watch);
   ctx.on('page', watch);
+  // What the app itself reports as a page failure, so a failed check is explained.
+  await ctx.route('**/playback/page-error', (route) => {
+    browserLog.push(`[page-error] ${route.request().postData()}`);
+    return route.continue();
+  });
   // Title data is the fixture's; den-edge holds no TMDB key here. Library requests are not routed.
   await ctx.route('**/tmdb/3/**', (route) => route.fulfill({ json: movie }));
   await ctx.route('https://image.tmdb.org/**', (route) =>
@@ -249,6 +255,14 @@ async function switcherShowsAll(page) {
   return false;
 }
 
+async function closeSwitcher(page) {
+  await page
+    .locator('dialog[open]')
+    .getByRole('button', { name: 'Done' })
+    .click({ timeout: 5_000 })
+    .catch(() => {});
+}
+
 /** Wait until den-edge holds household `key` with a directory naming an Owner and a Kid, or give up. */
 async function householdWithKid(edge, wire, key, limitMs = 60_000) {
   const started = Date.now();
@@ -277,7 +291,7 @@ const activity = (rows) =>
   );
 
 /** What den-edge holds for this browser's household, checked against the shape a committed split stores. */
-async function checkHousehold(label, edge, wire, kept) {
+async function checkHousehold(label, edge, wire, kept, { title = true } = {}) {
   const household = await householdWithKid(edge, wire, kept.householdKey);
   check(
     `${label}: den-edge holds the household at wire minimum 5`,
@@ -316,8 +330,10 @@ async function checkHousehold(label, edge, wire, kept) {
   );
   const ownerLibrary = await readLibrary(edge, wire, kept.ownerKey);
   check(
-    `${label}: the Owner library holds the kept title`,
-    ownerLibrary.status === 200 && watchlisted(ownerLibrary.rows),
+    title
+      ? `${label}: the Owner library holds the kept title`
+      : `${label}: the Owner library exists, with nothing kept yet`,
+    ownerLibrary.status === 200 && watchlisted(ownerLibrary.rows) === title,
     `status ${ownerLibrary.status}, rows ${JSON.stringify(ownerLibrary.rows).slice(0, 600)}`,
   );
   check(
@@ -352,6 +368,22 @@ async function main() {
     await quiet(edge, 3000);
     const browsing = libraryWrites(edge, mark);
     check('browsing writes nothing to den-edge', browsing.length === 0, browsing.join(' | '));
+    check(
+      'the switcher shows Owner, Kid and Visitor on the first visit, before anything is kept',
+      await switcherShowsAll(page),
+    );
+    check(
+      'and the page is the Owner',
+      (
+        (await page
+          .locator('button.profile-trigger')
+          .first()
+          .getAttribute('aria-label')
+          .catch(() => '')) ?? ''
+      ).includes('current Owner'),
+    );
+    await closeSwitcher(page);
+    check('opening the switcher wrote nothing either', libraryWrites(edge, mark).length === 0);
 
     // 2. The first kept action makes the household.
     step('the first watchlist add');
@@ -381,7 +413,7 @@ async function main() {
           () => '',
         ),
     );
-    await page.keyboard.press('Escape');
+    await closeSwitcher(page);
     await quiet(edge, 2000);
     await ctx.close();
 
@@ -479,7 +511,11 @@ async function main() {
     );
     await ctx.close();
 
-    await killedHalfway(wire);
+    // Each on its own den-edge, and each runs whatever the one before it did.
+    for (const scenario of [killedHalfway, kidFirst, membersSendNothing])
+      await scenario(wire).catch((error) =>
+        check(`${scenario.name} ran to the end`, false, String(error?.stack ?? error)),
+      );
   } finally {
     writeFileSync(join(work, 'den-edge.log'), edge.log.join('\n'));
     writeFileSync(join(work, 'browser.log'), browserLog.join('\n'));
@@ -549,6 +585,84 @@ async function killedHalfway(wire) {
     await ctx.close();
   } finally {
     writeFileSync(join(work, 'den-edge-crash.log'), edge.log.join('\n'));
+    await edge.stop();
+  }
+}
+
+// 6. Kid chosen before anything is kept: the Owner PIN is set twice, the household is made, and the page is the Kid.
+async function kidFirst(wire) {
+  const edge = await startEdge(join(work, 'edge-data-kid'));
+  try {
+    step('Kid chosen before anything is kept');
+    const ctx = await launch(join(work, 'browser-kid'));
+    const page = await firstPage(ctx);
+    await lookAround(page, edge);
+    await openTitle(page, edge);
+    const kept = await plan(page);
+    check('the switcher offers the Kid before the household exists', await switcherShowsAll(page));
+    check('nothing was written to den-edge yet', libraryWrites(edge).length === 0);
+    await page.getByRole('button', { name: 'Use Kids' }).click();
+    await page.getByLabel('New Owner PIN').fill(PIN);
+    await page.getByLabel('Confirm Owner PIN').fill(PIN);
+    const kid = await page
+      .locator('button.profile-trigger[aria-label*="current Kids"]')
+      .first()
+      .waitFor({ timeout: 60_000 })
+      .then(
+        () => true,
+        () => false,
+      );
+    check('choosing Kid made the household and opened the Kid', kid);
+    check('this browser points at its household', (await pointer(page)) === kept?.householdKey);
+    if (kept) {
+      await checkHousehold('after choosing Kid', edge, wire, kept, { title: false });
+      const household = await readLibrary(edge, wire, kept.householdKey);
+      const keysRow = household.rows.find((row) => row.kind === 'set' && row.name === 'keys');
+      check('the Owner PIN chosen then is the household’s', !!keysRow?.values?.parentalPIN?.value);
+    }
+    await page.locator('button.profile-trigger').first().click();
+    await page.getByRole('button', { name: 'Use Owner' }).click();
+    check(
+      'back to the Owner asks for that PIN',
+      await page
+        .locator('#owner-pin')
+        .waitFor({ timeout: 10_000 })
+        .then(
+          () => true,
+          () => false,
+        ),
+    );
+    await ctx.close();
+  } finally {
+    writeFileSync(join(work, 'den-edge-kid.log'), edge.log.join('\n'));
+    await edge.stop();
+  }
+}
+
+// 7. A den-edge that does not advertise households for browsers (`members`): a kept action stays in this browser and
+// no creation request is sent, and there is no switcher.
+async function membersSendNothing() {
+  const edge = await startEdge(join(work, 'edge-data-members'), 'members');
+  try {
+    step('NEW_LIBRARIES=members');
+    const ctx = await launch(join(work, 'browser-members'));
+    const page = await firstPage(ctx);
+    await lookAround(page, edge);
+    await openTitle(page, edge);
+    const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+    await watchlist.click();
+    await quiet(edge, 4000);
+    const sent = edge.log.filter((line) => /^(POST|PUT|DELETE) \/lib\//.test(line));
+    check('a kept action sends no creation request', sent.length === 0, sent.join(' | '));
+    check(
+      'the title is kept in this browser',
+      (await watchlist.getAttribute('aria-pressed')) === 'true',
+    );
+    check('no switcher is offered', (await page.locator('button.profile-trigger').count()) === 0);
+    check('no household is pointed at', (await pointer(page)) === null);
+    await ctx.close();
+  } finally {
+    writeFileSync(join(work, 'den-edge-members.log'), edge.log.join('\n'));
     await edge.stop();
   }
 }
