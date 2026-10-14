@@ -271,7 +271,9 @@ describe('persistent Kid profile Worker lifecycle', () => {
     const h = harness();
     let first: Awaited<ReturnType<typeof h.coordinator.begin>> | undefined;
     let halfwayBytes = 0;
-    for (let index = 0; index < 48; index += 1) {
+    // Each create re-reads and re-validates every settled receipt, so the work grows with the square of the count;
+    // 36 is the smallest even count past the old 32-receipt cap, and the halfway reading is at its midpoint.
+    for (let index = 0; index < 36; index += 1) {
       const receipt = await h.coordinator.begin(
         `${'😀'.repeat(120)}-${index}`,
         '😀'.repeat(64),
@@ -280,7 +282,7 @@ describe('persistent Kid profile Worker lifecycle', () => {
       );
       first ??= receipt;
       await h.coordinator.acknowledge(receipt.receipt);
-      if (index === 23)
+      if (index === 17)
         halfwayBytes = new TextEncoder().encode(
           JSON.stringify(h.vault.values.get('profile-create/v1/state')),
         ).byteLength;
@@ -296,8 +298,10 @@ describe('persistent Kid profile Worker lifecycle', () => {
     await expect(
       h.coordinator.begin(`${'😀'.repeat(120)}-0`, '😀'.repeat(64), 8, stamps),
     ).resolves.toEqual(first);
-    expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledTimes(49);
-  });
+    expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledTimes(37);
+    // ~0.55 s of CPU on an idle machine, nearly all of it den-core's WASM validating the growing envelope and
+    // directory on every create; the default 5 s is then under 10x headroom, which a busy runner removes.
+  }, 20_000);
 
   it('fails closed when a settled replay no longer has an authoritative directory mapping', async () => {
     const h = harness();

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import fixture from '../vendor/den-core/profiles-v1.json';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
@@ -40,9 +40,35 @@ function keyOf(byte: number): string {
   return btoa(String.fromCharCode(...new Uint8Array(32).fill(byte)));
 }
 
-async function idOf(key: string): Promise<string> {
-  const raw = Uint8Array.from(atob(key), (character) => character.charCodeAt(0));
-  return (await deriveKeys(raw)).id;
+// A library id is a pure function of its key, and the crash-at-every-step loops resume the executor thousands of
+// times over the same few keys (about 4,800 HKDF round trips through the WebCrypto thread pool in one test, which
+// is idle waiting that stretches several-fold when the whole suite runs at once). The executor's derivation is
+// memoised here; `idOf` below still derives each distinct key independently with the real `deriveKeys`, and every
+// id the executor produces is compared against it.
+vi.mock('./wire', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./wire')>();
+  const memo = new Map<string, Promise<string>>();
+  return {
+    ...actual,
+    deriveLibraryId: (key: Uint8Array<ArrayBuffer>) => {
+      const spelling = String.fromCharCode(...key);
+      let id = memo.get(spelling);
+      if (!id) memo.set(spelling, (id = actual.deriveLibraryId(key.slice())));
+      return id;
+    },
+  };
+});
+
+const ids = new Map<string, Promise<string>>();
+
+function idOf(key: string): Promise<string> {
+  let id = ids.get(key);
+  if (!id) {
+    const raw = Uint8Array.from(atob(key), (character) => character.charCodeAt(0));
+    id = deriveKeys(raw).then((keys) => keys.id);
+    ids.set(key, id);
+  }
+  return id;
 }
 
 /** Owner and two Kids, plus a deleted Kid that must never be moved. */
@@ -510,37 +536,54 @@ describe('compound profile key reset', () => {
     expect(backend.events.indexOf('observe:committed')).toBeLessThan(firstRetire);
   });
 
-  it.each([
-    ['dies right after the record is stored', 'killAfterPersist'],
-    ['dies before the record is stored', 'losePersist'],
-  ] as const)('survives a process that %s, at every durable step', async (_name, mode) => {
-    let steps = 0;
-    for (let n = 1; n < 80; n += 1) {
-      const backend = new FakeBackend();
-      const keys = new Keys();
-      backend[mode] = n;
-      const { status } = await drain(backend, keys, start(backend, keys));
-      if (backend[mode] !== null) break; // n is past the last persist: every step has been covered
-      steps = n;
+  // Every durable step is its own full reset with a death injected there, replayed to completion. They are run in
+  // slices of persist numbers, so each test keeps its own time budget however many steps a reset has and none of
+  // them is long enough for a busy machine to stretch past the default.
+  const SLICE = 5;
+  const LAST = 49;
+  it.each(
+    (['killAfterPersist', 'losePersist'] as const).flatMap((mode) =>
+      Array.from(
+        { length: Math.ceil(LAST / SLICE) },
+        (_, slice) => [mode, 1 + slice * SLICE] as const,
+      ),
+    ),
+  )(
+    'survives a process that dies (%s), at every durable step from persist %i',
+    async (mode, from) => {
+      let steps = 0;
+      for (let n = from; n < Math.min(from + SLICE, LAST + 1); n += 1) {
+        const backend = new FakeBackend();
+        const keys = new Keys();
+        backend[mode] = n;
+        const { status } = await drain(backend, keys, start(backend, keys));
+        if (backend[mode] !== null) break; // n is past the last persist: every step has been covered
+        steps = n;
 
-      // A death before the very first record leaves nothing to resume; a new reset starts instead.
-      if (backend.journal === null && !backend.journalCleared) {
-        expect(n).toBe(1);
-        expect(backend.events).toEqual([]);
-        continue;
+        // A death before the very first record leaves nothing to resume; a new reset starts instead.
+        if (backend.journal === null && !backend.journalCleared) {
+          expect(n).toBe(1);
+          expect(backend.events).toEqual([]);
+          continue;
+        }
+        expect(status?.phase, `persist ${n}`).toBe('complete');
+        expect(keys.calls, `persist ${n}`).toBe(4);
+        expect([...backend.retiredProfiles].sort(), `persist ${n}`).toEqual(LIVE);
+        expect(backend.retiredHousehold, `persist ${n}`).toBe(true);
+        expect(backend.intentWasDurable, `persist ${n}`).toBe(true);
+        expect(backend.journalCleared, `persist ${n}`).toBe(true);
+        const first = backend.events.findIndex((e) => e.startsWith('retire:'));
+        expect(backend.events.indexOf('observe:committed'), `persist ${n}`).toBeLessThan(first);
+        expect(backend.events.lastIndexOf('publish'), `persist ${n}`).toBeLessThan(first);
       }
-      expect(status?.phase, `persist ${n}`).toBe('complete');
-      expect(keys.calls, `persist ${n}`).toBe(4);
-      expect([...backend.retiredProfiles].sort(), `persist ${n}`).toEqual(LIVE);
-      expect(backend.retiredHousehold, `persist ${n}`).toBe(true);
-      expect(backend.intentWasDurable, `persist ${n}`).toBe(true);
-      expect(backend.journalCleared, `persist ${n}`).toBe(true);
-      const first = backend.events.findIndex((e) => e.startsWith('retire:'));
-      expect(backend.events.indexOf('observe:committed'), `persist ${n}`).toBeLessThan(first);
-      expect(backend.events.lastIndexOf('publish'), `persist ${n}`).toBeLessThan(first);
-    }
-    expect(steps).toBeGreaterThan(20);
-  });
+      // A reset has well over twenty durable steps, so the third slice is never past the end, and the last slice is
+      // always past it: were a reset ever to outgrow the slices, that slice would find steps to run and fail, and
+      // LAST is what to raise.
+      if (from === 21) expect(steps).toBeGreaterThan(20);
+      if (from + SLICE > LAST)
+        expect(steps, 'a reset has more durable steps than the slices cover').toBe(0);
+    },
+  );
 
   it('settles an ambiguous publish by lookup instead of publishing again', async () => {
     const backend = new FakeBackend({ killAfter: ['publish'] });

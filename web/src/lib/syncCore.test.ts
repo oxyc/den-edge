@@ -63,13 +63,22 @@ describe('shared Rust WASM sync policy', () => {
   // The assistant ops are a module of their own, which the main one refuses as `assistant_module`.
   const assistantOp = (request: Record<string, unknown>) =>
     String(request.op).startsWith('assistant_');
+  // recovery_derive is the one case that is not a few microseconds of policy: the den-spec vector is a real
+  // Argon2id at 64 MiB (the cost is the point of the code, and a weaker vector would not be the contract), about
+  // 0.3 s on an idle machine and memory-bandwidth bound, so it slows far more than the rest when runners share a
+  // machine. It gets a budget sized for that instead of the 5 s default.
+  const kdfOps = new Set(['recovery_derive']);
   for (const test of [...fixtures.cases, ...profileFixtures.cases]) {
-    it(test.name, async () => {
-      const policy = assistantOp(test.request) ? assistantPolicy : syncPolicy;
-      if (assistantOp(test.request)) await ensureAssistantPolicy();
-      if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
-      else expect(policy(test.request)).toEqual(test.ok);
-    });
+    it(
+      test.name,
+      async () => {
+        const policy = assistantOp(test.request) ? assistantPolicy : syncPolicy;
+        if (assistantOp(test.request)) await ensureAssistantPolicy();
+        if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
+        else expect(policy(test.request)).toEqual(test.ok);
+      },
+      kdfOps.has(String(test.request.op)) ? 30_000 : undefined,
+    );
   }
 
   it('fails closed when profile migration planner evidence is missing or malformed', () => {

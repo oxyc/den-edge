@@ -6,7 +6,7 @@ import {
   profilesResetNext,
   profilesRotateLibrary,
 } from './profileMigrationCore';
-import { Clock, compareStamps, deriveKeys, ZERO_STAMP, type Stamp } from './wire';
+import { Clock, compareStamps, deriveLibraryId, ZERO_STAMP, type Stamp } from './wire';
 
 /*
  * Dormant, UI-free executor for profiles-v1 §9: one crash-safe compound key reset that rotates the household and
@@ -1009,7 +1009,7 @@ function canonicalKey(value: unknown): value is string {
 export async function libraryId(key: string): Promise<string> {
   const raw = Uint8Array.from(atob(key), (character) => character.charCodeAt(0));
   try {
-    return (await deriveKeys(raw)).id;
+    return await deriveLibraryId(raw);
   } finally {
     raw.fill(0);
   }

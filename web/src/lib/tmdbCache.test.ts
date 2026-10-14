@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ANSWER_HANDOFF_MS,
   cachingFetch,
@@ -94,6 +94,18 @@ describe('every device, with a key of its own or without', () => {
 });
 
 describe('cachingFetch', () => {
+  // The first answer a store hands out schedules its startup housekeeping a PRUNE_PAUSE_MS later. On a real clock
+  // that timer outlives the test that started it and fires inside a later one, where it reaches the navigator and
+  // store that test has stubbed (the lock test saw 3 or 15 requests instead of one, depending on how slow the run
+  // was). A fake clock per test makes a test's leftover housekeeping die with it.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('remembers only den-edge’s exact missing-record answer for six hours', async () => {
     const { entries, store } = memory();
     const asked: string[] = [];
@@ -208,14 +220,14 @@ describe('cachingFetch', () => {
     let clock = 0;
     const cached = cachingFetch(store, net.fetchImpl, () => clock);
     expect(await (await cached(detail)).json()).toEqual({ n: 1 });
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     expect(await (await cached(detail)).json()).toEqual({ n: 1 });
     expect(net.asked).toHaveLength(1);
     expect([...entries.keys()].some((k) => k.includes('secret'))).toBe(false);
 
     clock = 7 * HOUR; // a list goes stale in hours, a title's details in weeks
     await cached(discover);
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     clock += 7 * HOUR;
     await cached(discover);
     await cached(detail);
@@ -229,7 +241,7 @@ describe('cachingFetch', () => {
     let clock = 0;
     const cached = cachingFetch(store, net.fetchImpl, () => clock);
     await cached(discover);
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     clock = 2 * 24 * HOUR;
     const aborted = AbortSignal.abort();
     const both = await Promise.all([cached(discover, { signal: aborted }), cached(discover)]);
@@ -245,7 +257,7 @@ describe('cachingFetch', () => {
     let clock = 0;
     const cached = cachingFetch(store, net.fetchImpl, () => clock);
     await cached(discover);
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     clock = 10 * 24 * HOUR;
     net.fail();
     expect(await (await cached(discover)).json()).toEqual({ n: 1 });
@@ -516,7 +528,7 @@ describe('cachingFetch', () => {
     const cached = cachingFetch(store, lending, () => now);
     const lent = `https://api.themoviedb.org/3/movie/603?api_key=${TMDB_PROXY_KEY}`;
     await cached(lent);
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     expect([...entries.values()][0]?.fetchedAt).toBe(keptAt);
 
     // Two days on it is past six months since den-edge fetched it, so it is asked for again.
@@ -528,7 +540,7 @@ describe('cachingFetch', () => {
     // TMDB's own Last-Modified is when the title changed, not when it was fetched.
     const direct = memory();
     await cachingFetch(direct.store, lending, () => clock)(detail);
-    await new Promise((resolve) => setTimeout(resolve));
+    await vi.advanceTimersByTimeAsync(0);
     expect([...direct.entries.values()][0]?.fetchedAt).toBe(clock);
   });
 
