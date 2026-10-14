@@ -156,22 +156,14 @@ export function policedAtlasFetch(
   policy: ContentPolicy | undefined,
 ): typeof fetch {
   if (!isRestricted(policy)) return inner;
+  // A title's own record gets the whole policy too, the Kid's band included: atlas applies no catalogue gate to it,
+  // and answers its `eligible` for the Kid (profiles-v1 §5).
   const query = new URLSearchParams(atlasPolicyFields(policy)).toString();
-  // A title's own record is a direct read: age policy only, never the Kid catalogue's audience gate.
-  const directQuery = new URLSearchParams(
-    atlasPolicyFields({ ...policy, kidAudience: undefined }),
-  ).toString();
   return (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!href.startsWith(`${atlas}/`)) return inner(input, init);
     const route = href.slice(atlas.length).split(/[?#]/)[0]!;
     if (ATLAS_UNPOLICED.has(route)) return inner(input, init);
-    if (route.startsWith('/index/title/')) {
-      if (!directQuery) return inner(input, init);
-      const separator = href.includes('?') ? '&' : '?';
-      const direct = `${href}${separator}${directQuery}`;
-      return inner(input instanceof Request ? new Request(direct, input) : direct, init);
-    }
     const method = (
       init?.method ?? (input instanceof Request ? input.method : 'GET')
     ).toUpperCase();

@@ -576,8 +576,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   /**
    * The one age check behind every direct read (detail, seasons, play, downloads...): is this title within the
-   * profile's policy? The public `minimumAge` comes from atlas' store and den-core's rule decides. Anything that
-   * cannot be established — atlas not configured, unreachable, or an unrecognised answer — is a refusal.
+   * profile's policy? atlas answers it (`eligible`): it holds the age, and for a Kid the made-for-audience admission
+   * and the warning veto (profiles-v1 §5). An atlas from before that answer gives the public `minimumAge`, which
+   * den-core's age rule decides. Anything that cannot be established — atlas not configured, unreachable, or an
+   * unrecognised answer — is an unknown maturity.
    */
   async #allowed(
     ref: ContentRef,
@@ -595,20 +597,25 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
     const url = `${atlas}/index/title/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`;
     try {
-      const minimumAge = await this.#wait(
+      const answer = await this.#wait(
         reuse(`content:eligible:${policyKey(policy)}:${url}`, async () => {
           const response = await this.#atlasFetch(atlas, policy)(url);
           // A title the store has never heard of has no age evidence: unknown, which the policy then decides.
-          if (response.status === 404) return null;
+          if (response.status === 404) return { minimumAge: null };
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
-          const age = object(await response.json())?.minimumAge;
-          return typeof age === 'number' && Number.isInteger(age) && age >= 0 && age <= 18
-            ? age
-            : null;
+          const record = object(await response.json());
+          const age = record?.minimumAge;
+          return {
+            eligible: typeof record?.eligible === 'boolean' ? record.eligible : undefined,
+            minimumAge:
+              typeof age === 'number' && Number.isInteger(age) && age >= 0 && age <= 18
+                ? age
+                : null,
+          };
         }),
         signal,
       );
-      return await ageAllowed(policy, minimumAge);
+      return answer.eligible ?? (await ageAllowed(policy, answer.minimumAge));
     } catch (error) {
       if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
       console.warn('den: atlas could not age a title; treating its maturity as unknown', error);
