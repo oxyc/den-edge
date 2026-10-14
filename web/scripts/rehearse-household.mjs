@@ -960,15 +960,16 @@ async function checkMoved(label, edge, wire, householdKey, seeded) {
     missing.length === 0,
     `${accounted}/${seeded.length} accounted for${missing.length ? `; missing ${missing.slice(0, 6).join(', ')}` : ''}`,
   );
-  // As profiles-v1 §6 partitions them: what a person sees is theirs, the region and API keys the household's.
+  // As profiles-v1 §6 partitions them: every preference is theirs, region included; the API keys and devices are the household's.
   const profileKeys = [
     'prefs.den.hideAnime',
     'prefs.den.preferredSubtitleLanguage',
     'prefs.den.preferredAudioLanguage',
     'prefs.den.autoSkipSegments',
     'prefs.den.minReleaseYear',
+    'prefs.den.watchRegion',
   ];
-  const householdKeys = ['prefs.den.watchRegion', 'keys.omdb', 'devices.cccccccccccccccc'];
+  const householdKeys = ['keys.omdb', 'devices.cccccccccccccccc'];
   check(
     `${label}: profile preferences are the Owner's, household ones the household's`,
     profileKeys.every((key) => placed[key] === 'owner') &&
