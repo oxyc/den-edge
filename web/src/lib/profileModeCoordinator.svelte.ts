@@ -760,6 +760,46 @@ export function allowsImplicitAssistant(
   return !coordinator || (coordinator.session === session && coordinator.mode === 'owner');
 }
 
+const safeStorage = (): Storage | undefined => {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Whether this browser has ever held a profile selection, i.e. belongs to a profile-aware household. */
+export function profileMarkerPresent(
+  storage: Pick<Storage, 'getItem'> | undefined = safeStorage(),
+): boolean {
+  try {
+    return storage?.getItem(ACTIVE_PROFILE_KEY) != null;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether household administration (invites, phone links, assistant consent, saved searches) is open. A household
+ * without profiles is unchanged: open while discovery is pending or says no. Once profiles are active it is open only
+ * to the active Owner session, and a profile-aware browser stays closed while discovery is unanswered.
+ */
+export function householdAdministration(
+  capability: ProfilesCapability | 'checking',
+  activeOwner: boolean,
+  markerPresent: boolean,
+): boolean {
+  switch (capability) {
+    case 'disabled':
+      return true;
+    case 'enabled':
+    case 'preview':
+      return activeOwner;
+    default:
+      return !markerPresent;
+  }
+}
+
 export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indeterminate';
 
 /** Cache-Control is a comma-separated directive list. Substring matching would accept made-up, cacheable

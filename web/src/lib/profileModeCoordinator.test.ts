@@ -5,6 +5,8 @@ import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProt
 import { legacyProfileIdentity } from './profileIdentity';
 import {
   allowsImplicitAssistant,
+  householdAdministration,
+  profileMarkerPresent,
   ProfileModeCoordinator,
   previewProfileDirectory,
   profileDirectoryChoices,
@@ -1003,6 +1005,29 @@ describe('ProfileModeCoordinator', () => {
     expect(restoredKid.coordinator.mode).toBe('kid');
     await expect(restoredKid.coordinator.switchToOwner('1234')).resolves.toBe(true);
     expect(restoredKid.coordinator.mode).toBe('owner');
+  });
+});
+
+describe('householdAdministration', () => {
+  it('leaves a household without profiles exactly as it was', () => {
+    for (const capability of ['checking', 'disabled', 'indeterminate'] as const)
+      expect(householdAdministration(capability, false, false)).toBe(true);
+    expect(profileMarkerPresent(memoryStorage())).toBe(false);
+  });
+
+  it('opens for an active Owner only once profiles are enabled', () => {
+    expect(householdAdministration('enabled', true, true)).toBe(true);
+    expect(householdAdministration('preview', true, true)).toBe(true);
+    expect(householdAdministration('enabled', false, true)).toBe(false);
+    expect(householdAdministration('preview', false, false)).toBe(false);
+  });
+
+  it('stays closed while a profile-aware browser has no discovery answer', () => {
+    const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', '{broken');
+    expect(profileMarkerPresent(storage)).toBe(true);
+    expect(householdAdministration('checking', false, true)).toBe(false);
+    expect(householdAdministration('indeterminate', false, true)).toBe(false);
   });
 });
 

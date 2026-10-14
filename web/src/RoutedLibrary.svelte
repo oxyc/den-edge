@@ -42,6 +42,8 @@
   import { resetProfileNavigation } from './lib/profileNavigation';
   import {
     allowsImplicitAssistant,
+    householdAdministration,
+    profileMarkerPresent,
     ProfileModeCoordinator,
     previewProfileDirectory,
     profileDirectoryChoices,
@@ -133,11 +135,14 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
-  // Linking, invites, assistant consent and the saved search list are the household's. With profiles on they open
-  // only for the active Owner session: every other state — discovery pending, the Owner gate, Kid, Visitor — is closed.
+  // Linking, invites, assistant consent and the saved search list are the household's. A household without profiles
+  // keeps them as ever; once profiles are active they open only for the active Owner session.
   const householdAdmin = $derived(
-    profileCapability === 'disabled' ||
-      (profileCoordinator?.session === session && session.administersHousehold),
+    householdAdministration(
+      profileCapability,
+      profileCoordinator?.session === session && session.administersHousehold,
+      profileMarkerPresent(),
+    ),
   );
   $effect.pre(() => scopeRecentSearches(householdAdmin));
   $effect.pre(() => onhouseholdadmin(householdAdmin));
