@@ -27,7 +27,8 @@ export function legacyClockBootstrap(
     return device || last
       ? { ...(device ? { device } : {}), ...(last ? { last } : {}) }
       : undefined;
-  } catch {
+  } catch (error) {
+    console.warn('den: the clock kept in this browser could not be read; starting a fresh one', error);
     return undefined;
   }
 }
