@@ -2149,7 +2149,10 @@ export class LibraryLog {
     vault: Vault | null = libraryVault,
   ): Promise<LibraryLog> {
     const log = await LibraryLog.destination(libraryKey, fetchImpl, storage, vault, wire);
-    await log.standing();
+    const standing = await log.standing();
+    // Requests that write (a member registration) carry the generation the library reports.
+    if (standing && 'generation' in standing && standing.generation)
+      log.generation = standing.generation;
     return log;
   }
 

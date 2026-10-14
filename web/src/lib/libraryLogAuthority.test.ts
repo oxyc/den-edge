@@ -291,9 +291,21 @@ describe('LibraryLogAuthority', () => {
         });
       expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
 
+      // Confirming asks nothing of den-edge and nothing of the gate: with no journal there is nothing to confirm.
+      const confirm = {
+        kind: 'profile-key-reset.confirm',
+        destinationLibraryKey: destination,
+      } as const;
+      await expect(reset.task(confirm, 'confirm-off')).resolves.toMatchObject({
+        result: { kind: 'profile-key-reset.confirm', outcome: 'none' },
+      });
+
       enrolled = true;
       await expect(reset.task(tasks[1], 'resume')).resolves.toMatchObject({
         result: { kind: 'profile-key-reset.resume', outcome: 'none' },
+      });
+      await expect(reset.task(confirm, 'confirm-on')).resolves.toMatchObject({
+        result: { kind: 'profile-key-reset.confirm', outcome: 'none' },
       });
       // No Owner PIN is delivered to this household: start and recover are refused before any other request.
       for (const task of [tasks[0], tasks[2]])

@@ -1694,3 +1694,138 @@ fn markers_round_trip_and_a_legacy_marker_still_names_its_tag() {
     assert_eq!(marker_successor(legacy).as_deref(), Some(NEW_OWNER));
     assert_eq!(marker_successor(b""), Some(String::new()));
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Starting the successors
+
+/// Start a library with one row, the way `takeMoved` does: its own token and wire, naming `member` when given.
+async fn start_library(h: &Harness, id: &str, member: Option<&str>) -> StatusCode {
+    let token = token_of(id);
+    let wire = wire_of(id);
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("x-den-library-token", &token),
+        ("x-den-wire", wire),
+        ("x-den-wire-min", wire),
+        ("x-den-generation", "0"),
+    ];
+    if let Some(member) = member {
+        headers.push(("x-den-library-member", member));
+    }
+    let body = json!({ "writes": [{ "k": ROW, "base": 0, "v": "first" }] }).to_string();
+    h.send("POST", &format!("/lib/{id}/batch"), Some(body), &headers).await.status()
+}
+
+fn proof_of(id: &str) -> String {
+    format!("{id}:{}", token_of(id))
+}
+
+fn household_proof() -> String {
+    proof_of(HOUSEHOLD)
+}
+
+/// Spend the address's whole new-library budget on libraries that are nobody's successors.
+async fn exhaust_new_library_budget(h: &Harness) {
+    let mut refused = false;
+    for n in 0..16u32 {
+        let id = format!("{:032x}", 0x7000_0000 + n);
+        if start_library(h, &id, None).await == StatusCode::TOO_MANY_REQUESTS {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "the budget never ran out");
+}
+
+#[tokio::test]
+async fn successors_a_live_lock_declares_do_not_spend_the_new_library_budget() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    exhaust_new_library_budget(&h).await;
+    let proof = household_proof();
+
+    // Every other way of starting a library is still throttled.
+    assert_eq!(
+        start_library(&h, &format!("{:032x}", 0x7100_0000u32), None).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        start_library(&h, &format!("{:032x}", 0x7100_0001u32), Some(&proof_of(OWNER))).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a member may not start a library it did not declare"
+    );
+    assert_eq!(
+        start_library(&h, NEW_OWNER, Some(&format!("{HOUSEHOLD}:not-its-token"))).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "without the household's token a declared id is not exempt"
+    );
+    assert_eq!(
+        start_library(&h, NEW_OWNER, Some(&proof_of(KID1))).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a member may start only its own successor"
+    );
+    assert_eq!(start_library(&h, NEW_OWNER, None).await, StatusCode::TOO_MANY_REQUESTS, "no proof at all");
+
+    // The household's own proof starts the declared successors, all of them, in one go.
+    assert_eq!(start_library(&h, NEW_HOUSEHOLD, Some(&proof)).await, StatusCode::OK);
+    // The same holds once the successor is committed.
+    let (status, body) = commit(&h, ATTEMPT, NEW_HOUSEHOLD).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Each profile successor is started the way `takeMoved` starts it: naming the library it is moved from.
+    for (old, new) in [(OWNER, NEW_OWNER), (KID1, NEW_KID1), (KID2, NEW_KID2)] {
+        assert_eq!(start_library(&h, new, Some(&proof_of(old))).await, StatusCode::OK, "{new}");
+    }
+    // And the budget was not touched on the way.
+    assert_eq!(
+        start_library(&h, &format!("{:032x}", 0x7200_0000u32), None).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn an_ended_or_absent_lock_exempts_nothing() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    // No reset at all.
+    exhaust_new_library_budget(&h).await;
+    assert_eq!(
+        start_library(&h, NEW_HOUSEHOLD, Some(&household_proof())).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    // A reset the household aborted no longer declares successors it can start.
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    let (status, body) = abort(&h, ATTEMPT).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    exhaust_new_library_budget(&h).await;
+    assert_eq!(start_library(&h, NEW_OWNER, Some(&proof_of(OWNER))).await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn a_successor_that_already_existed_is_not_the_resets_to_start_for_free() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    // The declared successor of the Owner exists before the lock is acquired, so the reset did not make it.
+    create(&h, NEW_OWNER).await;
+    acquire_all(&h, ATTEMPT).await;
+    exhaust_new_library_budget(&h).await;
+    // It exists, so writing to it is not a new library; the others, which the reset makes, are exempt.
+    assert_eq!(start_library(&h, NEW_KID1, Some(&proof_of(KID1))).await, StatusCode::OK);
+    assert!(h.state.library_v3.path(NEW_OWNER).exists());
+}
+
+#[tokio::test]
+async fn under_members_only_a_holder_of_the_household_starts_its_successors() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    let m = Harness::in_dir_with(h.dir.clone(), |state| {
+        state.profile_migration_enabled = true;
+        state.new_libraries = crate::library::NewLibraries::Members;
+    });
+    assert_eq!(start_library(&m, NEW_HOUSEHOLD, None).await, StatusCode::FORBIDDEN);
+    assert_eq!(start_library(&m, NEW_OWNER, Some(&proof_of(OWNER))).await, StatusCode::OK);
+    assert_eq!(start_library(&m, NEW_HOUSEHOLD, Some(&household_proof())).await, StatusCode::OK);
+}

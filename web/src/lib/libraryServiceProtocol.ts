@@ -602,6 +602,11 @@ export type LibraryTask =
   | { kind: 'profile-key-reset.start'; pin: string; destinationLibraryKey: string }
   /** Continue the journaled attempt on this device; the journal already holds the authorization. */
   | { kind: 'profile-key-reset.resume' }
+  /**
+   * The page installed the successor household key and read it back. Only then does the worker erase the journal,
+   * which holds the last copy of every old and provisional credential.
+   */
+  | { kind: 'profile-key-reset.confirm'; destinationLibraryKey: string }
   /** Journal-less recovery (§9.1) as the recovery attempt `recoveryAttempt`; `successorKey` only if this browser holds it. */
   | {
       kind: 'profile-key-reset.recover';
@@ -688,12 +693,18 @@ export type LibraryTaskResult =
     }
   | { kind: 'profile.create.ack'; outcome: 'acknowledged' }
   | {
-      kind: 'profile-key-reset.start' | 'profile-key-reset.resume' | 'profile-key-reset.recover';
+      kind:
+        | 'profile-key-reset.start'
+        | 'profile-key-reset.resume'
+        | 'profile-key-reset.confirm'
+        | 'profile-key-reset.recover';
       outcome: ProfileKeyResetOutcome;
     };
 
 export type ProfileKeyResetOutcome =
-  /** Every old library is retired and the successor household is adopted. */
+  /** Every old library is retired and the page may install the successor household key (`confirm` follows). */
+  | 'install'
+  /** The page installed the successor, the worker read it back and erased its journal. */
   | 'complete'
   /** The locks were released or den-edge rolled the attempt back; nothing changed and the journal is gone. */
   | 'aborted'

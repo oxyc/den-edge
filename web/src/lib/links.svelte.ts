@@ -196,6 +196,11 @@ export interface PendingReset {
    * library, until a standing check proves the reset was this one or the person chooses to use it.
    */
   held?: boolean;
+  /**
+   * A compound reset of a profile household (profiles-v1 §9). The library worker holds its journal under `from`,
+   * so settling it asks that worker rather than the legacy standing check, and it is never "held".
+   */
+  compound?: boolean;
 }
 
 export function readPendingReset(
@@ -204,9 +209,15 @@ export function readPendingReset(
   try {
     const value = JSON.parse(storage?.getItem(PENDING_RESET_KEY) ?? 'null') as unknown;
     if (value && typeof value === 'object') {
-      const { from, to, device, held } = value as Record<string, unknown>;
+      const { from, to, device, held, compound } = value as Record<string, unknown>;
       if (typeof from === 'string' && typeof to === 'string' && typeof device === 'string')
-        return { from, to, device, ...(held === true ? { held: true } : {}) };
+        return {
+          from,
+          to,
+          device,
+          ...(held === true ? { held: true } : {}),
+          ...(compound === true ? { compound: true } : {}),
+        };
     }
   } catch {
     /* Nothing readable is kept: no reset is pending. */
@@ -462,15 +473,21 @@ export class Links {
    * pending. What this browser kept of it under `from` goes, and so do its records of the devices it gave `from` to:
    * the reset cut them off. The app reopens the library under the new key.
    */
-  rekey(from: string, to: string): void {
+  rekey(from: string, to: string, keepOld = false): void {
     this.reread();
     this.list = this.list.map((l) => (l.libraryKey === from ? { ...l, libraryKey: to } : l));
     this.shared = this.shared.filter((s) => s.libraryKey !== from);
     this.keyReset = true;
     this.saveLinks();
     this.saveShared();
-    writePendingReset(null);
     forgetHeroLeadPointers(from);
+    // A compound reset keeps the old library's kept state and the pending marker until its journal is erased.
+    if (!keepOld) this.releaseRekeyed(from);
+  }
+
+  /** Drop what a reset from `from` left behind: the pending marker and the old library's kept state. */
+  releaseRekeyed(from: string): void {
+    writePendingReset(null);
     void forgetLibrary(from).catch((error: unknown) =>
       console.warn('den: the kept library could not be dropped', error),
     );

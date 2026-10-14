@@ -895,7 +895,7 @@ function successorDirectory(journal: ProfileResetJournal): ProfileDirectoryDocum
   return canonical;
 }
 
-function adoptionRequest(
+export function adoptionRequest(
   journal: ProfileResetJournal,
   locks: ProfileResetLockSet,
 ): ProfileAdoptionRequest {

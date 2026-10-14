@@ -54,7 +54,7 @@ export interface FakeLibraryRecord {
   rows: Map<string, string>;
   dir: ProfileDirectoryDocument | null;
   gen: number;
-  retired: { attempt: string; successor: string } | null;
+  retired: { attempt: string; acquired: string; successor: string } | null;
   lock: { attempt: string; successor: string; household: string; body: Body } | null;
   reset: Reset | null;
   /** Acquire requests and their answers by attempt: a replay is answered from here, whatever changed since. */
@@ -256,14 +256,14 @@ export class FakeEdge {
   ): Promise<Reply> {
     if (body.purpose === 'key-reset-recovery') return this.takeOver(lib, body, headers);
     const attempt = String(body.attempt);
+    // den-edge reaches the library before it looks anything up, so a retired one answers 410 to every request.
+    if (lib.retired) return refuse(410, 'library_moved');
     // 1. Lookup first.
     const stored = lib.stored.get(attempt);
     if (stored)
       return JSON.stringify(body) === JSON.stringify(stored.request)
         ? ok(stored.answer)
         : refuse(409, 'migration_attempt_mismatch');
-    // 2. A retired library.
-    if (lib.retired) return refuse(410, 'library_moved');
     const current = await this.source(lib);
     const expected = body.expectedSource as { generation: number; head: string };
     const stale = expected.generation !== current.generation || expected.head !== current.head;
@@ -367,6 +367,7 @@ export class FakeEdge {
   ): Promise<Reply> {
     const recovery = String(body.attempt);
     const reset = lib.reset;
+    if (lib.retired) return refuse(410, 'library_moved');
     // The same recovery attempt's repeat is looked up before any decision.
     const repeat = reset?.recoveries.get(recovery);
     if (repeat) return ok(repeat);
@@ -438,9 +439,34 @@ export class FakeEdge {
       if (!reset.preexisting.has(id)) this.libs.delete(id);
   }
 
+  /** What a retired library's marker says of an attempt: found without a token, and never naming a stranger's. */
+  private lookupRetired(lib: FakeLibraryRecord, attempt: string): Reply {
+    const marker = lib.retired!;
+    const retired = {
+      attempt,
+      state: 'retired',
+      library: lib.id,
+      successor: marker.successor,
+    };
+    if (lib.reset) {
+      const takenBy = lib.reset.recoveredBy.get(attempt);
+      if (takenBy !== undefined)
+        return ok({ attempt, state: 'recovered', recovery: takenBy, outcome: 'retired' });
+      if (attempt === marker.attempt && attempt !== marker.acquired)
+        return ok({ attempt, state: 'completed', outcome: 'retired' });
+      return attempt === marker.attempt || attempt === marker.acquired
+        ? ok(retired)
+        : refuse(404, 'not_found');
+    }
+    const house = this.governing(lib);
+    const follows = house?.attempt === marker.acquired && house.owner === attempt;
+    return attempt === marker.attempt || attempt === marker.acquired || follows
+      ? ok(retired)
+      : refuse(404, 'not_found');
+  }
+
   private lookup(lib: FakeLibraryRecord, attempt: string): Reply {
-    if (lib.retired?.attempt === attempt)
-      return ok({ attempt, state: 'retired', library: lib.id, successor: lib.retired.successor });
+    if (lib.retired) return this.lookupRetired(lib, attempt);
     const reset = lib.reset;
     if (!reset) {
       const lock = lib.lock;
@@ -468,10 +494,12 @@ export class FakeEdge {
           ? { attempt, state: 'aborted', library: lib.id }
           : { attempt, state: 'completed', outcome: 'aborted' },
       );
-    if (reset.phase === 'retired')
-      return ok({ attempt, state: 'retired', library: lib.id, successor: reset.successor });
     const stored = recovery ?? reset.acquireBody;
-    return ok({ ...stored, state: reset.phase === 'open' ? 'open' : 'committed' });
+    // A recovery's open body is always `open`; only the household's own reset reads `committed`.
+    return ok({
+      ...stored,
+      state: recovery || reset.phase === 'open' ? 'open' : 'committed',
+    });
   }
 
   private commit(lib: FakeLibraryRecord, attempt: string, body: { successor: string }): Reply {
@@ -497,7 +525,9 @@ export class FakeEdge {
 
   private abort(lib: FakeLibraryRecord, attempt: string): Reply {
     const reset = lib.reset;
-    if (!reset) return inProgress();
+    if (lib.retired) return refuse(410, 'library_moved');
+    // No household lock at all is a plain not-found, not a conflict.
+    if (!reset) return refuse(404, 'not_found');
     const original = attempt === reset.attempt;
     const answer = original
       ? { attempt, state: 'aborted', library: lib.id }
@@ -539,13 +569,13 @@ export class FakeEdge {
       const retiredAll = reset.members.every((m) => this.libs.get(m.libraryId)?.retired);
       if (reset.phase !== 'retiring' || !retiredAll) return refuse(409, 'locks_held');
       reset.phase = 'retired';
-      lib.retired = { attempt, successor };
+      lib.retired = { attempt, acquired: reset.attempt, successor };
       this.settle(reset, attempt, 'retired');
       return ok({ deleted: true });
     }
     // The retirement door is a household commit taken before the first member is retired.
     if (reset.phase === 'committed') reset.phase = 'retiring';
-    lib.retired = { attempt, successor };
+    lib.retired = { attempt, acquired: reset.attempt, successor };
     return ok({ deleted: true });
   }
 
@@ -579,6 +609,13 @@ export class FakeLibrary implements ProfileResetLibrary {
 
   private fault(name: string, count: number, when: 'before' | 'after'): boolean {
     return this.edge.faults.some((f) => f.when === when && f.on === name && (f.nth ?? 1) === count);
+  }
+
+  async relayMembership(): ReturnType<ProfileResetLibrary['relayMembership']> {
+    const label = this.edge.labelOf(this.libraryId);
+    if (this.edge.dead) throw new Killed();
+    this.edge.log.push(`${label} register`);
+    return { libraryId: this.libraryId, memberToken: this.memberProof.split(':')[1]! };
   }
 
   resetRequest: ProfileResetLibrary['resetRequest'] = async (input) => {

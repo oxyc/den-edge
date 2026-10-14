@@ -46,7 +46,13 @@ export type ResetWire = 4 | 5;
 /** The part of a library the reset uses: its own-token routes, its authenticated rows, and the §12 move primitives. */
 export type ProfileResetLibrary = Pick<
   LibraryLog,
-  'libraryId' | 'memberProof' | 'resetRequest' | 'resetSnapshot' | 'moving' | 'takeMoved'
+  | 'libraryId'
+  | 'memberProof'
+  | 'relayMembership'
+  | 'resetRequest'
+  | 'resetSnapshot'
+  | 'moving'
+  | 'takeMoved'
 >;
 
 export type ProfileResetSnapshot = Exclude<
@@ -242,6 +248,12 @@ type AcquireShape =
     }
   | { role: 'profile'; successor: string; household: string };
 
+/** Register the library as a member of itself, so its member proof names it. Moves the library's source. */
+export async function registerMember(library: ProfileResetLibrary): Promise<void> {
+  if ((await library.relayMembership()) === null)
+    throw new ProfileResetUnavailableError('the library could not be registered as a member');
+}
+
 export class HttpProfileKeyResetBackend implements ProfileKeyResetBackend {
   constructor(
     private readonly deps: {
@@ -346,6 +358,12 @@ export class HttpProfileKeyResetBackend implements ProfileKeyResetBackend {
     }
     if (found.state === 'aborted') throw new ProfileResetRolledBackError();
     if (found.state !== 'unknown') throw new ProfileResetRefusedError('attempt-unavailable');
+
+    // A library that was never registered as a member cannot vouch for its successor (`x-den-library-member`), and
+    // registration is refused once the library is locked, so it happens here, just before the lock, and before the
+    // source is observed because registering moves it. The household's is registered before its fence is taken
+    // (`registerHousehold`): its source is the one the owner authorized.
+    if (shape.role === 'profile') await registerMember(library);
 
     for (let round = 0; round < SOURCE_ROUNDS; round += 1) {
       const observed = await observeResetSource(library, wire);

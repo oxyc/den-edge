@@ -831,8 +831,14 @@ export class LibraryLogAuthority {
         (this.#options.destination ?? ((next) => LibraryLog.destination(next, this.#fetch)))(key),
       ),
       gate: async () => {
-        const answer = await capability.capability();
-        return answer !== null && answer.wireMin >= answer.runtimeHouseholdWire;
+        try {
+          const answer = await capability.capability();
+          return answer !== null && answer.wireMin >= answer.runtimeHouseholdWire;
+        } catch (error) {
+          // A refused or unreachable capability read keeps the reset closed; it is not an answer to guess past.
+          console.warn('den: the profile capability could not be read', error);
+          return false;
+        }
       },
       ownerPin: (pin) => this.#ownerPinMatches(pin),
     });
@@ -855,7 +861,9 @@ export class LibraryLogAuthority {
           ? await service.start(task)
           : task.kind === 'profile-key-reset.resume'
             ? await service.resume()
-            : await service.recover(task);
+            : task.kind === 'profile-key-reset.confirm'
+              ? await service.confirm(task)
+              : await service.recover(task);
     } catch (error) {
       if (error instanceof ProfileResetUnauthorizedError)
         throw authorityError('unauthorized', 'Owner PIN is required to reset a profile household');
@@ -865,12 +873,20 @@ export class LibraryLogAuthority {
   }
 
   async task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
-    // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`.
-    if (task.kind !== 'key-reset.settle' && task.kind !== 'key-reset.adopt') this.#writable();
+    // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`, and so
+    // does continuing a compound reset: it retires the very household this log belongs to.
+    if (
+      task.kind !== 'key-reset.settle' &&
+      task.kind !== 'key-reset.adopt' &&
+      task.kind !== 'profile-key-reset.resume' &&
+      task.kind !== 'profile-key-reset.confirm'
+    )
+      this.#writable();
     if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
     if (
       task.kind === 'profile-key-reset.start' ||
       task.kind === 'profile-key-reset.resume' ||
+      task.kind === 'profile-key-reset.confirm' ||
       task.kind === 'profile-key-reset.recover'
     )
       return this.#profileKeyResetTask(task);

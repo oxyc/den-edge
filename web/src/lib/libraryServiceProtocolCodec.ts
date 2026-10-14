@@ -914,6 +914,10 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile-key-reset.resume':
       return exact(value, ['kind']);
+    case 'profile-key-reset.confirm':
+      return (
+        exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+      );
     case 'profile-key-reset.recover':
       return (
         exact(value, ['kind', 'pin', 'recoveryAttempt', 'successorKey']) &&
@@ -2034,10 +2038,12 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
     case 'profile-key-reset.start':
     case 'profile-key-reset.resume':
+    case 'profile-key-reset.confirm':
     case 'profile-key-reset.recover':
       return (
         exact(value, ['kind', 'outcome']) &&
-        (value.outcome === 'complete' ||
+        (value.outcome === 'install' ||
+          value.outcome === 'complete' ||
           value.outcome === 'aborted' ||
           value.outcome === 'waiting' ||
           value.outcome === 'none' ||

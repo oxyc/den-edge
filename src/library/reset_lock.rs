@@ -1686,6 +1686,61 @@ pub async fn sweep_startup(state: Arc<AppState>) {
     }
 }
 
+/// Whether starting library `id` with the member proof of `prover` is the work of a key reset that is running now.
+/// A reset starts one successor per live library in one go, so those are not new storage in the sense of the
+/// per-address new-library budget. Exactly two proofs count, and each only for what it declared:
+///
+/// * the household's own, for any successor its live (`open` or `committed`) lock declared; and
+/// * a member library's, for the one successor its own lock declares, while its household's lock is live and of the
+///   same attempt (this is the proof `takeMoved` sends: the library the new one is moved from).
+///
+/// A successor that already existed when the lock was acquired was not made by the reset, and an ended or retiring
+/// lock declares nothing to start; both are ordinary new libraries.
+pub(super) async fn declared_successor(state: &AppState, prover: &str, id: &str) -> bool {
+    if !state.profile_migration_enabled {
+        return false;
+    }
+    match declares(state, prover, id).await {
+        Ok(declared) => declared,
+        Err(reason) => {
+            eprintln!("key reset successor check: {reason}");
+            false
+        }
+    }
+}
+
+async fn record_of(state: &AppState, id: &str) -> io::Result<Option<Record>> {
+    let Some(store) = peer(state, id).await?.store else { return Ok(None) };
+    tokio::task::spawn_blocking(move || read::<Record>(store.as_ref(), RESET))
+        .await
+        .map_err(io::Error::other)?
+        .map(|found| found.map(|(record, _)| record))
+        .map_err(v3_io)
+}
+
+async fn declares(state: &AppState, prover: &str, id: &str) -> io::Result<bool> {
+    let Some(record) = record_of(state, prover).await? else { return Ok(false) };
+    let live = |record: &Record| matches!(record.phase, Phase::Open | Phase::Committed);
+    let made_by_reset = |record: &Record| !record.preexisting.contains(&id.to_owned());
+    match record.role {
+        Role::Household => Ok(live(&record)
+            && made_by_reset(&record)
+            && (record.successor == id || record.members.iter().any(|member| member.successor == id))),
+        Role::Profile => {
+            if record.phase != Phase::Open || record.successor != id {
+                return Ok(false);
+            }
+            let Some(household) = record.household.as_deref() else { return Ok(false) };
+            let Some(house) = record_of(state, household).await? else { return Ok(false) };
+            Ok(house.role == Role::Household
+                && live(&house)
+                && house.attempt == record.attempt
+                && made_by_reset(&house)
+                && house.members.iter().any(|member| member.library_id == prover && member.successor == id))
+        }
+    }
+}
+
 /// The wire minimum an exclusive-operation route requires of the library it names: 5 for a household, 4 for a
 /// profile library. `None` below 4: such a library is never part of a key reset.
 pub(super) fn required_wire(wire_min: u64) -> Option<u64> {

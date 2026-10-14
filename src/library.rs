@@ -1558,8 +1558,24 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
                 return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed"));
             }
         }
-        if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
-            return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+        // A key reset starts one successor per live library at once. A successor its own household's live lock
+        // declared, started by a holder of that household, is the reset's work and not counted against the address.
+        let part_of_a_reset = match member.as_deref().and_then(|m| m.split_once(':')) {
+            Some((household, _)) => match holds_another(state, id, member.as_deref()).await {
+                Ok(true) => reset_lock::declared_successor(state, household, id).await,
+                Ok(false) => false,
+                Err(e) => return read_error(e),
+            },
+            None => false,
+        };
+        if !part_of_a_reset {
+            if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
+                return crate::handler::retry_after(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &error("rate_limited"),
+                    wait,
+                );
+            }
         }
     }
     let store = match v3_store(state, id, token_hash, &slot, &mut library, true).await {

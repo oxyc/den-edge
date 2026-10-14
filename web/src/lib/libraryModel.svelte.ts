@@ -752,6 +752,30 @@ export class LibraryModel {
     return this.task({ kind: 'key-reset.adopt', destinationLibraryKey }, operationId);
   }
 
+  startProfileKeyReset(pin: string, destinationLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'profile-key-reset.start', pin, destinationLibraryKey }, operationId);
+  }
+
+  resumeProfileKeyReset(operationId?: string) {
+    return this.task({ kind: 'profile-key-reset.resume' }, operationId);
+  }
+
+  confirmProfileKeyReset(destinationLibraryKey: string, operationId?: string) {
+    return this.task({ kind: 'profile-key-reset.confirm', destinationLibraryKey }, operationId);
+  }
+
+  recoverProfileKeyReset(
+    pin: string,
+    recoveryAttempt: string,
+    successorKey: string | null,
+    operationId?: string,
+  ) {
+    return this.task(
+      { kind: 'profile-key-reset.recover', pin, recoveryAttempt, successorKey },
+      operationId,
+    );
+  }
+
   mergeLocalLibrary(sourceLibraryKey: string, operationId?: string) {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey }, operationId);
   }

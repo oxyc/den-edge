@@ -333,6 +333,13 @@ describe('library service client protocol', () => {
       decodeTask({ kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: 'short' }),
     ).toMatchObject({ ok: false });
     expect(decodeTask({ kind: 'profile-key-reset.resume' })).toMatchObject({ ok: true });
+    expect(
+      decodeTask({ kind: 'profile-key-reset.confirm', destinationLibraryKey: key }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({ kind: 'profile-key-reset.confirm', destinationLibraryKey: 'short' }),
+    ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'profile-key-reset.confirm' })).toMatchObject({ ok: false });
     expect(decodeTask({ kind: 'profile-key-reset.resume', pin: '1234' })).toMatchObject({
       ok: false,
     });
@@ -354,6 +361,7 @@ describe('library service client protocol', () => {
       }),
     ).toMatchObject({ ok: false });
     for (const outcome of [
+      'install',
       'complete',
       'aborted',
       'waiting',

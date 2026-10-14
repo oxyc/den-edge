@@ -149,6 +149,8 @@ export class ProfileKeyResetRecovery {
       }
       const code = errorCode(reply);
       if (reply.status === 409 && code === 'migration_source_changed') continue;
+      // den-edge reaches the library before it looks an attempt up, so a retired household answers 410.
+      if (reply.status === 410) return { result: { kind: 'blocked' } };
       // No metadata: no lock, another owner, a wrong proof, or a retiring reset without proof all look the same.
       if (reply.status === 409 && code === 'migration_in_progress')
         return { result: { kind: 'blocked' } };
