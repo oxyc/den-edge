@@ -58,6 +58,7 @@
   import { scopeRecentSearches } from './lib/recentSearches';
   import { CompoundResetPage } from './lib/profileKeyResetPage';
   import {
+    bornHouseholds,
     commitHousehold,
     householdPlan,
     observeKeptActions,
@@ -413,7 +414,7 @@
     const coordinator = profileCoordinator;
     if (!coordinator || coordinator.preview || defaultKidAsked || coordinator.mode !== 'owner')
       return;
-    if (coordinator.choices.some((choice) => choice.role === 'kid')) return;
+    if (stagingProfiles || coordinator.choices.some((choice) => choice.role === 'kid')) return;
     const household = untrack(() => session.household.ownerSettingsModel());
     if (!household) return;
     defaultKidAsked = true;
@@ -421,6 +422,27 @@
       .then(() => household.ensureDefaultKidProfile())
       .catch((error: unknown) =>
         console.warn('den: the household’s Kid profile could not be made', error),
+      );
+  });
+
+  // Kid chosen before the household existed: once it does and its Kid is there, the PIN chosen then becomes the
+  // household's Owner PIN and the Kid opens.
+  let kidAfterHousehold: string | null = null;
+  $effect(() => {
+    const coordinator = profileCoordinator;
+    if (!coordinator || stagingProfiles || coordinator.mode !== 'owner') return;
+    const kid = coordinator.choices.find((choice) => choice.role === 'kid' && choice.id);
+    const pin = kidAfterHousehold;
+    if (!kid?.id || pin === null) return;
+    kidAfterHousehold = null;
+    void coordinator
+      .setOwnerPin(pin)
+      .then((saved) => {
+        if (!saved) throw new Error('the Owner PIN was not saved');
+        return coordinator.switchToPersistent(kid.id!);
+      })
+      .catch((error: unknown) =>
+        console.warn('den: the Kid chosen before the household could not be opened', error),
       );
   });
 
@@ -502,15 +524,16 @@
   let householdRefused = false;
   async function startHousehold(): Promise<void> {
     const plan = plannedHousehold;
-    const staging = session;
+    // The library kept here, even while the switcher has a Visitor open over it.
+    const staging = stagingOwner ?? session;
     const stagingKey = libraryIdentity;
     if (!plan || householdStarting || householdRefused || !alive) return;
     if (!staging.local || !staging.model || !stagingKey) return;
     householdStarting = true;
     let retryMs: number | null = null;
     try {
-      // A household is profile-aware from its first write, so it is made only where profiles are on.
-      if ((await profilesCapability()) !== 'enabled') return;
+      // Only where den-edge says it starts a household for a browser like this one; otherwise nothing is sent.
+      if (!(await bornHouseholds())) return;
       const started = startHouseholdPlan(plan, stagingKey);
       if (!started) return;
       plannedHousehold = started;
@@ -572,10 +595,20 @@
       convergence++;
       clearTimeout(convergenceRetry);
       ownHousehold = plan.householdKey;
+      // The switcher offered before the household gives way to the household's own.
+      const staged = stagingProfiles ? profileCoordinator : null;
+      if (staged) {
+        stagingProfiles = false;
+        stagingOwner = null;
+        profileCoordinator = null;
+        profileControlPublished = false;
+        onprofilecontrol(null);
+      }
       // The same route goes on under the household: this is not a profile switch.
       routedProfile = profileSessionKey(destination.identity, destination.policyKey);
       libraryIdentity = plan.householdKey;
       session = destination;
+      staged?.dispose();
       return true;
     } catch (error) {
       console.warn('den: this browser’s library could not move into its household yet', error);
@@ -584,9 +617,34 @@
       return false;
     }
   }
-  // A household asked for before a reload is finished now, not on the next kept action.
+  // Where den-edge starts households for browsers like this one, the switcher offers Owner, Kid and Visitor from the
+  // first visit; choosing Kid makes the household. A household asked for before a reload is finished now.
+  let stagingProfiles = $state(false);
+  let stagingOwner: ProfileSession | null = null;
   onMount(() => {
-    if (plannedHousehold?.started) void startHousehold();
+    if (!plannedHousehold || !session.local) return;
+    void bornHouseholds().then((offered) => {
+      const staging = session;
+      if (!offered || !alive || !plannedHousehold || !staging.local || !staging.model) return;
+      if (!profileCoordinator) {
+        stagingOwner = staging;
+        stagingProfiles = true;
+        profileCoordinator = new ProfileModeCoordinator(
+          staging,
+          localStorage,
+          window,
+          undefined,
+          null,
+          null,
+          async (pin) => {
+            kidAfterHousehold = pin;
+            await startHousehold();
+            return ownHousehold !== null;
+          },
+        );
+      }
+      if (plannedHousehold.started) void startHousehold();
+    });
   });
 
   function publishReset(pending: PendingReset | null): boolean {
@@ -1037,7 +1095,7 @@
   <p class="profile-loading" role="status">Opening profile directory…</p>
 {:else if !optimistic && profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring}
   <p class="profile-loading" role="status">Opening profiles…</p>
-{:else if profileCoordinator && !profileCoordinator.session && !profileCoordinator.restoring}
+{:else if profileCoordinator && !profileCoordinator.session && !profileCoordinator.restoring && !stagingProfiles}
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
   <!-- Optimistic first frames are inert: nothing can be written to the bootstrap library before the Owner opens. -->

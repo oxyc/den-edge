@@ -1055,7 +1055,11 @@ export class LibraryLogAuthority {
         (profile) => profile.role === 'kid' && !profile.deleted.value,
       )
     )
-      return { result: { kind: 'profile.create-default', outcome: 'present' }, affected: [] };
+      // The fresh read may have brought a Kid this page has not seen yet: the directory is published again.
+      return {
+        result: { kind: 'profile.create-default', outcome: 'present' },
+        affected: [{ kind: 'profiles' }],
+      };
     const stamps = [
       await this.#clock.issue(),
       await this.#clock.issue(),

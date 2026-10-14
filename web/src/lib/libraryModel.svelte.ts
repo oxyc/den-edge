@@ -495,12 +495,12 @@ export class LibraryModel {
     return created;
   }
 
-  /** The household's Kid when its directory has none yet; `present` when one already exists. */
+  /**
+   * The household's Kid when its directory has none yet; `present` when one already exists. Asked fresh each time
+   * (the Kid journal makes it once): the answer also brings in a directory this page had not read yet.
+   */
   async ensureDefaultKidProfile(): Promise<'created' | 'present'> {
-    const { result } = await this.task(
-      { kind: 'profile.create-default' },
-      'profile.create-default',
-    );
+    const { result } = await this.task({ kind: 'profile.create-default' });
     if (result.kind !== 'profile.create-default') throw wrongQueryResult('default Kid profile');
     return result.outcome;
   }

@@ -32,6 +32,25 @@ const randomId = () =>
     byte.toString(16).padStart(2, '0'),
   ).join('');
 
+/**
+ * Whether den-edge lets a browser with no TV start its own household (`x-den-born-households` on the profiles
+ * capability, sent only where a stranger's library is visitor-tier). Anything else, failures included, is no: the
+ * browser then keeps its library to itself and den-edge is asked nothing more.
+ */
+export async function bornHouseholds(
+  fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+): Promise<boolean> {
+  try {
+    const response = await fetchImpl('/capabilities/profiles', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    return response.ok && response.headers.get('x-den-born-households') === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** The key of this browser's household once it is made; null before, and where nothing can be kept. */
 export function keptHousehold(
   storage: Storage | undefined = globalThis.localStorage,
