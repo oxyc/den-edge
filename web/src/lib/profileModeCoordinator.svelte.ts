@@ -128,7 +128,7 @@ type StoredActiveProfile =
   | { readonly version: 1; readonly mode: 'persistent'; readonly profileId: string }
   | { readonly version: 1; readonly mode: 'visitor'; readonly visitorNamespace: string };
 
-const readActiveProfile = (storage: Storage): StoredActiveProfile | null => {
+export const readActiveProfile = (storage: Storage): StoredActiveProfile | null => {
   try {
     const value: unknown = JSON.parse(storage.getItem(ACTIVE_PROFILE_KEY) ?? 'null');
     if (value && typeof value === 'object' && 'mode' in value && value.mode === 'owner')
@@ -200,6 +200,7 @@ export class ProfileModeCoordinator {
   readonly #openingModels = new Set<ProfileActivityModelHandle>();
   #pendingOwner: ProfileSession | null;
   #transition = 0;
+  #restoring = $state(0);
   #disposed = false;
 
   constructor(
@@ -267,6 +268,14 @@ export class ProfileModeCoordinator {
 
   get session(): ProfileSession | null {
     return this.#session;
+  }
+
+  /**
+   * True while a remembered profile is still opening. No session exists yet, but that is not a decision
+   * that a PIN is needed; the gate waits until this is false and the session is still absent.
+   */
+  get restoring(): boolean {
+    return this.#restoring > 0;
   }
 
   get mode(): ActiveProfileMode | null {
@@ -667,6 +676,15 @@ export class ProfileModeCoordinator {
   }
 
   async #restorePersistent(choice: ProfileChoice, acceptLegacyOwner = false): Promise<void> {
+    this.#restoring++;
+    try {
+      await this.#finishRestore(choice, acceptLegacyOwner);
+    } finally {
+      this.#restoring--;
+    }
+  }
+
+  async #finishRestore(choice: ProfileChoice, acceptLegacyOwner: boolean): Promise<void> {
     const next = await this.#preparePersistent(choice);
     if (!next || this.#disposed) return;
     const saved = readActiveProfile(this.#storage);

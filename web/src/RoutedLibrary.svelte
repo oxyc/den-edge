@@ -41,6 +41,7 @@
   import { libraryCredentialId } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
+  import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
   import {
     allowsImplicitAssistant,
     householdAdministration,
@@ -65,6 +66,7 @@
     watchedYear,
     onchange,
     onprofilecontrol = () => {},
+    onprofilehint = () => {},
     onhouseholdadmin = () => {},
   }: {
     link: Link | null;
@@ -74,6 +76,8 @@
     watchedYear: string | undefined;
     onchange: (route: Route) => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
+    /** The remembered Owner the bar draws until the profile coordinator takes over; null once it has. */
+    onprofilehint?: (hint: ProfileHint | null) => void;
     /** Tells the page whether household-level dialogs (invites, phone links, assistant consent) may open. */
     onhouseholdadmin?: (allowed: boolean) => void;
   } = $props();
@@ -119,6 +123,25 @@
       ? 'disabled'
       : profileCapability,
   );
+  // A remembered Owner is drawn from localStorage on the first frame, before the capability, directory or activity
+  // model answer. The coordinator corrects it afterwards; a PIN gate appears only once it decides one is needed.
+  const profileHint = untrack(() => (usesProfileDirectory(session) ? readProfileHint() : null));
+  const optimistic = $derived(
+    profileHint !== null &&
+      (profileCapability === 'checking' ||
+        (activeCapability === 'enabled' && !profileCoordinator) ||
+        (!!profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring)),
+  );
+  $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
+  $effect(() => {
+    if (profileCapability === 'disabled') saveProfileHint(null);
+  });
+  $effect(() => {
+    const coordinator = profileCoordinator;
+    if (!coordinator) return;
+    if (coordinator.session) saveProfileHint(coordinator.activeChoice);
+    else if (!coordinator.restoring) saveProfileHint(null);
+  });
   let profileControlPublished = false;
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
@@ -857,94 +880,106 @@
     </p>
     <button type="button" onclick={() => location.reload()}>Reload Den</button>
   </section>
-{:else if profileCapability === 'checking'}
+{:else if !optimistic && profileCapability === 'checking'}
   <p class="profile-loading" role="status">Opening profiles…</p>
 {:else if profileCapability === 'indeterminate'}
   <section class="profile-unavailable" aria-labelledby="profile-unavailable-title">
     <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
     <p>The Owner library remains hidden. Reload Den to try again.</p>
   </section>
-{:else if activeCapability === 'enabled' && !profileCoordinator}
+{:else if !optimistic && activeCapability === 'enabled' && !profileCoordinator}
   <p class="profile-loading" role="status">Opening profile directory…</p>
-{:else if profileCoordinator && !profileCoordinator.session}
+{:else if !optimistic && profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring}
+  <p class="profile-loading" role="status">Opening profiles…</p>
+{:else if profileCoordinator && !profileCoordinator.session && !profileCoordinator.restoring}
   <ProfileOwnerGate profiles={profileCoordinator} />
 {:else}
-  {#if profileCapability === 'preview'}
-    <p class="profile-preview" role="status">
-      Profile preview · filtering and household migration remain off
-    </p>
-  {/if}
-  {#key session.identity}
-    <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
-    <Router
-      profile={profileSessionKey(session.identity)}
-      onchange={(route) => {
-        if (route.page === 'settings')
-          void (session.identity.kind === 'visitor'
-            ? Promise.resolve()
-            : link || session.local
-              ? SettingsScreen.load()
-              : LinkScreen.load());
-        onchange(route);
-      }}
-    >
-      {#snippet children(route, active)}
-        {#if route.page === 'settings'}
-          {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
-          {#if settingsRoute === 'personal'}
-            <ProfileSettings {session} />
-          {:else if settingsRoute === 'unavailable'}
-            <section class="profile-settings-unavailable" aria-labelledby="profile-settings-title">
-              <h1 id="profile-settings-title">
-                {session.identity.kind === 'visitor'
-                  ? 'Profile settings unavailable'
-                  : 'Household settings unavailable'}
-              </h1>
-              <p>
-                {session.identity.kind === 'visitor'
-                  ? 'Visitor settings couldn’t be opened. Switch profiles and try again.'
-                  : 'Owner profile settings will appear here after the household split is activated.'}
-              </p>
-            </section>
-          {:else if (link || session.local) && householdSettingsModel}
-            {#if SettingsScreen.current}
-              <SettingsScreen.current
-                {link}
-                model={householdSettingsModel}
-                preferences={session.preferences}
-                content={session.content}
-                local={session.local}
-                onjoin={joinLibrary}
-                onresetkey={resetLibraryKey}
-                heldReset={pendingReset?.held === true}
-                onadoptheld={adoptHeldReset}
-              />
+  <!-- Optimistic first frames are inert: nothing can be written to the bootstrap library before the Owner opens. -->
+  <div class="library-frame" inert={optimistic}>
+    {#if profileCapability === 'preview'}
+      <p class="profile-preview" role="status">
+        Profile preview · filtering and household migration remain off
+      </p>
+    {/if}
+    {#key session.identity}
+      <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+      <Router
+        profile={profileSessionKey(session.identity)}
+        onchange={(route) => {
+          if (route.page === 'settings')
+            void (session.identity.kind === 'visitor'
+              ? Promise.resolve()
+              : link || session.local
+                ? SettingsScreen.load()
+                : LinkScreen.load());
+          onchange(route);
+        }}
+      >
+        {#snippet children(route, active)}
+          {#if route.page === 'settings'}
+            {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
+            {#if settingsRoute === 'personal'}
+              <ProfileSettings {session} />
+            {:else if settingsRoute === 'unavailable'}
+              <section
+                class="profile-settings-unavailable"
+                aria-labelledby="profile-settings-title"
+              >
+                <h1 id="profile-settings-title">
+                  {session.identity.kind === 'visitor'
+                    ? 'Profile settings unavailable'
+                    : 'Household settings unavailable'}
+                </h1>
+                <p>
+                  {session.identity.kind === 'visitor'
+                    ? 'Visitor settings couldn’t be opened. Switch profiles and try again.'
+                    : 'Owner profile settings will appear here after the household split is activated.'}
+                </p>
+              </section>
+            {:else if (link || session.local) && householdSettingsModel}
+              {#if SettingsScreen.current}
+                <SettingsScreen.current
+                  {link}
+                  model={householdSettingsModel}
+                  preferences={session.preferences}
+                  content={session.content}
+                  local={session.local}
+                  onjoin={joinLibrary}
+                  onresetkey={resetLibraryKey}
+                  heldReset={pendingReset?.held === true}
+                  onadoptheld={adoptHeldReset}
+                />
+              {:else}
+                <ScreenLoading screen={SettingsScreen} />
+              {/if}
+            {:else if LinkScreen.current}
+              <LinkScreen.current />
             {:else}
-              <ScreenLoading screen={SettingsScreen} />
+              <ScreenLoading screen={LinkScreen} />
             {/if}
-          {:else if LinkScreen.current}
-            <LinkScreen.current />
           {:else}
-            <ScreenLoading screen={LinkScreen} />
+            <Library
+              link={session.identity.kind === 'visitor' ? null : link}
+              {session}
+              {route}
+              {active}
+              {query}
+              {explore}
+              {people}
+              {watchedYear}
+            />
           {/if}
-        {:else}
-          <Library
-            link={session.identity.kind === 'visitor' ? null : link}
-            {session}
-            {route}
-            {active}
-            {query}
-            {explore}
-            {people}
-            {watchedYear}
-          />
-        {/if}
-      {/snippet}
-    </Router>
-  {/key}
+        {/snippet}
+      </Router>
+    {/key}
+  </div>
 {/if}
 
 <style>
+  .library-frame {
+    display: contents;
+  }
+
   .profile-settings-unavailable {
     max-width: 680px;
     margin: 24px auto;

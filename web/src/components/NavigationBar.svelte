@@ -2,6 +2,8 @@
   import icon from '../assets/den-mark.svg';
   import DetailIcon from './DetailIcon.svelte';
   import ProfileSwitcher from './ProfileSwitcher.svelte';
+  import ProfileHintTrigger from './ProfileHintTrigger.svelte';
+  import { hintChoice, type ProfileHint } from '../lib/profileHint';
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
@@ -26,7 +28,13 @@
     route,
     query = '',
     profiles = null,
-  }: { route: Route; query?: string; profiles?: ProfileModeCoordinator | null } = $props();
+    profileHint = null,
+  }: {
+    route: Route;
+    query?: string;
+    profiles?: ProfileModeCoordinator | null;
+    profileHint?: ProfileHint | null;
+  } = $props();
   /**
    * On People the field finds people and facets there: what is typed stays in People's address (`q=`) instead of
    * opening Search, and Enter still searches titles.
@@ -361,7 +369,10 @@
         </a>
       {/each}
     </nav>
-    {#if profiles}<ProfileSwitcher {profiles} hideOnMobile />{/if}
+    {#if profiles}<ProfileSwitcher
+        {profiles}
+        hideOnMobile
+      />{:else if profileHint}<ProfileHintTrigger choice={hintChoice(profileHint)} />{/if}
     <button
       class="search-toggle"
       type="button"

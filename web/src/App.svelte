@@ -20,6 +20,7 @@
     PhoneDialogScreen,
   } from './lib/screens.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
+  import type { ProfileHint } from './lib/profileHint';
   // The invite and consent dialogs load only for a page that asks one of their questions: an invite link, or an
   // assistant's request to connect. Latched, since the invite dialog clears the code as it shows it.
   let invited = $state(false);
@@ -36,6 +37,7 @@
   });
   const identityClock = browserClock();
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
+  let profileHint = $state.raw<ProfileHint | null>(null);
   // Invites, phone links and assistant consent change what the household has shared, so with profiles on they open
   // only under the active Owner (`RoutedLibrary`). A browser with no library has no household to protect.
   let householdAdmin = $state(true);
@@ -139,7 +141,12 @@
 </script>
 
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
-<NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} {profiles} />
+<NavigationBar
+  {route}
+  query={route.page === 'people' ? (route.query ?? '') : query}
+  {profiles}
+  {profileHint}
+/>
 {#if householdAdmin}
   {#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
   {#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
@@ -157,6 +164,7 @@
         {watchedYear}
         onchange={(next) => (route = next)}
         onprofilecontrol={(control) => (profiles = control)}
+        onprofilehint={(hint) => (profileHint = hint)}
         onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
       />
     {/key}
