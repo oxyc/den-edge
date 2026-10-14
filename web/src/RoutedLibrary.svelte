@@ -283,19 +283,11 @@
   // bootstrap session holds no activity after the split, so drawing it would pop Continue Watching and the Watchlist in
   // later. When the directory confirms the same Owner library, the coordinator takes this very session over, so the
   // library never has two sessions (two senders of its kept work); otherwise it is closed before another is opened.
-  // Opt-in for now (`localStorage['den.fastOwnerFrame'] = '1'`, read once here); without it the first frame draws the
-  // bootstrap session as before.
-  const fastOwnerFrame = untrack(() => {
-    try {
-      return localStorage.getItem('den.fastOwnerFrame') === '1';
-    } catch {
-      return false;
-    }
-  });
+  // A hint saved before the library key was recorded has none, and draws the bootstrap session until the next load.
   let optimisticAdopted = false;
   let optimisticOwner = $state.raw<ProfileSession | null>(
     untrack(() => {
-      if (!fastOwnerFrame || !profileHint?.libraryKey) return null;
+      if (!profileHint?.libraryKey) return null;
       const activity = openProfileActivity(profileHint.libraryKey);
       return activeProfileSession(
         persistentProfileIdentity(profileHint.profileId, profileHint.libraryKey),

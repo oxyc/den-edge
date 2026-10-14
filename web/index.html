@@ -369,11 +369,24 @@
                     /^[0-9a-f]{16}$/.test(value.sentIdentityDeviceId)),
               )
             : undefined;
-          const identity =
-            linked?.libraryKey ??
-            (localStorage.getItem('den.browsing') === '1'
-              ? localStorage.getItem('den.localLibrary')
-              : null);
+          // A browser on a directory-backed profile paints that profile's lead or nothing, never the household's.
+          // Only a remembered Owner has one before the page knows who is using it: its hint names the library the
+          // lead was kept for, and counts only while the hint is the active profile's. A Kid or Visitor has none.
+          const marker = JSON.parse(localStorage.getItem('den.profile.active.v1') ?? 'null');
+          const hint = marker
+            ? JSON.parse(localStorage.getItem('den.profile.hint.v1') ?? 'null')
+            : null;
+          const identity = marker
+            ? marker.mode === 'persistent' &&
+              hint?.profileId === marker.profileId &&
+              typeof hint.libraryKey === 'string' &&
+              hint.libraryKey
+              ? hint.libraryKey
+              : null
+            : (linked?.libraryKey ??
+              (localStorage.getItem('den.browsing') === '1'
+                ? localStorage.getItem('den.localLibrary')
+                : null));
           if (!identity) return;
           const suffix = `${fresh ? 'fresh.' : ''}${facet}`;
           const pointerName = `den.hero-lead.current.v1.${suffix}`;
