@@ -61,6 +61,7 @@
     removeDevice,
     onjoin,
     onresetkey,
+    profileResetBlocked = false,
     hasRecoveryCode = false,
     heldReset = false,
     onadoptheld,
@@ -107,6 +108,8 @@
      * didn't. Absent where this browser can't: no linked library, or one not on v4 yet.
      */
     onresetkey?: () => Promise<KeyResetOutcome | null>;
+    /** The household has profiles, so the single-library reset is unavailable until the compound reset ships. */
+    profileResetBlocked?: boolean;
     /** The library has a recovery code, which a reset ends. */
     hasRecoveryCode?: boolean;
     /** A reset whose outcome den-edge couldn't prove is held, its new key kept (`PendingReset.held`). */
@@ -573,6 +576,8 @@
   const resetFailures: Partial<Record<KeyResetOutcome, string>> = {
     'update-required':
       'Your library holds something only a newer version of Den can move. Update Den on your devices, then try again.',
+    'profiles-active':
+      'Profile libraries need to rotate together. Key reset will be available after Den finishes that update.',
     unavailable:
       'Couldn’t move your library to a new key, so nothing changed. Check that this device is on your network and try again.',
     unknown:
@@ -1048,6 +1053,11 @@
       <p class="foot">
         To cut a device off, reset the library key. Removing it from the list doesn’t: it still
         holds the key.
+      </p>
+    {:else if profileResetBlocked}
+      <p class="foot">
+        Profile libraries need to rotate together. Key reset will be available after Den finishes
+        that update.
       </p>
     {:else}
       <p class="foot">

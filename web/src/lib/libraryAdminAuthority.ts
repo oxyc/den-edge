@@ -559,7 +559,11 @@ export class LibraryAdminAuthority {
         return this.#abandonReset(
           next,
           'key-reset.move',
-          moving.refused === 'update_required' ? 'update-required' : 'unavailable',
+          moving.refused === 'update_required'
+            ? 'update-required'
+            : moving.refused === 'profiles'
+              ? 'profiles-active'
+              : 'unavailable',
         );
       if (!(await next.takeMoved(moving, this.log.memberProof)))
         return this.#abandonReset(next, 'key-reset.move', 'unavailable');

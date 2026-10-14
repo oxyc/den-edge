@@ -1336,6 +1336,7 @@ export class LibraryLogAuthority {
         libraryFormat: this.#log.wireMinimum,
         pendingChanges: this.#log.pendingActions,
         selfDeviceId: this.#clock.device,
+        ...(this.#log.profileTopologyPresent ? { profileTopology: true } : {}),
       },
     };
   }

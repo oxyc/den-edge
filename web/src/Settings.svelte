@@ -84,6 +84,7 @@
   const pluginUrls = $derived(plugins?.map((plugin) => plugin.manifestUrl) ?? []);
   const disabled = $derived(!ready || saving);
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
+  const profileTopology = $derived(connections?.diagnostics.profileTopology ?? false);
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
     if (!quiet) {
@@ -282,7 +283,10 @@
         {link}
         {content}
         onjoin={local ? onjoin : undefined}
-        onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? onresetkey : undefined}
+        onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
+          ? onresetkey
+          : undefined}
+        profileResetBlocked={!!link && profileTopology}
         {hasRecoveryCode}
         {heldReset}
         {onadoptheld}
