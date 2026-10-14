@@ -211,7 +211,9 @@ household without writing its old rows back. It needs `cargo build --locked` (or
 Chromium (`npx playwright install chromium`, or an installed Chrome).
 
 ```
-npm run rehearse                                          # a synthetic household and a generated key
+npm run rehearse                                          # a synthetic household (~6,100 rows) and a generated key
+npm run rehearse -- --small                               # the same with a ~30-row household (REHEARSE_SMALL=1)
+npm run rehearse -- --fast-owner-frame                    # every browser opts in to den.fastOwnerFrame (REHEARSE_FAST_OWNER_FRAME=1)
 REHEARSE_DATA=/path/to/edge-data REHEARSE_KEY_FILE=/path/to/key npm run rehearse   # a copy of real data
 ```
 

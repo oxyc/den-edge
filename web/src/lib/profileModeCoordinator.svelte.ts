@@ -266,6 +266,17 @@ export class ProfileModeCoordinator {
         this.#session = this.#newKid(choice);
         this.#pendingOwner = null;
         owner.close();
+      } else if (
+        choice?.role === 'owner' &&
+        this.#profileModels &&
+        owner.identity.kind === 'profile' &&
+        owner.identity.id === choice.id &&
+        owner.identity.libraryKey === choice.libraryKey
+      ) {
+        // The Owner library is already open for exactly this profile. Keeping that session, rather than closing it and
+        // opening a second one on the same key, leaves one sender of its kept work.
+        this.#session = owner;
+        this.#pendingOwner = null;
       } else if (choice && this.#profileModels) {
         owner.close();
         this.#pendingOwner = null;

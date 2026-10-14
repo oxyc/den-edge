@@ -7,7 +7,7 @@ const OTHER = 'bbbbbbbbbbbbbbbb';
 const DAY = 86_400_000;
 
 /** `rows(now)`: library rows (wire.ts `Row`s) with every stamp a few days to a few months before `now`. */
-export function syntheticRows(now = Date.now(), { legacy = false } = {}) {
+export function syntheticRows(now = Date.now(), { legacy = false, large = false } = {}) {
   const at = (daysAgo, device = DEVICE) => [now - daysAgo * DAY, 0, device];
   const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
   const text = (value, when) => ({ value: { string: value }, at: when });
@@ -54,6 +54,8 @@ export function syntheticRows(now = Date.now(), { legacy = false } = {}) {
       });
     }
   });
+
+  if (large) rows.push(...longHistory(now, at, films, series));
 
   // A tracker account's receipts for one film, as a delivery document.
   rows.push({
@@ -148,5 +150,82 @@ export function syntheticRows(now = Date.now(), { legacy = false } = {}) {
       entries: {},
     },
   );
+  return rows;
+}
+
+/**
+ * Years of use on top of the rows above, at the size a long-lived household reaches: about 1,900 titles, 1,170
+ * seasons and 3,050 tracker receipts (two accounts), some 6,100 rows in all. Ids start above the common ones the
+ * small household uses, so nothing collides.
+ */
+function longHistory(now, at, films, series) {
+  const rows = [];
+  const filmIds = Array.from({ length: 1_500 }, (_, i) => 100_000 + i);
+  const seriesIds = Array.from({ length: 375 }, (_, i) => 200_000 + i);
+  filmIds.forEach((id, i) => {
+    const watchlist = i % 9 === 0;
+    rows.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id },
+      status: { value: watchlist ? 'watchlist' : 'watched', at: at(20 + (i % 900)) },
+      reaction:
+        i % 4 === 0 ? { value: 'love', at: at(19 + (i % 900)) } : { value: null, at: [0, 0, ''] },
+      addedAt: now - (40 + (i % 1_500)) * DAY,
+      watchedAt: watchlist ? null : now - (20 + (i % 900)) * DAY,
+    });
+  });
+  seriesIds.forEach((id, i) => {
+    // Most series are finished; a few are still being watched, so Continue Watching has more than a screenful.
+    const watching = i % 15 === 0;
+    rows.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id },
+      status: { value: watching ? 'inProgress' : 'watched', at: at(10 + (i % 700)) },
+      addedAt: now - (60 + (i % 1_200)) * DAY,
+    });
+    const seasons = 3 + (i % 3 === 0 ? 1 : 0) - (i % 5 === 0 ? 1 : 0);
+    for (let season = 1; season <= seasons; season += 1) {
+      const episodes = {};
+      for (let episode = 1; episode <= 10; episode += 1)
+        episodes[episode] = {
+          progress: {
+            value: watching && season === seasons ? 0.5 : 1,
+            at: at(10 + (i % 700) + episode),
+            viewing: 0,
+          },
+          imported: i % 2 === 0,
+          plays: { 0: now - (10 + (i % 700) + episode) * DAY },
+          cleared: null,
+        };
+      rows.push({
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id },
+        season,
+        seasonReset: null,
+        episodes,
+      });
+    }
+  });
+  // Receipts: every title for one account, and most of them again for a second account connected later.
+  const titles = [
+    ...[...films, ...filmIds].map((id) => ({ type: 'movie', id })),
+    ...[...series, ...seriesIds].map((id) => ({ type: 'tv', id })),
+  ];
+  const receipt = (account, title, daysAgo) => ({
+    format: 4,
+    kind: 'delivery',
+    provider: 'simkl',
+    account,
+    title,
+    entries: { list: ['in', at(daysAgo), [1, 1, OTHER]] },
+  });
+  titles.forEach((title, i) => {
+    if (!(title.type === 'movie' && title.id === 603))
+      rows.push(receipt('42', title, 8 + (i % 400)));
+  });
+  titles.slice(0, 1_163).forEach((title, i) => rows.push(receipt('7', title, 5 + (i % 300))));
   return rows;
 }
