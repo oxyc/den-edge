@@ -482,7 +482,7 @@ export class LibraryLog {
    * migration_in_progress`). Reads and playback are unaffected; edits are kept on this device meanwhile.
    */
   get migrationLocked(): boolean {
-    return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < RECHECK_MS;
+    return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS;
   }
 
   /** An Owner Restore aborted the migration attempt that held the household: its lock is gone. */
