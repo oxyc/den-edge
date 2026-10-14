@@ -5,6 +5,7 @@ import {
   type ContentServiceClientPort,
 } from './contentServiceClient';
 import type {
+  ContentPolicy,
   ContentRequest,
   ContentResultFor,
   ContentServiceStatusValue,
@@ -137,9 +138,11 @@ class SessionContentService implements ContentServiceClientPort {
     this.#bind(current());
   }
 
+  /** `policy` is the asking profile's (`PolicedContent`): it goes with every attempt, retries included. */
   async query<Request extends ContentRequest>(
     request: Request,
     signal?: AbortSignal,
+    policy?: ContentPolicy,
   ): Promise<ContentResultFor<Request>> {
     if (this.#closed)
       throw new ContentServiceError({
@@ -187,7 +190,7 @@ class SessionContentService implements ContentServiceClientPort {
           );
         if (request.kind === 'sources.configure')
           return { kind: 'sources.configure' } as ContentResultFor<Request>;
-        return await this.#query(client, request, signal, recoverUntil, recoveryFailure);
+        return await this.#query(client, request, signal, policy, recoverUntil, recoveryFailure);
       } catch (error) {
         const replacedWhilePending = this.current() !== client;
         const cancelledByReplacement =
@@ -369,11 +372,12 @@ class SessionContentService implements ContentServiceClientPort {
   async #query<Request extends ContentRequest>(
     client: ContentServiceClient,
     request: Request,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    policy: ContentPolicy | undefined,
     until?: number,
     timeoutError?: unknown,
   ): Promise<ContentResultFor<Request>> {
-    if (until === undefined) return client.query(request, signal);
+    if (until === undefined) return client.query(request, signal, policy);
     const remaining = until - performance.now();
     if (remaining <= 0) throw timeoutError;
     const controller = new AbortController();
@@ -385,7 +389,7 @@ class SessionContentService implements ContentServiceClientPort {
       controller.abort();
     }, remaining);
     try {
-      return await client.query(request, controller.signal);
+      return await client.query(request, controller.signal, policy);
     } catch (error) {
       if (timedOut) throw timeoutError;
       throw error;
