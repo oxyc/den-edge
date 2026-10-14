@@ -553,6 +553,17 @@ async function main() {
       directory?.profiles?.[directory.owner];
     const ownerKey = owner?.library?.value?.key ?? owner?.libraryKey;
     check('the directory names an Owner library', !!ownerKey);
+    // Every profile household has its Kid out of the box (den#295): the Owner's first visit after the split made it.
+    const kids = Object.values(directory?.profiles ?? {}).filter(
+      (p) => p.role === 'kid' && !p.deleted?.value,
+    );
+    check(
+      'the split household got its Kid, once',
+      kids.length === 1 &&
+        kids[0].policy.value.maximumAge === 12 &&
+        kids[0].policy.value.unknownRatings === 'block',
+      `${kids.length} Kid profiles`,
+    );
     let ownerRows = null;
     if (ownerKey) {
       ownerRows = await readLibrary(edge, wire, ownerKey);

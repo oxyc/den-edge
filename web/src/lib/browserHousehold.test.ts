@@ -91,15 +91,18 @@ it('splits a browser’s own rows between the household and its Owner', () => {
     schema: 2,
     name: 'prefs',
     values: {
-      'den.hideAnime': { value: true, at },
-      'den.region': { value: 'FI', at },
+      'den.hideAnime': { value: { bool: true }, at },
+      'den.region': { value: { string: 'FI' }, at },
     },
   };
   const keys: SettingsRow = {
     kind: 'set',
     schema: 2,
     name: 'keys',
-    values: { simkl: { value: 'token', at }, parentalPIN: { value: 'hash', at } },
+    values: {
+      simkl: { value: { string: 'token' }, at },
+      parentalPIN: { value: { string: 'hash' }, at },
+    },
   };
   expect(profileScoped(watch)).toBe(watch);
   expect(profileScoped(prefs)).toEqual({

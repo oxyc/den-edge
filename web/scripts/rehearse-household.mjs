@@ -232,6 +232,23 @@ async function openTitle(page, edge) {
   }
 }
 
+/** Open the switcher and wait (up to 10 s) for Owner, Kid and Visitor in it. */
+async function switcherShowsAll(page) {
+  const trigger = page.locator('button.profile-trigger').first();
+  await trigger.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
+  if (!(await page.locator('dialog[open]').count())) await trigger.click().catch(() => {});
+  for (let i = 0; i < 40; i += 1) {
+    const names = await page
+      .locator('dialog[open] .profile-choice strong')
+      .allInnerTexts()
+      .catch(() => []);
+    if (names.length === 3 && ['Owner', 'Kids', 'Visitor'].every((name) => names.includes(name)))
+      return true;
+    await sleep(250);
+  }
+  return false;
+}
+
 /** Wait until den-edge holds household `key` with a directory naming an Owner and a Kid, or give up. */
 async function householdWithKid(edge, wire, key, limitMs = 60_000) {
   const started = Date.now();
@@ -353,6 +370,18 @@ async function main() {
     if (!kept) return;
     await checkHousehold('after the first add', edge, wire, kept);
     check('the plan is settled once the library moved in', (await plan(page)) === null);
+    check(
+      'this page shows Owner, Kid and Visitor without a reload',
+      await switcherShowsAll(page),
+      await page
+        .locator('dialog[open] .profile-choice strong')
+        .allInnerTexts()
+        .then(
+          (names) => names.join(', '),
+          () => '',
+        ),
+    );
+    await page.keyboard.press('Escape');
     await quiet(edge, 2000);
     await ctx.close();
 
@@ -375,22 +404,12 @@ async function main() {
         .getAttribute('aria-pressed')
         .catch(() => null)) === 'true',
     );
-    await trigger.click();
     const opened = Date.now();
-    let choices = [];
-    const all = () =>
-      choices.length === 3 &&
-      choices.includes('Owner') &&
-      choices.includes('Kids') &&
-      choices.includes('Visitor');
-    for (let i = 0; i < 40 && !all(); i += 1) {
-      choices = await page.locator('dialog[open] .profile-choice strong').allInnerTexts();
-      if (!all()) await sleep(250);
-    }
+    const shown = await switcherShowsAll(page);
     check(
       'the switcher shows Owner, Kid and Visitor',
-      all(),
-      `${choices.join(', ')} after ${Date.now() - opened} ms`,
+      shown,
+      `${(await page.locator('dialog[open] .profile-choice strong').allInnerTexts()).join(', ')} after ${Date.now() - opened} ms`,
     );
 
     // 4. The first switch to Kid sets the Owner PIN, twice, then the Kid's policy applies.
