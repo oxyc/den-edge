@@ -33,7 +33,11 @@ fn expected_json(decision: &Decision) -> Value {
         Decision::Refused { status, error } => {
             json!({ "effect": "refused", "status": status, "error": error, "sideEffects": [] })
         }
-        Decision::Open => json!({ "effect": "open", "sideEffects": ["lock"] }),
+        Decision::Open { preexisting: None } => json!({ "effect": "open", "sideEffects": ["lock"] }),
+        Decision::Open { preexisting: Some(existing) } => {
+            json!({ "effect": "open", "sideEffects": ["lock"], "preexisting": existing })
+        }
+        Decision::Rendered { state } => json!({ "effect": "lookup", "state": state }),
         Decision::Takeover { phase } => {
             json!({ "effect": "takeover", "phase": phase, "sideEffects": ["owner-replaced"] })
         }
@@ -67,7 +71,13 @@ fn expected_json(decision: &Decision) -> Value {
 fn every_reset_lock_vector_decides_as_the_spec_says() {
     let contract = contract();
     let cases = contract["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 84, "the spec's vector set changed: map the new cases to tests");
+    assert_eq!(cases.len(), 100, "the spec's vector set changed: map the new cases to tests");
+    // The contract flags the implementation commits to.
+    assert_eq!(contract["sweepSkipsPreexistingSuccessors"], json!(true));
+    assert_eq!(contract["lookupRendersRetiringAs"], json!("committed"));
+    assert_eq!(contract["keyResetRetiredBodyNamesSuccessor"], json!(false));
+    assert_eq!(contract["malformedAttemptStatus"], json!(400));
+    assert_eq!(contract["retireCarriesGeneration"], json!(true));
     let mut checked = 0;
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -1612,6 +1622,40 @@ async fn lookup_is_metadata_free_for_an_unknown_attempt_and_markers_do_not_leak_
     // A retired library answers the lookup only for the attempt that retired it.
     assert_eq!(lookup(&h, OWNER, OTHER).await.0, StatusCode::NOT_FOUND);
     assert_eq!(lookup(&h, OWNER, ATTEMPT).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_retirement_without_its_generation_and_a_malformed_attempt_are_refused() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    build_successors(&h).await;
+    assert_eq!(commit(&h, ATTEMPT, NEW_HOUSEHOLD).await.0, StatusCode::OK);
+    let (status, body) = call(
+        &h,
+        "DELETE",
+        &format!("/lib/{OWNER}"),
+        OWNER,
+        "4",
+        None,
+        &[("x-den-exclusive-attempt", ATTEMPT), ("x-den-successor", NEW_OWNER)],
+    )
+    .await;
+    assert_eq!((status, body), (StatusCode::CONFLICT, json!({ "error": "generation_changed" })));
+    assert_eq!(lookup(&h, HOUSEHOLD, ATTEMPT).await.1["state"], "committed", "no door was crossed");
+    for (method, path) in [
+        ("GET", format!("/lib/{HOUSEHOLD}/exclusive-operation/zz")),
+        ("DELETE", format!("/lib/{HOUSEHOLD}/exclusive-operation/zz")),
+        ("POST", format!("/lib/{HOUSEHOLD}/exclusive-operation/zz/successor")),
+    ] {
+        let body = (method == "POST").then(|| json!({ "successor": NEW_HOUSEHOLD }));
+        let (status, answer) = call(&h, method, &path, HOUSEHOLD, "5", body, &[]).await;
+        assert_eq!(
+            (status, answer),
+            (StatusCode::BAD_REQUEST, json!({ "error": "bad_request" })),
+            "{method}"
+        );
+    }
 }
 
 #[test]

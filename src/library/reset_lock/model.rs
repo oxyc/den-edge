@@ -86,6 +86,9 @@ pub(crate) struct Lock {
     pub swept: bool,
     #[serde(default = "yes")]
     pub proven: bool,
+    /// Declared successors that already existed when the household acquired: never swept.
+    #[serde(default)]
+    pub preexisting: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -103,6 +106,9 @@ pub(crate) struct Lib {
     pub lock: Option<Lock>,
     #[serde(default)]
     pub credential: Option<String>,
+    /// A declared successor that has not been created yet is in the world but does not exist.
+    #[serde(default = "yes")]
+    pub exists: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -120,6 +126,7 @@ pub(crate) enum Kind {
     Write,
     Sweep,
     Retire,
+    Lookup,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,17 +155,33 @@ pub(crate) struct Req {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
     Lookup,
-    Refused { status: u16, error: &'static str },
-    Open,
-    Takeover { phase: Phase },
+    /// A lookup of an attempt on this library, rendered as the state a client sees.
+    Rendered {
+        state: &'static str,
+    },
+    Refused {
+        status: u16,
+        error: &'static str,
+    },
+    /// A new lock; for a household, the declared successors that already existed (never swept).
+    Open {
+        preexisting: Option<Vec<String>>,
+    },
+    Takeover {
+        phase: Phase,
+    },
     Rollback,
     Committed,
     Aborted,
     Allowed,
-    Sweep { delete: Vec<String> },
+    Sweep {
+        delete: Vec<String>,
+    },
     Nothing,
     OrdinaryDelete,
-    Retired { door: bool },
+    Retired {
+        door: bool,
+    },
 }
 
 /// A request the model refuses to interpret at all (the vectors' `error`).
@@ -236,8 +259,15 @@ pub(crate) fn step(world: &World, request: &Req) -> Result<Decision, Invalid> {
     let library = world.libraries.get(library_id).ok_or(Invalid::UnknownLibrary)?;
     let lock = library.lock.as_ref();
     let presenter = request.attempt.as_deref();
+    // A malformed attempt is a bad request wherever §9.1 takes one.
+    if matches!(request.kind, Kind::Retire | Kind::Abort | Kind::Commit | Kind::Lookup)
+        && presenter.is_some_and(|attempt| !valid_id32(attempt))
+    {
+        return Err(Invalid::BadRequest);
+    }
 
     match request.kind {
+        Kind::Lookup => Ok(lookup(world, library, lock, presenter)),
         Kind::Acquire | Kind::Takeover => acquire_or_takeover(world, request, library_id, library, lock),
         Kind::Commit => commit(world, request, lock),
         Kind::Abort => Ok(abort(world, library, lock, presenter)),
@@ -252,6 +282,7 @@ pub(crate) fn step(world: &World, request: &Req) -> Result<Decision, Invalid> {
             Some(lock) if lock.role == Role::Household && lock.phase == Phase::Aborted && !lock.swept => {
                 let mut delete = vec![lock.successor.clone()];
                 delete.extend(lock.members.iter().map(|member| member.successor.clone()));
+                delete.retain(|id| !lock.preexisting.contains(id));
                 Decision::Sweep { delete }
             }
             _ => Decision::Nothing,
@@ -392,7 +423,38 @@ fn acquire_or_takeover(
     if &library.source != expected {
         return Ok(refused(409, "migration_source_changed"));
     }
-    Ok(Decision::Open)
+    let preexisting = (role == Role::Household).then(|| {
+        let members = request.members.as_deref().unwrap_or_default();
+        std::iter::once(request.successor.clone().unwrap_or_default())
+            .chain(members.iter().map(|member| member.successor.clone()))
+            .filter(|id| world.libraries.get(id).is_some_and(|lib| lib.exists))
+            .collect()
+    });
+    Ok(Decision::Open { preexisting })
+}
+
+/// What a lookup of `presenter`'s attempt on this library says; `unknown_attempt` carries no metadata.
+fn lookup(world: &World, _library: &Lib, lock: Option<&Lock>, presenter: Option<&str>) -> Decision {
+    let unknown = refused(404, "unknown_attempt");
+    let Some(lock) = lock else { return unknown };
+    let house = match lock.role {
+        Role::Household => Some(lock),
+        Role::Profile => household_lock(world, lock),
+    };
+    if house.is_none() || !presenter.is_some_and(|p| p == lock.attempt || p == lock.owner) {
+        return unknown;
+    }
+    let mut phase = lock.phase;
+    if lock.role == Role::Profile && house.is_some_and(|house| house.phase == Phase::Aborted) {
+        phase = Phase::Aborted;
+    }
+    let state = match phase {
+        Phase::Open => "open",
+        Phase::Committed | Phase::Retiring => "committed",
+        Phase::Retired => "retired",
+        Phase::Aborted => "aborted",
+    };
+    Decision::Rendered { state }
 }
 
 /// The vectors use 32-hex ids; the store accepts any library id the routes accept (16 to 128 hex digits).
@@ -435,10 +497,9 @@ fn commit(world: &World, request: &Req, lock: Option<&Lock>) -> Result<Decision,
             return Ok(refused(409, "locks_incomplete"));
         }
     }
-    let ready = world
-        .libraries
-        .get(&lock.successor)
-        .is_some_and(|successor| !successor.retired && successor.wire_min >= 5 && successor.rows >= 1);
+    let ready = world.libraries.get(&lock.successor).is_some_and(|successor| {
+        successor.exists && !successor.retired && successor.wire_min >= 5 && successor.rows >= 1
+    });
     if !ready {
         return Ok(refused(409, "successor_not_ready"));
     }
@@ -473,16 +534,27 @@ fn retire(
     let successor = request.successor.as_deref();
     if library.retired {
         return match lock {
-            Some(lock)
-                if lock.phase == Phase::Retired
-                    && presenter
-                        .is_some_and(|presenter| presenter == lock.attempt || presenter == lock.owner)
-                    && successor == Some(lock.successor.as_str()) =>
-            {
-                Decision::Lookup
+            Some(lock) if lock.phase == Phase::Retired && presenter.is_some() => {
+                // A member's authority follows its household's current owner.
+                let owner = match lock.role {
+                    Role::Household => Some(lock.owner.as_str()),
+                    Role::Profile => household_lock(world, lock)
+                        .filter(|house| house.attempt == lock.attempt)
+                        .map(|house| house.owner.as_str()),
+                };
+                if (presenter == Some(lock.attempt.as_str()) || presenter == owner)
+                    && successor == Some(lock.successor.as_str())
+                {
+                    Decision::Lookup
+                } else {
+                    GONE
+                }
             }
             _ => GONE,
         };
+    }
+    if lock.is_some_and(|lock| lock.purpose != PURPOSE) && held(world, lock) {
+        return CONFLICT;
     }
     if !held(world, lock) {
         return if presenter.is_none() { Decision::OrdinaryDelete } else { refused(409, "lock_not_held") };

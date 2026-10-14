@@ -143,6 +143,7 @@ impl Record {
             household: self.household.clone(),
             swept,
             proven: self.proven,
+            preexisting: self.preexisting.clone(),
         }
     }
 
@@ -279,6 +280,7 @@ fn tombstone_lock(marker: &Marker) -> Lock {
         household: tombstone.household.clone(),
         swept: false,
         proven: true,
+        preexisting: Vec::new(),
     }
 }
 
@@ -295,6 +297,7 @@ fn foreign_lock(key: &str) -> Lock {
         household: None,
         swept: false,
         proven: true,
+        preexisting: Vec::new(),
     }
 }
 
@@ -424,8 +427,16 @@ fn view(peer: &Peer, role: Option<LibRole>, want_source: bool) -> Result<Option<
             .or(role)
             .unwrap_or(LibRole::Profile);
         let lock = marker.as_ref().map(tombstone_lock);
-        let lib =
-            Lib { role, wire_min: 0, source: dummy_source(), rows: 0, retired: true, lock, credential: None };
+        let lib = Lib {
+            role,
+            wire_min: 0,
+            source: dummy_source(),
+            rows: 0,
+            retired: true,
+            lock,
+            credential: None,
+            exists: true,
+        };
         return Ok(Some(View { lib, fence: None }));
     }
     let Some(store) = peer.store.as_deref() else { return Ok(None) };
@@ -451,6 +462,7 @@ fn view(peer: &Peer, role: Option<LibRole>, want_source: bool) -> Result<Option<
             retired: false,
             lock,
             credential: Some(hex_of(&store.credentials().0)),
+            exists: true,
         },
         fence,
     }))
@@ -642,6 +654,8 @@ pub(super) async fn handle(
         }
         ([], _) | (["source"], _) => method_not_allowed(),
         ([attempt], _) | ([attempt, "successor"], _) if model::valid_id32(attempt) => method_not_allowed(),
+        // A malformed attempt is a bad request wherever the surface takes one.
+        ([_], _) | ([_, "successor"], _) => bad_request(),
         _ => not_found(),
     }
 }
@@ -875,7 +889,7 @@ async fn post(state: &AppState, id: &str, token_hash: [u8; 32], request: Request
             );
             found.map_or_else(not_found, |found| json_reply(StatusCode::OK, &found))
         }
-        Decision::Open => {
+        Decision::Open { .. } => {
             let fence = fence.expect("a source was requested for the acquire");
             if body.role == Role::Household {
                 open_household(state, id, &store, &body, fence).await
