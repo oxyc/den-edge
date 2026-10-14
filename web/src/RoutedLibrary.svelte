@@ -56,6 +56,12 @@
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
+  import {
+    startupFailure,
+    startupHandedOver,
+    startupMark,
+    watchStartupHandover,
+  } from './lib/startupTiming';
   import { CompoundResetPage } from './lib/profileKeyResetPage';
   import {
     bornHouseholds,
@@ -112,6 +118,20 @@
 
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
+  /** Startup breadcrumbs for a library that is opening: when it was asked for, and when (or how) it answered. */
+  const timeOpening = (what: string, ready: Promise<unknown>) => {
+    const requestedAt = performance.now();
+    startupMark(`${what} open requested`);
+    void ready.then(
+      () => startupMark(`${what} opened`, `in ${Math.round(performance.now() - requestedAt)}ms`),
+      (error: unknown) =>
+        startupMark(
+          `${what} open failed`,
+          `after ${Math.round(performance.now() - requestedAt)}ms: ${startupFailure(error)}`,
+        ),
+    );
+  };
+
   const open = (key: string | null, local: boolean) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
@@ -135,6 +155,7 @@
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
     void model.ready.catch(() => {});
+    timeOpening(local ? 'local session' : 'household session', model.ready);
     return legacyProfileSession(key, local, model, services.content, () => services.close());
   };
 
@@ -165,6 +186,25 @@
         (!!profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring)),
   );
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
+  // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
+  let optimisticShown = false;
+  onMount(() => {
+    if (profileHint) watchStartupHandover();
+  });
+  $effect(() => {
+    if (optimistic) {
+      optimisticShown = true;
+      return;
+    }
+    if (!optimisticShown) return;
+    optimisticShown = false;
+    const coordinator = untrack(() => profileCoordinator);
+    startupHandedOver(
+      coordinator?.session
+        ? `${coordinator.mode ?? 'unknown'} session`
+        : `no session, capability ${untrack(() => profileCapability)}`,
+    );
+  });
   $effect(() => {
     if (profileCapability === 'disabled') saveProfileHint(null);
   });
@@ -231,6 +271,7 @@
       bootstrapProfileHousehold: false,
     });
     void model.ready.catch(() => {});
+    timeOpening('profile session', model.ready);
     let closed = false;
     return {
       model,
@@ -271,7 +312,10 @@
             undefined,
             previewProfileDirectory(),
           );
-        else profileDirectoryLease = session.model.profiles();
+        else {
+          startupMark('profile directory lease requested');
+          profileDirectoryLease = session.model.profiles();
+        }
         profileCapability = capability;
       });
     };
@@ -318,11 +362,19 @@
     return () => clearTimeout(timer);
   });
 
+  let directoryMarked = '';
   $effect(() => {
     if (profileCapability !== 'enabled') return;
     const state = profileDirectoryState(
       profileDirectoryLease?.snapshot.value as ProfileDirectoryView | undefined,
     );
+    // One line per change of state, with the lease's connection beside it; the connection is read untracked so the
+    // log adds no dependency to this effect.
+    const connection = untrack(() => profileDirectoryLease?.snapshot.connection ?? 'no lease');
+    if (directoryMarked !== `${state.kind}/${connection}`) {
+      directoryMarked = `${state.kind}/${connection}`;
+      startupMark('profile directory lease value', `${state.kind}, ${connection}`);
+    }
     if (state.kind === 'pending') return;
     const directory = state.kind === 'present' ? state.directory : null;
     if (!profileCoordinator) {

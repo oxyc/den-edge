@@ -18,6 +18,7 @@ import type {
   LibrarySessionStatus,
   LibraryVersion,
 } from './libraryServiceProtocol';
+import { startupFailure, startupMark } from './startupTiming';
 
 export interface LibraryServiceClientPort {
   open(options: LibraryServiceOpenOptions): Promise<LibraryVersion>;
@@ -185,6 +186,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       throw new LibraryServiceError(failure);
     }
     this.#automaticRestartsLeft--;
+    startupMark(
+      'supervisor restart',
+      `shared transport unusable; restarts left ${this.#automaticRestartsLeft}`,
+    );
     this.#disposeActive();
     return this.#beginConnection(true);
   }
@@ -313,6 +318,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           throw new LibraryServiceError(failure);
         }
         this.#automaticRestartsLeft--;
+        startupMark(
+          'supervisor restart',
+          `${startupFailure(error)}; restarts left ${this.#automaticRestartsLeft}`,
+        );
         this.#phase = 'reconnecting';
         this.#markSubscriptions('reconnecting');
         this.#emitStatus({ kind: 'reconnecting', version: this.#version ?? null });
@@ -331,7 +340,9 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     active.stopStatus = client.onStatus((status) => this.#receiveStatus(active, status));
     this.#active = active;
 
+    const helloAt = performance.now();
     let version = await client.open(this.#openOptions!);
+    startupMark('worker ready', `hello answered in ${Math.round(performance.now() - helloAt)}ms`);
     active.version = version;
     if (this.#active !== active || active.failure)
       throw new LibraryServiceError(
@@ -397,6 +408,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       subscription.staged = undefined;
       this.#notifySubscription(subscription);
     }
+    startupMark('supervisor ready', `${this.#subscriptions.size} subscriptions bound`);
     this.#emitStatus({ kind: 'ready', version: readyVersion });
     return readyVersion;
   }
@@ -448,6 +460,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       if (this.#phase === 'connecting' || this.#phase === 'reconnecting') return;
       this.#disposeActive();
       if (this.#canBootstrapProfileHousehold(status.error)) {
+        startupMark('supervisor household bootstrap', 'wire 4 needs an upgrade to wire 5');
         this.#phase = 'reconnecting';
         this.#markSubscriptions('reconnecting');
         this.#emitStatus({ kind: 'reconnecting', version: this.#version ?? null });
@@ -463,6 +476,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         return;
       }
       this.#automaticRestartsLeft--;
+      startupMark(
+        'supervisor restart',
+        `${startupFailure({ failure: status.error })}; restarts left ${this.#automaticRestartsLeft}`,
+      );
       void this.#beginConnection(true).catch(() => undefined);
       return;
     }
@@ -496,6 +513,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       // Host capability discovery is fail-closed. The original authenticated 426 remains authoritative.
     }
     if (!enabled || !this.#openOptions) return false;
+    startupMark('supervisor household bootstrap', 'reopening on wire 5');
     this.#openOptions = {
       ...this.#openOptions,
       wire: 5,
@@ -523,6 +541,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     if (this.#phase === 'closed') return;
     this.#phase = 'failed';
     this.#failure = failure;
+    startupMark('supervisor failed', startupFailure({ failure }));
     this.#disposeActive();
     this.#markSubscriptions('failed', failure);
     this.#emitStatus({ kind: 'failed', error: failure });
