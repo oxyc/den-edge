@@ -85,6 +85,13 @@ pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 /// Libraries an address may start a minute. A household starts one per TV and another when it moves to a new key;
 /// every one is new storage, which anyone may ask for while `NEW_LIBRARIES=open`.
 const NEW_PER_WINDOW: u32 = 5;
+/// Batches one library may send in a burst. Clients send a bulk write as sequential 200-row batches with no pause
+/// (`chunks` in web/src/lib/log.ts): a split copies ~6k rows in ~30, a first upload or restore of a library at its
+/// 50,000-row ceiling in 250. The burst holds that whole ceiling, so no legitimate bulk write is ever refused.
+pub const WRITE_BURST: u32 = 250;
+/// Batches a minute one library earns back: 2 a second, far above what edits made by hand or a 30-second refresh send,
+/// and a fifth of the 10 a second a looping client was seen sending. Once the burst is spent that is all it gets.
+pub const WRITE_PER_MINUTE: u32 = 120;
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
 /// A sealed record is under a kilobyte; this is room for any, not a target. The cap below wire minimum 4, and so
@@ -773,7 +780,10 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             profile_migration::handle(state, id, token_hash, action, req).await
         }
         (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
-        ("batch", Method::POST) => batch(state, id, token_hash, req).await,
+        ("batch", Method::POST) => match write_budget(state, id) {
+            Some(refused) => refused,
+            None => batch(state, id, token_hash, req).await,
+        },
         ("changes", Method::GET | Method::HEAD) => {
             let since = query_param(&req, "since").and_then(|s| s.parse().ok()).unwrap_or(0);
             let limit = query_param(&req, "limit")
@@ -1483,6 +1493,28 @@ async fn v3_store(
     state.libraries.reserve(id, slot, old_bytes, 0, state.library_limits)?.commit();
     publish_v3(state, slot, id).await?;
     Arc::clone(&state.library_v3).existing_library(id, token_hash).map(Some).map_err(v3_io)
+}
+
+/// One batch against the library's write budget (`WRITE_BURST`, `WRITE_PER_MINUTE`), counted after the token is
+/// proven so no one spends another library's budget, and before the body is read: the point is to not do work for a
+/// loop. Only ordinary writes pay. A profile migration, a key reset's lock and a staged rewrite are bounded protocols
+/// that move a whole library in chunks, and `DELETE` and `PUT member` are one act each; none comes through here.
+/// A refused library is logged once a minute, however many batches it keeps sending.
+fn write_budget(state: &AppState, id: &str) -> Option<Response> {
+    if state.library_write_per_minute == 0 {
+        return None;
+    }
+    let wait = crate::link::throttled_bucket(
+        state,
+        &format!("lib-write:{id}"),
+        state.library_write_burst,
+        state.library_write_per_minute,
+    )?;
+    state.metrics.record_library_write_throttled();
+    if crate::link::throttled_per_minute(state, &format!("lib-write-log:{id}"), 1).is_none() {
+        eprintln!("library write rate limited: library={} retry_after_ms={wait}", &id[..id.len().min(8)]);
+    }
+    Some(crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
@@ -2669,6 +2701,125 @@ mod tests {
         let mut statuses = [first.status(), second.status()];
         statuses.sort();
         assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+    }
+
+    /// A harness whose libraries earn `per_minute` batches a minute back after a burst of `burst`.
+    fn budgeted(burst: u32, per_minute: u32) -> Harness {
+        Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.library_write_burst = burst;
+            state.library_write_per_minute = per_minute;
+        })
+    }
+
+    /// One-row batch of its own. Test builds hold 8 rows, so the key repeats: a stale base is a `200` with a conflict
+    /// in it, which is what a looping client's batch often is, and costs the same budget.
+    async fn write_one(h: &Harness, lib: &str, n: u64) -> axum::response::Response {
+        let body = json!({ "writes": [{ "k": K1, "base": 0, "v": format!("v{n}") }] }).to_string();
+        h.send("POST", &format!("/lib/{lib}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await
+    }
+
+    /// A bulk write is sequential 200-row batches with no pause: the burst takes all of it, and what a looping
+    /// client sends after is refused with `retry-after` — here a client at 10 a second against 1 a second earned.
+    #[tokio::test]
+    async fn a_looping_writer_is_refused_within_seconds_and_a_burst_is_not() {
+        let h = budgeted(20, 60);
+        for n in 0..20 {
+            assert_eq!(write_one(&h, LIB, n).await.status(), StatusCode::OK, "burst write {n}");
+        }
+        let refused = write_one(&h, LIB, 20).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers().get(axum::http::header::RETRY_AFTER).unwrap(), "1");
+        assert_eq!(body_json(refused).await, json!({ "error": "rate_limited" }));
+
+        // The loop: 10 a second for a minute. It never gets more than the refill, and is refused throughout.
+        let (mut accepted, mut refusals) = (0, 0);
+        for n in 21..621 {
+            h.advance(100);
+            match write_one(&h, LIB, n).await.status() {
+                StatusCode::OK => accepted += 1,
+                StatusCode::TOO_MANY_REQUESTS => refusals += 1,
+                other => panic!("unexpected {other}"),
+            }
+        }
+        assert!((59..=61).contains(&accepted), "earned 1 a second for a minute, accepted {accepted}");
+        assert_eq!(accepted + refusals, 600);
+        let rendered = h.state.metrics.render();
+        assert!(
+            rendered.contains(&format!("den_edge_library_write_throttled_total {}", refusals + 1)),
+            "{rendered}"
+        );
+    }
+
+    /// First refused write after ~2 s at 10 a second, with a burst of 5 and 1 a second back.
+    #[tokio::test]
+    async fn a_loop_is_stopped_after_its_burst_and_the_budget_refills() {
+        let h = budgeted(5, 60);
+        let mut first_refused = None;
+        for n in 0..50 {
+            if write_one(&h, LIB, n).await.status() == StatusCode::TOO_MANY_REQUESTS {
+                first_refused = Some(n);
+                break;
+            }
+            h.advance(100);
+        }
+        assert!(first_refused.is_some_and(|n| n <= 8), "refused at {first_refused:?}");
+
+        // Waiting what `retry-after` says is enough, and a refusal spent nothing.
+        let refused = write_one(&h, LIB, 100).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let wait: u64 = refused.headers()[axum::http::header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+        h.advance(wait * 1000);
+        assert_eq!(write_one(&h, LIB, 101).await.status(), StatusCode::OK);
+        assert_eq!(write_one(&h, LIB, 102).await.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Idle for a minute and the whole burst is back.
+        h.advance(60_000);
+        for n in 200..205 {
+            assert_eq!(write_one(&h, LIB, n).await.status(), StatusCode::OK, "refilled write {n}");
+        }
+        assert_eq!(write_one(&h, LIB, 205).await.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The budget is each library's own, and reads, the rewrite protocol, `PUT member` and `DELETE` never draw on it.
+    #[tokio::test]
+    async fn the_budget_is_per_library_and_only_ordinary_batches_pay() {
+        let h = budgeted(2, 1);
+        for n in 0..2 {
+            assert_eq!(write_one(&h, LIB, n).await.status(), StatusCode::OK);
+        }
+        assert_eq!(write_one(&h, LIB, 2).await.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(write_one(&h, LIB2, 0).await.status(), StatusCode::OK, "another library has its own");
+
+        let token = [("x-den-library-token", TOKEN)];
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::OK);
+        let member = format!("{LIB}:{TOKEN}");
+        let put = h
+            .send("PUT", &format!("/lib/{LIB}/member"), Some(json!({ "member": member }).to_string()), &token)
+            .await;
+        assert_ne!(put.status(), StatusCode::TOO_MANY_REQUESTS);
+        let opened = h.send("POST", &format!("/lib/{LIB}/rewrite"), None, &token).await;
+        assert_eq!(opened.status(), StatusCode::OK, "a rewrite is a bounded protocol");
+        let rewrite = body_json(opened).await["rewrite"].as_str().unwrap().to_owned();
+        let rows = json!({ "rows": [{ "k": K1, "v": "rewritten" }] }).to_string();
+        for _ in 0..4 {
+            let sent = h
+                .send("POST", &format!("/lib/{LIB}/rewrite/{rewrite}/rows"), Some(rows.clone()), &token)
+                .await;
+            assert_ne!(sent.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        assert_eq!(
+            h.send("DELETE", &format!("/lib/{LIB}/rewrite/{rewrite}"), None, &token).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_per_minute_of_zero_turns_the_budget_off() {
+        let h = budgeted(1, 0);
+        for n in 0..30 {
+            assert_eq!(write_one(&h, LIB, n).await.status(), StatusCode::OK);
+        }
     }
 
     #[tokio::test]

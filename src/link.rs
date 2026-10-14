@@ -155,6 +155,25 @@ pub(crate) fn throttled_per_window(
     None
 }
 
+/// A token bucket of `burst` acts that refills `per_minute` a minute, for work that arrives in bursts but must not
+/// go on at a rate: a fixed window would let a looping caller spend a whole window's budget at once, then again the
+/// instant the next opens. Kept as the generic cell rate algorithm — `until` holds when the bucket is full again, so
+/// an idle bucket reads as expired and the one sweep that bounds the map still applies. `Some(ms)` is how long until
+/// one more act fits, and a refused act spends nothing.
+pub(crate) fn throttled_bucket(state: &AppState, bucket: &str, burst: u32, per_minute: u32) -> Option<u64> {
+    let now = state.now();
+    let interval = (CLAIM_WINDOW_MS / u64::from(per_minute.max(1))).max(1);
+    let mut claims = lock(&state.claims);
+    let Some(t) = claims.entry(bucket, now) else { return Some(CLAIM_WINDOW_MS) };
+    let full_again = t.until.max(now) + interval;
+    let over = full_again.saturating_sub(now).saturating_sub(interval * u64::from(burst.max(1)));
+    if over > 0 {
+        return Some(over);
+    }
+    t.until = full_again;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::Harness;

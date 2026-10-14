@@ -3605,6 +3605,42 @@ mod tests {
         assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT2));
     }
 
+    /// The per-library write budget is for ordinary batches: a migration moves a whole library in its own protocol and
+    /// is answered while the household's ordinary writes are being refused for rate.
+    #[tokio::test]
+    async fn a_spent_write_budget_does_not_refuse_the_migration_routes() {
+        let h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.library_write_burst = 1;
+            state.library_write_per_minute = 1;
+            state.profile_migration_enabled = true;
+            state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        });
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        assert_eq!(
+            write(&h, HOUSEHOLD, CONFIG, 0, "refused", HOUSEHOLD_TOKEN).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt = format!("{base}/{ATTEMPT}");
+        let observed =
+            migration_request(&h, "GET", &format!("{base}/source"), None, Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(observed.status(), StatusCode::OK);
+        let open = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
+        assert_eq!(
+            migration_request(&h, "POST", &base, Some(open), Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            migration_request(&h, "GET", &attempt, None, Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            migration_request(&h, "DELETE", &attempt, None, Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
+    }
+
     #[tokio::test]
     async fn a_sidecar_without_the_lock_is_a_crash_remnant_that_open_resumes() {
         let h = enabled_harness_with_legacy_row().await;

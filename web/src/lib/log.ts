@@ -8,6 +8,7 @@ import { exclusive } from './exclusive';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
+import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
   profileMigrationAuthorizationFingerprint,
@@ -474,6 +475,12 @@ export class LibraryLog {
    * on every refresh.
    */
   private migrationLockedAt = 0;
+  /**
+   * Until when den-edge has asked for no more batches (`429 rate_limited`, this library's write budget), as
+   * `Date.now()`; 0 for never or since a write landed. Like a migration lock, nothing was applied and the write is
+   * neither dropped nor resent on every refresh: kept work waits out the `Retry-After` it was given.
+   */
+  private throttledUntil = 0;
   /**
    * When den-edge last refused each piece of kept work for good (`failed`), by its key: a full library, a row it will
    * not take. That piece is sent again after `RECHECK_MS`, not on every refresh, where it was refused every 30 seconds
@@ -3677,6 +3684,11 @@ export class LibraryLog {
       return;
     }
     const code = await errorCode(res);
+    if (res.status === 429) {
+      this.throttledUntil = Date.now() + retryAfterMs(res, 60_000);
+      console.warn('den: den-edge asked for fewer library writes; the write is kept and will wait');
+      return code;
+    }
     if (res.status === 409 && code === 'migration_in_progress') {
       // Applied nothing and says nothing else. Not a refusal of the write itself: it stays kept, and waits.
       this.migrationLockedAt = Date.now();
@@ -3904,6 +3916,7 @@ export class LibraryLog {
   /** den-edge applied this browser's write of `row`: it now holds exactly that, at `seq`. */
   private acknowledge(name: string, seq: number, row: Row): void {
     this.migrationLockedAt = 0;
+    this.throttledUntil = 0;
     this.entries.set(name, { seq, row });
     this.acknowledged.set(name, { seq, row });
     this.dirty = true;
@@ -4193,6 +4206,8 @@ export class LibraryLog {
     // 30-second refresh would otherwise send every piece of it again each time.
     if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
       return this.projectKeptChanged(projected);
+    // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
+    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected);
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
     const waiting = this.pendingActions;

@@ -26,6 +26,8 @@ pub struct Metrics {
     /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
     /// over rows (or one keeps writing from an old base).
     library_writes: Mutex<(u64, u64)>,
+    /// Library batches answered `429 rate_limited` by the per-library write budget: a client looping on one library.
+    library_write_throttled: AtomicU64,
     /// An invited guest's play refused at session start, by the refusal's code (one of `GUEST_PLAY_REFUSALS`):
     /// how often each known limit is met, IPv6 above all, before anything bigger is built for it.
     guest_play_refused: Mutex<BTreeMap<&'static str, u64>>,
@@ -579,6 +581,10 @@ impl Metrics {
         counts.1 += conflicts as u64;
     }
 
+    pub fn record_library_write_throttled(&self) {
+        self.library_write_throttled.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_guest_play_refused(&self, code: &'static str) {
         debug_assert!(GUEST_PLAY_REFUSALS.contains(&code), "{code} is not a rendered label");
         *lock(&self.guest_play_refused).entry(code).or_default() += 1;
@@ -837,6 +843,12 @@ impl Metrics {
              # TYPE den_edge_library_writes_total counter\n\
              den_edge_library_writes_total{{outcome=\"applied\"}} {applied}\n\
              den_edge_library_writes_total{{outcome=\"conflict\"}} {conflicts}\n"
+        ));
+        out.push_str(&format!(
+            "# HELP den_edge_library_write_throttled_total Library batches refused by the per-library write budget.\n\
+             # TYPE den_edge_library_write_throttled_total counter\n\
+             den_edge_library_write_throttled_total {}\n",
+            self.library_write_throttled.load(Ordering::Relaxed)
         ));
         out.push_str(
             "# HELP den_edge_guest_play_refused_total Invited guests' plays refused at session start, by code.\n\
