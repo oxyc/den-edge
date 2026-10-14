@@ -35,6 +35,7 @@ const backup = {
   authorization: { tokenHash: HEAD, memberHash: null },
   rows: [],
 };
+const boundBackup = { attempt: ATTEMPT, id: backup.id, digest: backup.digest };
 const evidence: OwnerSplitDurableEvidence = {
   attempt: ATTEMPT,
   householdId: PROFILE,
@@ -58,6 +59,7 @@ function harness() {
     purpose: 'split',
     wireMin: 4,
     fence,
+    backup: { attempt: ATTEMPT, id: backup.id, digest: backup.digest },
   };
   const provider: OwnerSplitProvider = {
     observeSource: vi.fn(async () => ({
@@ -73,7 +75,6 @@ function harness() {
       wireMin: 4,
       fence,
     })),
-    createBackup: vi.fn(async () => ({ id: backup.id, digest: backup.digest })),
     readBackup: vi.fn(async () => backup),
     stage: vi.fn(async () => 'f'.repeat(64)),
     commit: vi.fn(async () => opened),
@@ -147,23 +148,63 @@ describe('dormant Owner split effect executor', () => {
     );
   });
 
-  it('creates, rereads and verifies a backup before returning it', async () => {
+  it('rereads and verifies the backup an open bound, without creating one', async () => {
     const value = harness();
-    const verified = await value.executor.createVerifiedBackup(ATTEMPT, fence);
+    const verified = await value.executor.verifyBoundBackup({
+      attempt: ATTEMPT,
+      fence,
+      backup: boundBackup,
+    });
     expect(verified.manifest).toEqual(backup);
-    expect(value.provider.createBackup).toHaveBeenCalledOnce();
     expect(value.provider.readBackup).toHaveBeenCalledOnce();
+    expect(value.provider.readBackup).toHaveBeenCalledWith(ATTEMPT, ATTEMPT);
     expect(value.secure.verifyBackup).toHaveBeenCalledWith({
       attempt: ATTEMPT,
       fence,
       created: { id: backup.id, digest: backup.digest },
       reread: backup,
     });
+    expect('createVerifiedBackup' in value.executor).toBe(false);
+    expect('createBackup' in value.provider).toBe(false);
+  });
+
+  it('verifies a handed-off backup against its own split and the handoff source', async () => {
+    const value = harness();
+    const recovery = 'fedcba9876543210fedcba9876543210';
+    // The restore attempt has its own rewrite handle, but the same frozen generation, base and head.
+    const handoffFence = { ...fence, rewrite: 'rewrite-recovery' };
+    const verified = await value.executor.verifyBoundBackup({
+      attempt: recovery,
+      fence: handoffFence,
+      backup: boundBackup,
+    });
+    expect(value.provider.readBackup).toHaveBeenCalledWith(recovery, ATTEMPT);
+    expect(value.secure.verifyBackup).toHaveBeenCalledWith({
+      attempt: ATTEMPT,
+      fence: backup.source,
+      created: { id: backup.id, digest: backup.digest },
+      reread: backup,
+    });
+    expect(verified.manifest.attempt).toBe(ATTEMPT);
+
+    vi.mocked(value.secure.verifyBackup).mockClear();
+    await expect(
+      value.executor.verifyBoundBackup({
+        attempt: recovery,
+        fence: { ...handoffFence, head: 'e'.repeat(64) },
+        backup: boundBackup,
+      }),
+    ).rejects.toThrow('does not describe the recovery attempt source');
+    expect(value.secure.verifyBackup).not.toHaveBeenCalled();
   });
 
   it('keeps the candidate key opaque while copying and reading back Owner', async () => {
     const value = harness();
-    const verified = await value.executor.createVerifiedBackup(ATTEMPT, fence);
+    const verified = await value.executor.verifyBoundBackup({
+      attempt: ATTEMPT,
+      fence,
+      backup: boundBackup,
+    });
     const result = await value.executor.copyAndAuthenticateCandidate({
       attempt: ATTEMPT,
       fence,
@@ -258,6 +299,7 @@ describe('dormant Owner split effect executor', () => {
           purpose: 'split',
           wireMin: 4,
           fence,
+          backup: boundBackup,
         },
       ),
     ).rejects.toThrow('unchanged legacy');

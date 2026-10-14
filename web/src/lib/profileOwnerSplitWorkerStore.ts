@@ -1,6 +1,7 @@
 import { profileMigrationAuthorizationFingerprint } from './profileMigrationCore';
 import {
   checkedOwnerSplitJournal,
+  type OwnerSplitHandoffRecovery,
   type OwnerSplitJournal,
   type OwnerSplitJournalStore,
   type OwnerSplitRecoveryIntent,
@@ -40,11 +41,13 @@ interface SealedCandidateCredential {
   readonly libraryKey: string;
 }
 
+/** Exactly one of `journal` (a split this device owns) or `handoff` (a journal-less Owner recovery) is present. */
 interface DurableOwnerSplitState {
   readonly version: 1;
   readonly householdId: string;
-  readonly journal: OwnerSplitJournal;
+  readonly journal?: OwnerSplitJournal;
   readonly recovery?: OwnerSplitRecoveryIntent;
+  readonly handoff?: OwnerSplitHandoffRecovery;
 }
 
 export interface ResolvedOwnerSplitCandidate {
@@ -147,12 +150,77 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
     return (await this.#state())?.journal ?? null;
   }
 
+  async loadHandoff(): Promise<OwnerSplitHandoffRecovery | null> {
+    return (await this.#state())?.handoff ?? null;
+  }
+
+  /** The migration generation fresh household reads are made against: this device's fence, or the handoff's. */
+  async fenceGeneration(): Promise<number | null> {
+    const state = await this.#state();
+    return state?.journal?.fence?.generation ?? state?.handoff?.fence?.generation ?? null;
+  }
+
+  async saveHandoff(handoff: OwnerSplitHandoffRecovery): Promise<void> {
+    const checked = checkedHandoff(handoff);
+    await this.#locked(async () => {
+      const current = await this.#state();
+      if (current?.journal !== undefined)
+        throw new Error('A split journal already owns this device’s migration state');
+      if (
+        current?.handoff !== undefined &&
+        current.handoff.recoveryAttempt !== checked.recoveryAttempt
+      )
+        throw new Error('Another recovery attempt is already durable');
+      await this.#vault.keepRequired(
+        this.#stateName(),
+        {
+          version: 1,
+          householdId: this.#vault.libraryId,
+          handoff: checked,
+        } satisfies DurableOwnerSplitState,
+        this.#stateBinding(),
+      );
+    });
+  }
+
+  async clearHandoff(recoveryAttempt: string): Promise<void> {
+    checkedAttempt(recoveryAttempt);
+    await this.#locked(async () => {
+      const current = await this.#state();
+      if (current === null) return;
+      if (current.handoff?.recoveryAttempt !== recoveryAttempt)
+        throw new Error('Refusing to clear another recovery attempt');
+      await this.#vault.discardKept(this.#stateName());
+    });
+  }
+
+  /** Forget a recovery authorization that den-edge refused, keeping the split journal that asked for it. */
+  async discardRecovery(attempt: string): Promise<void> {
+    checkedAttempt(attempt);
+    await this.#locked(async () => {
+      const current = await this.#state();
+      if (current?.journal === undefined || current.journal.attempt !== attempt)
+        throw new Error('Owner split journal changed before recovery was discarded');
+      await this.#vault.keepRequired(
+        this.#stateName(),
+        {
+          version: 1,
+          householdId: this.#vault.libraryId,
+          journal: current.journal,
+        } satisfies DurableOwnerSplitState,
+        this.#stateBinding(),
+      );
+    });
+  }
+
   async save(journal: OwnerSplitJournal): Promise<void> {
     const checked = checkedOwnerSplitJournal(journal);
     if (checked === null) throw new Error('Owner split journal is absent');
     await this.#locked(async () => {
       const current = await this.#state();
-      const sameAttempt = current?.journal.attempt === checked.attempt;
+      if (current?.handoff !== undefined)
+        throw new Error('A recovery handoff already owns this device’s migration state');
+      const sameAttempt = current?.journal?.attempt === checked.attempt;
       await this.#vault.keepRequired(
         this.#stateName(),
         {
@@ -170,7 +238,7 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
     const checked = checkedRecoveryIntent(intent);
     await this.#locked(async () => {
       const current = await this.#state();
-      if (current === null || current.journal.attempt !== intent.attempt)
+      if (current?.journal === undefined || current.journal.attempt !== intent.attempt)
         throw new Error('Owner split journal changed before recovery authorization');
       await this.#vault.keepRequired(
         this.#stateName(),
@@ -193,7 +261,7 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
     checkedAttempt(attempt);
     await this.#locked(async () => {
       const current = await this.#state();
-      if (current !== null && current.journal.attempt !== attempt)
+      if (current !== null && current.journal?.attempt !== attempt)
         throw new Error('Refusing to clear another Owner split attempt');
       await this.#vault.discardKept(this.#stateName());
     });
@@ -205,6 +273,17 @@ export class OwnerSplitWorkerStore implements OwnerSplitJournalStore {
     const value = opened.value;
     if (!record(value) || value.version !== 1 || value.householdId !== this.#vault.libraryId)
       throw new Error('Owner split durable state is unavailable or corrupt');
+    if ((value.journal === undefined) === (value.handoff === undefined))
+      throw new Error('Owner split durable state is unavailable or corrupt');
+    if (value.handoff !== undefined) {
+      if (value.recovery !== undefined)
+        throw new Error('Owner split durable state is unavailable or corrupt');
+      return {
+        version: 1,
+        householdId: this.#vault.libraryId,
+        handoff: checkedHandoff(value.handoff),
+      };
+    }
     const journal = checkedOwnerSplitJournal(value.journal as OwnerSplitJournal);
     if (journal === null) throw new Error('Owner split durable state is unavailable or corrupt');
     const recovery =
@@ -283,6 +362,48 @@ function checkedRecoveryIntent(value: unknown): OwnerSplitRecoveryIntent {
   )
     throw new Error('Recovery intent is unavailable or corrupt');
   return value as unknown as OwnerSplitRecoveryIntent;
+}
+
+function checkedHandoff(value: unknown): OwnerSplitHandoffRecovery {
+  if (
+    !record(value) ||
+    value.version !== 1 ||
+    typeof value.recoveryAttempt !== 'string' ||
+    !ATTEMPT.test(value.recoveryAttempt) ||
+    !record(value.source) ||
+    !Number.isSafeInteger(value.source.generation) ||
+    Number(value.source.generation) < 0 ||
+    typeof value.source.head !== 'string' ||
+    !DIGEST.test(value.source.head) ||
+    Object.keys(value.source).some((key) => key !== 'generation' && key !== 'head') ||
+    (value.fence === undefined) !== (value.backup === undefined)
+  )
+    throw new Error('Recovery handoff is unavailable or corrupt');
+  if (value.fence !== undefined) {
+    const fence = value.fence;
+    const backup = value.backup;
+    if (
+      !record(fence) ||
+      !Number.isSafeInteger(fence.generation) ||
+      Number(fence.generation) < 0 ||
+      !Number.isSafeInteger(fence.base) ||
+      Number(fence.base) < 0 ||
+      typeof fence.head !== 'string' ||
+      !DIGEST.test(fence.head) ||
+      typeof fence.rewrite !== 'string' ||
+      fence.rewrite.length === 0 ||
+      !record(backup) ||
+      typeof backup.attempt !== 'string' ||
+      !ATTEMPT.test(backup.attempt) ||
+      backup.attempt === value.recoveryAttempt ||
+      typeof backup.id !== 'string' ||
+      backup.id.length === 0 ||
+      typeof backup.digest !== 'string' ||
+      !DIGEST.test(backup.digest)
+    )
+      throw new Error('Recovery handoff is unavailable or corrupt');
+  }
+  return value as unknown as OwnerSplitHandoffRecovery;
 }
 
 function publicHandle(record: SealedCandidateCredential): OwnerSplitCandidateHandle {

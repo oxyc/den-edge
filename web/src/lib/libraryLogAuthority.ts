@@ -664,11 +664,7 @@ export class LibraryLogAuthority {
       }
       case 'profile-migration.observe-recovery': {
         const observation = await this.#profileMigration().observeRecovery(query.attempt);
-        return {
-          kind: 'profile-migration.observe-recovery',
-          attempt: query.attempt,
-          ...observation,
-        };
+        return { kind: 'profile-migration.observe-recovery', ...observation };
       }
       case 'profile-create.status': {
         const result = await this.#profileKidCreate().resume();
@@ -774,8 +770,13 @@ export class LibraryLogAuthority {
     });
     const coordinator = new DormantOwnerSplitCoordinator(effects, store, this.#log.libraryId);
     this.#ownerSplit = workerStatusControl(
-      () => transport.capability(),
-      () => store.load(),
+      {
+        capability: () => transport.capability(),
+        loadJournal: () => store.load(),
+        loadHandoff: () => store.loadHandoff(),
+        migrationLocked: () => this.#log.migrationLocked,
+        migrationReleased: () => this.#log.noteMigrationReleased(),
+      },
       coordinator,
       secure,
     );
@@ -842,18 +843,24 @@ export class LibraryLogAuthority {
         : task.kind === 'profile-migration.cancel'
           ? await control.cancel(task.attempt)
           : await control.recover(task.attempt, task.recoveryAttempt, task.source);
+    if (result.kind === 'setup-in-progress') this.#log.noteMigrationLocked();
+    if (result.kind === 'released') this.#log.noteMigrationReleased();
     const outcome =
       result.kind === 'active' || result.kind === 'restored'
         ? 'enabled'
-        : result.kind === 'recovery-blocked'
-          ? 'recovery-required'
-          : result.kind === 'restart-required'
-            ? 'source-changed'
-            : result.kind === 'cancelled'
-              ? 'cancelled'
-              : result.kind === 'commit-unknown'
-                ? 'reconciling'
-                : 'preparing';
+        : result.kind === 'released'
+          ? 'cancelled'
+          : result.kind === 'recovery-blocked'
+            ? 'recovery-required'
+            : result.kind === 'setup-in-progress'
+              ? 'setup-in-progress'
+              : result.kind === 'restart-required'
+                ? 'source-changed'
+                : result.kind === 'cancelled'
+                  ? 'cancelled'
+                  : result.kind === 'commit-unknown'
+                    ? 'reconciling'
+                    : 'preparing';
     return {
       result: {
         kind: task.kind,
@@ -2348,8 +2355,9 @@ export class LibraryLogAuthority {
         kind: 'status',
         status: {
           kind: 'read-only',
-          reason:
-            'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
+          reason: this.#log.migrationLocked
+            ? 'Profile setup is in progress on another device. Your change is saved on this device and will sync when it finishes.'
+            : 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
         },
       });
   }
@@ -2388,6 +2396,12 @@ export class LibraryLogAuthority {
       throw authorityError('read-only', 'library is read-only until it can be upgraded');
     if (this.#log.refusal)
       throw authorityError('refused', `library write was refused: ${this.#log.refusal}`);
+    if (this.#log.migrationLocked)
+      throw authorityError(
+        'unavailable',
+        'profile setup is in progress, so the library cannot be changed yet',
+        true,
+      );
     throw authorityError('unavailable', 'library write could not be saved', true);
   }
 }

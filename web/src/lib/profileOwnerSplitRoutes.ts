@@ -34,8 +34,9 @@ export function ownerSplitWorkerRoute(
     if (method === 'DELETE') return { kind: 'abort', attempt };
     return null;
   }
-  if (action === 'backup' && (method === 'GET' || method === 'POST'))
-    return { kind: 'backup', attempt };
+  // The backup is created by den-edge when it opens the attempt. A client may only read it, so the idempotent
+  // `POST …/backup` compatibility route is deliberately not reachable from Web.
+  if (action === 'backup' && method === 'GET') return { kind: 'backup', attempt };
   if (
     method === 'POST' &&
     (action === 'rows' ||

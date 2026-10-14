@@ -2,6 +2,7 @@ import type { MigrationSealedRow } from './profileMigrationCore';
 import type {
   OwnerSplitAttemptLookup,
   OwnerSplitBackup,
+  OwnerSplitBackupReference,
   OwnerSplitCandidateHandle,
   OwnerSplitFence,
   OwnerSplitHouseholdObservation,
@@ -76,29 +77,15 @@ export class HttpOwnerSplitProvider implements OwnerSplitProvider {
     return this.#attemptRequest('DELETE', attempt);
   }
 
-  async createBackup(attempt: string): Promise<{ readonly id: string; readonly digest: string }> {
-    const answer = await this.#transport.request({
-      method: 'POST',
-      path: `${this.#attemptPath(attempt)}/backup`,
-    });
-    if (
-      !record(answer) ||
-      typeof answer.id !== 'string' ||
-      !answer.id ||
-      !DIGEST.test(String(answer.digest))
-    )
-      throw new Error('Provider returned an invalid backup reference');
-    return { id: answer.id, digest: String(answer.digest) };
-  }
-
-  async readBackup(attempt: string): Promise<OwnerSplitBackup> {
+  async readBackup(attempt: string, manifestAttempt = attempt): Promise<OwnerSplitBackup> {
+    if (!ID.test(manifestAttempt)) throw new TypeError('Migration attempt is not canonical');
     const answer = await this.#transport.request({
       method: 'GET',
       path: `${this.#attemptPath(attempt)}/backup`,
     });
     if (
       !record(answer) ||
-      answer.attempt !== attempt ||
+      answer.attempt !== manifestAttempt ||
       answer.householdId !== this.#householdId ||
       checkedWireMin(answer.wireMin) === null ||
       typeof answer.id !== 'string' ||
@@ -240,7 +227,16 @@ function checkedLookup(value: unknown, attempt: string): OwnerSplitAttemptLookup
   if (wireMin === null || fence === null) return invalidLookup();
   const common = { attempt, purpose, wireMin, fence } as const;
 
-  if (value.state === 'open' || value.state === 'aborted') return { ...common, state: value.state };
+  if (value.state === 'open') {
+    const backup = parsedBoundBackup(value.backup);
+    // den-edge never publishes the lock without its verified backup, so an open answer lacking one is not evidence.
+    // A split's backup is its own; only a restore that took over a split's lock names another attempt's backup.
+    if (backup === null || (purpose === 'split' && backup.attempt !== attempt))
+      return invalidLookup();
+    if (purpose === 'restore' && backup.attempt === attempt) return invalidLookup();
+    return { ...common, state: 'open', backup };
+  }
+  if (value.state === 'aborted') return { ...common, state: 'aborted' };
   if (value.state === 'committed') {
     if (purpose !== 'split') return invalidLookup();
     const terminal = parsedTerminal(value, attempt, 'committed');
@@ -358,6 +354,12 @@ function parsedBackup(value: unknown): { readonly id: string; readonly digest: s
   if (!record(value) || typeof value.id !== 'string' || value.id.length === 0) return null;
   const digest = checkedDigest(value.digest);
   return digest === null ? null : { id: value.id, digest };
+}
+
+function parsedBoundBackup(value: unknown): OwnerSplitBackupReference | null {
+  if (!record(value) || !ID.test(String(value.attempt))) return null;
+  const backup = parsedBackup(value);
+  return backup === null ? null : { attempt: String(value.attempt), ...backup };
 }
 
 function checkedProtectedIds(

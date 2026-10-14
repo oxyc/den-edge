@@ -1653,6 +1653,84 @@ describe('LibraryLog', () => {
     }
   });
 
+  /**
+   * An exclusive profile migration holds the household (`409 migration_in_progress`, den-spec profiles-v1 §8.1). The
+   * edit was applied nowhere and den-edge says nothing else, so it must be neither dropped (a refusal) nor resent on
+   * every 30-second refresh, and the page must be able to tell this apart from being offline.
+   */
+  it('keeps an edit through 409 migration_in_progress, pauses its retries, and sends it once the lock is gone', async () => {
+    const { storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    let locked = false;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') {
+        batches++;
+        if (locked) return new Response('{"error":"migration_in_progress"}', { status: 409 });
+      }
+      return server.fetchImpl(url, init);
+    };
+    const action = (id: number, name: string) => {
+      const blank = blankTitle({ type: 'movie', id }, 0);
+      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+      expect(log.migrationLocked).toBe(false);
+
+      locked = true;
+      expect(await log.writeAction(action(10, 'held')), 'shown, not lost').not.toBeNull();
+      expect(log.migrationLocked, 'the page can tell a lock from being offline').toBe(true);
+      expect(log.refusal, 'not den-edge refusing the write itself').toBeNull();
+      expect(log.pendingActions, 'kept to be sent').toBe(1);
+      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
+
+      const tried = batches;
+      for (let i = 0; i < 3; i++) await log.refresh();
+      expect(batches, 'paused, not resent on every refresh').toBe(tried);
+      expect(log.pendingActions).toBe(1);
+
+      // After a minute one probe goes out; the lock is still there, so it waits again.
+      vi.setSystemTime(Date.now() + 61_000);
+      await log.refresh();
+      expect(batches).toBe(tried + 1);
+      for (let i = 0; i < 3; i++) await log.refresh();
+      expect(batches, 'and is paused again').toBe(tried + 1);
+      expect(log.pendingActions).toBe(1);
+
+      locked = false;
+      vi.setSystemTime(Date.now() + 61_000);
+      await log.refresh();
+      expect(log.pendingActions).toBe(0);
+      expect(log.migrationLocked, 'an applied write proves the lock is gone').toBe(false);
+      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops reporting a lock it has not seen again, instead of showing it for good', async () => {
+    const server = await edge([row(1)]);
+    const connection: typeof fetch = async (url, init) =>
+      init?.method === 'POST'
+        ? new Response('{"error":"migration_in_progress"}', { status: 409 })
+        : server.fetchImpl(url, init);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage))!;
+      const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+      await log.writeAction(
+        recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'held')!,
+      );
+      expect(log.migrationLocked).toBe(true);
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      expect(log.migrationLocked).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   /** A 400 or 403 den-edge's `/lib` never sends (a proxy's page) is not a refusal: the action stays kept. */
   it('keeps an action refused with an answer den-edge does not give, and sends it on the next refresh', async () => {
     const { storage } = memoryStorage();

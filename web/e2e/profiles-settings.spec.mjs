@@ -59,6 +59,27 @@ test('recovery observes and binds its own source before the fresh Owner PIN', as
     ]);
 });
 
+test('a locked household offers the journal-less Owner Restore, bound to its own fresh source', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/profiles-settings.html?locked`);
+  await expect(page.locator('#profile-migration')).toContainText('Setup in progress');
+  await expect(page.getByRole('button', { name: 'Enable Profiles' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Recover safely' }).click();
+  await expect(page.getByRole('heading', { name: 'Authorize profile recovery' })).toBeVisible();
+
+  await page.locator('#profiles-owner-pin').fill('1234');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // No split journal, so no attempt is named: only the fresh recovery attempt and its observed source.
+  await expect
+    .poll(() => page.evaluate(() => window.profileSettingsEvents()))
+    .toEqual([
+      'observe-recovery:null',
+      'verify:1234',
+      `recover:null:${'f'.repeat(32)}:7:${'a'.repeat(64)}`,
+    ]);
+});
+
 test('a queued new Owner PIN never observes or enables profiles', async ({ page }) => {
   await page.goto(`${E2E_ORIGIN}/test/profiles-settings.html?queued`);
   await page.getByRole('button', { name: 'Enable Profiles' }).click();

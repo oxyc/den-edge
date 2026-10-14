@@ -142,6 +142,88 @@ describe('OwnerSplit Worker durable store', () => {
     ).rejects.toThrow(/corrupt/);
   });
 
+  describe('journal-less recovery handoff', () => {
+    const pending = { version: 1 as const, recoveryAttempt: OTHER_ATTEMPT, source: SOURCE };
+    const bound = {
+      ...pending,
+      fence: { generation: 1, base: 4, head: DIGEST, rewrite: 'rewrite-r' },
+      backup: { attempt: ATTEMPT, id: 'backup-1', digest: DIGEST },
+    };
+
+    it('survives a restart, first without and then with the open answer’s bound values', async () => {
+      const vault = new MemoryWorkerVault(HOUSEHOLD);
+      const first = new OwnerSplitWorkerStore(vault);
+      await first.saveHandoff(pending);
+      await expect(first.fenceGeneration()).resolves.toBeNull();
+      await first.saveHandoff(bound);
+      const restarted = new OwnerSplitWorkerStore(vault);
+      await expect(restarted.loadHandoff()).resolves.toEqual(bound);
+      await expect(restarted.fenceGeneration()).resolves.toBe(1);
+      await expect(restarted.load()).resolves.toBeNull();
+      await restarted.clearHandoff(OTHER_ATTEMPT);
+      await expect(restarted.loadHandoff()).resolves.toBeNull();
+    });
+
+    it('never coexists with a split journal, in either order', async () => {
+      const handoff = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
+      await handoff.saveHandoff(pending);
+      await expect(handoff.save(idle())).rejects.toThrow(/recovery handoff already owns/);
+
+      const journal = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
+      await journal.save(idle());
+      await expect(journal.saveHandoff(pending)).rejects.toThrow(/split journal already owns/);
+    });
+
+    it('refuses a second restore attempt and clearing someone else’s', async () => {
+      const store = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
+      await store.saveHandoff(pending);
+      await expect(store.saveHandoff({ ...pending, recoveryAttempt: ATTEMPT })).rejects.toThrow(
+        /Another recovery attempt/,
+      );
+      await expect(store.clearHandoff(ATTEMPT)).rejects.toThrow(/another recovery attempt/);
+      await expect(store.loadHandoff()).resolves.toEqual(pending);
+    });
+
+    it('fails closed on a half-bound or corrupt handoff instead of treating it as absent', async () => {
+      const store = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
+      await expect(store.saveHandoff({ ...pending, fence: bound.fence })).rejects.toThrow(
+        /handoff is unavailable or corrupt/,
+      );
+      await expect(
+        store.saveHandoff({ ...bound, backup: { ...bound.backup, attempt: OTHER_ATTEMPT } }),
+      ).rejects.toThrow(/handoff is unavailable or corrupt/);
+      const vault = new MemoryWorkerVault(HOUSEHOLD);
+      await vault.keepRequired(
+        'profile-migration/v1/state',
+        { version: 1, householdId: HOUSEHOLD, handoff: pending, journal: idle() },
+        `state:${HOUSEHOLD}:1`,
+      );
+      await expect(new OwnerSplitWorkerStore(vault).loadHandoff()).rejects.toThrow(/corrupt/);
+    });
+  });
+
+  it('drops only a refused recovery authorization and keeps the split journal', async () => {
+    const store = new OwnerSplitWorkerStore(new MemoryWorkerVault(HOUSEHOLD));
+    await store.save({
+      ...idle(),
+      state: 'restore-required',
+      fence: { generation: 1, base: 4, head: DIGEST, rewrite: 'rewrite-1' },
+      backup: { id: 'backup-1', digest: DIGEST },
+    });
+    await store.authorizeRecovery({
+      version: 2,
+      attempt: ATTEMPT,
+      recoveryAttempt: OTHER_ATTEMPT,
+      recoveryIntent: true,
+      source: SOURCE,
+    });
+    await expect(store.loadRecoveryIntent(ATTEMPT)).resolves.not.toBeNull();
+    await store.discardRecovery(ATTEMPT);
+    await expect(store.loadRecoveryIntent(ATTEMPT)).resolves.toBeNull();
+    await expect(store.load()).resolves.toMatchObject({ attempt: ATTEMPT });
+    await expect(store.discardRecovery(OTHER_ATTEMPT)).rejects.toThrow(/changed before recovery/);
+  });
+
   it('rejects candidate corruption and removes the credential idempotently', async () => {
     const vault = new MemoryWorkerVault(HOUSEHOLD);
     const store = new OwnerSplitWorkerStore(vault);

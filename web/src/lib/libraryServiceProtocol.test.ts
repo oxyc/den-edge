@@ -106,6 +106,73 @@ describe('library service client protocol', () => {
     ).toMatchObject({ ok: false });
   });
 
+  it('carries the journal-less Owner Restore and the foreign-lock outcome, and nothing secret', () => {
+    const source = { generation: 7, head: 'a'.repeat(64) };
+    const recovery = 'f'.repeat(32);
+    const observe = (attempt: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-recovery-observe',
+        query: { kind: 'profile-migration.observe-recovery', attempt },
+      });
+    const recover = (attempt: unknown, extra: Record<string, unknown> = {}) =>
+      decodeLibraryServiceClientMessage({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-recover',
+        operationId: 'profile-recover',
+        task: {
+          kind: 'profile-migration.recover',
+          attempt,
+          recoveryAttempt: recovery,
+          source,
+          ...extra,
+        },
+      });
+    // No split journal on this device: recovery names no attempt, only its own fresh one.
+    expect(observe(null)).toMatchObject({ ok: true });
+    expect(recover(null)).toMatchObject({ ok: true });
+    expect(observe(undefined)).toMatchObject({ ok: false });
+    expect(observe('not-an-attempt')).toMatchObject({ ok: false });
+    expect(recover(null, { candidateKey: libraryKey })).toMatchObject({ ok: false });
+
+    const result = (body: Record<string, unknown>) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-status',
+        version,
+        result: body,
+      });
+    expect(result({ kind: 'profile-migration.status', phase: 'setup-in-progress' })).toMatchObject({
+      ok: true,
+    });
+    expect(result({ kind: 'profile-migration.status', phase: 'locked' })).toMatchObject({
+      ok: false,
+    });
+    expect(
+      result({
+        kind: 'profile-migration.observe-recovery',
+        attempt: null,
+        recoveryAttempt: recovery,
+        source,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const task = (outcome: string) =>
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-recover',
+        operationId: 'profile-recover',
+        version,
+        result: { kind: 'profile-migration.recover', outcome },
+      });
+    expect(task('setup-in-progress')).toMatchObject({ ok: true });
+    expect(task('locked-by-someone')).toMatchObject({ ok: false });
+  });
+
   it('accepts a handshake and semantic, idempotent commands', () => {
     expect(
       decodeLibraryServiceClientMessage({

@@ -13,7 +13,6 @@ describe('OwnerSplit Worker route boundary', () => {
     ['GET', `${root}/${ATTEMPT}`, 'lookup'],
     ['DELETE', `${root}/${ATTEMPT}`, 'abort'],
     ['GET', `${root}/${ATTEMPT}/backup`, 'backup'],
-    ['POST', `${root}/${ATTEMPT}/backup`, 'backup'],
     ['POST', `${root}/${ATTEMPT}/rows`, 'rows'],
     ['POST', `${root}/${ATTEMPT}/commit`, 'commit'],
     ['POST', `${root}/${ATTEMPT}/restore`, 'restore'],
@@ -29,6 +28,8 @@ describe('OwnerSplit Worker route boundary', () => {
     ['DELETE', root],
     ['POST', `${root}/${ATTEMPT}`],
     ['DELETE', `${root}/${ATTEMPT}/backup`],
+    // den-edge creates the backup when it opens the attempt; Web may only read it.
+    ['POST', `${root}/${ATTEMPT}/backup`],
     ['GET', `${root}/${ATTEMPT}/rows`],
     ['GET', `${root}/${ATTEMPT}/retire-candidate`],
     ['POST', `${root}/${ATTEMPT}/retire-candidate/extra`],

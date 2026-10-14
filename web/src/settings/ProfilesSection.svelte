@@ -28,7 +28,10 @@
 
   let status = $state<Status | null>(null);
   let observation = $state<Observation | null>(null);
+  const setupInProgress =
+    'Profile setup is already in progress on another device. Nothing was changed; finish it there, or use Recover safely to take it over.';
   let recoveryObservation = $state<{
+    attempt: string | null;
     recoveryAttempt: string;
     source: { generation: number; head: string };
   } | null>(null);
@@ -89,10 +92,17 @@
   }
 
   async function beginRecovery() {
-    if (!status?.attempt || busy || disabled) return;
+    if (
+      (status?.phase !== 'recovery-required' && status?.phase !== 'setup-in-progress') ||
+      busy ||
+      disabled
+    )
+      return;
     try {
-      const observed = await model.observeProfileRecovery(status.attempt);
+      // A split journal on this device names its attempt; without one this is the journal-less Owner Restore.
+      const observed = await model.observeProfileRecovery(status.attempt ?? null);
       recoveryObservation = {
+        attempt: observed.attempt,
         recoveryAttempt: observed.recoveryAttempt,
         source: observed.source,
       };
@@ -172,6 +182,12 @@
           failure = 'Your library changed during setup. Start again with a fresh PIN.';
           return;
         }
+        if (result.outcome === 'setup-in-progress') {
+          finishModal();
+          await refresh();
+          failure = setupInProgress;
+          return;
+        }
         finishModal();
         await refresh();
         return;
@@ -190,11 +206,16 @@
           failure = 'Your library changed during setup. Start again with a fresh PIN.';
           return;
         }
+        if (result.outcome === 'setup-in-progress') {
+          finishModal();
+          await refresh();
+          failure = setupInProgress;
+          return;
+        }
       } else if (modal === 'recover') {
-        if (!status?.attempt) throw new Error('Recovery attempt is absent');
         if (!recoveryObservation) throw new Error('Recovery source observation is absent');
         const { result } = await model.recoverProfileMigration(
-          status.attempt,
+          recoveryObservation.attempt,
           recoveryObservation.recoveryAttempt,
           recoveryObservation.source,
         );
@@ -203,6 +224,12 @@
           finishModal();
           await refresh();
           failure = 'Your library changed before recovery. Authorize recovery again.';
+          return;
+        }
+        if (result.outcome === 'setup-in-progress') {
+          finishModal();
+          await refresh();
+          failure = setupInProgress;
           return;
         }
       }
@@ -253,6 +280,7 @@
     if (status.phase === 'ready' || status.phase === 'reconciling') return 'Finishing safely…';
     if (status.phase === 'enabled') return 'Enabled';
     if (status.phase === 'recovery-required') return 'Recovery required';
+    if (status.phase === 'setup-in-progress') return 'Setup in progress';
     return 'Unavailable';
   });
 </script>
@@ -277,7 +305,7 @@
         onclick={() => void beginEnable()}
       />
     </div>
-  {:else if status?.phase === 'recovery-required'}
+  {:else if status?.phase === 'recovery-required' || status?.phase === 'setup-in-progress'}
     <div class="actions">
       <Button
         variant="primary"

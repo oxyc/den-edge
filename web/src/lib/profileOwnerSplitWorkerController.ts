@@ -1,5 +1,6 @@
 import {
   DormantOwnerSplitCoordinator,
+  type OwnerSplitHandoffRecovery,
   type OwnerSplitJournal,
   type OwnerSplitRunResult,
 } from './profileOwnerSplitCoordinator';
@@ -8,11 +9,24 @@ import type { OwnerSplitWorkerSecureAdapter } from './profileOwnerSplitWorkerSec
 import type { OwnerSplitCapability } from './profileOwnerSplitWorkerTransport';
 
 export type OwnerSplitWorkerPhase =
-  'off' | 'available' | 'preparing' | 'ready' | 'reconciling' | 'enabled' | 'recovery-required';
+  | 'off'
+  | 'available'
+  | 'preparing'
+  | 'ready'
+  | 'reconciling'
+  | 'enabled'
+  | 'recovery-required'
+  /** den-edge refused a write with `409 migration_in_progress`: another attempt holds the household lock. */
+  | 'setup-in-progress';
 
 export interface OwnerSplitWorkerControlPort {
   capability(): Promise<OwnerSplitCapability | null>;
   loadJournal(): Promise<OwnerSplitJournal | null>;
+  loadHandoff(): Promise<OwnerSplitHandoffRecovery | null>;
+  /** This browser saw den-edge refuse an ordinary household write because a migration holds the lock. */
+  migrationLocked(): boolean;
+  /** A journal-less Restore released the lock, so the browser's memory of it is stale. */
+  migrationReleased?(): void;
 }
 
 /** Status-only service adapter. No lifecycle action is exposed until the product contract has a matching core op. */
@@ -29,36 +43,86 @@ export class OwnerSplitWorkerController {
     if (capability === null) return { phase: 'off' };
     let journal = await this.port.loadJournal();
     if (journal === null) {
-      if (capability.wireMin === capability.runtimeHouseholdWire) return { phase: 'enabled' };
-      return capability.enrollment === 'prepare' && capability.wireMin < 5
-        ? { phase: 'available' }
-        : { phase: 'off' };
+      if ((await this.port.loadHandoff()) !== null) return this.#resumeHandoff(capability);
+      return this.#idleStatus(capability);
     }
     const resumed = await this.coordinator.resume();
     journal = await this.port.loadJournal();
     if (journal !== null) return { phase: phaseOf(journal), attempt: journal.attempt };
     if (resumed.kind === 'active' || resumed.kind === 'restored') return { phase: 'enabled' };
+    if (resumed.kind === 'setup-in-progress') return { phase: 'setup-in-progress' };
+    return this.#idleStatus(capability);
+  }
+
+  /** No journal and no handoff on this device. A refused ordinary write is the only sign of a foreign lock. */
+  #idleStatus(capability: OwnerSplitCapability): { readonly phase: OwnerSplitWorkerPhase } {
+    if (capability.wireMin === capability.runtimeHouseholdWire) return { phase: 'enabled' };
+    if (this.port.migrationLocked()) return { phase: 'setup-in-progress' };
     return capability.enrollment === 'prepare' && capability.wireMin < 5
       ? { phase: 'available' }
       : { phase: 'off' };
   }
 
+  /**
+   * A journal-less Restore this device already authorized resumes as exactly that attempt. An error is surfaced in the
+   * device log and as a state that still offers Restore; it never reads as "unavailable" and loses the handoff.
+   */
+  async #resumeHandoff(
+    capability: OwnerSplitCapability,
+  ): Promise<{ readonly phase: OwnerSplitWorkerPhase }> {
+    let resumed: OwnerSplitRunResult;
+    try {
+      resumed = await this.coordinator.resume();
+    } catch (error) {
+      console.error('den: journal-less profile recovery could not continue', error);
+      return { phase: 'recovery-required' };
+    }
+    if (resumed.kind === 'restored') return { phase: 'enabled' };
+    if (resumed.kind === 'released') this.port.migrationReleased?.();
+    if (resumed.kind === 'recovery-blocked') return { phase: 'recovery-required' };
+    if (resumed.kind === 'setup-in-progress') return { phase: 'setup-in-progress' };
+    return this.#idleStatus(capability);
+  }
+
   async observe(): Promise<{ readonly attempt: string; readonly source: OwnerSplitSource }> {
     await this.#requirePrepareCapability();
-    if ((await this.port.loadJournal()) !== null)
+    if ((await this.port.loadJournal()) !== null || (await this.port.loadHandoff()) !== null)
       throw new Error('A profile migration attempt is already durable');
     return { attempt: randomAttempt(), source: await this.coordinator.observeSource() };
   }
 
-  async observeRecovery(
-    attempt: string,
-  ): Promise<{ readonly recoveryAttempt: string; readonly source: OwnerSplitSource }> {
+  /**
+   * `attempt` names this device's restore-required split journal. `null` is the journal-less Owner Restore: it is
+   * offered only for a household this browser knows is locked, or one whose handoff is already durable.
+   */
+  async observeRecovery(attempt: string | null): Promise<{
+    readonly attempt: string | null;
+    readonly recoveryAttempt: string;
+    readonly source: OwnerSplitSource;
+  }> {
     const capability = await this.port.capability();
     if (capability === null) throw new Error('Profile recovery is unavailable');
     const journal = await this.port.loadJournal();
+    if (attempt === null) {
+      if (journal !== null) throw new Error('Profile recovery is not required');
+      // A durable handoff keeps its own attempt and source: a second one would be refused by den-edge.
+      const handoff = await this.port.loadHandoff();
+      if (handoff !== null)
+        return { attempt: null, recoveryAttempt: handoff.recoveryAttempt, source: handoff.source };
+      if (!this.port.migrationLocked()) throw new Error('Profile recovery is not required');
+      return {
+        attempt: null,
+        recoveryAttempt: randomAttempt(),
+        source: await this.coordinator.observeSource(),
+      };
+    }
     if (journal?.attempt !== attempt || journal.state !== 'restore-required')
       throw new Error('Profile recovery is not required');
-    return { recoveryAttempt: randomAttempt(), source: await this.coordinator.observeSource() };
+    return {
+      attempt,
+      recoveryAttempt: randomAttempt(),
+      source: await this.coordinator.observeSource(),
+    };
   }
 
   async enable(attempt: string, source: OwnerSplitSource): Promise<OwnerSplitRunResult> {
@@ -71,12 +135,13 @@ export class OwnerSplitWorkerController {
   }
 
   async recover(
-    attempt: string,
+    attempt: string | null,
     recoveryAttempt: string,
     source: OwnerSplitSource,
   ): Promise<OwnerSplitRunResult> {
     const capability = await this.port.capability();
     if (capability === null) throw new Error('Profile recovery is unavailable');
+    if (attempt === null) return this.coordinator.recoverWithoutJournal(recoveryAttempt, source);
     return this.coordinator.authorizeRecovery(attempt, recoveryAttempt, source);
   }
 
@@ -88,19 +153,11 @@ export class OwnerSplitWorkerController {
 }
 
 export function workerStatusControl(
-  capability: () => Promise<OwnerSplitCapability | null>,
-  loadJournal: () => Promise<OwnerSplitJournal | null>,
+  port: OwnerSplitWorkerControlPort,
   coordinator: DormantOwnerSplitCoordinator,
   secureWorker: OwnerSplitWorkerSecureAdapter,
 ): OwnerSplitWorkerController {
-  return new OwnerSplitWorkerController(
-    {
-      capability,
-      loadJournal,
-    },
-    coordinator,
-    secureWorker,
-  );
+  return new OwnerSplitWorkerController(port, coordinator, secureWorker);
 }
 
 function randomAttempt(): string {

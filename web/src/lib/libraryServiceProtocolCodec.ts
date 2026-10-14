@@ -742,7 +742,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'profile-create.status') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.observe') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.observe-recovery')
-    return exact(value, ['kind', 'attempt']) && hexId(value.attempt);
+    return exact(value, ['kind', 'attempt']) && nullable(value.attempt, hexId);
   if (value.kind === 'recovery.seal')
     return (
       exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
@@ -891,7 +891,7 @@ function task(value: unknown): value is LibraryTask {
     case 'profile-migration.recover':
       return (
         exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
-        hexId(value.attempt) &&
+        nullable(value.attempt, hexId) &&
         hexId(value.recoveryAttempt) &&
         migrationSource(value.source)
       );
@@ -1641,7 +1641,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         value.phase === 'ready' ||
         value.phase === 'reconciling' ||
         value.phase === 'enabled' ||
-        value.phase === 'recovery-required') &&
+        value.phase === 'recovery-required' ||
+        value.phase === 'setup-in-progress') &&
       optional(
         value.attempt,
         (attempt): attempt is string =>
@@ -1676,7 +1677,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (value.kind === 'profile-migration.observe-recovery')
     return (
       exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
-      hexId(value.attempt) &&
+      nullable(value.attempt, hexId) &&
       hexId(value.recoveryAttempt) &&
       migrationSource(value.source)
     );
@@ -1999,6 +2000,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'enabled' ||
           value.outcome === 'recovery-required' ||
           value.outcome === 'source-changed' ||
+          value.outcome === 'setup-in-progress' ||
           value.outcome === 'cancelled') &&
         optional(value.attempt, hexId)
       );

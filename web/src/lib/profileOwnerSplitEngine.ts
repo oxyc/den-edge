@@ -47,6 +47,13 @@ export interface OwnerSplitAuthenticatedCopy {
 
 export type OwnerSplitPurpose = 'split' | 'restore';
 
+/** The immutable backup den-edge created and bound when it opened the attempt; `attempt` is the creator. */
+export interface OwnerSplitBackupReference {
+  readonly attempt: string;
+  readonly id: string;
+  readonly digest: string;
+}
+
 interface OwnerSplitAttemptBase {
   readonly attempt: string;
   readonly purpose: OwnerSplitPurpose;
@@ -56,6 +63,41 @@ interface OwnerSplitAttemptBase {
 
 export interface OwnerSplitOpenAttempt extends OwnerSplitAttemptBase {
   readonly state: 'open';
+  /**
+   * Always present on an open attempt: den-edge publishes the exclusive lock only together with a read-back-verified
+   * backup. For a split it names this attempt; after a recovery handoff it names the split that created it.
+   */
+  readonly backup: OwnerSplitBackupReference;
+}
+
+/**
+ * den-edge refused a migration request. `409 migration_in_progress` carries no other field by contract: it names no
+ * attempt, purpose, fence or backup, so there is nothing to retain or retry on.
+ */
+export class OwnerSplitRefusedError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(`Profile migration provider refused ${status} ${code}`);
+    this.name = 'OwnerSplitRefusedError';
+  }
+}
+
+export function isMigrationInProgress(error: unknown): boolean {
+  return (
+    error instanceof OwnerSplitRefusedError &&
+    error.status === 409 &&
+    error.code === 'migration_in_progress'
+  );
+}
+
+export function isMigrationSourceChanged(error: unknown): boolean {
+  return (
+    error instanceof OwnerSplitRefusedError &&
+    error.status === 409 &&
+    error.code === 'migration_source_changed'
+  );
 }
 
 interface OwnerSplitTerminal {
@@ -104,8 +146,11 @@ export interface OwnerSplitProvider {
   ): Promise<OwnerSplitAttemptLookup>;
   lookup(attempt: string): Promise<OwnerSplitAttemptLookup>;
   abort(attempt: string): Promise<OwnerSplitAttemptLookup>;
-  createBackup(attempt: string): Promise<{ readonly id: string; readonly digest: string }>;
-  readBackup(attempt: string): Promise<OwnerSplitBackup>;
+  /**
+   * Reads the immutable backup bound to `attempt`. The manifest's own `attempt` is `manifestAttempt`, which differs
+   * from `attempt` only for a restore attempt that took over a split's lock. A client never creates a backup.
+   */
+  readBackup(attempt: string, manifestAttempt?: string): Promise<OwnerSplitBackup>;
   stage(input: {
     readonly attempt: string;
     readonly fence: OwnerSplitFence;
@@ -228,6 +273,12 @@ export interface OwnerSplitPlannerEvidence {
   readonly attemptLookup?: OwnerSplitAttemptLookup['state'];
   readonly householdFresh: boolean;
   readonly recoveryIntent: boolean;
+  /**
+   * True only when den-edge itself answered `superseded` for this journal's attempt: a durable terminal answer from
+   * before exclusive locks, which is the sole thing that may excuse a stale candidate library (den-core
+   * `legacy_cleanup_evidence_required`). A newly opened attempt can never produce it.
+   */
+  readonly legacyStaleCandidate?: boolean;
   /** Pre-fence authenticated source; den-core consumes it as the legacy observation without a household read. */
   readonly source?: OwnerSplitSource;
   readonly household?: OwnerSplitHouseholdObservation;
@@ -235,7 +286,8 @@ export interface OwnerSplitPlannerEvidence {
   readonly householdId: string;
   readonly backupDigest?: string;
   readonly stagedDigest?: string;
-  readonly splitAuthorization: ProfileMigrationAuthorization;
+  /** Absent for a journal-less recovery: Restore never inherits, and cannot be broadened by, a split authorization. */
+  readonly splitAuthorization?: ProfileMigrationAuthorization;
 }
 
 export type OwnerSplitJournalState =
@@ -323,30 +375,37 @@ export class DormantOwnerSplitEffectExecutor {
     return this.#provider.open(attempt, purpose, expectedSource);
   }
 
-  async createVerifiedBackup(
-    attempt: string,
-    fence: OwnerSplitFence,
-  ): Promise<VerifiedOwnerSplitBackup> {
+  /**
+   * Fetch and fully verify the backup den-edge bound to `attempt` when it opened it. Nothing here creates a backup:
+   * `backup` is the reference the open answer carried. `fence` is that same answer's fence. After a recovery
+   * handoff the backup belongs to the tombstoned split (`backup.attempt !== attempt`), so the manifest is checked
+   * against that split's own attempt and its frozen source, which must equal the handoff fence.
+   */
+  async verifyBoundBackup(input: {
+    readonly attempt: string;
+    readonly fence: OwnerSplitFence;
+    readonly backup: OwnerSplitBackupReference;
+  }): Promise<VerifiedOwnerSplitBackup> {
     this.#requireEnabled();
+    const { attempt, fence, backup } = input;
     checkedAttempt(attempt);
     checkedFence(fence);
-    const created = checkedBackup(await this.#provider.createBackup(attempt));
-    const reread = await this.#provider.readBackup(attempt);
-    await this.#secure.verifyBackup({ attempt, fence, created, reread });
-    return { manifest: reread, [VERIFIED_BACKUP]: true };
-  }
-
-  async reverifyBackup(
-    attempt: string,
-    fence: OwnerSplitFence,
-    reference: { readonly id: string; readonly digest: string },
-  ): Promise<VerifiedOwnerSplitBackup> {
-    this.#requireEnabled();
-    checkedAttempt(attempt);
-    checkedFence(fence);
-    const created = checkedBackup(reference);
-    const reread = await this.#provider.readBackup(attempt);
-    await this.#secure.verifyBackup({ attempt, fence, created, reread });
+    checkedAttempt(backup.attempt);
+    checkedBackup(backup);
+    const created = { id: backup.id, digest: backup.digest };
+    const reread = await this.#provider.readBackup(attempt, backup.attempt);
+    if (backup.attempt === attempt) {
+      await this.#secure.verifyBackup({ attempt, fence, created, reread });
+    } else {
+      const frozen = reread.source;
+      if (
+        frozen.generation !== fence.generation ||
+        frozen.base !== fence.base ||
+        frozen.head !== fence.head
+      )
+        throw new Error('Handed-off backup does not describe the recovery attempt source');
+      await this.#secure.verifyBackup({ attempt: backup.attempt, fence: frozen, created, reread });
+    }
     return { manifest: reread, [VERIFIED_BACKUP]: true };
   }
 
