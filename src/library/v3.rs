@@ -187,6 +187,53 @@ fn exclusive_operation_abort_key(attempt: &str) -> String {
     format!("exclusive-operation-aborted:{attempt}")
 }
 
+/// The records an exclusive operation keeps beside the lock live under this prefix, so a compound operation's
+/// bookkeeping can never overwrite a credential or a migration record.
+const EXCLUSIVE_RECORD_PREFIX: &str = "exclusive:";
+
+/// What an [`ExclusiveEdit`] requires of the lock key before it applies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum LockExpect {
+    Any,
+    Absent,
+    Held(String),
+}
+
+/// What an [`ExclusiveEdit`] does to the lock key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum LockChange {
+    Keep,
+    Set(String),
+    Clear,
+}
+
+/// One compare-and-set commit on a single library: preconditions on the lock key, the library's source and the
+/// exact bytes of the records it replaces, then record writes and the lock change, all or nothing. It knows nothing
+/// about what the records mean.
+#[derive(Clone, Debug)]
+pub(super) struct ExclusiveEdit {
+    pub expect_lock: LockExpect,
+    /// `(migration generation, head)` the library must still be at.
+    pub expect_source: Option<(u64, u64)>,
+    pub expect_records: Vec<(String, Option<Vec<u8>>)>,
+    pub lock: LockChange,
+    pub put: Vec<(String, Vec<u8>)>,
+    pub remove: Vec<String>,
+}
+
+impl ExclusiveEdit {
+    pub(super) fn new(expect_lock: LockExpect, lock: LockChange) -> Self {
+        Self {
+            expect_lock,
+            expect_source: None,
+            expect_records: Vec::new(),
+            lock,
+            put: Vec::new(),
+            remove: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
@@ -263,6 +310,9 @@ pub(super) trait LibraryStore: Send + Sync {
         expected_base: u64,
     ) -> Result<(), StoreError>;
     fn exclusive_operation_aborted(&self, attempt: &str) -> Result<bool, StoreError>;
+    /// One record an exclusive operation keeps beside the lock (`ExclusiveEdit`).
+    fn exclusive_record(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
+    fn exclusive_commit(&self, edit: &ExclusiveEdit) -> Result<(), StoreError>;
     fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError>;
     /// Return durable terminal evidence for one attempt. A matching attempt record proves that attempt won;
     /// otherwise the generation record identifies the attempt that won the same fence and proves this one lost.
@@ -1234,6 +1284,83 @@ impl LibraryStore for RedbLibrary {
         Ok(metadata.get(exclusive_operation_abort_key(attempt).as_str()).map_err(StoreError::redb)?.is_some())
     }
 
+    fn exclusive_record(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        if !key.starts_with(EXCLUSIVE_RECORD_PREFIX) {
+            return Err(StoreError::Invalid("not an exclusive-operation record".into()));
+        }
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        Ok(metadata.get(key).map_err(StoreError::redb)?.map(|value| value.value().to_vec()))
+    }
+
+    fn exclusive_commit(&self, edit: &ExclusiveEdit) -> Result<(), StoreError> {
+        if edit
+            .put
+            .iter()
+            .map(|(key, _)| key)
+            .chain(edit.remove.iter())
+            .chain(edit.expect_records.iter().map(|(key, _)| key))
+            .any(|key| !key.starts_with(EXCLUSIVE_RECORD_PREFIX))
+        {
+            return Err(StoreError::Invalid("not an exclusive-operation record".into()));
+        }
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        if let Some((expected_generation, expected_base)) = edit.expect_source {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let generation = numbers
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            let base = numbers
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+                .value();
+            if generation != expected_generation || base != expected_base {
+                return Err(StoreError::Invalid("migration_source_changed".into()));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match (&edit.expect_lock, held.as_deref()) {
+                (LockExpect::Any, _) | (LockExpect::Absent, None) => {}
+                (LockExpect::Held(expected), Some(held)) if held == expected.as_bytes() => {}
+                _ => return Err(StoreError::Locked),
+            }
+            for (key, expected) in &edit.expect_records {
+                let current =
+                    metadata.get(key.as_str()).map_err(StoreError::redb)?.map(|value| value.value().to_vec());
+                if current != *expected {
+                    return Err(StoreError::Invalid("exclusive_precondition".into()));
+                }
+            }
+            for key in &edit.remove {
+                metadata.remove(key.as_str()).map_err(StoreError::redb)?;
+            }
+            for (key, value) in &edit.put {
+                metadata.insert(key.as_str(), value.as_slice()).map_err(StoreError::redb)?;
+            }
+            match &edit.lock {
+                LockChange::Keep => {}
+                LockChange::Set(attempt) => {
+                    metadata
+                        .insert(EXCLUSIVE_OPERATION_LOCK, attempt.as_bytes())
+                        .map_err(StoreError::redb)?;
+                }
+                LockChange::Clear => {
+                    metadata.remove(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?;
+                }
+            }
+        }
+        transaction.commit().map_err(StoreError::redb)
+    }
+
     fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
@@ -1758,6 +1885,14 @@ impl LibraryStore for StoreLease {
 
     fn exclusive_operation_aborted(&self, attempt: &str) -> Result<bool, StoreError> {
         self.store.exclusive_operation_aborted(attempt)
+    }
+
+    fn exclusive_record(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.exclusive_record(key)
+    }
+
+    fn exclusive_commit(&self, edit: &ExclusiveEdit) -> Result<(), StoreError> {
+        self.store.exclusive_commit(edit)
     }
 
     fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError> {

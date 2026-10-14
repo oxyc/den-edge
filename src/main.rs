@@ -129,6 +129,9 @@ pub struct AppState {
     /// This is transport authority, not runtime truth: committed runtime is derived by a client only after it
     /// decrypts and validates the stored directory. An empty set keeps every legacy household off.
     pub profile_prepare_households: HashSet<String>,
+    /// Households whose aborted key reset still has declared successor libraries to delete
+    /// (`library::reset_lock`): filled from the sweep hints at startup and when a reset ends, drained by the sweep.
+    pub reset_sweeps: Mutex<HashSet<String>>,
     /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
@@ -343,6 +346,7 @@ impl AppState {
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
             profile_prepare_households: HashSet::new(),
+            reset_sweeps: Mutex::new(HashSet::new()),
             relays: Vec::new(),
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
@@ -534,6 +538,7 @@ async fn main() {
     tokio::spawn(skipdb::sweep_forever(Arc::clone(&state)));
     tokio::spawn(grants::sweep_forever(Arc::clone(&state)));
     tokio::spawn(oauth::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(library::reset_lock::sweep_startup(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = env_number("PORT").unwrap_or(8080);

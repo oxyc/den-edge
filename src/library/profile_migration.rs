@@ -1583,7 +1583,10 @@ fn fence(
     })
 }
 
-fn migration_source(library_id: &str, snapshot: &LibrarySnapshot) -> Result<MigrationSource, MigrationError> {
+pub(super) fn migration_source(
+    library_id: &str,
+    snapshot: &LibrarySnapshot,
+) -> Result<MigrationSource, MigrationError> {
     let source = MigrationSource {
         generation: snapshot.protocol.migration_generation,
         head: authenticated_head(library_id, snapshot)?,

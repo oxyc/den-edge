@@ -477,7 +477,7 @@ fn preflight() -> Response {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
             "content-type, x-den-link, x-den-library-token, x-den-library-member, \
-             x-den-candidate-library-token, x-den-grant, \
+             x-den-candidate-library-token, x-den-exclusive-attempt, x-den-successor-token, x-den-grant, \
              x-den-wire, x-den-wire-min, x-den-generation",
         ),
     );
@@ -676,7 +676,10 @@ fn profile_migration_path(path: &str) -> bool {
     let Some((_, action)) = rest.split_once('/') else {
         return false;
     };
-    action == "profile-migration" || action.starts_with("profile-migration/")
+    action == "profile-migration"
+        || action.starts_with("profile-migration/")
+        || action == "exclusive-operation"
+        || action.starts_with("exclusive-operation/")
 }
 
 /// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind
@@ -919,6 +922,16 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.contains("/profile-migration/") => {
             "/lib/:id/profile-migration/:attempt"
         }
+        p if p.starts_with("/lib/") && p.ends_with("/exclusive-operation") => "/lib/:id/exclusive-operation",
+        p if p.starts_with("/lib/") && p.ends_with("/exclusive-operation/source") => {
+            "/lib/:id/exclusive-operation/source"
+        }
+        p if p.starts_with("/lib/") && p.contains("/exclusive-operation/") && p.ends_with("/successor") => {
+            "/lib/:id/exclusive-operation/:attempt/successor"
+        }
+        p if p.starts_with("/lib/") && p.contains("/exclusive-operation/") => {
+            "/lib/:id/exclusive-operation/:attempt"
+        }
         p if p.starts_with("/lib/") && p.ends_with("/rows") && p.contains("/rewrite/") => {
             "/lib/:id/rewrite/:rid/rows"
         }
@@ -974,7 +987,9 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/recovery/open" | "/recovery/timing" => Some(POST),
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
-        "/lib/:id/profile-migration/:attempt" => Some(&[Method::GET, Method::DELETE]),
+        "/lib/:id/profile-migration/:attempt" | "/lib/:id/exclusive-operation/:attempt" => {
+            Some(&[Method::GET, Method::DELETE])
+        }
         "/lib/:id/profile-migration/:attempt/backup" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
         "/lib/:id/grants/:gid/code" => Some(POST),
@@ -993,6 +1008,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/metrics"
         | "/lib/:id/profile-capability"
         | "/lib/:id/profile-migration/source"
+        | "/lib/:id/exclusive-operation/source"
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
@@ -1005,6 +1021,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/rewrite/:rid/rows"
         | "/lib/:id/rewrite/:rid/commit"
         | "/lib/:id/profile-migration"
+        | "/lib/:id/exclusive-operation"
+        | "/lib/:id/exclusive-operation/:attempt/successor"
         | "/lib/:id/profile-migration/:attempt/rows"
         | "/lib/:id/profile-migration/:attempt/commit"
         | "/lib/:id/profile-migration/:attempt/restore"

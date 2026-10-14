@@ -50,6 +50,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 mod profile_migration;
 pub const PROFILE_MIGRATION_BODY_BYTES: usize = profile_migration::BODY_BYTES;
+pub(crate) mod reset_lock;
 pub(crate) mod v3;
 #[cfg(test)]
 mod v3_model;
@@ -471,6 +472,11 @@ pub(crate) async fn profile_migration_available(state: &AppState, path: &str) ->
     }
     let Some(rest) = path.strip_prefix("/lib/") else { return false };
     let Some((id, action)) = rest.split_once('/') else { return false };
+    if valid_hex_id(id) && (action == "exclusive-operation" || action.starts_with("exclusive-operation/")) {
+        // A key reset's lock surface is addressed per library: the handler decides by the library's own minimum
+        // (and a retired library still answers its lock's lookup), so only the global switch applies here.
+        return true;
+    }
     if !valid_hex_id(id) || !(action == "profile-migration" || action.starts_with("profile-migration/")) {
         return false;
     }
@@ -544,9 +550,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     }
     let migration_action = action == "profile-migration" || action.starts_with("profile-migration/");
     let capability_action = action == "profile-capability";
-    if migration_action && !state.profile_migration_enabled {
+    let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
+    if (migration_action || exclusive_action) && !state.profile_migration_enabled {
         return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
     }
+    // Households that owe a sweep of declared successors (an aborted key reset) are swept on their next access.
+    reset_lock::sweep_if_due(state, id).await;
     let protocol = match protocol_for(state, id).await {
         Ok(protocol) => protocol,
         Err(reason) => return with_wire_headers(state, read_error(reason), None),
@@ -575,6 +584,39 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         let response =
             json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": 5 }));
         return with_wire_headers(state, response, protocol.as_ref());
+    }
+    // A key reset's lock surface exists for a household at minimum 5 (request wire 5) and for a profile library at
+    // minimum 4 (request wire 4); no other library takes part in one. A retired library has no database but still
+    // answers its lock's lookup, so it reaches the handler.
+    if exclusive_action {
+        let required = match protocol.as_ref() {
+            Some(known) if known.wire_min > 5 => {
+                let response = json_reply(
+                    StatusCode::UPGRADE_REQUIRED,
+                    &json!({ "error": "upgrade_required", "min": known.wire_min }),
+                );
+                return with_wire_headers(state, response, protocol.as_ref());
+            }
+            Some(known) => reset_lock::required_wire(known.wire_min),
+            None => match retired(state, id).await {
+                Ok(true) => Some(wire.filter(|wire| matches!(*wire, 4 | 5)).unwrap_or(5)),
+                _ => None,
+            },
+        };
+        let Some(required) = required else {
+            return with_wire_headers(
+                state,
+                json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+                protocol.as_ref(),
+            );
+        };
+        if wire != Some(required) {
+            let response = json_reply(
+                StatusCode::UPGRADE_REQUIRED,
+                &json!({ "error": "upgrade_required", "min": required }),
+            );
+            return with_wire_headers(state, response, protocol.as_ref());
+        }
     }
     if minimum >= 3 && wire.unwrap_or(0) < minimum && !home_check {
         let response =
@@ -627,30 +669,50 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     // A profile migration owns an exclusive, durable household mutation lock. Check it before generation and
     // rewrite handling so every ordinary writer receives one stable answer; the store repeats this check inside
     // its write transaction to close the check-to-commit race.
-    if is_write && !migration_action && protocol.is_some() {
+    //
+    // A `DELETE` naming an owning attempt is a key reset retiring a library it locked: it is the one write a lock
+    // lets through, and `reset_lock::retire` decides whether this attempt may.
+    let exclusive_retire =
+        if state.profile_migration_enabled && action.is_empty() && req.method() == Method::DELETE {
+            match reset_lock::retire_headers(req.headers()) {
+                Ok(headers) => headers,
+                Err(()) => {
+                    return with_wire_headers(
+                        state,
+                        json_reply(StatusCode::BAD_REQUEST, &error("bad_request")),
+                        protocol.as_ref(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+    if let Some((attempt, successor)) = &exclusive_retire {
+        let response =
+            reset_lock::retire(state, id, token_hash, attempt, successor, sent_generation.as_deref()).await;
+        let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
+        return with_wire_headers(state, response, latest.as_ref());
+    }
+    if is_write && !migration_action && !exclusive_action && protocol.is_some() {
         let manager = Arc::clone(&state.library_v3);
         let locked_id = id.to_owned();
-        let locked = tokio::task::spawn_blocking(move || {
-            manager.existing_library(&locked_id, token_hash)?.exclusive_operation_lock()
-        })
-        .await;
-        match locked {
-            Ok(Ok(Some(_))) => {
+        let opened =
+            tokio::task::spawn_blocking(move || manager.existing_library(&locked_id, token_hash)).await;
+        let blocked = match opened {
+            Ok(Ok(store)) => reset_lock::write_blocked(state, id, &store).await,
+            Ok(Err(reason)) => Err(v3_io(reason)),
+            Err(reason) => Err(io::Error::other(reason)),
+        };
+        match blocked {
+            Ok(true) => {
                 return with_wire_headers(
                     state,
                     json_reply(StatusCode::CONFLICT, &error("migration_in_progress")),
                     protocol.as_ref(),
                 );
             }
-            Ok(Ok(None)) => {}
-            Ok(Err(reason)) => return with_wire_headers(state, read_error(v3_io(reason)), protocol.as_ref()),
-            Err(reason) => {
-                return with_wire_headers(
-                    state,
-                    internal("profile migration lock task", io::Error::other(reason)),
-                    protocol.as_ref(),
-                );
-            }
+            Ok(false) => {}
+            Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
     // A DELETE to a retired library — a key reset's, retried or replayed — learns that it landed, and for which
@@ -663,7 +725,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
-    if is_write && wire.is_some() && !migration_action {
+    if is_write && wire.is_some() && !migration_action && !exclusive_action {
         let current = protocol
             .as_ref()
             .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
@@ -678,7 +740,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             return with_wire_headers(state, response, protocol.as_ref());
         }
     }
-    if is_write && !action.starts_with("rewrite") && !migration_action {
+    if is_write && !action.starts_with("rewrite") && !migration_action && !exclusive_action {
         match load_rewrite(state, id).await {
             Ok(Some(_)) => {
                 let response = crate::handler::retry_after(
@@ -710,6 +772,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         (action, _) if action == "profile-migration" || action.starts_with("profile-migration/") => {
             profile_migration::handle(state, id, token_hash, action, req).await
         }
+        (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
         ("batch", Method::POST) => batch(state, id, token_hash, req).await,
         ("changes", Method::GET | Method::HEAD) => {
             let since = query_param(&req, "since").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -759,7 +822,7 @@ async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Respo
     }) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
-    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+    if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
         return *response;
     }
     match load_rewrite(state, id).await {
@@ -799,7 +862,7 @@ async fn rewrite_rows(
     }) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
-    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+    if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
         return *response;
     }
     let Some(requested) = rewrite_id(action, "/rows") else {
@@ -931,7 +994,7 @@ async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action:
     }) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
-    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+    if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
         return *response;
     }
     let Some(requested) = action.strip_prefix("rewrite/").filter(|value| !value.contains('/')) else {
@@ -1052,7 +1115,7 @@ async fn forget(
             Ok(Err(reason)) => return internal("library exclusive operation", v3_io(reason)),
             Err(reason) => return internal("library exclusive operation task", io::Error::other(reason)),
         };
-        if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+        if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
             return *response;
         }
     }
@@ -1094,6 +1157,29 @@ async fn retire_owned_locked(
     successor: Option<&str>,
     recovery: tokio::sync::MutexGuard<'_, ()>,
 ) -> Response {
+    retire_owned_marked(
+        state,
+        id,
+        slot,
+        library,
+        selected_v3,
+        successor.unwrap_or_default().as_bytes(),
+        recovery,
+    )
+    .await
+}
+
+/// `retire_owned_locked` with the retirement marker's exact bytes: a bare successor tag, or a key-reset lock's
+/// terminal record, so the retirement and the lock's `retired` result are the one file replace.
+async fn retire_owned_marked(
+    state: &AppState,
+    id: &str,
+    slot: &Arc<LibrarySlot>,
+    library: &mut Option<Library>,
+    selected_v3: bool,
+    marker: &[u8],
+    recovery: tokio::sync::MutexGuard<'_, ()>,
+) -> Response {
     // The owner's guests go with the token that vouched for them.
     let revoked = match crate::grants::revoke_host(state, id).await {
         Ok(gids) => gids,
@@ -1108,7 +1194,7 @@ async fn retire_owned_locked(
     if let Err(e) = crate::assistant::delete_library(state, id).await {
         return internal("library assistant delete", e);
     }
-    if let Err(e) = state.store.replace_file(NS, id, MOVED, successor.unwrap_or_default().as_bytes()).await {
+    if let Err(e) = state.store.replace_file(NS, id, MOVED, marker).await {
         return internal("library retire", e);
     }
     // The marker is written: the library is retired, and the answer is 200 from here on. A client told anything else
@@ -1221,7 +1307,9 @@ async fn retired(state: &AppState, id: &str) -> io::Result<bool> {
 /// marker that can't be read is `503`, never a `410` without one: a client takes that as another device's move.
 async fn moved(state: &AppState, id: &str) -> Response {
     let successor = match state.store.get_file(NS, id, MOVED).await {
-        Ok(marker) => marker.and_then(|bytes| String::from_utf8(bytes).ok()).filter(|s| valid_hex_id(s)),
+        Ok(marker) => {
+            marker.and_then(|bytes| reset_lock::marker_successor(&bytes)).filter(|s| valid_hex_id(s))
+        }
         Err(reason) => {
             eprintln!("library retire marker: {reason}");
             return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("library_unavailable"));
@@ -1248,15 +1336,18 @@ fn v3_io(error: v3::StoreError) -> io::Error {
 /// Recheck the durable lock while the caller holds the library slot that serializes migration acquisition and
 /// sidecar publication. Store mutations repeat this in their redb write transaction; filesystem-side mutations
 /// use this boundary so a migration cannot enter between this check and their first write.
-async fn ensure_exclusive_operation_unlocked(store: &Arc<dyn v3::LibraryStore>) -> Result<(), Box<Response>> {
-    let read_store = Arc::clone(store);
-    match tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock()).await {
-        Ok(Ok(None)) => Ok(()),
-        Ok(Ok(Some(_))) | Ok(Err(v3::StoreError::Locked)) => {
+async fn ensure_exclusive_operation_unlocked(
+    state: &AppState,
+    id: &str,
+    store: &Arc<dyn v3::LibraryStore>,
+) -> Result<(), Box<Response>> {
+    match reset_lock::write_blocked(state, id, store).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(Box::new(json_reply(StatusCode::CONFLICT, &error("migration_in_progress")))),
+        Err(reason) if reason.kind() == io::ErrorKind::WouldBlock => {
             Err(Box::new(json_reply(StatusCode::CONFLICT, &error("migration_in_progress"))))
         }
-        Ok(Err(reason)) => Err(Box::new(internal("library exclusive operation", v3_io(reason)))),
-        Err(reason) => Err(Box::new(internal("library exclusive operation task", io::Error::other(reason)))),
+        Err(reason) => Err(Box::new(internal("library exclusive operation", reason))),
     }
 }
 
