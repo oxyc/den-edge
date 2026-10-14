@@ -339,10 +339,15 @@ export async function openMigrationRow(
     } catch {
       return { status: 'unreadable', name: null };
     }
-    const legacy = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
+    const known = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
+    // As den-core's `doc_decode` says it: a settings row is v4's own, unless it is a v3 tracker event.
+    const legacy =
+      known &&
+      (row.kind !== 'set' ||
+        (typeof row.name === 'string' && row.name.startsWith('tracker-event:')));
     let name: string | null;
     try {
-      name = legacy ? rowName(row as Row) : null;
+      name = known ? rowName(row as Row) : null;
     } catch {
       return { status: 'unreadable', name: null };
     }

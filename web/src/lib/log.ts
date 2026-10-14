@@ -1265,6 +1265,19 @@ export class LibraryLog {
   }
 
   /**
+   * `fenced` for a key holder's one-off repair (`scripts/repair-household.mjs`): `build` gets every stored row through
+   * the fence's base and answers the whole new log, or null to change nothing. The app never calls it.
+   */
+  rewriteStored(
+    build: (
+      base: number,
+      raw: RawEntry[],
+    ) => Promise<{ writes: { k: string; v: string }[]; wireMin: number } | null>,
+  ): Promise<boolean> {
+    return this.fenced(build);
+  }
+
+  /**
    * One fenced rewrite (v3 §9): open it, read every row through its `base`, stage what `build` makes of them, and
    * commit. `build` answering null aborts it, and nothing changes. On a commit this browser reads the new log from
    * the start; its kept work is sent again after.
