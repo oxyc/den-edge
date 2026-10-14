@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import Button from '../components/Button.svelte';
   import PinInput from '../components/PinInput.svelte';
-  import type { LibraryModel } from '../lib/libraryModel.svelte';
-  import type { LibraryQueryResult } from '../lib/libraryServiceProtocol';
+  import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
+  import type { LibraryQueryResult, ProfileDirectoryView } from '../lib/libraryServiceProtocol';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
 
@@ -48,6 +48,23 @@
   let created = $state<string | null>(null);
 
   const busy = $derived(working || status?.phase === 'reconciling');
+  // Every profile household has its Kid out of the box (den#295); creating one by hand is only for a household that
+  // has none yet.
+  let directory = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
+  $effect(() => {
+    if (status?.phase !== 'enabled') return;
+    const lease = model.profiles();
+    directory = lease;
+    return () => {
+      lease.release();
+      directory = null;
+    };
+  });
+  const kid = $derived(
+    directory?.snapshot.value?.profiles.find(
+      (profile) => profile.role === 'kid' && !profile.deleted,
+    ),
+  );
   const kidNameValid = $derived(!!kidName.trim() && [...kidName.trim()].length <= 64);
 
   onMount(() => void refresh());
@@ -345,7 +362,14 @@
       />
     </div>
   {/if}
-  {#if status?.phase === 'enabled'}
+  {#if status?.phase === 'enabled' && kid}
+    <SettingRow
+      id="profile-create-kid"
+      label="Kid profile"
+      detail="A separate activity library. Unrated titles stay hidden."
+      value={kid.name}
+    />
+  {:else if status?.phase === 'enabled'}
     <SettingRow
       id="profile-create-kid"
       label="Kid profile"

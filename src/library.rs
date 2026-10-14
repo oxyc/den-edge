@@ -2230,7 +2230,9 @@ async fn member_wire_minimum(state: &AppState, id: &str, member: Option<&str>) -
     if !holds_another(state, id, member).await? {
         return Ok(None);
     }
-    Ok(Some(protocol_for(state, other).await?.map_or(2, |protocol| protocol.wire_min)))
+    // Up to library-v4 only. Minimum 5 is a household's profile topology (profiles-v1 §2), not a row form: the
+    // profile libraries its members start (Owner, Kid) are ordinary library-v4, written at wire 4.
+    Ok(Some(protocol_for(state, other).await?.map_or(2, |protocol| protocol.wire_min.min(4))))
 }
 
 /// Read one bounded log line. Even a corrupt/no-newline log cannot allocate its whole file.
@@ -3083,6 +3085,35 @@ mod tests {
             .await;
         assert_eq!(current.status(), StatusCode::OK);
         assert_eq!(current.headers()[super::WIRE_MIN_HEADER], "3");
+    }
+
+    /// A profile household is at minimum 5, and the Owner and Kid libraries its members start are library-v4.
+    #[tokio::test]
+    async fn a_profile_library_started_by_a_household_member_stays_at_wire_4() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "member" }])).await;
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
+        let protocol = member_store.protocol().unwrap();
+        member_store.rewrite(protocol.head, &[], 5, h.state.library_limits.stored_bytes, None).unwrap();
+
+        let member = format!("{LIB}:{TOKEN}");
+        let started = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB2}/batch"),
+                Some(json!({ "writes": [{ "k": K2, "base": 0, "v": "profile" }] }).to_string()),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::MEMBER_HEADER, &member),
+                    (super::WIRE_HEADER, "4"),
+                    (super::GENERATION_HEADER, "0"),
+                    (super::WIRE_MIN_HEADER, "4"),
+                ],
+            )
+            .await;
+        assert_eq!(started.status(), StatusCode::OK);
+        assert_eq!(started.headers()[super::WIRE_MIN_HEADER], "4");
     }
 
     /// A request from a client at `wire`, which starts a new library at minimum `wire`.
