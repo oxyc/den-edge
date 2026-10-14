@@ -14,7 +14,8 @@ const storage = (marker: unknown, hint?: unknown) => {
   } as Storage;
 };
 const marker = { version: 1, mode: 'persistent', profileId: owner };
-const hint = { version: 1, profileId: owner, name: 'Owner', avatar: 'owner' };
+const hint = { version: 1, profileId: owner, name: 'Owner', avatar: 'owner', libraryKey: 'key' };
+const choice = { id: profileId(owner), role: 'owner', name: 'Owner', avatar: 'owner' } as const;
 
 describe('profile hint', () => {
   it('is read back only while the active marker names the same profile', () => {
@@ -33,11 +34,27 @@ describe('profile hint', () => {
     expect(readProfileHint(broken)).toBeNull();
   });
 
-  it('remembers an Owner and forgets anything else', () => {
+  it('reads a hint with no usable library key without one', () => {
+    const { libraryKey: _, ...keyless } = hint;
+    expect(readProfileHint(storage(marker, keyless))).toEqual(keyless);
+    expect(readProfileHint(storage(marker, { ...hint, libraryKey: '' }))).toEqual(keyless);
+    expect(readProfileHint(storage(marker, { ...hint, libraryKey: 'k'.repeat(257) }))).toEqual(
+      keyless,
+    );
+  });
+
+  it('remembers an Owner, with its library key when known, and forgets anything else', () => {
     const store = storage(marker);
-    saveProfileHint({ id: profileId(owner), role: 'owner', name: 'Owner', avatar: 'owner' }, store);
+    saveProfileHint(choice, 'key', store);
     expect(readProfileHint(store)).toEqual(hint);
-    saveProfileHint({ id: profileId(owner), role: 'kid', name: 'Kids', avatar: 'kid' }, store);
+    saveProfileHint(choice, null, store);
+    expect(readProfileHint(store)).toEqual({
+      version: 1,
+      profileId: owner,
+      name: 'Owner',
+      avatar: 'owner',
+    });
+    saveProfileHint({ ...choice, role: 'kid' }, 'key', store);
     expect(readProfileHint(store)).toBeNull();
   });
 });
