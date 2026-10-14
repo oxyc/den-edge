@@ -70,6 +70,13 @@ export function syntheticRows(now = Date.now(), { legacy = false } = {}) {
       'den.hideAnime': { value: { bool: true }, at: at(40) },
       'den.watchRegion': text('FI', at(60)),
       'den.audioLanguages': { value: { strings: ['en', 'fi'] }, at: at(60) },
+      // Non-default values for personal keys, which the split moves to the Owner library, so Settings after it can
+      // be told from defaults. The watch region above is the household's and stays.
+      'den.preferredSubtitleLanguage': text('fi', at(50)),
+      'den.autoSkipSegments': { value: { bool: true }, at: at(50) },
+      'den.excludedLanguages': { value: { strings: ['hi', 'ko'] }, at: at(50) },
+      'den.minReleaseYear': { value: { int: 1990 }, at: at(50) },
+      'den.preferredAudioLanguage': text('sv', at(50)),
     }),
     setting('keys', {
       'scout.install': text('c3ludGhldGljLWluc3RhbGw', at(90)),
