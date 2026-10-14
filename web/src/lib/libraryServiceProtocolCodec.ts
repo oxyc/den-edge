@@ -1594,8 +1594,9 @@ function profileDirectoryView(
 ): value is Extract<LibrarySelectionValue, { kind: 'profiles' }> {
   if (
     !record(value) ||
-    !exact(value, ['kind', 'owner', 'profiles']) ||
+    !exact(value, ['kind', 'state', 'owner', 'profiles']) ||
     value.kind !== 'profiles' ||
+    (value.state !== 'absent' && value.state !== 'invalid' && value.state !== 'present') ||
     !nullable(
       value.owner,
       (id): id is string => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id),

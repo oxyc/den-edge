@@ -106,6 +106,21 @@ test('RoutedLibrary accepts the exact host preview capability in production UI',
   ).toBeVisible();
 });
 
+test('RoutedLibrary runs the legacy path when profiles are enabled but no directory exists yet', async ({
+  page,
+}) => {
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } }),
+  );
+
+  await page.goto(ROUTED_FIXTURE);
+
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  await expect(page.getByText('Opening profile directory…')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toHaveCount(0);
+});
+
 test('capability discovery never exposes or enables the legacy Owner UI', async ({ page }) => {
   await guardNetwork(page);
   let answerCapability;

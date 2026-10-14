@@ -427,9 +427,26 @@ describe('LibraryLogAuthority', () => {
     const { log, authority } = await localAuthority();
     await expect(authority.select({ kind: 'profiles' })).resolves.toEqual({
       kind: 'profiles',
+      state: 'absent',
       owner: null,
       profiles: [],
     });
+    // A profiles row that failed validation, or a wire minimum only a committed split reaches, is never "absent".
+    const topology = vi.spyOn(log, 'profileTopologyPresent', 'get').mockReturnValue(true);
+    await expect(authority.select({ kind: 'profiles' })).resolves.toMatchObject({
+      state: 'invalid',
+    });
+    topology.mockReturnValue(false);
+    const minimum = vi.spyOn(log, 'wireMinimum', 'get').mockReturnValue(5);
+    await expect(authority.select({ kind: 'profiles' })).resolves.toMatchObject({
+      state: 'invalid',
+    });
+    minimum.mockReturnValue(4);
+    await expect(authority.select({ kind: 'profiles' })).resolves.toMatchObject({
+      state: 'absent',
+    });
+    topology.mockRestore();
+    minimum.mockRestore();
     await expect(authority.select({ kind: 'runtime' })).resolves.toMatchObject({
       kind: 'runtime',
       pluginManifestUrls: [],

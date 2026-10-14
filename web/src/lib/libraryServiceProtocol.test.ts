@@ -891,7 +891,7 @@ describe('library service server protocol', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         subscriptionId: 'household-profiles',
         version,
-        value: { kind: 'profiles', owner, profiles },
+        value: { kind: 'profiles', state: 'present', owner, profiles },
       });
     const profile = {
       id: '00112233445566778899aabbccddeeff',

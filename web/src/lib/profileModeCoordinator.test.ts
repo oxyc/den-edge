@@ -10,6 +10,7 @@ import {
   ProfileModeCoordinator,
   previewProfileDirectory,
   profileDirectoryChoices,
+  profileDirectoryState,
   profilesCapability,
   type ProfileActivityModelFactory,
   type PreviewProfileDirectory,
@@ -136,6 +137,7 @@ const realDirectoryView = (
   const preview = previewProfileDirectory();
   return {
     kind: 'profiles',
+    state: 'present',
     owner: preview.owner,
     profiles: preview.profiles.map((profile, index) => ({
       id: profile.id!,
@@ -218,6 +220,30 @@ describe('ProfileModeCoordinator', () => {
         ({ name }) => name,
       ),
     ).toEqual(['Owner', 'Kids', 'Teens']);
+  });
+
+  it('tells an unanswered directory read from an absent and an invalid directory', () => {
+    const valid = realDirectoryView();
+    expect(profileDirectoryState(undefined)).toEqual({ kind: 'pending' });
+    const none = { kind: 'profiles' as const, owner: null, profiles: [] };
+    expect(profileDirectoryState({ ...none, state: 'absent' })).toEqual({ kind: 'absent' });
+    // The log's verdict wins: an empty projection of a corrupt or committed household is not "none".
+    expect(profileDirectoryState({ ...none, state: 'invalid' })).toEqual({ kind: 'invalid' });
+    expect(profileDirectoryState(valid)).toMatchObject({ kind: 'present' });
+    // A directory that exists but cannot be opened is never mistaken for none.
+    expect(profileDirectoryState({ ...valid, owner: null })).toEqual({ kind: 'invalid' });
+    expect(
+      profileDirectoryState({
+        ...valid,
+        profiles: valid.profiles.filter((profile) => profile.role !== 'owner'),
+      }),
+    ).toEqual({ kind: 'invalid' });
+    expect(
+      profileDirectoryState({
+        ...valid,
+        profiles: valid.profiles.map((profile) => ({ ...profile, libraryKey: '' })),
+      }),
+    ).toEqual({ kind: 'invalid' });
   });
 
   it('keeps a failed Owner transition intact and retries the same durable visit', async () => {
