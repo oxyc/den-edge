@@ -87,16 +87,17 @@ describe('watchPlayback', () => {
       duration: 600,
       error: null,
       buffered: ranges([0, 30]),
+      played: ranges([0, 40], [50, 80]),
       getVideoPlaybackQuality: () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 }),
     }) as unknown as HTMLVideoElement;
-    const told: [number, number][] = [];
+    const told: unknown[] = [];
     const watcher = watchPlayback({
       video,
       hls: { instance, Hls: { Events } } as never,
       reportUrl: '/r',
       send: () => undefined,
       now: () => 0,
-      onEstimate: (bps, fragments) => told.push([bps, fragments]),
+      onEstimate: (evidence) => told.push(evidence),
     });
     for (let sn = 0; sn < 7; sn++)
       handlers.get('f')!('f', {
@@ -113,7 +114,7 @@ describe('watchPlayback', () => {
       } as unknown as never);
     watcher.stop();
     watcher.stop();
-    expect(told).toEqual([[15_162_000, 7]]);
+    expect(told).toEqual([{ bps: 15_162_000, fragments: 7, playedSeconds: 70, stalls: 0 }]);
   });
 
   it('does not take a frame count that moves every two seconds for a frozen picture', () => {

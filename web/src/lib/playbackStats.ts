@@ -374,8 +374,19 @@ export interface WatchOptions {
   reportUrl: string;
   send?: (url: string, body: string) => void;
   now?: () => number;
-  /** Told, as the watcher stops, what hls.js's bandwidth estimate came to over `fragments` fetches (bits a second). */
-  onEstimate?: (bitsPerSecond: number, fragments: number) => void;
+  /** Told, as the watcher stops, what hls.js's bandwidth estimate came to and how much playing it rests on. */
+  onEstimate?: (evidence: PlaybackEvidence) => void;
+}
+
+/** What a session's playback says of the link: hls.js's bandwidth estimate (bits a second) and what it rests on. */
+export interface PlaybackEvidence {
+  bps: number;
+  /** Fragments hls.js fetched. */
+  fragments: number;
+  /** Seconds of media the video actually played. */
+  playedSeconds: number;
+  /** Stalls the player counted. */
+  stalls: number;
 }
 
 export interface Watcher {
@@ -546,7 +557,13 @@ export function watchPlayback(options: WatchOptions): Watcher {
     stop() {
       if (stopped) return;
       const bps = hls?.instance.bandwidthEstimate;
-      if (bps && Number.isFinite(bps) && bps > 0) options.onEstimate?.(bps, fragments);
+      if (bps && Number.isFinite(bps) && bps > 0)
+        options.onEstimate?.({
+          bps,
+          fragments,
+          playedSeconds: playedSecondsOf(video.played),
+          stalls: recorder.liveStalls(now()).stallCount,
+        });
       schedule.end();
       stopped = true;
       listening.abort();

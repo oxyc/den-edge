@@ -29,9 +29,10 @@
     nativeHls,
     endSession,
     guestLimits,
+    estimateToLink,
     linkLimit,
     listReleases,
-    lowerLink,
+    playedSession,
     login,
     reassertGrant,
     relayLimit,
@@ -1343,7 +1344,8 @@
         video: element,
         hls: { instance: hls, Hls },
         reportUrl,
-        onEstimate: (bps, fragments) => lowerLink(route, bps, fragments),
+        // Bound to this route and session now: both can change before the watcher stops.
+        onEstimate: estimateToLink(route, playedSession(current)),
       });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal, and the session moves to a copy

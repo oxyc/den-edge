@@ -4,17 +4,23 @@ import {
   describeRelease,
   downmixLabel,
   endSession,
+  ESTIMATE_FLOOR_BPS,
   ESTIMATE_MIN_FRAGMENTS,
+  ESTIMATE_MIN_PLAYED_SECONDS,
+  estimateToLink,
   findRemux,
   forgetBrowserTokens,
   forgetLinks,
   forgetSubtitles,
   guestLimits,
+  holdsLink,
   linkLimit,
   linkRate,
   LINK_MEMORY_MS,
   LINK_TTL_MS,
+  LOWERED_LINK_MS,
   lowerLink,
+  playedSession,
   premeasureLink,
   relayLimit,
   rememberedLink,
@@ -37,6 +43,7 @@ import {
   type Want,
 } from './remux';
 import type { Playable } from './playable';
+import type { PlaybackEvidence } from './playbackStats';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -691,21 +698,138 @@ describe('linkLimit', () => {
     expect(rememberedLink(tailnet, Date.now(), fresh)?.maxBitrate).toBe(1_000_000);
   });
 
-  it('lowers a remembered link to what playback got, never raises it', () => {
+  describe('lowerLink', () => {
+    // The incident: probed at 43 Mbit/s, a 25.3 Mbit/s episode played at 15.2 and stalled.
+    const probed = 43_000_000;
+    const copy = { converted: false, mediaBps: 25_300_000 };
+    const evidence = (over: Partial<PlaybackEvidence> = {}): PlaybackEvidence => ({
+      bps: 15_162_000,
+      fragments: ESTIMATE_MIN_FRAGMENTS,
+      playedSeconds: ESTIMATE_MIN_PLAYED_SECONDS,
+      stalls: 1,
+      ...over,
+    });
+    const remembered = (route = tailnet) => {
+      const storage = memoryStorage();
+      rememberLink(route, probed, Date.now(), storage);
+      return storage;
+    };
+    const kept = (storage: Storage, route = tailnet) =>
+      rememberedLink(route, Date.now(), storage)?.maxBitrate;
+
+    it('lowers a remembered link to what playback got, and marks it lowered', () => {
+      const storage = remembered();
+      lowerLink(tailnet, evidence(), copy, Date.now(), storage);
+      expect(rememberedLink(tailnet, Date.now(), storage)).toMatchObject({
+        maxBitrate: 15_162_000,
+        lowered: true,
+      });
+    });
+
+    it('never raises a link, and leaves none where none was remembered', () => {
+      const storage = remembered();
+      lowerLink(tailnet, evidence({ bps: 60_000_000 }), copy, Date.now(), storage);
+      lowerLink(tailnet, evidence({ bps: Number.NaN }), copy, Date.now(), storage);
+      expect(kept(storage)).toBe(probed);
+      const none = memoryStorage();
+      lowerLink(tailnet, evidence(), copy, Date.now(), none);
+      expect(kept(none)).toBeUndefined();
+    });
+
+    it('wants enough played to say anything: a stop right after a stall stores nothing', () => {
+      const storage = remembered();
+      const few = { fragments: ESTIMATE_MIN_FRAGMENTS - 1 };
+      const short = { playedSeconds: ESTIMATE_MIN_PLAYED_SECONDS - 1 };
+      // hls.js's average, a stall after the start, is a few hundred kbit/s.
+      const starved = { bps: ESTIMATE_FLOOR_BPS - 1 };
+      for (const over of [few, short, starved])
+        lowerLink(tailnet, evidence(over), copy, Date.now(), storage);
+      expect(kept(storage)).toBe(probed);
+      lowerLink(tailnet, evidence({ bps: ESTIMATE_FLOOR_BPS }), copy, Date.now(), storage);
+      expect(kept(storage)).toBe(ESTIMATE_FLOOR_BPS);
+    });
+
+    it('does not lower from a conversion', () => {
+      const storage = remembered();
+      lowerLink(tailnet, evidence(), { converted: true, mediaBps: 4_000_000 }, Date.now(), storage);
+      expect(kept(storage)).toBe(probed);
+    });
+
+    it('does not lower from a player that was stream-limited, but does from one that stalled', () => {
+      // 26 Mbit/s over a 25.3 Mbit/s stream: all it asked for, no news of the link.
+      const storage = remembered();
+      lowerLink(tailnet, evidence({ bps: 26_000_000, stalls: 0 }), copy, Date.now(), storage);
+      expect(kept(storage), 'near the stream’s own bitrate, no stall').toBe(probed);
+      lowerLink(tailnet, evidence({ bps: 15_000_000, stalls: 0 }), copy, Date.now(), storage);
+      expect(kept(storage), 'below it, no stall').toBe(probed);
+      lowerLink(tailnet, evidence({ bps: 15_000_000, stalls: 1 }), copy, Date.now(), storage);
+      expect(kept(storage), 'below it and starved').toBe(15_000_000);
+      const clear = remembered();
+      lowerLink(tailnet, evidence({ bps: 35_000_000, stalls: 0 }), copy, Date.now(), clear);
+      expect(kept(clear), 'well above it: the link is at least that').toBe(35_000_000);
+      const unknown = remembered();
+      lowerLink(tailnet, evidence({ stalls: 0 }), { converted: false }, Date.now(), unknown);
+      expect(kept(unknown), 'a stream of no known bitrate can’t be said stream-limited').toBe(
+        15_162_000,
+      );
+    });
+
+    it('books an estimate to the route its watcher was made for', () => {
+      const other = 'https://other.example.ts.net:8443/remux';
+      const storage = remembered();
+      rememberLink(other, probed, Date.now(), storage);
+      const report = estimateToLink(tailnet, copy, storage);
+      // The page has since moved to `other` (Cast, leaving Cast): the watcher still reports for its own route.
+      report(evidence());
+      expect(kept(storage, tailnet)).toBe(15_162_000);
+      expect(kept(storage, other)).toBe(probed);
+    });
+
+    it('reads a session as converted or copied, and its bitrate from size and length', () => {
+      const release = { label: 'l', filename: 'f', size: 12_081_049_022 };
+      expect(playedSession({ duration: 3818, release, video: undefined })).toEqual({
+        converted: false,
+        mediaBps: (12_081_049_022 * 8) / 3818,
+      });
+      expect(
+        playedSession({ duration: 0, release, video: { codec: 'h264', transcoded: true } }),
+      ).toEqual({ converted: true });
+    });
+
+    it('holds a lowered link for a while, then lets a probe measure it again', async () => {
+      const storage = remembered();
+      lowerLink(tailnet, evidence(), copy, 1_000, storage);
+      const lowered = rememberedLink(tailnet, 1_000, storage);
+      expect(holdsLink(lowered, 1_000 + LOWERED_LINK_MS - 1)).toBe(true);
+      expect(holdsLink(lowered, 1_000 + LOWERED_LINK_MS)).toBe(false);
+      expect(holdsLink({ at: 1_000, maxBitrate: probed }, 1_000 + LOWERED_LINK_MS)).toBe(true);
+      expect(holdsLink(undefined)).toBe(false);
+    });
+  });
+
+  it('measures a link again once the lowered one has lapsed, and keeps it where it cannot', async () => {
     const storage = memoryStorage();
-    const kept = () => rememberedLink(tailnet, Date.now(), storage)?.maxBitrate;
-    lowerLink(tailnet, 14_000_000, ESTIMATE_MIN_FRAGMENTS, Date.now(), storage);
-    expect(kept(), 'nothing remembered: nothing to lower').toBeUndefined();
-    // Probed at 43 Mbit/s; hls.js then got 15.2 over a session.
-    rememberLink(tailnet, 43_000_000, Date.now(), storage);
-    lowerLink(tailnet, 15_162_000, ESTIMATE_MIN_FRAGMENTS - 1, Date.now(), storage);
-    expect(kept(), 'too few fragments to say').toBe(43_000_000);
-    lowerLink(tailnet, 15_162_000, ESTIMATE_MIN_FRAGMENTS, Date.now(), storage);
-    expect(kept()).toBe(15_162_000);
-    lowerLink(tailnet, 60_000_000, 50, Date.now(), storage);
-    expect(kept(), 'an estimate above the link is no news').toBe(15_162_000);
-    lowerLink(tailnet, Number.NaN, 50, Date.now(), storage);
-    expect(kept()).toBe(15_162_000);
+    rememberLink(tailnet, 15_000_000, Date.now() - LOWERED_LINK_MS, storage, true);
+    const measured = link([
+      [0, 1],
+      [1_000, 125_000],
+    ]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, storage)).toBe(1_000_000);
+    expect(measured.asked).toHaveLength(1);
+    expect(rememberedLink(tailnet, Date.now(), storage)).toEqual({
+      at: expect.any(Number),
+      maxBitrate: 1_000_000,
+    });
+
+    const failing = memoryStorage();
+    rememberLink(tailnet, 15_000_000, Date.now() - LOWERED_LINK_MS, failing, true);
+    forgetLinks();
+    expect(await linkLimit(tailnet, async () => answer(429, {}), undefined, failing)).toBe(
+      15_000_000,
+    );
+    expect(rememberedLink(tailnet, Date.now(), failing)?.lowered, 'still the lowered one').toBe(
+      true,
+    );
   });
 
   it('measures as before where the browser refuses storage', async () => {
@@ -894,6 +1018,30 @@ describe('premeasureLink', () => {
     const again = idleness();
     premeasureLink('/remux', { fetchImpl: speed(asked), storage, idle: again.idle });
     expect(again.waiting, 'remembered: not timed again').toBe(false);
+  });
+
+  it('times the link again once a link playback lowered has lapsed, and not before', async () => {
+    const storage = memoryStorage();
+    rememberLink('/remux', 15_000_000, Date.now(), storage, true);
+    const held = idleness();
+    premeasureLink('/remux', { fetchImpl: speed([]), storage, idle: held.idle });
+    expect(held.waiting, 'a fresh lowered link stands').toBe(false);
+
+    forgetLinks();
+    rememberLink('/remux', 15_000_000, Date.now() - LOWERED_LINK_MS, storage, true);
+    const lapsed = idleness();
+    let clock = 0;
+    premeasureLink('/remux', {
+      fetchImpl: speed([]),
+      now: () => (clock += 500),
+      storage,
+      idle: lapsed.idle,
+    });
+    expect(lapsed.waiting, 'a lapsed one is timed again').toBe(true);
+    lapsed.run();
+    await vi.waitFor(() =>
+      expect(rememberedLink('/remux', Date.now(), storage)?.lowered).toBeUndefined(),
+    );
   });
 
   it('does not admit the speculative transfer during the page-settling window', async () => {
