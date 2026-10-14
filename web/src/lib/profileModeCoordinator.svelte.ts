@@ -182,6 +182,23 @@ export const readActiveProfile = (storage: Storage): StoredActiveProfile | null 
   return null;
 };
 
+/**
+ * After this browser's household joined another (den#295): the profile it had open is the one it became there, a Kid
+ * the Kid it merged into and the Owner the joined household's Owner (whose PIN the join asked for, when it has one). A
+ * Visitor stays a Visitor. Nothing changes for a household without profiles (`owner` null).
+ */
+export function carryActiveProfile(
+  storage: Storage,
+  owner: string | null,
+  kids: Readonly<Record<string, string>>,
+): void {
+  if (!owner) return;
+  const saved = readActiveProfile(storage);
+  if (saved?.mode === 'visitor') return;
+  const kid = saved?.mode === 'persistent' ? kids[saved.profileId] : undefined;
+  keepActiveProfile(storage, { version: 1, mode: 'persistent', profileId: kid ?? owner });
+}
+
 const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void => {
   // Profile transitions are durable commits. Failing the marker write must abort the transition before the old
   // namespace can be deleted or another tab can mistake the visit for active.

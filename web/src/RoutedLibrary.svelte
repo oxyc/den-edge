@@ -13,6 +13,7 @@
     type ProfileSession,
   } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
+  import { LibraryServiceError } from './lib/libraryServiceClient';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
   import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
@@ -44,6 +45,7 @@
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
   import {
     allowsImplicitAssistant,
+    carryActiveProfile,
     householdAdministration,
     profileMarkerPresent,
     ProfileModeCoordinator,
@@ -60,13 +62,19 @@
   import {
     bornHouseholds,
     commitHousehold,
+    householdJoinPlan,
     householdPlan,
+    keepHouseholdJoin,
     observeKeptActions,
     planHousehold,
     settledHousehold,
+    settleHouseholdJoin,
     settleHouseholdPlan,
     startHouseholdPlan,
+    type HouseholdJoinPlan,
     type HouseholdPlan,
+    type JoinAnswer,
+    type JoinLink,
   } from './lib/browserHousehold';
 
   let {
@@ -112,7 +120,7 @@
 
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
-  const open = (key: string | null, local: boolean) => {
+  const open = (key: string | null, local: boolean, wire: 4 | 5 = 4) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
     const services = createWorkerServiceSession({
@@ -129,8 +137,8 @@
     const model = new LibraryModel(library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
-      wire: 4,
-      bootstrapProfileHousehold: !local,
+      wire,
+      bootstrapProfileHousehold: !local && wire === 4,
       ...(clock ? { legacyClock: clock } : {}),
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
@@ -474,8 +482,89 @@
     clearTimeout(convergenceRetry);
   });
 
+  /**
+   * Bring what this browser keeps into the household `key` opens, before the browser switches to it: the library kept
+   * only here, or this browser's own household (`joinOwnHousehold`). `link` is the TV paired with, opened from then on.
+   */
+  async function joinLibrary(
+    key: string,
+    options: { pin?: string; link?: JoinLink } = {},
+  ): Promise<JoinAnswer> {
+    if (!session.local && ownHousehold) return joinOwnHousehold(ownHousehold, key, options);
+    return (await joinLocalLibrary(key)) ? 'joined' : 'failed';
+  }
+  const joinsAsBoolean = async (key: string) => (await joinLibrary(key)) === 'joined';
+
+  /**
+   * This browser's own household joins the household `destination` (den#295): the household joined wins, and what was
+   * kept here (Owner and Kid activity) moves into its profiles before this browser's household is retired. The plan
+   * is kept first, so a reload finishes a join cut off anywhere (`resumeHouseholdJoin`).
+   */
+  async function joinOwnHousehold(
+    source: string,
+    destination: string,
+    options: { pin?: string; link?: JoinLink },
+  ): Promise<JoinAnswer> {
+    if (source === destination) return 'failed';
+    const kept = householdJoinPlan();
+    const link = options.link ?? (kept?.destination === destination ? kept.link : undefined);
+    const plan: HouseholdJoinPlan = { version: 1, source, destination, ...(link ? { link } : {}) };
+    if (!keepHouseholdJoin(plan)) return 'failed';
+    let opened = open(destination, false);
+    try {
+      await opened.model!.ready;
+      const ask = () => opened.model!.joinHousehold(source, options.pin);
+      const answer = await ask().catch(async (error: unknown) => {
+        // Opened again from this browser's copy, a profile household is known to need wire 5 before den-edge is
+        // asked, and the copy opened at 4 is read-only: it is opened at 5 instead.
+        if (!(error instanceof LibraryServiceError) || error.failure.code !== 'read-only')
+          throw error;
+        opened.close();
+        opened = open(destination, false, 5);
+        await opened.model!.ready;
+        return ask();
+      });
+      // Refused before anything moved: this browser keeps its household.
+      if (answer.outcome === 'refused-kids') settleHouseholdJoin(plan, false);
+      if (answer.outcome !== 'joined')
+        return answer.outcome === 'unavailable' ? 'failed' : answer.outcome;
+      carryActiveProfile(localStorage, answer.owner ?? null, answer.kids ?? {});
+      // The link first: should the page stop here, the next load opens the household joined and settles the plan.
+      if (plan.link) {
+        links.add(plan.link.inboxKey, {
+          name: plan.link.name,
+          libraryKey: destination,
+          linkKey: plan.link.linkKey,
+          ...(plan.link.deviceId ? { deviceId: plan.link.deviceId } : {}),
+        });
+        links.makeCurrent(plan.link.inboxKey);
+      } else links.addRecovered(destination);
+      settleHouseholdJoin(plan, true);
+      return 'joined';
+    } catch (error) {
+      console.warn('den: this browser’s household could not join that household yet', error);
+      return 'failed';
+    } finally {
+      opened.close();
+    }
+  }
+
+  // A join of this browser's household that a reload cut off is finished now; one still waiting for the Owner PIN
+  // when it stopped had moved nothing, and is given up. A join that opened its household already only settles.
+  onMount(() => {
+    const plan = householdJoinPlan();
+    if (!plan) return;
+    if (link) {
+      if (link.libraryKey === plan.destination) settleHouseholdJoin(plan, true);
+      return;
+    }
+    void joinOwnHousehold(plan.source, plan.destination, {}).then((answer) => {
+      if (answer === 'pin-required' || answer === 'pin-wrong') settleHouseholdJoin(plan, false);
+    });
+  });
+
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
-  async function joinLibrary(key: string): Promise<boolean> {
+  async function joinLocalLibrary(key: string): Promise<boolean> {
     let sourceKey = libraryIdentity;
     if (!session.local || !session.model || !sourceKey) return false;
     const destination = open(key, false);
@@ -1050,7 +1139,7 @@
     if (!phoneLanding.request || phoneLanding.phase !== 'idle') return;
     if (!link && !session.local) return;
     if (!householdAdmin) return;
-    void untrack(() => phoneLanding.run(link ? null : joinLibrary));
+    void untrack(() => phoneLanding.run(link ? null : joinsAsBoolean));
   });
 
   // Anyone invited gets a synced library: a browser with a live grant and no synced library starts the one the grant
@@ -1065,7 +1154,7 @@
     const grant = startingGrant();
     if (!grant || !session.local || phoneLanding.request || guestStarting) return;
     guestStarting = true;
-    void startGuestLibrary(grant, joinLibrary)
+    void startGuestLibrary(grant, joinsAsBoolean)
       .then((outcome) => {
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
@@ -1148,7 +1237,7 @@
                   preferences={session.preferences}
                   content={session.content}
                   local={session.local}
-                  onjoin={joinLibrary}
+                  onjoin={!link && (session.local || ownHousehold) ? joinLibrary : undefined}
                   onresetkey={resetLibraryKey}
                   heldReset={pendingReset?.held === true}
                   onadoptheld={adoptHeldReset}
