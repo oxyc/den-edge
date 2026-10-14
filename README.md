@@ -200,7 +200,7 @@ cargo test
 `npm run rehearse` (in `web/`) runs the Owner split end to end: the real `den-edge` binary on a temporary copy of the
 data (profile migration on, `NEW_LIBRARIES=members`, the household enrolled), serving the built web app, driven by real
 Den Web in Chromium. It opens the household, enables Profiles with a PIN, waits for the commit, then reopens a browser
-whose storage was snapshotted before the split, with one tab and then two, and checks that it adopts the committed
+whose storage was snapshotted before the split, with one tab (`REHEARSE_TWO_TABS=1` adds a two-tab pass), and checks that it adopts the committed
 household without writing its old rows back. It needs `cargo build --locked` (or `DEN_EDGE_BIN`), `npm run build`, and
 Chromium (`npx playwright install chromium`, or an installed Chrome).
 

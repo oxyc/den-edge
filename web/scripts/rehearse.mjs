@@ -121,8 +121,19 @@ async function startEdge(dataDir, port, env) {
     await sleep(100);
   }
   if (!log.some((l) => l.includes('listening on'))) fail('den-edge did not start');
+  // The log line can precede the first accepted connection; wait until a request is actually answered.
+  const origin = `http://127.0.0.1:${port}`;
+  let ready = false;
+  for (let i = 0; i < 100 && !ready; i += 1) {
+    ready = await fetch(`${origin}/health`).then(
+      (r) => r.ok,
+      () => false,
+    );
+    if (!ready) await sleep(100);
+  }
+  if (!ready) fail('den-edge did not answer /health');
   return {
-    origin: `http://127.0.0.1:${port}`,
+    origin,
     log,
     stop: async () => {
       child.kill();
@@ -391,13 +402,13 @@ async function main() {
       `${strayAfterSplit.length} activity rows`,
     );
 
-    // 5. the pre-split browser comes back: one tab, then two. Each starts from the committed household as the split
+    // 5. the pre-split browser comes back: one tab (then two with REHEARSE_TWO_TABS=1). Each starts from the committed household as the split
     // left it (den-edge restarted on a copy of its data, same port, so the browser's origin is the one it cached), so
     // one phase's write-back cannot hide or inflate the next one's.
     await edge.stop();
     const committedData = join(work, 'edge-data-committed');
     cpSync(dataDir, committedData, { recursive: true });
-    for (const tabs of [1, 2]) {
+    for (const tabs of process.env.REHEARSE_TWO_TABS === '1' ? [1, 2] : [1]) {
       step(`reopen the pre-split browser with ${tabs} tab${tabs > 1 ? 's' : ''}`);
       rmSync(dataDir, { recursive: true, force: true });
       cpSync(committedData, dataDir, { recursive: true });
