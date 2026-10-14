@@ -903,10 +903,20 @@ const CONNECTION_SEND_BUFFER: usize = 64 * 1024;
 const CONNECTION_RECV_BUFFER: usize = 32 * 1024;
 const SOCKET_BUFFER_ACCOUNTING_FACTOR: usize = 2;
 
+// The read-back is only a sound check on Linux, where an explicit SO_RCVBUF/SO_SNDBUF switches autotuning off for
+// good. macOS keeps growing the receive buffer of a connection that is already receiving data, even straight after
+// an explicit set, so a legitimate local client (Node's fetch, the rehearsal) would read back far above the ceiling
+// and be refused at random. The cgroup memory bound this guards is a Linux deployment concern, so elsewhere the
+// ceilings are applied best-effort and not verified.
+const VERIFY_BUFFER_CEILINGS: bool = cfg!(target_os = "linux");
+
 fn bound_connection_buffers(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
     let socket = socket2::SockRef::from(stream);
     socket.set_send_buffer_size(CONNECTION_SEND_BUFFER)?;
     socket.set_recv_buffer_size(CONNECTION_RECV_BUFFER)?;
+    if !VERIFY_BUFFER_CEILINGS {
+        return Ok(());
+    }
     let send = socket.send_buffer_size()?;
     let recv = socket.recv_buffer_size()?;
     if send > CONNECTION_SEND_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
@@ -1001,6 +1011,35 @@ mod tests {
             socket.recv_buffer_size().unwrap() <= CONNECTION_RECV_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
         );
         drop(client);
+    }
+
+    // A client such as Node's undici sends its request the moment the handshake completes, so the connection is
+    // already receiving data when it is bounded. On macOS the kernel then grows the receive buffer past the
+    // ceiling at random (seen: recv=555392), which must not get a legitimate connection refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bounding_a_connection_that_is_already_receiving_data_is_not_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut refused = Vec::new();
+        for _ in 0..1000 {
+            let writer = tokio::spawn(async move {
+                let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+                while client.write_all(&[b'x'; 64 * 1024]).await.is_ok() {}
+            });
+            let (server, _) = listener.accept().await.unwrap();
+            if let Err(e) = bound_connection_buffers(&server) {
+                refused.push(e.to_string());
+            }
+            // Drain like a server that has started reading the request, which lets the kernel grow the window.
+            let drain = tokio::spawn(async move {
+                let mut server = server;
+                let _ = tokio::io::copy(&mut server, &mut tokio::io::sink()).await;
+            });
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            writer.abort();
+            drain.abort();
+        }
+        assert!(refused.is_empty(), "{} of 1000 refused, e.g. {:?}", refused.len(), refused.first());
     }
 
     #[test]
