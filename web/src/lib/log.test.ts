@@ -970,7 +970,8 @@ describe('LibraryLog', () => {
         requiredWire: 5,
       }),
     );
-    expect(requests.length).toBeGreaterThanOrEqual(2);
+    // The membership is registered only after a first page names the generation, so the read is all that was sent.
+    expect(requests.length).toBeGreaterThanOrEqual(1);
     for (const request of requests) expect(request.headers).toMatchObject({ 'x-den-wire': '4' });
   });
 
@@ -1621,6 +1622,8 @@ describe('LibraryLog', () => {
       recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'accepted')!,
     );
     expect(log.pendingActions).toBe(0);
+    const registeredBefore = memberRegistrations;
+    expect(registeredBefore).toBeGreaterThanOrEqual(1);
     server = await edge();
     generation = 'restored';
     expect(await log.refresh()).toBe(true);
@@ -1631,7 +1634,7 @@ describe('LibraryLog', () => {
     expect(
       memberRegistrations,
       'a restored store invalidates the persisted registration marker and registers again',
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThan(registeredBefore);
   });
 
   /**
