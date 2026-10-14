@@ -49,6 +49,9 @@ const CHARGES: TableDefinition<&str, u64> = TableDefinition::new("charges-v3");
 const SEQUENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("sequence-v3");
 const META_U64: TableDefinition<&str, u64> = TableDefinition::new("metadata-u64-v3");
 const META_BYTES: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata-bytes-v3");
+/// One opaque, attempt-scoped exclusive operation owner. The generic store primitive deliberately knows
+/// nothing about profiles or household rows so a future authenticated compound reset can reuse it.
+const EXCLUSIVE_OPERATION_LOCK: &str = "exclusive-operation-lock";
 type Credentials = ([u8; 32], Option<[u8; 32]>);
 
 /// What one live row of a v3 library counts against `Limits::stored_bytes`: the bytes its client stored, key and
@@ -67,6 +70,8 @@ fn compaction_turn() -> &'static Mutex<()> {
 pub(crate) enum StoreError {
     Full,
     Forbidden,
+    /// An authenticated compound operation owns the library's durable exclusive mutation lock.
+    Locked,
     /// A value over the cap of the library's wire minimum (`super::value_fits`).
     TooLarge,
     Invalid(String),
@@ -178,6 +183,10 @@ fn profile_migration_generation_key(expected_generation: u64) -> String {
     format!("profile-migration-generation:{expected_generation}")
 }
 
+fn exclusive_operation_abort_key(attempt: &str) -> String {
+    format!("exclusive-operation-aborted:{attempt}")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
@@ -231,6 +240,30 @@ pub(super) trait LibraryStore: Send + Sync {
     fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError>;
     fn protocol(&self) -> Result<Protocol, StoreError>;
     fn snapshot(&self) -> Result<LibrarySnapshot, StoreError>;
+    fn exclusive_operation_lock(&self) -> Result<Option<String>, StoreError>;
+    fn acquire_exclusive_operation_lock(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError>;
+    #[cfg(test)]
+    fn release_exclusive_operation_lock(&self, attempt: &str) -> Result<(), StoreError>;
+    fn abort_exclusive_operation(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError>;
+    fn transfer_exclusive_operation_lock(
+        &self,
+        from_attempt: &str,
+        to_attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError>;
+    fn exclusive_operation_aborted(&self, attempt: &str) -> Result<bool, StoreError>;
+    fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError>;
     /// Return durable terminal evidence for one attempt. A matching attempt record proves that attempt won;
     /// otherwise the generation record identifies the attempt that won the same fence and proves this one lost.
     fn migration_result(
@@ -684,6 +717,15 @@ impl LibraryStore for RedbLibrary {
         let mut prepared = self.prepared.lock().unwrap();
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
+        if transaction
+            .open_table(META_BYTES)
+            .map_err(StoreError::redb)?
+            .get(EXCLUSIVE_OPERATION_LOCK)
+            .map_err(StoreError::redb)?
+            .is_some()
+        {
+            return Err(StoreError::Locked);
+        }
         let mut head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -940,21 +982,21 @@ impl LibraryStore for RedbLibrary {
 
     fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError> {
         let mut cached = self.member_hash.lock().unwrap();
-        if let Some(stored) = *cached {
-            return if constant_time_eq(&stored, &member_hash) {
-                Ok(false)
-            } else {
-                Err(StoreError::Invalid("member_already_registered".into()))
-            };
-        }
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
         {
-            transaction
-                .open_table(META_BYTES)
-                .map_err(StoreError::redb)?
-                .insert("member", member_hash.as_slice())
-                .map_err(StoreError::redb)?;
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            if metadata.get(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?.is_some() {
+                return Err(StoreError::Locked);
+            }
+            if let Some(stored) = *cached {
+                return if constant_time_eq(&stored, &member_hash) {
+                    Ok(false)
+                } else {
+                    Err(StoreError::Invalid("member_already_registered".into()))
+                };
+            }
+            metadata.insert("member", member_hash.as_slice()).map_err(StoreError::redb)?;
             // Authorization is part of a restorable migration backup. Changing it must invalidate an already-open
             // source fence just like changing a row, or that backup could restore stale member evidence.
             let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
@@ -1027,6 +1069,183 @@ impl LibraryStore for RedbLibrary {
         Ok(LibrarySnapshot { protocol: Protocol { head, wire_min, generation, migration_generation }, rows })
     }
 
+    fn exclusive_operation_lock(&self) -> Result<Option<String>, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        metadata
+            .get(EXCLUSIVE_OPERATION_LOCK)
+            .map_err(StoreError::redb)?
+            .map(|value| {
+                std::str::from_utf8(value.value())
+                    .map(str::to_owned)
+                    .map_err(|_| StoreError::Invalid("invalid exclusive operation lock".into()))
+            })
+            .transpose()
+    }
+
+    fn acquire_exclusive_operation_lock(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let generation = numbers
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            let base = numbers
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+                .value();
+            if generation != expected_generation || base != expected_base {
+                return Err(StoreError::Invalid("migration_source_changed".into()));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            if let Some(held) = metadata.get(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)? {
+                if held.value() != attempt.as_bytes() {
+                    return Err(StoreError::Locked);
+                }
+                return Ok(());
+            }
+            metadata.insert(EXCLUSIVE_OPERATION_LOCK, attempt.as_bytes()).map_err(StoreError::redb)?;
+        }
+        transaction.commit().map_err(StoreError::redb)
+    }
+
+    #[cfg(test)]
+    fn release_exclusive_operation_lock(&self, attempt: &str) -> Result<(), StoreError> {
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match held.as_deref() {
+                Some(held) if held != attempt.as_bytes() => return Err(StoreError::Locked),
+                Some(_) => {
+                    metadata.remove(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?;
+                }
+                None => return Ok(()),
+            }
+        }
+        transaction.commit().map_err(StoreError::redb)
+    }
+
+    fn abort_exclusive_operation(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let generation = numbers
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            let base = numbers
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+                .value();
+            if generation != expected_generation || base != expected_base {
+                return Err(StoreError::Invalid("migration_source_changed".into()));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match held.as_deref() {
+                Some(held) if held == attempt.as_bytes() => {}
+                _ => return Err(StoreError::Locked),
+            }
+            metadata
+                .insert(exclusive_operation_abort_key(attempt).as_str(), b"1".as_slice())
+                .map_err(StoreError::redb)?;
+            metadata.remove(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?;
+        }
+        transaction.commit().map_err(StoreError::redb)
+    }
+
+    fn transfer_exclusive_operation_lock(
+        &self,
+        from_attempt: &str,
+        to_attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        if from_attempt == to_attempt {
+            return Err(StoreError::Invalid("exclusive operation transfer reuses its owner".into()));
+        }
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let generation = numbers
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            let base = numbers
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+                .value();
+            if generation != expected_generation || base != expected_base {
+                return Err(StoreError::Invalid("migration_source_changed".into()));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match held.as_deref() {
+                Some(held) if held == from_attempt.as_bytes() => {}
+                _ => return Err(StoreError::Locked),
+            }
+            metadata
+                .insert(exclusive_operation_abort_key(from_attempt).as_str(), b"1".as_slice())
+                .map_err(StoreError::redb)?;
+            metadata.insert(EXCLUSIVE_OPERATION_LOCK, to_attempt.as_bytes()).map_err(StoreError::redb)?;
+        }
+        transaction.commit().map_err(StoreError::redb)
+    }
+
+    fn exclusive_operation_aborted(&self, attempt: &str) -> Result<bool, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        Ok(metadata.get(exclusive_operation_abort_key(attempt).as_str()).map_err(StoreError::redb)?.is_some())
+    }
+
+    fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        let Some(value) = metadata.get("profile-migration-winner").map_err(StoreError::redb)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(value.value())
+            .map(Some)
+            .map_err(|error| StoreError::Invalid(format!("invalid profile migration terminal: {error}")))
+    }
+
     fn migration_result(
         &self,
         attempt: &str,
@@ -1084,6 +1303,19 @@ impl LibraryStore for RedbLibrary {
         let mut prepared = self.prepared.lock().unwrap();
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match (held.as_deref(), migration) {
+                (Some(held), Some(commit)) if held == commit.attempt.as_bytes() => {}
+                (Some(_), _) => return Err(StoreError::Locked),
+                (None, Some(_)) => return Err(StoreError::Locked),
+                (None, None) => {}
+            }
+        }
         let current = {
             let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let current = numbers
@@ -1169,6 +1401,7 @@ impl LibraryStore for RedbLibrary {
                     )
                     .map_err(StoreError::redb)?;
                 metadata.insert("profile-migration-winner", winner.as_slice()).map_err(StoreError::redb)?;
+                metadata.remove(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?;
             }
         }
         transaction.commit().map_err(StoreError::redb)?;
@@ -1209,6 +1442,17 @@ impl LibraryStore for RedbLibrary {
         let mut prepared = self.prepared.lock().unwrap();
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let held = metadata
+                .get(EXCLUSIVE_OPERATION_LOCK)
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().to_vec());
+            match held.as_deref() {
+                Some(held) if held == migration.attempt.as_bytes() => {}
+                _ => return Err(StoreError::Locked),
+            }
+        }
         let (stored_base, current_min, current_migration_generation) = {
             let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let stored_base = numbers
@@ -1290,6 +1534,7 @@ impl LibraryStore for RedbLibrary {
                 )
                 .map_err(StoreError::redb)?;
             metadata.insert("profile-migration-winner", winner.as_slice()).map_err(StoreError::redb)?;
+            metadata.remove(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?;
         }
         transaction.commit().map_err(StoreError::redb)?;
         *self.member_hash.lock().unwrap() = member_hash;
@@ -1467,6 +1712,56 @@ impl LibraryStore for StoreLease {
 
     fn snapshot(&self) -> Result<LibrarySnapshot, StoreError> {
         self.store.snapshot()
+    }
+
+    fn exclusive_operation_lock(&self) -> Result<Option<String>, StoreError> {
+        self.store.exclusive_operation_lock()
+    }
+
+    fn acquire_exclusive_operation_lock(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        self.store.acquire_exclusive_operation_lock(attempt, expected_generation, expected_base)
+    }
+
+    #[cfg(test)]
+    fn release_exclusive_operation_lock(&self, attempt: &str) -> Result<(), StoreError> {
+        self.store.release_exclusive_operation_lock(attempt)
+    }
+
+    fn abort_exclusive_operation(
+        &self,
+        attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        self.store.abort_exclusive_operation(attempt, expected_generation, expected_base)
+    }
+
+    fn transfer_exclusive_operation_lock(
+        &self,
+        from_attempt: &str,
+        to_attempt: &str,
+        expected_generation: u64,
+        expected_base: u64,
+    ) -> Result<(), StoreError> {
+        self.store.transfer_exclusive_operation_lock(
+            from_attempt,
+            to_attempt,
+            expected_generation,
+            expected_base,
+        )
+    }
+
+    fn exclusive_operation_aborted(&self, attempt: &str) -> Result<bool, StoreError> {
+        self.store.exclusive_operation_aborted(attempt)
+    }
+
+    fn latest_migration_result(&self) -> Result<Option<MigrationCommit>, StoreError> {
+        self.store.latest_migration_result()
     }
 
     fn migration_result(

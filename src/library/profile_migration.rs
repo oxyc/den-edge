@@ -7,8 +7,8 @@
 //! remains locked.
 
 use super::v3::{
-    LibrarySnapshot, MigrationCommit, MigrationResultKind, Protocol, RestorePlan, RestoreRow, RewriteRow,
-    StoreError,
+    LibrarySnapshot, LibraryStore, MigrationCommit, MigrationResultKind, Protocol, RestorePlan, RestoreRow,
+    RewriteRow, StoreError,
 };
 use super::{library_store_locked, load_rewrite, owned, retire_owned_locked, v3_io};
 use crate::handler::{constant_time_eq, error, internal, json_reply, read_json};
@@ -141,6 +141,7 @@ pub(crate) struct AttemptEvidence {
     pub purpose: AttemptPurpose,
     pub wire_minimum: u64,
     pub fence: MigrationFence,
+    pub backup: Option<BackupReference>,
     pub winner: Option<MigrationCommit>,
 }
 
@@ -160,6 +161,7 @@ pub(crate) enum RetirementResult {
 #[derive(Debug)]
 pub(crate) enum MigrationError {
     Invalid(&'static str),
+    InProgress,
     FenceChanged,
     SourceChanged,
     BackupMissing,
@@ -181,6 +183,7 @@ impl From<StoreError> for MigrationError {
     fn from(value: StoreError) -> Self {
         match value {
             StoreError::Forbidden => Self::Forbidden,
+            StoreError::Locked => Self::InProgress,
             other => Self::Storage(v3_io(other)),
         }
     }
@@ -246,6 +249,11 @@ struct DurableAttempt {
     terminal: Option<MigrationCommit>,
     state: AttemptState,
     fence: MigrationFence,
+    /// The immutable provider-read-back-verified artifact bound before this attempt becomes authoritative. A
+    /// split always owns its artifact; a restore owns the original split artifact selected by recovery handoff.
+    backup: Option<BackupReference>,
+    #[serde(default)]
+    provider_read_back_verified: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -287,8 +295,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         valid_attempt(attempt)?;
         valid_source(expected_source)?;
         self.authenticate_household(household_id, token_hash).await?;
-        // Idempotent replay is a durable lookup first. It must not depend on the current household being readable
-        // or unchanged: the exact stored attempt is already bound to its immutable source and purpose.
+        // A terminal replay is a durable lookup first. An open replay continues to the durable lock check: a
+        // sidecar may have reached disk immediately before a crash that preceded lock acquisition.
         if let Some(opened) = self.load_attempt(household_id, attempt).await? {
             if opened.purpose != purpose || source_from_fence(&opened.fence) != *expected_source {
                 return Err(MigrationError::Invalid("migration attempt mismatch"));
@@ -296,51 +304,145 @@ impl<'a> ProfileMigrationStorage<'a> {
             let mut resolved = opened.clone();
             // The redb terminal may be newer than the sidecar after a crash. Repair it when possible, but an exact
             // replay still returns its stored result if current storage cannot be consulted.
-            if self.resolve_terminal(household_id, token_hash, &mut resolved).await.is_ok() {
+            if self.resolve_terminal(household_id, token_hash, &mut resolved).await.is_ok()
+                && resolved.state != AttemptState::Open
+            {
                 return Ok(AttemptEvidence {
                     attempt: resolved.attempt,
                     state: resolved.state,
                     purpose: resolved.purpose,
                     wire_minimum: resolved.wire_minimum,
                     fence: resolved.fence,
+                    backup: resolved.backup,
                     winner: resolved.terminal,
                 });
             }
-            return Ok(AttemptEvidence {
-                attempt: opened.attempt,
-                state: opened.state,
-                purpose: opened.purpose,
-                wire_minimum: opened.wire_minimum,
-                fence: opened.fence,
-                winner: opened.terminal,
-            });
         }
         if purpose == AttemptPurpose::Split && !allow_new_split {
             return Err(MigrationError::NotFound);
         }
         let slot = self.state.libraries.slot(household_id, self.state.now());
         let mut library = slot.library.lock().await;
-        if load_rewrite(self.state, household_id).await?.is_some() {
-            return Err(MigrationError::Invalid("another rewrite is staged"));
-        }
         let store = library_store_locked(self.state, household_id, token_hash, &slot, &mut library)
             .await
             .map_err(|_| MigrationError::Forbidden)?
             .ok_or(MigrationError::NotFound)?;
-        // Another opener may have won after the lookup-first fast path but before this task acquired the household
-        // lock. Re-read the sidecar under that lock so one attempt can never receive two rewrite handles.
-        if let Some(opened) = self.load_attempt(household_id, attempt).await? {
+        let read_store = Arc::clone(&store);
+        let active = tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock())
+            .await
+            .map_err(io::Error::other)??;
+        if active.as_deref() == Some(attempt) {
+            let opened = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::InProgress)?;
             if opened.purpose != purpose || source_from_fence(&opened.fence) != *expected_source {
                 return Err(MigrationError::Invalid("migration attempt mismatch"));
             }
-            return Ok(AttemptEvidence {
-                attempt: opened.attempt,
-                state: opened.state,
-                purpose: opened.purpose,
-                wire_minimum: opened.wire_minimum,
-                fence: opened.fence,
-                winner: opened.terminal,
-            });
+            if !opened.provider_read_back_verified || opened.backup.is_none() {
+                return Err(MigrationError::InProgress);
+            }
+            return Ok(attempt_evidence(opened));
+        }
+        if let Some(held) = active.as_deref() {
+            if purpose != AttemptPurpose::Restore {
+                return Err(MigrationError::InProgress);
+            }
+            // The only different-attempt exception is owner-authenticated recovery handoff. Resolve the held id
+            // internally and reveal nothing unless its split has the invariant read-back-verified backup.
+            let mut split = self
+                .load_attempt(household_id, held)
+                .await
+                .map_err(|reason| match reason {
+                    MigrationError::Storage(_) => reason,
+                    _ => MigrationError::InProgress,
+                })?
+                .ok_or(MigrationError::InProgress)?;
+            let backup = split.backup.clone().ok_or(MigrationError::InProgress)?;
+            if split.state != AttemptState::Open
+                || split.purpose != AttemptPurpose::Split
+                || !split.provider_read_back_verified
+                || source_from_fence(&split.fence) != *expected_source
+            {
+                return Err(MigrationError::InProgress);
+            }
+            self.load_verified_backup(household_id, &split.fence, &backup).await.map_err(|reason| {
+                match reason {
+                    MigrationError::Storage(_) => reason,
+                    _ => MigrationError::InProgress,
+                }
+            })?;
+            let read_store = Arc::clone(&store);
+            let snapshot = tokio::task::spawn_blocking(move || read_store.snapshot())
+                .await
+                .map_err(io::Error::other)??;
+            if migration_source(household_id, &snapshot)? != *expected_source {
+                return Err(MigrationError::InProgress);
+            }
+            let existing = self.load_attempt(household_id, attempt).await?;
+            let restore = match existing {
+                Some(opened)
+                    if opened.purpose == AttemptPurpose::Restore
+                        && source_from_fence(&opened.fence) == *expected_source
+                        && opened.backup.as_ref() == Some(&backup)
+                        && opened.provider_read_back_verified =>
+                {
+                    opened
+                }
+                Some(_) => return Err(MigrationError::Invalid("migration attempt mismatch")),
+                None => {
+                    let opened = DurableAttempt {
+                        version: BACKUP_VERSION,
+                        household_id: household_id.to_owned(),
+                        attempt: attempt.to_owned(),
+                        purpose,
+                        wire_minimum: snapshot.protocol.wire_min,
+                        request_digest: None,
+                        terminal: None,
+                        state: AttemptState::Open,
+                        fence: fence(household_id, &snapshot, crate::hex(&crate::random_bytes::<16>()))?,
+                        backup: Some(backup),
+                        provider_read_back_verified: true,
+                    };
+                    self.save_attempt(&opened).await?;
+                    opened
+                }
+            };
+            let write_store = Arc::clone(&store);
+            let from_attempt = held.to_owned();
+            let to_attempt = attempt.to_owned();
+            let expected_generation = restore.fence.generation;
+            let expected_base = restore.fence.base;
+            let transferred = tokio::task::spawn_blocking(move || {
+                write_store.transfer_exclusive_operation_lock(
+                    &from_attempt,
+                    &to_attempt,
+                    expected_generation,
+                    expected_base,
+                )
+            })
+            .await
+            .map_err(io::Error::other)?;
+            match transferred {
+                Ok(()) => {}
+                Err(StoreError::Locked) | Err(StoreError::Invalid(_)) => {
+                    return Err(MigrationError::InProgress);
+                }
+                Err(reason) => return Err(reason.into()),
+            }
+            split.state = AttemptState::Aborted;
+            if let Err(reason) = self.save_attempt(&split).await {
+                eprintln!("profile migration recovery handoff sidecar: {reason:?}");
+            }
+            return Ok(attempt_evidence(restore));
+        }
+        if active.is_none() && load_rewrite(self.state, household_id).await?.is_some() {
+            return Err(MigrationError::Invalid("another rewrite is staged"));
+        }
+        // Re-read the sidecar under the same household lock. A sidecar without a matching redb lock is only a
+        // crash remnant from before acquisition and may resume only this exact immutable attempt.
+        let existing = self.load_attempt(household_id, attempt).await?;
+        if let Some(opened) = existing.as_ref() {
+            if opened.purpose != purpose || source_from_fence(&opened.fence) != *expected_source {
+                return Err(MigrationError::Invalid("migration attempt mismatch"));
+            }
         }
         let read_store = Arc::clone(&store);
         let snapshot =
@@ -348,26 +450,95 @@ impl<'a> ProfileMigrationStorage<'a> {
         if migration_source(household_id, &snapshot)? != *expected_source {
             return Err(MigrationError::SourceChanged);
         }
-        let opened = DurableAttempt {
-            version: BACKUP_VERSION,
-            household_id: household_id.to_owned(),
-            attempt: attempt.to_owned(),
-            purpose,
-            wire_minimum: snapshot.protocol.wire_min,
-            request_digest: None,
-            terminal: None,
-            state: AttemptState::Open,
-            fence: fence(household_id, &snapshot, crate::hex(&crate::random_bytes::<16>()))?,
+        let opened = match existing {
+            Some(opened) => {
+                if !opened.provider_read_back_verified || opened.backup.is_none() {
+                    return Err(MigrationError::InProgress);
+                }
+                let backup = opened.backup.as_ref().ok_or(MigrationError::InProgress)?;
+                let verified = if opened.purpose == AttemptPurpose::Split {
+                    self.load_verified_backup(household_id, &opened.fence, backup).await.map(drop)
+                } else {
+                    self.load_backup_for_restore(household_id, backup).await.map(drop)
+                };
+                if verified.is_err() {
+                    return Err(MigrationError::InProgress);
+                }
+                opened
+            }
+            None => {
+                let frozen = fence(household_id, &snapshot, crate::hex(&crate::random_bytes::<16>()))?;
+                let backup = match purpose {
+                    AttemptPurpose::Split => Some(
+                        self.create_backup_artifact(
+                            attempt,
+                            household_id,
+                            token_hash,
+                            &frozen,
+                            &snapshot,
+                            store.credentials().1,
+                        )
+                        .await?,
+                    ),
+                    AttemptPurpose::Restore => {
+                        let read_store = Arc::clone(&store);
+                        let winner =
+                            tokio::task::spawn_blocking(move || read_store.latest_migration_result())
+                                .await
+                                .map_err(io::Error::other)??
+                                .ok_or(MigrationError::InProgress)?;
+                        let reference = self
+                            .load_attempt(household_id, &winner.attempt)
+                            .await?
+                            .and_then(|terminal| terminal.backup)
+                            .unwrap_or(BackupReference {
+                                attempt: winner.attempt,
+                                id: winner.backup_id,
+                                digest: winner.backup_digest,
+                            });
+                        self.load_backup_for_restore(household_id, &reference).await.map_err(|reason| {
+                            match reason {
+                                MigrationError::Storage(_) => reason,
+                                _ => MigrationError::InProgress,
+                            }
+                        })?;
+                        Some(reference)
+                    }
+                };
+                let opened = DurableAttempt {
+                    version: BACKUP_VERSION,
+                    household_id: household_id.to_owned(),
+                    attempt: attempt.to_owned(),
+                    purpose,
+                    wire_minimum: snapshot.protocol.wire_min,
+                    request_digest: None,
+                    terminal: None,
+                    state: AttemptState::Open,
+                    fence: frozen,
+                    backup,
+                    provider_read_back_verified: true,
+                };
+                self.save_attempt(&opened).await?;
+                opened
+            }
         };
-        self.save_attempt(&opened).await?;
-        Ok(AttemptEvidence {
-            attempt: opened.attempt,
-            state: opened.state,
-            purpose: opened.purpose,
-            wire_minimum: opened.wire_minimum,
-            fence: opened.fence,
-            winner: None,
+        let write_store = Arc::clone(&store);
+        let lock_attempt = attempt.to_owned();
+        let expected_generation = opened.fence.generation;
+        let expected_base = opened.fence.base;
+        let acquired = tokio::task::spawn_blocking(move || {
+            write_store.acquire_exclusive_operation_lock(&lock_attempt, expected_generation, expected_base)
         })
+        .await
+        .map_err(io::Error::other)?;
+        match acquired {
+            Ok(()) => Ok(attempt_evidence(opened)),
+            Err(StoreError::Locked) => Err(MigrationError::InProgress),
+            Err(StoreError::Invalid(message)) if message == "migration_source_changed" => {
+                Err(MigrationError::SourceChanged)
+            }
+            Err(reason) => Err(reason.into()),
+        }
     }
 
     /// Read the migration-authoritative source without creating an attempt. A later open must present this exact
@@ -405,8 +576,8 @@ impl<'a> ProfileMigrationStorage<'a> {
             .fence)
     }
 
-    /// Persist and read back the source snapshot. The attempt-scoped file is idempotent only for the same source;
-    /// a retry with a changed fence refuses to overwrite the evidence from which a candidate may already derive.
+    /// Re-open and verify the immutable backup already bound by open. This compatibility endpoint never creates a
+    /// second artifact: lock publication and backup publication share the open crash boundary.
     pub(crate) async fn create_verified_backup(
         &self,
         attempt: &str,
@@ -424,21 +595,36 @@ impl<'a> ProfileMigrationStorage<'a> {
             .await
             .map_err(|_| MigrationError::Forbidden)?
             .ok_or(MigrationError::NotFound)?;
+        self.ensure_attempt_lock(&store, attempt).await?;
         let opened = self
             .load_attempt(household_id, attempt)
             .await?
             .ok_or(MigrationError::Invalid("attempt is absent"))?;
-        if opened.state != AttemptState::Open
-            || opened.purpose != AttemptPurpose::Split
-            || opened.fence != *expected
-        {
+        if opened.state != AttemptState::Open || opened.fence != *expected {
             return Err(MigrationError::FenceChanged);
         }
-        let read_store = Arc::clone(&store);
-        let snapshot =
-            tokio::task::spawn_blocking(move || read_store.snapshot()).await.map_err(io::Error::other)??;
-        ensure_fence(household_id, &snapshot, expected)?;
-        let (_, member_hash) = store.credentials();
+        let reference = opened.backup.ok_or(MigrationError::InProgress)?;
+        if !opened.provider_read_back_verified {
+            return Err(MigrationError::InProgress);
+        }
+        if opened.purpose == AttemptPurpose::Split {
+            self.load_verified_backup(household_id, expected, &reference).await?;
+        } else {
+            self.load_backup_for_restore(household_id, &reference).await?;
+        }
+        Ok(reference)
+    }
+
+    async fn create_backup_artifact(
+        &self,
+        attempt: &str,
+        household_id: &str,
+        token_hash: [u8; 32],
+        expected: &MigrationFence,
+        snapshot: &LibrarySnapshot,
+        member_hash: Option<[u8; 32]>,
+    ) -> Result<BackupReference, MigrationError> {
+        ensure_fence(household_id, snapshot, expected)?;
         let manifest = BackupManifest {
             id: format!("backup-{attempt}"),
             household_id: household_id.to_owned(),
@@ -449,7 +635,7 @@ impl<'a> ProfileMigrationStorage<'a> {
                 token_hash: crate::hex(&token_hash),
                 member_hash: member_hash.map(|value| crate::hex(&value)),
             },
-            rows: snapshot_rows(&snapshot)?,
+            rows: snapshot_rows(snapshot)?,
         };
         let backup = DurableBackup { version: BACKUP_VERSION, manifest };
         let bytes = serde_json::to_vec(&backup).map_err(io::Error::other)?;
@@ -465,7 +651,7 @@ impl<'a> ProfileMigrationStorage<'a> {
         }
         let reference =
             BackupReference { attempt: attempt.to_owned(), id: backup.manifest.id.clone(), digest };
-        self.verify_backup(household_id, expected, &reference).await?;
+        self.load_verified_backup(household_id, expected, &reference).await?;
         Ok(reference)
     }
 
@@ -517,10 +703,9 @@ impl<'a> ProfileMigrationStorage<'a> {
     async fn verified_backup_json(
         &self,
         household_id: &str,
-        expected: &MigrationFence,
         reference: &BackupReference,
     ) -> Result<Value, MigrationError> {
-        let manifest = self.load_verified_backup(household_id, expected, reference).await?;
+        let manifest = self.load_backup_for_restore(household_id, reference).await?;
         let mut value = serde_json::to_value(&manifest).map_err(io::Error::other)?;
         value
             .as_object_mut()
@@ -534,22 +719,13 @@ impl<'a> ProfileMigrationStorage<'a> {
         household_id: &str,
         attempt: &str,
     ) -> Result<BackupReference, MigrationError> {
-        let bytes = self
-            .state
-            .store
-            .get_file(NS, &attempt_key(household_id, attempt), BACKUP_EXT)
-            .await?
-            .ok_or(MigrationError::BackupMissing)?;
-        let backup: DurableBackup =
-            serde_json::from_slice(&bytes).map_err(|_| MigrationError::BackupCorrupt)?;
-        if backup.version != BACKUP_VERSION
-            || backup.manifest.household_id != household_id
-            || backup.manifest.attempt != attempt
-        {
+        let opened = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
+        if !opened.provider_read_back_verified {
             return Err(MigrationError::BackupCorrupt);
         }
-        let digest = hex_digest(&canonical_json(&backup.manifest)?);
-        Ok(BackupReference { attempt: attempt.to_owned(), id: backup.manifest.id, digest })
+        let reference = opened.backup.ok_or(MigrationError::BackupMissing)?;
+        self.load_backup_for_restore(household_id, &reference).await?;
+        Ok(reference)
     }
 
     async fn load_backup_for_restore(
@@ -588,6 +764,17 @@ impl<'a> ProfileMigrationStorage<'a> {
         let mut durable = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
         self.resolve_terminal(household_id, token_hash, &mut durable).await?;
         let store = self.state.library_v3.existing_library(household_id, token_hash)?;
+        if durable.state == AttemptState::Open {
+            // A sidecar written immediately before a crash that preceded lock acquisition is not a recorded
+            // attempt: the lock transaction is the commit point of open.
+            let lock_store = Arc::clone(&store);
+            let held = tokio::task::spawn_blocking(move || lock_store.exclusive_operation_lock())
+                .await
+                .map_err(io::Error::other)??;
+            if held.as_deref() != Some(attempt) {
+                return Err(MigrationError::NotFound);
+            }
+        }
         let lookup_attempt = durable.attempt.clone();
         let expected_generation = durable.fence.generation;
         let winner =
@@ -600,6 +787,7 @@ impl<'a> ProfileMigrationStorage<'a> {
             purpose: durable.purpose,
             wire_minimum: durable.wire_minimum,
             fence: durable.fence,
+            backup: durable.backup,
             winner: durable.terminal.or(winner),
         })
     }
@@ -620,6 +808,19 @@ impl<'a> ProfileMigrationStorage<'a> {
             .ok_or(MigrationError::NotFound)?;
         let mut durable = self.load_attempt(household_id, attempt).await?.ok_or(MigrationError::NotFound)?;
         let read_store = Arc::clone(&store);
+        let active = tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock())
+            .await
+            .map_err(io::Error::other)??;
+        if active.as_deref().is_some_and(|held| held != attempt) {
+            return Err(MigrationError::InProgress);
+        }
+        let abort_store = Arc::clone(&store);
+        let abort_attempt = attempt.to_owned();
+        let already_aborted =
+            tokio::task::spawn_blocking(move || abort_store.exclusive_operation_aborted(&abort_attempt))
+                .await
+                .map_err(io::Error::other)??;
+        let read_store = Arc::clone(&store);
         let lookup_attempt = durable.attempt.clone();
         let expected_generation = durable.fence.generation;
         let winner = tokio::task::spawn_blocking(move || {
@@ -634,7 +835,31 @@ impl<'a> ProfileMigrationStorage<'a> {
                     MigrationResultKind::Restored => AttemptState::Restored,
                 },
                 Some(_) => AttemptState::Superseded,
-                None => AttemptState::Aborted,
+                None if already_aborted => AttemptState::Aborted,
+                None => {
+                    if active.as_deref() != Some(attempt) {
+                        return Err(MigrationError::NotFound);
+                    }
+                    if self
+                        .state
+                        .store
+                        .get_file(NS, &attempt_key(household_id, attempt), STAGE_EXT)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(MigrationError::InProgress);
+                    }
+                    let write_store = Arc::clone(&store);
+                    let abort_attempt = attempt.to_owned();
+                    let generation = durable.fence.generation;
+                    let base = durable.fence.base;
+                    tokio::task::spawn_blocking(move || {
+                        write_store.abort_exclusive_operation(&abort_attempt, generation, base)
+                    })
+                    .await
+                    .map_err(io::Error::other)??;
+                    AttemptState::Aborted
+                }
             };
             durable.terminal = winner.clone();
             self.save_attempt(&durable).await?;
@@ -645,6 +870,7 @@ impl<'a> ProfileMigrationStorage<'a> {
             purpose: durable.purpose,
             wire_minimum: durable.wire_minimum,
             fence: durable.fence,
+            backup: durable.backup,
             winner: durable.terminal.or(winner),
         })
     }
@@ -667,6 +893,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         if opened.state != AttemptState::Open
             || opened.purpose != AttemptPurpose::Split
             || opened.fence != *expected
+            || opened.backup.as_ref() != Some(backup)
+            || !opened.provider_read_back_verified
         {
             return Err(MigrationError::FenceChanged);
         }
@@ -678,6 +906,7 @@ impl<'a> ProfileMigrationStorage<'a> {
     pub(crate) async fn stage_household_rows(
         &self,
         household_id: &str,
+        token_hash: [u8; 32],
         expected: &MigrationFence,
         backup: &BackupReference,
         rows: &[RewriteRow],
@@ -693,6 +922,13 @@ impl<'a> ProfileMigrationStorage<'a> {
         {
             return Err(MigrationError::Invalid("invalid staged rows"));
         }
+        let slot = self.state.libraries.slot(household_id, self.state.now());
+        let mut library = slot.library.lock().await;
+        let store = library_store_locked(self.state, household_id, token_hash, &slot, &mut library)
+            .await
+            .map_err(|_| MigrationError::Forbidden)?
+            .ok_or(MigrationError::NotFound)?;
+        self.ensure_attempt_lock(&store, &backup.attempt).await?;
         let opened = self
             .load_attempt(household_id, &backup.attempt)
             .await?
@@ -700,10 +936,28 @@ impl<'a> ProfileMigrationStorage<'a> {
         if opened.state != AttemptState::Open
             || opened.purpose != AttemptPurpose::Split
             || opened.fence != *expected
+            || opened.backup.as_ref() != Some(backup)
+            || !opened.provider_read_back_verified
         {
             return Err(MigrationError::FenceChanged);
         }
         self.stage_rows(household_id, expected, backup, rows).await
+    }
+
+    async fn ensure_attempt_lock(
+        &self,
+        store: &Arc<dyn LibraryStore>,
+        attempt: &str,
+    ) -> Result<(), MigrationError> {
+        let read_store = Arc::clone(store);
+        let active = tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock())
+            .await
+            .map_err(io::Error::other)??;
+        if active.as_deref() == Some(attempt) {
+            Ok(())
+        } else {
+            Err(MigrationError::InProgress)
+        }
     }
 
     pub(crate) async fn commit_household(
@@ -735,6 +989,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         if opened.state != AttemptState::Open
             || opened.purpose != AttemptPurpose::Split
             || opened.fence != *expected
+            || opened.backup.as_ref() != Some(backup)
+            || !opened.provider_read_back_verified
         {
             return Err(MigrationError::FenceChanged);
         }
@@ -742,7 +998,6 @@ impl<'a> ProfileMigrationStorage<'a> {
         let snapshot =
             tokio::task::spawn_blocking(move || read_store.snapshot()).await.map_err(io::Error::other)??;
         if ensure_fence(household_id, &snapshot, expected).is_err() {
-            self.set_attempt_state(household_id, &backup.attempt, AttemptState::Superseded).await?;
             return Err(MigrationError::FenceChanged);
         }
         let owned_rows = rows;
@@ -827,6 +1082,8 @@ impl<'a> ProfileMigrationStorage<'a> {
         if opened.purpose != AttemptPurpose::Restore
             || opened.fence != request.fence
             || opened.wire_minimum != request.wire_minimum
+            || opened.backup.as_ref() != Some(&request.backup)
+            || !opened.provider_read_back_verified
         {
             return Err(MigrationError::Invalid("recovery attempt mismatch"));
         }
@@ -850,7 +1107,6 @@ impl<'a> ProfileMigrationStorage<'a> {
             || current.protocol.wire_min != request.wire_minimum
             || !profiles_evidence_matches(&current, &request.profiles_row)?
         {
-            self.set_attempt_state(household_id, recovery_attempt, AttemptState::Superseded).await?;
             return Err(MigrationError::FenceChanged);
         }
         let resulting_generation = request
@@ -1103,20 +1359,6 @@ impl<'a> ProfileMigrationStorage<'a> {
         Ok(())
     }
 
-    async fn set_attempt_state(
-        &self,
-        household_id: &str,
-        attempt: &str,
-        state: AttemptState,
-    ) -> Result<(), MigrationError> {
-        let mut durable = self
-            .load_attempt(household_id, attempt)
-            .await?
-            .ok_or(MigrationError::Invalid("attempt is absent"))?;
-        durable.state = state;
-        self.save_attempt(&durable).await
-    }
-
     async fn set_attempt_terminal(
         &self,
         household_id: &str,
@@ -1143,6 +1385,17 @@ impl<'a> ProfileMigrationStorage<'a> {
             return Ok(());
         }
         let store = self.state.library_v3.existing_library(household_id, token_hash)?;
+        let abort_store = Arc::clone(&store);
+        let abort_attempt = attempt.attempt.clone();
+        let aborted =
+            tokio::task::spawn_blocking(move || abort_store.exclusive_operation_aborted(&abort_attempt))
+                .await
+                .map_err(io::Error::other)??;
+        if aborted {
+            attempt.state = AttemptState::Aborted;
+            self.save_attempt(attempt).await?;
+            return Ok(());
+        }
         let lookup_attempt = attempt.attempt.clone();
         let expected_generation = attempt.fence.generation;
         let winner =
@@ -1477,8 +1730,20 @@ fn backup_reference(attempt: &str, input: BackupInput) -> BackupReference {
     BackupReference { attempt: attempt.to_owned(), id: input.id, digest: input.digest }
 }
 
+fn attempt_evidence(attempt: DurableAttempt) -> AttemptEvidence {
+    AttemptEvidence {
+        attempt: attempt.attempt,
+        state: attempt.state,
+        purpose: attempt.purpose,
+        wire_minimum: attempt.wire_minimum,
+        fence: attempt.fence,
+        backup: attempt.backup,
+        winner: attempt.terminal,
+    }
+}
+
 fn attempt_json(evidence: AttemptEvidence) -> Value {
-    let AttemptEvidence { attempt, state, purpose, wire_minimum, fence, winner } = evidence;
+    let AttemptEvidence { attempt, state, purpose, wire_minimum, fence, backup, winner } = evidence;
     let mut answer = json!({
         "attempt": attempt,
         "state": state,
@@ -1486,6 +1751,9 @@ fn attempt_json(evidence: AttemptEvidence) -> Value {
         "wireMin": wire_minimum,
         "fence": fence,
     });
+    if let Some(backup) = backup {
+        answer["backup"] = json!(backup);
+    }
     if let Some(terminal) = winner {
         let terminal_json = json!({
             "attempt": terminal.attempt,
@@ -1527,6 +1795,7 @@ fn migration_error(error_value: MigrationError) -> Response {
         MigrationError::Invalid("staged digest changed") => {
             json_reply(StatusCode::CONFLICT, &error("staged_digest_mismatch"))
         }
+        MigrationError::InProgress => json_reply(StatusCode::CONFLICT, &error("migration_in_progress")),
         MigrationError::FenceChanged => json_reply(StatusCode::CONFLICT, &error("migration_fence_moved")),
         MigrationError::SourceChanged => json_reply(StatusCode::CONFLICT, &error("migration_source_changed")),
         MigrationError::BackupMissing => json_reply(StatusCode::NOT_FOUND, &error("backup_not_found")),
@@ -1619,23 +1888,25 @@ pub(crate) async fn handle(
                 Err(reason) => return migration_error(reason),
             };
             match storage.create_verified_backup(attempt, household_id, token_hash, &evidence.fence).await {
-                Ok(reference) => json_reply(
-                    StatusCode::OK,
-                    &json!({ "id": reference.id, "digest": reference.digest, "source": evidence.fence }),
-                ),
+                Ok(reference) => match storage.load_backup_for_restore(household_id, &reference).await {
+                    Ok(manifest) => json_reply(
+                        StatusCode::OK,
+                        &json!({ "id": reference.id, "digest": reference.digest, "source": manifest.source }),
+                    ),
+                    Err(reason) => migration_error(reason),
+                },
                 Err(reason) => migration_error(reason),
             }
         }
         (Some("backup"), Method::GET) => {
-            let evidence = match storage.lookup_attempt(household_id, token_hash, attempt).await {
-                Ok(evidence) => evidence,
-                Err(reason) => return migration_error(reason),
-            };
+            if let Err(reason) = storage.lookup_attempt(household_id, token_hash, attempt).await {
+                return migration_error(reason);
+            }
             let reference = match storage.backup_reference(household_id, attempt).await {
                 Ok(reference) => reference,
                 Err(reason) => return migration_error(reason),
             };
-            match storage.verified_backup_json(household_id, &evidence.fence, &reference).await {
+            match storage.verified_backup_json(household_id, &reference).await {
                 Ok(backup) => json_reply(StatusCode::OK, &backup),
                 Err(reason) => migration_error(reason),
             }
@@ -1651,7 +1922,7 @@ pub(crate) async fn handle(
                 .into_iter()
                 .map(|row| RewriteRow { key: row.k, value: row.v })
                 .collect::<Vec<_>>();
-            match storage.stage_household_rows(household_id, &input.fence, &backup, &rows).await {
+            match storage.stage_household_rows(household_id, token_hash, &input.fence, &backup, &rows).await {
                 Ok(digest) => json_reply(StatusCode::OK, &json!({ "stagedDigest": digest })),
                 Err(reason) => migration_error(reason),
             }
@@ -2141,7 +2412,11 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
-        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 2, "after-open", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        assert_eq!(
+            write(&h, HOUSEHOLD, ACTIVITY, 2, "after-open", HOUSEHOLD_TOKEN).await,
+            StatusCode::CONFLICT,
+            "an opened migration exclusively owns household mutation"
+        );
         super::super::save_rewrite(
             &h.state,
             HOUSEHOLD,
@@ -2180,8 +2455,7 @@ mod tests {
         let changed_replay = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
         let response =
             migration_request(&h, "POST", &open_path, Some(changed_replay), Some(HOUSEHOLD_TOKEN)).await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(body_json(response).await, json!({ "error": "migration_attempt_mismatch" }));
+        assert_eq!(response.status(), StatusCode::OK, "the owning attempt resumes with the unchanged source");
 
         let missing = json!({ "attempt": ATTEMPT2, "purpose": "split" }).to_string();
         assert_eq!(
@@ -2220,7 +2494,12 @@ mod tests {
         .to_string();
         let restored_open =
             migration_request(&h, "POST", &open_path, Some(restore), Some(HOUSEHOLD_TOKEN)).await;
-        assert_eq!(restored_open.status(), StatusCode::OK);
+        assert_eq!(restored_open.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(restored_open).await, json!({ "error": "migration_in_progress" }));
+        assert!(
+            ProfileMigrationStorage::new(&h.state).load_attempt(HOUSEHOLD, ATTEMPT3).await.unwrap().is_none(),
+            "restore cannot open without a server-verified bound backup"
+        );
 
         let split = json!({
             "attempt": ATTEMPT,
@@ -2552,24 +2831,22 @@ mod tests {
             .await,
         )
         .await;
+        let attempt_path = format!("{base}/{ATTEMPT}");
+        assert_eq!(
+            migration_request(&h, "DELETE", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
         write(&h, HOUSEHOLD, CONFIG, 0, "changed", HOUSEHOLD_TOKEN).await;
-        let fresh = body_json(
-            migration_request(
-                &h,
-                "POST",
-                &base,
-                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT2, "split").await),
-                Some(HOUSEHOLD_TOKEN),
-            )
-            .await,
-        )
-        .await;
+        let snapshot = ProfileMigrationStorage::new(&h.state)
+            .locked_snapshot(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
         let body = json!({
             "source": source["fence"],
             "authority": {
-                "generation": fresh["fence"]["generation"],
-                "base": fresh["fence"]["base"],
-                "head": fresh["fence"]["head"],
+                "generation": snapshot.protocol.migration_generation,
+                "base": snapshot.protocol.head,
+                "head": authenticated_head(HOUSEHOLD, &snapshot).unwrap(),
                 "kind": "changed-legacy",
             },
             "profilesRow": null,
@@ -2634,23 +2911,26 @@ mod tests {
         );
         let storage = ProfileMigrationStorage::new(&h.state);
         let source = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        let concurrent = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        assert_eq!(source.generation, concurrent.generation);
-        assert_eq!(source.base, concurrent.base);
-        assert_eq!(source.authenticated_head, concurrent.authenticated_head);
-        assert_ne!(source.rewrite, concurrent.rewrite);
+        assert!(matches!(
+            storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await,
+            Err(MigrationError::InProgress)
+        ));
         let backup = storage
             .create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &source)
             .await
             .unwrap();
         storage.verify_backup(HOUSEHOLD, &source, &backup).await.unwrap();
 
+        assert_eq!(
+            storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap().state,
+            AttemptState::Aborted
+        );
         assert_eq!(write(&h, HOUSEHOLD, CONFIG, 0, "later", HOUSEHOLD_TOKEN).await, StatusCode::OK);
         let changed = storage.acquire_fence(ATTEMPT3, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         assert_ne!(source, changed);
         assert!(matches!(
             storage.create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &changed).await,
-            Err(MigrationError::FenceChanged)
+            Err(MigrationError::InProgress)
         ));
 
         h.state
@@ -2672,42 +2952,38 @@ mod tests {
         let stale = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let stale_backup =
             storage.create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &stale).await.unwrap();
-        write(&h, HOUSEHOLD, CONFIG, 0, "household-config", HOUSEHOLD_TOKEN).await;
+        assert_eq!(
+            write(&h, HOUSEHOLD, CONFIG, 0, "household-config", HOUSEHOLD_TOKEN).await,
+            StatusCode::CONFLICT
+        );
         let kept = vec![RewriteRow { key: CONFIG.into(), value: "household-config".into() }];
+        let mut moved = stale.clone();
+        moved.base += 1;
         assert!(matches!(
-            storage.rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &stale, &stale_backup, &kept).await,
+            storage.rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &moved, &stale_backup, &kept).await,
             Err(MigrationError::FenceChanged)
         ));
-
-        let current = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        let backup = storage
-            .create_verified_backup(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &current)
-            .await
-            .unwrap();
         let rows = vec![
             RewriteRow { key: CONFIG.into(), value: "household-config".into() },
             RewriteRow { key: DIRECTORY.into(), value: "sealed-directory".into() },
         ];
         let committed = storage
-            .rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &current, &backup, &rows)
+            .rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &stale, &stale_backup, &rows)
             .await
             .unwrap();
         assert_eq!(committed.wire_min, 5);
-        assert_eq!(committed.head, current.base + 2);
+        assert_eq!(committed.head, stale.base + 2);
         assert_eq!(
             h.state.library_v3.credentials(HOUSEHOLD).unwrap().unwrap().0,
             token(HOUSEHOLD_TOKEN),
             "the in-place split keeps the household id and key"
         );
-        let winner = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap();
+        let winner = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap();
         assert_eq!(winner.state, AttemptState::Committed);
         let winner = winner.winner.unwrap();
         assert_eq!(winner.resulting_base, committed.head);
         assert_eq!(winner.resulting_generation, committed.migration_generation);
         assert_eq!(winner.staged_digest, Some(staged_digest(&rows).unwrap()));
-
-        let loser = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap();
-        assert_eq!(loser.state, AttemptState::Superseded);
 
         let abort_fence = storage.acquire_fence(ATTEMPT3, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let aborted = storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT3).await.unwrap();
@@ -2737,6 +3013,15 @@ mod tests {
         assert_eq!(storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap(), source);
         storage.verify_backup(HOUSEHOLD, &source, &backup).await.unwrap();
         assert_eq!(
+            write(&restarted, HOUSEHOLD, CONFIG, source.base, "blocked", HOUSEHOLD_TOKEN).await,
+            StatusCode::CONFLICT,
+            "a process restart retains the durable lock"
+        );
+        assert!(matches!(
+            storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await,
+            Err(MigrationError::InProgress)
+        ));
+        assert_eq!(
             storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap().state,
             AttemptState::Open
         );
@@ -2747,7 +3032,333 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_attempts_share_a_snapshot_and_only_one_matching_commit_wins() {
+    async fn verified_split_backup_hands_the_exclusive_lock_to_fresh_restore_and_survives_restart() {
+        let h = Harness::new();
+        let dir = h.dir.clone();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "sealed-activity", HOUSEHOLD_TOKEN).await;
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let source = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let split = storage
+            .open_attempt(ATTEMPT, AttemptPurpose::Split, &source, HOUSEHOLD, token(HOUSEHOLD_TOKEN), true)
+            .await
+            .unwrap();
+        let backup = split.backup.clone().expect("open publishes its verified backup binding");
+        storage.verify_backup(HOUSEHOLD, &split.fence, &backup).await.unwrap();
+        let replay = storage
+            .open_attempt(ATTEMPT, AttemptPurpose::Split, &source, HOUSEHOLD, token(HOUSEHOLD_TOKEN), true)
+            .await
+            .unwrap();
+        assert_eq!(replay.backup, Some(backup.clone()));
+
+        let restore = storage
+            .open_attempt(ATTEMPT3, AttemptPurpose::Restore, &source, HOUSEHOLD, token(HOUSEHOLD_TOKEN), true)
+            .await
+            .unwrap();
+        assert_eq!(restore.backup, Some(backup.clone()), "handoff returns the exact split artifact");
+        assert_eq!(
+            storage.backup_reference(HOUSEHOLD, ATTEMPT3).await.unwrap(),
+            backup,
+            "the restore route is bound to the original split backup"
+        );
+        let store = h.state.library_v3.existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).unwrap();
+        assert_eq!(store.exclusive_operation_lock().unwrap().as_deref(), Some(ATTEMPT3));
+        assert_eq!(
+            storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap().state,
+            AttemptState::Aborted
+        );
+        drop(h);
+
+        let restarted = Harness::in_dir(dir);
+        let storage = ProfileMigrationStorage::new(&restarted.state);
+        let resumed = storage
+            .open_attempt(ATTEMPT3, AttemptPurpose::Restore, &source, HOUSEHOLD, token(HOUSEHOLD_TOKEN), true)
+            .await
+            .unwrap();
+        assert_eq!(resumed.backup, restore.backup);
+        assert_eq!(
+            restarted
+                .state
+                .library_v3
+                .existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+                .unwrap()
+                .exclusive_operation_lock()
+                .unwrap()
+                .as_deref(),
+            Some(ATTEMPT3),
+            "the compare-and-transfer lock survives process restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_handoff_requires_an_intact_bound_backup_and_never_leaks_split_metadata() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "sealed-activity", HOUSEHOLD_TOKEN).await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let split = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(split.status(), StatusCode::OK);
+        assert!(body_json(split).await["backup"]["digest"].is_string());
+        h.state
+            .store
+            .replace_file(NS, &attempt_key(HOUSEHOLD, ATTEMPT), BACKUP_EXT, b"corrupt")
+            .await
+            .unwrap();
+
+        let restore = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT3, "restore").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(restore.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(restore).await, json!({ "error": "migration_in_progress" }));
+        let storage = ProfileMigrationStorage::new(&h.state);
+        assert!(storage.load_attempt(HOUSEHOLD, ATTEMPT3).await.unwrap().is_none());
+        assert_eq!(
+            h.state
+                .library_v3
+                .existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+                .unwrap()
+                .exclusive_operation_lock()
+                .unwrap()
+                .as_deref(),
+            Some(ATTEMPT),
+            "an ineligible recovery leaves the original lock untouched"
+        );
+    }
+
+    async fn enabled_harness_with_legacy_row() -> Harness {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        h
+    }
+
+    fn household_lock(h: &Harness) -> Option<String> {
+        h.state
+            .library_v3
+            .existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .unwrap()
+            .exclusive_operation_lock()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_lookup_replays_the_open_answer_and_abort_is_refused_once_staging_begins() {
+        let h = enabled_harness_with_legacy_row().await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt = format!("{base}/{ATTEMPT}");
+        let open = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
+        let opened =
+            body_json(migration_request(&h, "POST", &base, Some(open.clone()), Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        assert_eq!(opened["state"], "open");
+        assert_eq!(opened["backup"]["attempt"], ATTEMPT);
+
+        let looked_up =
+            body_json(migration_request(&h, "GET", &attempt, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(looked_up, opened, "a lost open response is answered by an identical lookup");
+        let replayed =
+            body_json(migration_request(&h, "POST", &base, Some(open), Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(replayed, opened);
+
+        let backup = body_json(
+            migration_request(&h, "POST", &format!("{attempt}/backup"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        assert_eq!(backup["digest"], opened["backup"]["digest"]);
+        assert_eq!(backup["source"], opened["fence"]);
+        let artifact = body_json(
+            migration_request(&h, "GET", &format!("{attempt}/backup"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        assert_eq!(artifact["attempt"], ATTEMPT);
+
+        let staged = migration_request(
+            &h,
+            "POST",
+            &format!("{attempt}/rows"),
+            Some(
+                json!({
+                    "fence": opened["fence"],
+                    "backup": { "id": opened["backup"]["id"], "digest": opened["backup"]["digest"] },
+                    "writes": [{ "k": CONFIG, "v": "kept" }],
+                })
+                .to_string(),
+            ),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(staged.status(), StatusCode::OK);
+
+        let refused = migration_request(&h, "DELETE", &attempt, None, Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(refused).await, json!({ "error": "migration_in_progress" }));
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT), "a refused abort leaves the lock held");
+        let still_open =
+            body_json(migration_request(&h, "GET", &attempt, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(still_open, opened);
+    }
+
+    #[tokio::test]
+    async fn abort_before_staging_releases_the_lock_atomically_for_a_new_attempt() {
+        let h = enabled_harness_with_legacy_row().await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt = format!("{base}/{ATTEMPT}");
+        let open = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
+        assert_eq!(
+            migration_request(&h, "POST", &base, Some(open.clone()), Some(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::OK
+        );
+        let aborted = migration_request(&h, "DELETE", &attempt, None, Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(aborted.status(), StatusCode::OK);
+        assert_eq!(body_json(aborted).await["state"], "aborted");
+        assert_eq!(household_lock(&h), None);
+
+        let replay =
+            body_json(migration_request(&h, "POST", &base, Some(open), Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(replay["state"], "aborted", "an aborted attempt id is never reopened");
+        assert_eq!(household_lock(&h), None);
+        let next = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT2, "split").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(next.status(), StatusCode::OK);
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT2));
+    }
+
+    #[tokio::test]
+    async fn a_sidecar_without_the_lock_is_a_crash_remnant_that_open_resumes() {
+        let h = enabled_harness_with_legacy_row().await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt = format!("{base}/{ATTEMPT}");
+        let open = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await;
+        let opened =
+            body_json(migration_request(&h, "POST", &base, Some(open.clone()), Some(HOUSEHOLD_TOKEN)).await)
+                .await;
+        // Model a crash after the sidecar and backup reached disk but before the lock transaction committed.
+        h.state
+            .library_v3
+            .existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .unwrap()
+            .release_exclusive_operation_lock(ATTEMPT)
+            .unwrap();
+
+        for method in ["GET", "DELETE"] {
+            assert_eq!(
+                migration_request(&h, method, &attempt, None, Some(HOUSEHOLD_TOKEN)).await.status(),
+                StatusCode::NOT_FOUND,
+                "{method}: the lock transaction is the commit point of open"
+            );
+        }
+        assert_eq!(household_lock(&h), None);
+        let resumed =
+            body_json(migration_request(&h, "POST", &base, Some(open), Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(resumed, opened, "the same attempt resumes with its stored fence and backup");
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT));
+    }
+
+    #[tokio::test]
+    async fn http_recovery_handoff_returns_the_bound_backup_and_competitors_learn_nothing() {
+        let h = enabled_harness_with_legacy_row().await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let split = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+
+        let source = ProfileMigrationStorage::new(&h.state)
+            .observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
+        let mut wrong = source.clone();
+        wrong.head = if wrong.head.starts_with('f') { "e".repeat(64) } else { "f".repeat(64) };
+        let wrong = json!({ "attempt": ATTEMPT3, "purpose": "restore", "expectedSource": wrong }).to_string();
+        let refused = migration_request(&h, "POST", &base, Some(wrong), Some(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(refused).await, json!({ "error": "migration_in_progress" }));
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT), "a failed handoff changes nothing");
+
+        let restore = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &base,
+                Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT3, "restore").await),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!((restore["state"].as_str(), restore["purpose"].as_str()), (Some("open"), Some("restore")));
+        assert_eq!(restore["backup"], split["backup"], "the handoff binds the split's exact artifact");
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT3));
+        let artifact = body_json(
+            migration_request(&h, "GET", &format!("{base}/{ATTEMPT3}/backup"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(artifact["attempt"], ATTEMPT, "the restore reads the original manifest unchanged");
+        let old = body_json(
+            migration_request(&h, "GET", &format!("{base}/{ATTEMPT}"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        assert_eq!(old["state"], "aborted");
+
+        for (attempt, purpose) in [(ATTEMPT, "split"), (ATTEMPT2, "split"), (ATTEMPT2, "restore")] {
+            let body = open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, attempt, purpose).await;
+            let response = migration_request(&h, "POST", &base, Some(body), Some(HOUSEHOLD_TOKEN)).await;
+            if attempt == ATTEMPT {
+                assert_eq!(body_json(response).await["state"], "aborted");
+            } else {
+                assert_eq!(response.status(), StatusCode::CONFLICT, "{attempt} {purpose}");
+                assert_eq!(body_json(response).await, json!({ "error": "migration_in_progress" }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_abort_marker_repairs_a_lost_sidecar_response_and_unlocks() {
+        let h = Harness::new();
+        write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let opened = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let store = h.state.library_v3.existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).unwrap();
+        store.abort_exclusive_operation(ATTEMPT, opened.generation, opened.base).unwrap();
+
+        let repaired = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap();
+        assert_eq!(repaired.state, AttemptState::Aborted);
+        assert_eq!(store.exclusive_operation_lock().unwrap(), None);
+        assert_eq!(
+            write(&h, HOUSEHOLD, CONFIG, opened.base, "unlocked", HOUSEHOLD_TOKEN).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn one_attempt_exclusively_owns_mutation_and_same_attempt_resumes() {
         let h = Harness::new();
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await;
         let storage = ProfileMigrationStorage::new(&h.state);
@@ -2758,33 +3369,220 @@ mod tests {
         assert_eq!(first.unwrap(), repeated.unwrap(), "one attempt id has one durable rewrite handle");
 
         let one = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        let two = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        assert!(matches!(
+            storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await,
+            Err(MigrationError::InProgress)
+        ));
         assert_eq!(
-            (one.generation, one.base, &one.authenticated_head),
-            (two.generation, two.base, &two.authenticated_head)
+            storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap(),
+            one,
+            "an owning attempt resumes idempotently"
+        );
+        assert_eq!(
+            write(&h, HOUSEHOLD, CONFIG, one.base, "blocked", HOUSEHOLD_TOKEN).await,
+            StatusCode::CONFLICT
         );
         let backup_one =
             storage.create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &one).await.unwrap();
-        let backup_two =
-            storage.create_verified_backup(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &two).await.unwrap();
         let rows = [RewriteRow { key: CONFIG.into(), value: "kept".into() }];
-        let (commit_one, commit_two) = tokio::join!(
-            storage.rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &one, &backup_one, &rows),
-            storage.rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &two, &backup_two, &rows)
+        let committed = storage
+            .rewrite_household(HOUSEHOLD, token(HOUSEHOLD_TOKEN), &one, &backup_one, &rows)
+            .await
+            .unwrap();
+        assert_eq!(committed.wire_min, PROFILE_WIRE_MINIMUM);
+        let household = h.state.library_v3.existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).unwrap();
+        assert_eq!(household.exclusive_operation_lock().unwrap(), None);
+        let protocol = household.protocol().unwrap();
+        let generation = super::super::full_generation(&h.state, &protocol.generation);
+        assert_eq!(
+            h.send(
+                "POST",
+                &format!("/lib/{HOUSEHOLD}/batch"),
+                Some(
+                    json!({ "writes": [{ "k": DIRECTORY, "base": committed.head, "v": "unlocked" }] })
+                        .to_string(),
+                ),
+                &[
+                    ("x-den-wire", "5"),
+                    ("x-den-generation", &generation),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                ],
+            )
+            .await
+            .status(),
+            StatusCode::OK,
+            "commit atomically releases the exclusive lock"
         );
-        assert_ne!(commit_one.is_ok(), commit_two.is_ok());
-        assert!(matches!(commit_one, Ok(_) | Err(MigrationError::FenceChanged)));
-        assert!(matches!(commit_two, Ok(_) | Err(MigrationError::FenceChanged)));
+    }
 
-        let state_one =
-            storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap().state;
-        let state_two =
-            storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap().state;
+    #[tokio::test]
+    async fn exclusive_migration_lock_refuses_competitors_and_every_ordinary_mutation() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        Arc::get_mut(&mut h.state).unwrap().profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let opened = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+
+        let competing = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT2, "split").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(competing.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(competing).await, json!({ "error": "migration_in_progress" }));
+
+        let mutations = [
+            ("POST", format!("/lib/{HOUSEHOLD}/batch"), Some(json!({ "writes": [] }).to_string())),
+            ("PUT", format!("/lib/{HOUSEHOLD}/member"), None),
+            ("DELETE", format!("/lib/{HOUSEHOLD}"), None),
+            ("POST", format!("/lib/{HOUSEHOLD}/rewrite"), None),
+        ];
+        for (method, path, body) in mutations {
+            let response = h
+                .send(method, &path, body, &[("x-den-wire", "5"), ("x-den-library-token", HOUSEHOLD_TOKEN)])
+                .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {path}");
+            assert_eq!(
+                body_json(response).await,
+                json!({ "error": "migration_in_progress" }),
+                "the response never exposes the owning attempt"
+            );
+        }
+
+        let resumed = migration_request(
+            &h,
+            "POST",
+            &base,
+            Some(open_body(&h, HOUSEHOLD, HOUSEHOLD_TOKEN, ATTEMPT, "split").await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(resumed.status(), StatusCode::OK);
+        assert_eq!(body_json(resumed).await["attempt"], ATTEMPT);
+    }
+
+    #[tokio::test]
+    async fn mutation_boundaries_close_delete_and_rewrite_preflight_races() {
+        let h = Harness::new();
+        assert_eq!(write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy", HOUSEHOLD_TOKEN).await, StatusCode::OK);
+        let storage = ProfileMigrationStorage::new(&h.state);
+        let expected = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
+        let store = h.state.library_v3.existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).unwrap();
+        let protocol = store.protocol().unwrap();
+        store
+            .acquire_exclusive_operation_lock(ATTEMPT, protocol.migration_generation, protocol.head)
+            .unwrap();
+
+        assert_eq!(
+            super::super::rewrite_open(&h.state, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.status(),
+            StatusCode::CONFLICT,
+            "rewrite open rechecks after taking the library slot"
+        );
+        assert_eq!(
+            super::super::forget(&h.state, HOUSEHOLD, token(HOUSEHOLD_TOKEN), None, None).await.status(),
+            StatusCode::CONFLICT,
+            "delete rechecks before its first irreversible mutation"
+        );
+        assert!(h.state.library_v3.credentials(HOUSEHOLD).unwrap().is_some());
+        store.release_exclusive_operation_lock(ATTEMPT).unwrap();
+
+        let opened = super::super::rewrite_open(&h.state, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened = body_json(opened).await;
+        let rewrite = opened["rewrite"].as_str().unwrap();
+        let rewrite_base = opened["base"].as_u64().unwrap();
+
         assert!(matches!(
-            (state_one, state_two),
-            (AttemptState::Committed, AttemptState::Superseded)
-                | (AttemptState::Superseded, AttemptState::Committed)
+            storage
+                .open_attempt(
+                    ATTEMPT,
+                    AttemptPurpose::Split,
+                    &expected,
+                    HOUSEHOLD,
+                    token(HOUSEHOLD_TOKEN),
+                    true,
+                )
+                .await,
+            Err(MigrationError::Invalid("another rewrite is staged"))
         ));
+        assert_eq!(store.exclusive_operation_lock().unwrap(), None);
+
+        // Model a lock acquired after an HTTP preflight but before the sidecar handler takes the slot. Production
+        // migration acquisition serializes this boundary; the direct store call makes the losing side observable.
+        store
+            .acquire_exclusive_operation_lock(ATTEMPT, protocol.migration_generation, protocol.head)
+            .unwrap();
+        let rows = Request::builder()
+            .method(Method::POST)
+            .body(axum::body::Body::from(json!({ "writes": [{ "k": CONFIG, "v": "kept" }] }).to_string()))
+            .unwrap();
+        assert_eq!(
+            super::super::rewrite_rows(
+                &h.state,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                &format!("rewrite/{rewrite}/rows"),
+                rows,
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT,
+            "rewrite rows rechecks before replacing its sidecar"
+        );
+        let commit = Request::builder()
+            .method(Method::POST)
+            .body(axum::body::Body::from(json!({ "base": rewrite_base, "wireMin": 4 }).to_string()))
+            .unwrap();
+        assert_eq!(
+            super::super::rewrite_commit(
+                &h.state,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                5,
+                &format!("rewrite/{rewrite}/commit"),
+                commit,
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT,
+            "rewrite commit rechecks inside the redb write transaction"
+        );
+        assert_eq!(
+            super::super::rewrite_abort(
+                &h.state,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                &format!("rewrite/{rewrite}"),
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT,
+            "rewrite abort rechecks while holding the library slot"
+        );
+        store.release_exclusive_operation_lock(ATTEMPT).unwrap();
+        assert_eq!(
+            super::super::rewrite_abort(
+                &h.state,
+                HOUSEHOLD,
+                token(HOUSEHOLD_TOKEN),
+                &format!("rewrite/{rewrite}"),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -2845,6 +3643,16 @@ mod tests {
         assert_eq!(after.protocol.wire_min, 5);
         assert_eq!(find_row(&after, ACTIVITY).unwrap().unwrap().value, "legacy-activity");
         assert!(find_row(&after, DIRECTORY).unwrap().is_none());
+        assert_eq!(
+            h.state
+                .library_v3
+                .existing_library(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+                .unwrap()
+                .exclusive_operation_lock()
+                .unwrap(),
+            None,
+            "verified restore atomically releases the exclusive lock"
+        );
 
         let repeated =
             storage.restore_backup(ATTEMPT3, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &request).await.unwrap();
@@ -2872,8 +3680,6 @@ mod tests {
         write(&h, HOUSEHOLD, ACTIVITY, 0, "legacy-activity", HOUSEHOLD_TOKEN).await;
         let storage = ProfileMigrationStorage::new(&h.state);
         let source = storage.acquire_fence(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        let loser_source = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
-        assert_eq!(loser_source.generation, source.generation);
         let winner_open = storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().unwrap();
         let backup = storage
             .create_verified_backup(ATTEMPT, HOUSEHOLD, token(HOUSEHOLD_TOKEN), &source)
@@ -2889,17 +3695,11 @@ mod tests {
             .unwrap();
 
         // Model a process death after redb committed but before the attempt sidecar recorded the response.
-        // The loser also remains open because it never observed the winning response.
         storage.save_attempt(&winner_open).await.unwrap();
         assert_eq!(
             storage.load_attempt(HOUSEHOLD, ATTEMPT).await.unwrap().unwrap().state,
             AttemptState::Open
         );
-        assert_eq!(
-            storage.load_attempt(HOUSEHOLD, ATTEMPT2).await.unwrap().unwrap().state,
-            AttemptState::Open
-        );
-
         let recovery_source = storage.observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN)).await.unwrap();
         let recovery = storage
             .open_attempt(
@@ -2937,10 +3737,6 @@ mod tests {
         assert_eq!(winning_terminal.attempt, ATTEMPT);
         assert_eq!(winning_terminal.kind, MigrationResultKind::Committed);
         assert_eq!(winning_terminal.expected_generation, source.generation);
-
-        let loser = storage.lookup_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap();
-        assert_eq!(loser.state, AttemptState::Superseded);
-        assert_eq!(loser.winner, Some(winning_terminal));
     }
 
     #[tokio::test]
@@ -2987,13 +3783,8 @@ mod tests {
                 token(HOUSEHOLD_TOKEN),
                 true,
             )
-            .await
-            .unwrap();
-        assert_eq!(other.state, AttemptState::Open);
-        assert_eq!(
-            storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT2).await.unwrap().state,
-            AttemptState::Aborted
-        );
+            .await;
+        assert!(matches!(other, Err(MigrationError::InProgress)));
         assert!(matches!(
             storage
                 .conditionally_retire_candidate(
@@ -3056,17 +3847,23 @@ mod tests {
             Err(MigrationError::SameLegacyFence)
         ));
 
-        write(&h, HOUSEHOLD, DIRECTORY, 0, "sealed-committed-directory", HOUSEHOLD_TOKEN).await;
+        assert_eq!(
+            storage.abort_attempt(HOUSEHOLD, token(HOUSEHOLD_TOKEN), ATTEMPT).await.unwrap().state,
+            AttemptState::Aborted
+        );
+        assert_eq!(
+            write(&h, HOUSEHOLD, DIRECTORY, 0, "sealed-committed-directory", HOUSEHOLD_TOKEN).await,
+            StatusCode::OK
+        );
         let household_hash = token(HOUSEHOLD_TOKEN);
         let candidate_hash = token(CANDIDATE_TOKEN);
-        let fresh = storage.acquire_fence(ATTEMPT2, HOUSEHOLD, household_hash).await.unwrap();
+        let snapshot = storage.locked_snapshot(HOUSEHOLD, household_hash).await.unwrap();
         let committed = RetirementAuthority {
-            generation: fresh.generation,
-            base: fresh.base,
-            head: fresh.authenticated_head.clone(),
+            generation: snapshot.protocol.migration_generation,
+            base: snapshot.protocol.head,
+            head: authenticated_head(HOUSEHOLD, &snapshot).unwrap(),
             kind: AuthorityKind::Committed,
         };
-        let snapshot = storage.locked_snapshot(HOUSEHOLD, household_hash).await.unwrap();
         let row = find_row(&snapshot, DIRECTORY).unwrap().unwrap();
         let sealed = SealedProfilesRow { key: row.key, sequence: row.sequence, value: row.value };
         let includes_candidate =
