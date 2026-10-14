@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:worker-build": "node scripts/test-library-service-worker.mjs",
     "test:e2e": "playwright test --grep-invert @soak",
+    "rehearse": "node scripts/rehearse.mjs",
     "test:e2e:soak": "playwright test --grep @soak",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
