@@ -88,6 +88,16 @@ for (const scenario of [
       await expect(page.locator('[data-active="false"] .films .card')).toHaveCount(
         scenario.scrolled ? 24 : 20,
       );
+      // A reactivated page's rows are `placed` only after their first observer delivery. Until then they switch
+      // `content-visibility` on in the next frame, and Chromium's renderer crashes (about 1 run in 20, only ever
+      // observed in this state) when the viewport resizes across that switch. Rotate a settled page.
+      await page.waitForFunction(
+        () =>
+          document.querySelector(
+            '[data-active="true"] .row-window, [data-active="true"] .windowed',
+          ) &&
+          !document.querySelector('[data-active="true"] :is(.row-window, .windowed):not(.placed)'),
+      );
       await page.setViewportSize({ width: scenario.width, height: scenario.height });
       await page.waitForTimeout(300);
       await page.evaluate(() => {
