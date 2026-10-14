@@ -168,6 +168,87 @@ it('merges only a distinct registered browser-local source into an online target
   expect(existing).toHaveBeenCalledTimes(2);
 });
 
+it('keeps the source until den-edge, read back, holds everything moved', async () => {
+  const watchlisted = {
+    kind: 'rec',
+    schema: 2,
+    title: { type: 'movie', id: 1 },
+    status: { value: 'watchlist', at: [1000, 0, 'aaaaaaaaaaaaaaaa'] },
+    resume: { value: 0, at: [0, 0, ''], viewing: 0 },
+    reaction: { value: null, at: [0, 0, ''] },
+    deleted: { value: false, at: [0, 0, ''] },
+    dismissed: { value: false, at: [0, 0, ''] },
+    episodesReset: null,
+    addedAt: 1000,
+    watchedAt: null,
+  };
+  const source = {
+    rows: vi.fn(() => [watchlisted]),
+    forget: vi.fn(async () => true),
+    close: vi.fn(),
+  };
+  vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValue(source as unknown as LibraryLog);
+  const held: unknown[] = [];
+  const log = {
+    writeRows: vi.fn(async () => true),
+    heldRows: vi.fn(async () => ({ rows: held, entries: held.length })),
+    retryAfterMs: 0,
+  };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+  });
+  const merge = () =>
+    authority.task({
+      kind: 'local-library.merge',
+      sourceLibraryKey: DESTINATION,
+      scope: 'profile',
+      verify: true,
+    });
+
+  await expect(merge()).resolves.toMatchObject({ result: { outcome: 'unverified' } });
+  expect(source.forget).not.toHaveBeenCalled();
+
+  held.push(watchlisted);
+  await expect(merge()).resolves.toMatchObject({ result: { outcome: 'merged', held: 1 } });
+  expect(source.forget).toHaveBeenCalledOnce();
+  vi.restoreAllMocks();
+});
+
+it('stops writing a move in batches once den-edge asks it to wait, and says how long', async () => {
+  const rows = Array.from({ length: 250 }, (_, id) => ({
+    kind: 'set',
+    schema: 2,
+    name: `extra-${id}`,
+    values: {},
+  }));
+  const source = { rows: vi.fn(() => rows), forget: vi.fn(async () => true), close: vi.fn() };
+  vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValue(source as unknown as LibraryLog);
+  const log = {
+    // A refused edit is kept, so the batch still answers true; the wait is what tells.
+    writeRows: vi.fn(async (_rows: unknown[]) => {
+      log.retryAfterMs = 3000;
+      return true;
+    }),
+    heldRows: vi.fn(async () => ({ rows: [], entries: 0 })),
+    retryAfterMs: 0,
+  };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+  });
+
+  await expect(
+    authority.task({ kind: 'local-library.merge', sourceLibraryKey: DESTINATION, verify: true }),
+  ).resolves.toMatchObject({ result: { outcome: 'unavailable', retryAfterMs: 3000 } });
+  expect(log.writeRows).toHaveBeenCalledOnce();
+  expect(log.writeRows.mock.calls[0]![0]).toHaveLength(100);
+  expect(source.forget).not.toHaveBeenCalled();
+  vi.restoreAllMocks();
+});
+
 it('rejects a source key that has no browser-local library', async () => {
   const existing = vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValueOnce(null);
   const log = { writeRows: vi.fn(async () => true) };
