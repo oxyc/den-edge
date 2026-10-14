@@ -104,6 +104,7 @@
     type SkipSegment,
   } from '../lib/skipdb';
   import { shouldWarmNext } from '../lib/binge';
+  import { titleAllowed } from '../lib/playGuard';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import {
@@ -1601,6 +1602,11 @@
     if (!session || castOffer === 'looking') return;
     reachCast('attempted');
     castOffer = 'looking';
+    // Handing the film to another screen is a boundary of its own: the active profile's policy is asked again.
+    if (!(await titleAllowed(title, { content, restricted: true }))) {
+      castOffer = 'none';
+      return;
+    }
     const origin = await fetchCastOrigin();
     if (castOffer !== 'looking' || ended) return;
     if (origin) lookOrigin = origin;

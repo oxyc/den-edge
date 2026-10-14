@@ -21,6 +21,11 @@ class BlockedTitles {
     if (!!this.#by[key] === blocked) return;
     this.#by = { ...this.#by, [key]: blocked };
   }
+
+  /** Forget every hint: they were computed under one profile's ceiling and mean nothing to the next. */
+  reset(): void {
+    this.#by = {};
+  }
 }
 
 export const blockedTitles = new BlockedTitles();

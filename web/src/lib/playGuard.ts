@@ -15,19 +15,40 @@ export interface PlayGuardOptions {
   content: ContentServiceClientPort;
   region?: string;
   ceiling?: 'pg13' | 'r';
+  /** The active profile runs under a numeric content policy (`ProfileSession.restricted`). */
+  restricted?: boolean;
+}
+
+/**
+ * Whether the active profile's policy establishes `ref`: the one shared age check (`title.eligibility`) that every
+ * boundary — Play, Sources, remux, autoplay, downloads, cast, assistant — asks. A check that cannot be answered is a
+ * refusal. A profile with no policy skips the round trip.
+ */
+export async function titleAllowed(
+  ref: { type: MediaType; id: number },
+  { content, restricted }: Pick<PlayGuardOptions, 'content' | 'restricted'>,
+): Promise<boolean> {
+  if (!restricted) return true;
+  const asked = { type: ref.type, id: ref.id };
+  return content.query({ kind: 'title.eligibility', titles: [asked] }).then(
+    (answer) => answer.allowed.length === 1,
+    () => false,
+  );
 }
 
 /**
  * Resolves to the refusal message when `ref` may not play, or `null` when it may.
  *
- * No ceiling blocks nothing, so nothing is looked up for one — the common case, and a guest's always. A lookup
- * that fails WITH a ceiling set fails closed: a title this couldn't check for is refused rather than screened
- * through, since the one wrong answer costs a retry and the other costs exactly what the ceiling is for.
+ * The numeric profile policy is checked first; then the household's legacy ceiling. No ceiling blocks nothing, so
+ * nothing is looked up for one — the common case, and a guest's always. A lookup that fails WITH a ceiling set fails
+ * closed: a title this couldn't check for is refused rather than screened through, since the one wrong answer costs
+ * a retry and the other costs exactly what the ceiling is for.
  */
 export async function playGuard(
   ref: { type: MediaType; id: number },
-  { content, region = 'US', ceiling }: PlayGuardOptions,
+  { content, region = 'US', ceiling, restricted }: PlayGuardOptions,
 ): Promise<string | null> {
+  if (!(await titleAllowed(ref, { content, restricted }))) return BLOCKED_MESSAGE;
   if (!ceiling) return null;
   const answer = await content
     .query({ kind: 'title.detail', title: ref, region })

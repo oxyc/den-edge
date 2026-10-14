@@ -55,11 +55,17 @@ const notability = (credit: Json) =>
       Math.max(1, typeof credit.vote_count === 'number' ? credit.vote_count : 0),
   );
 
-/** `atlas` is where this page reaches atlas (`findAtlas`); null leaves search to TMDB alone. */
+/**
+ * `atlas` is where this page reaches atlas (`findAtlas`); null leaves search to TMDB alone. With `tmdbLanes` off (a
+ * restricted profile) TMDB finds nothing by itself: its search, year and filmography lanes carry no age or audience
+ * evidence, so every candidate must come from atlas, which applies the policy before it ranks. TMDB then only draws
+ * the poster of a title atlas already named.
+ */
 export function searchSources(
   tmdbKey: string,
   fetchImpl: typeof fetch = tmdbFetch,
   atlas: string | null = '/atlas',
+  tmdbLanes = true,
 ): SearchSources {
   const cache = new Map<string, Promise<Title | null>>();
 
@@ -143,6 +149,7 @@ export function searchSources(
     },
 
     async multi(query) {
+      if (!tmdbLanes) throw new Error('TMDB search is not available to a restricted profile');
       const body = await tmdb('/search/multi', { query, include_adult: 'false' });
       return records(body.results).flatMap((r): Hit[] => {
         if (typeof r.id !== 'number') return [];
@@ -159,6 +166,7 @@ export function searchSources(
     },
 
     async byYear(query, year) {
+      if (!tmdbLanes) return [];
       const [movies, series] = await Promise.all([
         tmdb('/search/movie', { query, year: String(year) }).catch((): Json => ({})),
         tmdb('/search/tv', { query, first_air_date_year: String(year) }).catch((): Json => ({})),
@@ -169,6 +177,7 @@ export function searchSources(
     // Acting roles minus cameos, plus what they directed or wrote — not producer credits, which surface titles
     // the person isn't in. The TV's `notableFilms`.
     async notableFilms(personId) {
+      if (!tmdbLanes) return [];
       const body = await tmdb(`/person/${personId}/combined_credits`);
       const authored = records(body.crew).filter((c) => c.job === 'Director' || c.job === 'Writer');
       const ranked = [...records(body.cast).filter((c) => !isCameo(c)), ...authored].sort(

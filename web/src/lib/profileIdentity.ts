@@ -93,6 +93,9 @@ export function legacyProfileIdentity(libraryKey: string | null, local: boolean)
     : { kind: 'owner', id: OWNER_ID, libraryKey, retainedScope: libraryKey };
 }
 
-/** Keys the entire retained route/presentation tree by the typed active profile, including legacy key resets. */
-export const profileSessionKey = (identity: ProfileIdentity): string =>
-  `${identity.kind}:${identity.id}:${identity.libraryKey ?? ''}`;
+/**
+ * Keys the entire retained route/presentation tree by the typed active profile, including legacy key resets, and by
+ * the content policy it runs under: a policy change on the same profile leaves no route of the old one standing.
+ */
+export const profileSessionKey = (identity: ProfileIdentity, policy?: string): string =>
+  `${identity.kind}:${identity.id}:${identity.libraryKey ?? ''}${policy ? `:${policy}` : ''}`;

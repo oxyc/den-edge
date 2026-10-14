@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appPath, KEPT_DETAILS, Navigation, nearest } from './navigation';
+import { appPath, foreignProfileEntry, KEPT_DETAILS, Navigation, nearest } from './navigation';
 
 describe('retained routes', () => {
   it('restores Home through nested title/person visits and tab navigation', () => {
@@ -100,6 +100,20 @@ describe('history entry ownership', () => {
     expect(nav.visit('/movie/42', 'entry-1')).toBe(first);
     expect(nav.current.y).toBe(1100);
     expect(nav.visit('/movie/42', 'entry-3').y).toBe(200);
+  });
+});
+
+describe('history across a profile switch', () => {
+  const entry = (profile?: string) => ({ denNavigation: { scope: 's', position: 1, profile } });
+  it('refuses to traverse into an entry another profile wrote', () => {
+    expect(foreignProfileEntry(entry('owner:owner:key'), 'profile:kid:key')).toBe(true);
+    expect(foreignProfileEntry(entry('visitor:one:'), 'visitor:two:')).toBe(true);
+  });
+  it('keeps the same profile’s entries, and entries from before the stamp or with no state', () => {
+    expect(foreignProfileEntry(entry('owner:owner:key'), 'owner:owner:key')).toBe(false);
+    expect(foreignProfileEntry(entry(), 'owner:owner:key')).toBe(false);
+    expect(foreignProfileEntry({ other: 1 }, 'owner:owner:key')).toBe(false);
+    expect(foreignProfileEntry(null, 'owner:owner:key')).toBe(false);
   });
 });
 

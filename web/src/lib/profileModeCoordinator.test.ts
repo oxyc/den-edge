@@ -5,6 +5,8 @@ import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProt
 import { legacyProfileIdentity } from './profileIdentity';
 import {
   allowsImplicitAssistant,
+  householdAdministration,
+  profileMarkerPresent,
   ProfileModeCoordinator,
   previewProfileDirectory,
   profileDirectoryChoices,
@@ -76,17 +78,26 @@ function owner(
           release,
         }) as unknown as LibraryModelLease<ConnectionsView>,
     );
-    const model = { close, connections, verifyParentalPin } as unknown as LibraryModel;
+    const settings = {
+      connection: 'ready',
+      value: {
+        kind: 'settings',
+        preferences: { watchRegion: 'fi', services: [], servicesConfigured: false },
+        assistant: { read: false, write: false },
+      },
+    };
+    const model = { close, connections, verifyParentalPin, settings } as unknown as LibraryModel;
     return { model, close, connections, release, verifyParentalPin };
   };
   const activity = authority(pinConfigured);
   const control =
     householdPinConfigured === undefined ? activity : authority(householdPinConfigured);
   const closeWorker = vi.fn();
+  const householdContent = content();
   const household = new HouseholdSession(
     { kind: 'legacy', libraryKey: 'household-key', configurationOnly: false },
     control.model,
-    content(),
+    householdContent,
     closeWorker,
   );
   const session = new ProfileSession(
@@ -106,6 +117,7 @@ function owner(
       profileModels,
     ),
     model: activity.model,
+    householdContent,
     close: activity.close,
     closeWorker,
     release: control.release,
@@ -895,6 +907,133 @@ describe('ProfileModeCoordinator', () => {
     expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
   });
 
+  it('lets only the active Owner administer the household, for preview and real profiles alike', async () => {
+    const storage = memoryStorage();
+    const previewDirectory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: previewDirectory.owner }),
+    );
+    const preview = owner(storage, true, null, undefined, previewDirectory).coordinator;
+    expect(preview.session!.administersHousehold).toBe(true);
+    await preview.switchToKid();
+    expect(preview.session!.administersHousehold).toBe(false);
+    await preview.switchToVisitor('1234');
+    expect(preview.session!.administersHousehold).toBe(false);
+    preview.dispose();
+
+    const realStorage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    realStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const kidOpening = deferred<unknown>();
+    const ownerOpening = deferred<unknown>();
+    const ownerKey = view.profiles.find((profile) => profile.role === 'owner')!.libraryKey;
+    const models = profileModels(
+      new Map([
+        [kid.libraryKey, kidOpening],
+        [ownerKey, ownerOpening],
+      ]),
+    );
+    const real = owner(realStorage, true, null, undefined, directory, models.factory);
+    kidOpening.resolve({});
+    await vi.waitFor(() => expect(real.coordinator.mode).toBe('kid'));
+    expect(real.coordinator.session!.model).not.toBeNull();
+    expect(real.coordinator.session!.administersHousehold).toBe(false);
+
+    ownerOpening.resolve({});
+    await expect(real.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    expect(real.coordinator.session!.administersHousehold).toBe(true);
+  });
+
+  it('runs every content query under the active profile’s own policy, across a switch', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    // The Owner carries a migrated ceiling (a legacy `pg13`), the Kid the default restricted policy.
+    view.profiles[0]!.policy = { maximumAge: 13, unknownRatings: 'allow' };
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const openings = new Map([
+      [ownerProfile.libraryKey, deferred<unknown>()],
+      [kid.libraryKey, deferred<unknown>()],
+    ]);
+    const models = profileModels(openings);
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    openings.get(kid.libraryKey)!.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    const kidSession = first.coordinator.session!;
+    const ask = (session: ProfileSession) =>
+      session.content.query({ kind: 'catalog.page', catalog: { kind: 'upcoming' }, page: 1 });
+    await ask(kidSession);
+    expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
+      maximumAge: 12,
+      unknownRatings: 'block',
+      kidAudience: 'child-or-teen',
+      region: 'FI',
+    });
+    expect(kidSession.restricted).toBe(true);
+    expect(kidSession.policyKey).toBe('12_block_-_child-or-teen');
+
+    // Owner is restricted by its own ceiling, but is not a Kid catalogue.
+    openings.get(ownerProfile.libraryKey)!.resolve({});
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    const ownerSession = first.coordinator.session!;
+    expect(ownerSession).not.toBe(kidSession);
+    expect(ownerSession.content).not.toBe(kidSession.content);
+    await ask(ownerSession);
+    expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
+      maximumAge: 13,
+      unknownRatings: 'allow',
+      region: 'FI',
+    });
+    expect(ownerSession.policyKey).toBe('13_allow_-_-');
+    // An Owner ceiling that admits unknown ratings keeps assistants and TMDB surfaces; only fail-closed loses them.
+    expect(ownerSession.restricted).toBe(true);
+    expect(ownerSession.failsClosed).toBe(false);
+    expect(kidSession.failsClosed).toBe(true);
+    expect(allowsImplicitAssistant(first.coordinator, ownerSession)).toBe(true);
+
+    // Visitor inherits Owner's policy; it is never looser than the profile the household set.
+    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    const visitor = first.coordinator.session!;
+    await ask(visitor);
+    expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
+      maximumAge: 13,
+      unknownRatings: 'allow',
+      region: 'FI',
+    });
+    expect(visitor.policyKey).toBe('13_allow_-_-');
+  });
+
+  it('leaves an Owner with no ceiling on the household port, as before', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const openings = new Map([[ownerProfile.libraryKey, deferred<unknown>()]]);
+    const first = owner(storage, true, null, undefined, directory, profileModels(openings).factory);
+    openings.get(ownerProfile.libraryKey)!.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    const session = first.coordinator.session!;
+    expect(session.restricted).toBe(false);
+    expect(session.content).toBe(session.household.content);
+    expect(session.policyKey).toBeUndefined();
+    expect(allowsImplicitAssistant(first.coordinator, session)).toBe(true);
+  });
+
   it.each([
     null,
     '{broken',
@@ -960,6 +1099,29 @@ describe('ProfileModeCoordinator', () => {
     expect(restoredKid.coordinator.mode).toBe('kid');
     await expect(restoredKid.coordinator.switchToOwner('1234')).resolves.toBe(true);
     expect(restoredKid.coordinator.mode).toBe('owner');
+  });
+});
+
+describe('householdAdministration', () => {
+  it('leaves a household without profiles exactly as it was', () => {
+    for (const capability of ['checking', 'disabled', 'indeterminate'] as const)
+      expect(householdAdministration(capability, false, false)).toBe(true);
+    expect(profileMarkerPresent(memoryStorage())).toBe(false);
+  });
+
+  it('opens for an active Owner only once profiles are enabled', () => {
+    expect(householdAdministration('enabled', true, true)).toBe(true);
+    expect(householdAdministration('preview', true, true)).toBe(true);
+    expect(householdAdministration('enabled', false, true)).toBe(false);
+    expect(householdAdministration('preview', false, false)).toBe(false);
+  });
+
+  it('stays closed while a profile-aware browser has no discovery answer', () => {
+    const storage = memoryStorage();
+    storage.setItem('den.profile.active.v1', '{broken');
+    expect(profileMarkerPresent(storage)).toBe(true);
+    expect(householdAdministration('checking', false, true)).toBe(false);
+    expect(householdAdministration('indeterminate', false, true)).toBe(false);
   });
 });
 

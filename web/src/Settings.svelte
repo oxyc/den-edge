@@ -270,6 +270,7 @@
         save={savePrefs}
         savePin={(pin) => run(() => model.setParentalPin(pin))}
         verifyPin={(pin) => model.verifyParentalPin(pin)}
+        pinRemovable={!profileTopology}
       />
       <ProfilesSection
         {model}

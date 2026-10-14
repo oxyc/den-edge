@@ -397,6 +397,32 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
+  it('replaces but never removes the parental PIN while a restricted profile is live', async () => {
+    const { log, authority } = await localAuthority();
+    await authority.command({ kind: 'parental-pin.set', pin: '1234' }, 'set');
+    const directory = (kidDeleted: boolean) =>
+      ({
+        owner: 'owner',
+        profiles: {
+          owner: { role: 'owner', deleted: { value: false } },
+          kid: { role: 'kid', deleted: { value: kidDeleted } },
+        },
+      }) as never;
+    const spy = vi.spyOn(log, 'profileDirectory').mockReturnValue(directory(false));
+
+    await expect(
+      authority.command({ kind: 'parental-pin.set', pin: null }, 'clear'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+    await expect(
+      authority.command({ kind: 'parental-pin.set', pin: '4321' }, 'replace'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+
+    spy.mockReturnValue(directory(true));
+    await expect(
+      authority.command({ kind: 'parental-pin.set', pin: null }, 'clear-after-delete'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+  });
+
   it('owns minimal runtime discovery and the named retained Home values', async () => {
     const { log, authority } = await localAuthority();
     await expect(authority.select({ kind: 'profiles' })).resolves.toEqual({

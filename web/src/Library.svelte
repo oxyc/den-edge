@@ -34,6 +34,7 @@
     sight,
     type Sighting,
   } from './lib/livePosition';
+  import { blockedTitles } from './lib/blockedTitles.svelte';
   import { libraryStandings } from './lib/standing.svelte';
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
@@ -119,6 +120,9 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  // The download queue spends household credentials and bandwidth, so only a session that administers the household
+  // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page.
+  const downloadsModel = untrack(() => (session.administersHousehold ? session.model : null));
   // Visitor owns only this device-local activity adapter. It is deliberately independent of LibraryModel, so none
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
@@ -269,8 +273,8 @@
     };
   });
   $effect(() => {
-    if (!model || (route.page !== 'library' && route.page !== 'downloads')) return;
-    const lease = model.downloads();
+    if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
+    const lease = downloadsModel.downloads();
     downloadsLease = lease;
     return () => {
       lease.release();
@@ -419,7 +423,10 @@
       ),
     ),
   );
-  $effect(() => () => libraryStandings.set(new Map()));
+  $effect(() => () => {
+    libraryStandings.set(new Map());
+    blockedTitles.reset();
+  });
 
   /**
    * The clock a Continue Watching card shows while its title plays on some device. It ticks each second only
@@ -709,6 +716,7 @@
             content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
+            restricted: session.restricted,
           });
           if (blocked) {
             busy = false;
@@ -746,6 +754,7 @@
             content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
+            restricted: session.restricted,
           });
           if (blocked) {
             failure = blocked;
@@ -852,6 +861,22 @@
     })();
   });
 
+  /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
+  async function advance(next: Target) {
+    const blocked = await playGuard(next.title, {
+      content: session.content,
+      region: detailPrefs.region,
+      ceiling: detailPrefs.ceiling,
+      restricted: session.restricted,
+    });
+    if (blocked) {
+      playing = null;
+      session.notify(blocked);
+      return;
+    }
+    playing = next;
+  }
+
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
   function resumePoint(target: Target): { fraction: number; seconds?: number } {
     const continued = continueEntries.find(
@@ -915,7 +940,9 @@
     void DetailScreen.load();
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
-    if (!reel) return;
+    // A trailer warm-up is keyed by the title alone, with nothing to check the policy against. A restricted
+    // profile's trailer is asked of reel only once its page has established the title.
+    if (!reel || session.restricted) return;
     void prepareTrailers(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
       surface: 'audible',
       player: nativeHls() ? 'native' : 'hls.js',
@@ -1211,6 +1238,8 @@
    */
   const memberPost = memberPostOn();
   const fresh = freshOn();
+  /** A restricted profile neither reads nor writes a kept billboard: those rankings are not policy-scoped. */
+  const keepsBillboard = () => !session.restricted;
   /** The title on the billboard's screen, which a new ranking leaves in place. */
   let slideShown = $state<Title>();
   /**
@@ -1252,7 +1281,7 @@
   // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const type = facet;
-    if (!model) {
+    if (!model || !keepsBillboard()) {
       retainedBillboardReady = true;
       return;
     }
@@ -1356,18 +1385,19 @@
             }),
           )
         : null;
-    const kept = ranked
-      ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
-          (saved) =>
-            saved?.kind === 'personal'
-              ? (displayableKept({
-                  at: saved.at,
-                  titles: structuredClone(saved.titles) as RecommendedTitle[],
-                })?.titles ?? null)
-              : null,
-          () => null,
-        )
-      : Promise.resolve(null);
+    const kept =
+      ranked && keepsBillboard()
+        ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+            (saved) =>
+              saved?.kind === 'personal'
+                ? (displayableKept({
+                    at: saved.at,
+                    titles: structuredClone(saved.titles) as RecommendedTitle[],
+                  })?.titles ?? null)
+                : null,
+            () => null,
+          )
+        : Promise.resolve(null);
     void kept
       .then(async (personal) => {
         if (run !== billboardRun) return;
@@ -1380,7 +1410,7 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
         stageFeatured(picked);
-        if (model) {
+        if (model && keepsBillboard()) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
             session.identity.retainedScope,
@@ -1425,7 +1455,7 @@
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
     // forever, with its stale explanation attached.
     featured = picked;
-    if (model)
+    if (model && keepsBillboard())
       void model
         .retainBillboard({ kind: 'shared', facet: type, fresh }, { kind: 'shared', titles: picked })
         .catch(warnKeep);
@@ -1581,7 +1611,7 @@
     {busy}
     {failure}
     {notice}
-    {model}
+    model={downloadsModel}
     onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
     onseen={(title, seen) => fromPage(setSeen(title, seen))}
     onseason={markSeasonSeen}
@@ -1634,7 +1664,9 @@
 {:else if route.page === 'people'}
   <PeopleScreen.current view={people} content={session.content} {atlas} {atlasReady} />
 {:else if route.page === 'downloads'}
-  {#if !model}
+  {#if !session.administersHousehold}
+    <p class="note">Downloads are managed by the Owner.</p>
+  {:else if !downloadsModel}
     <p class="note">
       Downloads live in your library, which this browser can’t keep. <a href="/settings"
         >Link a TV</a
@@ -1643,7 +1675,7 @@
   {:else if !DownloadsScreen.current}
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
-    <DownloadsScreen.current {model} {active} />
+    <DownloadsScreen.current model={downloadsModel} {active} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !model && !profileActivity}
@@ -1699,7 +1731,13 @@
     {routes}
     onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
-      void enrichPersonalBackdrop(session.identity.retainedScope, facet, fresh, title, detail)}
+      void enrichPersonalBackdrop(
+        keepsBillboard() ? session.identity.retainedScope : null,
+        facet,
+        fresh,
+        title,
+        detail,
+      )}
     onplay={playHere && ((title) => playHere(title))}
     rowOf={model ? rowOf : undefined}
     onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
@@ -1840,7 +1878,7 @@
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
       onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
-      onnext={after ? () => (playing = after) : undefined}
+      onnext={after ? () => void advance(after) : undefined}
       onclose={() => (playing = null)}
     />
   {/key}

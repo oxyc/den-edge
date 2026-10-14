@@ -47,6 +47,18 @@ describe('profile identity', () => {
     expect(profileSessionKey(kid)).toBe(`profile:${KID_ID}:kid-library-key`);
   });
 
+  it('keys the retained route tree by the content policy as well, so a policy change leaves no old route', () => {
+    const kid = persistentProfileIdentity(KID_ID, 'kid-library-key');
+
+    expect(profileSessionKey(kid, '12_block_child-or-teen')).toBe(
+      `profile:${KID_ID}:kid-library-key:12_block_child-or-teen`,
+    );
+    expect(profileSessionKey(kid, '12_block_child-or-teen')).not.toBe(
+      profileSessionKey(kid, '7_block_child'),
+    );
+    expect(profileSessionKey(kid, undefined)).toBe(profileSessionKey(kid));
+  });
+
   it('accepts only profiles-v1 lowercase 32-hex directory ids', () => {
     expect(profileId('00000000000000000000000000000000')).toBe('00000000000000000000000000000000');
     expect(profileId('ffffffffffffffffffffffffffffffff')).toBe('ffffffffffffffffffffffffffffffff');

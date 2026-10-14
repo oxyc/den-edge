@@ -1,5 +1,6 @@
 import {
   CONTENT_SERVICE_PROTOCOL,
+  type ContentPolicy,
   type ContentRequest,
   type ContentResult,
   type ContentResultFor,
@@ -21,6 +22,8 @@ export interface ContentServiceClientPort {
   query<Request extends ContentRequest>(
     request: Request,
     signal?: AbortSignal,
+    /** The asking profile's policy. A profile's own port (`ProfileSession.content`) always supplies it. */
+    policy?: ContentPolicy,
   ): Promise<ContentResultFor<Request>>;
   onStatus(listener: (status: ContentServiceStatusValue) => void): () => void;
 }
@@ -94,6 +97,7 @@ export class ContentServiceClient {
   query<Request extends ContentRequest>(
     request: Request,
     signal?: AbortSignal,
+    policy?: ContentPolicy,
   ): Promise<ContentResultFor<Request>> {
     this.#assertOpen();
     if (signal?.aborted) return Promise.reject(cancelled());
@@ -130,6 +134,7 @@ export class ContentServiceClient {
           protocol: CONTENT_SERVICE_PROTOCOL,
           requestId,
           request,
+          ...(policy ? { policy } : {}),
         });
       } catch (error) {
         this.#pending.delete(requestId);

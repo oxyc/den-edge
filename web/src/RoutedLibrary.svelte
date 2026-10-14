@@ -42,6 +42,8 @@
   import { resetProfileNavigation } from './lib/profileNavigation';
   import {
     allowsImplicitAssistant,
+    householdAdministration,
+    profileMarkerPresent,
     ProfileModeCoordinator,
     previewProfileDirectory,
     profileDirectoryChoices,
@@ -50,6 +52,7 @@
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
+  import { scopeRecentSearches } from './lib/recentSearches';
   import { CompoundResetPage } from './lib/profileKeyResetPage';
 
   let {
@@ -60,6 +63,7 @@
     watchedYear,
     onchange,
     onprofilecontrol = () => {},
+    onhouseholdadmin = () => {},
   }: {
     link: Link | null;
     query: string;
@@ -68,6 +72,8 @@
     watchedYear: string | undefined;
     onchange: (route: Route) => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
+    /** Tells the page whether household-level dialogs (invites, phone links, assistant consent) may open. */
+    onhouseholdadmin?: (allowed: boolean) => void;
   } = $props();
 
   const ownKey = untrack(() => (link ? null : localLibraryKey()));
@@ -117,7 +123,7 @@
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
-  let routedProfile = untrack(() => profileSessionKey(session.identity));
+  let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
@@ -130,13 +136,25 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
+  // Linking, invites, assistant consent and the saved search list are the household's. A household without profiles
+  // keeps them as ever; once profiles are active they open only for the active Owner session.
+  const householdAdmin = $derived(
+    householdAdministration(
+      profileCapability,
+      profileCoordinator?.session === session && session.administersHousehold,
+      profileMarkerPresent(),
+    ),
+  );
+  $effect.pre(() => scopeRecentSearches(householdAdmin));
+  $effect.pre(() => onhouseholdadmin(householdAdmin));
+  onDestroy(() => onhouseholdadmin(true));
 
   // Every retained route owns profile-specific presentation and in-flight work. Before Svelte replaces the keyed
   // route tree, move the old Router to Home with a replace (not a history entry). This also flushes a debounced
   // search address before teardown, so a Kid/Visitor never inherits the previous viewer's detail, Settings route,
   // scroll snapshot or request graph. The pre-effect runs for local and cross-tab switches alike.
   $effect.pre(() => {
-    const next = profileSessionKey(session.identity);
+    const next = profileSessionKey(session.identity, session.policyKey);
     if (next === routedProfile) return;
     resetProfileNavigation();
     routedProfile = next;
@@ -251,6 +269,7 @@
               activity.model,
               activity.close,
               owner.policy ?? null,
+              true,
             );
             legacy.relinquishHouseholdOwnership();
             legacy.close();
@@ -283,7 +302,8 @@
     if (session !== active) {
       // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
       // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
-      if (!profileControlPublished) routedProfile = profileSessionKey(active.identity);
+      if (!profileControlPublished)
+        routedProfile = profileSessionKey(active.identity, active.policyKey);
       session = active;
     }
     if (!profileControlPublished) {
@@ -762,6 +782,7 @@
   $effect(() => {
     if (!phoneLanding.request || phoneLanding.phase !== 'idle') return;
     if (!link && !session.local) return;
+    if (!householdAdmin) return;
     void untrack(() => phoneLanding.run(link ? null : joinLibrary));
   });
 
@@ -816,6 +837,7 @@
   {#key session.identity}
     <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
     <Router
+      profile={profileSessionKey(session.identity)}
       onchange={(route) => {
         if (route.page === 'settings')
           void (session.identity.kind === 'visitor'

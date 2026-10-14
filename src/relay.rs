@@ -4310,6 +4310,65 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), ["DELETE /p/AbC_-9", "DELETE /p/AbC_-9?op=reannounce"]);
     }
 
+    /// A profile's content policy rides on atlas' query (`maximumAge`, `unknownRatings`, `region`, `kidAudience`) or, for
+    /// the personalised `POST /recommend`, in its body. Atlas filters before ranking and paging, and the browser, this
+    /// relay and Cloudflare all key a GET by its URL, so the relay must hand atlas exactly what was asked — never strip,
+    /// reorder or default a policy parameter, or one profile's page would answer another's.
+    #[tokio::test]
+    async fn atlas_gets_the_profile_policy_exactly_as_asked() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let asked = Arc::clone(&asked);
+            move |req: axum::extract::Request| {
+                let asked = Arc::clone(&asked);
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                    asked.lock().unwrap().push(format!(
+                        "{} {} {}",
+                        parts.method,
+                        parts.uri,
+                        String::from_utf8_lossy(&body)
+                    ));
+                    StatusCode::NO_CONTENT
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas=http://{addr}"));
+        let policy = "maximumAge=12&unknownRatings=block&kidAudience=child-or-teen";
+        let rows = format!("/atlas/index/rows/movie/subgenre/Heist.json?skip=24&limit=24&{policy}");
+        let recommend =
+            json!({ "surface": "home", "maximumAge": 12, "unknownRatings": "block", "kidAudience": "child" })
+                .to_string();
+        for path in [rows.as_str(), "/atlas/index/title/movie/603.json?maximumAge=12&unknownRatings=block"] {
+            assert_eq!(h.send("GET", path, None, &[]).await.status(), StatusCode::NO_CONTENT, "{path}");
+        }
+        h.send("POST", "/atlas/recommend", Some(recommend), &[]).await;
+        let shared = format!("/atlas/recommend/home.json?day=2026-10-13&{policy}");
+        h.send("GET", &shared, None, &[]).await;
+        let asked = asked.lock().unwrap();
+        assert_eq!(
+            [&asked[0], &asked[1], &asked[3]],
+            [
+                &format!("GET /index/rows/movie/subgenre/Heist.json?skip=24&limit=24&{policy} "),
+                "GET /index/title/movie/603.json?maximumAge=12&unknownRatings=block ",
+                &format!("GET /recommend/home.json?day=2026-10-13&{policy} "),
+            ]
+        );
+        // The relay adds today's TMDB lists to a ranking request as candidates (`billboard.rs`); atlas applies the
+        // policy to that whole pool, so every field of it must reach atlas as the browser wrote it.
+        let sent: serde_json::Value =
+            serde_json::from_str(asked[2].strip_prefix("POST /recommend ").unwrap()).unwrap();
+        assert_eq!(sent["surface"], "home");
+        assert_eq!(sent["maximumAge"], 12);
+        assert_eq!(sent["unknownRatings"], "block");
+        assert_eq!(sent["kidAudience"], "child");
+    }
+
     /// Only a member is answered on the web name, so what scout says anyone may keep must not be kept by a shared
     /// cache in front of it, to be handed to whoever asks next.
     #[tokio::test]
