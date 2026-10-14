@@ -246,7 +246,12 @@
   $effect(() => {
     if (profileCapability !== 'enabled' || profileCoordinator) return;
     const snapshot = profileDirectoryLease?.snapshot;
-    if (!snapshot || snapshot.value) return;
+    if (
+      !snapshot ||
+      (snapshot.value &&
+        profileDirectoryState(snapshot.value as ProfileDirectoryView).kind !== 'pending')
+    )
+      return;
     if (snapshot.connection === 'failed' || snapshot.connection === 'closed') {
       profileCapability = 'indeterminate';
       return;
