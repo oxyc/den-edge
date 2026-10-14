@@ -756,8 +756,8 @@ export class ProfileModeCoordinator {
 
 /**
  * Implicit assistant work is always Owner-only, even when Kid has a real writable activity model, and never runs
- * under a content policy: a queued assistant request names its title only once opened inside the library service,
- * where no policy is asked, so a restricted Owner has no assistant until that request can be checked first.
+ * under a fail-closed policy: a queued assistant request names its title only once opened inside the library
+ * service, where no policy is asked. An Owner ceiling that admits unknown ratings keeps its assistants.
  */
 export function allowsImplicitAssistant(
   coordinator: Pick<ProfileModeCoordinator, 'mode' | 'session'> | null,
@@ -765,7 +765,7 @@ export function allowsImplicitAssistant(
 ): boolean {
   return (
     !coordinator ||
-    (coordinator.session === session && coordinator.mode === 'owner' && !session.restricted)
+    (coordinator.session === session && coordinator.mode === 'owner' && !session.failsClosed)
   );
 }
 

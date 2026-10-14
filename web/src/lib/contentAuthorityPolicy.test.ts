@@ -300,6 +300,22 @@ describe('a title only a non-atlas source names', () => {
     expect(w.atlas.every((url) => url.includes(KID_QUERY))).toBe(true);
   });
 
+  it('keeps an Owner ceiling that admits unknown ratings on today’s TMDB surfaces, with the boundary check intact', async () => {
+    const w = world();
+    await w.ask({ kind: 'collection', id: 10 }, CEILING);
+    await w.ask({ kind: 'person.filmography', id: 7 }, CEILING);
+    expect(w.tmdb.length).toBe(2);
+    const detail = (await w.ask(
+      { kind: 'title.detail', title: { type: 'movie', id: 1 }, region: 'FI' },
+      CEILING,
+    )) as { detail: { value: { more: unknown[] } } };
+    expect(detail.detail.value.more).toHaveLength(1);
+    // Age 15 is over the ceiling of 13, and that still refuses.
+    await expect(
+      w.ask({ kind: 'title.detail', title: { type: 'movie', id: 3 }, region: 'FI' }, CEILING),
+    ).resolves.toMatchObject({ detail: { reason: 'refused' } });
+  });
+
   it('still serves the same lists to an unrestricted Owner', async () => {
     const w = world();
     await w.ask({ kind: 'collection', id: 10 });

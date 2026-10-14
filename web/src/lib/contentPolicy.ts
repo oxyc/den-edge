@@ -31,6 +31,14 @@ export function isRestricted(policy: ContentPolicy | undefined): policy is Conte
   );
 }
 
+/**
+ * Fail-closed policies (`unknownRatings: block`, and every Kid) cannot admit a title no store has aged, so TMDB-only
+ * surfaces are hidden for them. An Owner ceiling with `allow` keeps those surfaces: its boundary checks still run.
+ */
+export function failsClosed(policy: ContentPolicy | undefined): policy is ContentPolicy {
+  return !!policy && (policy.unknownRatings === 'block' || !!policy.kidAudience);
+}
+
 /** Whether the policy limits what a direct request (detail, play, download) may open; the audience gate does not. */
 export function isAgeRestricted(policy: ContentPolicy | undefined): policy is ContentPolicy {
   return !!policy && (policy.maximumAge !== null || policy.unknownRatings === 'block');
@@ -120,14 +128,14 @@ export async function ageAllowed(
 export class PolicedContent implements ContentServiceClientPort {
   constructor(
     private readonly inner: ContentServiceClientPort,
-    private readonly policy: () => ContentPolicy | undefined,
+    private readonly policy: () => ContentPolicy | undefined | Promise<ContentPolicy | undefined>,
   ) {}
 
-  query<Request extends ContentRequest>(
+  async query<Request extends ContentRequest>(
     request: Request,
     signal?: AbortSignal,
   ): Promise<ContentResultFor<Request>> {
-    return this.inner.query(request, signal, this.policy());
+    return this.inner.query(request, signal, await this.policy());
   }
 
   onStatus(listener: (status: ContentServiceStatusValue) => void): () => void {

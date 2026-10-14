@@ -994,8 +994,11 @@ describe('ProfileModeCoordinator', () => {
       unknownRatings: 'allow',
     });
     expect(ownerSession.policyKey).toBe('13_allow_-_-');
-    // A queued assistant request is opened where no policy is asked, so a restricted Owner has none.
-    expect(allowsImplicitAssistant(first.coordinator, ownerSession)).toBe(false);
+    // An Owner ceiling that admits unknown ratings keeps assistants and TMDB surfaces; only fail-closed loses them.
+    expect(ownerSession.restricted).toBe(true);
+    expect(ownerSession.failsClosed).toBe(false);
+    expect(kidSession.failsClosed).toBe(true);
+    expect(allowsImplicitAssistant(first.coordinator, ownerSession)).toBe(true);
 
     // Visitor inherits Owner's policy; it is never looser than the profile the household set.
     await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
@@ -1006,7 +1009,7 @@ describe('ProfileModeCoordinator', () => {
       unknownRatings: 'allow',
       region: 'FI',
     });
-    expect(visitor.policyKey).toBe('13_allow_FI_-');
+    expect(visitor.policyKey).toBe('13_allow_-_-');
   });
 
   it('leaves an Owner with no ceiling on the household port, as before', async () => {

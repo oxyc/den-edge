@@ -117,6 +117,55 @@ describe('a restricted profile names only the titles its policy establishes', ()
   });
 });
 
+describe('the watch region', () => {
+  it('is waited for once, so every request names the same region and no cache splits', async () => {
+    let settle!: () => void;
+    const ready = new Promise<void>((resolve) => (settle = resolve));
+    const settings: { value?: unknown } = {};
+    const query = vi.fn(async () => ({ kind: 'collection', titles: [] }));
+    const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
+    const model = {
+      ready,
+      get settings() {
+        return settings;
+      },
+    } as unknown as LibraryModel;
+    const household = new HouseholdSession(
+      { kind: 'legacy', libraryKey: 'household', configurationOnly: false },
+      model,
+      content,
+    );
+    const kid = new ProfileSession(
+      persistentProfileIdentity('b'.repeat(32), 'key'),
+      household,
+      null,
+      false,
+      false,
+      household.policy,
+      null,
+      { maximumAge: 12, unknownRatings: 'block' },
+      null,
+      null,
+      false,
+      true,
+    );
+    const first = kid.content.query({ kind: 'collection', id: 1 });
+    await Promise.resolve();
+    expect(query).not.toHaveBeenCalled();
+    settings.value = { kind: 'settings', preferences: { watchRegion: 'fi', services: [] } };
+    settle();
+    await first;
+    await kid.content.query({ kind: 'collection', id: 2 });
+    const sent = {
+      maximumAge: 12,
+      unknownRatings: 'block',
+      kidAudience: 'child-or-teen',
+      region: 'FI',
+    };
+    expect(query.mock.calls.map((call) => (call as unknown[])[2])).toEqual([sent, sent]);
+  });
+});
+
 describe('the content protocol carries the policy', () => {
   const message = (extra: Record<string, unknown>) => ({
     type: 'content-query',

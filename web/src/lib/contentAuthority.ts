@@ -11,6 +11,7 @@ import { titlesOf } from './atlasRows';
 import { ContentServiceFault, type ContentServiceAuthority } from './contentServiceCore';
 import {
   ageAllowed,
+  failsClosed,
   isAgeRestricted,
   isRestricted,
   policedAtlasFetch,
@@ -359,7 +360,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         return {
           kind: 'title.detail',
           detail:
-            isRestricted(policy) && detail.state === 'ready'
+            failsClosed(policy) && detail.state === 'ready'
               ? { state: 'ready', value: { ...detail.value, more: [] } }
               : detail,
         };
@@ -408,8 +409,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       case 'catalog.page':
         // TMDB's lists (discover, trending, popular, top rated, upcoming, recommendations) carry no age or audience
         // evidence, and filtering one page at a time would leave sparse or empty pages while eligible titles exist.
-        // A restricted profile browses through the policy-aware atlas rows instead; this surface is hidden.
-        if (isRestricted(policy)) return { kind: 'catalog.page', titles: [] };
+        // A fail-closed profile browses through the policy-aware atlas rows instead; this surface is hidden.
+        if (failsClosed(policy)) return { kind: 'catalog.page', titles: [] };
         return {
           kind: 'catalog.page',
           titles: await this.#wait(this.#catalog(request.catalog, request.page), signal),
@@ -417,8 +418,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       case 'search': {
         let hits: Hit[] = [];
         const atlas = this.credentials.atlas?.() ?? null;
-        const restricted = isRestricted(policy);
-        // Without atlas a restricted search has no eligibility evidence, so it finds nothing rather than TMDB's.
+        const restricted = failsClosed(policy);
+        // Without atlas a fail-closed search has no eligibility evidence, so it finds nothing rather than TMDB's.
         if (restricted && !atlas) return { kind: 'search', hits };
         const sources = searchSources(
           this.#tmdbKey(),
@@ -431,15 +432,15 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           !restricted,
         );
         for await (const batch of searchStream(request.query, sources, signal)) hits = batch;
-        // People are not titles, and their pages list a TMDB filmography; a restricted search finds titles only.
+        // People are not titles, and their pages list a TMDB filmography; a fail-closed search finds titles only.
         return {
           kind: 'search',
           hits: restricted ? hits.filter((hit) => hit.kind === 'title') : hits,
         };
       }
       case 'collection': {
-        // A TMDB collection is another TMDB-only title list; a restricted profile's franchise is atlas'.
-        if (isRestricted(policy)) return { kind: 'collection', titles: [] };
+        // A TMDB collection is another TMDB-only title list; a fail-closed profile's franchise is atlas'.
+        if (failsClosed(policy)) return { kind: 'collection', titles: [] };
         const body = await this.#wait(
           this.#tmdb(`/collection/${request.id}`, this.#tmdbKey()),
           signal,
@@ -464,8 +465,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'person.filmography': {
         // A filmography is one unpaged TMDB list with no age evidence; it cannot be made eligible without an atlas
-        // lookup per credit, so a restricted profile does not get one.
-        if (isRestricted(policy))
+        // lookup per credit, so a fail-closed profile does not get one.
+        if (failsClosed(policy))
           return { kind: 'person.filmography', credits: { state: 'absent' } };
         const body = await this.#wait(
           this.#tmdb(`/person/${request.id}/combined_credits`, this.#tmdbKey()),

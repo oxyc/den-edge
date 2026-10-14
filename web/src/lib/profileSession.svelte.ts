@@ -1,7 +1,6 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-import { contentPolicyFor, PolicedContent, policyKey } from './contentPolicy';
+import { contentPolicyFor, failsClosed, PolicedContent, policyKey } from './contentPolicy';
 import type { ContentServiceClientPort } from './contentServiceClient';
-import type { ContentPolicy } from './contentServiceProtocol';
 import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
@@ -22,6 +21,8 @@ import type { ProfileActivity } from './visitorActivity.svelte';
 import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
 
 const TOAST_MS = 6_000;
+/** How long the first content request waits for the household settings that name the watch region. */
+const REGION_WAIT_MS = 3_000;
 
 /**
  * Active-profile presentation and activity state. Every persistent profile will use this same class; this first
@@ -33,6 +34,7 @@ export class ProfileSession {
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
   readonly #policed: ContentServiceClientPort | null;
+  #region?: Promise<string | undefined>;
   readonly #displays = new SvelteMap<string, Title>();
   readonly #missing = new SvelteSet<string>();
   #toastTimer?: ReturnType<typeof setTimeout>;
@@ -63,8 +65,32 @@ export class ProfileSession {
     readonly kid: boolean = false,
   ) {
     this.#policed = this.restricted
-      ? new PolicedContent(household.content, () => this.#queryPolicy())
+      ? new PolicedContent(household.content, async () =>
+          contentPolicyFor(this.contentPolicy, this.kid, await this.#watchRegion()),
+        )
       : null;
+  }
+
+  /**
+   * The household's watch region, read once for the session after the settings have resolved (bounded), so every
+   * request this session makes names the same region and no cache is split by it arriving late.
+   */
+  #watchRegion(): Promise<string | undefined> {
+    return (this.#region ??= (async () => {
+      const model = this.household.ownerSettingsModel();
+      if (model) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          Promise.resolve(model.ready).then(
+            () => undefined,
+            () => undefined,
+          ),
+          new Promise<void>((resolve) => (timer = setTimeout(resolve, REGION_WAIT_MS))),
+        ]);
+        clearTimeout(timer);
+      }
+      return this.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
+    })());
   }
 
   /**
@@ -80,18 +106,18 @@ export class ProfileSession {
     return contentPolicyFor(this.contentPolicy, this.kid) !== undefined;
   }
 
+  /** Whether it blocks what no store has aged (`unknownRatings: block`, every Kid): TMDB-only surfaces are hidden. */
+  get failsClosed(): boolean {
+    return failsClosed(contentPolicyFor(this.contentPolicy, this.kid));
+  }
+
   /**
    * What every policy-dependent cache this profile keeps is keyed by; undefined when it has no policy, which leaves
    * the legacy household's names and stored values exactly as they were.
    */
   get policyKey(): string | undefined {
-    const policy = this.#queryPolicy();
+    const policy = contentPolicyFor(this.contentPolicy, this.kid);
     return policy ? policyKey(policy) : undefined;
-  }
-
-  #queryPolicy(): ContentPolicy | undefined {
-    const region = this.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
-    return contentPolicyFor(this.contentPolicy, this.kid, region);
   }
 
   get services() {
