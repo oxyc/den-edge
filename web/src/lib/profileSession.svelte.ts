@@ -51,6 +51,11 @@ export class ProfileSession {
     readonly preferences: ProfilePreferences | null = null,
     /** Owns the separate Worker session behind a directory-backed activity model. */
     private readonly closeActivityModel: (() => void) | null = null,
+    /**
+     * Whether this session may change household-scoped state: downloads, linking, assistant consent. Only the
+     * legacy topology and a persistent Owner do; the coordinator builds every Kid and Visitor session with false.
+     */
+    readonly administersHousehold: boolean = true,
   ) {}
 
   get content(): ContentServiceClientPort {
@@ -167,6 +172,7 @@ export function activeProfileSession(
   model: LibraryModel,
   closeActivityModel: (() => void) | null = null,
   contentPolicy: ProfileContentPolicy | null = null,
+  administersHousehold = false,
 ): ProfileSession {
   const householdPolicy = household.policy;
   const preferences = householdPolicy
@@ -183,6 +189,7 @@ export function activeProfileSession(
     contentPolicy,
     preferences,
     closeActivityModel,
+    administersHousehold,
   );
 }
 

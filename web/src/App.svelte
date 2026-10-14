@@ -36,6 +36,9 @@
   });
   const identityClock = browserClock();
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
+  // Invites, phone links and assistant consent change what the household has shared, so with profiles on they open
+  // only under the active Owner (`RoutedLibrary`). A browser with no library has no household to protect.
+  let householdAdmin = $state(true);
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight work must not retrigger the effect that starts it.
   const sendingIdentity = new Set<string>();
 
@@ -137,9 +140,11 @@
 
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
 <NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} {profiles} />
-{#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
-{#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
-{#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
+{#if householdAdmin}
+  {#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
+  {#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
+  {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
+{/if}
 
 <main>
   {#if links.current}
@@ -152,6 +157,7 @@
         {watchedYear}
         onchange={(next) => (route = next)}
         onprofilecontrol={(control) => (profiles = control)}
+        onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
       />
     {/key}
   {:else if links.browsing}
@@ -165,6 +171,7 @@
       {watchedYear}
       onchange={(next) => (route = next)}
       onprofilecontrol={(control) => (profiles = control)}
+      onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
     />
   {:else if LinkScreen.current}
     <LinkScreen.current />

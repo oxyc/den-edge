@@ -103,6 +103,17 @@ export function appPath(href: string, base: string): string | null {
   return route.page !== 'library' || home ? url.pathname + url.search : null;
 }
 
+/**
+ * Whether a history entry was written under another profile. Every entry the Router writes names the profile it was
+ * written for; going Back into one that names a different profile would show that profile's page to this one.
+ * Entries from before the stamp existed name none and are not foreign.
+ */
+export function foreignProfileEntry(state: unknown, profile: string): boolean {
+  const stamped = (state as { denNavigation?: { profile?: unknown } } | null)?.denNavigation
+    ?.profile;
+  return typeof stamped === 'string' && stamped !== profile;
+}
+
 /** Where a route lives, for callers holding a route rather than a link. */
 export { routePath };
 
