@@ -58,6 +58,12 @@
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
+  import {
+    startupFailure,
+    startupHandedOver,
+    startupMark,
+    watchStartupHandover,
+  } from './lib/startupTiming';
   import { CompoundResetPage } from './lib/profileKeyResetPage';
   import {
     bornHouseholds,
@@ -120,6 +126,20 @@
 
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
+  /** Startup breadcrumbs for a library that is opening: when it was asked for, and when (or how) it answered. */
+  const timeOpening = (what: string, ready: Promise<unknown>) => {
+    const requestedAt = performance.now();
+    startupMark(`${what} open requested`);
+    void ready.then(
+      () => startupMark(`${what} opened`, `in ${Math.round(performance.now() - requestedAt)}ms`),
+      (error: unknown) =>
+        startupMark(
+          `${what} open failed`,
+          `after ${Math.round(performance.now() - requestedAt)}ms: ${startupFailure(error)}`,
+        ),
+    );
+  };
+
   const open = (key: string | null, local: boolean, wire: 4 | 5 = 4) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
@@ -143,6 +163,7 @@
     });
     // Root snapshots carry failure state; avoid an unhandled rejection while the error surface renders it.
     void model.ready.catch(() => {});
+    timeOpening(local ? 'local session' : 'household session', model.ready);
     return legacyProfileSession(key, local, model, services.content, () => services.close());
   };
 
@@ -166,21 +187,15 @@
   // A remembered Owner is drawn from localStorage on the first frame, before the capability, directory or activity
   // model answer. The coordinator corrects it afterwards; a PIN gate appears only once it decides one is needed.
   const profileHint = untrack(() => (usesProfileDirectory(session) ? readProfileHint() : null));
-  const optimistic = $derived(
-    profileHint !== null &&
-      (profileCapability === 'checking' ||
-        (activeCapability === 'enabled' && !profileCoordinator) ||
-        (!!profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring)),
-  );
-  $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   $effect(() => {
-    if (profileCapability === 'disabled') saveProfileHint(null);
+    if (profileCapability === 'disabled') saveProfileHint(null, null);
   });
   $effect(() => {
     const coordinator = profileCoordinator;
     if (!coordinator) return;
-    if (coordinator.session) saveProfileHint(coordinator.activeChoice);
-    else if (!coordinator.restoring) saveProfileHint(null);
+    if (coordinator.session)
+      saveProfileHint(coordinator.activeChoice, coordinator.session.identity.libraryKey);
+    else if (!coordinator.restoring) saveProfileHint(null, null);
   });
   let profileControlPublished = false;
   let openingCommittedProfiles = false;
@@ -239,6 +254,7 @@
       bootstrapProfileHousehold: false,
     });
     void model.ready.catch(() => {});
+    timeOpening('profile session', model.ready);
     let closed = false;
     return {
       model,
@@ -250,6 +266,73 @@
       },
     };
   };
+
+  // The remembered Owner's own library, opened from its local cache while the profile pipeline answers. The household
+  // bootstrap session holds no activity after the split, so drawing it would pop Continue Watching and the Watchlist in
+  // later. When the directory confirms the same Owner library, the coordinator takes this very session over, so the
+  // library never has two sessions (two senders of its kept work); otherwise it is closed before another is opened.
+  // Opt-in for now (`localStorage['den.fastOwnerFrame'] = '1'`, read once here); without it the first frame draws the
+  // bootstrap session as before.
+  const fastOwnerFrame = untrack(() => {
+    try {
+      return localStorage.getItem('den.fastOwnerFrame') === '1';
+    } catch {
+      return false;
+    }
+  });
+  let optimisticAdopted = false;
+  let optimisticOwner = $state.raw<ProfileSession | null>(
+    untrack(() => {
+      if (!fastOwnerFrame || !profileHint?.libraryKey) return null;
+      const activity = openProfileActivity(profileHint.libraryKey);
+      return activeProfileSession(
+        persistentProfileIdentity(profileHint.profileId, profileHint.libraryKey),
+        session.household,
+        activity.model,
+        activity.close,
+        null,
+        true,
+      );
+    }),
+  );
+  const optimistic = $derived(
+    profileHint !== null &&
+      (profileCapability === 'checking' ||
+        (activeCapability === 'enabled' && !profileCoordinator) ||
+        (!!profileCoordinator &&
+          (profileCoordinator.session
+            ? // The Owner library stays drawn until the coordinator's session has replaced the bootstrap one, so
+              // the swap is never seen.
+              optimisticOwner !== null && session !== profileCoordinator.session
+            : profileCoordinator.restoring))),
+  );
+  const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
+  // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
+  let optimisticShown = false;
+  onMount(() => {
+    if (profileHint) watchStartupHandover();
+  });
+  $effect(() => {
+    if (optimistic) {
+      optimisticShown = true;
+      return;
+    }
+    if (!optimisticShown) return;
+    optimisticShown = false;
+    const coordinator = untrack(() => profileCoordinator);
+    startupHandedOver(
+      coordinator?.session
+        ? `${coordinator.mode ?? 'unknown'} session`
+        : `no session, capability ${untrack(() => profileCapability)}`,
+    );
+  });
+  $effect(() => {
+    if (optimistic || !optimisticOwner) return;
+    if (!optimisticAdopted) optimisticOwner.close();
+    optimisticOwner = null;
+  });
+  onDestroy(() => optimisticOwner?.close());
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
   // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
@@ -279,7 +362,10 @@
             undefined,
             previewProfileDirectory(),
           );
-        else profileDirectoryLease = session.model.profiles();
+        else {
+          startupMark('profile directory lease requested');
+          profileDirectoryLease = session.model.profiles();
+        }
         profileCapability = capability;
       });
     };
@@ -326,11 +412,19 @@
     return () => clearTimeout(timer);
   });
 
+  let directoryMarked = '';
   $effect(() => {
     if (profileCapability !== 'enabled') return;
     const state = profileDirectoryState(
       profileDirectoryLease?.snapshot.value as ProfileDirectoryView | undefined,
     );
+    // One line per change of state, with the lease's connection beside it; the connection is read untracked so the
+    // log adds no dependency to this effect.
+    const connection = untrack(() => profileDirectoryLease?.snapshot.connection ?? 'no lease');
+    if (directoryMarked !== `${state.kind}/${connection}`) {
+      directoryMarked = `${state.kind}/${connection}`;
+      startupMark('profile directory lease value', `${state.kind}, ${connection}`);
+    }
     if (state.kind === 'pending') return;
     const directory = state.kind === 'present' ? state.directory : null;
     if (!profileCoordinator) {
@@ -350,7 +444,26 @@
       }
       const legacy = session;
       const opening = ++committedProfilesOpen;
-      const activity = openProfileActivity(owner.libraryKey);
+      const first = untrack(() => optimisticOwner);
+      const adopt =
+        first !== null &&
+        first.identity.kind === 'profile' &&
+        first.identity.id === owner.id &&
+        first.identity.libraryKey === owner.libraryKey &&
+        first.household === legacy.household &&
+        // The optimistic session is unrestricted, as an Owner with no policy, or an open one, is.
+        (!owner.policy ||
+          (owner.policy.maximumAge === null && owner.policy.unknownRatings === 'allow'))
+          ? first
+          : null;
+      // Never a second session on a library that already has one: its kept work would be sent by both.
+      if (first && !adopt) {
+        first.close();
+        optimisticOwner = null;
+      }
+      const activity = adopt
+        ? { model: adopt.model!, close: () => adopt.close() }
+        : openProfileActivity(owner.libraryKey);
       openingCommittedProfiles = true;
       void activity.model.ready
         .then(
@@ -360,14 +473,17 @@
               return;
             }
             legacy.household.commitProfiles(libraryIdentity!);
-            const ownerSession = activeProfileSession(
-              persistentProfileIdentity(owner.id!, owner.libraryKey!),
-              legacy.household,
-              activity.model,
-              activity.close,
-              owner.policy ?? null,
-              true,
-            );
+            if (adopt) optimisticAdopted = true;
+            const ownerSession =
+              adopt ??
+              activeProfileSession(
+                persistentProfileIdentity(owner.id!, owner.libraryKey!),
+                legacy.household,
+                activity.model,
+                activity.close,
+                owner.policy ?? null,
+                true,
+              );
             legacy.relinquishHouseholdOwnership();
             legacy.close();
             profileCoordinator = new ProfileModeCoordinator(
@@ -1194,10 +1310,13 @@
         Profile preview · filtering and household migration remain off
       </p>
     {/if}
-    {#key session.identity}
-      <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+    <!-- Keyed by the session object: Library holds its session's model, services and trackers for its whole life, so
+         a new session always mounts a new tree, even one with the same identity (a reopened Owner, whose old model is
+         closed). The adopted first-frame session is the coordinator's own object, so that handover keeps the tree. -->
+    {#key shown}
+      <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
       <Router
-        profile={profileSessionKey(session.identity)}
+        profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
@@ -1252,8 +1371,8 @@
             {/if}
           {:else}
             <Library
-              link={session.identity.kind === 'visitor' ? null : link}
-              {session}
+              link={shown.identity.kind === 'visitor' ? null : link}
+              session={shown}
               {route}
               {active}
               {query}

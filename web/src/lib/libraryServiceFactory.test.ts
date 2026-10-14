@@ -12,6 +12,7 @@ import {
   type ContentServiceServerMessage,
 } from './contentServiceProtocol';
 import { hasLibraryCredential } from './relayFetch';
+import { contentPolicyFor, PolicedContent } from './contentPolicy';
 
 type WorkerClientMessage = LibraryServiceClientMessage | ContentServiceClientMessage;
 type WorkerServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
@@ -871,6 +872,42 @@ it('replays authoritative source configuration before retrying on a replacement 
     },
   ]);
   await expect(loading).resolves.toMatchObject({ kind: 'atlas.service.catalogs' });
+  services.close();
+});
+
+it("carries a Kid's policy to the Worker on the first attempt and on a replacement", async () => {
+  const first = new FakeWorker();
+  const replacement = new FakeWorker();
+  const createWorker = vi
+    .fn<() => Worker>()
+    .mockReturnValueOnce(first as unknown as Worker)
+    .mockReturnValueOnce(replacement as unknown as Worker);
+  const services = createWorkerServiceSession({ createWorker });
+  const policy = contentPolicyFor({ maximumAge: 12, unknownRatings: 'block' }, true)!;
+  const kid = new PolicedContent(services.content, () => policy);
+
+  const loading = kid.query({ kind: 'service.regions' });
+  await expect.poll(() => first.posted.length).toBe(1);
+  expect(first.posted[0]).toMatchObject({
+    type: 'content-query',
+    request: { kind: 'service.regions' },
+    policy: { maximumAge: 12, unknownRatings: 'block', kidAudience: 'child-or-teen' },
+  });
+  first.fail();
+
+  await expect.poll(() => replacement.posted.length).toBe(1);
+  const retried = replacement.posted[0];
+  if (retried?.type !== 'content-query') throw new Error('content query was not retried');
+  expect(retried.policy).toEqual(policy);
+  replacement.emit([
+    {
+      type: 'content-result',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: retried.requestId,
+      result: { kind: 'service.regions', regions: [] },
+    },
+  ]);
+  await expect(loading).resolves.toEqual({ kind: 'service.regions', regions: [] });
   services.close();
 });
 

@@ -10,6 +10,7 @@ import {
 import { activeProfileSession, ProfileSession } from './profileSession.svelte';
 import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
+import { startupMark } from './startupTiming';
 import {
   crossTabVisitorActivityLock,
   purgeOrphanVisitorNamespaces,
@@ -282,6 +283,17 @@ export class ProfileModeCoordinator {
         this.#session = this.#newKid(choice);
         this.#pendingOwner = null;
         owner.close();
+      } else if (
+        choice?.role === 'owner' &&
+        this.#profileModels &&
+        owner.identity.kind === 'profile' &&
+        owner.identity.id === choice.id &&
+        owner.identity.libraryKey === choice.libraryKey
+      ) {
+        // The Owner library is already open for exactly this profile. Keeping that session, rather than closing it and
+        // opening a second one on the same key, leaves one sender of its kept work.
+        this.#session = owner;
+        this.#pendingOwner = null;
       } else if (choice && this.#profileModels) {
         owner.close();
         this.#pendingOwner = null;
@@ -299,6 +311,11 @@ export class ProfileModeCoordinator {
       }
     }
     this.#events?.addEventListener('storage', this.#storageChanged);
+    // Reads no reactive state: the committed-household constructor runs inside a tracked effect.
+    startupMark(
+      'coordinator created',
+      directory ? (profileModels ? 'household' : 'preview') : 'staging',
+    );
   }
 
   get session(): ProfileSession | null {
@@ -968,10 +985,21 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
   };
 };
 
-/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
 export async function profilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
+): Promise<ProfilesCapability> {
+  const askedAt = performance.now();
+  startupMark('capability requested');
+  const answer = await readProfilesCapability(fetchImpl, visitorLock);
+  startupMark('capability answered', `${answer} in ${Math.round(performance.now() - askedAt)}ms`);
+  return answer;
+}
+
+/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
+async function readProfilesCapability(
+  fetchImpl: typeof fetch,
+  visitorLock: VisitorActivityLock,
 ): Promise<ProfilesCapability> {
   try {
     const response = await fetchImpl('/capabilities/profiles', {
