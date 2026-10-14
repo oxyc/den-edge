@@ -1,16 +1,22 @@
 <script lang="ts">
-  import { onMount, tick, type Snippet } from 'svelte';
+  import { onMount, tick, untrack, type Snippet } from 'svelte';
   import type { PageSnapshot } from './lib/pageSnapshot';
   import type * as TouchNavigation from './lib/touchNavigation';
   import RoutePage from './components/RoutePage.svelte';
-  import { Navigation, appPath, nearest, routeKey } from './lib/navigation';
+  import { Navigation, appPath, foreignProfileEntry, nearest, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
   import { swapOnNavigation } from './lib/release';
 
   let {
     children,
     onchange,
-  }: { children: Snippet<[Route, boolean]>; onchange: (route: Route) => void } = $props();
+    profile = '',
+  }: {
+    children: Snippet<[Route, boolean]>;
+    onchange: (route: Route) => void;
+    /** The active profile's session key. Entries stamped with another one are never traversed back into. */
+    profile?: string;
+  } = $props();
   // The parent keys this entire scope by the typed active profile, including all retained pages and data.
   const navigation = new Navigation(location.pathname + location.search);
   let current = $state.raw(navigation.current);
@@ -110,7 +116,11 @@
       stopLoading = () => observer.disconnect();
       ready();
     }
-    history.replaceState({ ...history.state, denNavigation: { scope, position } }, '');
+    const ownProfile = untrack(() => profile);
+    history.replaceState(
+      { ...history.state, denNavigation: { scope, position, profile: ownProfile } },
+      '',
+    );
     const destination = (offset: number) =>
       snapshots.get(entries.get(position + offset)?.pageKey ?? '');
     const previewDestination = (offset: number, direction: 1 | -1) => {
@@ -226,7 +236,10 @@
           position = 0;
           entries.clear();
           entries.set(position, { routeKey: key, pageKey: key });
-          history.replaceState({ ...history.state, denNavigation: { scope, position } }, '');
+          history.replaceState(
+            { ...history.state, denNavigation: { scope, position, profile: ownProfile } },
+            '',
+          );
         }
       }
       if (key === requestedKey && (push || entries.get(position)?.pageKey === requestedPageKey)) {
@@ -240,7 +253,7 @@
           position++;
           for (const at of entries.keys()) if (at >= position) entries.delete(at);
           entries.set(position, { routeKey: key, pageKey: requestedPageKey });
-          history.pushState({ denNavigation: { scope, position } }, '', path);
+          history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
         }
         current.route = parseRoute(path);
         onchange(current.route);
@@ -270,7 +283,7 @@
             ? crypto.randomUUID()
             : key;
         entries.set(position, { routeKey: key, pageKey });
-        history.pushState({ denNavigation: { scope, position } }, '', path);
+        history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
@@ -348,13 +361,16 @@
       const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
       void follow(path, true, replace);
     };
-    const traversed = (event: PopStateEvent) =>
+    const traversed = (event: PopStateEvent) => {
+      // Back into a page another profile opened would show that page to this one; land on Home instead, in place.
+      if (foreignProfileEntry(history.state, ownProfile)) history.replaceState(null, '', '/');
       void follow(
         address(),
         false,
         false,
         (event as PopStateEvent & { hasUAVisualTransition?: boolean }).hasUAVisualTransition,
       );
+    };
     const clicked = (event: MouseEvent) => {
       if (
         event.defaultPrevented ||

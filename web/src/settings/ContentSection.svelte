@@ -56,6 +56,7 @@
     personalOnly = false,
     contentPolicy = null,
     role = 'owner',
+    pinRemovable = true,
   }: {
     prefs: SettingsPreferences;
     /** Worker-owned provider metadata boundary. */
@@ -72,6 +73,8 @@
       readonly unknownRatings: 'allow' | 'block';
     } | null;
     role?: 'owner' | 'kid' | 'visitor';
+    /** False once profiles exist: the PIN can be changed but not removed, since it returns a Kid to Owner. */
+    pinRemovable?: boolean;
   } = $props();
 
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
@@ -643,7 +646,7 @@
             label={pinConfigured ? 'Change PIN' : 'Set PIN'}
             disabled={disabled || !/^\d{4}$/.test(newPin)}
           />
-          {#if pinConfigured}
+          {#if pinConfigured && pinRemovable}
             <Confirm
               label="Remove PIN"
               question="Remove the parental PIN?"

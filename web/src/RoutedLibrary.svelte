@@ -765,6 +765,7 @@
   {#key session.identity}
     <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
     <Router
+      profile={profileSessionKey(session.identity)}
       onchange={(route) => {
         if (route.page === 'settings')
           void (session.identity.kind === 'visitor'

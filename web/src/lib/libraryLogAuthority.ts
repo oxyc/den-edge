@@ -1762,6 +1762,12 @@ export class LibraryLogAuthority {
   async #setParentalPin(pin: string | null): Promise<LibraryAuthorityCommandResult> {
     if (pin !== null && !/^\d{4}$/.test(pin))
       throw authorityError('invalid-request', 'parental PIN must be four digits');
+    // The PIN is what returns a Kid to Owner: it may be replaced, never removed, while a restricted profile is live.
+    if (pin === null && this.#restrictedProfileLive())
+      throw authorityError(
+        'conflict',
+        'the parental PIN cannot be removed while a Kid profile exists',
+      );
     const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
     const matches = pin === null ? !current : !!current && (await pinMatches(current, pin));
     if (matches) {
@@ -1782,6 +1788,16 @@ export class LibraryLogAuthority {
       'keys',
       { parentalPIN: pin === null ? null : { string: await hashPin(pin) } },
       [{ kind: 'connections' }],
+    );
+  }
+
+  #restrictedProfileLive(): boolean {
+    const directory = this.#log.profileDirectory();
+    return (
+      !!directory &&
+      Object.values(directory.profiles).some(
+        (profile) => profile.role !== 'owner' && !profile.deleted.value,
+      )
     );
   }
 
