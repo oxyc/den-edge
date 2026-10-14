@@ -1,5 +1,6 @@
 import { syncPolicy } from './syncCore';
 import type { ProfileDirectoryDocument } from './profileDirectory';
+import type { Stamp } from './wire';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const LIBRARY_ID = /^[0-9a-f]{32}$/;
@@ -304,17 +305,53 @@ export function profilesApplyCreate(input: {
   });
 }
 
+/**
+ * Rotate one live profile's library register through den-core's canonical stamped operation. A compound reset
+ * applies this once per verified candidate with one durable fresh stamp; Web never patches the register itself.
+ */
+export function profilesRotateLibrary(input: {
+  readonly document: ProfileDirectoryDocument;
+  readonly profile: string;
+  readonly keyVersion: number;
+  readonly key: string;
+  readonly at: Stamp;
+}): ProfileDirectoryDocument {
+  return syncPolicy<ProfileDirectoryDocument>({
+    op: 'profiles_apply',
+    document: input.document,
+    operation: 'library',
+    profile: input.profile,
+    value: { keyVersion: input.keyVersion, key: input.key },
+    at: input.at,
+  });
+}
+
 /** Merge two authenticated directory observations using the one shared CRDT rule. */
 export function profilesMerge(
   left: ProfileDirectoryDocument,
   right: ProfileDirectoryDocument,
 ): ProfileDirectoryDocument {
-  return syncPolicy<ProfileDirectoryDocument>({ op: 'profiles_merge', left, right });
+  return syncPolicy<ProfileDirectoryDocument>({ op: 'profiles_merge', a: left, b: right });
 }
 
 /** Pure crash/retry/concurrency planner for one explicitly requested persistent Kid profile. */
 export function profilesCreateNext(input: Record<string, unknown>): ProfileCreateEffect {
   return syncPolicy<ProfileCreateEffect>({ op: 'profiles_create_next', input });
+}
+
+export type ProfileResetEffect =
+  | { readonly effect: 'move-live-profiles'; readonly profiles: readonly string[] }
+  | { readonly effect: 'commit-successor-household' }
+  | {
+      readonly effect: 'retire-old-libraries';
+      readonly profiles: readonly string[];
+      readonly household: boolean;
+    }
+  | { readonly effect: 'complete' };
+
+/** Pure planner for the compound household key reset (profiles-v1 §9). Callers execute exactly what it returns. */
+export function profilesResetNext(input: Record<string, unknown>): ProfileResetEffect {
+  return syncPolicy<ProfileResetEffect>({ op: 'profiles_reset_next', input });
 }
 
 /** Narrow early so malformed network evidence never reaches crypto or den-core as trusted state. */
