@@ -25,7 +25,8 @@ test('a cold linked library renders HTTP 426 as a stable update-required screen'
   await page.goto(`${FIXTURE}?online&lifecycle`);
 
   await expectUpdateRequired(page);
-  expect(edge.wires.length).toBeGreaterThanOrEqual(2);
+  // Membership is registered only after a first read succeeds, so a library refused with 426 is only read.
+  expect(edge.wires.length).toBeGreaterThan(0);
   expect(new Set(edge.wires)).toEqual(new Set(['4']));
 });
 
