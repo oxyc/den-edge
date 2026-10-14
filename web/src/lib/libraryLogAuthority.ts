@@ -75,7 +75,7 @@ import {
   type LibraryAuthorityTaskResult,
   type LibrarySelectionScope,
 } from './libraryServiceCore';
-import { LibraryLog, type DeferredDelivery } from './log';
+import { LibraryLog, LibraryStartRefused, type DeferredDelivery } from './log';
 import { LibraryAdminAuthority } from './libraryAdminAuthority';
 import {
   ASSISTANT_RECORDS,
@@ -143,6 +143,8 @@ type Delivery = 'synced' | 'queued' | 'local';
 
 const RETAINED_SERVICES = 'services.v1';
 const RETAINED_HOME_SHELVES = 'home.shelves.v1';
+/** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
+const DEFAULT_KID_OPERATION = 'default-kid';
 const retainedBillboardName = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
 ) =>
@@ -906,6 +908,8 @@ export class LibraryLogAuthority {
       task.kind === 'profile-migration.recover'
     )
       return this.#profileMigrationTask(task);
+    if (task.kind === 'household.create') return this.#createHousehold(task);
+    if (task.kind === 'profile.create-default') return this.#createDefaultKid();
     if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
     if (task.kind === 'profile.create.ack') {
       await this.#profileKidCreate().acknowledge(task.receipt);
@@ -991,6 +995,77 @@ export class LibraryLogAuthority {
     );
     return {
       result: { kind: 'profile.create', outcome: 'created', ...result },
+      affected: [{ kind: 'profiles' }],
+    };
+  }
+
+  /**
+   * A browser's own household (den#295), started or finished from the library kept only here: the page keeps the
+   * plan before it asks, and asking again with it finishes what a cut-off run began (`LibraryLog.createBornHousehold`).
+   */
+  async #createHousehold(
+    task: Extract<LibraryTask, { kind: 'household.create' }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    const household = await LibraryLog.destination(
+      task.householdKey,
+      this.#fetch,
+      undefined,
+      this.#options.vault ?? null,
+      5,
+    );
+    try {
+      await household.createBornHousehold({
+        attempt: task.attempt,
+        ownerProfile: task.ownerProfile,
+        ownerKey: task.ownerKey,
+        createdAt: task.createdAt,
+      });
+    } catch (error) {
+      const throttled =
+        error instanceof LibraryStartRefused &&
+        (error.status === 429 || error.status === 503 || error.status === 413);
+      const refused = error instanceof LibraryStartRefused && error.status === 403;
+      console.warn('den: this browser’s household could not be started yet', error);
+      return {
+        result: {
+          kind: 'household.create',
+          outcome: refused ? 'refused' : throttled ? 'throttled' : 'unavailable',
+          ...(throttled ? { retryAfterMs: Math.round(error.retryAfterMs) } : {}),
+        },
+        affected: [],
+      };
+    }
+    return { result: { kind: 'household.create', outcome: 'created' }, affected: [] };
+  }
+
+  /**
+   * Every profile household has a Kid out of the box (den#295): made here, once, when the directory den-edge holds
+   * has no live Kid. No Owner PIN is asked, since a household born in a browser has none until the first switch to
+   * Kid sets it. It is the Kid journal's creation (`profile.create` without the PIN), so a run cut off anywhere is
+   * finished by the next, and its fixed operation id never makes a second Kid on this device.
+   */
+  async #createDefaultKid(): Promise<LibraryAuthorityTaskResult> {
+    const kids = this.#profileKidCreate();
+    // A creation this device left pending or unacknowledged is finished first; it may be the default Kid itself.
+    const earlier = await kids.resume();
+    if (earlier) await kids.acknowledge(earlier.receipt);
+    const { directory } = await this.#log.readKidProfileDirectory();
+    if (
+      Object.values(directory.profiles).some(
+        (profile) => profile.role === 'kid' && !profile.deleted.value,
+      )
+    )
+      return { result: { kind: 'profile.create-default', outcome: 'present' }, affected: [] };
+    const stamps = [
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+      await this.#clock.issue(),
+    ] as const;
+    const created = await kids.begin(DEFAULT_KID_OPERATION, 'Kids', 12, stamps);
+    await kids.acknowledge(created.receipt);
+    return {
+      result: { kind: 'profile.create-default', outcome: 'created' },
       affected: [{ kind: 'profiles' }],
     };
   }

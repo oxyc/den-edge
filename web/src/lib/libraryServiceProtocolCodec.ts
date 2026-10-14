@@ -844,7 +844,34 @@ function task(value: unknown): value is LibraryTask {
       );
     }
     case 'local-library.merge':
-      return exact(value, ['kind', 'sourceLibraryKey']) && libraryKey(value.sourceLibraryKey);
+      return (
+        exact(value, ['kind', 'sourceLibraryKey', 'scope', 'keep']) &&
+        libraryKey(value.sourceLibraryKey) &&
+        optional(
+          value.scope,
+          (scope): scope is 'household' | 'profile' => scope === 'household' || scope === 'profile',
+        ) &&
+        optional(value.keep, (keep): keep is true => keep === true)
+      );
+    case 'household.create':
+      return (
+        exact(value, [
+          'kind',
+          'householdKey',
+          'attempt',
+          'ownerProfile',
+          'ownerKey',
+          'createdAt',
+        ]) &&
+        libraryKey(value.householdKey) &&
+        hexId(value.attempt) &&
+        hexId(value.ownerProfile) &&
+        libraryKey(value.ownerKey) &&
+        value.ownerKey !== value.householdKey &&
+        integer(value.createdAt)
+      );
+    case 'profile.create-default':
+      return exact(value, ['kind']);
     case 'key-reset.move':
     case 'key-reset.settle':
     case 'key-reset.adopt':
@@ -1967,6 +1994,20 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         (value.outcome === 'merged' ||
           value.outcome === 'absent' ||
           value.outcome === 'unavailable')
+      );
+    case 'household.create':
+      return (
+        exact(value, ['kind', 'outcome', 'retryAfterMs']) &&
+        (value.outcome === 'created' ||
+          value.outcome === 'refused' ||
+          value.outcome === 'throttled' ||
+          value.outcome === 'unavailable') &&
+        optional(value.retryAfterMs, integer)
+      );
+    case 'profile.create-default':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'created' || value.outcome === 'present')
       );
     case 'key-reset.move':
     case 'key-reset.settle':

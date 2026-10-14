@@ -495,6 +495,16 @@ export class LibraryModel {
     return created;
   }
 
+  /** The household's Kid when its directory has none yet; `present` when one already exists. */
+  async ensureDefaultKidProfile(): Promise<'created' | 'present'> {
+    const { result } = await this.task(
+      { kind: 'profile.create-default' },
+      'profile.create-default',
+    );
+    if (result.kind !== 'profile.create-default') throw wrongQueryResult('default Kid profile');
+    return result.outcome;
+  }
+
   async #ackProfileCreate(receipt: string): Promise<void> {
     const acknowledged = await this.task({ kind: 'profile.create.ack', receipt });
     if (acknowledged.result.kind !== 'profile.create.ack')
@@ -789,8 +799,21 @@ export class LibraryModel {
     );
   }
 
-  mergeLocalLibrary(sourceLibraryKey: string, operationId?: string) {
-    return this.task({ kind: 'local-library.merge', sourceLibraryKey }, operationId);
+  mergeLocalLibrary(
+    sourceLibraryKey: string,
+    operationId?: string,
+    part: { scope?: 'household' | 'profile'; keep?: true } = {},
+  ) {
+    return this.task({ kind: 'local-library.merge', sourceLibraryKey, ...part }, operationId);
+  }
+
+  /** Start or finish this browser's own household (`household.create`); asked of the library kept only here. */
+  async createHousehold(
+    plan: Omit<Extract<LibraryTask, { kind: 'household.create' }>, 'kind'>,
+  ): Promise<Extract<LibraryTaskResult, { kind: 'household.create' }>> {
+    const { result } = await this.task({ kind: 'household.create', ...plan });
+    if (result.kind !== 'household.create') throw wrongQueryResult('household create');
+    return result;
   }
 
   /**

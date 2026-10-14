@@ -57,6 +57,16 @@
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
   import { CompoundResetPage } from './lib/profileKeyResetPage';
+  import {
+    commitHousehold,
+    householdPlan,
+    observeKeptActions,
+    planHousehold,
+    settledHousehold,
+    settleHouseholdPlan,
+    startHouseholdPlan,
+    type HouseholdPlan,
+  } from './lib/browserHousehold';
 
   let {
     link,
@@ -82,8 +92,22 @@
     onhouseholdadmin?: (allowed: boolean) => void;
   } = $props();
 
-  const ownKey = untrack(() => (link ? null : localLibraryKey()));
-  let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownKey));
+  // A browser with no TV opens its own household once it has one (den#295); until then, the library kept only here.
+  const keptLocal = untrack(() => (link ? null : keptLocalLibraryKey()));
+  let ownHousehold = $state<string | null>(
+    untrack(() => (link ? null : settledHousehold(keptLocal))),
+  );
+  const ownKey = untrack(() => (link || ownHousehold ? null : localLibraryKey()));
+  // A browser that has just made its first library plans its household beside it. One that already kept a library
+  // here keeps today's behaviour.
+  let plannedHousehold = $state.raw(
+    untrack(() =>
+      link || ownHousehold || !ownKey
+        ? null
+        : (householdPlan() ?? (keptLocal ? null : planHousehold(ownKey))),
+    ),
+  );
+  let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
 
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
@@ -96,7 +120,12 @@
     if (!key)
       return legacyProfileSession(null, false, null, services.content, () => services.close());
     const clock = legacyClockBootstrap();
-    const model = new LibraryModel(services.library, {
+    // The library a household is planned beside starts the household with the first thing kept in it.
+    const library =
+      local && plannedHousehold
+        ? observeKeptActions(services.library, () => void startHousehold())
+        : services.library;
+    const model = new LibraryModel(library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
       wire: 4,
@@ -108,7 +137,9 @@
     return legacyProfileSession(key, local, model, services.content, () => services.close());
   };
 
-  let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
+  let session = $state.raw(
+    untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
+  );
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
@@ -375,6 +406,24 @@
     }
   });
 
+  // Every profile household has a Kid out of the box (den#295): one born here, and one split before Kids were automatic.
+  // The Owner's visit makes it, once; the switcher shows it as soon as the directory has it.
+  let defaultKidAsked = false;
+  $effect(() => {
+    const coordinator = profileCoordinator;
+    if (!coordinator || coordinator.preview || defaultKidAsked || coordinator.mode !== 'owner')
+      return;
+    if (coordinator.choices.some((choice) => choice.role === 'kid')) return;
+    const household = untrack(() => session.household.ownerSettingsModel());
+    if (!household) return;
+    defaultKidAsked = true;
+    void household
+      .ensureDefaultKidProfile()
+      .catch((error: unknown) =>
+        console.warn('den: the household’s Kid profile could not be made', error),
+      );
+  });
+
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
   const RENEW_EVERY_MS = 6 * 60 * 60 * 1000;
 
@@ -442,6 +491,103 @@
       return false;
     }
   }
+
+  // den#295: the first thing kept here makes this browser's household on den-edge, and what was kept moves into it.
+  // Asked again on a later kept action, or by itself after `Retry-After`; a host that starts no library for this
+  // browser (`refused`) is not asked again this visit.
+  const HOUSEHOLD_RETRY_MS = 30_000;
+  const HOUSEHOLD_TRIES = 5;
+  let householdTries = 0;
+  let householdStarting = false;
+  let householdRefused = false;
+  async function startHousehold(): Promise<void> {
+    const plan = plannedHousehold;
+    const staging = session;
+    const stagingKey = libraryIdentity;
+    if (!plan || householdStarting || householdRefused || !alive) return;
+    if (!staging.local || !staging.model || !stagingKey) return;
+    householdStarting = true;
+    let retryMs: number | null = null;
+    try {
+      // A household is profile-aware from its first write, so it is made only where profiles are on.
+      if ((await profilesCapability()) !== 'enabled') return;
+      const started = startHouseholdPlan(plan, stagingKey);
+      if (!started) return;
+      plannedHousehold = started;
+      // A reload resumes this as the page opens, before the library kept here is ready to be asked.
+      await staging.model.ready;
+      const { outcome, retryAfterMs } = await staging.model.createHousehold({
+        householdKey: started.householdKey,
+        attempt: started.attempt,
+        ownerProfile: started.ownerProfile,
+        ownerKey: started.ownerKey,
+        createdAt: started.createdAt,
+      });
+      if (outcome === 'created') {
+        if (!(await adoptHousehold(started))) retryMs = HOUSEHOLD_RETRY_MS;
+      } else if (outcome === 'refused') householdRefused = true;
+      else retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
+    } catch (error) {
+      console.warn('den: this browser’s household could not be made yet', error);
+      retryMs = HOUSEHOLD_RETRY_MS;
+    } finally {
+      householdStarting = false;
+    }
+    if (retryMs !== null && alive && ++householdTries < HOUSEHOLD_TRIES)
+      setTimeout(() => void startHousehold(), retryMs);
+  }
+
+  /**
+   * Open the household just made and move the library kept here into it, its household half into the household and the
+   * rest into the Owner library, before switching to it (as `joinLibrary` does for a TV). The Owner opens from there
+   * through the directory, as in any profile household.
+   */
+  async function adoptHousehold(plan: HouseholdPlan): Promise<boolean> {
+    if (!commitHousehold(plan)) return false;
+    const destination = open(plan.householdKey, false);
+    const owner = openProfileActivity(plan.ownerKey);
+    const merged = (result: { kind: string; outcome?: string }) =>
+      result.kind === 'local-library.merge' &&
+      (result.outcome === 'merged' || result.outcome === 'absent');
+    try {
+      await Promise.all([destination.model!.ready, owner.model.ready]);
+      const household = await destination.model!.mergeLocalLibrary(plan.stagingKey, undefined, {
+        scope: 'household',
+        keep: true,
+      });
+      if (!merged(household.result)) throw new Error('the household did not take its settings');
+      const profile = await owner.model.mergeLocalLibrary(plan.stagingKey, undefined, {
+        scope: 'profile',
+      });
+      if (!merged(profile.result)) throw new Error('the Owner library did not take its activity');
+      owner.close();
+      if (!alive || libraryIdentity !== plan.stagingKey) {
+        destination.close();
+        return false;
+      }
+      await dropLocalLibrary(plan.stagingKey);
+      settleHouseholdPlan();
+      plannedHousehold = null;
+      // Cancel a queued convergence open before publishing the household.
+      convergence++;
+      clearTimeout(convergenceRetry);
+      ownHousehold = plan.householdKey;
+      // The same route goes on under the household: this is not a profile switch.
+      routedProfile = profileSessionKey(destination.identity, destination.policyKey);
+      libraryIdentity = plan.householdKey;
+      session = destination;
+      return true;
+    } catch (error) {
+      console.warn('den: this browser’s library could not move into its household yet', error);
+      owner.close();
+      destination.close();
+      return false;
+    }
+  }
+  // A household asked for before a reload is finished now, not on the next kept action.
+  onMount(() => {
+    if (plannedHousehold?.started) void startHousehold();
+  });
 
   function publishReset(pending: PendingReset | null): boolean {
     if (!writePendingReset(pending)) return false;
@@ -909,7 +1055,7 @@
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
               ? Promise.resolve()
-              : link || session.local
+              : link || session.local || ownHousehold
                 ? SettingsScreen.load()
                 : LinkScreen.load());
           onchange(route);
@@ -936,7 +1082,7 @@
                     : 'Owner profile settings will appear here after the household split is activated.'}
                 </p>
               </section>
-            {:else if (link || session.local) && householdSettingsModel}
+            {:else if (link || session.local || ownHousehold) && householdSettingsModel}
               {#if SettingsScreen.current}
                 <SettingsScreen.current
                   {link}

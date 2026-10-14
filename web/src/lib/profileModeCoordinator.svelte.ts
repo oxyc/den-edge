@@ -317,6 +317,26 @@ export class ProfileModeCoordinator {
     return this.#preview;
   }
 
+  /**
+   * Whether choosing `target` first sets the Owner PIN (den#295): Kid is in every household from the start, and the
+   * first switch to it, with no PIN yet, makes the one that brings the Owner back.
+   */
+  setsPin(target: ActiveProfileMode): boolean {
+    return (
+      target === 'kid' &&
+      !this.#preview &&
+      this.mode === 'owner' &&
+      this.parentalPinConfigured === false
+    );
+  }
+
+  /** The Owner sets the household's Owner PIN; true once den-edge holds it. */
+  async setOwnerPin(pin: string): Promise<boolean> {
+    this.#assertOpen();
+    if (this.mode !== 'owner' || !/^\d{4}$/.test(pin)) return false;
+    return this.#household.setParentalPin(pin);
+  }
+
   requiresPin(target: ActiveProfileMode): boolean {
     if (target === this.mode || this.mode === 'owner') return false;
     if (target === 'owner') return true;
