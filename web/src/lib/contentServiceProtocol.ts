@@ -13,8 +13,11 @@ import type {
   PeopleCounts,
 } from './filterRoutes';
 
-/** The read-only content protocol is versioned independently from encrypted library state. */
-export const CONTENT_SERVICE_PROTOCOL = 4 as const;
+/**
+ * The read-only content protocol is versioned independently from encrypted library state. Version 5 added the
+ * per-query `policy`: a Worker from the earlier build, which would ignore it and answer unrestricted, is refused.
+ */
+export const CONTENT_SERVICE_PROTOCOL = 5 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -27,6 +30,23 @@ export const CONTENT_SERVICE_WIRE_LIMITS = {
   importLookups: 10_000,
   cursor: 128,
 } as const;
+
+/** Which intended-audience evidence Kid discovery accepts (den-atlas `kidAudience`). */
+export type ContentKidAudience = 'child' | 'child-or-teen';
+
+/**
+ * The active profile's content policy, stamped on every query by the page (`PolicedContent`). The Worker never
+ * holds a "current" policy: a request carries the policy it was made under, so a profile switch cannot leak one
+ * profile's answer, in-flight read or cache entry into another.
+ */
+export interface ContentPolicy {
+  maximumAge: number | null;
+  unknownRatings: 'allow' | 'block';
+  /** Present for a Kid only: the audience-relevance gate on browse, search and recommendations. */
+  kidAudience?: ContentKidAudience;
+  /** The viewer's ISO 3166-1 region, part of atlas' cache identity. */
+  region?: string;
+}
 
 export type ContentProvider = 'tmdb' | 'ratings' | 'warnings' | 'atlas';
 export type ContentProviderKey = 'tmdb' | 'omdb' | 'content-warnings';
@@ -159,6 +179,8 @@ export type ContentRequest =
   | { kind: 'title.detail'; title: ContentTitleRef; region: string }
   | { kind: 'title.extras'; title: ContentTitleRef; warningCategories: string[] }
   | { kind: 'title.external-id'; title: ContentTitleRef }
+  /** The one shared age check every boundary (detail, trailer, play, download, cast...) asks. */
+  | { kind: 'title.eligibility'; titles: ContentTitleRef[] }
   | { kind: 'season'; title: ContentTitleRef & { type: 'tv' }; season: number }
   | { kind: 'person'; id: number }
   | { kind: 'person.filmography'; id: number }
@@ -257,6 +279,8 @@ export type ContentResult =
   | { kind: 'title.detail'; detail: OptionalContent<TitleDetail> }
   | { kind: 'title.extras'; extras: ContentTitleExtras }
   | { kind: 'title.external-id'; imdbId: OptionalContent<string> }
+  /** The asked titles the policy establishes, in the order asked. */
+  | { kind: 'title.eligibility'; allowed: ContentTitleRef[] }
   | { kind: 'season'; episodes: OptionalContent<Episode[]> }
   | { kind: 'person'; person: OptionalContent<PersonDetail> }
   | { kind: 'person.filmography'; credits: OptionalContent<FilmCredit[]> }
@@ -324,6 +348,8 @@ export interface ContentServiceQueryRequest extends ContentClientMessage {
   type: 'content-query';
   requestId: string;
   request: ContentRequest;
+  /** Absent means unrestricted: the legacy single-profile household and an Owner with no ceiling. */
+  policy?: ContentPolicy;
 }
 
 /** Cancellation has no reply; the page waiter is rejected immediately and late results are ignored. */

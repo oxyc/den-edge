@@ -122,7 +122,7 @@
   };
 
   let session = $state.raw(untrack(() => open(libraryIdentity, !link && libraryIdentity !== null)));
-  let routedProfile = untrack(() => profileSessionKey(session.identity));
+  let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
@@ -153,7 +153,7 @@
   // search address before teardown, so a Kid/Visitor never inherits the previous viewer's detail, Settings route,
   // scroll snapshot or request graph. The pre-effect runs for local and cross-tab switches alike.
   $effect.pre(() => {
-    const next = profileSessionKey(session.identity);
+    const next = profileSessionKey(session.identity, session.policyKey);
     if (next === routedProfile) return;
     resetProfileNavigation();
     routedProfile = next;
@@ -301,7 +301,8 @@
     if (session !== active) {
       // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
       // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
-      if (!profileControlPublished) routedProfile = profileSessionKey(active.identity);
+      if (!profileControlPublished)
+        routedProfile = profileSessionKey(active.identity, active.policyKey);
       session = active;
     }
     if (!profileControlPublished) {

@@ -11,6 +11,7 @@
     disabled = false,
     compact = false,
     model,
+    allowed = async () => true,
   }: {
     /** The series, as each episode's download is written down for every device to show. */
     title: SeasonTitle;
@@ -21,6 +22,8 @@
     /** Beside the season tabs: the icon alone, since the tab it sits next to already says which season. */
     compact?: boolean;
     model: LibraryModel;
+    /** The active profile's policy check, asked again where the download starts. */
+    allowed?: () => Promise<boolean>;
   } = $props();
   let job = $state<SeasonJob>();
   let observer: AbortController | undefined;
@@ -28,7 +31,8 @@
     void `${title.id}:${imdb}:${season}`;
     return () => observer?.abort();
   });
-  function start() {
+  async function start() {
+    if (!(await allowed())) return;
     observer?.abort();
     observer = new AbortController();
     job = undefined;

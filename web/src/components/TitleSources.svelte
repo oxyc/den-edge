@@ -23,6 +23,7 @@
     still,
     onplay,
     model,
+    allowed = async () => true,
   }: {
     imdb?: string;
     season?: number;
@@ -41,6 +42,8 @@
     onplay?: (filename: string) => void;
     /** Library-owned download commands/view. Detail supplies this during the final integration cutover. */
     model?: LibraryModel;
+    /** The active profile's policy check, asked again where a download starts. */
+    allowed?: () => Promise<boolean>;
   } = $props();
   let downloadLease = $state<LibraryModelLease<DownloadsView>>();
   onMount(() => {
@@ -111,6 +114,10 @@
   async function download(source: DownloadSourceOption) {
     if (!descriptor || !model) return;
     message = '';
+    if (!(await allowed())) {
+      message = 'This title isn’t available on this profile.';
+      return;
+    }
     try {
       await model.enqueueDownload(
         descriptor,
