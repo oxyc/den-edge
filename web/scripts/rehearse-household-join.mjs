@@ -30,6 +30,8 @@ const TV_PIN = '1234';
 const BROWSER_PIN = '5678';
 /** The joining browser's Owner keeps a title the household joined has too (merged) and one it hasn't. */
 const JOINER_TITLES = { titles: [1002, 1003], kidTitle: 2001 };
+/** The Kid each household's Kid title was kept by, by household key. */
+const keptKids = new Map();
 
 if (!existsSync(BINARY)) fail(`no den-edge binary at ${BINARY}: run cargo build --locked`);
 if (!existsSync(join(DIST, 'index.html'))) fail('no built web app: run npm run build in web/');
@@ -224,12 +226,13 @@ const browserLog = [];
 
 /** A browser of its own, at its own visitor address. */
 async function launch(name, address) {
-  const ctx = await chromium.launchPersistentContext(join(work, `browser-${name}`), {
+  const ctx = await chromium.launchPersistentContext(join(work, `browser-${name}-${round}`), {
     headless: !HEADED,
     executablePath: executablePath(),
     viewport: { width: 1280, height: 900 },
     extraHTTPHeaders: { 'x-forwarded-for': address },
   });
+  ctx.denName = name;
   const watch = (page) => {
     page.on('console', (m) => {
       if (['error', 'warning'].includes(m.type()))
@@ -286,6 +289,8 @@ async function until(condition, limitMs = 60_000, everyMs = 500) {
 async function openTitle(page, edge, id = 1002) {
   await page.goto(`${edge.origin}/movie/${id}`);
   await page.getByRole('heading', { name: `Movie ${id}`, level: 1 }).waitFor({ timeout: 60_000 });
+  // A remembered profile's first frame is drawn inert until that profile has opened: nothing on it can be pressed yet.
+  await page.locator('.library-frame[inert]').waitFor({ state: 'detached', timeout: 60_000 });
 }
 
 const watchlistPressed = (page) =>
@@ -315,7 +320,7 @@ async function makeHousehold(
   await page.goto(`${edge.origin}/`);
   await page.getByRole('button', { name: 'Look around instead' }).click({ timeout: 30_000 });
   const plan = JSON.parse((await stored(page, 'den.household.plan')) ?? 'null');
-  // Each kept title is in the library before the next step: the Owner's until the Kid exists.
+  // Each kept title is in its library (the Owner's, or the Kid's) before the next step.
   const keep = async (id, libraryKey) => {
     await openTitle(page, edge, id);
     await page.getByRole('button', { name: 'Watchlist', exact: true }).click();
@@ -325,22 +330,28 @@ async function makeHousehold(
       );
       if (!made) throw new Error('the browser did not make its household');
     }
-    await until(async () =>
-      (await readLibrary(edge, wire, libraryKey ?? plan.ownerKey)).rows.some(
+    const holds = async (key) =>
+      (await readLibrary(edge, wire, key)).rows.some(
         (row) => row.kind === 'title' && row.title?.id === id && row.status?.value === 'watchlist',
-      ),
-    );
-  };
-  // The first title makes the household; the rest are kept once its Kid is made and the page is the Owner again.
-  await keep(titles[0], null);
-  if (kid) {
-    const kidMade = async () =>
-      profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory).kids.length === 1;
-    // The Owner's visit makes the household's Kid; a visit that asked too early asks again on the next.
-    if (!(await until(kidMade, 30_000))) {
-      await page.reload();
-      if (!(await until(kidMade))) throw new Error('the household’s Kid was not made');
+      );
+    if (!(await until(() => holds(libraryKey ?? plan.ownerKey)))) {
+      const where = [
+        `pressed ${await watchlistPressed(page)}`,
+        `as "${await current(page)}"`,
+        `Owner library holds it: ${await holds(plan.ownerKey)}`,
+      ].join(', ');
+      throw new Error(`title ${id} did not reach its library (${where})`);
     }
+  };
+  // The first title makes the household, and the next is opened (a navigation) while its Kid is being made.
+  for (const [index, id] of titles.entries()) await keep(id, index ? plan.ownerKey : null);
+  if (kid) {
+    const made = await until(
+      async () =>
+        profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory).kids.length === 1,
+    );
+    if (!check(`${ctx.denName}: the household’s Kid is made during the same visit`, !!made))
+      throw new Error('the household’s Kid was not made');
     await openSwitcher(page);
     await page.getByRole('button', { name: 'Use Kids' }).click();
     await page.getByLabel('New Owner PIN').fill(pin);
@@ -349,12 +360,12 @@ async function makeHousehold(
       .locator('button.profile-trigger[aria-label*="current Kids"]')
       .first()
       .waitFor({ timeout: 60_000 });
-    if (kidTitle)
-      await keep(
-        kidTitle,
-        profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory).kids[0].library
-          .value.key,
-      );
+    if (kidTitle) {
+      const target = profilesOf((await readLibrary(edge, wire, plan.householdKey)).directory)
+        .kids[0];
+      keptKids.set(plan.householdKey, `${target.id} key ${target.library.value.key.slice(0, 8)}`);
+      await keep(kidTitle, target.library.value.key);
+    }
     await openSwitcher(page);
     await page.getByRole('button', { name: 'Use Owner' }).click();
     await page.locator('#owner-pin').fill(pin);
@@ -368,7 +379,6 @@ async function makeHousehold(
       .waitFor({ timeout: 60_000 });
     await page.keyboard.press('Escape').catch(() => {});
   }
-  for (const id of titles.slice(1)) await keep(id, plan.ownerKey);
   return { ...plan, page };
 }
 
@@ -378,6 +388,7 @@ async function snapshot(edge, wire, householdKey) {
   const { owner, kids } = profilesOf(household.directory);
   const library = async (key) => readLibrary(edge, wire, key);
   return {
+    keptKid: keptKids.get(householdKey),
     household,
     owner,
     kids,
@@ -442,6 +453,21 @@ const joinedTo = (page, householdKey) =>
  * target. Nothing else is in either: every document there came from one side or the other.
  */
 function checkCarried(label, wire, before, source, after, kidTarget) {
+  check(
+    `${label}: the browser's household had one Kid, holding the title it kept`,
+    source.kids.length === 1 && documentsOf(wire, source.kidLibraries[0]).size === 1,
+    `${source.kids.map((kid) => `${kid.id} key ${kid.library.value.key.slice(0, 8)}`).join(', ')} holding ${source.kidLibraries
+      .map(
+        (library) =>
+          `${documentsOf(wire, library).size} (status ${library.status}, rows ${library.rows
+            .map((row) => (row.kind === 'set' ? `set:${row.name}` : `${row.kind}:${row.title?.id}`))
+            .join(' ')})`,
+      )
+      .join(', ')}; deleted: ${Object.values(source.household.directory?.profiles ?? {})
+      .filter((p) => p.deleted.value)
+      .map((p) => p.id)
+      .join(', ')}; the title went to ${source.keptKid}`,
+  );
   const compare = (what, held, ...sides) => {
     const expected = new Map();
     for (const side of sides)
@@ -512,6 +538,8 @@ async function checkOpensAsOwner(label, page, edge) {
 }
 
 let address = 0;
+/** Which run of a scenario this is: each run's browsers are new. */
+let round = 0;
 const nextAddress = () => `10.0.0.${(address += 1)}`;
 
 // 1. A TV household (Owner, Kid, PIN) is joined by a browser household with Owner and Kid activity. The Kid merges into
@@ -762,10 +790,17 @@ async function main() {
   const edge = await startEdge(join(work, 'edge-data'));
   console.log(`den-edge on ${edge.origin}`);
   try {
-    for (const scenario of [joinsHousehold, joinKilledMidway, joinMakesKid, joinLegacy])
+    // REHEARSE_ONLY=<scenario function name> runs that one alone, repeated REHEARSE_REPEAT times.
+    const scenarios = [joinsHousehold, joinKilledMidway, joinMakesKid, joinLegacy].filter(
+      (scenario) => !process.env.REHEARSE_ONLY || scenario.name === process.env.REHEARSE_ONLY,
+    );
+    const repeat = Number(process.env.REHEARSE_REPEAT ?? 1);
+    for (const scenario of Array.from({ length: repeat }, () => scenarios).flat()) {
+      round += 1;
       await scenario(edge, app).catch((error) =>
         check(`${scenario.name} ran to the end`, false, String(error?.stack ?? error)),
       );
+    }
   } finally {
     writeFileSync(join(work, 'den-edge.log'), edge.log.join('\n'));
     writeFileSync(join(work, 'browser.log'), browserLog.join('\n'));

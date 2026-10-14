@@ -187,6 +187,16 @@ async function launch(profileDir) {
   });
   // Title data is the fixture's; den-edge holds no TMDB key here. Library requests are not routed.
   await ctx.route('**/tmdb/3/**', (route) => route.fulfill({ json: movie }));
+  // A Kid opens a title only with its age known (unrated titles are blocked): this origin's atlas answers that the
+  // fixture film is for all ages, and nothing else.
+  await ctx.route('**/atlas/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } });
+    if (path.startsWith('/atlas/index/title/movie/'))
+      return route.fulfill({ json: { minimumAge: 0 } });
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
   await ctx.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
       contentType: 'image/svg+xml',
@@ -478,8 +488,8 @@ async function main() {
     const keysRow = settings.rows.find((row) => row.kind === 'set' && row.name === 'keys');
     check('the Owner PIN is the household’s', !!keysRow?.values?.parentalPIN?.value);
     await page.goto(`${edge.origin}/movie/1002`);
-    // The title's own rating check is atlas's, which this rehearsal does not run; what is checked here is that the
-    // Kid is its own profile under its own policy: not the Owner's watchlist, and 12-and-under in the switcher.
+    // The title's age is the stubbed atlas's (all ages); what is checked here is that the Kid is its own profile under
+    // its own policy: not the Owner's watchlist, and 12-and-under in the switcher.
     await page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor({ timeout: 30_000 });
     check(
       'the Kid does not see the Owner’s watchlist',

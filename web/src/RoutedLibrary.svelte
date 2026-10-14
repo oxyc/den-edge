@@ -14,6 +14,7 @@
   } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryServiceError } from './lib/libraryServiceClient';
+  import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
   import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
@@ -532,21 +533,33 @@
   });
 
   // Every profile household has a Kid out of the box (den#295): one born here, and one split before Kids were automatic.
-  // The Owner's visit makes it, once; the switcher shows it as soon as the directory has it.
+  // The Owner's visit makes it, once; the switcher shows it as soon as the directory has it. The service may be between
+  // connections then (the household reconnecting at wire 5, or a session replaced as the page navigates): the request
+  // waits that out and is asked again of the household open by then.
   let defaultKidAsked = false;
   $effect(() => {
     const coordinator = profileCoordinator;
     if (!coordinator || coordinator.preview || defaultKidAsked || coordinator.mode !== 'owner')
       return;
     if (stagingProfiles || coordinator.choices.some((choice) => choice.role === 'kid')) return;
-    const household = untrack(() => session.household.ownerSettingsModel());
-    if (!household) return;
+    if (!untrack(() => session.household.ownerSettingsModel())) return;
     defaultKidAsked = true;
-    void household.ready
-      .then(() => household.ensureDefaultKidProfile())
-      .catch((error: unknown) =>
-        console.warn('den: the household’s Kid profile could not be made', error),
-      );
+    void untilServiceSettles(
+      async () => {
+        const household = untrack(() => session.household.ownerSettingsModel());
+        if (!household)
+          throw new LibraryServiceError({
+            code: 'not-ready',
+            message: 'the household is not open',
+            retryable: true,
+          });
+        await household.ready;
+        return household.ensureDefaultKidProfile();
+      },
+      { live: () => alive },
+    ).catch((error: unknown) =>
+      console.error('den: the household’s Kid profile could not be made', error),
+    );
   });
 
   // Kid chosen before the household existed: once it does and its Kid is there, the PIN chosen then becomes the
