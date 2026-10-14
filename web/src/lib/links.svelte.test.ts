@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { Links, readLinks, readShared } from './links.svelte';
+import { Links, readLinks, readPendingReset, readShared, writePendingReset } from './links.svelte';
 
 const KEYS = { libraryKey: 'bGli', linkKey: 'bGluaw==' };
 
@@ -135,4 +135,33 @@ it("a key reset moves every link to the library onto the new key, and the old li
   // A link another device's reset cut off is still forgotten.
   tab.forgetMoved(tab.list[2]!);
   expect(tab.list.map((link) => link.name)).toEqual(['Living room', 'Bedroom']);
+});
+
+it('a compound reset keeps the pending marker through the install and drops it only when released', () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  const marker = { from: KEYS.libraryKey, to: 'bmV3', device: '0123456789abcdef', compound: true };
+  expect(writePendingReset(marker)).toBe(true);
+  expect(readPendingReset()).toEqual(marker);
+
+  tab.rekey(KEYS.libraryKey, 'bmV3', true);
+  expect(readLinks().map((link) => link.libraryKey)).toEqual(['bmV3']);
+  // Installed, but the reset is not over: the marker is what finds the worker's journal after a reload.
+  expect(readPendingReset()).toEqual(marker);
+
+  tab.releaseRekeyed(KEYS.libraryKey);
+  expect(readPendingReset()).toBeNull();
+});
+
+it('a legacy marker has no compound flag, and an ordinary rekey still clears it', () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  writePendingReset({ from: KEYS.libraryKey, to: 'bmV3', device: '0123456789abcdef' });
+  expect(readPendingReset()).toEqual({
+    from: KEYS.libraryKey,
+    to: 'bmV3',
+    device: '0123456789abcdef',
+  });
+  tab.rekey(KEYS.libraryKey, 'bmV3');
+  expect(readPendingReset()).toBeNull();
 });

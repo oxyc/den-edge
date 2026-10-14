@@ -54,6 +54,7 @@ function authority(
   mode: 'online' | 'local',
   fetchImpl?: typeof fetch,
   tmdbFetchImpl?: typeof fetch,
+  extra: { libraryKey?: string; vault?: Vault } = {},
 ) {
   const downloads = new DownloadCoordinator(log, clock, {
     prepare: async () => ({ state: 'preparing', progress: 0 }),
@@ -96,7 +97,7 @@ function authority(
         { tmdbFetch: tmdbFetchImpl },
       )
     : missingContent;
-  return new LibraryLogAuthority(log, clock, { mode, downloads, content, fetchImpl });
+  return new LibraryLogAuthority(log, clock, { mode, downloads, content, fetchImpl, ...extra });
 }
 
 async function pinDeliveryServer() {
@@ -233,6 +234,97 @@ describe('LibraryLogAuthority', () => {
       expect(headers['x-den-library-token']).toBeTruthy();
       expect(headers['x-den-wire']).toBe('5');
       expect(JSON.stringify(requests)).not.toContain(KEY);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the compound key reset behind the profile capability and a fresh Owner PIN', async () => {
+    let enrolled = false;
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input, init) => {
+        const url = String(input);
+        requests.push(`${init?.method ?? 'GET'} ${url}`);
+        if (!url.endsWith('/profile-capability')) throw new Error(`unexpected request ${url}`);
+        if (!enrolled) return new Response('{"error":"not_found"}', { status: 404 });
+        return new Response(
+          JSON.stringify({
+            enrollment: 'prepare',
+            wireMin: 5,
+            migrationWire: 5,
+            runtimeHouseholdWire: 5,
+            runtimeProfileWire: 4,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'key-reset-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const reset = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      const destination = btoa(String.fromCharCode(...new Uint8Array(32).fill(23)));
+      const tasks = [
+        { kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: destination },
+        { kind: 'profile-key-reset.resume' },
+        {
+          kind: 'profile-key-reset.recover',
+          pin: '1234',
+          recoveryAttempt: 'fedcba9876543210fedcba9876543210',
+          successorKey: null,
+        },
+      ] as const;
+
+      // Profile migration off: every entry is unavailable, and the only request is the capability read.
+      for (const task of tasks)
+        await expect(reset.task(task, `off-${task.kind}`)).resolves.toMatchObject({
+          result: { kind: task.kind, outcome: 'unavailable' },
+        });
+      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
+
+      // Confirming asks nothing of den-edge and nothing of the gate: with no journal there is nothing to confirm.
+      const confirm = {
+        kind: 'profile-key-reset.confirm',
+        destinationLibraryKey: destination,
+      } as const;
+      await expect(reset.task(confirm, 'confirm-off')).resolves.toMatchObject({
+        result: { kind: 'profile-key-reset.confirm', outcome: 'none' },
+      });
+
+      enrolled = true;
+      await expect(reset.task(tasks[1], 'resume')).resolves.toMatchObject({
+        result: { kind: 'profile-key-reset.resume', outcome: 'none' },
+      });
+      await expect(reset.task(confirm, 'confirm-on')).resolves.toMatchObject({
+        result: { kind: 'profile-key-reset.confirm', outcome: 'none' },
+      });
+      // No Owner PIN is delivered to this household: start and recover are refused before any other request.
+      for (const task of [tasks[0], tasks[2]])
+        await expect(reset.task(task, `pin-${task.kind}`)).rejects.toEqual(
+          expect.objectContaining<Partial<LibraryServiceAuthorityError>>({
+            failure: expect.objectContaining({ code: 'unauthorized' }),
+          }),
+        );
+      await expect(
+        reset.task(
+          { kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: KEY },
+          'same-key',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<LibraryServiceAuthorityError>>({
+          failure: expect.objectContaining({ code: 'invalid-request' }),
+        }),
+      );
+      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

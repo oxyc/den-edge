@@ -4,7 +4,10 @@ import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from '.
 import {
   ProfileKeyResetExecutor,
   ProfileResetError,
+  ProfileResetRefusedError,
+  ProfileResetRolledBackError,
   VaultProfileResetJournal,
+  type ProfileResetAbortRequest,
   type HouseholdObservation,
   type HouseholdObservationRequest,
   type HouseholdPublishRequest,
@@ -70,6 +73,10 @@ interface FaultPlan {
   /** The process dies before the effect lands. */
   readonly killBefore?: readonly Operation[];
   readonly unavailableProfile?: string;
+  /** den-edge refuses this operation for good (a moved source, a held lock, a successor that is not ready). */
+  readonly refuse?: Operation;
+  /** den-edge says the attempt is over (an abort or a recovery's rollback) when this operation is tried. */
+  readonly rolledBack?: Operation;
   readonly observeUnknown?: number;
   readonly ignoreAdoptOnce?: boolean;
   /** Sabotage the backend's answers. */
@@ -134,8 +141,29 @@ class FakeBackend implements ProfileKeyResetBackend {
     }
   }
 
+  /** What `abortReset` answers; `committed` means den-edge refused because the successor is committed. */
+  abortAnswer: 'aborted' | 'committed' = 'aborted';
+  abortCalls: ProfileResetAbortRequest[] = [];
+  /** The journal may be erased without an adoption only after den-edge ended the attempt. */
+  private ended = false;
+
+  /** The abort lands, then the process dies before its response is seen. */
+  loseAbortResponse = false;
+
+  async abortReset(request: ProfileResetAbortRequest) {
+    this.abortCalls.push(structuredClone(request));
+    this.events.push('abort');
+    if (this.loseAbortResponse) {
+      this.loseAbortResponse = false;
+      throw new Killed();
+    }
+    if (this.abortAnswer === 'aborted') this.ended = true;
+    return this.abortAnswer;
+  }
+
   async clearJournal(attempt: string) {
-    if (this.journal?.attempt !== attempt || this.adopted === null) throw new Unavailable();
+    if (this.journal?.attempt !== attempt || (this.adopted === null && !this.ended))
+      throw new Unavailable();
     await this.store?.clear(attempt);
     this.journal = null;
     this.journalCleared = true;
@@ -271,6 +299,11 @@ class FakeBackend implements ProfileKeyResetBackend {
   }
 
   private dieBefore(operation: Operation) {
+    if (this.plan.refuse === operation) throw new ProfileResetRefusedError(`refused-${operation}`);
+    if (this.plan.rolledBack === operation) {
+      this.ended = true;
+      throw new ProfileResetRolledBackError();
+    }
     if (this.failBefore.delete(operation)) throw new Killed();
   }
 
@@ -872,6 +905,95 @@ describe('compound profile key reset', () => {
       expect(backend.journal).toBeNull();
       expect(backend.persists).toBe(0);
       expect(backend.events).toEqual([]);
+    });
+  });
+
+  describe('aborts before the successor commit', () => {
+    const household = async () => ({
+      libraryId: await idOf(HOUSEHOLD_KEY),
+      key: HOUSEHOLD_KEY,
+    });
+
+    it.each([['lock'], ['move'], ['publish']] as const)(
+      'releases the locks and discards the journal when %s is refused for good',
+      async (refuse) => {
+        const backend = new FakeBackend({ refuse });
+        const keys = new Keys();
+        const first = await executor(backend, keys).start(directory(), HOUSEHOLD_KEY, FENCE);
+        const { status } =
+          first.phase === 'aborted' ? { status: first } : await drain(backend, keys);
+
+        expect(status?.phase).toBe('aborted');
+        expect(backend.abortCalls).toEqual([{ attempt: ATTEMPT, household: await household() }]);
+        expect(backend.journal).toBeNull();
+        expect(backend.events.at(-1)).toBe('clear-journal');
+        expect(backend.retiredProfiles.size).toBe(0);
+        expect(backend.retiredHousehold).toBe(false);
+        expect(backend.adopted).toBeNull();
+      },
+    );
+
+    it('does not abort a reset den-edge already committed, and keeps the journal', async () => {
+      const backend = new FakeBackend({ refuse: 'publish' });
+      backend.abortAnswer = 'committed';
+      const keys = new Keys();
+      await executor(backend, keys).start(directory(), HOUSEHOLD_KEY, FENCE);
+      await expect(drain(backend, keys)).rejects.toBeInstanceOf(ProfileResetRefusedError);
+
+      expect(backend.abortCalls.length).toBeGreaterThan(0);
+      expect(backend.journal).not.toBeNull();
+      expect(backend.events).not.toContain('clear-journal');
+    });
+
+    it('never aborts once the successor is committed: a refusal then is only surfaced', async () => {
+      const backend = new FakeBackend({ refuse: 'retireProfile' });
+      const keys = new Keys();
+      await executor(backend, keys).start(directory(), HOUSEHOLD_KEY, FENCE);
+      await expect(drain(backend, keys)).rejects.toBeInstanceOf(ProfileResetRefusedError);
+
+      expect(backend.journal!.householdCommitted).toBe(true);
+      expect(backend.abortCalls).toEqual([]);
+    });
+
+    it('repeats a lost abort on the next resume, which is idempotent', async () => {
+      const backend = new FakeBackend({ refuse: 'lock' });
+      backend.loseAbortResponse = true;
+      const keys = new Keys();
+      await expect(
+        executor(backend, keys).start(directory(), HOUSEHOLD_KEY, FENCE),
+      ).rejects.toBeInstanceOf(Killed);
+      expect(backend.journal).not.toBeNull();
+
+      const status = await executor(backend, keys).resume();
+      expect(status?.phase).toBe('aborted');
+      expect(backend.abortCalls).toHaveLength(2);
+      expect(backend.journal).toBeNull();
+    });
+
+    it('discards the journal without an abort when den-edge says a recovery rolled the attempt back', async () => {
+      const backend = new FakeBackend({ rolledBack: 'move' });
+      const keys = new Keys();
+      await executor(backend, keys).start(directory(), HOUSEHOLD_KEY, FENCE);
+      const { status } = await drain(backend, keys);
+
+      expect(status?.phase).toBe('aborted');
+      expect(backend.abortCalls).toEqual([]);
+      expect(backend.journal).toBeNull();
+    });
+
+    it('reuses the page prepared successor household key', async () => {
+      const backend = new FakeBackend();
+      const prepared = keyOf(7);
+      await executor(backend, new Keys()).start(directory(), HOUSEHOLD_KEY, FENCE, prepared);
+      expect(backend.journal!.newHouseholdKey).toBe(prepared);
+      await expect(
+        executor(new FakeBackend(), new Keys()).start(
+          directory(),
+          HOUSEHOLD_KEY,
+          FENCE,
+          HOUSEHOLD_KEY,
+        ),
+      ).rejects.toMatchObject({ code: 'invalid-household-key' });
     });
   });
 

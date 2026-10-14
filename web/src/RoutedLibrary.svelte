@@ -53,6 +53,7 @@
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
+  import { CompoundResetPage } from './lib/profileKeyResetPage';
 
   let {
     link,
@@ -470,6 +471,47 @@
     }
   }
 
+  // The page's half of a compound key reset of a profile household. Nothing starts one yet (`start` has no caller);
+  // this only carries a reset whose marker is already kept through its install, so a reload or a crash converges.
+  const compoundReset = new CompoundResetPage<{ session: ProfileSession }>({
+    pending: { read: () => pendingReset, write: publishReset },
+    worker: async (from) => {
+      if (from === libraryIdentity && session.model)
+        return { model: session.model, close: () => {} };
+      const old = open(from, false);
+      if (!old.model) {
+        old.close();
+        throw new Error('The library service of the old household is not available');
+      }
+      await old.model.ready;
+      return { model: old.model, close: () => old.close() };
+    },
+    openDestination: async (key) => {
+      if (key === libraryIdentity) return { session, close: () => {} };
+      const destination = open(key, false);
+      try {
+        await destination.model!.ready;
+      } catch (error) {
+        destination.close();
+        throw error;
+      }
+      return { session: destination, close: () => destination.close() };
+    },
+    link: () => links.list.find((l) => l.libraryKey === pendingReset?.to) ?? null,
+    install: (from, to) => links.rekey(from, to, true),
+    release: (from) => {
+      links.releaseRekeyed(from);
+      pendingReset = null;
+    },
+    adopt: (destination, to) => {
+      if (libraryIdentity === to || !alive) return;
+      libraryIdentity = to;
+      session = destination.session;
+    },
+  });
+  let compoundRetry: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(compoundRetry));
+
   async function adoptHeldReset(): Promise<void> {
     const pending = pendingReset;
     const model = session.model;
@@ -513,7 +555,14 @@
   $effect(() => {
     const pending = pendingReset;
     const model = session.model;
-    if (!pending || !model || pending.from !== libraryIdentity || pending.held || resetInFlight)
+    if (
+      !pending ||
+      pending.compound ||
+      !model ||
+      pending.from !== libraryIdentity ||
+      pending.held ||
+      resetInFlight
+    )
       return;
     let current = true;
     void model.ready
@@ -526,6 +575,23 @@
     return () => {
       current = false;
     };
+  });
+  // A compound reset is settled by the library service that holds its journal, not by the legacy standing check.
+  $effect(() => {
+    const pending = pendingReset;
+    if (!pending?.compound || resetInFlight) return;
+    const run = () =>
+      void compoundReset
+        .run(pending)
+        .then((result) => {
+          if (alive && (result === 'waiting' || result === 'blocked'))
+            compoundRetry = setTimeout(() => (pendingReset = readPendingReset()), 15_000);
+        })
+        .catch((error: unknown) =>
+          console.warn('den: the profile key reset could not continue', error),
+        );
+    run();
+    return () => clearTimeout(compoundRetry);
   });
   $effect(() => {
     const current = session;
