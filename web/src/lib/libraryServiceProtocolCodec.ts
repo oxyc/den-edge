@@ -2020,6 +2020,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'enabled' ||
           value.outcome === 'recovery-required' ||
           value.outcome === 'source-changed' ||
+          value.outcome === 'source-refused' ||
           value.outcome === 'setup-in-progress' ||
           value.outcome === 'cancelled') &&
         optional(value.attempt, hexId)

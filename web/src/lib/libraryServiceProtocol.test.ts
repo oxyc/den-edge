@@ -170,6 +170,7 @@ describe('library service client protocol', () => {
         result: { kind: 'profile-migration.recover', outcome },
       });
     expect(task('setup-in-progress')).toMatchObject({ ok: true });
+    expect(task('source-refused')).toMatchObject({ ok: true });
     expect(task('locked-by-someone')).toMatchObject({ ok: false });
   });
 

@@ -683,6 +683,8 @@ export type LibraryTaskResult =
         | 'enabled'
         | 'recovery-required'
         | 'source-changed'
+        /** den-core refused the source before anything was staged; the attempt was aborted and the lock released. */
+        | 'source-refused'
         /** `409 migration_in_progress`: another attempt holds the household lock; nothing was changed. */
         | 'setup-in-progress'
         | 'cancelled';

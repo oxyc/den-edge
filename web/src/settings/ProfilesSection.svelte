@@ -30,6 +30,8 @@
   let observation = $state<Observation | null>(null);
   const setupInProgress =
     'Profile setup is already in progress on another device. Nothing was changed; finish it there, or use Recover safely to take it over.';
+  const sourceRefused =
+    'Your library needed an update before Profiles could be set up. Nothing was changed and setup was released; enable Profiles again.';
   let recoveryObservation = $state<{
     attempt: string | null;
     recoveryAttempt: string;
@@ -193,6 +195,12 @@
           failure = setupInProgress;
           return;
         }
+        if (result.outcome === 'source-refused') {
+          finishModal();
+          await refresh();
+          failure = sourceRefused;
+          return;
+        }
         finishModal();
         await refresh();
         return;
@@ -215,6 +223,12 @@
           finishModal();
           await refresh();
           failure = setupInProgress;
+          return;
+        }
+        if (result.outcome === 'source-refused') {
+          finishModal();
+          await refresh();
+          failure = sourceRefused;
           return;
         }
       } else if (modal === 'recover') {

@@ -505,6 +505,59 @@ describe('dormant full Owner split coordinator', () => {
     expect(value.store.journal).toBeNull();
   });
 
+  it('aborts and releases an opened attempt whose source den-core refuses before staging', async () => {
+    const value = harness();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(value.secure.copyAndAuthenticateOwner).mockRejectedValue(
+      new Error('Sync policy rejected the action: legacy_source_row'),
+    );
+    await expect(value.coordinator.prepare(ATTEMPT, source)).resolves.toEqual({
+      kind: 'refused',
+      attempt: ATTEMPT,
+      reason: 'legacy_source_row',
+    });
+    expect(value.provider.open).toHaveBeenCalledOnce();
+    expect(value.provider.abort).toHaveBeenCalledExactlyOnceWith(ATTEMPT);
+    expect(value.provider.stage).not.toHaveBeenCalled();
+    expect(value.provider.commit).not.toHaveBeenCalled();
+    expect(value.store.journal).toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it('releases a backed-up journal left holding the lock by an earlier refused attempt', async () => {
+    const value = harness();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    value.store.journal = {
+      version: 6,
+      attempt: ATTEMPT,
+      explicitIntent: true,
+      householdId: HOUSEHOLD,
+      state: 'backed-up',
+      source,
+      splitAuthorization: preparedAuthorization(),
+      fence,
+      backup: { id: backup.id, digest: backup.digest },
+    };
+    vi.mocked(value.secure.copyAndAuthenticateOwner).mockRejectedValue(
+      new Error('Sync policy rejected the action: legacy_source_row'),
+    );
+    await expect(value.coordinator.resume()).resolves.toMatchObject({ kind: 'refused' });
+    expect(value.provider.abort).toHaveBeenCalledExactlyOnceWith(ATTEMPT);
+    expect(value.store.journal).toBeNull();
+    error.mockRestore();
+  });
+
+  it('keeps the attempt and its lock when the Owner copy fails for any other reason', async () => {
+    const value = harness();
+    vi.mocked(value.secure.copyAndAuthenticateOwner).mockRejectedValue(
+      new TypeError('Failed to fetch'),
+    );
+    await expect(value.coordinator.prepare(ATTEMPT, source)).rejects.toThrow('Failed to fetch');
+    expect(value.provider.abort).not.toHaveBeenCalled();
+    expect(value.store.journal?.state).toBe('backed-up');
+  });
+
   it('verifies a racing winner, conditionally retires only the loser, then adopts', async () => {
     const value = harness({ superseded: true });
     const observed = await value.coordinator.observeSource();
