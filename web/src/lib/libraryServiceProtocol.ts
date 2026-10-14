@@ -308,6 +308,11 @@ export type LibrarySelection =
 
 export interface ProfileDirectoryView {
   kind: 'profiles';
+  /**
+   * `absent`: no profiles row and no committed split, so a legacy household or a browser-local library. `invalid`: a
+   * row exists but cannot be opened, or the household's wire minimum shows a split was committed. Never open Owner.
+   */
+  state: 'absent' | 'invalid' | 'present';
   owner: string | null;
   profiles: Array<{
     id: string;

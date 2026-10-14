@@ -101,7 +101,8 @@ export function profileDirectoryState(
   view: ProfileDirectoryView | undefined,
 ): ProfileDirectoryState {
   if (!view) return { kind: 'pending' };
-  if (!view.owner && view.profiles.length === 0) return { kind: 'absent' };
+  if (view.state === 'absent') return { kind: 'absent' };
+  if (view.state === 'invalid') return { kind: 'invalid' };
   const directory = profileDirectoryChoices(view);
   return directory ? { kind: 'present', directory } : { kind: 'invalid' };
 }
