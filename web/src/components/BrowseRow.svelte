@@ -14,6 +14,7 @@
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
+  import { gatesPlacement } from '../lib/placementGate';
   import { Pager } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
@@ -62,7 +63,7 @@
   $effect(() => {
     if (!page.active) {
       rowNear = false;
-      if (observed) placed = false;
+      if (observed && gatesPlacement) placed = false;
       return;
     }
     return observeNearViewport(

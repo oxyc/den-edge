@@ -11,6 +11,7 @@
   import { keyboardInput } from '../lib/inputModality';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
+  import { gatesPlacement } from '../lib/placementGate';
   import PosterRow from './PosterRow.svelte';
 
   let {
@@ -102,7 +103,7 @@
       interactingPointer = null;
       stopReleaseListeners();
       rowNear = false;
-      if (observed) placed = false;
+      if (observed && gatesPlacement) placed = false;
       return;
     }
     return observeNearViewport(
