@@ -211,17 +211,33 @@ type ObservedService = Pick<
   | 'close'
 >;
 
-/** `service` as it is, but `kept` is told after each kept action it carried out. */
-export function observeKeptActions(service: ObservedService, kept: () => void): ObservedService {
+/**
+ * `service` as it is, but `kept` is told after each kept action it carried out, and `pending` how many kept actions are
+ * on their way: a move of the library into its household knows from the two whether something was kept while it copied.
+ */
+export function observeKeptActions(
+  service: ObservedService,
+  kept: () => void,
+  pending: (change: 1 | -1) => void = () => {},
+): ObservedService {
   return {
     open: (options) => service.open(options),
     retry: () => service.retry(),
     command: async (command, operationId) => {
-      const result = await (operationId === undefined
-        ? service.command(command)
-        : service.command(command, operationId));
-      if (KEPT.has(command.kind)) kept();
-      return result;
+      if (!KEPT.has(command.kind))
+        return operationId === undefined
+          ? service.command(command)
+          : service.command(command, operationId);
+      pending(1);
+      try {
+        const result = await (operationId === undefined
+          ? service.command(command)
+          : service.command(command, operationId));
+        kept();
+        return result;
+      } finally {
+        pending(-1);
+      }
     },
     query: (...query) => service.query(...query),
     task: (...task) => service.task(...task),

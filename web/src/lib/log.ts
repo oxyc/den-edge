@@ -951,11 +951,13 @@ export class LibraryLog {
     if (this.readOnly) return false;
     if (this.wireMin >= WIRE && !this.offline) {
       // Title and episode rows (an import, or a library this browser kept) and actions are edits: den-core's writes.
-      // v3 watch and receipt rows go in as the documents its switch makes of them, merged with what is there.
+      // v3 watch and receipt rows go in as the documents its switch makes of them, merged with what is there. Edits are
+      // made against what den-edge holds (`storedBefore`): one already drawn from work kept here but never sent (a
+      // move cut off part way) would otherwise come out as no edit at all, and never reach den-edge.
       const ops = rows.flatMap((row) => {
         const event = trackerEvent(row);
         if (event) return opsFor(event.before, event.after);
-        return row.kind === 'rec' || row.kind === 'ep' ? opsFor(this.before(row), row) : [];
+        return row.kind === 'rec' || row.kind === 'ep' ? opsFor(this.storedBefore(row), row) : [];
       });
       let documents: DocumentRow[];
       try {
@@ -2328,6 +2330,36 @@ export class LibraryLog {
       if (!page.more || page.entries.length === 0) return { entries, head: page.head, generation };
       since = page.entries.at(-1)!.seq;
     }
+  }
+
+  /**
+   * Every row den-edge holds for this library, read from the start to its head and opened: a title or season document
+   * as the row it stands for (as `rows`), a delivery document as itself. What is really there, apart from anything
+   * this browser holds or still has to send. Null when it could not be read whole.
+   */
+  async heldRows(): Promise<Row[] | null> {
+    if (this.offline) return null;
+    let read: { entries: RawEntry[] } | null;
+    try {
+      read = await this.readAll(this.wireMin > WIRE ? this.wireMin : undefined);
+    } catch {
+      read = null;
+    }
+    if (!read) return null;
+    const rows: Row[] = [];
+    for (const { k, v } of read.entries) {
+      if (!v) continue;
+      const opened = await openEntry(this.keys, k, v);
+      if (!('row' in opened)) continue;
+      const row = opened.row;
+      rows.push(...(isDocument(row) && row.kind !== 'delivery' ? projectDocument(row) : [row]));
+    }
+    return rows;
+  }
+
+  /** How long den-edge last asked this library's writes to wait (`429` with `Retry-After`), or 0. */
+  get retryAfterMs(): number {
+    return Math.max(0, this.throttledUntil - Date.now());
   }
 
   /**

@@ -84,6 +84,7 @@ import {
   type AssistantRecords,
 } from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
+import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
 import {
   workerStatusControl,
@@ -1006,6 +1007,8 @@ export class LibraryLogAuthority {
   async #createHousehold(
     task: Extract<LibraryTask, { kind: 'household.create' }>,
   ): Promise<LibraryAuthorityTaskResult> {
+    if (task.ifKept && !keptSomething(this.#log.rows()))
+      return { result: { kind: 'household.create', outcome: 'empty' }, affected: [] };
     const household = await LibraryLog.destination(
       task.householdKey,
       this.#fetch,

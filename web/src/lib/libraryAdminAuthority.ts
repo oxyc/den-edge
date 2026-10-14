@@ -8,6 +8,7 @@ import {
 import type { ClockStore } from './clockStore';
 import { buildHistoryExport } from './historyExport';
 import { householdScoped, profileScoped } from './householdScope';
+import { unaccounted } from './localLibraryMove';
 import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
@@ -31,7 +32,9 @@ import { fromBase64url, toBase64url } from './wire';
 import type { Row, Stamp } from './wire';
 
 const RESET_ROUNDS = 3;
-const IMPORT_BATCH = 250;
+// Rows per `writeRows` of an import or a move. On a v4 library each batch goes as one write of every document it
+// touches, a title's and an episode's season at most two per row, and den-edge takes at most 200 writes in one.
+const IMPORT_BATCH = 100;
 const STALE_IMPORT_MS = 182 * 86_400_000;
 const RECOVERY_MAKES = 'library-service-recovery-makes.v1';
 const LOCAL_MERGES = 'library-service-local-merges.v1';
@@ -486,7 +489,7 @@ export class LibraryAdminAuthority {
   async #mergeLocal(
     sourceLibraryKey: string,
     operationId?: string,
-    part: { scope?: 'household' | 'profile'; keep?: true } = {},
+    part: { scope?: 'household' | 'profile'; keep?: true; verify?: true } = {},
   ): Promise<LibraryAuthorityTaskResult> {
     if (sourceLibraryKey === this.options.libraryKey)
       return {
@@ -520,26 +523,58 @@ export class LibraryAdminAuthority {
         affected: [],
       };
     try {
+      const rows = source.rows().flatMap((row): Row[] => {
+        if (row.kind === 'set' && row.name === 'recovery') return [];
+        if (!part.scope) return [row];
+        const scoped =
+          part.scope === 'profile'
+            ? profileScoped(row)
+            : profileScoped(row) === row
+              ? null
+              : householdScoped(row);
+        return scoped ? [scoped] : [];
+      });
       if (!wasWritten) {
-        const rows = source.rows().flatMap((row): Row[] => {
-          if (row.kind === 'set' && row.name === 'recovery') return [];
-          if (!part.scope) return [row];
-          const scoped =
-            part.scope === 'profile'
-              ? profileScoped(row)
-              : profileScoped(row) === row
-                ? null
-                : householdScoped(row);
-          return scoped ? [scoped] : [];
-        });
-        if (!(await this.log.writeRows(rows)))
+        // In batches, as an import is: a v4 library takes each batch's edits as one write, and a library kept here for
+        // years holds more titles than one write may carry. Once den-edge asks for fewer writes (`429`), the rest waits
+        // out its `Retry-After` (an edit it refused is kept, so `writeRows` still answers true).
+        for (let start = 0; start < rows.length; start += IMPORT_BATCH) {
+          const written = await this.log.writeRows(rows.slice(start, start + IMPORT_BATCH));
+          const retryAfterMs = Math.round(this.log.retryAfterMs);
+          if (written && !retryAfterMs) continue;
           return {
-            result: { kind: 'local-library.merge', outcome: 'unavailable' },
+            result: {
+              kind: 'local-library.merge',
+              outcome: 'unavailable',
+              ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
+            },
             affected: affectedLibrary,
           };
+        }
         if (operationId) {
           staged.push({ operationId, sourceLibraryKey });
           await this.log.keep(LOCAL_MERGES, staged.slice(-64));
+        }
+      }
+      if (part.verify) {
+        // Read back from den-edge, not from what this browser holds: the source is retired only once den-edge has it.
+        const held = await this.log.heldRows();
+        const missing = held ? unaccounted(rows, held) : null;
+        if (!missing || missing.length) {
+          console.warn(
+            missing
+              ? `den: ${missing.length} of ${rows.length} rows moved from this browser are not on den-edge yet (${missing.slice(0, 5).join(', ')})`
+              : 'den: the library could not be read back from den-edge to check the move',
+          );
+          const retryAfterMs = Math.round(this.log.retryAfterMs);
+          return {
+            result: {
+              kind: 'local-library.merge',
+              outcome: 'unverified',
+              ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
+            },
+            affected: affectedLibrary,
+          };
         }
       }
       if (!part.keep && !(await source.forget()))

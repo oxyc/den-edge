@@ -72,6 +72,28 @@ it('starts the household on a kept action, never on what the page writes by itse
   expect(kept).toHaveBeenCalledOnce();
 });
 
+it('counts kept actions on their way, a failed one included, so a move knows to copy again', async () => {
+  let finish!: () => void;
+  const service = {
+    command: vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((done) => (finish = () => done({}))))
+      .mockRejectedValueOnce(new Error('refused')),
+  } as unknown as Parameters<typeof observeKeptActions>[0];
+  const kept = vi.fn();
+  let pending = 0;
+  const observed = observeKeptActions(service, kept, (change) => (pending += change));
+  const adding = observed.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } });
+  expect(pending).toBe(1);
+  finish();
+  await adding;
+  expect([pending, kept.mock.calls.length]).toEqual([0, 1]);
+  await expect(
+    observed.command({ kind: 'watchlist.add', title: { type: 'movie', id: 2 } }),
+  ).rejects.toThrow('refused');
+  expect([pending, kept.mock.calls.length]).toEqual([0, 1]);
+});
+
 it('splits a browser’s own rows between the household and its Owner', () => {
   const watch: Row = {
     kind: 'rec',

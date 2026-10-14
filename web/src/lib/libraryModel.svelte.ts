@@ -802,7 +802,7 @@ export class LibraryModel {
   mergeLocalLibrary(
     sourceLibraryKey: string,
     operationId?: string,
-    part: { scope?: 'household' | 'profile'; keep?: true } = {},
+    part: { scope?: 'household' | 'profile'; keep?: true; verify?: true } = {},
   ) {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey, ...part }, operationId);
   }

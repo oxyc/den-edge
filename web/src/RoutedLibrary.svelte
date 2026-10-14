@@ -105,15 +105,16 @@
     untrack(() => (link ? null : settledHousehold(keptLocal))),
   );
   const ownKey = untrack(() => (link || ownHousehold ? null : localLibraryKey()));
-  // A browser that has just made its first library plans its household beside it. One that already kept a library
-  // here keeps today's behaviour.
+  // A browser with a library kept only here plans its household beside it: one made just now starts it with its first
+  // kept action, one kept here before moves into it as the page opens (`startHousehold`).
   let plannedHousehold = $state.raw(
     untrack(() =>
-      link || ownHousehold || !ownKey
-        ? null
-        : (householdPlan() ?? (keptLocal ? null : planHousehold(ownKey))),
+      link || ownHousehold || !ownKey ? null : (householdPlan() ?? planHousehold(ownKey)),
     ),
   );
+  // Kept actions done, and on their way, in the library kept here: a move that copied it goes again if either changed.
+  let keptActions = 0;
+  let keptPending = 0;
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
 
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
@@ -132,7 +133,8 @@
     );
   };
 
-  const open = (key: string | null, local: boolean) => {
+  // `wire` 5 opens a library known to be a profile household (one this browser made) without the 426 round trip.
+  const open = (key: string | null, local: boolean, wire: 4 | 5 = 4) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
     const services = createWorkerServiceSession({
@@ -144,12 +146,19 @@
     // The library a household is planned beside starts the household with the first thing kept in it.
     const library =
       local && plannedHousehold
-        ? observeKeptActions(services.library, () => void startHousehold())
+        ? observeKeptActions(
+            services.library,
+            () => {
+              keptActions++;
+              void startHousehold();
+            },
+            (change) => (keptPending += change),
+          )
         : services.library;
     const model = new LibraryModel(library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
-      wire: 4,
+      wire,
       bootstrapProfileHousehold: !local,
       ...(clock ? { legacyClock: clock } : {}),
     });
@@ -567,14 +576,16 @@
   }
 
   // den#295: the first thing kept here makes this browser's household on den-edge, and what was kept moves into it.
-  // Asked again on a later kept action, or by itself after `Retry-After`; a host that starts no library for this
-  // browser (`refused`) is not asked again this visit.
+  // A library kept here before the household was planned moves as the page opens (`ifKept`: only when it holds
+  // something kept, so a browser that only looked around still writes nothing). Asked again on a later kept action, or
+  // by itself after `Retry-After`; a host that starts no library for this browser (`refused`) is not asked again this
+  // visit. Until the move is done the page goes on with the library kept here.
   const HOUSEHOLD_RETRY_MS = 30_000;
   const HOUSEHOLD_TRIES = 5;
   let householdTries = 0;
   let householdStarting = false;
   let householdRefused = false;
-  async function startHousehold(): Promise<void> {
+  async function startHousehold(ifKept = false): Promise<void> {
     const plan = plannedHousehold;
     // The library kept here, even while the switcher has a Visitor open over it.
     const staging = stagingOwner ?? session;
@@ -586,7 +597,11 @@
     try {
       // Only where den-edge says it starts a household for a browser like this one; otherwise nothing is sent.
       if (!(await bornHouseholds())) return;
-      const started = startHouseholdPlan(plan, stagingKey);
+      // `ifKept` marks the plan started only once something was found to move: a reload of an empty library stays idle.
+      const started =
+        ifKept && !plan.started && plan.stagingKey === stagingKey
+          ? plan
+          : startHouseholdPlan(plan, stagingKey);
       if (!started) return;
       plannedHousehold = started;
       // A reload resumes this as the page opens, before the library kept here is ready to be asked.
@@ -597,11 +612,14 @@
         ownerProfile: started.ownerProfile,
         ownerKey: started.ownerKey,
         createdAt: started.createdAt,
+        ...(started.started ? {} : { ifKept: true as const }),
       });
       if (outcome === 'created') {
-        if (!(await adoptHousehold(started))) retryMs = HOUSEHOLD_RETRY_MS;
+        if (!started.started) plannedHousehold = startHouseholdPlan(started, stagingKey) ?? started;
+        const adopted = await adoptHousehold(started);
+        if (adopted !== 'adopted') retryMs = adopted;
       } else if (outcome === 'refused') householdRefused = true;
-      else retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
+      else if (outcome !== 'empty') retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
     } catch (error) {
       console.warn('den: this browser’s household could not be made yet', error);
       retryMs = HOUSEHOLD_RETRY_MS;
@@ -614,31 +632,51 @@
 
   /**
    * Open the household just made and move the library kept here into it, its household half into the household and the
-   * rest into the Owner library, before switching to it (as `joinLibrary` does for a TV). The Owner opens from there
-   * through the directory, as in any profile household.
+   * rest into the Owner library, before switching to it (as `joinLibrary` does for a TV). Each half is read back from
+   * den-edge and checked against the library kept here (`verify`), and the copy is made again if something was kept
+   * meanwhile; only then is the library kept here retired. The Owner opens from there through the directory, as in any
+   * profile household. `adopted`, or how long to wait before trying again.
    */
-  async function adoptHousehold(plan: HouseholdPlan): Promise<boolean> {
-    if (!commitHousehold(plan)) return false;
-    const destination = open(plan.householdKey, false);
+  async function adoptHousehold(plan: HouseholdPlan): Promise<'adopted' | number> {
+    if (!commitHousehold(plan)) return HOUSEHOLD_RETRY_MS;
+    // At wire 5 from the start: a second try in this page would otherwise open it from this browser's copy at 4,
+    // read-only until den-edge's 426 has been answered, and refuse the move meanwhile.
+    const destination = open(plan.householdKey, false, 5);
     const owner = openProfileActivity(plan.ownerKey);
-    const merged = (result: { kind: string; outcome?: string }) =>
-      result.kind === 'local-library.merge' &&
-      (result.outcome === 'merged' || result.outcome === 'absent');
+    let waitMs = HOUSEHOLD_RETRY_MS;
+    const moved = (result: { kind: string; outcome?: string; retryAfterMs?: number }) => {
+      if (
+        result.kind === 'local-library.merge' &&
+        (result.outcome === 'merged' || result.outcome === 'absent')
+      )
+        return true;
+      if (result.retryAfterMs) waitMs = result.retryAfterMs;
+      return false;
+    };
     try {
       await Promise.all([destination.model!.ready, owner.model.ready]);
-      const household = await destination.model!.mergeLocalLibrary(plan.stagingKey, undefined, {
-        scope: 'household',
-        keep: true,
-      });
-      if (!merged(household.result)) throw new Error('the household did not take its settings');
-      const profile = await owner.model.mergeLocalLibrary(plan.stagingKey, undefined, {
-        scope: 'profile',
-      });
-      if (!merged(profile.result)) throw new Error('the Owner library did not take its activity');
+      let settled = false;
+      for (let pass = 0; pass < 3 && !settled; pass++) {
+        const seen = keptActions;
+        const household = await destination.model!.mergeLocalLibrary(plan.stagingKey, undefined, {
+          scope: 'household',
+          keep: true,
+          verify: true,
+        });
+        if (!moved(household.result)) throw new Error('the household did not take its settings');
+        const profile = await owner.model.mergeLocalLibrary(plan.stagingKey, undefined, {
+          scope: 'profile',
+          keep: true,
+          verify: true,
+        });
+        if (!moved(profile.result)) throw new Error('the Owner library did not take its activity');
+        settled = keptActions === seen && keptPending === 0;
+      }
+      if (!settled) throw new Error('the library kept here kept changing while it moved');
       owner.close();
       if (!alive || libraryIdentity !== plan.stagingKey) {
         destination.close();
-        return false;
+        return HOUSEHOLD_RETRY_MS;
       }
       await dropLocalLibrary(plan.stagingKey);
       settleHouseholdPlan();
@@ -661,16 +699,17 @@
       libraryIdentity = plan.householdKey;
       session = destination;
       staged?.dispose();
-      return true;
+      return 'adopted';
     } catch (error) {
       console.warn('den: this browser’s library could not move into its household yet', error);
       owner.close();
       destination.close();
-      return false;
+      return waitMs;
     }
   }
   // Where den-edge starts households for browsers like this one, the switcher offers Owner, Kid and Visitor from the
-  // first visit; choosing Kid makes the household. A household asked for before a reload is finished now.
+  // first visit; choosing Kid makes the household. A household asked for before a reload is finished now, and a library
+  // kept here from an earlier visit moves into one.
   let stagingProfiles = $state(false);
   let stagingOwner: ProfileSession | null = null;
   onMount(() => {
@@ -696,6 +735,7 @@
         );
       }
       if (plannedHousehold.started) void startHousehold();
+      else if (keptLocal) void startHousehold(true);
     });
   });
 

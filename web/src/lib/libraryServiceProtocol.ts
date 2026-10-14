@@ -575,18 +575,21 @@ export type LibraryTask =
   | { kind: 'history.import'; items: HistoryImportItem[] }
   /**
    * A library kept only in this browser written into this one. `scope` takes only the household half or only the
-   * profile half of its rows; `keep` leaves the source in place for the other half to be taken from it.
+   * profile half of its rows; `keep` leaves the source in place for the other half to be taken from it. `verify` reads
+   * this library back from den-edge afterwards and answers `unverified` unless it holds everything that was written.
    */
   | {
       kind: 'local-library.merge';
       sourceLibraryKey: string;
       scope?: 'household' | 'profile';
       keep?: true;
+      verify?: true;
     }
   /**
    * Start, or finish, the household `householdKey` that a browser with no TV makes on its first kept action (den#295):
    * born at wire minimum 5 with an Owner library and the directory a committed Owner split stores. Idempotent on its
-   * inputs, which the page keeps before it asks.
+   * inputs, which the page keeps before it asks. `ifKept` starts nothing (`empty`) while the library kept here holds
+   * nothing a person kept: a browser that kept a library before households is moved on load, one that only browsed is not.
    */
   | {
       kind: 'household.create';
@@ -595,6 +598,7 @@ export type LibraryTask =
       ownerProfile: string;
       ownerKey: string;
       createdAt: number;
+      ifKept?: true;
     }
   /** The household's Kid, made once when its directory has none: no Owner PIN is asked, since none may exist yet. */
   | { kind: 'profile.create-default' }
@@ -686,14 +690,20 @@ export type LibraryTaskResult =
   | { kind: 'recovery.abandon'; outcome: 'abandoned' }
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
-  | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
+  | {
+      kind: 'local-library.merge';
+      /** `unverified`: written, but den-edge's copy read back lacks some of it. `retryAfterMs`: den-edge asked to wait. */
+      outcome: 'merged' | 'absent' | 'unavailable' | 'unverified';
+      retryAfterMs?: number;
+    }
   | {
       kind: 'household.create';
       /**
        * `refused`: den-edge starts no library for this browser (`403 new_libraries_closed`); `throttled`: not now, try
-       * again after `retryAfterMs`; `unavailable`: anything else, to be tried again with the same inputs.
+       * again after `retryAfterMs`; `unavailable`: anything else, to be tried again with the same inputs; `empty`:
+       * `ifKept` and nothing is kept here, so nothing was asked.
        */
-      outcome: 'created' | 'refused' | 'throttled' | 'unavailable';
+      outcome: 'created' | 'refused' | 'throttled' | 'unavailable' | 'empty';
       retryAfterMs?: number;
     }
   | { kind: 'profile.create-default'; outcome: 'created' | 'present' }
