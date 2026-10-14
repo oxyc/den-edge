@@ -237,13 +237,17 @@ function movedTo(moved: { successor?: string }, tag: string): MoveEnd {
   return moved.successor === tag ? 'deleted' : 'lost';
 }
 
-/** Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). */
+/**
+ * Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). Matched by
+ * name as den-core's `doc_decode` does: a `tracker-event:` row whose event doesn't parse is still legacy, and the
+ * profile split refuses it until the switch has removed it.
+ */
 const legacy = (row: Row): boolean =>
   row.kind === 'rec' ||
   row.kind === 'ep' ||
   row.kind === 'wat' ||
   row.kind === 'snt' ||
-  trackerEvent(row) !== null;
+  (row.kind === 'set' && row.name.startsWith('tracker-event:'));
 
 /**
  * Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach, and whether
