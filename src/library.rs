@@ -624,6 +624,35 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             }
         }
     }
+    // A profile migration owns an exclusive, durable household mutation lock. Check it before generation and
+    // rewrite handling so every ordinary writer receives one stable answer; the store repeats this check inside
+    // its write transaction to close the check-to-commit race.
+    if is_write && !migration_action && protocol.is_some() {
+        let manager = Arc::clone(&state.library_v3);
+        let locked_id = id.to_owned();
+        let locked = tokio::task::spawn_blocking(move || {
+            manager.existing_library(&locked_id, token_hash)?.exclusive_operation_lock()
+        })
+        .await;
+        match locked {
+            Ok(Ok(Some(_))) => {
+                return with_wire_headers(
+                    state,
+                    json_reply(StatusCode::CONFLICT, &error("migration_in_progress")),
+                    protocol.as_ref(),
+                );
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(reason)) => return with_wire_headers(state, read_error(v3_io(reason)), protocol.as_ref()),
+            Err(reason) => {
+                return with_wire_headers(
+                    state,
+                    internal("profile migration lock task", io::Error::other(reason)),
+                    protocol.as_ref(),
+                );
+            }
+        }
+    }
     // A DELETE to a retired library — a key reset's, retried or replayed — learns that it landed, and for which
     // successor, before the generation check: a retired library has none, and `409 generation_changed` would send the
     // resetting client back to copy a library that is gone.
@@ -730,6 +759,9 @@ async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Respo
     }) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
+    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+        return *response;
+    }
     match load_rewrite(state, id).await {
         Ok(Some(_)) => return json_reply(StatusCode::CONFLICT, &error("rewrite_in_progress")),
         Ok(None) => {}
@@ -761,7 +793,13 @@ async fn rewrite_rows(
 ) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    if let Err(response) = library_store_locked(state, id, token_hash, &slot, &mut library).await {
+    let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    }) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
         return *response;
     }
     let Some(requested) = rewrite_id(action, "/rows") else {
@@ -878,6 +916,7 @@ async fn rewrite_commit(
         }
         Ok(Err(v3::StoreError::Full)) => json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full")),
         Ok(Err(v3::StoreError::TooLarge)) => json_reply(StatusCode::BAD_REQUEST, &error("value_too_large")),
+        Ok(Err(v3::StoreError::Locked)) => json_reply(StatusCode::CONFLICT, &error("migration_in_progress")),
         Ok(Err(reason)) => internal("rewrite commit", v3_io(reason)),
         Err(reason) => internal("rewrite commit task", io::Error::other(reason)),
     }
@@ -886,7 +925,13 @@ async fn rewrite_commit(
 async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action: &str) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    if let Err(response) = library_store_locked(state, id, token_hash, &slot, &mut library).await {
+    let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    }) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
         return *response;
     }
     let Some(requested) = action.strip_prefix("rewrite/").filter(|value| !value.contains('/')) else {
@@ -943,6 +988,9 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
         Ok(Err(v3::StoreError::Invalid(message))) if message == "member_already_registered" => {
             return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
         }
+        Ok(Err(v3::StoreError::Locked)) => {
+            return json_reply(StatusCode::CONFLICT, &error("migration_in_progress"));
+        }
         Ok(Err(reason)) => return internal("member registration", v3_io(reason)),
         Err(reason) => return internal("member registration task", io::Error::other(reason)),
     }
@@ -992,6 +1040,22 @@ async fn forget(
         Ok(owner) => owner,
         Err(refused) => return *refused,
     };
+    if selected_v3 {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        let store = match tokio::task::spawn_blocking(move || {
+            manager.existing_library(&owned_id, stored_token)
+        })
+        .await
+        {
+            Ok(Ok(store)) => store,
+            Ok(Err(reason)) => return internal("library exclusive operation", v3_io(reason)),
+            Err(reason) => return internal("library exclusive operation task", io::Error::other(reason)),
+        };
+        if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
+            return *response;
+        }
+    }
     // A key reset copied the library through `base` (den-spec library-v4 §12): a write since then would be lost with
     // it, so the copy is made again first. Checked under the library's lock, so no write lands between this and the
     // retirement. A head that can't be read (an unloaded v2 log, never the source of a reset) refuses it.
@@ -1176,7 +1240,23 @@ fn v3_io(error: v3::StoreError) -> io::Error {
         v3::StoreError::Full => full(),
         v3::StoreError::Forbidden => io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"),
         v3::StoreError::TooLarge => io::Error::new(io::ErrorKind::InvalidInput, "value_too_large"),
+        v3::StoreError::Locked => io::Error::new(io::ErrorKind::WouldBlock, "migration_in_progress"),
         v3::StoreError::Invalid(message) | v3::StoreError::Failed(message) => io::Error::other(message),
+    }
+}
+
+/// Recheck the durable lock while the caller holds the library slot that serializes migration acquisition and
+/// sidecar publication. Store mutations repeat this in their redb write transaction; filesystem-side mutations
+/// use this boundary so a migration cannot enter between this check and their first write.
+async fn ensure_exclusive_operation_unlocked(store: &Arc<dyn v3::LibraryStore>) -> Result<(), Box<Response>> {
+    let read_store = Arc::clone(store);
+    match tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock()).await {
+        Ok(Ok(None)) => Ok(()),
+        Ok(Ok(Some(_))) | Ok(Err(v3::StoreError::Locked)) => {
+            Err(Box::new(json_reply(StatusCode::CONFLICT, &error("migration_in_progress"))))
+        }
+        Ok(Err(reason)) => Err(Box::new(internal("library exclusive operation", v3_io(reason)))),
+        Err(reason) => Err(Box::new(internal("library exclusive operation task", io::Error::other(reason)))),
     }
 }
 
@@ -1424,6 +1504,9 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             // The answer a v3 client has always had for an oversized value, and one it refuses for good.
             Ok(Err(v3::StoreError::TooLarge)) => {
                 return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+            }
+            Ok(Err(v3::StoreError::Locked)) => {
+                return json_reply(StatusCode::CONFLICT, &error("migration_in_progress"));
             }
             Ok(Err(error)) => return internal("library write", v3_io(error)),
             Err(error) => return internal("library write task", io::Error::other(error)),
