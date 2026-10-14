@@ -760,7 +760,7 @@ async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Respo
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
-        return response;
+        return *response;
     }
     match load_rewrite(state, id).await {
         Ok(Some(_)) => return json_reply(StatusCode::CONFLICT, &error("rewrite_in_progress")),
@@ -800,7 +800,7 @@ async fn rewrite_rows(
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
-        return response;
+        return *response;
     }
     let Some(requested) = rewrite_id(action, "/rows") else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
@@ -932,7 +932,7 @@ async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action:
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
-        return response;
+        return *response;
     }
     let Some(requested) = action.strip_prefix("rewrite/").filter(|value| !value.contains('/')) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
@@ -1053,7 +1053,7 @@ async fn forget(
             Err(reason) => return internal("library exclusive operation task", io::Error::other(reason)),
         };
         if let Err(response) = ensure_exclusive_operation_unlocked(&store).await {
-            return response;
+            return *response;
         }
     }
     // A key reset copied the library through `base` (den-spec library-v4 §12): a write since then would be lost with
@@ -1248,15 +1248,15 @@ fn v3_io(error: v3::StoreError) -> io::Error {
 /// Recheck the durable lock while the caller holds the library slot that serializes migration acquisition and
 /// sidecar publication. Store mutations repeat this in their redb write transaction; filesystem-side mutations
 /// use this boundary so a migration cannot enter between this check and their first write.
-async fn ensure_exclusive_operation_unlocked(store: &Arc<dyn v3::LibraryStore>) -> Result<(), Response> {
+async fn ensure_exclusive_operation_unlocked(store: &Arc<dyn v3::LibraryStore>) -> Result<(), Box<Response>> {
     let read_store = Arc::clone(store);
     match tokio::task::spawn_blocking(move || read_store.exclusive_operation_lock()).await {
         Ok(Ok(None)) => Ok(()),
         Ok(Ok(Some(_))) | Ok(Err(v3::StoreError::Locked)) => {
-            Err(json_reply(StatusCode::CONFLICT, &error("migration_in_progress")))
+            Err(Box::new(json_reply(StatusCode::CONFLICT, &error("migration_in_progress"))))
         }
-        Ok(Err(reason)) => Err(internal("library exclusive operation", v3_io(reason))),
-        Err(reason) => Err(internal("library exclusive operation task", io::Error::other(reason))),
+        Ok(Err(reason)) => Err(Box::new(internal("library exclusive operation", v3_io(reason)))),
+        Err(reason) => Err(Box::new(internal("library exclusive operation task", io::Error::other(reason)))),
     }
 }
 
