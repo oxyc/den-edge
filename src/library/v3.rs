@@ -2099,8 +2099,9 @@ impl StoreManager {
     pub(super) fn import_v2(&self, id: &str, library: &super::Library) -> Result<(), StoreError> {
         let final_path = self.path(id);
         let temporary = final_path.with_extension("redb.tmp");
-        self.remove_path(&temporary)?;
-        self.remove_path(&final_path)?;
+        // An unpublished database left beside the log may already be open here (a read opens it by its file alone).
+        // `remove` closes that handle, or refuses while it is in use, so no write lands in a database replaced below.
+        self.remove(id)?;
         {
             let store = RedbLibrary::open(
                 &temporary,
@@ -2273,7 +2274,18 @@ impl StoreManager {
         let created = !path.exists();
         match shared_or_open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
             Ok(store) => {
-                let protocol = store.reconcile_protocol(self.index.get(id).as_ref(), created)?;
+                let recorded = self.index.get(id);
+                let protocol = store.reconcile_protocol(recorded.as_ref(), created)?;
+                // A database that no longer matches what was recorded for it was restored or replaced on disk; one
+                // that was not shows here as lost data, so it is said.
+                if let Some(known) = recorded.filter(|known| known.generation != protocol.generation) {
+                    eprintln!(
+                        "library reopened as restored: library={} head={} recorded_head={}",
+                        &id[..id.len().min(8)],
+                        protocol.head,
+                        known.head
+                    );
+                }
                 self.index.record(id, &protocol)?;
                 *stored = Some(Arc::clone(&store));
                 Ok(self.lease(id, store))
