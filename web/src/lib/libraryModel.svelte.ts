@@ -448,7 +448,15 @@ export class LibraryModel {
     source: { generation: number; head: string },
     operationId?: string,
   ) {
-    return this.task({ kind: 'profile-migration.enable', attempt, source }, operationId);
+    // A caller's `$state` proxy can't be structured-cloned into the Worker; send a plain copy.
+    return this.task(
+      {
+        kind: 'profile-migration.enable',
+        attempt,
+        source: { generation: source.generation, head: source.head },
+      },
+      operationId,
+    );
   }
 
   cancelProfileMigration(attempt: string, operationId?: string) {
@@ -462,7 +470,12 @@ export class LibraryModel {
     operationId?: string,
   ) {
     return this.task(
-      { kind: 'profile-migration.recover', attempt, recoveryAttempt, source },
+      {
+        kind: 'profile-migration.recover',
+        attempt,
+        recoveryAttempt,
+        source: { generation: source.generation, head: source.head },
+      },
       operationId,
     );
   }
