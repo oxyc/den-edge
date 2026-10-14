@@ -50,6 +50,11 @@ export interface LibraryKeys {
   mac: CryptoKey;
 }
 
+/** The `{id}` in `/lib/{id}/…` alone, for callers that never need the other keys. */
+export async function deriveLibraryId(libraryKey: Uint8Array<ArrayBuffer>): Promise<string> {
+  return hex(await hkdf(libraryKey, 'den/library/salt/v1', 'den/library/id/v1', 16));
+}
+
 export async function deriveKeys(libraryKey: Uint8Array<ArrayBuffer>): Promise<LibraryKeys> {
   const [id, enc, mac, token, member] = await Promise.all([
     hkdf(libraryKey, 'den/library/salt/v1', 'den/library/id/v1', 16),
