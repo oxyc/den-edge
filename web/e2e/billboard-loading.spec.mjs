@@ -393,3 +393,114 @@ test('the document starts its exact personalized hero before the app module answ
   await page.goto(`${E2E_ORIGIN}/?legacy-document=1#movies`);
   await expect(page.locator('link[rel="preload"][as="image"]')).toHaveCount(0);
 });
+
+// A household that has split into profiles: the Owner's lead is kept under the Owner library's key, the household's
+// own lead is what the library kept before the split.
+const OWNER_ID = 'a'.repeat(32);
+const KID_ID = 'b'.repeat(32);
+
+async function seedProfileHousehold(page, { marker, hint }) {
+  const lead = (library, title) => {
+    const id = createHash('sha256').update(library).digest('hex');
+    return [
+      `den.hero-lead.v1.${id}.fresh.all`,
+      {
+        at: Date.now(),
+        path: `/${title}.jpg`,
+        copy: { type: 'movie', id: 42, title, year: 2026, genres: ['Drama'], overview: title },
+      },
+    ];
+  };
+  const [ownerKey, ownerLead] = lead('owner-library', 'Owner-title');
+  const [householdKey, householdLead] = lead('household-library', 'Household-title');
+  await page.addInitScript(
+    ({ entries, pointer, marker, hint }) => {
+      localStorage.setItem(
+        'den.links',
+        JSON.stringify([
+          {
+            inboxKey: '0123456789abcdef',
+            libraryKey: 'household-library',
+            linkKey: 'fixture-link',
+          },
+        ]),
+      );
+      localStorage.setItem('den.billboard.fresh', '1');
+      localStorage.setItem('den.billboard.member-post', '1');
+      for (const [key, value] of entries) localStorage.setItem(key, JSON.stringify(value));
+      // One pointer per facet: the Owner session's write replaced the household's.
+      localStorage.setItem('den.hero-lead.current.v1.fresh.all', JSON.stringify(pointer));
+      localStorage.setItem('den.profile.active.v1', JSON.stringify(marker));
+      if (hint) localStorage.setItem('den.profile.hint.v1', JSON.stringify(hint));
+    },
+    {
+      entries: [
+        [ownerKey, ownerLead],
+        [householdKey, householdLead],
+      ],
+      pointer: { identity: 'owner-library', key: ownerKey },
+      marker,
+      hint,
+    },
+  );
+  await page.route('https://image.tmdb.org/t/p/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    }),
+  );
+  let releaseModule;
+  const moduleGate = new Promise((resolve) => (releaseModule = resolve));
+  let moduleStarted;
+  const moduleRequest = new Promise((resolve) => (moduleStarted = resolve));
+  await page.route('**/src/main.ts*', async (route) => {
+    moduleStarted();
+    await moduleGate;
+    await route.fulfill({ contentType: 'text/javascript', body: '' });
+  });
+  return { moduleRequest, releaseModule };
+}
+
+test('a remembered Owner on a profile household gets the Owner’s hero before the app module answers', async ({
+  page,
+}) => {
+  const { moduleRequest, releaseModule } = await seedProfileHousehold(page, {
+    marker: { version: 1, mode: 'persistent', profileId: OWNER_ID },
+    hint: {
+      version: 1,
+      profileId: OWNER_ID,
+      name: 'Owner',
+      avatar: 'owner',
+      libraryKey: 'owner-library',
+    },
+  });
+  const navigating = page.goto(`${E2E_ORIGIN}/`);
+  await moduleRequest;
+  await expect(
+    page.locator('[data-den-early-copy]:not([hidden]) [data-den-early-title]'),
+  ).toHaveText('Owner-title');
+  releaseModule();
+  await navigating;
+});
+
+test('a remembered Kid never gets the Owner’s or the household’s hero from the document', async ({
+  page,
+}) => {
+  // The Kid has no hint; the hint left in storage is the Owner's, whose profile is not the active one.
+  const { moduleRequest, releaseModule } = await seedProfileHousehold(page, {
+    marker: { version: 1, mode: 'persistent', profileId: KID_ID },
+    hint: {
+      version: 1,
+      profileId: OWNER_ID,
+      name: 'Owner',
+      avatar: 'owner',
+      libraryKey: 'owner-library',
+    },
+  });
+  const navigating = page.goto(`${E2E_ORIGIN}/`);
+  await moduleRequest;
+  await page.waitForTimeout(300);
+  await expect(page.locator('[data-den-early-billboard]:not([hidden])')).toHaveCount(0);
+  releaseModule();
+  await navigating;
+});

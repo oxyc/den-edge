@@ -385,6 +385,44 @@ it('exposes named discovery and retained-Home operations without a generic cache
   model.close();
 });
 
+it('asks a retained read again once the service is back, not answers it as nothing kept', async () => {
+  let refusals = 2;
+  class ReconnectingService extends FakeService {
+    override async query(query: LibraryQuery) {
+      if (query.kind === 'retained.billboard.get' && refusals-- > 0) {
+        setTimeout(() => this.status({ kind: 'ready', version: version(7) }), 0);
+        throw new LibraryServiceError({
+          code: 'not-ready',
+          message: 'library service is not ready',
+          retryable: true,
+        });
+      }
+      return super.query(query);
+    }
+  }
+  const model = new LibraryModel(new ReconnectingService(), options);
+  await model.ready;
+  const scope = { kind: 'personal', facet: null, fresh: false } as const;
+
+  await expect(model.retainedBillboard(scope)).resolves.toEqual({
+    kind: 'personal',
+    at: 1_000,
+    titles: [],
+  });
+  expect(refusals).toBe(-1);
+
+  // Any other refusal is the caller's to handle.
+  const refused = new FakeService();
+  refused.query = async () => {
+    throw new LibraryServiceError({ code: 'internal', message: 'no', retryable: true });
+  };
+  const other = new LibraryModel(refused, options);
+  await other.ready;
+  await expect(other.retainedBillboard(scope)).rejects.toThrow('no');
+  model.close();
+  other.close();
+});
+
 it('deep-copies a retained Home billboard onto the service wire', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);

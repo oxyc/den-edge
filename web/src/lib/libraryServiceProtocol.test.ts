@@ -335,6 +335,15 @@ describe('library service client protocol', () => {
       ok: false,
     });
     const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(3)));
+    expect(decodeTask({ kind: 'household.join', sourceLibraryKey: key })).toMatchObject({
+      ok: true,
+    });
+    expect(
+      decodeTask({ kind: 'household.join', sourceLibraryKey: key, pin: '1234' }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({ kind: 'household.join', sourceLibraryKey: key, pin: '12345' }),
+    ).toMatchObject({ ok: false });
     expect(
       decodeTask({ kind: 'profile-key-reset.start', pin: '1234', destinationLibraryKey: key }),
     ).toMatchObject({ ok: true });

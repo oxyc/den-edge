@@ -868,13 +868,14 @@ function task(value: unknown): value is LibraryTask {
     }
     case 'local-library.merge':
       return (
-        exact(value, ['kind', 'sourceLibraryKey', 'scope', 'keep']) &&
+        exact(value, ['kind', 'sourceLibraryKey', 'scope', 'keep', 'verify']) &&
         libraryKey(value.sourceLibraryKey) &&
         optional(
           value.scope,
           (scope): scope is 'household' | 'profile' => scope === 'household' || scope === 'profile',
         ) &&
-        optional(value.keep, (keep): keep is true => keep === true)
+        optional(value.keep, (keep): keep is true => keep === true) &&
+        optional(value.verify, (verify): verify is true => verify === true)
       );
     case 'household.create':
       return (
@@ -885,16 +886,24 @@ function task(value: unknown): value is LibraryTask {
           'ownerProfile',
           'ownerKey',
           'createdAt',
+          'ifKept',
         ]) &&
         libraryKey(value.householdKey) &&
         hexId(value.attempt) &&
         hexId(value.ownerProfile) &&
         libraryKey(value.ownerKey) &&
         value.ownerKey !== value.householdKey &&
-        integer(value.createdAt)
+        integer(value.createdAt) &&
+        optional(value.ifKept, (ifKept): ifKept is true => ifKept === true)
       );
     case 'profile.create-default':
       return exact(value, ['kind']);
+    case 'household.join':
+      return (
+        exact(value, ['kind', 'sourceLibraryKey', 'pin']) &&
+        libraryKey(value.sourceLibraryKey) &&
+        optional(value.pin, pin)
+      );
     case 'key-reset.move':
     case 'key-reset.settle':
     case 'key-reset.adopt':
@@ -2024,10 +2033,13 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'local-library.merge':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ['kind', 'outcome', 'retryAfterMs', 'held']) &&
         (value.outcome === 'merged' ||
           value.outcome === 'absent' ||
-          value.outcome === 'unavailable')
+          value.outcome === 'unavailable' ||
+          value.outcome === 'unverified') &&
+        optional(value.retryAfterMs, integer) &&
+        optional(value.held, integer)
       );
     case 'household.create':
       return (
@@ -2035,13 +2047,29 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         (value.outcome === 'created' ||
           value.outcome === 'refused' ||
           value.outcome === 'throttled' ||
-          value.outcome === 'unavailable') &&
+          value.outcome === 'unavailable' ||
+          value.outcome === 'empty') &&
         optional(value.retryAfterMs, integer)
       );
     case 'profile.create-default':
       return (
         exact(value, ['kind', 'outcome']) &&
         (value.outcome === 'created' || value.outcome === 'present')
+      );
+    case 'household.join':
+      return (
+        exact(value, ['kind', 'outcome', 'owner', 'kids']) &&
+        (value.outcome === 'joined'
+          ? nullable(value.owner, hexId) &&
+            record(value.kids) &&
+            Object.keys(value.kids).length <= 64 &&
+            Object.entries(value.kids).every(([from, to]) => hexId(from) && hexId(to))
+          : (value.outcome === 'pin-required' ||
+              value.outcome === 'pin-wrong' ||
+              value.outcome === 'refused-kids' ||
+              value.outcome === 'unavailable') &&
+            value.owner === undefined &&
+            value.kids === undefined)
       );
     case 'key-reset.move':
     case 'key-reset.settle':

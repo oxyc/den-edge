@@ -24,6 +24,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import type { LibraryModel } from './lib/libraryModel.svelte';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
+  import type { JoinLibrary } from './lib/browserHousehold';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
   import Button from './components/Button.svelte';
@@ -50,7 +51,8 @@
     preferences?: ProfilePreferences | null;
     content: ContentServiceClientPort;
     local?: boolean;
-    onjoin?: (libraryKey: string) => Promise<boolean>;
+    /** Present where this browser's own library or household can be brought into another. */
+    onjoin?: JoinLibrary;
     onresetkey?: () => Promise<KeyResetOutcome | null>;
     heldReset?: boolean;
     onadoptheld?: () => Promise<void>;
@@ -304,7 +306,7 @@
       <ConnectionsSection
         {link}
         {content}
-        onjoin={local ? onjoin : undefined}
+        {onjoin}
         onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
           ? onresetkey
           : undefined}
@@ -359,7 +361,9 @@
       />
       <AdvancedSection
         {link}
-        onjoin={local ? onjoin : undefined}
+        onjoin={local && onjoin
+          ? async (key: string) => (await onjoin(key)) === 'joined'
+          : undefined}
         recovery={link && !local ? recovery : undefined}
         remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
         {disabled}

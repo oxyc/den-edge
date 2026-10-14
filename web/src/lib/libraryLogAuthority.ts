@@ -84,6 +84,7 @@ import {
   type AssistantRecords,
 } from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
+import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
 import {
   workerStatusControl,
@@ -97,6 +98,9 @@ import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
 import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
 import { profilesApplyPolicy } from './profileMigrationCore';
+import { exclusive } from './exclusive';
+import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
+import { validateStoredProfileDirectory } from './profileDirectory';
 import {
   ProfileKeyResetService,
   ProfileResetUnauthorizedError,
@@ -916,6 +920,7 @@ export class LibraryLogAuthority {
       return this.#profileMigrationTask(task);
     if (task.kind === 'household.create') return this.#createHousehold(task);
     if (task.kind === 'profile.create-default') return this.#createDefaultKid();
+    if (task.kind === 'household.join') return this.#joinHousehold(task);
     if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
     if (task.kind === 'profile.policy.set') return this.#profilePolicyTask(task);
     if (task.kind === 'profile.create.ack') {
@@ -1055,6 +1060,8 @@ export class LibraryLogAuthority {
   async #createHousehold(
     task: Extract<LibraryTask, { kind: 'household.create' }>,
   ): Promise<LibraryAuthorityTaskResult> {
+    if (task.ifKept && !keptSomething(this.#log.rows()))
+      return { result: { kind: 'household.create', outcome: 'empty' }, affected: [] };
     const household = await LibraryLog.destination(
       task.householdKey,
       this.#fetch,
@@ -1120,6 +1127,88 @@ export class LibraryLogAuthority {
     return {
       result: { kind: 'profile.create-default', outcome: 'created' },
       affected: [{ kind: 'profiles' }],
+    };
+  }
+
+  /**
+   * This browser's own household joins this one (den#295, `householdJoin.ts`). Run under one lock per source, so a
+   * second tab waits and then finds the work done. The progress is kept sealed under this household's key on this
+   * device; den-edge is read afresh for everything else.
+   */
+  async #joinHousehold(
+    task: Extract<LibraryTask, { kind: 'household.join' }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    if (this.#options.mode !== 'online' || task.sourceLibraryKey === this.#options.libraryKey)
+      throw authorityError('invalid-request', 'only a household den-edge holds joins another');
+    const vault = this.#options.vault ?? null;
+    const open = (key: string, wire: 4 | 5) =>
+      LibraryLog.forReset(key, wire, this.#fetch, undefined, vault);
+    const source = await open(task.sourceLibraryKey, 5);
+    const name = `household-join/v1/${source.libraryId}`;
+    const binding = `household-join:${this.#log.libraryId}:1`;
+    const directory = async (log: LibraryLog) => {
+      const read = await log.readDirectory();
+      if (read === 'gone' || read === null) return read;
+      validateStoredProfileDirectory(read);
+      const household = joinHouseholdOf(read);
+      if (!household) throw new Error('The household’s directory has no live Owner');
+      return household;
+    };
+    const result = await exclusive(`den.household.join.${source.libraryId}`, () =>
+      joinHousehold(
+        {
+          state: async () => {
+            const kept = await this.#log.keptRequired<JoinState>(name, binding);
+            return kept.kind === 'value' ? kept.value : null;
+          },
+          keep: (state) => this.#log.keepRequired(name, state, binding),
+          source: async () => {
+            const household = await directory(source);
+            // A browser's household always has its directory: without one there is nothing to join from.
+            if (household === null) throw new Error('This browser’s household has no directory');
+            return household;
+          },
+          destination: async () => {
+            await this.#log.readToHead();
+            const household = await directory(this.#log);
+            if (household === 'gone') throw new Error('The household joined is not on den-edge');
+            return {
+              profiles: household,
+              pin: !!readApiKey(this.#log.settings('keys'), 'parentalPIN'),
+            };
+          },
+          pinMatches: (pin) => this.#ownerPinMatches(pin),
+          documents: async (key) => {
+            const read = await (await open(key, 4)).activityDocuments();
+            if (read === null) throw new Error('A profile library could not be read whole');
+            return read === 'gone' ? { documents: [], head: null } : read;
+          },
+          take: async (key, documents) =>
+            (key === null ? this.#log : await open(key, 4)).takeDocuments(documents),
+          createKid: async (operationId, kidName, maximumAge) => {
+            const kids = this.#profileKidCreate();
+            // A creation this device left pending or unacknowledged is finished first: the journal holds one at a time.
+            const earlier = await kids.resume();
+            if (earlier) await kids.acknowledge(earlier.receipt);
+            const stamps = [
+              await this.#clock.issue(),
+              await this.#clock.issue(),
+              await this.#clock.issue(),
+              await this.#clock.issue(),
+            ] as const;
+            const created = await kids.begin(operationId, kidName, maximumAge, stamps);
+            await kids.acknowledge(created.receipt);
+            return created.profile;
+          },
+          retire: async (key, head) =>
+            key === null ? source.retire() : (await open(key, 4)).retire(head ?? undefined),
+        },
+        task.pin,
+      ),
+    );
+    return {
+      result: { kind: 'household.join', ...result },
+      affected: result.outcome === 'joined' ? [{ kind: 'profiles' }] : [],
     };
   }
 

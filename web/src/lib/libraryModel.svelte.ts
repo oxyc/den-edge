@@ -17,6 +17,7 @@ import type {
   LibraryOverviewView,
   LibraryPreferencesPatch,
   StoredPreferenceValues,
+  LibraryQuery,
   LibraryQueryResult,
   LibraryTask,
   LibraryTaskResult,
@@ -45,6 +46,11 @@ import type {
 } from './libraryServiceSupervisor';
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+
+/** How often, and how long each time, a refused read of kept Home state waits for the service before it asks again. */
+const RETAINED_READ_ATTEMPTS = 4;
+const RECONNECT_WAIT_MS = 2_000;
+const RETAINED_READ_RETRY_MS = 50;
 
 /** Render views are service-owned replacements. Page code can read them but must never edit them in place. */
 export type Immutable<T> = T extends Primitive | ((...arguments_: never[]) => unknown)
@@ -124,6 +130,7 @@ export class LibraryModel {
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
+  readonly #readyWaiters = new Set<() => void>();
   #closed = false;
 
   /** Settles only after the service and all four Home-critical root replacements are ready. */
@@ -635,7 +642,7 @@ export class LibraryModel {
 
   async retainedHomeContinue(): Promise<boolean | null> {
     this.#assertOpen();
-    const { result } = await this.service.query({ kind: 'retained.home-continue.get' });
+    const { result } = await this.#retainedQuery({ kind: 'retained.home-continue.get' });
     if (result.kind !== 'retained.home-continue') throw wrongQueryResult('retained Home hint');
     return result.present;
   }
@@ -644,7 +651,7 @@ export class LibraryModel {
     scope: RetainedBillboardScope,
   ): Promise<Immutable<RetainedBillboard> | null> {
     this.#assertOpen();
-    const { result } = await this.service.query({
+    const { result } = await this.#retainedQuery({
       kind: 'retained.billboard.get',
       scope: structuredClone(scope),
     });
@@ -830,9 +837,23 @@ export class LibraryModel {
   mergeLocalLibrary(
     sourceLibraryKey: string,
     operationId?: string,
-    part: { scope?: 'household' | 'profile'; keep?: true } = {},
+    part: { scope?: 'household' | 'profile'; keep?: true; verify?: true } = {},
   ) {
     return this.task({ kind: 'local-library.merge', sourceLibraryKey, ...part }, operationId);
+  }
+
+  /** This browser's own household joins the one this model opens (`household.join`); asked again, it finishes it. */
+  async joinHousehold(
+    sourceLibraryKey: string,
+    pin?: string,
+  ): Promise<Extract<LibraryTaskResult, { kind: 'household.join' }>> {
+    const { result } = await this.task({
+      kind: 'household.join',
+      sourceLibraryKey,
+      ...(pin === undefined ? {} : { pin }),
+    });
+    if (result.kind !== 'household.join') throw wrongQueryResult('household join');
+    return result;
   }
 
   /** Start or finish this browser's own household (`household.create`); asked of the library kept only here. */
@@ -973,7 +994,44 @@ export class LibraryModel {
     this.#runtime = closedSnapshot(this.#runtime);
     this.#connection = 'closed';
     this.#status = Object.freeze({ kind: 'closed' });
+    for (const waiter of [...this.#readyWaiters]) waiter();
     this.service.close();
+  }
+
+  /**
+   * What a page kept for its first paint, asked again once the service is back when it was asked while the service
+   * reconnects (the household reopens on a newer wire at startup). A refused read answered as "nothing kept" paints
+   * the fallback over what was kept.
+   */
+  async #retainedQuery(
+    query: Extract<LibraryQuery, { kind: 'retained.billboard.get' | 'retained.home-continue.get' }>,
+  ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.service.query(query);
+      } catch (error) {
+        const { code, retryable } = failureFrom(error);
+        if (code !== 'not-ready' || !retryable || attempt === RETAINED_READ_ATTEMPTS) throw error;
+        await this.#reconnected();
+      }
+    }
+  }
+
+  /** Settles once the service reports ready again, or after a bounded wait: the caller asks again either way. */
+  #reconnected(): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.#readyWaiters.delete(done);
+        resolve();
+      };
+      // A service that already reports ready is still refusing for a moment: look again shortly.
+      const timer = setTimeout(
+        done,
+        this.#connection === 'ready' ? RETAINED_READ_RETRY_MS : RECONNECT_WAIT_MS,
+      );
+      this.#readyWaiters.add(done);
+    });
   }
 
   #command(command: LibraryCommand, operationId?: string): Promise<LibraryServiceCommandResult> {
@@ -989,6 +1047,7 @@ export class LibraryModel {
     if (status.kind === 'ready') {
       this.#connection = 'ready';
       this.#openFailure = undefined;
+      for (const waiter of [...this.#readyWaiters]) waiter();
     } else if (status.kind === 'reconnecting') this.#connection = 'reconnecting';
     else if (status.kind === 'moved') {
       this.#connection = 'failed';

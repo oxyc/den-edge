@@ -24,11 +24,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 // The only inline script in the app shell: its one retry when the shell's own startup files are missing, and its
 // parser-time personalized lead preload and static hero insertion. A hash keeps the shared shell cacheable and
 // grants no other inline script permission. The test below binds this value to web/index.html's bytes.
-const EARLY_HERO_SCRIPT: &str = "'sha256-FTcr5ENLVdWiUi52L/q38JoBhr9+EXfxXWIcFsjUyBQ='";
+const EARLY_HERO_SCRIPT: &str = "'sha256-90M+iVmuIa5B+kjKZ8jGh9l0Mt8vDnlcSqOLsLIqfZQ='";
 #[cfg(test)]
 const EARLY_HERO_SHA256: [u8; 32] = [
-    21, 55, 43, 228, 67, 75, 85, 213, 162, 82, 46, 118, 47, 250, 183, 240, 154, 1, 134, 191, 126, 17, 119,
-    241, 93, 98, 28, 22, 200, 212, 200, 20,
+    247, 67, 62, 137, 89, 174, 33, 174, 65, 250, 72, 202, 103, 200, 198, 135, 217, 116, 50, 223, 47, 14, 121,
+    92, 74, 163, 139, 176, 178, 42, 125, 148,
 ];
 
 /// Direct-media DNS names are short-lived sibling labels. Keep script-driven HLS bounded to that

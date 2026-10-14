@@ -583,18 +583,21 @@ export type LibraryTask =
   | { kind: 'history.import'; items: HistoryImportItem[] }
   /**
    * A library kept only in this browser written into this one. `scope` takes only the household half or only the
-   * profile half of its rows; `keep` leaves the source in place for the other half to be taken from it.
+   * profile half of its rows; `keep` leaves the source in place for the other half to be taken from it. `verify` reads
+   * this library back from den-edge afterwards and answers `unverified` unless it holds everything that was written.
    */
   | {
       kind: 'local-library.merge';
       sourceLibraryKey: string;
       scope?: 'household' | 'profile';
       keep?: true;
+      verify?: true;
     }
   /**
    * Start, or finish, the household `householdKey` that a browser with no TV makes on its first kept action (den#295):
    * born at wire minimum 5 with an Owner library and the directory a committed Owner split stores. Idempotent on its
-   * inputs, which the page keeps before it asks.
+   * inputs, which the page keeps before it asks. `ifKept` starts nothing (`empty`) while the library kept here holds
+   * nothing a person kept: a browser that kept a library before households is moved on load, one that only browsed is not.
    */
   | {
       kind: 'household.create';
@@ -603,9 +606,15 @@ export type LibraryTask =
       ownerProfile: string;
       ownerKey: string;
       createdAt: number;
+      ifKept?: true;
     }
   /** The household's Kid, made once when its directory has none: no Owner PIN is asked, since none may exist yet. */
   | { kind: 'profile.create-default' }
+  /**
+   * This browser's own household `sourceLibraryKey` joins this one (den#295): its Owner's and Kids' activity merge in,
+   * then it is retired. `pin` is this household's Owner PIN, asked once when it has one.
+   */
+  | { kind: 'household.join'; sourceLibraryKey: string; pin?: string }
   | { kind: 'key-reset.move'; destinationLibraryKey: string }
   | { kind: 'key-reset.settle'; destinationLibraryKey: string }
   | { kind: 'key-reset.adopt'; destinationLibraryKey: string }
@@ -705,17 +714,37 @@ export type LibraryTaskResult =
   | { kind: 'recovery.abandon'; outcome: 'abandoned' }
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
-  | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
+  | {
+      kind: 'local-library.merge';
+      /** `unverified`: written, but den-edge's copy read back lacks some of it. `retryAfterMs`: den-edge asked to wait. */
+      outcome: 'merged' | 'absent' | 'unavailable' | 'unverified';
+      retryAfterMs?: number;
+      /** With `verify`, merged: how many live rows den-edge held when it was read back. */
+      held?: number;
+    }
   | {
       kind: 'household.create';
       /**
        * `refused`: den-edge starts no library for this browser (`403 new_libraries_closed`); `throttled`: not now, try
-       * again after `retryAfterMs`; `unavailable`: anything else, to be tried again with the same inputs.
+       * again after `retryAfterMs`; `unavailable`: anything else, to be tried again with the same inputs; `empty`:
+       * `ifKept` and nothing is kept here, so nothing was asked.
        */
-      outcome: 'created' | 'refused' | 'throttled' | 'unavailable';
+      outcome: 'created' | 'refused' | 'throttled' | 'unavailable' | 'empty';
       retryAfterMs?: number;
     }
   | { kind: 'profile.create-default'; outcome: 'created' | 'present' }
+  | {
+      kind: 'household.join';
+      /**
+       * `joined`: everything carried and the source retired; `owner` is this household's Owner and `kids` the Kid each
+       * source Kid became (both empty for a household without profiles). `pin-required`/`pin-wrong`: ask for the
+       * Owner PIN. `refused-kids`: this household has no profiles and a source Kid has activity. Nothing is lost on
+       * any answer but `joined`; the same task finishes it later.
+       */
+      outcome: 'joined' | 'pin-required' | 'pin-wrong' | 'refused-kids' | 'unavailable';
+      owner?: string | null;
+      kids?: Record<string, string>;
+    }
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
   | { kind: 'assistant.consent'; grant: string; key: string; readKey?: string }
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }

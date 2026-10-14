@@ -52,8 +52,6 @@ const KEEP = flag('keep') || process.env.REHEARSE_KEEP === '1';
 const HEADED = flag('headed');
 // The synthetic household at the size a long-lived one reaches (about 6,100 rows) unless asked for the small one.
 const LARGE = !(flag('small') || process.env.REHEARSE_SMALL === '1');
-// Every browser opts in to drawing a returning Owner's first frame from the Owner library (`den.fastOwnerFrame`).
-const FAST_OWNER_FRAME = flag('fast-owner-frame') || process.env.REHEARSE_FAST_OWNER_FRAME === '1';
 
 if (!!DATA !== !!KEY_FILE)
   fail('give both REHEARSE_DATA and REHEARSE_KEY_FILE, or neither for a synthetic household');
@@ -277,14 +275,6 @@ async function launch(profileDir) {
   };
   ctx.pages().forEach(watch);
   ctx.on('page', watch);
-  if (FAST_OWNER_FRAME)
-    await ctx.addInitScript(() => {
-      try {
-        localStorage.setItem('den.fastOwnerFrame', '1');
-      } catch {
-        // about:blank has no storage.
-      }
-    });
   return ctx;
 }
 
@@ -335,6 +325,13 @@ function watchOwnerGate() {
  * and its shelf is never drawn; what is under test is when the shelf appears, not where its names come from.
  */
 async function nameSyntheticTitles(ctx) {
+  await ctx.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'max-age=3600' },
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    }),
+  );
   await ctx.route('**/tmdb/3/**', (route) => {
     const url = new URL(route.request().url());
     const [, , , kind, id] = url.pathname.split('/');
@@ -347,6 +344,8 @@ async function nameSyntheticTitles(ctx) {
           title: `Film ${id}`,
           release_date: '2001-01-01',
           poster_path: null,
+          // A billboard keeps a lead only for a title with a backdrop.
+          backdrop_path: `/backdrop-${id}.jpg`,
         },
       });
     if (kind === 'tv')
@@ -363,6 +362,54 @@ async function nameSyntheticTitles(ctx) {
       });
     return route.fulfill({ status: 404, json: { status_code: 34 } });
   });
+}
+
+// The billboards atlas answers with. The shared pool is one title for everyone; every ranking asked for a library is a
+// new one (atlas ranks again as the day, the catalogue and the library move), so each session that ranks and keeps a
+// billboard keeps a different lead from the others.
+const SHARED_LEAD_ID = 9201;
+
+/** atlas on the page's own origin, answering what a billboard asks: its manifest, the shared pool and a ranking. */
+async function stubAtlas(ctx, firstLead) {
+  let lead = firstLead;
+  const slides = (first) => ({
+    slides: [first, first + 1, first + 2].map((id) => ({ type: 'movie', id })),
+  });
+  await ctx.route('**/atlas/**', async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    if (pathname === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', version: '0.0.0' } });
+    if (pathname.startsWith('/atlas/recommend/') && request.method() === 'GET')
+      return route.fulfill({ json: slides(SHARED_LEAD_ID) });
+    if (pathname === '/atlas/recommend' && request.method() === 'POST')
+      return route.fulfill({ json: slides((lead += 10)) });
+    return route.fulfill({ status: 404, json: {} });
+  });
+}
+
+/**
+ * Init script (runs in the page, from navigation start): the title on the billboard on every painted frame, kept when
+ * it changes. That is the front slide of the library's billboard, or the early copy the page draws before it; a blank
+ * frame is a title of null.
+ */
+function recordBillboard() {
+  window.__billboards = [];
+  const frame = () => {
+    const front = document.querySelector(
+      'main .billboard article.slide[aria-hidden="false"] .title-link',
+    );
+    const early = document.querySelector(
+      '[data-den-early-billboard]:not([hidden]) [data-den-early-title]',
+    );
+    const title = front?.textContent || early?.textContent || null;
+    const source = front?.textContent ? 'library' : early?.textContent ? 'shell' : null;
+    const last = window.__billboards.at(-1);
+    if (!last || last.title !== title || last.source !== source)
+      window.__billboards.push({ ms: Math.round(performance.now()), title, source });
+    if (performance.now() < 30_000) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
 }
 
 // A page that answers: every round trip into its main thread within a second, from navigation start through the
@@ -553,7 +600,7 @@ async function stubStreaming(ctx, asked, phase = () => '') {
  * An atlas the page finds on its own origin: every title is rated 12+, and each request that names a policy has its
  * `maximumAge` noted in `asked` under the `phase()` it was made in (null when the request names none).
  */
-async function stubAtlas(ctx, asked, phase = () => '') {
+async function stubPolicyAtlas(ctx, asked, phase = () => '') {
   await ctx.route(/\/atlas\//, (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/atlas/manifest.json')
@@ -626,7 +673,7 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
   await nameSyntheticTitles(ctx);
   await stubStreaming(ctx, asked, () => phase);
   const atlasAsked = [];
-  await stubAtlas(ctx, atlasAsked, () => phase);
+  await stubPolicyAtlas(ctx, atlasAsked, () => phase);
   const agesIn = (name) => [
     ...new Set(atlasAsked.filter((entry) => entry.phase === name).map((entry) => entry.maximumAge)),
   ];
@@ -966,9 +1013,7 @@ async function main() {
   const { wire, close } = await loadWire();
   let edge;
   try {
-    console.log(
-      `${LARGE ? 'large' : 'small'} household, fast Owner frame ${FAST_OWNER_FRAME ? 'on' : 'off'}`,
-    );
+    console.log(`${LARGE ? 'large' : 'small'} household`);
     // 1. data and key
     step('data');
     const dataDir = join(work, 'edge-data');
@@ -1308,9 +1353,8 @@ async function main() {
         }))
         .catch(() => null);
       if (path === '/') {
-        // With the opt-in, the Owner's own library opens from its local cache on the first frame, so the shelves that
-        // come from it are already in the first frame that draws any shelf, and never pop in afterwards. Without it
-        // the bootstrap session is drawn first and they pop in; the timings are reported either way.
+        // The Owner's own library opens from its local cache on the first frame, so the shelves that come from it are
+        // already in the first frame that draws any shelf, and never pop in afterwards.
         const first = seen?.frames.findIndex((f) => f.continueWatching || f.watchlist || f.shelves);
         const at = first >= 0 ? seen.frames[first] : null;
         const detail = JSON.stringify({
@@ -1318,13 +1362,11 @@ async function main() {
           continueWatchingAtMs: seen?.frames.find((f) => f.continueWatching)?.ms ?? null,
           watchlistAtMs: seen?.frames.find((f) => f.watchlist)?.ms ?? null,
         });
-        if (FAST_OWNER_FRAME)
-          check(
-            'a returning Owner paints Continue Watching and Watchlist in the first shelf frame',
-            !!at && at.continueWatching && at.watchlist,
-            detail,
-          );
-        else console.log(`first shelf frame (no fast Owner frame): ${detail}`);
+        check(
+          'a returning Owner paints Continue Watching and Watchlist in the first shelf frame',
+          !!at && at.continueWatching && at.watchlist,
+          detail,
+        );
       }
       check(`the Owner hint was remembered after ${path} settled`, !!seen?.hint);
       check(
@@ -1460,6 +1502,53 @@ async function main() {
         workers <= MAX_SESSION_WORKERS,
         `${workers} Workers started (the household bootstrap, the Owner library, and the directory read)`,
       );
+      await ctx.close().catch(() => {});
+    }
+
+    // 4b''. A returning Owner's billboard. The page paints the Owner's kept lead from index.html before any script
+    // runs, then the Owner library's own billboard takes over: from navigation start, the title on screen is the Owner's
+    // from the first painted frame and never changes. The first visit settles the Owner and keeps a billboard; every
+    // visit after it is a returning Owner, recorded from navigation start.
+    step("a returning Owner's billboard is the Owner's from the first paint and never changes");
+    {
+      ctx = await launch(join(work, 'profile-owner-billboard'));
+      await ctx.addInitScript(
+        ([key, value]) => localStorage.setItem(key, value),
+        [
+          'den.profile.active.v1',
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+        ],
+      );
+      await ctx.addInitScript(recordBillboard);
+      await nameSyntheticTitles(ctx);
+      await stubAtlas(ctx, 9500);
+      const heroPage = await seedLink(ctx, edge, keyText);
+      for (const visit of [1, 2, 3]) {
+        await heroPage.goto(`${edge.origin}/`);
+        await heroPage
+          .locator('main')
+          .getByText('Continue Watching')
+          .first()
+          .waitFor({ timeout: 60_000 });
+        await sleep(6000);
+        const frames = (await heroPage.evaluate(() => window.__billboards).catch(() => null)) ?? [];
+        console.log(`billboard by painted frame, visit ${visit}: ${JSON.stringify(frames)}`);
+        if (visit === 1) continue;
+        const titles = frames.flatMap((f) => (f.title === null ? [] : [f.title]));
+        const painted = frames.find((f) => f.title !== null);
+        const blanks = frames.slice(frames.indexOf(painted)).filter((f) => f.title === null);
+        check(
+          `a returning Owner's billboard never changes title after it first paints (visit ${visit})`,
+          titles.length > 0 && new Set(titles).size === 1,
+          `${titles.length ? [...new Set(titles)].join(' -> ') : 'no billboard'} (${blanks.length} blank frames after first paint)`,
+        );
+        // The page's own early copy (index.html, before any script) is the first thing painted, not the library's.
+        check(
+          `a returning Owner's billboard is painted before the app loads (visit ${visit})`,
+          painted?.source === 'shell',
+          `first painted from ${painted?.source ?? 'nothing'} at ${painted?.ms ?? '-'} ms`,
+        );
+      }
       await ctx.close().catch(() => {});
     }
 
