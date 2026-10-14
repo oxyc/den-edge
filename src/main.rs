@@ -125,6 +125,9 @@ pub struct AppState {
     /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
     /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
     pub profile_migration_enabled: bool,
+    /// What `/config` tells the Apple TV about profiles (env `PROFILES_TV`): `Some(true)` enables them,
+    /// `Some(false)` is the operator's explicit rollback, and `None` omits the key so the TV stays "unavailable".
+    pub profiles_tv: Option<bool>,
     /// Exact household library ids enrolled for profiles-v1 preparation (env `PROFILE_PREPARE_HOUSEHOLDS`).
     /// This is transport authority, not runtime truth: committed runtime is derived by a client only after it
     /// decrypts and validates the stored directory. An empty set keeps every legacy household off.
@@ -345,6 +348,7 @@ impl AppState {
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
+            profiles_tv: None,
             profile_prepare_households: HashSet::new(),
             reset_sweeps: Mutex::new(HashSet::new()),
             relays: Vec::new(),
@@ -464,6 +468,12 @@ async fn main() {
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
     state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
+    state.profiles_tv = env_opt("PROFILES_TV").and_then(|value| {
+        parse_tri_state("PROFILES_TV", &value).unwrap_or_else(|reason| {
+            eprintln!("{reason}");
+            std::process::exit(1);
+        })
+    });
     state.profile_prepare_households = env_opt("PROFILE_PREPARE_HOUSEHOLDS")
         .map(|value| {
             parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", &value).unwrap_or_else(|reason| {
@@ -722,6 +732,17 @@ fn env_flag(name: &str, default: bool) -> bool {
     match env_opt(name) {
         None => default,
         Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false"),
+    }
+}
+
+/// A value that is on, off, or deliberately unsaid. Unlike `env_flag`, anything outside the six spellings is an
+/// error: a mistyped rollback signal must stop the start, not be read as "on".
+fn parse_tri_state(name: &str, value: &str) -> Result<Option<bool>, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "1" | "true" | "on" => Ok(Some(true)),
+        "0" | "false" | "off" => Ok(Some(false)),
+        _ => Err(format!("{name} is {value:?}: expected 1, true, on, 0, false or off")),
     }
 }
 
@@ -987,6 +1008,25 @@ mod tests {
             "0123456789abcdef0123456789abcdef,0123456789abcdef0123456789abcdef",
         ] {
             assert!(parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn profiles_tv_is_tri_state_and_rejects_anything_else() {
+        for (value, expected) in [
+            ("", None),
+            ("  ", None),
+            ("1", Some(true)),
+            ("true", Some(true)),
+            (" ON ", Some(true)),
+            ("0", Some(false)),
+            ("False", Some(false)),
+            ("off", Some(false)),
+        ] {
+            assert_eq!(parse_tri_state("PROFILES_TV", value), Ok(expected), "{value:?}");
+        }
+        for invalid in ["yes", "no", "2", "enabled", "tru", "1,0"] {
+            assert!(parse_tri_state("PROFILES_TV", invalid).is_err(), "{invalid}");
         }
     }
 
