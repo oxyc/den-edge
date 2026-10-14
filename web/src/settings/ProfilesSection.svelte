@@ -54,8 +54,9 @@
     try {
       status = await model.profileMigrationStatus();
       failure = null;
-    } catch {
+    } catch (error) {
       // Capability 404/off and transport failures are deliberately indistinguishable here.
+      console.warn('den: profile setup status could not be read', error);
       status = { kind: 'profile-migration.status', phase: 'off' };
       return;
     }
@@ -63,8 +64,9 @@
       try {
         const resumed = await model.profileCreateStatus();
         if (resumed.phase === 'created') created = `${resumed.name} is ready.`;
-      } catch {
+      } catch (error) {
         // The household is still profile-aware. A transient Kid-journal retry must not hide profile settings.
+        console.error('den: a pending Kid profile could not be resumed', error);
         failure = 'A pending Kid profile couldn’t be resumed yet. Try again when Den is online.';
       }
     }
@@ -85,7 +87,8 @@
       modal = 'enable';
       pin = '';
       denied = false;
-    } catch {
+    } catch (error) {
+      console.error('den: the profile setup source could not be observed', error);
       failure = 'Profiles can’t be prepared on this library yet.';
       await refresh();
     }
@@ -110,7 +113,8 @@
       modal = 'recover';
       pin = '';
       denied = false;
-    } catch {
+    } catch (error) {
+      console.error('den: profile recovery could not be observed', error);
       failure = 'Profile recovery is not available yet.';
     }
   }
@@ -147,7 +151,8 @@
       if (result.kind !== 'profile.create') throw new Error('Wrong profile creation result');
       created = `${result.name} is ready.`;
       finishModal();
-    } catch {
+    } catch (error) {
+      console.error('den: the Kid profile could not be created', error);
       failure = 'The Kid profile couldn’t be created safely. Enter your PIN and try again.';
     } finally {
       working = false;
@@ -235,7 +240,8 @@
       }
       finishModal();
       await refresh();
-    } catch {
+    } catch (error) {
+      console.error(`den: profile ${modal === 'recover' ? 'recovery' : 'setup'} failed`, error);
       if (pinEstablished && modal === 'create-pin') finishModal();
       failure =
         modal === 'recover'
@@ -253,7 +259,8 @@
     try {
       await model.cancelProfileMigration(status.attempt);
       await refresh();
-    } catch {
+    } catch (error) {
+      console.error('den: profile setup could not be cancelled', error);
       failure = 'The profile setup couldn’t be cancelled safely.';
     } finally {
       working = false;
