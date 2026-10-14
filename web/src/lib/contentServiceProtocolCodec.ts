@@ -5,6 +5,7 @@ import {
   type ContentCatalogSpec,
   type ContentDiscoverQuery,
   type ContentImportLookup,
+  type ContentPolicy,
   type ContentProvider,
   type ContentProviderKey,
   type ContentRelatedQuery,
@@ -71,6 +72,18 @@ function titleRef(value: unknown, onlyTv = false): value is ContentTitleRef {
 
 function region(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Z]{2}$/.test(value);
+}
+
+function contentPolicy(value: unknown): value is ContentPolicy {
+  return (
+    record(value) &&
+    exact(value, ['maximumAge', 'unknownRatings', 'kidAudience']) &&
+    (value.maximumAge === null || (integer(value.maximumAge) && value.maximumAge <= 18)) &&
+    (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
+    (value.kidAudience === undefined ||
+      value.kidAudience === 'child' ||
+      value.kidAudience === 'child-or-teen')
+  );
 }
 
 function serviceBase(value: unknown): value is string | null {
@@ -340,6 +353,13 @@ function request(value: unknown): value is ContentRequest {
       );
     case 'title.external-id':
       return exact(value, ['kind', 'title']) && titleRef(value.title);
+    case 'title.eligibility':
+      return (
+        exact(value, ['kind', 'titles']) &&
+        Array.isArray(value.titles) &&
+        value.titles.length <= CONTENT_SERVICE_WIRE_LIMITS.titles &&
+        value.titles.every((candidate) => titleRef(candidate))
+      );
     case 'season':
       return (
         exact(value, ['kind', 'title', 'season']) &&
@@ -457,6 +477,12 @@ function result(value: unknown): value is ContentResult {
       return exact(value, ['kind', 'extras']) && record(value.extras);
     case 'title.external-id':
       return exact(value, ['kind', 'imdbId']) && resource(value.imdbId);
+    case 'title.eligibility':
+      return (
+        exact(value, ['kind', 'allowed']) &&
+        boundedArray(value.allowed) &&
+        value.allowed.every((candidate) => titleRef(candidate))
+      );
     case 'season':
       return exact(value, ['kind', 'episodes']) && resource(value.episodes);
     case 'person':
@@ -572,9 +598,10 @@ export function decodeContentServiceClientMessage(
   if (mismatch) return { ok: false, error: mismatch };
   if (input.type === 'content-query') {
     if (
-      !exact(input, ['type', 'protocol', 'requestId', 'request']) ||
+      !exact(input, ['type', 'protocol', 'requestId', 'request', 'policy']) ||
       !text(input.requestId, 256) ||
-      !request(input.request)
+      !request(input.request) ||
+      !optional(input.policy, contentPolicy)
     )
       return { ok: false, error: failure('invalid-request', 'content query is invalid') };
     return { ok: true, value: input as unknown as ContentServiceClientMessage };

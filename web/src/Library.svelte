@@ -716,6 +716,7 @@
             content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
+            restricted: session.restricted,
           });
           if (blocked) {
             busy = false;
@@ -753,6 +754,7 @@
             content: session.content,
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
+            restricted: session.restricted,
           });
           if (blocked) {
             failure = blocked;
@@ -859,6 +861,22 @@
     })();
   });
 
+  /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
+  async function advance(next: Target) {
+    const blocked = await playGuard(next.title, {
+      content: session.content,
+      region: detailPrefs.region,
+      ceiling: detailPrefs.ceiling,
+      restricted: session.restricted,
+    });
+    if (blocked) {
+      playing = null;
+      session.notify(blocked);
+      return;
+    }
+    playing = next;
+  }
+
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
   function resumePoint(target: Target): { fraction: number; seconds?: number } {
     const continued = continueEntries.find(
@@ -922,7 +940,9 @@
     void DetailScreen.load();
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
-    if (!reel) return;
+    // A trailer warm-up is keyed by the title alone, with nothing to check the policy against. A restricted
+    // profile's trailer is asked of reel only once its page has established the title.
+    if (!reel || session.restricted) return;
     void prepareTrailers(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
       surface: 'audible',
       player: nativeHls() ? 'native' : 'hls.js',
@@ -1218,6 +1238,11 @@
    */
   const memberPost = memberPostOn();
   const fresh = freshOn();
+  /** The retained-billboard scope's policy: present only under a content policy, so the legacy names are unchanged. */
+  const retainedPolicy = () => {
+    const policy = session.policyKey;
+    return policy ? { policy } : {};
+  };
   /** The title on the billboard's screen, which a new ranking leaves in place. */
   let slideShown = $state<Title>();
   /**
@@ -1265,8 +1290,8 @@
     }
     retainedBillboardReady = false;
     const scope: RetainedBillboardScope = memberPost
-      ? { kind: 'personal', facet: type, fresh }
-      : { kind: 'shared', facet: type, fresh };
+      ? { kind: 'personal', facet: type, fresh, ...retainedPolicy() }
+      : { kind: 'shared', facet: type, fresh, ...retainedPolicy() };
     let current = true;
     void model.ready
       .then(() => (current ? model.retainedBillboard(scope) : null))
@@ -1364,16 +1389,18 @@
           )
         : null;
     const kept = ranked
-      ? model!.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
-          (saved) =>
-            saved?.kind === 'personal'
-              ? (displayableKept({
-                  at: saved.at,
-                  titles: structuredClone(saved.titles) as RecommendedTitle[],
-                })?.titles ?? null)
-              : null,
-          () => null,
-        )
+      ? model!
+          .retainedBillboard({ kind: 'personal', facet: type, fresh, ...retainedPolicy() })
+          .then(
+            (saved) =>
+              saved?.kind === 'personal'
+                ? (displayableKept({
+                    at: saved.at,
+                    titles: structuredClone(saved.titles) as RecommendedTitle[],
+                  })?.titles ?? null)
+                : null,
+            () => null,
+          )
       : Promise.resolve(null);
     void kept
       .then(async (personal) => {
@@ -1390,13 +1417,13 @@
         if (model) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
-            session.identity.retainedScope,
+            session.retainedScope,
             type,
             fresh,
             picked,
             (kept) =>
               model.retainBillboard(
-                { kind: 'personal', facet: type, fresh },
+                { kind: 'personal', facet: type, fresh, ...retainedPolicy() },
                 { kind: 'personal', at: kept.at, titles: kept.titles },
               ),
             keptAt,
@@ -1434,7 +1461,10 @@
     featured = picked;
     if (model)
       void model
-        .retainBillboard({ kind: 'shared', facet: type, fresh }, { kind: 'shared', titles: picked })
+        .retainBillboard(
+          { kind: 'shared', facet: type, fresh, ...retainedPolicy() },
+          { kind: 'shared', titles: picked },
+        )
         .catch(warnKeep);
   }
 
@@ -1708,7 +1738,7 @@
     {routes}
     onready={() => (heroReadyKey = heroKey)}
     onretained={(title, detail) =>
-      void enrichPersonalBackdrop(session.identity.retainedScope, facet, fresh, title, detail)}
+      void enrichPersonalBackdrop(session.retainedScope, facet, fresh, title, detail)}
     onplay={playHere && ((title) => playHere(title))}
     rowOf={model ? rowOf : undefined}
     onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
@@ -1849,7 +1879,7 @@
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
       onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
-      onnext={after ? () => (playing = after) : undefined}
+      onnext={after ? () => void advance(after) : undefined}
       onclose={() => (playing = null)}
     />
   {/key}

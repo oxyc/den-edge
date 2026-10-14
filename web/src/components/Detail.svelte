@@ -235,6 +235,8 @@
    * spent 24 ms in this flush.
    */
   let detail = $state.raw<TitleDetail | null | undefined>();
+  /** The active profile's content policy does not allow this title: nothing about it is shown or offered. */
+  let withheld = $state(false);
   /** The curated studios credited on this title; undefined while they are asked for. */
   let iconicStudios = $state.raw<IconicStudio[] | undefined>();
   /** atlas's facts about this title; undefined while they are asked for. */
@@ -304,6 +306,7 @@
     void retry;
     const controller = new AbortController();
     detail = undefined;
+    withheld = false;
     season = null;
     seasonEpisodes = undefined;
     displayedSeason = null;
@@ -315,6 +318,11 @@
       .query({ kind: 'title.detail', title: current, region: country }, controller.signal)
       .then(({ detail: loaded }) => {
         if (controller.signal.aborted) return;
+        // The active profile's policy refused the title (a deep link, or Back after a profile switch).
+        withheld =
+          loaded.state === 'unavailable' &&
+          loaded.provider === 'atlas' &&
+          loaded.reason === 'refused';
         detail = loaded.state === 'ready' ? loaded.value : null;
         season = detail ? seriesPresentation(detail, episodes, row).initialSeason : null;
       })
@@ -582,10 +590,20 @@
     if (d && picked !== null) (onplayhere ?? onplay)?.(d.title, picked, number);
   }
 
+  /** The active profile's policy, asked again where a download starts (`title.eligibility`). */
+  const entitled = () =>
+    content.query({ kind: 'title.eligibility', titles: [{ type: ref.type, id: ref.id }] }).then(
+      (answer) => answer.allowed.length === 1,
+      () => false,
+    );
   async function queueEpisode(episode: Episode) {
     const d = untrack(() => detail),
       picked = untrack(() => displayedSeason);
     if (!d || !model || guestScout || !d.imdbId || picked === null) return;
+    if (!(await entitled())) {
+      notify?.('This title isn’t available on this profile.');
+      return;
+    }
     const result = await downloadEpisode(model, d.imdbId, picked, episode, d.title);
     if (result === 'ready') notify?.('This episode is already ready to play.');
     else if (result === 'unavailable')
@@ -595,7 +613,9 @@
   }
 </script>
 
-{#if detail === null}
+{#if withheld}
+  <p class="note">This title isn’t available on this profile.</p>
+{:else if detail === null}
   <p class="note">Couldn’t load this title from TMDB.</p>
   <button class="retry" onclick={() => retry++}>Try again</button>
 {:else}
@@ -767,6 +787,7 @@
       <div class="title-sources" hidden={restricted}>
         <TitleSources
           model={model ?? undefined}
+          allowed={entitled}
           bind:this={sourcesPanel}
           imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
           {active}
@@ -810,6 +831,7 @@
           {#if model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
             <SeasonDownload
               {model}
+              allowed={entitled}
               title={d.title}
               imdb={d.imdbId}
               season={displayedSeason}

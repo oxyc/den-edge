@@ -9,7 +9,15 @@
 import { parseWarnings, type Warning } from './contentWarnings';
 import { titlesOf } from './atlasRows';
 import { ContentServiceFault, type ContentServiceAuthority } from './contentServiceCore';
+import {
+  ageAllowed,
+  isAgeRestricted,
+  isRestricted,
+  policedAtlasFetch,
+  policyKey,
+} from './contentPolicy';
 import type {
+  ContentPolicy,
   ContentProvider,
   ContentRequest,
   ContentResult as ServiceContentResult,
@@ -211,6 +219,13 @@ function refused(response: Response, now: () => number): ProviderResult<never> {
   return unavailable('upstream', response, now);
 }
 
+/** What a direct read of a title the active profile's policy does not establish answers. */
+const REFUSED: Extract<OptionalContent<never>, { state: 'unavailable' }> = {
+  state: 'unavailable',
+  provider: 'atlas',
+  reason: 'refused',
+};
+
 const optionalReason = (
   reason: ContentUnavailableReason,
 ): Extract<OptionalContent<never>, { state: 'unavailable' }>['reason'] =>
@@ -277,7 +292,11 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     this.#atlasTitleCursors.clear();
   }
 
-  async query(request: ContentRequest, signal: AbortSignal): Promise<ServiceContentResult> {
+  async query(
+    request: ContentRequest,
+    signal: AbortSignal,
+    policy?: ContentPolicy,
+  ): Promise<ServiceContentResult> {
     // Source discovery is ordering-sensitive: configure synchronously before any later query can observe the old
     // source, even while paired credentials are still opening.
     if (request.kind === 'sources.configure') {
@@ -293,6 +312,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         let next = 0;
         const read = async () => {
           for (let ref = request.titles[next++]; ref; ref = request.titles[next++]) {
+            // A title the policy does not establish is neither shown nor retried: it is not a transient failure.
+            if (!(await this.#allowed(ref, policy, signal))) continue;
             const result = await this.#wait(this.title(ref), signal);
             if (result.kind === 'found') titles.push(result.value.title);
             else if (result.kind === 'unavailable' || result.kind === 'not-configured')
@@ -313,18 +334,43 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         );
         return { kind: 'titles', titles, retryable };
       }
-      case 'title.detail':
+      case 'title.eligibility': {
+        // A few at a time: each unknown title is one atlas read, and a whole library can be asked at once.
+        const answers: boolean[] = [];
+        let next = 0;
+        const ask = async () => {
+          for (let at = next++; at < request.titles.length; at = next++)
+            answers[at] = await this.#allowed(request.titles[at]!, policy, signal);
+        };
+        await Promise.all(Array.from({ length: Math.min(6, request.titles.length) }, ask));
+        return {
+          kind: 'title.eligibility',
+          allowed: request.titles.filter((_, index) => answers[index]),
+        };
+      }
+      case 'title.detail': {
+        if (!(await this.#allowed(request.title, policy, signal)))
+          return { kind: 'title.detail', detail: REFUSED };
+        const detail = optional(
+          await this.#wait(this.detail(request.title, request.region), signal),
+          'tmdb',
+        );
+        // TMDB's "recommendations" are a TMDB-only discovery list that no store has aged or audience-checked.
         return {
           kind: 'title.detail',
-          detail: optional(
-            await this.#wait(this.detail(request.title, request.region), signal),
-            'tmdb',
-          ),
+          detail:
+            isRestricted(policy) && detail.state === 'ready'
+              ? { state: 'ready', value: { ...detail.value, more: [] } }
+              : detail,
         };
+      }
       case 'prefetch.detail':
-        await this.#wait(this.detail(request.title, request.region), signal);
+        if (await this.#allowed(request.title, policy, signal))
+          await this.#wait(this.detail(request.title, request.region), signal);
         return { kind: 'prefetch.detail' };
       case 'title.external-id': {
+        if (!(await this.#allowed(request.title, policy, signal)))
+          return { kind: 'title.external-id', imdbId: REFUSED };
         const result = await this.#wait(this.identifiers(request.title), signal);
         return {
           kind: 'title.external-id',
@@ -337,6 +383,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         };
       }
       case 'season':
+        if (!(await this.#allowed(request.title, policy, signal)))
+          return { kind: 'season', episodes: REFUSED };
         return {
           kind: 'season',
           episodes: optional(
@@ -345,23 +393,53 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           ),
         };
       case 'title.extras':
-        return this.#queryExtras(request.title, request.warningCategories, signal);
+        if (!(await this.#allowed(request.title, policy, signal)))
+          return {
+            kind: 'title.extras',
+            extras: {
+              title: request.title,
+              ratings: REFUSED,
+              warnings: REFUSED,
+              facts: REFUSED,
+              iconicStudios: REFUSED,
+            },
+          };
+        return this.#queryExtras(request.title, request.warningCategories, signal, policy);
       case 'catalog.page':
+        // TMDB's lists (discover, trending, popular, top rated, upcoming, recommendations) carry no age or audience
+        // evidence, and filtering one page at a time would leave sparse or empty pages while eligible titles exist.
+        // A restricted profile browses through the policy-aware atlas rows instead; this surface is hidden.
+        if (isRestricted(policy)) return { kind: 'catalog.page', titles: [] };
         return {
           kind: 'catalog.page',
           titles: await this.#wait(this.#catalog(request.catalog, request.page), signal),
         };
       case 'search': {
         let hits: Hit[] = [];
+        const atlas = this.credentials.atlas?.() ?? null;
+        const restricted = isRestricted(policy);
+        // Without atlas a restricted search has no eligibility evidence, so it finds nothing rather than TMDB's.
+        if (restricted && !atlas) return { kind: 'search', hits };
         const sources = searchSources(
           this.#tmdbKey(),
-          (input, init) => this.#contentFetch(input, { ...init, signal }),
-          this.credentials.atlas?.() ?? null,
+          policedAtlasFetch(
+            (input, init) => this.#contentFetch(input, { ...init, signal }),
+            atlas ?? '',
+            policy,
+          ),
+          atlas,
+          !restricted,
         );
         for await (const batch of searchStream(request.query, sources, signal)) hits = batch;
-        return { kind: 'search', hits };
+        // People are not titles, and their pages list a TMDB filmography; a restricted search finds titles only.
+        return {
+          kind: 'search',
+          hits: restricted ? hits.filter((hit) => hit.kind === 'title') : hits,
+        };
       }
       case 'collection': {
+        // A TMDB collection is another TMDB-only title list; a restricted profile's franchise is atlas'.
+        if (isRestricted(policy)) return { kind: 'collection', titles: [] };
         const body = await this.#wait(
           this.#tmdb(`/collection/${request.id}`, this.#tmdbKey()),
           signal,
@@ -385,6 +463,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         };
       }
       case 'person.filmography': {
+        // A filmography is one unpaged TMDB list with no age evidence; it cannot be made eligible without an atlas
+        // lookup per credit, so a restricted profile does not get one.
+        if (isRestricted(policy))
+          return { kind: 'person.filmography', credits: { state: 'absent' } };
         const body = await this.#wait(
           this.#tmdb(`/person/${request.id}/combined_credits`, this.#tmdbKey()),
           signal,
@@ -444,25 +526,25 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       case 'atlas.query':
         return {
           kind: 'atlas.query',
-          answer: await this.#atlasQuery(request.query, signal),
+          answer: await this.#atlasQuery(request.query, signal, policy),
         };
       case 'atlas.related':
         return {
           kind: 'atlas.related',
-          answer: await this.#atlasRelated(request.query, signal),
+          answer: await this.#atlasRelated(request.query, signal, policy),
         };
       case 'atlas.row':
-        return { kind: 'atlas.row', titles: await this.#atlasRow(request, signal) };
+        return { kind: 'atlas.row', titles: await this.#atlasRow(request, signal, policy) };
       case 'atlas.service.catalogs':
         return { kind: 'atlas.service.catalogs', catalogs: await this.#atlasCatalogs(signal) };
       case 'atlas.service.chart':
         return {
           kind: 'atlas.service.chart',
-          titles: await this.#atlasServiceChart(request, signal),
+          titles: await this.#atlasServiceChart(request, signal, policy),
         };
       case 'atlas.recommend.shared':
       case 'atlas.recommend.personal':
-        return { kind: request.kind, slides: await this.#atlasRecommend(request, signal) };
+        return { kind: request.kind, slides: await this.#atlasRecommend(request, signal, policy) };
       case 'import.resolve':
         return {
           kind: 'import.resolve',
@@ -483,6 +565,46 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           message: 'content operation is not owned by ContentAuthority yet',
           retryable: false,
         });
+    }
+  }
+
+  /** `providerFetch` with the profile's policy on every request to the configured atlas. */
+  #atlasFetch(atlas: string, policy: ContentPolicy | undefined): typeof fetch {
+    return policedAtlasFetch(this.#providerFetch, atlas, policy);
+  }
+
+  /**
+   * The one age check behind every direct read (detail, seasons, play, downloads...): is this title within the
+   * profile's policy? The public `minimumAge` comes from atlas' store and den-core's rule decides. Anything that
+   * cannot be established — atlas not configured, unreachable, or an unrecognised answer — is a refusal.
+   */
+  async #allowed(
+    ref: ContentRef,
+    policy: ContentPolicy | undefined,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (!isAgeRestricted(policy)) return true;
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas || !validRef(ref)) return false;
+    const url = `${atlas}/index/title/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`;
+    try {
+      const minimumAge = await this.#wait(
+        reuse(`content:eligible:${policyKey(policy)}:${url}`, async () => {
+          const response = await this.#atlasFetch(atlas, policy)(url);
+          // A title the store has never heard of has no age evidence: unknown, which the policy then decides.
+          if (response.status === 404) return null;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          const age = object(await response.json())?.minimumAge;
+          return typeof age === 'number' && Number.isInteger(age) && age >= 0 && age <= 18
+            ? age
+            : null;
+        }),
+        signal,
+      );
+      return await ageAllowed(policy, minimumAge);
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return false;
     }
   }
 
@@ -561,11 +683,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     ref: ContentRef,
     warningCategories: readonly string[],
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<ServiceContentResult> {
     const [identifiers, facts, iconicStudios] = await Promise.all([
       this.#wait(this.identifiers(ref), signal),
-      this.#wait(this.#facts(ref), signal),
-      this.#wait(this.#iconicStudios(ref), signal),
+      this.#wait(this.#facts(ref, policy), signal),
+      this.#wait(this.#iconicStudios(ref, policy), signal),
     ]);
     let ratings: OptionalContent<Ratings>;
     let warnings: OptionalContent<Warning[]>;
@@ -726,11 +849,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   async #atlasQuery(
     query: Extract<ContentRequest, { kind: 'atlas.query' }>['query'],
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<OptionalContent<import('./contentServiceProtocol').ContentAtlasAnswer>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
-    const fetchImpl: typeof fetch = (input, init) =>
-      this.#providerFetch(input, { ...init, signal });
+    const policed = this.#atlasFetch(atlas, policy);
+    const fetchImpl: typeof fetch = (input, init) => policed(input, { ...init, signal });
     try {
       switch (query.operation) {
         case 'titles': {
@@ -738,7 +862,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             state: 'ready',
             value: {
               operation: 'titles',
-              titles: await this.#atlasTitlePage(atlas, query, signal),
+              titles: await this.#atlasTitlePage(atlas, query, signal, policy),
             },
           };
         }
@@ -818,13 +942,15 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   async #atlasRelated(
     query: Extract<ContentRequest, { kind: 'atlas.related' }>['query'],
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<OptionalContent<import('./contentServiceProtocol').ContentRelatedAnswer>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
     const kind = query.title.type === 'tv' ? 'series' : 'movie';
+    const policed = this.#atlasFetch(atlas, policy);
     const request = async (path: string, init?: RequestInit) => {
       try {
-        const response = await this.#providerFetch(`${atlas}${path}`, { ...init, signal });
+        const response = await policed(`${atlas}${path}`, { ...init, signal });
         if (response.status === 404) return null;
         if (!response.ok) throw new Error(`atlas answered ${response.status}`);
         return object(await response.json());
@@ -865,6 +991,16 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           };
         }
         case 'suggest': {
+          if (isRestricted(policy)) {
+            // `POST /index/suggest.json` has no policy-aware form; the GET row of the same suggestions carries one.
+            const body = await request(
+              `/index/suggest/${kind}/${query.title.id}.json?skip=0&limit=${query.limit ?? 100}`,
+            );
+            const refs = body && refsFrom(body, true, true);
+            return refs
+              ? { state: 'ready', value: { operation: 'refs', refs } }
+              : { state: 'absent' };
+          }
           const body = await request('/index/suggest.json', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -947,8 +1083,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       { operation: 'titles' }
     >,
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<import('./library').Title[]> {
-    const selection = JSON.stringify([atlas, query.type, query.items]);
+    // The policy is part of what a cursor pages through: one opened under another profile's policy cannot continue.
+    const selection = JSON.stringify([atlas, query.type, query.items, policyKey(policy)]);
     let cursor = this.#atlasTitleCursors.get(query.cursor);
     if (cursor && cursor.selection !== selection)
       throw new ContentServiceFault({
@@ -966,7 +1104,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       cursor = {
         selection,
         load: filterTitles(atlas, query.type, structuredClone(query.items), {
-          fetchImpl: this.#providerFetch,
+          fetchImpl: this.#atlasFetch(atlas, policy),
         }),
       };
     } else this.#atlasTitleCursors.delete(query.cursor);
@@ -987,6 +1125,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   async #atlasRow(
     request: Extract<ContentRequest, { kind: 'atlas.row' }>,
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<OptionalContent<import('./library').Title[]>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
@@ -999,8 +1138,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const url = `${atlas}/index/row/${type}.json?${query}`;
     try {
       return await this.#wait(
-        reuse(`content:${url}`, async () => {
-          const response = await this.#providerFetch(url);
+        reuse(`content:${policyKey(policy)}:${url}`, async () => {
+          const response = await this.#atlasFetch(atlas, policy)(url);
           if (response.status === 404) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const titles = titlesOf(await response.json());
@@ -1083,6 +1222,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   async #atlasServiceChart(
     request: Extract<ContentRequest, { kind: 'atlas.service.chart' }>,
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<OptionalContent<import('./library').Title[]>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
@@ -1090,8 +1230,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const url = `${atlas}/catalog/${type}/${encodeURIComponent(request.catalog.id)}/country=${request.country}.json`;
     try {
       return await this.#wait(
-        reuse(`content:chart:${url}`, async () => {
-          const response = await this.#providerFetch(url);
+        reuse(`content:chart:${policyKey(policy)}:${url}`, async () => {
+          const response = await this.#atlasFetch(atlas, policy)(url);
           if (response.status === 404) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const titles = this.#atlasChartTitles(await response.json());
@@ -1115,6 +1255,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       { kind: 'atlas.recommend.shared' | 'atlas.recommend.personal' }
     >,
     signal: AbortSignal,
+    policy: ContentPolicy | undefined,
   ): Promise<OptionalContent<import('./recommend').Slide[]>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
@@ -1123,7 +1264,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       ? `${atlas}/recommend/${request.scope}.json?day=${request.day}${request.fresh ? '&fresh=1' : ''}`
       : `${atlas}/recommend`;
     const load = async (requestSignal?: AbortSignal) => {
-      const response = await this.#providerFetch(
+      const response = await this.#atlasFetch(atlas, policy)(
         url,
         shared
           ? undefined
@@ -1145,7 +1286,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       // A daily GET is safe to share, but one caller cancelling only leaves its wait: it must not cancel the
       // underlying request for every other waiter. Personalized POSTs are request-owned and never coalesced.
       return await this.#wait(
-        shared ? reuse(`content:${url}`, () => load()) : load(signal),
+        shared ? reuse(`content:${policyKey(policy)}:${url}`, () => load()) : load(signal),
         signal,
       );
     } catch (error) {
@@ -1154,28 +1295,44 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
   }
 
-  #facts(ref: ContentRef): Promise<ProviderResult<TitleFacts>> {
+  #facts(ref: ContentRef, policy: ContentPolicy | undefined): Promise<ProviderResult<TitleFacts>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return Promise.resolve({ kind: 'not-configured' });
     const type = ref.type === 'tv' ? 'series' : 'movie';
-    return this.#join(`facts\0${ref.type}:${ref.id}\0${atlas}`, async () => {
-      const response = await this.#provider(`${atlas}/index/title/${type}/${ref.id}.json`, '');
+    return this.#join(`facts\0${ref.type}:${ref.id}\0${atlas}\0${policyKey(policy)}`, async () => {
+      const response = await this.#provider(
+        `${atlas}/index/title/${type}/${ref.id}.json`,
+        '',
+        {},
+        this.#atlasFetch(atlas, policy),
+      );
       return response.kind === 'found'
         ? { kind: 'found', value: parseTitleFacts(response.value) }
         : response;
     });
   }
 
-  #iconicStudios(ref: ContentRef): Promise<ProviderResult<IconicStudio[]>> {
+  #iconicStudios(
+    ref: ContentRef,
+    policy: ContentPolicy | undefined,
+  ): Promise<ProviderResult<IconicStudio[]>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return Promise.resolve({ kind: 'not-configured' });
     const type = ref.type === 'tv' ? 'series' : 'movie';
-    return this.#join(`studios\0${ref.type}:${ref.id}\0${atlas}`, async () => {
-      const response = await this.#provider(`${atlas}/index/studios/${type}/${ref.id}.json`, '');
-      return response.kind === 'found'
-        ? { kind: 'found', value: parseIconicStudios(response.value) }
-        : response;
-    });
+    return this.#join(
+      `studios\0${ref.type}:${ref.id}\0${atlas}\0${policyKey(policy)}`,
+      async () => {
+        const response = await this.#provider(
+          `${atlas}/index/studios/${type}/${ref.id}.json`,
+          '',
+          {},
+          this.#atlasFetch(atlas, policy),
+        );
+        return response.kind === 'found'
+          ? { kind: 'found', value: parseIconicStudios(response.value) }
+          : response;
+      },
+    );
   }
 
   #ratings(imdbId: string): Promise<ProviderResult<Ratings>> {
@@ -1236,12 +1393,13 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     path: string,
     key: string,
     headers: Record<string, string> = {},
+    fetchImpl: typeof fetch = this.#providerFetch,
   ): Promise<ProviderResult<Json>> {
     const requestHeaders = new Headers(headers);
     if (key) requestHeaders.set('x-api-key', key);
     let response: Response;
     try {
-      response = await this.#providerFetch(path, {
+      response = await fetchImpl(path, {
         headers: requestHeaders,
         signal: AbortSignal.timeout(15_000),
       });

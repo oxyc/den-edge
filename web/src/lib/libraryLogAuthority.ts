@@ -141,9 +141,11 @@ const RETAINED_HOME_SHELVES = 'home.shelves.v1';
 const retainedBillboardName = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
 ) =>
-  scope.kind === 'personal'
+  (scope.kind === 'personal'
     ? `billboard.personal.v1.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`
-    : `billboard.v4.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`;
+    : `billboard.v4.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`) +
+  // A restricted profile's ranking is kept apart from every other policy's, and from the unrestricted name above.
+  (scope.policy ? `.policy.${scope.policy}` : '');
 const retainedBillboardValue = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
   stored: unknown,

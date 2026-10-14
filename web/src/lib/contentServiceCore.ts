@@ -1,5 +1,6 @@
 import {
   CONTENT_SERVICE_PROTOCOL,
+  type ContentPolicy,
   type ContentRequest,
   type ContentResult,
   type ContentServiceClientMessage,
@@ -9,7 +10,11 @@ import {
 } from './contentServiceProtocol';
 
 export interface ContentServiceAuthority {
-  query(request: ContentRequest, signal: AbortSignal): Promise<ContentResult>;
+  query(
+    request: ContentRequest,
+    signal: AbortSignal,
+    policy?: ContentPolicy,
+  ): Promise<ContentResult>;
   listen?(listener: (status: ContentServiceStatusValue) => void): () => void;
   close?(): void | Promise<void>;
 }
@@ -68,7 +73,7 @@ export class ContentServiceCore {
       this.#requests.get(message.targetRequestId)?.abort();
       return Promise.resolve([]);
     }
-    return this.#query(message.requestId, message.request);
+    return this.#query(message.requestId, message.request, message.policy);
   }
 
   listen(listener: (messages: ContentServiceServerMessage[]) => void): () => void {
@@ -87,7 +92,11 @@ export class ContentServiceCore {
     await this.authority.close?.();
   }
 
-  async #query(requestId: string, request: ContentRequest): Promise<ContentServiceServerMessage[]> {
+  async #query(
+    requestId: string,
+    request: ContentRequest,
+    policy?: ContentPolicy,
+  ): Promise<ContentServiceServerMessage[]> {
     if (this.#closed)
       return [
         errorMessage(
@@ -109,7 +118,7 @@ export class ContentServiceCore {
     const controller = new AbortController();
     this.#requests.set(requestId, controller);
     try {
-      const result = await this.authority.query(request, controller.signal);
+      const result = await this.authority.query(request, controller.signal, policy);
       if (result.kind !== request.kind)
         throw new ContentServiceFault({
           code: 'internal',

@@ -1,5 +1,7 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import { contentPolicyFor, PolicedContent, policyKey } from './contentPolicy';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { ContentPolicy } from './contentServiceProtocol';
 import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
@@ -30,6 +32,7 @@ export class ProfileSession {
   live = $state(false);
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
+  readonly #policed: ContentServiceClientPort | null;
   readonly #displays = new SvelteMap<string, Title>();
   readonly #missing = new SvelteSet<string>();
   #toastTimer?: ReturnType<typeof setTimeout>;
@@ -56,10 +59,45 @@ export class ProfileSession {
      * legacy topology and a persistent Owner do; the coordinator builds every Kid and Visitor session with false.
      */
     readonly administersHousehold: boolean = true,
-  ) {}
+    /** A Kid is held to the audience-relevance gate on top of its age policy (profiles-v1 §5). */
+    readonly kid: boolean = false,
+  ) {
+    this.#policed = this.restricted
+      ? new PolicedContent(household.content, () => this.#queryPolicy())
+      : null;
+  }
 
+  /**
+   * Every content query this profile makes runs under its policy: the page, the Worker and atlas all see the same
+   * one. An unrestricted profile (the legacy household, an Owner with no ceiling) uses the household port as-is.
+   */
   get content(): ContentServiceClientPort {
-    return this.household.content;
+    return this.#policed ?? this.household.content;
+  }
+
+  /** Whether this profile's content is limited by a ceiling, an unknown-rating block or the Kid audience gate. */
+  get restricted(): boolean {
+    return contentPolicyFor(this.contentPolicy, this.kid) !== undefined;
+  }
+
+  /**
+   * What every policy-dependent cache this profile keeps is keyed by; undefined when it has no policy, which leaves
+   * the legacy household's names and stored values exactly as they were.
+   */
+  get policyKey(): string | undefined {
+    const policy = this.#queryPolicy();
+    return policy ? policyKey(policy) : undefined;
+  }
+
+  /** The browser-side retained-state scope: the library key, and the policy it was ranked and filtered under. */
+  get retainedScope(): string | null {
+    const scope = this.identity.retainedScope;
+    const key = this.policyKey;
+    return scope !== null && key ? `${scope}~${key}` : scope;
+  }
+
+  #queryPolicy(): ContentPolicy | undefined {
+    return contentPolicyFor(this.contentPolicy, this.kid);
   }
 
   get services() {
@@ -105,7 +143,26 @@ export class ProfileSession {
     retryable: TitleRef[];
     retryAfterMs?: number;
   }> {
-    return this.model?.libraryMetadata(refs) ?? { titles: [], shapes: [], retryable: [] };
+    const found = (await this.model?.libraryMetadata(refs)) ?? {
+      titles: [],
+      shapes: [],
+      retryable: [],
+    };
+    if (!this.model || !this.restricted || !refs.length) return found;
+    // The library names its own titles through its own provider reads. A title the policy does not establish is
+    // answered as absent, so no shelf, history row or seed shows it; a policy that cannot be asked refuses all.
+    const allowed = await this.content
+      .query({ kind: 'title.eligibility', titles: refs.map(({ type, id }) => ({ type, id })) })
+      .then(
+        (answer) => new SvelteSet(answer.allowed.map(titleKey)),
+        () => new SvelteSet<string>(),
+      );
+    return {
+      ...found,
+      titles: found.titles.filter((title) => allowed.has(titleKey(title))),
+      shapes: found.shapes.filter((shape) => allowed.has(titleKey(shape.title))),
+      retryable: found.retryable.filter((ref) => allowed.has(titleKey(ref))),
+    };
   }
 
   rememberTitle(title: Title): void {
@@ -173,6 +230,7 @@ export function activeProfileSession(
   closeActivityModel: (() => void) | null = null,
   contentPolicy: ProfileContentPolicy | null = null,
   administersHousehold = false,
+  kid = false,
 ): ProfileSession {
   const householdPolicy = household.policy;
   const preferences = householdPolicy
@@ -190,6 +248,7 @@ export function activeProfileSession(
     preferences,
     closeActivityModel,
     administersHousehold,
+    kid,
   );
 }
 

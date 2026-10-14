@@ -135,9 +135,13 @@ export interface RetainedBillboardTitle extends TitleRef {
   why?: RetainedRecommendationWhy;
 }
 
+/**
+ * `policy` is the content policy the ranking was made under (`policyKey`). A restricted profile's retained
+ * billboard is its own: it can never be read back by, or replace, another policy's. Absent for the legacy household.
+ */
 export type RetainedBillboardScope =
-  | { kind: 'shared'; facet: MediaType | null; fresh: boolean }
-  | { kind: 'personal'; facet: MediaType | null; fresh: boolean };
+  | { kind: 'shared'; facet: MediaType | null; fresh: boolean; policy?: string }
+  | { kind: 'personal'; facet: MediaType | null; fresh: boolean; policy?: string };
 
 export type RetainedBillboard =
   | { kind: 'shared'; titles: RetainedBillboardTitle[] }
