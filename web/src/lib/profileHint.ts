@@ -9,6 +9,8 @@ export interface ProfileHint {
   readonly profileId: string;
   readonly name: string;
   readonly avatar: string;
+  /** The Owner profile's library key, already held by this browser; it opens that library's local cache. */
+  readonly libraryKey: string;
 }
 
 /**
@@ -33,25 +35,40 @@ export function readProfileHint(storage: Storage = localStorage): ProfileHint | 
       !('avatar' in value) ||
       typeof value.avatar !== 'string' ||
       value.avatar.length > 32 ||
+      !('libraryKey' in value) ||
+      typeof value.libraryKey !== 'string' ||
+      value.libraryKey.length === 0 ||
+      value.libraryKey.length > 256 ||
       marker?.mode !== 'persistent' ||
       marker.profileId !== value.profileId
     )
       return null;
-    return { version: 1, profileId: value.profileId, name: value.name, avatar: value.avatar };
+    return {
+      version: 1,
+      profileId: value.profileId,
+      name: value.name,
+      avatar: value.avatar,
+      libraryKey: value.libraryKey,
+    };
   } catch {
     return null;
   }
 }
 
 /** Remember the settled profile, or forget it when the browser is not on a persistent Owner. */
-export function saveProfileHint(choice: ProfileChoice | null, storage: Storage = localStorage) {
+export function saveProfileHint(
+  choice: ProfileChoice | null,
+  libraryKey: string | null,
+  storage: Storage = localStorage,
+) {
   try {
-    if (choice?.role === 'owner' && choice.id) {
+    if (choice?.role === 'owner' && choice.id && libraryKey) {
       const hint: ProfileHint = {
         version: 1,
         profileId: choice.id,
         name: choice.name,
         avatar: choice.avatar,
+        libraryKey,
       };
       storage.setItem(PROFILE_HINT_KEY, JSON.stringify(hint));
     } else storage.removeItem(PROFILE_HINT_KEY);

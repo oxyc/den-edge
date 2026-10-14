@@ -10,7 +10,7 @@
 // Needs `cargo build --locked` (or DEN_EDGE_BIN) and `npm run build` first. Real data and keys are only ever read
 // from the paths given; nothing from them is written into the repo.
 
-/* global window, document, MutationObserver -- the browser-side init script and evaluate callbacks below */
+/* global window, document, MutationObserver, requestAnimationFrame -- the browser-side init script and evaluate callbacks below */
 
 import { spawn } from 'node:child_process';
 import { hkdfSync, randomBytes } from 'node:crypto';
@@ -44,6 +44,9 @@ const KEY_FILE = option('key-file', 'REHEARSE_KEY_FILE');
 const PIN = option('pin', 'REHEARSE_PIN', '1234');
 const SETTLE_MS = Number(option('settle', 'REHEARSE_SETTLE_SECONDS', '25')) * 1000;
 const MAX_BATCHES = Number(option('max-batches', 'REHEARSE_MAX_BATCHES', '6'));
+// Workers a returning Owner's page starts: the household bootstrap, the Owner library, and the directory read. A
+// second session on the Owner library (the shape before the coordinator adopted the first one) started six.
+const MAX_SESSION_WORKERS = 3;
 const BINARY = option('bin', 'DEN_EDGE_BIN', join(ROOT, 'target/debug/den-edge'));
 const KEEP = flag('keep') || process.env.REHEARSE_KEEP === '1';
 const HEADED = flag('headed');
@@ -278,6 +281,54 @@ function watchOwnerGate() {
   new MutationObserver((records) =>
     records.forEach((r) => r.addedNodes.forEach((n) => note(n))),
   ).observe(document, { childList: true, subtree: true });
+  // What each painted frame carried, from navigation start. `main` is the library; the bar's own links are not.
+  window.__frames = [];
+  const frame = () => {
+    const text = document.querySelector('main')?.innerText ?? '';
+    window.__frames.push({
+      ms: Math.round(performance.now()),
+      continueWatching: text.includes('Continue Watching'),
+      watchlist: text.includes('Watchlist'),
+      shelves: /Trending|Loading your shelves/.test(text),
+    });
+    if (window.__frames.length < 900) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+/**
+ * Names for the synthetic titles. The rehearsal has no TMDB key, so without this a Continue Watching card has no name
+ * and its shelf is never drawn; what is under test is when the shelf appears, not where its names come from.
+ */
+async function nameSyntheticTitles(ctx) {
+  await ctx.route('**/tmdb/3/**', (route) => {
+    const url = new URL(route.request().url());
+    const [, , , kind, id] = url.pathname.split('/');
+    const headers = { 'cache-control': 'max-age=3600' };
+    if (kind === 'movie')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          title: `Film ${id}`,
+          release_date: '2001-01-01',
+          poster_path: null,
+        },
+      });
+    if (kind === 'tv')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          name: `Series ${id}`,
+          first_air_date: '2001-01-01',
+          poster_path: null,
+          number_of_seasons: 2,
+          seasons: [1, 2].map((n) => ({ season_number: n, episode_count: 8 })),
+        },
+      });
+    return route.fulfill({ status: 404, json: { status_code: 34 } });
+  });
 }
 
 /** Wait for no request to den-edge's library routes for `quietMs`, or give up after `limitMs`. */
@@ -585,6 +636,7 @@ async function main() {
         ],
       );
       await ctx.addInitScript(watchOwnerGate);
+      await nameSyntheticTitles(ctx);
       const ownerPage = await seedLink(ctx, edge, keyText);
       const loop = [];
       // Svelte reports the loop as a thrown error (a page error), and logs it to the console as well.
@@ -620,6 +672,25 @@ async function main() {
         Array.isArray(gate) && gate.length === 0,
         JSON.stringify(gate),
       );
+      // Let the first visit finish syncing and naming, so the second one starts from a warm local cache.
+      if (path === '/') {
+        let attempts = 0;
+        let warm = false;
+        while (!warm && attempts < 3) {
+          if (attempts++) await ownerPage.goto(`${edge.origin}${path}`);
+          warm = await ownerPage
+            .locator('main')
+            .getByText('Continue Watching')
+            .first()
+            .waitFor({ timeout: 25_000 })
+            .then(
+              () => true,
+              () => false,
+            );
+        }
+        check('the first visit syncs and names the Owner shelves', warm, `${attempts} attempt(s)`);
+        await sleep(2000);
+      }
       // The second visit has the remembered Owner in localStorage: nothing waits on the capability, directory or
       // activity model, so the first frame already carries the switcher and no loading or PIN state is ever drawn.
       await ownerPage.goto(`${edge.origin}${path}`);
@@ -631,13 +702,29 @@ async function main() {
           loading: window.__loadingSeen,
           trigger: window.__triggerSeen,
           hint: localStorage.getItem('den.profile.hint.v1') !== null,
+          frames: window.__frames,
         }))
         .catch(() => null);
+      if (path === '/') {
+        // The Owner's own library opens from its local cache on the first frame, so the shelves that come from it
+        // are already in the first frame that draws any shelf, and never pop in afterwards.
+        const first = seen?.frames.findIndex((f) => f.continueWatching || f.watchlist || f.shelves);
+        const at = first >= 0 ? seen.frames[first] : null;
+        check(
+          'a returning Owner paints Continue Watching and Watchlist in the first shelf frame',
+          !!at && at.continueWatching && at.watchlist,
+          JSON.stringify({
+            firstShelfFrame: at,
+            continueWatchingAtMs: seen?.frames.find((f) => f.continueWatching)?.ms ?? null,
+            watchlistAtMs: seen?.frames.find((f) => f.watchlist)?.ms ?? null,
+          }),
+        );
+      }
       check(`the Owner hint was remembered after ${path} settled`, !!seen?.hint);
       check(
         `a returning Owner on ${path} sees no PIN gate and no loading state`,
         !!seen && seen.gate.length === 0 && seen.loading.length === 0,
-        JSON.stringify(seen),
+        JSON.stringify({ ...seen, frames: seen?.frames.length }),
       );
       check(
         `a returning Owner on ${path} has the switcher on the first frame`,
@@ -651,6 +738,87 @@ async function main() {
       );
       if (path === '/settings' && !DATA)
         await checkOwnerPreferences(ownerPage, edge, wire, keyText, ownerKey);
+      await ctx.close().catch(() => {});
+    }
+
+    // 4b'. A returning Owner who HAS kept, unsent work. The first frame opens the Owner library before the profile
+    // pipeline answers; if the coordinator then opened a second session on that library, both would replay the same
+    // kept work. From navigation start through the handover, every write to a library must be sent once, by one
+    // session: no request repeated, and no library written by more than the one session.
+    step('reopen as the persistent Owner with kept, unsent work');
+    {
+      ctx = await launch(join(work, 'profile-owner-kept'));
+      await ctx.addInitScript(
+        ([key, value]) => localStorage.setItem(key, value),
+        [
+          'den.profile.active.v1',
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+        ],
+      );
+      await nameSyntheticTitles(ctx);
+      const keptPage = await seedLink(ctx, edge, keyText);
+      await keptPage.goto(`${edge.origin}/`);
+      await keptPage
+        .locator('main')
+        .getByText('Continue Watching')
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await sleep(2000);
+
+      // Keep an edit: den-edge refuses the write, so the browser holds it unsent.
+      const writes = /\/lib\/[^/]+\/(?:batch|member)$/;
+      const refuse = (route) =>
+        route.request().method() === 'POST' &&
+        /\/batch$/.test(new URL(route.request().url()).pathname)
+          ? route.abort('connectionfailed')
+          : route.fallback();
+      await ctx.route('**/lib/*/batch', refuse);
+      await keptPage
+        .getByRole('button', { name: /^Actions for Series/ })
+        .first()
+        .click({ force: true });
+      await keptPage.getByRole('menuitem', { name: /Remove from Continue Watching/ }).click();
+      await sleep(4000);
+      await ctx.unroute('**/lib/*/batch', refuse);
+
+      // Reopen with den-edge answering again, recording every library write from navigation start.
+      const sent = [];
+      ctx.on('request', (request) => {
+        const url = new URL(request.url());
+        if (['POST', 'PUT'].includes(request.method()) && writes.test(url.pathname))
+          sent.push(`${request.method()} ${url.pathname} ${request.postData() ?? ''}`);
+      });
+      // Every session runs its own Worker, so Workers started are sessions opened.
+      let workers = 0;
+      keptPage.on('worker', () => workers++);
+      await keptPage.goto(`${edge.origin}/`);
+      await keptPage
+        .locator('main')
+        .getByText('Continue Watching')
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await sleep(8000);
+      const kept = sent.filter((line) => line.startsWith('POST'));
+      const byLibrary = new Map();
+      for (const line of sent) {
+        const id = line.split(' ')[1].split('/')[2];
+        byLibrary.set(id, (byLibrary.get(id) ?? 0) + 1);
+      }
+      check(
+        'the kept work is sent, and nothing is sent twice',
+        kept.length >= 1 && new Set(sent).size === sent.length,
+        `${sent.length} writes: ${sent.map((l) => l.split(' ').slice(0, 2).join(' ')).join(', ')}`,
+      );
+      check(
+        'only one library is written, once',
+        byLibrary.size === 1 && [...byLibrary.values()][0] === 1,
+        JSON.stringify([...byLibrary.values()]),
+      );
+      check(
+        'the Owner library is opened by one session, not two',
+        workers <= MAX_SESSION_WORKERS,
+        `${workers} Workers started (the household bootstrap, the Owner library, and the directory read)`,
+      );
       await ctx.close().catch(() => {});
     }
 
@@ -744,6 +912,7 @@ try {
   await main();
 } catch (error) {
   check('the rehearsal ran to the end', false, String(error?.stack ?? error));
+  console.log(browserLog.slice(-15).join('\n'));
 }
 
 const failed = results.filter((r) => !r.ok);
