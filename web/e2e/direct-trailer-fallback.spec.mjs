@@ -226,6 +226,23 @@ async function play(launch, surface, origin, network, wait = 15_000) {
           return query.call(this, descriptor);
         };
       });
+    // The page's own record of which copies it asked the element to play, in order. Unlike `seen`, it does not
+    // depend on a request surviving long enough to reach a route: a direct attempt whose first-frame deadline
+    // passes before the engine has dispatched it (a starved runner) is abandoned without ever being routed.
+    await page.addInitScript(() => {
+      const srcs = (window.__srcs = []);
+      const note = (video) => {
+        const src = video.getAttribute('src');
+        if (src && srcs.at(-1) !== src) srcs.push(src);
+      };
+      const watch = new MutationObserver(() => document.querySelectorAll('video').forEach(note));
+      watch.observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['src'],
+      });
+    });
     const seen = await mock(page, origin, network);
     const began = Date.now();
     await surface.open(page, origin);
@@ -236,7 +253,8 @@ async function play(launch, surface, origin, network, wait = 15_000) {
       .catch(() => false);
     const took = played ? Date.now() - began : null;
     const src = (await video.count()) ? await video.getAttribute('src') : null;
-    return { took, src, seen };
+    const srcs = await page.evaluate(() => window.__srcs);
+    return { took, src, srcs, seen };
   } finally {
     await browser.close();
   }
@@ -279,18 +297,21 @@ for (const [engine, launch, available = () => true] of engines) {
       test(`${name}: away tries the public listener before any relay`, async () => {
         test.skip(!available(), `${engine} is not installed here`);
         const away = await play(launch, surface, PUBLIC, { home: false, reach: ['public'] });
-        // A direct copy gets a deliberately short first-frame deadline. On a saturated WebKit runner the served
-        // file can miss that deadline even though its request succeeded; advancing to the relay is then the product
-        // behavior under test, not a wrong URL. In either outcome public must be tried first and playback must use
-        // either that exact copy or its ordered relay fallback, never skip straight to the relay.
+        // A direct copy gets a deliberately short first-frame deadline. On a saturated WebKit runner the engine can
+        // miss it before it has even dispatched the request, so the route never sees it and the page moves on to the
+        // relay: that is the product behavior under test, not a wrong URL. So "public first" is read from the copies
+        // the page itself handed the element (`srcs`), and the routed requests are asserted only where the outcome
+        // guarantees them: playing from the direct copy means it was requested and no relay was.
         expect([`${DIRECT}${MEDIA}`, MEDIA]).toContain(away.src);
         expect(away.seen.lan).toBe(0);
-        expect(away.seen.direct).toBeGreaterThan(0);
-        expect(away.seen.order[0]).toBe('public:first');
+        expect(away.srcs[0]).toBe(`${DIRECT}${MEDIA}`);
         if (away.src === MEDIA) {
+          expect(away.srcs).toEqual([`${DIRECT}${MEDIA}`, MEDIA]);
           expect(away.seen.relay).toBeGreaterThan(0);
-          expect(away.seen.order).toEqual(['public:first', 'relay:first']);
+          expect(away.seen.order.at(-1)).toBe('relay:first');
         } else {
+          expect(away.srcs).toEqual([`${DIRECT}${MEDIA}`]);
+          expect(away.seen.direct).toBeGreaterThan(0);
           expect(away.seen.relay).toBe(0);
           expect(away.seen.order).toEqual(['public:first']);
         }
