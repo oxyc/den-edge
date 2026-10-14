@@ -319,7 +319,13 @@
         .finally(() => {
           if (opening === committedProfilesOpen) openingCommittedProfiles = false;
         });
-    } else profileCoordinator.updateDirectory(directory);
+    } else {
+      // Applying a directory closes and opens activity models. Closing a `LibraryModel` reads and rewrites its own
+      // snapshot state, so run tracked here this effect would invalidate itself on every pass and never settle.
+      // The directory snapshot above is the effect's only input; the coordinator's bookkeeping is not.
+      const coordinator = profileCoordinator;
+      untrack(() => coordinator.updateDirectory(directory));
+    }
   });
 
   $effect(() => {
