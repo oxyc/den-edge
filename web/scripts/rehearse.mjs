@@ -378,6 +378,60 @@ async function main() {
     await ctx.close();
     if (!committed) return;
 
+    // 4a. The browser that performed the split reopens `/` with its own storage kept, exactly as it left it.
+    step('reopen the browser that split, keeping its storage');
+    {
+      const logMark = edge.log.length;
+      ctx = await launch(warmDir);
+      const splitReopen = ctx.pages()[0] ?? (await ctx.newPage());
+      const loop = [];
+      splitReopen.on('pageerror', (e) => {
+        if (e.message.includes('effect_update_depth')) loop.push(e.message);
+      });
+      await splitReopen.goto(`${edge.origin}/`);
+      // The Owner set a PIN to enable Profiles, so a reopened browser asks for it before it opens the Owner.
+      // Four digits submit the gate.
+      const pin = splitReopen.locator('#owner-gate-pin');
+      await pin.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
+      if (await pin.isVisible().catch(() => false)) await pin.fill(PIN);
+      await splitReopen
+        .locator('button.profile-trigger')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => {});
+      await sleep(4000);
+      const state = await (async () => ({
+        trigger: (await splitReopen.locator('button.profile-trigger').count()) > 0,
+        unavailable: (await splitReopen.locator('#profile-unavailable-title').count()) > 0,
+        page: (await splitReopen.locator('body').innerText()).replace(/\s+/g, ' ').slice(0, 160),
+      }))().catch(() => null);
+      const reopened = !!state && state.trigger && !state.unavailable;
+      check(
+        'the browser that split reopens / as the Owner with no error',
+        reopened,
+        JSON.stringify(state),
+      );
+      if (!reopened) {
+        console.log(browserLog.slice(-15).join('\n'));
+        console.log(
+          edge.log
+            .slice(logMark)
+            .filter((l) => /\/lib\//.test(l))
+            .join('\n'),
+        );
+      }
+      check('the browser that split reopens / with no effect loop', loop.length === 0);
+      const unread = browserLog.filter((line) =>
+        line.includes('could not be read to its current head'),
+      );
+      check(
+        'the browser that split reopens / and reads the household to its head',
+        unread.length === 0,
+        unread[0]?.split('\n')[0] ?? '',
+      );
+      await ctx.close().catch(() => {});
+    }
+
     const afterSplit = await readLibrary(edge, wire, keyText);
     check('household wire_min is 5', afterSplit.wireMin === 5, `wire_min ${afterSplit.wireMin}`);
     const directory = afterSplit.rows.find((r) => r.profileDirectory)?.profileDirectory;

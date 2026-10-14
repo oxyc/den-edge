@@ -105,13 +105,15 @@ export type ProfileDirectoryState =
   | { readonly kind: 'present'; readonly directory: PreviewProfileDirectory };
 
 /**
- * What the directory read says. `pending` is not yet answered; `absent` is answered with no directory (a household
+ * What the directory read says. `pending` is not yet answered (including a kept household that predates a committed
+ * split and has yet to read it); `absent` is answered with no directory (a household
  * before its Owner split, or a browser-local library); `invalid` is a directory that exists but cannot be opened.
  */
 export function profileDirectoryState(
   view: ProfileDirectoryView | undefined,
 ): ProfileDirectoryState {
   if (!view) return { kind: 'pending' };
+  if (view.state === 'pending') return { kind: 'pending' };
   if (view.state === 'absent') return { kind: 'absent' };
   if (view.state === 'invalid') return { kind: 'invalid' };
   const directory = profileDirectoryChoices(view);

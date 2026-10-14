@@ -391,6 +391,8 @@ export class LibraryLog {
   private profileDirectoryEntry?: { seq: number; document: ProfileDirectoryDocument };
   /** Highest transport sequence seen for the control row, including an invalid replacement. */
   private profileDirectorySeq = 0;
+  /** A page of den-edge's log was read in the generation it now answers at, by this instance (not only a kept copy). */
+  private readCurrentGeneration = false;
   /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
   private rowsCache?: { version: number; rows: Row[] };
   /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
@@ -1808,7 +1810,9 @@ export class LibraryLog {
   ): Promise<import('./profileOwnerSplitEngine').OwnerSplitHouseholdObservation> {
     if (!Number.isSafeInteger(migrationGeneration) || migrationGeneration < 0)
       throw new Error('Migration generation is not canonical');
-    const snapshot = await this.readAll();
+    // Wire 5 like every other migration request (`profileMigrationRequest`): once the split has committed the household
+    // is at minimum 5, and a resumed attempt that reads it at this instance's wire 4 is refused with 426.
+    const snapshot = await this.readAll(5);
     if (!snapshot) throw new Error('Household could not be read to its current head');
     const rows = [...snapshot.entries].sort((left, right) =>
       left.k < right.k ? -1 : left.k > right.k ? 1 : 0,
@@ -2187,8 +2191,11 @@ export class LibraryLog {
     };
   }
 
-  /** Every row in the log to its head, as den-edge stores it; null when a page couldn't be read. */
-  private async readAll(): Promise<{
+  /**
+   * Every row in the log to its head, as den-edge stores it; null when a page couldn't be read. `wire` overrides the
+   * wire this instance speaks: a household at minimum 5 answers 426 to a read at 4.
+   */
+  private async readAll(wire?: number): Promise<{
     entries: RawEntry[];
     head: number;
     generation: string | null;
@@ -2198,7 +2205,10 @@ export class LibraryLog {
     let generation: string | null = null;
     for (;;) {
       const res = await this.send(`/lib/${this.keys.id}/changes?since=${since}&limit=1000`, {
-        headers: this.headers(),
+        headers: {
+          ...this.headers(),
+          ...(wire === undefined ? {} : { 'x-den-wire': String(wire) }),
+        },
       });
       if (!res.ok) return null;
       const page = (await res.json()) as Page;
@@ -2606,6 +2616,7 @@ export class LibraryLog {
         continue;
       }
       log.generation = page.generation;
+      log.readCurrentGeneration = true;
       if (!credential) {
         credential = true;
         // Register before exposing the proof to relayed requests.
@@ -2724,6 +2735,15 @@ export class LibraryLog {
    */
   get profileTopologyPresent(): boolean {
     return this.profileDirectorySeq > 0;
+  }
+
+  /**
+   * A browser that kept the household from before its split learns the committed wire minimum (its own, or from den-edge
+   * answering 426) before it has read the household that holds the directory. No directory is then not evidence that
+   * there isn't one: it is read once a page of the committed generation has been (`adoptProfileSplit`).
+   */
+  get profileDirectoryPending(): boolean {
+    return this.splitCommitted && !this.readCurrentGeneration;
   }
 
   private document(name: string): DocumentRow | undefined {
@@ -2881,6 +2901,7 @@ export class LibraryLog {
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
+          this.readCurrentGeneration = true;
           this.writeGeneration = undefined;
           for (const entry of page.entries) {
             // Unreadable rows are skipped individually, as on initial open.

@@ -239,6 +239,8 @@ describe('ProfileModeCoordinator', () => {
     expect(profileDirectoryState({ ...none, state: 'absent' })).toEqual({ kind: 'absent' });
     // The log's verdict wins: an empty projection of a corrupt or committed household is not "none".
     expect(profileDirectoryState({ ...none, state: 'invalid' })).toEqual({ kind: 'invalid' });
+    // A kept household that predates a committed split has yet to read it: not invalid, not yet answered.
+    expect(profileDirectoryState({ ...none, state: 'pending' })).toEqual({ kind: 'pending' });
     expect(profileDirectoryState(valid)).toMatchObject({ kind: 'present' });
     // A directory that exists but cannot be opened is never mistaken for none.
     expect(profileDirectoryState({ ...valid, owner: null })).toEqual({ kind: 'invalid' });

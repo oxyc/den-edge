@@ -1524,6 +1524,8 @@ export class LibraryLogAuthority {
   #profiles(): Extract<LibrarySelectionValue, { kind: 'profiles' }> {
     const directory = this.#log.profileDirectory();
     if (!directory) {
+      if (this.#log.profileDirectoryPending)
+        return { kind: 'profiles', state: 'pending', owner: null, profiles: [] };
       // A row that failed validation, or a wire minimum no legacy household reaches, means a split was committed:
       // only a household with neither is truly without a directory.
       const committed = this.#log.profileTopologyPresent || this.#log.wireMinimum >= 5;
