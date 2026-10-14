@@ -10,6 +10,8 @@
 // Needs `cargo build --locked` (or DEN_EDGE_BIN) and `npm run build` first. Real data and keys are only ever read
 // from the paths given; nothing from them is written into the repo.
 
+/* global window, document, MutationObserver -- the browser-side init script and evaluate callbacks below */
+
 import { spawn } from 'node:child_process';
 import { hkdfSync, randomBytes } from 'node:crypto';
 import {
@@ -249,6 +251,35 @@ async function launch(profileDir) {
   return ctx;
 }
 
+/**
+ * Init script (runs in the page, from navigation start): records every Owner PIN gate element that is ever
+ * attached, so a flash too short to poll for still shows up in `window.__ownerGateSeen`.
+ */
+function watchOwnerGate() {
+  window.__ownerGateSeen = [];
+  window.__loadingSeen = [];
+  window.__triggerSeen = [];
+  const find = (node, selector) => (node.matches(selector) ? node : node.querySelector(selector));
+  const note = (node) => {
+    if (node.nodeType !== 1) return;
+    const gate = find(node, '.owner-gate');
+    if (gate)
+      window.__ownerGateSeen.push(gate.textContent.replace(/\s+/g, ' ').trim().slice(0, 60));
+    const loading = find(node, '.profile-loading');
+    if (loading) window.__loadingSeen.push(loading.textContent.trim());
+    const trigger = find(node, 'button.profile-trigger');
+    if (trigger && !window.__triggerSeen.length)
+      window.__triggerSeen.push({
+        label: trigger.getAttribute('aria-label'),
+        // Whether the library had already drawn its own content when the switcher first appeared.
+        ms: Math.round(performance.now()),
+      });
+  };
+  new MutationObserver((records) =>
+    records.forEach((r) => r.addedNodes.forEach((n) => note(n))),
+  ).observe(document, { childList: true, subtree: true });
+}
+
 /** Wait for no request to den-edge's library routes for `quietMs`, or give up after `limitMs`. */
 async function quiet(edge, quietMs, limitMs = 60_000) {
   const started = Date.now();
@@ -383,6 +414,7 @@ async function main() {
     {
       const logMark = edge.log.length;
       ctx = await launch(warmDir);
+      await ctx.addInitScript(watchOwnerGate);
       const splitReopen = ctx.pages()[0] ?? (await ctx.newPage());
       const loop = [];
       splitReopen.on('pageerror', (e) => {
@@ -393,7 +425,9 @@ async function main() {
       // Four digits submit the gate.
       const pin = splitReopen.locator('#owner-gate-pin');
       await pin.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
-      if (await pin.isVisible().catch(() => false)) await pin.fill(PIN);
+      const gateShown = await pin.isVisible().catch(() => false);
+      check('a browser with no remembered profile is still asked for the Owner PIN', gateShown);
+      if (gateShown) await pin.fill(PIN);
       await splitReopen
         .locator('button.profile-trigger')
         .first()
@@ -471,6 +505,7 @@ async function main() {
           JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
         ],
       );
+      await ctx.addInitScript(watchOwnerGate);
       const ownerPage = await seedLink(ctx, edge, keyText);
       const loop = [];
       // Svelte reports the loop as a thrown error (a page error), and logs it to the console as well.
@@ -499,10 +534,69 @@ async function main() {
         loop.length ? `${loop.length} effect_update_depth_exceeded` : '',
       );
       check(`Owner profile ${path} still answers`, answers);
+      // seedLink navigates before the page under test, so the log is read from the last navigation's start.
+      const gate = await ownerPage.evaluate(() => window.__ownerGateSeen ?? null).catch(() => null);
+      check(
+        `a remembered Owner never sees the PIN gate on ${path}`,
+        Array.isArray(gate) && gate.length === 0,
+        JSON.stringify(gate),
+      );
+      // The second visit has the remembered Owner in localStorage: nothing waits on the capability, directory or
+      // activity model, so the first frame already carries the switcher and no loading or PIN state is ever drawn.
+      await ownerPage.goto(`${edge.origin}${path}`);
+      await ownerPage.locator('button.profile-trigger').first().waitFor({ timeout: 30_000 });
+      await sleep(4000);
+      const seen = await ownerPage
+        .evaluate(() => ({
+          gate: window.__ownerGateSeen,
+          loading: window.__loadingSeen,
+          trigger: window.__triggerSeen,
+          hint: localStorage.getItem('den.profile.hint.v1') !== null,
+        }))
+        .catch(() => null);
+      check(`the Owner hint was remembered after ${path} settled`, !!seen?.hint);
+      check(
+        `a returning Owner on ${path} sees no PIN gate and no loading state`,
+        !!seen && seen.gate.length === 0 && seen.loading.length === 0,
+        JSON.stringify(seen),
+      );
+      check(
+        `a returning Owner on ${path} has the switcher on the first frame`,
+        !!seen && /^Switch profile, current \S/.test(seen.trigger[0]?.label ?? ''),
+        JSON.stringify(seen?.trigger),
+      );
       check(
         `Owner profile ${path} shows the switcher and no modal`,
         !!state && state.trigger && !state.modal,
         JSON.stringify(state),
+      );
+      await ctx.close().catch(() => {});
+    }
+
+    // 4c. A remembered profile the household no longer has: the page may draw it from the hint at first, but the
+    // coordinator then decides a PIN is needed and the gate must appear.
+    step('reopen as a remembered profile the household no longer has');
+    {
+      ctx = await launch(join(work, 'profile-gone'));
+      const gone = 'b'.repeat(32);
+      await ctx.addInitScript(
+        ([marker, hint]) => {
+          localStorage.setItem('den.profile.active.v1', marker);
+          localStorage.setItem('den.profile.hint.v1', hint);
+        },
+        [
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: gone }),
+          JSON.stringify({ version: 1, profileId: gone, name: 'Owner', avatar: 'owner' }),
+        ],
+      );
+      await ctx.addInitScript(watchOwnerGate);
+      const gonePage = await seedLink(ctx, edge, keyText);
+      await gonePage.goto(`${edge.origin}/`);
+      const gate = gonePage.locator('#owner-gate-pin');
+      await gate.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
+      check(
+        'a remembered profile that is gone still asks for the Owner PIN',
+        await gate.isVisible(),
       );
       await ctx.close().catch(() => {});
     }
