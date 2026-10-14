@@ -12,6 +12,7 @@ import {
   profileDirectoryChoices,
   profileDirectoryState,
   profilesCapability,
+  usesProfileDirectory,
   type ProfileActivityModelFactory,
   type PreviewProfileDirectory,
 } from './profileModeCoordinator.svelte';
@@ -220,6 +221,15 @@ describe('ProfileModeCoordinator', () => {
         ({ name }) => name,
       ),
     ).toEqual(['Owner', 'Kids', 'Teens']);
+  });
+
+  it('waits on a profile directory only for a linked household', () => {
+    const model = {};
+    expect(usesProfileDirectory({ local: false, model })).toBe(true);
+    // This browser's own library is not a household, and a session without a model has nothing to read.
+    expect(usesProfileDirectory({ local: true, model })).toBe(false);
+    expect(usesProfileDirectory({ local: false, model: null })).toBe(false);
+    expect(usesProfileDirectory({ local: true, model: null })).toBe(false);
   });
 
   it('tells an unanswered directory read from an absent and an invalid directory', () => {

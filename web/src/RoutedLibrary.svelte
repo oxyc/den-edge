@@ -48,6 +48,7 @@
     previewProfileDirectory,
     profileDirectoryState,
     profilesCapability,
+    usesProfileDirectory,
     type ProfileActivityModelFactory,
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
@@ -127,7 +128,7 @@
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
-    untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
+    untrack(() => (!libraryIdentity || !usesProfileDirectory(session) ? 'disabled' : 'checking')),
   );
   // The directory read answered "none": a household before its Owner split, or a browser-local library.
   let profileDirectoryAbsent = $state(false);
@@ -208,30 +209,37 @@
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
   // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
+  let discoverProfiles: () => void = () => {};
   onMount(() => {
-    if (!libraryIdentity || !session.model) return;
     let current = true;
-    void profilesCapability().then((capability) => {
-      if (!current) return;
-      if (
-        (capability !== 'enabled' && capability !== 'preview') ||
-        profileCoordinator ||
-        !session.model
-      ) {
+    let discovering = false;
+    discoverProfiles = () => {
+      if (discovering || !libraryIdentity || !usesProfileDirectory(session)) return;
+      discovering = true;
+      profileCapability = 'checking';
+      void profilesCapability().then((capability) => {
+        if (!current) return;
+        if (
+          (capability !== 'enabled' && capability !== 'preview') ||
+          profileCoordinator ||
+          !session.model
+        ) {
+          profileCapability = capability;
+          return;
+        }
+        if (capability === 'preview')
+          profileCoordinator = new ProfileModeCoordinator(
+            session,
+            localStorage,
+            window,
+            undefined,
+            previewProfileDirectory(),
+          );
+        else profileDirectoryLease = session.model.profiles();
         profileCapability = capability;
-        return;
-      }
-      if (capability === 'preview')
-        profileCoordinator = new ProfileModeCoordinator(
-          session,
-          localStorage,
-          window,
-          undefined,
-          previewProfileDirectory(),
-        );
-      else profileDirectoryLease = session.model.profiles();
-      profileCapability = capability;
-    });
+      });
+    };
+    discoverProfiles();
     return () => {
       current = false;
       committedProfilesOpen++;
@@ -243,6 +251,30 @@
       onprofilecontrol(null);
       coordinator?.dispose();
     };
+  });
+
+  // A local library that joins a household becomes one: it is discovered then, never left on the legacy Owner path.
+  $effect(() => {
+    if (session.local) return;
+    untrack(discoverProfiles);
+  });
+
+  // The directory read must answer. A failed or closed read, or one that stays silent, is fail-closed rather than a
+  // spinner that never ends.
+  const PROFILE_DIRECTORY_WAIT_MS = 20_000;
+  $effect(() => {
+    if (profileCapability !== 'enabled' || profileCoordinator) return;
+    const snapshot = profileDirectoryLease?.snapshot;
+    if (!snapshot || snapshot.value) return;
+    if (snapshot.connection === 'failed' || snapshot.connection === 'closed') {
+      profileCapability = 'indeterminate';
+      return;
+    }
+    const timer = setTimeout(
+      () => (profileCapability = 'indeterminate'),
+      PROFILE_DIRECTORY_WAIT_MS,
+    );
+    return () => clearTimeout(timer);
   });
 
   $effect(() => {
