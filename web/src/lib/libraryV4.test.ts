@@ -293,6 +293,33 @@ describe('Library v4 documents', () => {
     expect(log.episode(ref, 1, 3)?.progress.value).toBe(1);
   });
 
+  it('writes no tracker-event or episode row from a kept v4 library whose minimum this browser never kept', async () => {
+    const server = await edge([filmDocument(1)]);
+    const { vault, data } = memoryVault();
+    const first = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    await vi.waitFor(() => expect(data.has(`${first.libraryId}:log.v4`)).toBe(true));
+    // The minimum was remembered only in page storage, which the Worker that opens the log cannot read.
+    first.close();
+    data.delete(`${first.libraryId}:runtime:meta:wireMin`);
+    expect([...data.keys()].filter((key) => key.includes('meta'))).toEqual([]);
+
+    // Nothing den-edge answers reaches this browser before the edit: it is drawn and made from the kept copy alone.
+    const quiet: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/member')) throw new TypeError('offline');
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, quiet, undefined, vault))!;
+    expect(log.fromCache).toBe(true);
+    const before = blankEpisode({ type: 'tv', id: 1399 }, 1, 4);
+    const journal = recordTrackerEvent(before, markEpisode(before, true, at(7000)), at(7000))!;
+    expect(await log.writeAction(journal)).not.toBeNull();
+    await log.refresh();
+
+    const stored = await server.opened();
+    expect(stored.filter((row) => ['set', 'ep', 'rec', 'wat'].includes(row.kind))).toEqual([]);
+    expect(document(stored, 'season:tv:1399:1')).toBeDefined();
+  });
+
   it('keeps a write den-edge refuses for now as den-core writes, and sends it on the next refresh', async () => {
     const server = await edge([filmDocument(550)]);
     const storage = memoryStorage();
@@ -558,6 +585,21 @@ describe('the switch to Library v4', () => {
     expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
     // Two titles, a season and the settings row: the stray row is dropped, not kept for a second switch.
     expect(server.stored.size).toBe(4);
+    expect(log.needsV4).toBe(false);
+  });
+
+  it('switches a v4 library holding a stray tracker event again, folding its watch into the season', async () => {
+    const before = blankEpisode({ type: 'tv', id: 1399 }, 1, 4);
+    const stray = recordTrackerEvent(before, markEpisode(before, true, at(7000)), at(7000))!;
+    const server = await edge([filmDocument(550), prefs, stray]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(log.needsV4).toBe(true);
+    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
+
+    const stored = await server.opened();
+    expect(stored.filter((row) => row.kind === 'set').map((row) => row.name)).toEqual(['prefs']);
+    expect(log.episode({ type: 'tv', id: 1399 }, 1, 4)?.progress.value).toBe(1);
+    expect(log.predatesV3).toBe(false);
     expect(log.needsV4).toBe(false);
   });
 

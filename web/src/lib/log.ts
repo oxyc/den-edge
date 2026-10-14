@@ -2418,19 +2418,25 @@ export class LibraryLog {
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
-    const saved =
-      (await log.kept<Snapshot>(SNAPSHOT_V4, true)) ?? (await log.kept<Snapshot>(SNAPSHOT, true));
+    const savedV4 = await log.kept<Snapshot>(SNAPSHOT_V4, true);
+    const saved = savedV4 ?? (await log.kept<Snapshot>(SNAPSHOT, true));
     if (saved) {
       await policy;
       log.memberRegistered = saved.memberRegistered ?? false;
       log.generation = saved.generation;
       log.head = saved.head;
+      let documents = false;
       await inPolicySlices(saved.entries, ([name, seq, row]) => {
         if (!wellFormed(row)) return;
         log.noteFormat(row);
+        documents ||= isDocument(row);
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       });
+      // A library kept as v4 is at minimum 4 even when this browser kept no minimum for it (one remembered only in
+      // page storage before the log moved into the Worker). Without this, an edit made before den-edge first answers
+      // goes out in the v2/v3 form: `set:tracker-event:*` and `ep`/`rec` rows a v4 library must never hold (§8).
+      if ((savedV4 || documents) && log.wireMin < WIRE) log.wireMin = WIRE;
       log.restoreProfileDirectory(saved);
       // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
       // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
