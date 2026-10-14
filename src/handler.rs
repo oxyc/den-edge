@@ -32,6 +32,11 @@ fn config(state: &AppState) -> String {
         "recommendedVersion": "0.1.0",
         "features": { "addonModule": true, "aiReco": false },
     });
+    // Whether the Apple TV offers profiles. `false` is the operator's rollback signal and `true` the switch-on;
+    // absent (the default) leaves the TV "unavailable".
+    if let Some(on) = state.profiles_tv {
+        config["features"]["profiles"] = Value::Bool(on);
+    }
     // SIMKL's PIN flow runs in the browser and needs only the app's public client id. Left out when unset, so
     // the web app hides a sign-in it could not complete rather than offering one that fails.
     if let Some(id) = &state.simkl_client_id {
@@ -1607,6 +1612,21 @@ pub mod tests {
         assert_eq!(config["minSupportedVersion"], "0.1.0");
         assert_eq!(config["features"]["aiReco"], false);
         assert_eq!(h.call("GET", "/nope", None).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn config_profiles_feature_is_tri_state_and_survives_the_prepared_body() {
+        let mut h = Harness::new();
+        let (_, config) = h.call("GET", "/config", None).await;
+        assert!(config["features"].get("profiles").is_none(), "unset omits the key");
+        for (setting, expected) in [(Some(true), json!(true)), (Some(false), json!(false))] {
+            Arc::get_mut(&mut h.state).unwrap().profiles_tv = setting;
+            prepare_public_json(&mut h);
+            let (status, config) = h.call("GET", "/config", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(config["features"]["profiles"], expected);
+            assert_eq!(config["features"]["aiReco"], false);
+        }
     }
 
     /// A harness serving a web app, with `d.oxy.fi` as its public name and `d-api.oxy.fi` as the device API's.
