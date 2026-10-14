@@ -193,7 +193,8 @@ export class ProfileModeCoordinator {
   readonly #events: StorageEvents | null;
   readonly #visitorLock: VisitorActivityLock;
   readonly #connections: LibraryModelLease<ConnectionsView>;
-  #directory: PreviewProfileDirectory | null;
+  // Reactive: a Kid made while the page is open reaches the switcher's choices without a reload.
+  #directory = $state.raw<PreviewProfileDirectory | null>(null);
   readonly #profileModels: ProfileActivityModelFactory | null;
   readonly #preview: boolean;
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Ownership bookkeeping; UI observes session only.

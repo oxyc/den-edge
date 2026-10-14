@@ -417,8 +417,8 @@
     const household = untrack(() => session.household.ownerSettingsModel());
     if (!household) return;
     defaultKidAsked = true;
-    void household
-      .ensureDefaultKidProfile()
+    void household.ready
+      .then(() => household.ensureDefaultKidProfile())
       .catch((error: unknown) =>
         console.warn('den: the household’s Kid profile could not be made', error),
       );
