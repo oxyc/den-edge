@@ -15,6 +15,7 @@
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
+  import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import {
     links,
@@ -80,26 +81,6 @@
   const ownKey = untrack(() => (link ? null : localLibraryKey()));
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownKey));
 
-  function legacyClock() {
-    try {
-      const device = localStorage.getItem('den.deviceID') ?? undefined;
-      const parsed: unknown = JSON.parse(localStorage.getItem('den.clock') ?? 'null');
-      const last =
-        Array.isArray(parsed) &&
-        parsed.length === 3 &&
-        typeof parsed[0] === 'number' &&
-        typeof parsed[1] === 'number' &&
-        typeof parsed[2] === 'string'
-          ? ([parsed[0], parsed[1], parsed[2]] as [number, number, string])
-          : undefined;
-      return device || last
-        ? { ...(device ? { device } : {}), ...(last ? { last } : {}) }
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
   const open = (key: string | null, local: boolean) => {
@@ -110,7 +91,7 @@
     });
     if (!key)
       return legacyProfileSession(null, false, null, services.content, () => services.close());
-    const clock = legacyClock();
+    const clock = legacyClockBootstrap();
     const model = new LibraryModel(services.library, {
       libraryKey: key,
       mode: local ? 'local' : 'online',
