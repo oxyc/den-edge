@@ -44,6 +44,9 @@ const KEY_FILE = option('key-file', 'REHEARSE_KEY_FILE');
 const PIN = option('pin', 'REHEARSE_PIN', '1234');
 const SETTLE_MS = Number(option('settle', 'REHEARSE_SETTLE_SECONDS', '25')) * 1000;
 const MAX_BATCHES = Number(option('max-batches', 'REHEARSE_MAX_BATCHES', '6'));
+// Workers a returning Owner's page starts: the household bootstrap, the Owner library, and the directory read. A
+// second session on the Owner library (the shape before the coordinator adopted the first one) started six.
+const MAX_SESSION_WORKERS = 3;
 const BINARY = option('bin', 'DEN_EDGE_BIN', join(ROOT, 'target/debug/den-edge'));
 const KEEP = flag('keep') || process.env.REHEARSE_KEEP === '1';
 const HEADED = flag('headed');
@@ -735,6 +738,87 @@ async function main() {
       );
       if (path === '/settings' && !DATA)
         await checkOwnerPreferences(ownerPage, edge, wire, keyText, ownerKey);
+      await ctx.close().catch(() => {});
+    }
+
+    // 4b'. A returning Owner who HAS kept, unsent work. The first frame opens the Owner library before the profile
+    // pipeline answers; if the coordinator then opened a second session on that library, both would replay the same
+    // kept work. From navigation start through the handover, every write to a library must be sent once, by one
+    // session: no request repeated, and no library written by more than the one session.
+    step('reopen as the persistent Owner with kept, unsent work');
+    {
+      ctx = await launch(join(work, 'profile-owner-kept'));
+      await ctx.addInitScript(
+        ([key, value]) => localStorage.setItem(key, value),
+        [
+          'den.profile.active.v1',
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+        ],
+      );
+      await nameSyntheticTitles(ctx);
+      const keptPage = await seedLink(ctx, edge, keyText);
+      await keptPage.goto(`${edge.origin}/`);
+      await keptPage
+        .locator('main')
+        .getByText('Continue Watching')
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await sleep(2000);
+
+      // Keep an edit: den-edge refuses the write, so the browser holds it unsent.
+      const writes = /\/lib\/[^/]+\/(?:batch|member)$/;
+      const refuse = (route) =>
+        route.request().method() === 'POST' &&
+        /\/batch$/.test(new URL(route.request().url()).pathname)
+          ? route.abort('connectionfailed')
+          : route.fallback();
+      await ctx.route('**/lib/*/batch', refuse);
+      await keptPage
+        .getByRole('button', { name: /^Actions for Series/ })
+        .first()
+        .click({ force: true });
+      await keptPage.getByRole('menuitem', { name: /Remove from Continue Watching/ }).click();
+      await sleep(4000);
+      await ctx.unroute('**/lib/*/batch', refuse);
+
+      // Reopen with den-edge answering again, recording every library write from navigation start.
+      const sent = [];
+      ctx.on('request', (request) => {
+        const url = new URL(request.url());
+        if (['POST', 'PUT'].includes(request.method()) && writes.test(url.pathname))
+          sent.push(`${request.method()} ${url.pathname} ${request.postData() ?? ''}`);
+      });
+      // Every session runs its own Worker, so Workers started are sessions opened.
+      let workers = 0;
+      keptPage.on('worker', () => workers++);
+      await keptPage.goto(`${edge.origin}/`);
+      await keptPage
+        .locator('main')
+        .getByText('Continue Watching')
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await sleep(8000);
+      const kept = sent.filter((line) => line.startsWith('POST'));
+      const byLibrary = new Map();
+      for (const line of sent) {
+        const id = line.split(' ')[1].split('/')[2];
+        byLibrary.set(id, (byLibrary.get(id) ?? 0) + 1);
+      }
+      check(
+        'the kept work is sent, and nothing is sent twice',
+        kept.length >= 1 && new Set(sent).size === sent.length,
+        `${sent.length} writes: ${sent.map((l) => l.split(' ').slice(0, 2).join(' ')).join(', ')}`,
+      );
+      check(
+        'only one library is written, once',
+        byLibrary.size === 1 && [...byLibrary.values()][0] === 1,
+        JSON.stringify([...byLibrary.values()]),
+      );
+      check(
+        'the Owner library is opened by one session, not two',
+        workers <= MAX_SESSION_WORKERS,
+        `${workers} Workers started (the household bootstrap, the Owner library, and the directory read)`,
+      );
       await ctx.close().catch(() => {});
     }
 

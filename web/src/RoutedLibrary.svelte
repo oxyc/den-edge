@@ -207,7 +207,9 @@
 
   // The remembered Owner's own library, opened from its local cache while the profile pipeline answers. The household
   // bootstrap session holds no activity after the split, so drawing it would pop Continue Watching and the Watchlist in
-  // later. The coordinator opens its own session for the same library; this one is closed once that has taken over.
+  // later. When the directory confirms the same Owner library, the coordinator takes this very session over, so the
+  // library never has two sessions (two senders of its kept work); otherwise it is closed before another is opened.
+  let optimisticAdopted = false;
   let optimisticOwner = $state.raw<ProfileSession | null>(
     untrack(() => {
       if (!profileHint) return null;
@@ -237,7 +239,7 @@
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   $effect(() => {
     if (optimistic || !optimisticOwner) return;
-    optimisticOwner.close();
+    if (!optimisticAdopted) optimisticOwner.close();
     optimisticOwner = null;
   });
   onDestroy(() => optimisticOwner?.close());
@@ -341,7 +343,26 @@
       }
       const legacy = session;
       const opening = ++committedProfilesOpen;
-      const activity = openProfileActivity(owner.libraryKey);
+      const first = untrack(() => optimisticOwner);
+      const adopt =
+        first !== null &&
+        first.identity.kind === 'profile' &&
+        first.identity.id === owner.id &&
+        first.identity.libraryKey === owner.libraryKey &&
+        first.household === legacy.household &&
+        // The optimistic session is unrestricted, as an Owner with no policy, or an open one, is.
+        (!owner.policy ||
+          (owner.policy.maximumAge === null && owner.policy.unknownRatings === 'allow'))
+          ? first
+          : null;
+      // Never a second session on a library that already has one: its kept work would be sent by both.
+      if (first && !adopt) {
+        first.close();
+        optimisticOwner = null;
+      }
+      const activity = adopt
+        ? { model: adopt.model!, close: () => adopt.close() }
+        : openProfileActivity(owner.libraryKey);
       openingCommittedProfiles = true;
       void activity.model.ready
         .then(
@@ -351,14 +372,17 @@
               return;
             }
             legacy.household.commitProfiles(libraryIdentity!);
-            const ownerSession = activeProfileSession(
-              persistentProfileIdentity(owner.id!, owner.libraryKey!),
-              legacy.household,
-              activity.model,
-              activity.close,
-              owner.policy ?? null,
-              true,
-            );
+            if (adopt) optimisticAdopted = true;
+            const ownerSession =
+              adopt ??
+              activeProfileSession(
+                persistentProfileIdentity(owner.id!, owner.libraryKey!),
+                legacy.household,
+                activity.model,
+                activity.close,
+                owner.policy ?? null,
+                true,
+              );
             legacy.relinquishHouseholdOwnership();
             legacy.close();
             profileCoordinator = new ProfileModeCoordinator(
