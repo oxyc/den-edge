@@ -14,8 +14,7 @@ const storage = (marker: unknown, hint?: unknown) => {
   } as Storage;
 };
 const marker = { version: 1, mode: 'persistent', profileId: owner };
-const hint = { version: 1, profileId: owner, name: 'Owner', avatar: 'owner', libraryKey: 'key' };
-const choice = { id: profileId(owner), role: 'owner', name: 'Owner', avatar: 'owner' } as const;
+const hint = { version: 1, profileId: owner, name: 'Owner', avatar: 'owner' };
 
 describe('profile hint', () => {
   it('is read back only while the active marker names the same profile', () => {
@@ -25,25 +24,20 @@ describe('profile hint', () => {
     expect(readProfileHint(storage(undefined, hint))).toBeNull();
   });
 
-  it('treats a missing, versioned-wrong, keyless or corrupt hint as absent', () => {
+  it('treats a missing, versioned-wrong or corrupt hint as absent', () => {
     expect(readProfileHint(storage(marker))).toBeNull();
     expect(readProfileHint(storage(marker, { ...hint, version: 2 }))).toBeNull();
     expect(readProfileHint(storage(marker, { ...hint, name: 'x'.repeat(65) }))).toBeNull();
-    expect(readProfileHint(storage(marker, { ...hint, libraryKey: '' }))).toBeNull();
-    expect(readProfileHint(storage(marker, { ...hint, libraryKey: undefined }))).toBeNull();
     const broken = storage(marker);
     broken.setItem('den.profile.hint.v1', '{broken');
     expect(readProfileHint(broken)).toBeNull();
   });
 
-  it('remembers an Owner with its library key and forgets anything else', () => {
+  it('remembers an Owner and forgets anything else', () => {
     const store = storage(marker);
-    saveProfileHint(choice, 'key', store);
+    saveProfileHint({ id: profileId(owner), role: 'owner', name: 'Owner', avatar: 'owner' }, store);
     expect(readProfileHint(store)).toEqual(hint);
-    saveProfileHint({ ...choice, role: 'kid' }, 'key', store);
-    expect(readProfileHint(store)).toBeNull();
-    saveProfileHint(choice, 'key', store);
-    saveProfileHint(choice, null, store);
+    saveProfileHint({ id: profileId(owner), role: 'kid', name: 'Kids', avatar: 'kid' }, store);
     expect(readProfileHint(store)).toBeNull();
   });
 });
