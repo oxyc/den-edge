@@ -8,6 +8,7 @@ import { exclusive } from './exclusive';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
+import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
   profileMigrationAuthorizationFingerprint,
@@ -237,13 +238,31 @@ function movedTo(moved: { successor?: string }, tag: string): MoveEnd {
   return moved.successor === tag ? 'deleted' : 'lost';
 }
 
-/** Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). */
+/**
+ * Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). Matched by
+ * name as den-core's `doc_decode` does: a `tracker-event:` row whose event doesn't parse is still legacy, and the
+ * profile split refuses it until the switch has removed it.
+ */
 const legacy = (row: Row): boolean =>
   row.kind === 'rec' ||
   row.kind === 'ep' ||
   row.kind === 'wat' ||
   row.kind === 'snt' ||
-  trackerEvent(row) !== null;
+  (row.kind === 'set' && row.name.startsWith('tracker-event:'));
+
+/** `legacy` for a raw opened row this build may not read as a `Row`: matched as den-core's switch matches (§10). */
+const rawLegacy = (row: unknown): boolean => {
+  if (!row || typeof row !== 'object') return false;
+  const { kind, name, schema } = row as { kind?: unknown; name?: unknown; schema?: unknown };
+  return (
+    kind === 'rec' ||
+    kind === 'ep' ||
+    kind === 'wat' ||
+    kind === 'snt' ||
+    (kind === 'set' && typeof name === 'string' && name.startsWith('tracker-event:')) ||
+    (schema === 1 && 'after' in row)
+  );
+};
 
 /**
  * Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach, and whether
@@ -456,6 +475,12 @@ export class LibraryLog {
    * on every refresh.
    */
   private migrationLockedAt = 0;
+  /**
+   * Until when den-edge has asked for no more batches (`429 rate_limited`, this library's write budget), as
+   * `Date.now()`; 0 for never or since a write landed. Like a migration lock, nothing was applied and the write is
+   * neither dropped nor resent on every refresh: kept work waits out the `Retry-After` it was given.
+   */
+  private throttledUntil = 0;
   /**
    * When den-edge last refused each piece of kept work for good (`failed`), by its key: a full library, a row it will
    * not take. That piece is sent again after `RECHECK_MS`, not on every refresh, where it was refused every 30 seconds
@@ -1104,8 +1129,11 @@ export class LibraryLog {
    * stays read-only until a later try passes. A difference only in pending tracker commands is logged and the switch
    * goes on. True when it committed.
    */
-  async switchToV4(performer: string): Promise<boolean> {
-    if (!this.needsV4) return false;
+  async switchToV4(performer: string, stray = false): Promise<boolean> {
+    if (stray) {
+      if (this.offline || this.moved || this.upgradeRequired !== null || this.predatesV3)
+        return false;
+    } else if (!this.needsV4) return false;
     await ensureSyncPolicy();
     const switched = await this.fenced(async (base, raw) => {
       const now = Date.now();
@@ -1117,6 +1145,9 @@ export class LibraryLog {
           row: await this.plainRow(k, v),
         })),
       );
+      // `stray`: a v4 library may hold a v2/v3 row this build cannot read as a row (a malformed tracker event), so it
+      // never reaches `needsV4`. den-core's switch removes such rows by name, so it runs whenever the raw log has one.
+      if (stray && !rows.some(({ row }) => rawLegacy(row))) return null;
       let form: V4Form;
       try {
         form = syncPolicy<V4Form>({ op: 'v4_form', rows, base, performer, now });
@@ -1639,11 +1670,38 @@ export class LibraryLog {
       input.candidate.createdAt > newest[0]
         ? [input.candidate.createdAt, 0, input.candidate.handle.profileId.slice(0, 16)]
         : [newest[0], newest[1] + 1, input.candidate.handle.profileId.slice(0, 16)];
-    const partition = profileMigrationPartition({
-      base: backup.source.base,
-      ownerPolicyAt: stamp,
-      rows,
-    });
+    let partition: ReturnType<typeof profileMigrationPartition>;
+    try {
+      partition = profileMigrationPartition({
+        base: backup.source.base,
+        ownerPolicyAt: stamp,
+        rows,
+      });
+    } catch (error) {
+      // Name the rows den-core may hold against the split (names and kinds only, never contents), so a refusal says
+      // which rows instead of only a code.
+      const suspect = rows.flatMap(({ seq, opened }) => {
+        const row = opened as {
+          status: string;
+          name: string | null;
+          legacy?: boolean;
+          row?: { kind?: unknown };
+        };
+        const kind = row.row?.kind;
+        return row.status === 'row' &&
+          (row.legacy === true ||
+            ['rec', 'wat', 'snt', 'ep'].includes(String(kind)) ||
+            /^(rec|wat|snt|ep):|^set:tracker-event:/.test(row.name ?? ''))
+          ? [{ seq, name: row.name, kind: typeof kind === 'string' ? kind : undefined }]
+          : [];
+      });
+      console.error(
+        'den: profile split refused; rows den-core may hold against it',
+        suspect,
+        error,
+      );
+      throw error;
+    }
     const candidateRaw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
       character.charCodeAt(0),
     );
@@ -1797,18 +1855,35 @@ export class LibraryLog {
     keys: LibraryKeys,
     writes: readonly MigrationSealedRow[],
   ): Promise<void> {
+    // The first chunk creates the library at generation 0; each later chunk carries the generation den-edge answered.
+    // A retried attempt finds the library already created, and den-edge's 409 names its generation.
+    let generation = '0';
     for (const chunk of chunks(writes.map((write) => ({ ...write, base: 0 })))) {
-      const response = await this.send(
-        `/lib/${keys.id}/batch`,
-        {
-          method: 'POST',
-          // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
-          headers: ownerSplitCandidateWriteHeaders(this.keys, keys),
-          body: JSON.stringify({ writes: chunk }),
-        },
-        false,
-      );
-      if (!response.ok) throw new Error('Owner candidate write was refused');
+      const post = () =>
+        this.send(
+          `/lib/${keys.id}/batch`,
+          {
+            method: 'POST',
+            // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
+            headers: {
+              ...ownerSplitCandidateWriteHeaders(this.keys, keys),
+              'x-den-generation': generation,
+            },
+            body: JSON.stringify({ writes: chunk }),
+          },
+          false,
+        );
+      let response = await post();
+      const current = response.headers.get('x-den-generation');
+      if (response.status === 409 && current && current !== generation) {
+        generation = current;
+        response = await post();
+      }
+      if (!response.ok)
+        throw new Error(
+          `Owner candidate write was refused (${response.status} ${await response.text().catch(() => '')})`,
+        );
+      generation = response.headers.get('x-den-generation') ?? generation;
       const value = (await response.json()) as unknown;
       if (!migrationBatch(value))
         throw new Error('Owner candidate write returned malformed evidence');
@@ -3609,6 +3684,11 @@ export class LibraryLog {
       return;
     }
     const code = await errorCode(res);
+    if (res.status === 429) {
+      this.throttledUntil = Date.now() + retryAfterMs(res, 60_000);
+      console.warn('den: den-edge asked for fewer library writes; the write is kept and will wait');
+      return code;
+    }
     if (res.status === 409 && code === 'migration_in_progress') {
       // Applied nothing and says nothing else. Not a refusal of the write itself: it stays kept, and waits.
       this.migrationLockedAt = Date.now();
@@ -3836,6 +3916,7 @@ export class LibraryLog {
   /** den-edge applied this browser's write of `row`: it now holds exactly that, at `seq`. */
   private acknowledge(name: string, seq: number, row: Row): void {
     this.migrationLockedAt = 0;
+    this.throttledUntil = 0;
     this.entries.set(name, { seq, row });
     this.acknowledged.set(name, { seq, row });
     this.dirty = true;
@@ -4125,6 +4206,8 @@ export class LibraryLog {
     // 30-second refresh would otherwise send every piece of it again each time.
     if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
       return this.projectKeptChanged(projected);
+    // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
+    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected);
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
     const waiting = this.pendingActions;

@@ -125,6 +125,10 @@ pub struct AppState {
     /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
     /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
     pub profile_migration_enabled: bool,
+    /// Batches one library may send in a burst, and how many a minute it earns back (env `LIBRARY_WRITE_BURST`,
+    /// `LIBRARY_WRITE_PER_MINUTE`). A per-minute of 0 turns the budget off.
+    pub library_write_burst: u32,
+    pub library_write_per_minute: u32,
     /// What `/config` tells the Apple TV about profiles (env `PROFILES_TV`): `Some(true)` enables them,
     /// `Some(false)` is the operator's explicit rollback, and `None` omits the key so the TV stays "unavailable".
     pub profiles_tv: Option<bool>,
@@ -348,6 +352,8 @@ impl AppState {
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
+            library_write_burst: library::WRITE_BURST,
+            library_write_per_minute: library::WRITE_PER_MINUTE,
             profiles_tv: None,
             profile_prepare_households: HashSet::new(),
             reset_sweeps: Mutex::new(HashSet::new()),
@@ -468,6 +474,9 @@ async fn main() {
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
     state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
+    state.library_write_burst = env_number("LIBRARY_WRITE_BURST").unwrap_or(library::WRITE_BURST);
+    state.library_write_per_minute =
+        env_number("LIBRARY_WRITE_PER_MINUTE").unwrap_or(library::WRITE_PER_MINUTE);
     state.profiles_tv = env_opt("PROFILES_TV").and_then(|value| {
         parse_tri_state("PROFILES_TV", &value).unwrap_or_else(|reason| {
             eprintln!("{reason}");

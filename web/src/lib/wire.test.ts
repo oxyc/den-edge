@@ -10,6 +10,7 @@ import {
   mergeTitle,
   newestSummary,
   open,
+  openMigrationRow,
   rowName,
   seal,
   ZERO_STAMP,
@@ -167,5 +168,37 @@ describe('library wire v3 rows', () => {
     const merged = mergeV3(older, newer);
     expect(merged.entries['2']?.progress?.at).toEqual([3000, 0, 'tv01']);
     expect(merged.entries['2']?.plays).toEqual({ '2': 2000, '3': 3000 });
+  });
+});
+
+describe('openMigrationRow legacy evidence', () => {
+  const settings = (name: string): SettingsRow => ({ kind: 'set', schema: 2, name, values: {} });
+
+  it('reads a sealed settings row as current, and a tracker event as legacy, as den-core does', async () => {
+    const keys = await deriveKeys(fromHex(library.libraryKey));
+    const opened = async (row: Row) => {
+      const sealed = await seal(keys, row);
+      return openMigrationRow(keys, sealed.k, sealed.v);
+    };
+    expect(await opened(settings('prefs'))).toMatchObject({
+      status: 'row',
+      name: 'set:prefs',
+      legacy: false,
+    });
+    expect(await opened(settings('tracker-event:x'))).toMatchObject({
+      status: 'row',
+      name: 'set:tracker-event:x',
+      legacy: true,
+    });
+    const watching: WatchRow = {
+      kind: 'wat',
+      schema: 3,
+      title: { type: 'tv', id: 95396 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: {},
+    };
+    expect(await opened(watching)).toMatchObject({ status: 'row', legacy: true });
   });
 });

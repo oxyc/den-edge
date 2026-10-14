@@ -50,6 +50,11 @@ export interface LibraryKeys {
   mac: CryptoKey;
 }
 
+/** The `{id}` in `/lib/{id}/…` alone, for callers that never need the other keys. */
+export async function deriveLibraryId(libraryKey: Uint8Array<ArrayBuffer>): Promise<string> {
+  return hex(await hkdf(libraryKey, 'den/library/salt/v1', 'den/library/id/v1', 16));
+}
+
 export async function deriveKeys(libraryKey: Uint8Array<ArrayBuffer>): Promise<LibraryKeys> {
   const [id, enc, mac, token, member] = await Promise.all([
     hkdf(libraryKey, 'den/library/salt/v1', 'den/library/id/v1', 16),
@@ -339,14 +344,19 @@ export async function openMigrationRow(
     } catch {
       return { status: 'unreadable', name: null };
     }
-    const legacy = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
+    const known = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
     let name: string | null;
     try {
-      name = legacy ? rowName(row as Row) : null;
+      name = known ? rowName(row as Row) : null;
     } catch {
       return { status: 'unreadable', name: null };
     }
     if (name !== null && !(await named(name))) return { status: 'unreadable', name: null };
+    // As den-core's `doc_decode`: a settings row is current in v4, except a v1 tracker event.
+    const legacy =
+      known &&
+      (row.kind !== 'set' ||
+        (typeof row.name === 'string' && row.name.startsWith('tracker-event:')));
     return { status: 'row', name, legacy, row };
   }
   const decoded = syncPolicy<{

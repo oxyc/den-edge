@@ -429,20 +429,24 @@ describe('compound key reset backend against the profiles-v1 §9.1 surface', () 
       expect(rig.edge.lib('H').reset!.phase).toBe('retired');
     });
 
-    it('publishes again when the lookup finds nothing, and completes a partial successor idempotently', async () => {
+    it('publishes again when the lookup finds nothing', async () => {
       const rig = await Rig.create();
       await rig.run([{ on: 'H2 takeMoved', when: 'before' }]);
       expect(rig.edge.log.filter((e) => e === 'H2 takeMoved')).toHaveLength(2);
+    });
 
-      // A partial copy under the successor key, as a crash between two batches would leave it.
+    // A partial copy under the successor key, as a crash between two batches would leave it.
+    it('completes a partial successor idempotently when publishing', async () => {
       const viaPublish = await Rig.create();
       await viaPublish.start();
       await viaPublish.drive((journal) => journal.phase === 'publishing-household');
       await viaPublish.edge.add('H2', SUCCESSOR_KEYS.H2, 5, ['library']);
       expect((await viaPublish.drive())?.phase).toBe('complete');
       expect([...viaPublish.edge.lib('H2').rows.keys()].sort()).toEqual(['library', 'settings']);
+    });
 
-      // The lookup after a death finds the partial successor incomplete and reports it absent, so it is published again.
+    // The lookup after a death finds the partial successor incomplete and reports it absent, so it is published again.
+    it('completes a partial successor idempotently when the lookup reports it absent', async () => {
       const viaLookup = await Rig.create();
       await viaLookup.start();
       viaLookup.edge.faults.push({ on: 'H2 takeMoved', when: 'before' });

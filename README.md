@@ -30,7 +30,7 @@ See [Architecture](ARCHITECTURE.md) for the current request and storage flows an
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied. An unknown or expired queue is `{messages: []}` like an empty one: a queue exists only while messages wait, so there is no way to tell a dead key from a quiet one |
 | `POST /inbox/drain` `{keys}` | several queues at once, one per linked device: `{queues: [[…], …]}` in the order of `keys`, each emptied. 1–16 distinct keys, each its own credential as in the header; one malformed key is a `400` and empties nothing. Both drains share one budget of 240 queues per address per minute (`429` with `Retry-After` past it). `?wait=S`: when every queue is empty the drain is held up to S ≤ 25 seconds and answered the moment a message lands in one of them; priced once, held or not; at most 2 held per address and 16 in all, past which it is answered at once |
 | `DELETE /sync/{id}` | erases a backup an older link or the retired settings backup left |
-| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the transactional library: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
+| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the transactional library: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}`. Budgeted per library (`LIBRARY_WRITE_BURST`, `LIBRARY_WRITE_PER_MINUTE`): over it is `429 rate_limited` with `retry-after` |
 | `GET /lib/{id}/changes?since=&limit=&wait=` | the records written after `since`, in sequence order: `{entries, head, more}`. With `wait=S` and nothing after `since` (in the generation the client sent), held up to S ≤ 25 seconds and answered as soon as a write to that library commits — see [docs/LIBRARY_V3.md](docs/LIBRARY_V3.md#held-reads) |
 | `/lib/{id}/profile-migration[/…]` | the authenticated, attempt-addressed backup/rewrite/restore/retirement transaction from den-spec profiles-v1 §8.1. Every request requires the household token and exact wire 5; candidate retirement also requires its token in `x-den-candidate-library-token`. A legacy household is uniformly `404` unless both the global emergency transport switch and that exact household's prepare enrollment are on. A committed wire-5 household keeps recovery transport without enrollment while the emergency switch is on |
 | `/lib/{id}/exclusive-operation[/…]`, `DELETE /lib/{id}` with `x-den-exclusive-attempt` + `x-den-successor` | the exclusive locks of a compound multi-profile key reset (den-spec profiles-v1 §9.1): `GET …/source`, `POST …` (acquire, or a journal-less recovery with `x-den-successor-token`), `GET …/{attempt}` (lookup), `POST …/{attempt}/successor` (the one successor-household commit), `DELETE …/{attempt}` (abort, household only) and the locked `DELETE` that retires a library and releases its lock in one commit. The household's lock record is the authority and no commit spans two libraries; a member lock is void once its household aborted, and den-edge deletes the declared successors of an aborted reset (at startup and on the household's next access). Exact wire 5 for a household and 4 for a profile library. Off with `PROFILE_MIGRATION_ENABLED`: the routes are `404` and the headers on a `DELETE` mean nothing |
@@ -142,6 +142,8 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `ADDON_RELAY` | unset | `/<prefix>=<LAN origin>` pairs, comma-separated (`/scout=http://192.168.86.193:8080,/atlas=http://192.168.86.193:8081`). The web app asks its addons at `/<prefix>/…` on its own origin and den-edge fetches them at the LAN address: JSON only (GET, HEAD, POST), without the browser's cookies or headers, not on the `API_HOSTS` names. So the browser never holds the Access token, and needs no CORS past Access |
 | `ROUTES` | unset | every address for each service, in order: `<service>=<entry> <entry> …;<service>=…`, an entry `[access:]http(s)://host[:port][/path]` (`access:` marks a name behind Cloudflare Access). Served as `GET /routes`; den-remux's https entries are allowed in the web app's `connect-src` and `media-src`. den's `render-env.sh` builds it from four facts (oxyc/den#16) |
 | `NEW_LIBRARIES` | `open` | who may start a library. `open`: any first write. `members`: only a device that proves it holds another library here, with `x-den-library-member: <id>:<token>` on its first write, as a TV moving its library to a new key does, or the one library a live guest grant reserved for that library's own key (`POST /grant/library`). So a stranger reaching the public device API can't use den-edge as storage, and neither can a new household (den #21). A store that lost its data needs `open` again for its TVs to write their libraries back |
+| `LIBRARY_WRITE_BURST` | `250` | batches one library may send in a burst before `POST /lib/{id}/batch` answers `429 {"error":"rate_limited"}` with `retry-after`. Clients send a bulk write as back-to-back 200-row batches (a split copies ~6k rows in ~30; a library at its 50,000-row ceiling is 250), so the burst holds the largest legitimate one. The budget is each library's own and counted after the token is proven; migration, key-reset-lock and rewrite routes, `PUT …/member`, `DELETE` and reads never draw on it. Refusals are counted in `den_edge_library_write_throttled_total` and logged once a minute per library |
+| `LIBRARY_WRITE_PER_MINUTE` | `120` | batches a minute one library earns back after a burst: 2 a second, well above what edits by hand or a 30-second refresh send, and a fifth of the 10 a second a looping client was sending. `0` turns the budget off |
 | `REMUX_EDGE_SECRET` | unset | shared with den-remux (its `EDGE_SECRET`). Set, a grant guest may use the `/remux` control routes and den-edge can end a grant's sessions (`POST /remux/admin/kill`); unset, guests are offered no remux, because remux would count their sessions as the host's |
 | `SEGMENTS_KEY` | unset | den-remux's key for asking it to detect an episode's intro and credits (`X-Den-Segments-Key`). `/skipdb/<tt>/<s>/<e>` falls back to remux's `/remux/segments` (through the `/remux` relay) when SkipDB has nothing; set, it also asks remux to scan an episode remux does not know, at most once per episode per 10 minutes. Unset, detected segments are still read but no scan is requested |
 | `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address limits read the last `X-Forwarded-For` entry, and `CF-Connecting-IP` first from an entry written `cf:<ip>` — `cloudflared`'s, since Cloudflare sets that header, while `tailscale serve` is assumed to pass on whatever a peer wrote in it (not measured). The two are told apart by the address they reach den-edge from, so `cloudflared` and `tailscale serve` must connect from different addresses: on one address, the `cf:` entry's trust covers both; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
@@ -194,6 +196,34 @@ cross-tab lock also fails closed instead of entering preview.
 cargo run                       # http://localhost:8080, state in ./data
 cargo test
 ```
+
+### Migration rehearsal
+
+`npm run rehearse` (in `web/`) runs the Owner split end to end: the real `den-edge` binary on a temporary copy of the
+data (profile migration on, `NEW_LIBRARIES=members`, the household enrolled), serving the built web app, driven by real
+Den Web in Chromium. It opens the household, enables Profiles with a PIN, waits for the commit, then reopens a browser
+whose storage was snapshotted before the split, with one tab (`REHEARSE_TWO_TABS=1` adds a two-tab pass), and checks that it adopts the committed
+household without writing its old rows back. It needs `cargo build --locked` (or `DEN_EDGE_BIN`), `npm run build`, and
+Chromium (`npx playwright install chromium`, or an installed Chrome).
+
+```
+npm run rehearse                                          # a synthetic household and a generated key
+REHEARSE_DATA=/path/to/edge-data REHEARSE_KEY_FILE=/path/to/key npm run rehearse   # a copy of real data
+```
+
+`REHEARSE_DATA` is a copied `DATA_DIR` (`lib/` and `library-v3-index.json`); `REHEARSE_KEY_FILE` holds the household's
+base64 library key. Both are read only; the data is copied before anything runs, and neither is ever committed, so keep
+real copies outside the repo. Options (env, or `--flag value`): `REHEARSE_PIN` (default `1234`; the Owner PIN if the
+household has one), `REHEARSE_SETTLE_SECONDS` (how long each reopen is watched, default 25), `REHEARSE_MAX_BATCHES`
+(batch writes tolerated per reopen, default 6), `--keep` (keep the temp dir with the den-edge logs and browser
+profiles), `--headed`. `REHEARSE_LEGACY_ROWS=1` adds rows den-core refuses outright to the synthetic household (a
+malformed `set:tracker-event:*` row, v3 `wat`/`snt` rows).
+
+It prints PASS/FAIL per check and exits 1 if any fails: the household commits at wire minimum 5, its directory names an
+Owner library that holds the activity, the committed household holds no activity (title, season and delivery
+documents, `trackers`, `deliver:*`, `handoff:*`, `assistant-applied`, tracker events), and, after each reopen, at most
+`REHEARSE_MAX_BATCHES` `POST /lib/:id/batch` reached den-edge and the decrypted household again holds no activity.
+Each reopen starts from the committed data (den-edge restarted on a copy, same port), so they do not affect each other.
 
 ## Deploy
 
