@@ -2030,6 +2030,7 @@ mod tests {
     const ACTIVITY: &str = "aaaaaaaaaaaaaaaa";
     const CONFIG: &str = "bbbbbbbbbbbbbbbb";
     const DIRECTORY: &str = "cccccccccccccccc";
+    const DELIVERY: &str = "dddddddddddddddd";
     const ATTEMPT: &str = "11111111111111111111111111111111";
     const ATTEMPT2: &str = "22222222222222222222222222222222";
     const ATTEMPT3: &str = "33333333333333333333333333333333";
@@ -2080,6 +2081,15 @@ mod tests {
     async fn assert_disabled(response: Response) {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_json(response).await, json!({ "error": "not_found" }));
+    }
+
+    fn row_values(value: &Value, field: &str) -> std::collections::BTreeMap<String, String> {
+        value[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row["k"].as_str().unwrap().to_owned(), row["v"].as_str().unwrap().to_owned()))
+            .collect()
     }
 
     #[tokio::test]
@@ -2755,6 +2765,356 @@ mod tests {
             StatusCode::NOT_FOUND,
             "opening a migration must never auto-start a library"
         );
+    }
+
+    fn rehearsal_rows() -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([
+            (ACTIVITY.to_owned(), "synthetic-owner-activity".to_owned()),
+            (CONFIG.to_owned(), "synthetic-household-config".to_owned()),
+            (DELIVERY.to_owned(), "synthetic-delivery-state".to_owned()),
+        ])
+    }
+
+    /// A wire-4 household with synthetic rows and the migration adapter switched on, over the real router and
+    /// redb stores in the Harness's temporary directory.
+    async fn rehearsal_household() -> Harness {
+        let mut h = Harness::new();
+        let created = h
+            .send(
+                "POST",
+                &format!("/lib/{HOUSEHOLD}/batch"),
+                Some(
+                    json!({
+                        "writes": [
+                            { "k": ACTIVITY, "base": 0, "v": "synthetic-owner-activity" },
+                            { "k": CONFIG, "base": 0, "v": "synthetic-household-config" },
+                            { "k": DELIVERY, "base": 0, "v": "synthetic-delivery-state" },
+                        ],
+                    })
+                    .to_string(),
+                ),
+                &[
+                    ("x-den-wire", "4"),
+                    ("x-den-wire-min", "4"),
+                    ("x-den-generation", "0"),
+                    ("x-den-library-token", HOUSEHOLD_TOKEN),
+                ],
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(created.headers()["x-den-wire-min"], "4");
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.profile_migration_enabled = true;
+        state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        h
+    }
+
+    async fn rehearsal_open(h: &Harness, attempt: &str, purpose: &str) -> Response {
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        migration_request(
+            h,
+            "POST",
+            &base,
+            Some(open_body(h, HOUSEHOLD, HOUSEHOLD_TOKEN, attempt, purpose).await),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await
+    }
+
+    async fn household_changes(h: &Harness, wire: &str) -> Response {
+        h.send(
+            "GET",
+            &format!("/lib/{HOUSEHOLD}/changes"),
+            None,
+            &[("x-den-wire", wire), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+        )
+        .await
+    }
+
+    /// Single exclusive attempt, end to end: open (backup bound), copy Owner rows into a real candidate library,
+    /// every competitor and ordinary write refused while locked, stage, commit with the response discarded,
+    /// recover by lookup, then the lock is released and wire 5 is enforced. All ids, credentials and row values
+    /// are fresh synthetic constants scoped to the temporary Harness directory. Dropping the commit response
+    /// models the only part outside the in-process server: a client losing a response the server committed.
+    #[tokio::test]
+    async fn synthetic_server_rehearsal_runs_one_exclusive_split_with_a_lost_commit_response() {
+        let h = rehearsal_household().await;
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let attempt_path = format!("{base}/{ATTEMPT}");
+
+        let opened = body_json(rehearsal_open(&h, ATTEMPT, "split").await).await;
+        assert_eq!(opened["state"], "open");
+        let backup = opened["backup"].clone();
+        assert_eq!(backup["attempt"], ATTEMPT);
+        let artifact = body_json(
+            migration_request(&h, "GET", &format!("{attempt_path}/backup"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(artifact["digest"], backup["digest"]);
+        assert_eq!(row_values(&artifact, "rows"), rehearsal_rows());
+
+        // Copy the Owner's rows from the bound backup into a real candidate library and read them back over
+        // the normal wire-4 API before the household is touched.
+        let copied = artifact["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["k"] == ACTIVITY || row["k"] == DELIVERY)
+            .map(|row| json!({ "k": row["k"], "base": 0, "v": row["v"] }))
+            .collect::<Vec<_>>();
+        let created = h
+            .send(
+                "POST",
+                &format!("/lib/{CANDIDATE}/batch"),
+                Some(json!({ "writes": copied }).to_string()),
+                &[
+                    ("x-den-wire", "4"),
+                    ("x-den-wire-min", "4"),
+                    ("x-den-generation", "0"),
+                    ("x-den-library-token", CANDIDATE_TOKEN),
+                ],
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let readback = body_json(
+            h.send(
+                "GET",
+                &format!("/lib/{CANDIDATE}/changes"),
+                None,
+                &[("x-den-wire", "4"), ("x-den-library-token", CANDIDATE_TOKEN)],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            row_values(&readback, "entries"),
+            std::collections::BTreeMap::from([
+                (ACTIVITY.to_owned(), "synthetic-owner-activity".to_owned()),
+                (DELIVERY.to_owned(), "synthetic-delivery-state".to_owned()),
+            ])
+        );
+
+        // While locked: a competing split, a competing restore (stale source, so not the Owner handoff) and
+        // ordinary household writes all learn only `migration_in_progress`; reads keep working.
+        let mut stale = ProfileMigrationStorage::new(&h.state)
+            .observe_source(HOUSEHOLD, token(HOUSEHOLD_TOKEN))
+            .await
+            .unwrap();
+        stale.head = if stale.head.starts_with('f') { "e".repeat(64) } else { "f".repeat(64) };
+        let competing_restore =
+            json!({ "attempt": ATTEMPT3, "purpose": "restore", "expectedSource": stale }).to_string();
+        let refused = [
+            rehearsal_open(&h, ATTEMPT2, "split").await,
+            migration_request(&h, "POST", &base, Some(competing_restore), Some(HOUSEHOLD_TOKEN)).await,
+            h.send(
+                "POST",
+                &format!("/lib/{HOUSEHOLD}/batch"),
+                Some(json!({ "writes": [{ "k": CONFIG, "base": 2, "v": "blocked" }] }).to_string()),
+                &[("x-den-wire", "4"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+            )
+            .await,
+            h.send(
+                "PUT",
+                &format!("/lib/{HOUSEHOLD}/member"),
+                None,
+                &[("x-den-wire", "4"), ("x-den-library-token", HOUSEHOLD_TOKEN)],
+            )
+            .await,
+        ];
+        for response in refused {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(body_json(response).await, json!({ "error": "migration_in_progress" }));
+        }
+        assert_eq!(household_lock(&h).as_deref(), Some(ATTEMPT));
+        let locked_read = household_changes(&h, "4").await;
+        assert_eq!(locked_read.status(), StatusCode::OK);
+        assert_eq!(row_values(&body_json(locked_read).await, "entries"), rehearsal_rows());
+
+        let staged = body_json(
+            migration_request(
+                &h,
+                "POST",
+                &format!("{attempt_path}/rows"),
+                Some(
+                    json!({
+                        "fence": opened["fence"],
+                        "backup": { "id": backup["id"], "digest": backup["digest"] },
+                        "writes": [
+                            { "k": CONFIG, "v": "synthetic-household-config" },
+                            { "k": DIRECTORY, "v": format!("synthetic-directory-owner:{CANDIDATE}") },
+                        ],
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+
+        // The server commits, the caller discards the response, and a lookup alone recovers the terminal.
+        let lost = migration_request(
+            &h,
+            "POST",
+            &format!("{attempt_path}/commit"),
+            Some(
+                json!({
+                    "fence": opened["fence"],
+                    "backup": { "id": backup["id"], "digest": backup["digest"] },
+                    "stagedDigest": staged["stagedDigest"],
+                    "wireMin": 5,
+                })
+                .to_string(),
+            ),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(lost.status(), StatusCode::OK);
+        drop(lost);
+        let committed =
+            body_json(migration_request(&h, "GET", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(committed["state"], "committed");
+        assert_eq!(committed["wireMin"], 5);
+        assert_eq!(committed["stagedDigest"], staged["stagedDigest"]);
+        assert_eq!(committed["backup"], json!({ "id": backup["id"], "digest": backup["digest"] }));
+        assert!(committed["head"].is_string() && committed.get("winner").is_none());
+        let again =
+            body_json(migration_request(&h, "GET", &attempt_path, None, Some(HOUSEHOLD_TOKEN)).await).await;
+        assert_eq!(again, committed, "a repeated lookup is byte-identical");
+
+        assert_eq!(household_lock(&h), None, "commit releases the exclusive lock");
+        let old_wire = household_changes(&h, "4").await;
+        assert_eq!(old_wire.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body_json(old_wire).await, json!({ "error": "upgrade_required", "min": 5 }));
+        let current = body_json(household_changes(&h, "5").await).await;
+        assert_eq!(
+            row_values(&current, "entries"),
+            std::collections::BTreeMap::from([
+                (CONFIG.to_owned(), "synthetic-household-config".to_owned()),
+                (DIRECTORY.to_owned(), format!("synthetic-directory-owner:{CANDIDATE}")),
+            ])
+        );
+    }
+
+    /// Process death mid-split: the split is opened and rows are staged, the server restarts, and a client with
+    /// no journal recovers with the Owner PIN alone. The restore handoff binds the split's exact backup, restore
+    /// puts the original household back, and a second restart shows the result, the released lock and both
+    /// terminal states are durable.
+    #[tokio::test]
+    async fn synthetic_server_rehearsal_recovers_a_crashed_split_by_owner_pin_restore_across_restarts() {
+        let h = rehearsal_household().await;
+        let dir = h.dir.clone();
+        let base = format!("/lib/{HOUSEHOLD}/profile-migration");
+        let opened = body_json(rehearsal_open(&h, ATTEMPT, "split").await).await;
+        let backup = opened["backup"].clone();
+        let staged = migration_request(
+            &h,
+            "POST",
+            &format!("{base}/{ATTEMPT}/rows"),
+            Some(
+                json!({
+                    "fence": opened["fence"],
+                    "backup": { "id": backup["id"], "digest": backup["digest"] },
+                    "writes": [
+                        { "k": CONFIG, "v": "synthetic-household-config" },
+                        { "k": DIRECTORY, "v": format!("synthetic-directory-owner:{CANDIDATE}") },
+                    ],
+                })
+                .to_string(),
+            ),
+            Some(HOUSEHOLD_TOKEN),
+        )
+        .await;
+        assert_eq!(staged.status(), StatusCode::OK);
+        drop(h);
+
+        let enable = |h: &mut Harness| {
+            let state = Arc::get_mut(&mut h.state).unwrap();
+            state.profile_migration_enabled = true;
+            state.profile_prepare_households.insert(HOUSEHOLD.to_owned());
+        };
+        let mut restarted = Harness::in_dir(dir.clone());
+        enable(&mut restarted);
+        assert_eq!(household_lock(&restarted).as_deref(), Some(ATTEMPT), "the lock survives the crash");
+
+        // No journal: only the Owner PIN's household credential and the live source observation.
+        let recovery = body_json(rehearsal_open(&restarted, ATTEMPT3, "restore").await).await;
+        assert_eq!(
+            (recovery["state"].as_str(), recovery["purpose"].as_str()),
+            (Some("open"), Some("restore"))
+        );
+        assert_eq!(recovery["backup"], backup, "the handoff binds the split's exact backup");
+        assert_eq!(household_lock(&restarted).as_deref(), Some(ATTEMPT3));
+        let artifact = body_json(
+            migration_request(
+                &restarted,
+                "GET",
+                &format!("{base}/{ATTEMPT3}/backup"),
+                None,
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(artifact["attempt"], ATTEMPT);
+        assert_eq!(artifact["digest"], backup["digest"]);
+        assert_eq!(row_values(&artifact, "rows"), rehearsal_rows());
+        let split = body_json(
+            migration_request(&restarted, "GET", &format!("{base}/{ATTEMPT}"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(split["state"], "aborted");
+
+        let restored = body_json(
+            migration_request(
+                &restarted,
+                "POST",
+                &format!("{base}/{ATTEMPT3}/restore"),
+                Some(
+                    json!({
+                        "backup": backup,
+                        "fence": recovery["fence"],
+                        "wireMin": recovery["wireMin"],
+                        "profilesRow": { "present": false, "seq": null, "digest": null },
+                        "directoryState": "absent",
+                        "plannerDecision": "restore-backup",
+                    })
+                    .to_string(),
+                ),
+                Some(HOUSEHOLD_TOKEN),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(restored["state"], "restored");
+        assert_eq!(household_lock(&restarted), None);
+        let restored_lookup = body_json(
+            migration_request(&restarted, "GET", &format!("{base}/{ATTEMPT3}"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        drop(restarted);
+
+        let mut again = Harness::in_dir(dir);
+        enable(&mut again);
+        assert_eq!(household_lock(&again), None, "the released lock is durable");
+        let lookup = body_json(
+            migration_request(&again, "GET", &format!("{base}/{ATTEMPT3}"), None, Some(HOUSEHOLD_TOKEN))
+                .await,
+        )
+        .await;
+        assert_eq!(lookup["state"], "restored");
+        assert_eq!(lookup, restored_lookup);
+        let split = body_json(
+            migration_request(&again, "GET", &format!("{base}/{ATTEMPT}"), None, Some(HOUSEHOLD_TOKEN)).await,
+        )
+        .await;
+        assert_eq!(split["state"], "aborted");
+        let household = household_changes(&again, "4").await;
+        assert_eq!(household.status(), StatusCode::OK);
+        assert_eq!(row_values(&body_json(household).await, "entries"), rehearsal_rows());
     }
 
     #[tokio::test]
