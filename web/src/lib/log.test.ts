@@ -2055,6 +2055,57 @@ describe('LibraryLog', () => {
     }
   });
 
+  /**
+   * den-edge's per-library write budget (`429 rate_limited` with `Retry-After`). Nothing was applied: the edit is kept,
+   * never dropped as a refusal, and is not resent on every refresh while the answer's own wait is running.
+   */
+  it('keeps an edit through 429 rate_limited, waits out its Retry-After, and then sends it', async () => {
+    const { storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    let limited = false;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') {
+        batches++;
+        if (limited)
+          return new Response('{"error":"rate_limited"}', {
+            status: 429,
+            headers: { 'retry-after': '90' },
+          });
+      }
+      return server.fetchImpl(url, init);
+    };
+    const action = (id: number, name: string) => {
+      const blank = blankTitle({ type: 'movie', id }, 0);
+      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+
+      limited = true;
+      expect(await log.writeAction(action(10, 'throttled')), 'shown, not lost').not.toBeNull();
+      expect(log.refusal, 'not den-edge refusing the write itself').toBeNull();
+      expect(log.pendingActions, 'kept to be sent').toBe(1);
+
+      const tried = batches;
+      for (let i = 0; i < 5; i++) await log.refresh();
+      expect(batches, 'not resent on every refresh while it is told to wait').toBe(tried);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      await log.refresh();
+      expect(batches, 'still inside the 90 seconds it named').toBe(tried);
+
+      limited = false;
+      vi.setSystemTime(Date.now() + 30_000);
+      await log.refresh();
+      expect(log.pendingActions).toBe(0);
+      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops reporting a lock it has not seen again, instead of showing it for good', async () => {
     const server = await edge([row(1)]);
     const connection: typeof fetch = async (url, init) =>
