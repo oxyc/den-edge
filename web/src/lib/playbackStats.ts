@@ -374,6 +374,19 @@ export interface WatchOptions {
   reportUrl: string;
   send?: (url: string, body: string) => void;
   now?: () => number;
+  /** Told, as the watcher stops, what hls.js's bandwidth estimate came to and how much playing it rests on. */
+  onEstimate?: (evidence: PlaybackEvidence) => void;
+}
+
+/** What a session's playback says of the link: hls.js's bandwidth estimate (bits a second) and what it rests on. */
+export interface PlaybackEvidence {
+  bps: number;
+  /** Fragments hls.js fetched. */
+  fragments: number;
+  /** Seconds of media the video actually played. */
+  playedSeconds: number;
+  /** Stalls the player counted. */
+  stalls: number;
 }
 
 export interface Watcher {
@@ -408,6 +421,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
   let arrived: number | undefined;
   /** When the last `timeupdate` came, to count playing time between two of them. */
   let lastTick: number | undefined;
+  /** How many fragments hls.js has fetched, to tell an estimate it has formed from its starting guess. */
+  let fragments = 0;
   const requests = (): Pick<Stall, 'loading' | 'idleMs'> =>
     !hls
       ? { loading: null, idleMs: null }
@@ -521,6 +536,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
       if (stopped || data.frag.type === 'subtitle') return;
       if (data.frag.sn === fetching) fetching = undefined;
       arrived = now();
+      fragments += 1;
       const stats = (data.part ?? data.frag).stats;
       recorder.fragment(stats.loaded || stats.total, stats.loading);
     });
@@ -540,6 +556,14 @@ export function watchPlayback(options: WatchOptions): Watcher {
   return {
     stop() {
       if (stopped) return;
+      const bps = hls?.instance.bandwidthEstimate;
+      if (bps && Number.isFinite(bps) && bps > 0)
+        options.onEstimate?.({
+          bps,
+          fragments,
+          playedSeconds: playedSecondsOf(video.played),
+          stalls: recorder.liveStalls(now()).stallCount,
+        });
       schedule.end();
       stopped = true;
       listening.abort();
