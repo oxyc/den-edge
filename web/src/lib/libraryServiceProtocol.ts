@@ -218,6 +218,11 @@ export type LibraryCommand =
       observedAt: number;
     }
   | { kind: 'preferences.patch'; patch: LibraryPreferencesPatch }
+  /**
+   * profiles-v1 §6.3: give this profile library the preferences an older household still holds that it has not
+   * decided itself. `household` is the household's stored `set:prefs` values (`preferences.raw`).
+   */
+  | { kind: 'preferences.seed'; household: StoredPreferenceValues }
   | {
       kind: 'api-key.set';
       service: LibraryApiKeyService;
@@ -263,6 +268,9 @@ export type LibraryCommand =
       target: DownloadTarget;
       identity: string;
     };
+
+/** A `set:prefs` row's `values`: each key's stamped value (`{value, at}` plus any members this client does not know). */
+export type StoredPreferenceValues = Record<string, object>;
 
 export interface LibraryPreferencesPatch {
   excludedGenres?: number[];
@@ -786,6 +794,8 @@ export type LibraryQuery =
   | { kind: 'download.refresh'; target?: DownloadTarget }
   | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
   | { kind: 'download.artwork'; target: DownloadTarget }
+  /** The stored `set:prefs` values with their stamps, as profile seeding takes them. */
+  | { kind: 'preferences.raw' }
   | { kind: 'retained.services.get' }
   | { kind: 'retained.home-continue.get' }
   | { kind: 'retained.billboard.get'; scope: RetainedBillboardScope }
@@ -879,6 +889,7 @@ export type LibraryQueryResult =
       failure?: 'not-configured' | 'unmatched' | 'unreachable';
     }
   | { kind: 'download.artwork'; stillPath: string | null }
+  | { kind: 'preferences.raw'; values: StoredPreferenceValues }
   | { kind: 'retained.services'; value: RetainedServices | null }
   | { kind: 'retained.home-continue'; present: boolean | null }
   | {

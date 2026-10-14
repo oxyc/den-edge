@@ -44,8 +44,8 @@
     model: LibraryModel;
     /**
      * The active profile's own preferences. Once the household has split, `model` is the household's control log, which
-     * holds only the household half (region, services, maturity ceiling); everything personal is in the profile's
-     * library, so it is read from and written to here. Null while the household has no profiles.
+     * holds no preferences; all of them (region and services included) are in the profile's library, so they are read
+     * from and written to here. Null while the household has no profiles.
      */
     preferences?: ProfilePreferences | null;
     content: ContentServiceClientPort;
@@ -117,14 +117,11 @@
       await model.patchPreferences(changes);
       return;
     }
-    // The household's half stays on the control log; the profile's library takes the rest, and the household's write
-    // guard would drop a personal key sent there.
-    const { watchRegion, services, maturityCeiling, ...personal } = changes;
-    const household: PreferenceChanges = {};
-    if ('watchRegion' in changes) household.watchRegion = watchRegion;
-    if ('services' in changes) household.services = services;
-    if ('maturityCeiling' in changes) household.maturityCeiling = maturityCeiling;
-    if (Object.keys(household).length) await model.patchPreferences(household);
+    // Every preference, region and services included, belongs to the active profile's library; the household's write
+    // guard would drop one sent to the control log. Only the maturity ceiling is not a profile preference (a
+    // profile's policy lives in the directory) and stays on the control log.
+    const { maturityCeiling, ...personal } = changes;
+    if ('maturityCeiling' in changes) await model.patchPreferences({ maturityCeiling });
     if (Object.keys(personal).length) await preferences.patch(personal);
   }
   const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));

@@ -272,9 +272,13 @@ describe.skipIf(!available)(
           'set:prefs': 1,
           'set:keys': 1,
         },
-        ownerKeys: { 'set:prefs': ['den.hideAnime'], 'set:keys': ['simkl'] },
-        // title 2's reaction and the assistant journal and hand-off the Owner never had.
-        ownerWrites: 3,
+        // Every preference is a profile's, so the household's region goes to the Owner with the rest.
+        ownerKeys: {
+          'set:prefs': ['den.hideAnime', 'den.regionOverride'],
+          'set:keys': ['simkl'],
+        },
+        // title 2's reaction, the assistant journal and hand-off, and the region the Owner never had.
+        ownerWrites: 4,
       });
       expect(dry.stdout).not.toContain('owner-simkl');
       expect((await opened(edge, householdKey, 5)).head).toBe(householdBefore.head);
@@ -283,14 +287,14 @@ describe.skipIf(!available)(
       const applied = await repair(edge, householdKey, '--apply');
       expect(applied.report).toMatchObject({
         outcome: 'repaired',
-        ownerWrites: 3,
+        ownerWrites: 4,
         before: { ownerRows: 7 },
         after: { ownerRows: 0 },
       });
 
       // The Owner gained exactly what only the household held, and lost nothing.
       const owner = await opened(edge, OWNER_KEY, 4);
-      expect(owner.head).toBe(ownerBefore.head + 3);
+      expect(owner.head).toBe(ownerBefore.head + 4);
       expect(owner.byName.get('title:movie:2')).toMatchObject({ reaction: { value: 'love' } });
       expect(owner.byName.has('set:assistant-applied')).toBe(true);
       expect(owner.byName.has(`set:handoff:${KID}`)).toBe(true);
@@ -303,9 +307,7 @@ describe.skipIf(!available)(
       );
       for (const name of ['set:trackers', 'set:assistant-applied', `set:handoff:${KID}`])
         expect(household.byName.has(name)).toBe(false);
-      expect(Object.keys((household.byName.get('set:prefs') as SettingsRow).values)).toEqual([
-        'den.regionOverride',
-      ]);
+      expect(household.byName.has('set:prefs')).toBe(false);
       expect(Object.keys((household.byName.get('set:keys') as SettingsRow).values)).toEqual([
         'tmdb',
       ]);
@@ -314,7 +316,7 @@ describe.skipIf(!available)(
       const raw = (await stored(edge, await keysOf(householdKey), 5)).rows;
       expect(raw.get(approvals.k)?.v).toBe(approvals.v);
       expect(raw.get(profiles.k)?.v).toBe(profiles.v);
-      expect(household.keys).toHaveLength(5);
+      expect(household.keys).toHaveLength(4);
       const capability = await fetch(
         `${edge.base}/lib/${(await keysOf(householdKey)).id}/profile-capability`,
         {

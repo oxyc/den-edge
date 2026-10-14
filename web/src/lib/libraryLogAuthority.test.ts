@@ -1227,6 +1227,36 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('gives a profile library the household preferences it has not decided, with their stamps, once', async () => {
+    const { log, authority } = await localAuthority();
+    const stamp = [1_000, 0, 'a1b2c3d4e5f60718'] as [number, number, string];
+    const household = {
+      'den.watchRegion': { value: { string: 'SE' }, at: stamp },
+      'den.myServicePicks': { value: { strings: ['337@SE'] }, at: stamp },
+    };
+    await authority.command(
+      { kind: 'preferences.patch', patch: { watchRegion: 'FI' } },
+      'region-1',
+    );
+    await authority.command(
+      { kind: 'preferences.patch', patch: { watchRegion: null } },
+      'region-2',
+    );
+    await expect(authority.query({ kind: 'preferences.raw' })).resolves.toMatchObject({
+      kind: 'preferences.raw',
+    });
+    await expect(
+      authority.command({ kind: 'preferences.seed', household }, 'seed-1'),
+    ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'settings' }] });
+    const values = log.settings('prefs')!.values;
+    expect(values['den.myServicePicks']).toEqual(household['den.myServicePicks']);
+    // The region was cleared in the profile before: a decision, so the household's is not given over it.
+    expect(values['den.watchRegion']?.value).toBeNull();
+    await expect(
+      authority.command({ kind: 'preferences.seed', household }, 'seed-2'),
+    ).resolves.toMatchObject({ outcome: 'unchanged' });
+  });
+
   it('owns normalized connections and semantic settings commands without exposing rows', async () => {
     const { log, authority } = await localAuthority();
     const manifestUrl = 'https://addon.example/manifest.json';

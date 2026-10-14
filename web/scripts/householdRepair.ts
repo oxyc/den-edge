@@ -1,8 +1,8 @@
 // A one-off, key-holding repair of a profile-aware household (wire 5, with a `profiles` directory) that an older
 // browser wrote its pre-split library back into. The Owner-only rows it wrote (titles, seasons, receipts, trackers,
 // the Owner's preferences and Simkl key) are first merged into the Owner's library where that changes anything, then
-// a fenced rewrite of the household keeps every other row and cuts `set:prefs` and `set:keys` to their household
-// halves. den-core's profile split (`profiles_migration_partition_rows`) decides which rows and keys are the Owner's.
+// a fenced rewrite of the household keeps every other row, drops `set:prefs` (every preference is a profile's) and cuts
+// `set:keys` to its household half. den-core's profile split (`profiles_migration_partition_rows`) decides which rows and keys are the Owner's.
 // Run it through `repair-household.mjs`; it writes nothing unless asked to.
 
 import { readFileSync } from 'node:fs';

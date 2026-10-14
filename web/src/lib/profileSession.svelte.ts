@@ -21,24 +21,29 @@ import type { ProfileActivity } from './visitorActivity.svelte';
 import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
 
 const TOAST_MS = 6_000;
-/** How long the first content request waits for the household settings that name the watch region. */
+/** How long the first content request waits for the profile settings that name the watch region. */
 const REGION_WAIT_MS = 3_000;
-/** The household watch region this browser last read: a country code, so it needs no protection. */
+/** The watch region this browser last read for a profile: a country code, so it needs no protection. */
 const REGION_KEY = 'den.profile.watch-region.v1';
 
-function rememberedRegion(): string | undefined {
+/** Every profile has its own region (profiles-v1 §6), so what a browser remembers is kept per profile. */
+const regionKey = (identity: ProfileIdentity): string =>
+  identity.kind === 'profile' ? `${REGION_KEY}:${identity.id}` : REGION_KEY;
+
+function rememberedRegion(identity: ProfileIdentity): string | undefined {
   try {
-    const region = globalThis.localStorage?.getItem(REGION_KEY);
+    const region = globalThis.localStorage?.getItem(regionKey(identity));
     return region && /^[A-Z]{2}$/.test(region) ? region : undefined;
   } catch {
     return undefined;
   }
 }
 
-function rememberRegion(region: string | undefined): void {
+function rememberRegion(identity: ProfileIdentity, region: string | undefined): void {
   try {
-    if (region && /^[A-Z]{2}$/.test(region)) globalThis.localStorage?.setItem(REGION_KEY, region);
-    else globalThis.localStorage?.removeItem(REGION_KEY);
+    if (region && /^[A-Z]{2}$/.test(region))
+      globalThis.localStorage?.setItem(regionKey(identity), region);
+    else globalThis.localStorage?.removeItem(regionKey(identity));
   } catch {
     // Storage refused (a private window): the next session waits for the settings again.
   }
@@ -92,9 +97,9 @@ export class ProfileSession {
   }
 
   /**
-   * The household's watch region, read once for the session so every request this session makes names the same
-   * region and no cache is split by it arriving late. The region this browser last read is used at once, so a
-   * restricted profile's first request does not wait on the household settings; without one, the first request
+   * This profile's watch region, read once for the session so every request this session makes names the same
+   * region and no cache is split by it arriving late. The region this browser last read for this profile is used at
+   * once, so a restricted profile's first request does not wait on its settings; without one, the first request
    * waits for them (bounded). Either way the settled value is kept for the next session, so a changed region
    * applies from the next load.
    */
@@ -102,14 +107,14 @@ export class ProfileSession {
     return (this.#region ??= (async () => {
       const settled = this.#settledRegion();
       void settled.then((read) => {
-        if (read.known) rememberRegion(read.region);
+        if (read.known) rememberRegion(this.identity, read.region);
       });
-      return rememberedRegion() ?? (await settled).region;
+      return rememberedRegion(this.identity) ?? (await settled).region;
     })());
   }
 
   async #settledRegion(): Promise<{ known: boolean; region?: string }> {
-    const model = this.household.ownerSettingsModel();
+    const model = this.model;
     if (model) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
@@ -121,9 +126,8 @@ export class ProfileSession {
       ]);
       clearTimeout(timer);
     }
-    // Household-scoped (den#234): every profile reads it from the household control log, never from its own
-    // settings, so a Kid latches the same region as Owner.
-    const settings = this.household.policy?.settings?.value;
+    // Profile-scoped (profiles-v1 §6): each profile reads its own region, so a Kid latches its own, not the Owner's.
+    const settings = this.policy?.settings?.value;
     return { known: !!settings, region: settings?.preferences.watchRegion?.toUpperCase() };
   }
 
@@ -286,10 +290,7 @@ export function activeProfileSession(
   administersHousehold = false,
   kid = false,
 ): ProfileSession {
-  const householdPolicy = household.policy;
-  const preferences = householdPolicy
-    ? new SyncedProfilePreferences(identity, model, householdPolicy)
-    : null;
+  const preferences = household.policy ? new SyncedProfilePreferences(identity, model) : null;
   return new ProfileSession(
     identity,
     household,

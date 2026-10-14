@@ -105,14 +105,9 @@ it('splits a browser’s own rows between the household and its Owner', () => {
     },
   };
   expect(profileScoped(watch)).toBe(watch);
-  expect(profileScoped(prefs)).toEqual({
-    ...prefs,
-    values: { 'den.hideAnime': prefs.values['den.hideAnime'] },
-  });
-  expect(householdScoped(prefs)).toEqual({
-    ...prefs,
-    values: { 'den.region': prefs.values['den.region'] },
-  });
+  // Every preference is the profile's: the household takes none of the row.
+  expect(profileScoped(prefs)).toEqual(prefs);
+  expect(householdScoped(prefs)).toBeNull();
   expect(profileScoped(keys)).toEqual({ ...keys, values: { simkl: keys.values.simkl } });
   expect(householdScoped(keys)).toEqual({
     ...keys,

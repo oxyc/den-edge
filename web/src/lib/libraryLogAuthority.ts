@@ -103,6 +103,7 @@ import {
 } from './profileKeyResetService';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
+import { syncPolicy } from './syncCore';
 import { recordTrackerEvent } from './trackerEvents';
 import {
   approveSimklRemovalsWithClock,
@@ -604,6 +605,8 @@ export class LibraryLogAuthority {
         return this.#progress(command);
       case 'preferences.patch':
         return this.#patchPreferences(command.patch);
+      case 'preferences.seed':
+        return this.#seedPreferences(command.household);
       case 'api-key.set':
         return this.#setApiKey(command.service, command.value);
       case 'parental-pin.set':
@@ -742,6 +745,8 @@ export class LibraryLogAuthority {
           kind: 'download.artwork',
           stillPath: (await this.#options.downloadArtwork?.(query.target)) ?? null,
         };
+      case 'preferences.raw':
+        return { kind: 'preferences.raw', values: this.#log.settings('prefs')?.values ?? {} };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
         return {
@@ -1927,6 +1932,30 @@ export class LibraryLogAuthority {
     const values = { ...base.values };
     for (const [name, value] of changed) values[name] = { value, at };
     return this.#writeRow({ ...base, values }, [{ kind: 'settings' }]);
+  }
+
+  /**
+   * profiles-v1 §6.3: den-core decides which of an older household's preferences this profile has not decided, and
+   * they are written with the household's own stamps, so seeding the same profile twice (or from two devices) is the
+   * same write.
+   */
+  async #seedPreferences(
+    household: Extract<LibraryCommand, { kind: 'preferences.seed' }>['household'],
+  ): Promise<LibraryAuthorityCommandResult> {
+    const base = this.#log.settings('prefs') ?? {
+      kind: 'set' as const,
+      schema: 2,
+      name: 'prefs',
+      values: {},
+    };
+    const { values } = syncPolicy<{ values: SettingsRow['values'] }>({
+      op: 'profiles_seed_preferences',
+      input: { household, profile: base.values },
+    });
+    if (!Object.keys(values).length) return this.#unchanged();
+    return this.#writeRow({ ...base, values: { ...base.values, ...values } }, [
+      { kind: 'settings' },
+    ]);
   }
 
   #keyName(service: 'tmdb' | 'omdb' | 'content-warnings'): string {

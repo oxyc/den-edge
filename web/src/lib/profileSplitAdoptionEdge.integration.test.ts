@@ -178,7 +178,7 @@ async function commitSplit(edge: Edge, householdKey: string) {
   const ownerKey = directory.profiles[OWNER]!.library.value.key;
   await seed(edge, ownerKey, [
     ...OWNER_ROWS(),
-    settings('prefs', { 'den.hideWatched': PREFS['den.hideWatched'] }),
+    settings('prefs', PREFS),
     settings('keys', { simkl: KEYS.simkl }),
   ]);
   const { generation } = await entries(edge, householdKey, '4');
@@ -189,7 +189,6 @@ async function commitSplit(edge: Edge, householdKey: string) {
   const rows = await Promise.all(
     [
       settings('household', { 'den.name': { string: 'Home' } }),
-      settings('prefs', { 'den.watchRegion': PREFS['den.watchRegion'] }),
       settings('keys', { tmdb: KEYS.tmdb }),
     ].map((row) => seal(keys, row)),
   );
@@ -308,12 +307,11 @@ describe.skipIf(!available)(
         expect('row' in opened, `household row ${k} opens`).toBe(true);
         const row = (opened as { row: Row }).row;
         names.push(rowName(row));
-        if (row.kind === 'set' && row.name === 'prefs')
-          expect(Object.keys(row.values)).toEqual(['den.watchRegion']);
         if (row.kind === 'set' && row.name === 'keys')
           expect(Object.keys(row.values)).toEqual(['tmdb']);
       }
-      expect(names.sort()).toEqual(['profiles', 'set:household', 'set:keys', 'set:prefs']);
+      // Every preference is a profile's: the split household holds no `set:prefs`.
+      expect(names.sort()).toEqual(['profiles', 'set:household', 'set:keys']);
       // The Owner library is untouched.
       expect((await entries(edge, ownerKey, '4')).entries).toEqual(owner.entries);
 
@@ -334,7 +332,7 @@ describe.skipIf(!available)(
       expect(members.some(({ status }) => status < 300)).toBe(true);
     });
 
-    it('writes a split household only its own rows, and only the household half of prefs and keys', async () => {
+    it('writes a split household only its own rows, no prefs, and only the household half of keys', async () => {
       const edge = await startEdge();
       const household = keyOf(43);
       const keys = await keysOf(household);
@@ -357,15 +355,13 @@ describe.skipIf(!available)(
       expect(await log.writeAt(film(11) as never, 0)).toBe(false);
       expect((await entries(edge, household)).entries).toEqual(split.entries);
 
-      const prefs = await log.write(settings('prefs', PREFS));
-      expect(prefs).not.toBeNull();
+      expect(await log.write(settings('prefs', PREFS))).toBeNull();
       const stored = new Map<string, Row>();
       for (const { k, v } of (await entries(edge, household)).entries) {
         const opened = await openEntry(keys, k, v);
         if ('row' in opened) stored.set(rowName(opened.row as Row), opened.row as Row);
       }
-      const values = (stored.get('set:prefs') as { values: Record<string, unknown> }).values;
-      expect(Object.keys(values)).toEqual(['den.watchRegion']);
+      expect(stored.has('set:prefs')).toBe(false);
       expect([...stored.keys()].filter((name) => name.startsWith('set:tr'))).toEqual([]);
     });
 

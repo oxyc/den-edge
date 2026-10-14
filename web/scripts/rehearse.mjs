@@ -161,21 +161,25 @@ async function readLibrary(edge, wire, keyText) {
   const rows = [];
   let since = 0;
   let wireMin = null;
+  let generation = '0';
   for (;;) {
     const response = await fetch(`${edge.origin}/lib/${keys.id}/changes?since=${since}`, {
       headers: { 'x-den-library-token': keys.token, 'x-den-wire': '5' },
     });
     const status = response.status;
-    if (!response.ok) return { status, rows, wireMin, keys };
+    if (!response.ok) return { status, rows, wireMin, keys, generation };
     wireMin = Number(response.headers.get('x-den-wire-min'));
+    generation = response.headers.get('x-den-generation') ?? generation;
     const body = await response.json();
     for (const entry of body.entries) {
       since = Math.max(since, entry.seq);
       if (entry.v === null) continue;
       rows.push(await wire.openEntry(keys, entry.k, entry.v));
       rows.at(-1).migration = await wire.openMigrationRow(keys, entry.k, entry.v);
+      rows.at(-1).k = entry.k;
+      rows.at(-1).seq = entry.seq;
     }
-    if (!body.more) return { status, rows, wireMin, keys };
+    if (!body.more) return { status, rows, wireMin, keys, generation };
   }
 }
 
@@ -487,19 +491,369 @@ async function checkOwnerPreferences(page, edge, wire, keyText, ownerKey) {
     subtitleOf(household) === undefined,
     `household holds ${JSON.stringify(subtitleOf(household))}`,
   );
-  // "Automatic" clears the region: the household row then holds a newer null for it.
+  // The watch region is a profile preference like the rest: "Automatic" clears it in the Owner library, and the
+  // household never holds one.
   await page.locator('#region select').selectOption('');
   const regionOf = (values) => values['den.watchRegion'];
-  for (let i = 0; i < 20 && regionOf(household)?.value !== null; i += 1) {
+  for (let i = 0; i < 20 && regionOf(owner)?.value !== null; i += 1) {
     await sleep(500);
     household = prefValues(await readLibrary(edge, wire, keyText));
     owner = prefValues(await readLibrary(edge, wire, ownerKey));
   }
   check(
-    'a changed household preference persists in the household, not the Owner library',
-    regionOf(household)?.value === null && regionOf(owner) === undefined,
-    `household ${JSON.stringify(regionOf(household)?.value)}, Owner library ${JSON.stringify(regionOf(owner))}`,
+    'a changed region persists in the Owner library, not the household',
+    regionOf(owner)?.value === null && regionOf(household) === undefined,
+    `Owner library ${JSON.stringify(regionOf(owner)?.value)}, household ${JSON.stringify(regionOf(household))}`,
   );
+  // Put it back, so the scenarios after this one start from the region the household had.
+  await page.locator('#region select').selectOption('FI');
+  for (let i = 0; i < 20 && regionOf(owner)?.value?.string !== 'FI'; i += 1) {
+    await sleep(500);
+    owner = prefValues(await readLibrary(edge, wire, ownerKey));
+  }
+}
+
+/**
+ * The streaming-service directory a TMDB stand-in answers, with the region each request named noted in `asked`, under
+ * the `phase()` it was made in.
+ */
+async function stubStreaming(ctx, asked, phase = () => '') {
+  const providers = [
+    [8, 'Netflix'],
+    [119, 'Amazon Prime Video'],
+    [337, 'Disney Plus'],
+  ].map(([id, name]) => ({
+    provider_id: id,
+    provider_name: name,
+    display_priorities: { FI: id, SE: id, US: id },
+  }));
+  await ctx.route(/\/tmdb\/3\/watch\/providers\/regions/, (route) =>
+    route.fulfill({
+      json: {
+        results: [
+          { iso_3166_1: 'FI', english_name: 'Finland' },
+          { iso_3166_1: 'SE', english_name: 'Sweden' },
+        ],
+      },
+    }),
+  );
+  await ctx.route(/\/tmdb\/3\/watch\/providers\/(movie|tv)/, (route) => {
+    asked.push({
+      phase: phase(),
+      region: new URL(route.request().url()).searchParams.get('watch_region'),
+    });
+    return route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { results: providers },
+    });
+  });
+}
+
+/** Seal one settings row and write it to a library at the generation den-edge holds (a household that already split). */
+async function writeSettingsRow(edge, wire, keyText, name, values) {
+  const library = await readLibrary(edge, wire, keyText);
+  const sealed = await wire.seal(library.keys, { kind: 'set', schema: 2, name, values });
+  const existing = library.rows.find((r) => r.k === sealed.k);
+  const response = await fetch(`${edge.origin}/lib/${library.keys.id}/batch`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-den-library-token': library.keys.token,
+      'x-den-wire': '5',
+      'x-den-wire-min': '5',
+      'x-den-generation': library.generation,
+    },
+    body: JSON.stringify({ writes: [{ k: sealed.k, base: existing?.seq ?? 0, v: sealed.v }] }),
+  });
+  if (!response.ok)
+    fail(`writing ${name} to the household failed: ${response.status} ${await response.text()}`);
+}
+
+const servicesOf = (values) => values['den.myServicePicks']?.value?.strings?.slice().sort();
+const regionOfValues = (values) => values['den.watchRegion']?.value?.string;
+
+/** Wait for `read()` to answer something truthy, polling the libraries; false if it never does. */
+async function eventually(read, tries = 40) {
+  for (let i = 0; i < tries; i += 1) {
+    if (await read()) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+/**
+ * Every preference belongs to a profile (profiles-v1 §6): the household holds none after the split; an older household's
+ * are given to each profile once, when it opens; Owner and Kid then edit their own, the Kid's Settings behind the Owner
+ * PIN; and each profile's Home and requests follow its own region and services.
+ */
+async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
+  step('every preference is the profile’s: seeding, independent edits, PIN-gated Kid Settings');
+  const read = async (key) => prefValues(await readLibrary(edge, wire, key));
+  const STAMP = (n) => [n, 0, 'a1b2c3d4e5f60718'];
+  // An older household's preferences, as a household that split before this rule still holds them: a region and a
+  // service list the Owner (which has its own) and the Kid (which has none yet) are to be given once, and one key
+  // the Owner has not decided.
+  const stale = {
+    'den.watchRegion': { value: { string: 'SE' }, at: STAMP(1_000) },
+    'den.myServicePicks': { value: { strings: ['337@SE'] }, at: STAMP(1_001) },
+    'den.autoplayTrailers': { value: { bool: false }, at: STAMP(1_002) },
+  };
+  await writeSettingsRow(edge, wire, keyText, 'prefs', stale);
+
+  const asked = [];
+  let phase = 'owner-open';
+  const regionsIn = (name) => [
+    ...new Set(asked.filter((entry) => entry.phase === name).map((entry) => entry.region)),
+  ];
+  const ctx = await ctxFor('profile-scoped-preferences', people.owner.id);
+  await nameSyntheticTitles(ctx);
+  await stubStreaming(ctx, asked, () => phase);
+  const page = await seedLink(ctx, edge, keyText);
+  const loopErrors = [];
+  page.on('pageerror', (e) => {
+    if (e.message.includes('effect_update_depth')) loopErrors.push(e.message);
+  });
+  const nav = (name) =>
+    page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name });
+  const tiles = async () => {
+    const section = page.locator('section[aria-label="Services"]');
+    await section.waitFor({ timeout: 30_000 }).catch(() => {});
+    // The shelf asks for its directories only once it is near the viewport.
+    await eventually(async () => {
+      // Scrolled again on every try: the page swaps its first frame for the profile's, which draws the shelf anew.
+      await section.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+      return /Netflix|Amazon|Disney/.test(await section.innerText().catch(() => ''));
+    }, 30);
+    // The first frame is the household's, replaced by the profile's own: read the shelf once it has stopped changing.
+    const read = async () => (await section.innerText().catch(() => '')).replace(/\s+/g, ' ');
+    let text = await read();
+    for (let steady = 0; steady < 4;) {
+      await sleep(700);
+      const next = await read();
+      steady = next === text ? steady + 1 : 0;
+      text = next;
+    }
+    return text;
+  };
+  const openServices = async () => {
+    await page.locator('#my-services > button.row').click();
+    await page.locator('#my-services-panel').getByLabel('Netflix').waitFor({ timeout: 30_000 });
+  };
+  const switchTo = async (name, pin) => {
+    await page.locator('button.profile-trigger').first().click();
+    await page.getByRole('button', { name: `Use ${name}` }).click();
+    if (pin)
+      await page
+        .locator('#owner-pin')
+        .fill(pin, { timeout: 10_000 })
+        .catch(async (error) => {
+          console.log(
+            `switcher said: ${(
+              await page
+                .locator('dialog')
+                .innerText()
+                .catch(() => '')
+            ).replace(/\s+/g, ' ')}`,
+          );
+          throw error;
+        });
+    await page
+      .locator('dialog[open]')
+      .waitFor({ state: 'detached', timeout: 15_000 })
+      .catch(() => {});
+  };
+
+  // 1. The Owner opens: it keeps its own region and services and is given only the key it had not decided.
+  await page.goto(`${edge.origin}/`);
+  await page.locator('button.profile-trigger').first().waitFor({ timeout: 60_000 });
+  const ownerSeeded = await eventually(
+    async () => (await read(people.owner.key))['den.autoplayTrailers']?.value?.bool === false,
+  );
+  let owner = await read(people.owner.key);
+  check(
+    'the Owner is given the household preference it had not decided, once, with the household’s stamp',
+    ownerSeeded &&
+      JSON.stringify(owner['den.autoplayTrailers']?.at) === JSON.stringify(STAMP(1_002)),
+    JSON.stringify(owner['den.autoplayTrailers']) ??
+      browserLog
+        .filter((line) => /seed|preferences/i.test(line))
+        .slice(-3)
+        .join(' | '),
+  );
+  check(
+    'the Owner keeps its own region and services over the household’s',
+    regionOfValues(owner) === 'FI' &&
+      JSON.stringify(servicesOf(owner)) === JSON.stringify(['8@FI']),
+    `${regionOfValues(owner)} ${JSON.stringify(servicesOf(owner))}`,
+  );
+
+  // 1b. The Kid opens: given the household's list once (the Kid had none), with the household's stamps.
+  phase = 'kid';
+  await switchTo(people.kid.name);
+  const kidSeeded = await eventually(async () => {
+    const seeded = await read(people.kid.key);
+    return servicesOf(seeded)?.length === 1;
+  });
+  let kid = await read(people.kid.key);
+  check(
+    'the Kid is given the household’s region and services once, with the household’s stamps',
+    kidSeeded &&
+      regionOfValues(kid) === 'SE' &&
+      JSON.stringify(servicesOf(kid)) === JSON.stringify(['337@SE']) &&
+      JSON.stringify(kid['den.watchRegion']?.at) === JSON.stringify(STAMP(1_000)) &&
+      JSON.stringify(kid['den.myServicePicks']?.at) === JSON.stringify(STAMP(1_001)),
+    JSON.stringify({ region: kid['den.watchRegion'], services: kid['den.myServicePicks'] }),
+  );
+  const kidSeedTiles = await tiles();
+  check(
+    'the Kid’s Home shows the Kid’s services, not the Owner’s',
+    /Disney/.test(kidSeedTiles) && !/Netflix|Amazon/.test(kidSeedTiles),
+    kidSeedTiles,
+  );
+
+  // 1c. Every profile is seeded, so the household's copy is repaired away (profiles-v1 §8.2): it holds no preference.
+  phase = 'repair';
+  await switchTo(people.owner.name, PIN);
+  await writeSettingsRow(edge, wire, keyText, 'prefs', {});
+  const householdBefore = await read(keyText);
+  check(
+    'the repaired household holds no preferences',
+    Object.keys(householdBefore).length === 0,
+    JSON.stringify(Object.keys(householdBefore)),
+  );
+
+  // 2. The Owner sets its services (A): Amazon joins Netflix in Finland. The regions the pages ask the directory for
+  // are noted under the profile that asked (a repeat can come from the browser's own cache, so each window is a stretch
+  // of pages, not one load).
+  phase = 'owner';
+  await page.goto(`${edge.origin}/settings`);
+  await page.getByRole('heading', { name: 'Settings', level: 1 }).waitFor({ timeout: 60_000 });
+  await openServices();
+  // The checkbox is drawn by its label, which covers the input.
+  await page.locator('#my-services-panel').getByLabel('Amazon Prime Video').check({ force: true });
+  const ownerServices = ['119@FI', '8@FI'];
+  const ownerSaved = await eventually(
+    async () =>
+      JSON.stringify(servicesOf(await read(people.owner.key))) === JSON.stringify(ownerServices),
+  );
+  check('the Owner’s services are saved to the Owner library', ownerSaved);
+
+  // 3. The Owner's Home: its tiles are its own, and everything it asked for named its own region.
+  await page.goto(`${edge.origin}/`);
+  await page.locator('button.profile-trigger').first().waitFor({ timeout: 60_000 });
+  const ownerTiles = await tiles();
+  check(
+    'the Owner’s Home shows the Owner’s services, not the Kid’s',
+    /Netflix/.test(ownerTiles) && /Amazon/.test(ownerTiles) && !/Disney/.test(ownerTiles),
+    ownerTiles,
+  );
+  check(
+    'the Owner’s requests carry the Owner’s region, never the Kid’s',
+    regionsIn('owner').includes('FI') && !regionsIn('owner').includes('SE'),
+    JSON.stringify(regionsIn('owner')),
+  );
+
+  // 4. The Kid again.
+  phase = 'kid';
+  await switchTo(people.kid.name);
+
+  // 5. The Kid's Settings ask for the Owner PIN: a wrong one is refused, the right one opens the full Settings.
+  await nav('Settings').click();
+  const gate = page.locator('#settings-gate-pin');
+  await gate.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
+  const gated = await gate.isVisible().catch(() => false);
+  check('opening a Kid’s Settings asks for the Owner PIN', gated);
+  if (gated) {
+    await gate.fill('0000');
+    await page
+      .locator('.settings-gate .denied')
+      .waitFor({ timeout: 10_000 })
+      .catch(() => {});
+    check(
+      'a wrong Owner PIN is refused and opens nothing',
+      (await page
+        .locator('.settings-gate .denied')
+        .isVisible()
+        .catch(() => false)) && (await page.locator('#my-services').count()) === 0,
+    );
+    await gate.fill(PIN);
+  }
+  await page
+    .locator('#my-services')
+    .waitFor({ timeout: 30_000 })
+    .catch(() => {});
+  check(
+    'the right Owner PIN opens the Kid’s full Settings, services and region included',
+    (await page.locator('#my-services').count()) === 1 &&
+      (await page.locator('#region select').count()) === 1,
+  );
+
+  // 6. The Kid sets its services (B): Netflix joins Disney in Sweden.
+  await openServices();
+  await page.locator('#my-services-panel').getByLabel('Netflix').check({ force: true });
+  const kidServices = ['337@SE', '8@SE'];
+  const kidSaved = await eventually(
+    async () =>
+      JSON.stringify(servicesOf(await read(people.kid.key))) === JSON.stringify(kidServices),
+  );
+  check('the Kid’s services are saved to the Kid library', kidSaved);
+  // A fresh load of the Kid.
+  await page.goto(`${edge.origin}/`);
+  await page.locator('button.profile-trigger').first().waitFor({ timeout: 60_000 });
+  const kidTiles = await tiles();
+  check(
+    'the Kid’s Home shows the Kid’s services after its change',
+    /Netflix/.test(kidTiles) && /Disney/.test(kidTiles) && !/Amazon/.test(kidTiles),
+    kidTiles,
+  );
+  check(
+    'the Kid’s requests carry the Kid’s region, never the Owner’s',
+    regionsIn('kid').includes('SE') && !regionsIn('kid').includes('FI'),
+    JSON.stringify(regionsIn('kid')),
+  );
+
+  // 7. Decrypted from den-edge: each library holds its own, and the household was never written.
+  owner = await read(people.owner.key);
+  kid = await read(people.kid.key);
+  const householdAfter = await read(keyText);
+  check(
+    'the Owner library holds services A and region FI; the Kid library holds services B and region SE',
+    JSON.stringify(servicesOf(owner)) === JSON.stringify(ownerServices) &&
+      regionOfValues(owner) === 'FI' &&
+      JSON.stringify(servicesOf(kid)) === JSON.stringify(kidServices) &&
+      regionOfValues(kid) === 'SE',
+    JSON.stringify({ owner: servicesOf(owner), kid: servicesOf(kid) }),
+  );
+  check(
+    'neither profile’s edits touched the household’s preferences',
+    JSON.stringify(householdAfter) === JSON.stringify(householdBefore),
+  );
+
+  // 8. Switching profile relocks the Kid's Settings.
+  await switchTo(people.owner.name, PIN);
+  await switchTo(people.kid.name);
+  await nav('Settings').click();
+  const relocked = await page
+    .locator('#settings-gate-pin')
+    .waitFor({ state: 'visible', timeout: 30_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+  check('switching profile relocks the Kid’s Settings', relocked);
+
+  // 9. Reopening the Kid does not seed over its own choices.
+  await page.goto(`${edge.origin}/`);
+  await tiles();
+  await sleep(3000);
+  kid = await read(people.kid.key);
+  check(
+    'reopening the Kid keeps its own services and region (the seed is not applied again)',
+    JSON.stringify(servicesOf(kid)) === JSON.stringify(kidServices) && regionOfValues(kid) === 'SE',
+    JSON.stringify(servicesOf(kid)),
+  );
+  check('the profile preference scenario ran without an effect loop', loopErrors.length === 0);
+  await ctx.close().catch(() => {});
 }
 
 async function seedLink(ctx, edge, keyText) {
@@ -707,6 +1061,24 @@ async function main() {
       strayAfterSplit.length === 0,
       `${strayAfterSplit.length} activity rows`,
     );
+    // Every preference is a profile's (profiles-v1 §6): the split household keeps none, region and services included.
+    const householdPrefs = Object.keys(prefValues(afterSplit)).filter((key) =>
+      key.startsWith('den.'),
+    );
+    check(
+      'the committed household holds no preferences',
+      householdPrefs.length === 0,
+      householdPrefs.length ? `holds ${householdPrefs.join(', ')}` : '',
+    );
+    if (ownerRows && !DATA) {
+      const ownerPrefs = prefValues(ownerRows);
+      check(
+        'the Owner library holds the household’s region and services',
+        ownerPrefs['den.watchRegion']?.value?.string === 'FI' &&
+          JSON.stringify(ownerPrefs['den.myServicePicks']?.value?.strings) === '["8@FI"]',
+        `region ${JSON.stringify(ownerPrefs['den.watchRegion']?.value)}, services ${JSON.stringify(ownerPrefs['den.myServicePicks']?.value)}`,
+      );
+    }
 
     // 4a'. A returning Owner's browser, as one upgraded from 0.271.5 is: a persistent Owner and an Owner hint with no
     // library key. With a long-lived library a release once froze such a tab on its second load (the renderer stopped
@@ -774,6 +1146,8 @@ async function main() {
       );
       await ctx.addInitScript(watchOwnerGate);
       await nameSyntheticTitles(ctx);
+      // Settings lists the countries a region can be picked from, which the rehearsal's TMDB stand-in answers.
+      await stubStreaming(ctx, []);
       const ownerPage = await seedLink(ctx, edge, keyText);
       const loop = [];
       // Svelte reports the loop as a thrown error (a page error), and logs it to the console as well.
@@ -880,6 +1254,41 @@ async function main() {
       if (path === '/settings' && !DATA)
         await checkOwnerPreferences(ownerPage, edge, wire, keyText, ownerKey);
       await ctx.close().catch(() => {});
+    }
+
+    // 4b''. Preferences are per profile: seeding, independent Owner and Kid edits, the Kid's PIN-gated Settings.
+    if (!DATA) {
+      const person = (profile) => ({
+        id: profile.id,
+        key: profile.library?.value?.key ?? profile.libraryKey,
+        name: profile.display?.value?.name ?? profile.name,
+      });
+      await checkProfilePreferences(
+        async (name, ownerId) => {
+          const context = await launch(join(work, name));
+          // Only the first load starts as the Owner: a later one keeps whichever profile the page switched to.
+          await context.addInitScript(
+            ([key, value]) => {
+              try {
+                if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
+              } catch {
+                // about:blank has no storage.
+              }
+            },
+            [
+              'den.profile.active.v1',
+              JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerId }),
+            ],
+          );
+          return context;
+        },
+        edge,
+        wire,
+        keyText,
+        { owner: person(owner), kid: person(kids[0]) },
+      );
+      // REHEARSE_ONLY_PREFERENCES=1 stops here, for working on the scenario above without the long ones after it.
+      if (process.env.REHEARSE_ONLY_PREFERENCES === '1') return;
     }
 
     // 4b'. A returning Owner who HAS kept, unsent work. The first frame opens the Owner library before the profile

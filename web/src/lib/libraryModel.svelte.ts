@@ -16,6 +16,7 @@ import type {
   LibraryMetadataShape,
   LibraryOverviewView,
   LibraryPreferencesPatch,
+  StoredPreferenceValues,
   LibraryQueryResult,
   LibraryTask,
   LibraryTaskResult,
@@ -389,6 +390,22 @@ export class LibraryModel {
     operationId?: string,
   ): Promise<LibraryServiceCommandResult> {
     return this.#command({ kind: 'preferences.patch', patch }, operationId);
+  }
+
+  /** The stored `set:prefs` values with their stamps: what profile seeding reads from an older household. */
+  async rawPreferences(): Promise<StoredPreferenceValues> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'preferences.raw' });
+    if (result.kind !== 'preferences.raw') throw wrongQueryResult('raw preferences');
+    return result.values;
+  }
+
+  /** Give this profile library the preferences `household` holds that it has not decided (profiles-v1 §6.3). */
+  seedPreferences(
+    household: StoredPreferenceValues,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'preferences.seed', household }, operationId);
   }
 
   setApiKey(

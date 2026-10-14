@@ -356,109 +356,96 @@
     </p>
   </SettingRow>
 
-  {#if personalOnly}
-    <SettingRow id="household-streaming" label="Streaming household" value={countryName(region)}>
-      <p class="summary">
-        Region: {countryName(region)} · {effectiveServices.length} shared service{effectiveServices.length ===
-        1
-          ? ''
-          : 's'}
-      </p>
-      <p class="foot">
-        Region and streaming services are shared by the household and managed by Owner.
-      </p>
-    </SettingRow>
-  {:else}
-    <SettingRow id="my-services" label="My services" value={count(effectiveServices.length, '')}>
-      <p class="summary">
-        <span
-          >{effectiveServices.length
-            ? `${effectiveServices.length} service${effectiveServices.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
-            : 'None selected'}</span
+  <!-- Services and region are this profile's own (profiles-v1 §6), so every profile edits them here. -->
+  <SettingRow id="my-services" label="My services" value={count(effectiveServices.length, '')}>
+    <p class="summary">
+      <span
+        >{effectiveServices.length
+          ? `${effectiveServices.length} service${effectiveServices.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
+          : 'None selected'}</span
+      >
+    </p>
+    <div class="form">
+      <Select
+        label="Country"
+        value={shownCountry}
+        groups={countryGroups}
+        boxed
+        onchange={(code) => {
+          servicesCountry = code;
+          serviceFilter = '';
+        }}
+      />
+      <input
+        id="service-filter"
+        class="field"
+        type="search"
+        placeholder="Filter {countryName(shownCountry)}’s services"
+        aria-label="Filter services"
+        bind:value={serviceFilter}
+      />
+    </div>
+    {#if countriesFailed}
+      <p class="status bad">
+        Couldn’t refresh the country list. Check your TMDB key in Settings.
+        <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
+          >Try again</button
         >
       </p>
-      <div class="form">
-        <Select
-          label="Country"
-          value={shownCountry}
-          groups={countryGroups}
-          boxed
-          onchange={(code) => {
-            servicesCountry = code;
-            serviceFilter = '';
-          }}
-        />
-        <input
-          id="service-filter"
-          class="field"
-          type="search"
-          placeholder="Filter {countryName(shownCountry)}’s services"
-          aria-label="Filter services"
-          bind:value={serviceFilter}
-        />
-      </div>
-      {#if countriesFailed}
-        <p class="status bad">
-          Couldn’t refresh the country list. Check your TMDB key in Settings.
-          <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
-            >Try again</button
-          >
-        </p>
-      {/if}
-      {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
-        <p class="status bad">
-          {directoryLoad.status === 'partial'
-            ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
-            : `Couldn’t load ${countryName(shownCountry)}’s services.`}
-          <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
-            >Try again</button
-          >
-        </p>
-      {/if}
-      {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
-        <p class="status">Loading services…</p>
-      {:else if directory.length}
-        <CheckGrid
-          legend="{countryName(shownCountry)} · most prominent first"
-          options={serviceOptions}
-          checked={(id) => {
-            const service = directory.find((s) => s.id === id);
-            return !!service && isPicked(service, shownCountry);
-          }}
-          wide
-          {disabled}
-          onchange={toggleService}
-        />
-      {:else if directoryLoad.status === 'ready'}
-        <p class="status">No services listed for {countryName(shownCountry)}</p>
-      {/if}
-      <p class="foot">
-        Services are licensed per country, so pick them by country. Each becomes a brand tile on
-        Home, opening that country’s catalogue. Every pick shares the one shelf, and a tile says
-        which country it is for when you have picked the same service twice. The “where to watch”
-        badges on individual titles still follow your own region.
+    {/if}
+    {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
+      <p class="status bad">
+        {directoryLoad.status === 'partial'
+          ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
+          : `Couldn’t load ${countryName(shownCountry)}’s services.`}
+        <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
+          >Try again</button
+        >
       </p>
-      <p class="foot">Streaming availability by JustWatch.</p>
-    </SettingRow>
+    {/if}
+    {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
+      <p class="status">Loading services…</p>
+    {:else if directory.length}
+      <CheckGrid
+        legend="{countryName(shownCountry)} · most prominent first"
+        options={serviceOptions}
+        checked={(id) => {
+          const service = directory.find((s) => s.id === id);
+          return !!service && isPicked(service, shownCountry);
+        }}
+        wide
+        {disabled}
+        onchange={toggleService}
+      />
+    {:else if directoryLoad.status === 'ready'}
+      <p class="status">No services listed for {countryName(shownCountry)}</p>
+    {/if}
+    <p class="foot">
+      Services are licensed per country, so pick them by country. Each becomes a brand tile on Home,
+      opening that country’s catalogue. Every pick shares the one shelf, and a tile says which
+      country it is for when you have picked the same service twice. The “where to watch” badges on
+      individual titles still follow your own region.
+    </p>
+    <p class="foot">Streaming availability by JustWatch.</p>
+  </SettingRow>
 
-    <SettingRow id="region" label="Region">
-      {#snippet control()}
-        <Select
-          labelledby="region-label"
-          value={prefs.watchRegion ?? ''}
-          options={[
-            { value: '', label: `Automatic (${countryName(deviceRegion)})` },
-            ...(countries ?? []).map((c) => ({ value: c.code, label: c.name })),
-            ...(prefs.watchRegion && !countries?.some((c) => c.code === prefs.watchRegion)
-              ? [{ value: prefs.watchRegion, label: countryName(prefs.watchRegion) }]
-              : []),
-          ]}
-          {disabled}
-          onchange={(code) => save(change.watchRegion(code || undefined))}
-        />
-      {/snippet}
-    </SettingRow>
-  {/if}
+  <SettingRow id="region" label="Region">
+    {#snippet control()}
+      <Select
+        labelledby="region-label"
+        value={prefs.watchRegion ?? ''}
+        options={[
+          { value: '', label: `Automatic (${countryName(deviceRegion)})` },
+          ...(countries ?? []).map((c) => ({ value: c.code, label: c.name })),
+          ...(prefs.watchRegion && !countries?.some((c) => c.code === prefs.watchRegion)
+            ? [{ value: prefs.watchRegion, label: countryName(prefs.watchRegion) }]
+            : []),
+        ]}
+        {disabled}
+        onchange={(code) => save(change.watchRegion(code || undefined))}
+      />
+    {/snippet}
+  </SettingRow>
 
   <SettingRow id="minimum-year" label="Minimum year">
     {#snippet control()}

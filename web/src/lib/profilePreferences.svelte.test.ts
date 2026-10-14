@@ -147,7 +147,34 @@ describe('preview profile preferences', () => {
     expect(storage.values.size).toBe(0);
   });
 
-  it('has no household or policy writer and leaves the Owner values unchanged', async () => {
+  it('keeps its own region and services once chosen, leaving the household values unchanged', async () => {
+    const storage = new MemoryStorage();
+    const session = kid();
+    const store = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
+    await store.patch({
+      watchRegion: 'SE',
+      services: { kind: 'values', values: [{ id: 9, country: 'SE' }] },
+    });
+    expect(store.value).toMatchObject({
+      watchRegion: 'SE',
+      services: [{ id: 9, country: 'SE' }],
+      servicesConfigured: true,
+    });
+    const reloaded = new PreviewProfilePreferences(
+      session.identity,
+      session.policy!,
+      storage,
+      null,
+    );
+    expect(reloaded.value).toMatchObject({
+      watchRegion: 'SE',
+      services: [{ id: 9, country: 'SE' }],
+    });
+    expect(ownerPreferences.watchRegion).toBe('FI');
+    expect(ownerPreferences.services).toEqual([{ id: 8, country: 'FI' }]);
+  });
+
+  it('has no policy writer', async () => {
     const session = kid();
     const store = new PreviewProfilePreferences(
       session.identity,
@@ -155,21 +182,13 @@ describe('preview profile preferences', () => {
       new MemoryStorage(),
       null,
     );
-    await expect(store.patch({ watchRegion: 'SE' })).rejects.toThrow('cannot write household');
-    await expect(store.patch({ maturityCeiling: 'pg13' })).rejects.toThrow(
-      'cannot write household',
-    );
-    await expect(store.patch({ services: { kind: 'values', values: [] } })).rejects.toThrow(
-      'cannot write household',
-    );
-    expect(ownerPreferences.watchRegion).toBe('FI');
+    await expect(store.patch({ maturityCeiling: 'pg13' })).rejects.toThrow('cannot write');
     expect(ownerPreferences.maturityCeiling).toBe('r');
-    expect(ownerPreferences.services).toEqual([{ id: 8, country: 'FI' }]);
   });
 });
 
 describe('synced profile preferences', () => {
-  it('reads personal values from the profile and household values from the control log', () => {
+  it('reads every value, region and services included, from the profile and none from the household', () => {
     const personal: LibraryPreferences = {
       ...ownerPreferences,
       excludedGenres: [35],
@@ -186,19 +205,19 @@ describe('synced profile preferences', () => {
       },
       patchPreferences: async () => ({}),
     } as unknown as LibraryModel;
-    const preferences = new SyncedProfilePreferences(kid().identity, model, policy);
+    const preferences = new SyncedProfilePreferences(kid().identity, model);
 
     expect(preferences.value).toMatchObject({
       excludedGenres: [35],
       audioLanguage: 'da',
-      watchRegion: 'FI',
-      services: [{ id: 8, country: 'FI' }],
-      servicesConfigured: true,
+      watchRegion: 'US',
+      services: [],
+      servicesConfigured: false,
       maturityCeiling: undefined,
     });
     expect(preferences.policy.settings.value).toMatchObject({
       assistant: { read: false, write: false },
-      preferences: { excludedGenres: [35], watchRegion: 'FI', maturityCeiling: undefined },
+      preferences: { excludedGenres: [35], watchRegion: 'US', maturityCeiling: undefined },
     });
   });
 
@@ -218,18 +237,16 @@ describe('synced profile preferences', () => {
         return {};
       },
     } as unknown as LibraryModel;
-    const preferences = new SyncedProfilePreferences(kid().identity, model, policy);
+    const preferences = new SyncedProfilePreferences(kid().identity, model);
 
     await preferences.patch({ audioLanguage: 'da', excludedGenres: [35] });
-    await expect(preferences.patch({ watchRegion: 'SE' })).rejects.toThrow(
-      'A profile cannot write household settings or content policy',
-    );
+    await preferences.patch({ watchRegion: 'SE', services: { kind: 'values', values: [] } });
     await expect(preferences.patch({ maturityCeiling: 'r' })).rejects.toThrow(
-      'A profile cannot write household settings or content policy',
+      'A profile cannot write its content policy through preferences',
     );
-    await expect(preferences.patch({ services: { kind: 'values', values: [] } })).rejects.toThrow(
-      'A profile cannot write household settings or content policy',
-    );
-    expect(patches).toEqual([{ audioLanguage: 'da', excludedGenres: [35] }]);
+    expect(patches).toEqual([
+      { audioLanguage: 'da', excludedGenres: [35] },
+      { watchRegion: 'SE', services: { kind: 'values', values: [] } },
+    ]);
   });
 });

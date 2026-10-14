@@ -7,9 +7,8 @@ export type HouseholdWrite =
 
 /**
  * The household write rule (profiles-v1 §2), shaped as den-core's `profile_household_write` answers it, so that op
- * replaces this body once it is vendored. Until then it is den-core's `profile_scoped_name` with the split's own
- * partition: `set:prefs` keeps what `profiles_partition_preferences` leaves in the household, `set:keys` everything
- * but `simkl`.
+ * replaces this body once it is vendored. Until then it is den-core's `profile_scoped_name`: every preference is
+ * profile-scoped, so a `set:prefs` row is refused whole, and `set:keys` keeps everything but `simkl`.
  */
 export function profileHouseholdWrite(row: {
   name: string;
@@ -26,18 +25,12 @@ export function profileHouseholdWrite(row: {
     name === 'set:assistant-applied'
   )
     return { effect: 'refuse' };
-  if (name !== 'set:prefs' && name !== 'set:keys') return { effect: 'allow' };
-  let values: SettingsRow['values'];
-  if (name === 'set:prefs')
-    values = syncPolicy<{ household: SettingsRow['values'] }>({
-      op: 'profiles_partition_preferences',
-      values: row.values ?? {},
-    }).household;
-  else {
-    const { simkl: _owner, ...household } = row.values ?? {};
-    values = household;
-  }
-  return Object.keys(values).length ? { effect: 'restrict', values } : { effect: 'refuse' };
+  if (name === 'set:prefs') return { effect: 'refuse' };
+  if (name !== 'set:keys') return { effect: 'allow' };
+  const { simkl: _owner, ...household } = row.values ?? {};
+  return Object.keys(household).length
+    ? { effect: 'restrict', values: household }
+    : { effect: 'refuse' };
 }
 
 /**

@@ -8,6 +8,7 @@ import { CONTENT_SERVICE_PROTOCOL } from './contentServiceProtocol';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import { persistentProfileIdentity } from './profileIdentity';
+import { profilePolicy } from './profilePolicy';
 import { ProfileSession } from './profileSession.svelte';
 
 function session(options: {
@@ -138,10 +139,10 @@ describe('the watch region', () => {
     const kid = new ProfileSession(
       persistentProfileIdentity('b'.repeat(32), 'key'),
       household,
-      null,
+      model,
       false,
       false,
-      household.policy,
+      profilePolicy(model),
       null,
       { maximumAge: 12, unknownRatings: 'block' },
       null,
@@ -166,7 +167,8 @@ describe('the watch region', () => {
   });
 
   it('is the one this browser last read, at once, and the settled one is kept for next time', async () => {
-    const kept = new Map<string, string>([['den.profile.watch-region.v1', 'SE']]);
+    const regionKey = `den.profile.watch-region.v1:${'b'.repeat(32)}`;
+    const kept = new Map<string, string>([[regionKey, 'SE']]);
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => kept.get(key) ?? null,
       setItem: (key: string, value: string) => kept.set(key, value),
@@ -192,10 +194,10 @@ describe('the watch region', () => {
       const kid = new ProfileSession(
         persistentProfileIdentity('b'.repeat(32), 'key'),
         household,
-        null,
+        model,
         false,
         false,
-        household.policy,
+        profilePolicy(model),
         null,
         { maximumAge: 12, unknownRatings: 'block' },
         null,
@@ -209,7 +211,7 @@ describe('the watch region', () => {
 
       settings.value = { kind: 'settings', preferences: { watchRegion: 'fi', services: [] } };
       settle();
-      await expect.poll(() => kept.get('den.profile.watch-region.v1')).toBe('FI');
+      await expect.poll(() => kept.get(regionKey)).toBe('FI');
       // The session keeps the region it started with, so its cache is never split.
       await kid.content.query({ kind: 'collection', id: 2 });
       expect((query.mock.calls[1] as unknown[])[2]).toMatchObject({ region: 'SE' });
@@ -218,7 +220,7 @@ describe('the watch region', () => {
     }
   });
 
-  it('is the household’s for Kid and Owner alike, never the Kid’s own setting', async () => {
+  it('is each profile’s own, never the household’s or another profile’s', async () => {
     const query = vi.fn(async () => ({ kind: 'collection', titles: [] }));
     const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
     const model = {
@@ -233,7 +235,7 @@ describe('the watch region', () => {
       model,
       content,
     );
-    // The Kid's own projection names another region (and the Owner's names none): neither is consulted.
+    // The household names Sweden; each profile's own projection is what its session reads, the Owner's naming none.
     const own = (watchRegion?: string) =>
       ({
         settings: {
@@ -262,7 +264,7 @@ describe('the watch region', () => {
     await open(false, own(undefined)).content.query({ kind: 'collection', id: 1 });
     expect(
       query.mock.calls.map((call) => ((call as unknown[])[2] as { region?: string }).region),
-    ).toEqual(['SE', 'SE']);
+    ).toEqual(['US', undefined]);
   });
 });
 

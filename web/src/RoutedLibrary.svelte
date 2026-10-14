@@ -1242,7 +1242,7 @@
           {#if route.page === 'settings'}
             {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
             {#if settingsRoute === 'personal'}
-              <ProfileSettings {session} />
+              <ProfileSettings {session} profiles={profileCoordinator} />
             {:else if settingsRoute === 'unavailable'}
               <section
                 class="profile-settings-unavailable"
