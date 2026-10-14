@@ -65,6 +65,9 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
   await expect(sparse).toBeVisible();
   // A title cached far down the shelf must not jump ahead of unnamed titles or cause a 200-title lookup burst.
   await expect(sparse.locator('[data-card-index]')).toHaveCount(8);
+  // The light slots exist before the shelf is near the viewport, and only then does it listen for scrolls. A
+  // mounted card is the shelf going live; a scroll sent before it is lost and no more titles are ever admitted.
+  await expect(sparse.locator('.card').first()).toBeVisible();
   await sparse.locator('.track').evaluate((node) => {
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
@@ -101,6 +104,8 @@ test('Home keeps admitting Watchlist titles as the viewer scrolls', async ({ pag
   const row = page.getByRole('region', { name: 'Watchlist', exact: true });
   const slots = row.locator('[data-card-index]');
   await expect(slots).toHaveCount(8);
+  // A mounted card is the shelf going live; it listens for scrolls only from then on.
+  await expect(row.locator('.card').first()).toBeVisible();
   for (const count of [16, 24, 32, 40]) {
     await row.locator('.track').evaluate((node) => {
       node.scrollLeft = node.scrollWidth;
