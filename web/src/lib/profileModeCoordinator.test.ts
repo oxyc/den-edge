@@ -61,6 +61,7 @@ function owner(
   directory?: PreviewProfileDirectory,
   profileModels?: ProfileActivityModelFactory,
   householdPinConfigured?: boolean,
+  startsKid?: (pin: string) => Promise<boolean>,
 ) {
   const authority = (configured: boolean) => {
     const release = vi.fn();
@@ -117,6 +118,7 @@ function owner(
       visitorLock ?? immediateLock,
       directory,
       profileModels,
+      startsKid,
     ),
     model: activity.model,
     householdContent,
@@ -1250,5 +1252,33 @@ describe('profilesCapability', () => {
         }) as typeof fetch,
       ),
     ).resolves.toBe('indeterminate');
+  });
+});
+
+describe('a browser whose household is not made yet (den#295)', () => {
+  it('offers the Kid it will have, and choosing it hands the new Owner PIN to the household it makes', async () => {
+    const storage = memoryStorage();
+    const startsKid = vi.fn(async () => true);
+    const { coordinator } = owner(
+      storage,
+      false,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      startsKid,
+    );
+    expect(coordinator.establishUnprotectedOwner()).toBe(true);
+    expect(coordinator.choices.map((choice) => choice.name)).toEqual(['Owner', 'Kids', 'Visitor']);
+    expect(coordinator.setsPin('kid')).toBe(true);
+    const kid = coordinator.choices.find((choice) => choice.role === 'kid')!;
+    // No PIN chosen: nothing is made.
+    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toBe(false);
+    expect(startsKid).not.toHaveBeenCalled();
+    await expect(coordinator.setOwnerPin('4321')).resolves.toBe(true);
+    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toBe(true);
+    expect(startsKid).toHaveBeenCalledWith('4321');
+    coordinator.dispose();
   });
 });

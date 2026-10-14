@@ -38,6 +38,7 @@ import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyReset
 import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
+import { startupMark } from './startupTiming';
 import {
   believe,
   compareStamps,
@@ -1962,13 +1963,17 @@ export class LibraryLog {
 
   /** Create an empty activity library and prove its only initial row decrypts exactly under the journal key. */
   async createAndVerifyKidProfileLibrary(journal: ProfileCreateJournal): Promise<void> {
-    const keys = await this.kidProfileKeys(journal);
+    await this.createAndVerifyProfileLibrary(await this.kidProfileKeys(journal));
+  }
+
+  /** A profile library's first write, started under this household's member proof and read back exactly. */
+  private async createAndVerifyProfileLibrary(keys: LibraryKeys): Promise<void> {
     const initial: SettingsRow = { kind: 'set', schema: 2, name: 'prefs', values: {} };
     const expected = await seal(keys, initial);
     await this.writeMigrationCandidate(keys, [expected]);
     const rows = await this.readMigrationCandidate(keys);
     if (rows.length !== 1 || rows[0]!.k !== expected.k)
-      throw new Error('Kid activity library contains unexpected rows');
+      throw new Error('Profile activity library contains unexpected rows');
     const [wanted, actual] = await Promise.all([
       openPlaintext(keys, expected.k, expected.v),
       openPlaintext(keys, rows[0]!.k, rows[0]!.v),
@@ -1979,7 +1984,126 @@ export class LibraryLog {
       wanted.length !== actual.length ||
       wanted.some((byte, index) => byte !== actual[index])
     )
-      throw new Error('Kid activity library readback did not match its initial row');
+      throw new Error('Profile activity library readback did not match its initial row');
+  }
+
+  /**
+   * Make this library a household born profile-aware in this browser (den#295), opened through `destination` at wire
+   * 5. In order: its first write (an empty `set:prefs`) starts it at wire minimum 5; this browser registers as its
+   * member; the Owner library is started under that membership, as a Kid's is; then the `profiles` directory goes in
+   * by CAS. The directory is the one a committed Owner split stores (`profiles_migration_construct_directory`), its
+   * evidence what this household really was: `source` the household before the directory (generation 0, its one
+   * row), `ownerHead` the Owner library as read back. A born household has no backup, so `backup` names none
+   * (`born`) and carries the source digest, the whole of what one would hold; a restore that looks it up finds
+   * nothing and changes nothing. Every step is idempotent on `plan`, so a run cut off anywhere is finished by running
+   * it again, and a household whose directory names this attempt is already done.
+   */
+  async createBornHousehold(plan: {
+    readonly attempt: string;
+    readonly ownerProfile: string;
+    readonly ownerKey: string;
+    readonly createdAt: number;
+  }): Promise<void> {
+    const owner = await libraryKeys(plan.ownerKey);
+    let household = await this.readBornHousehold();
+    if (household.kind === 'absent') {
+      const first = await seal(this.keys, { kind: 'set', schema: 2, name: 'prefs', values: {} });
+      const res = await this.send(`/lib/${this.keys.id}/batch`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-den-library-token': this.keys.token,
+          'x-den-wire': '5',
+          'x-den-wire-min': '5',
+          'x-den-generation': '0',
+        },
+        body: JSON.stringify({ writes: [{ ...first, base: 0 }] }),
+      });
+      // 409: a run cut off after the write landed, or another tab's run; either way the household is there.
+      if (!res.ok && res.status !== 409)
+        throw new LibraryStartRefused(res.status, await errorCode(res), retryAfterMs(res, 60_000));
+      household = await this.readBornHousehold();
+      if (household.kind === 'absent') throw new Error('The new household was not kept');
+    }
+    if (household.directory) {
+      if (household.directory.migration.attempt !== plan.attempt)
+        throw new Error('The household already holds another profile directory');
+      return;
+    }
+    this.generation = household.generation;
+    await this.registerMember();
+    if (!this.memberRegistered) throw new Error('The household membership was not registered');
+    await this.createAndVerifyProfileLibrary(owner);
+    const ownerRows = await this.readMigrationCandidate(owner);
+    const ownerHead = profileMigrationDigest('owner', {
+      libraryId: owner.id,
+      base: ownerRows.at(-1)?.seq ?? 0,
+      wireMin: WIRE,
+      rows: ownerRows,
+    });
+    const source = profileMigrationDigest('source', {
+      libraryId: this.keys.id,
+      generation: 0,
+      base: household.head,
+      wireMin: 5,
+      rows: household.entries,
+    });
+    const at: Stamp = [plan.createdAt, 0, plan.ownerProfile.slice(0, 16)];
+    const { directory } = profileMigrationConstructDirectory({
+      attempt: plan.attempt,
+      source: { generation: 0, head: source },
+      backup: { id: 'born', digest: source },
+      owner: {
+        id: plan.ownerProfile,
+        display: { value: { name: 'Owner' }, at },
+        libraryKey: plan.ownerKey,
+        libraryAt: at,
+        policy: { value: { maximumAge: null, unknownRatings: 'allow' }, at },
+        deletedAt: at,
+      },
+      ownerHead,
+    });
+    const outcome = await this.casKidProfileDirectory(
+      { base: 0, generation: household.generation },
+      directory as ProfileDirectoryDocument,
+    );
+    if (outcome === 'committed') return;
+    const after = await this.readBornHousehold();
+    if (after.kind === 'present' && after.directory?.migration.attempt === plan.attempt) return;
+    throw new Error(`The household directory was not committed (${outcome})`);
+  }
+
+  /** This household from den-edge to its head, with its directory when it has one; `absent` before its first write. */
+  private async readBornHousehold(): Promise<
+    | { readonly kind: 'absent' }
+    | {
+        readonly kind: 'present';
+        readonly entries: RawEntry[];
+        readonly head: number;
+        readonly generation: string;
+        readonly directory?: ProfileDirectoryDocument;
+      }
+  > {
+    const standing = await this.send(`/lib/${this.keys.id}/changes?since=0&limit=1`, {
+      headers: this.headers(),
+    });
+    if (standing.status === 404) return { kind: 'absent' };
+    if (!standing.ok) throw new Error(`The household could not be read (${standing.status})`);
+    const snapshot = await this.readAll();
+    if (!snapshot?.generation) throw new Error('The household could not be read to its head');
+    let directory: ProfileDirectoryDocument | undefined;
+    for (const row of snapshot.entries) {
+      const opened = await openEntry(this.keys, row.k, row.v);
+      if ('invalidProfileDirectory' in opened) throw new Error('Profile directory is corrupt');
+      if ('profileDirectory' in opened) directory = opened.profileDirectory;
+    }
+    return {
+      kind: 'present',
+      entries: snapshot.entries,
+      head: snapshot.head,
+      generation: snapshot.generation,
+      ...(directory ? { directory } : {}),
+    };
   }
 
   /** Exact `set:profiles` row CAS. A lost response is deliberately reported as unknown. */
@@ -2084,21 +2208,7 @@ export class LibraryLog {
   }
 
   private async kidProfileKeys(journal: ProfileCreateJournal): Promise<LibraryKeys> {
-    let raw: Uint8Array<ArrayBuffer>;
-    try {
-      raw = Uint8Array.from(atob(journal.key), (character) => character.charCodeAt(0));
-    } catch {
-      throw new Error('Kid profile key is not canonical');
-    }
-    if (raw.length !== 32 || btoa(String.fromCharCode(...raw)) !== journal.key) {
-      raw.fill(0);
-      throw new Error('Kid profile key is not canonical');
-    }
-    try {
-      return await deriveKeys(raw);
-    } finally {
-      raw.fill(0);
-    }
+    return libraryKeys(journal.key);
   }
 
   /**
@@ -2568,8 +2678,10 @@ export class LibraryLog {
       });
       log.restoreProfileDirectory(partial);
     }
+    let firstPage = true;
     for (;;) {
       let res: Response;
+      const askedAt = performance.now();
       try {
         res = await log.send(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, {
           headers: log.headers(),
@@ -2578,6 +2690,13 @@ export class LibraryLog {
         return null;
       }
       await policy;
+      if (firstPage) {
+        firstPage = false;
+        startupMark(
+          'log first changes page',
+          `status ${res.status} in ${Math.round(performance.now() - askedAt)}ms`,
+        );
+      }
       if (res.status === 404) {
         if (!(await log.stageRecovery())) return null;
         log.forgetPartial();
@@ -4520,6 +4639,36 @@ export class LibraryLog {
   private async projectKeptChanged(projected: number): Promise<boolean> {
     await this.projectKept();
     return this.projected !== projected;
+  }
+}
+
+/** den-edge would not start a library: its status, `error` code and how long it asked to be left (`Retry-After`). */
+export class LibraryStartRefused extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | undefined,
+    readonly retryAfterMs: number,
+  ) {
+    super(`den-edge did not start the library (${status} ${code ?? ''})`);
+  }
+}
+
+/** The keys of a profile library from its canonical base64 key. */
+async function libraryKeys(key: string): Promise<LibraryKeys> {
+  let raw: Uint8Array<ArrayBuffer>;
+  try {
+    raw = Uint8Array.from(atob(key), (character) => character.charCodeAt(0));
+  } catch {
+    throw new Error('Profile library key is not canonical');
+  }
+  if (raw.length !== 32 || btoa(String.fromCharCode(...raw)) !== key) {
+    raw.fill(0);
+    throw new Error('Profile library key is not canonical');
+  }
+  try {
+    return await deriveKeys(raw);
+  } finally {
+    raw.fill(0);
   }
 }
 

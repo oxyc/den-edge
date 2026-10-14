@@ -815,11 +815,20 @@ fn profile_capability(state: &AppState, req: &Request, face: Face) -> Response {
     if allowed(&state.profiles_preview_hosts) {
         bare_json(StatusCode::OK, &json!({ "enabled": true, "preview": true }))
     } else if allowed(&state.profiles_hosts) {
-        bare_json(StatusCode::OK, &json!({ "enabled": true }))
+        let mut resp = bare_json(StatusCode::OK, &json!({ "enabled": true }));
+        // A browser with no TV may start its own household here (den#295) only where a stranger's library is
+        // visitor-tier. A header rather than a member: every deployed client reads the body's exact shape.
+        if state.new_libraries == crate::library::NewLibraries::Visitors {
+            resp.headers_mut().insert(BORN_HOUSEHOLDS_HEADER, HeaderValue::from_static("1"));
+        }
+        resp
     } else {
         bare_json(StatusCode::NOT_FOUND, &error("not_found"))
     }
 }
+
+/// On `/capabilities/profiles`: this host lets a browser with no TV start its own profile household.
+const BORN_HOUSEHOLDS_HEADER: &str = "x-den-born-households";
 
 /// reel's own route inside the relay mount.
 ///
@@ -1720,6 +1729,25 @@ pub mod tests {
         assert_eq!(head.status(), StatusCode::OK);
         assert_eq!(head.headers()[header::CACHE_CONTROL], "no-store");
         assert!(body_text(head).await.is_empty());
+    }
+
+    /// Only a host whose strangers' libraries are visitor-tier invites a browser with no TV to start a household.
+    #[tokio::test]
+    async fn profiles_capability_advertises_born_households_only_for_visitor_libraries() {
+        for (mode, advertised) in [
+            (crate::library::NewLibraries::Open, false),
+            (crate::library::NewLibraries::Members, false),
+            (crate::library::NewLibraries::Visitors, true),
+        ] {
+            let mut h = split_harness();
+            let state = Arc::get_mut(&mut h.state).unwrap();
+            state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+            state.profiles_hosts = crate::parse_hosts("PROFILES_HOSTS", "d.oxy.fi");
+            state.new_libraries = mode;
+            let resp = h.send("GET", "/capabilities/profiles", None, &[("host", "d.oxy.fi")]).await;
+            assert_eq!(resp.headers().contains_key(BORN_HOUSEHOLDS_HEADER), advertised, "{mode:?}");
+            assert_eq!(body_json(resp).await, json!({ "enabled": true }), "{mode:?}");
+        }
     }
 
     /// With a public table built for it, the web app's public name serves that and nothing else: the LAN

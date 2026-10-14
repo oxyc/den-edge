@@ -10,6 +10,7 @@ import {
 import { activeProfileSession, ProfileSession } from './profileSession.svelte';
 import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
+import { startupMark } from './startupTiming';
 import {
   crossTabVisitorActivityLock,
   purgeOrphanVisitorNamespaces,
@@ -21,6 +22,15 @@ import {
 } from './visitorProfileSession.svelte';
 
 const ACTIVE_PROFILE_KEY = 'den.profile.active.v1';
+
+/** The Kid a household not made yet will have: offered by the switcher, and made with the household (den#295). */
+const UNBORN_KID = {
+  id: profileId('ffffffffffffffffffffffffffffffff'),
+  role: 'kid' as const,
+  name: 'Kids',
+  avatar: 'kid',
+  policy: { maximumAge: 12, unknownRatings: 'block' as const },
+};
 
 export type ActiveProfileMode = 'owner' | 'kid' | 'visitor';
 
@@ -193,7 +203,8 @@ export class ProfileModeCoordinator {
   readonly #events: StorageEvents | null;
   readonly #visitorLock: VisitorActivityLock;
   readonly #connections: LibraryModelLease<ConnectionsView>;
-  #directory: PreviewProfileDirectory | null;
+  // Reactive: a Kid made while the page is open reaches the switcher's choices without a reload.
+  #directory = $state.raw<PreviewProfileDirectory | null>(null);
   readonly #profileModels: ProfileActivityModelFactory | null;
   readonly #preview: boolean;
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Ownership bookkeeping; UI observes session only.
@@ -202,7 +213,13 @@ export class ProfileModeCoordinator {
   #transition = 0;
   #restoring = $state(0);
   #disposed = false;
+  readonly #startsKid: ((pin: string) => Promise<boolean>) | null;
+  #startPin: string | null = null;
 
+  /**
+   * `startsKid`, for a browser whose household is not made yet (den#295): its switcher offers the Kid it will have.
+   * Choosing it takes a new Owner PIN, twice, and hands it to `startsKid`, which makes the household; true once made.
+   */
   constructor(
     owner: ProfileSession,
     storage: Storage = localStorage,
@@ -210,7 +227,9 @@ export class ProfileModeCoordinator {
     visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
     directory: PreviewProfileDirectory | null = null,
     profileModels: ProfileActivityModelFactory | null = null,
+    startsKid: ((pin: string) => Promise<boolean>) | null = null,
   ) {
+    this.#startsKid = directory ? null : startsKid;
     if (!owner.model || owner.identity.libraryKey === null)
       throw new TypeError('Profiles require an open Owner library');
     owner.relinquishHouseholdOwnership();
@@ -264,6 +283,11 @@ export class ProfileModeCoordinator {
       }
     }
     this.#events?.addEventListener('storage', this.#storageChanged);
+    // Reads no reactive state: the committed-household constructor runs inside a tracked effect.
+    startupMark(
+      'coordinator created',
+      directory ? (profileModels ? 'household' : 'preview') : 'staging',
+    );
   }
 
   get session(): ProfileSession | null {
@@ -293,6 +317,7 @@ export class ProfileModeCoordinator {
         ]
       : [
           { id: null, role: 'owner' as const, name: 'Owner', avatar: 'owner' },
+          ...(this.#startsKid ? [UNBORN_KID] : []),
           { id: null, role: 'visitor' as const, name: 'Visitor', avatar: 'visitor' },
         ];
     return choices.map((choice) => this.#publicChoice(choice)!);
@@ -315,6 +340,35 @@ export class ProfileModeCoordinator {
 
   get preview(): boolean {
     return this.#preview;
+  }
+
+  /**
+   * Whether choosing `target` first sets the Owner PIN (den#295): Kid is in every household from the start, and the
+   * first switch to it, with no PIN yet, makes the one that brings the Owner back.
+   */
+  setsPin(target: ActiveProfileMode): boolean {
+    if (this.#startsKid) return target === 'kid' && this.mode !== null && this.mode !== 'kid';
+    return (
+      target === 'kid' &&
+      !this.#preview &&
+      this.mode === 'owner' &&
+      this.parentalPinConfigured === false
+    );
+  }
+
+  /**
+   * The Owner sets the household's Owner PIN; true once den-edge holds it. With no household yet it is kept for the
+   * household the Kid choice makes (`startsKid`).
+   */
+  async setOwnerPin(pin: string): Promise<boolean> {
+    this.#assertOpen();
+    if (!/^\d{4}$/.test(pin)) return false;
+    if (this.#startsKid) {
+      this.#startPin = pin;
+      return true;
+    }
+    if (this.mode !== 'owner') return false;
+    return this.#household.setParentalPin(pin);
   }
 
   requiresPin(target: ActiveProfileMode): boolean {
@@ -402,6 +456,11 @@ export class ProfileModeCoordinator {
 
   async switchToPersistent(target: ProfileId, pin?: string): Promise<boolean> {
     this.#assertOpen();
+    if (this.#startsKid && target === UNBORN_KID.id) {
+      const chosen = this.#startPin;
+      this.#startPin = null;
+      return chosen !== null && this.#startsKid(chosen);
+    }
     const kid = this.#choice(target);
     if (!kid?.id || kid.role !== 'kid') return false;
     if (this.session?.identity.kind === 'profile' && this.session.identity.id === kid.id)
@@ -497,8 +556,15 @@ export class ProfileModeCoordinator {
     this.#cancelOpenings();
     if (!current) {
       const saved = readActiveProfile(this.#storage);
-      const selected = saved?.mode === 'persistent' ? this.#choice(saved.profileId) : undefined;
-      if (selected) void this.#restorePersistent(selected);
+      // An Owner chosen before the household had a directory (`{mode: 'owner'}`) is its Owner: restored like the
+      // constructor restores it, since this update cancelled that opening.
+      const selected =
+        saved?.mode === 'persistent'
+          ? this.#choice(saved.profileId)
+          : saved?.mode === 'owner' && directory
+            ? this.#choice(directory.owner)
+            : undefined;
+      if (selected) void this.#restorePersistent(selected, saved?.mode === 'owner');
       else if (saved?.mode === 'visitor' && directory && this.#visitorLock.available()) {
         const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
         const next = this.#newVisitor(visitorVisitId(visitId));
@@ -891,10 +957,21 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
   };
 };
 
-/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
 export async function profilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
+): Promise<ProfilesCapability> {
+  const askedAt = performance.now();
+  startupMark('capability requested');
+  const answer = await readProfilesCapability(fetchImpl, visitorLock);
+  startupMark('capability answered', `${answer} in ${Math.round(performance.now() - askedAt)}ms`);
+  return answer;
+}
+
+/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
+async function readProfilesCapability(
+  fetchImpl: typeof fetch,
+  visitorLock: VisitorActivityLock,
 ): Promise<ProfilesCapability> {
   try {
     const response = await fetchImpl('/capabilities/profiles', {

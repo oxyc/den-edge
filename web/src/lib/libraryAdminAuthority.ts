@@ -7,6 +7,7 @@ import {
 } from './actions';
 import type { ClockStore } from './clockStore';
 import { buildHistoryExport } from './historyExport';
+import { householdScoped, profileScoped } from './householdScope';
 import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
@@ -213,7 +214,7 @@ export class LibraryAdminAuthority {
       case 'history.import':
         return this.#importHistory(task.items, operationId);
       case 'local-library.merge':
-        return this.#mergeLocal(task.sourceLibraryKey, operationId);
+        return this.#mergeLocal(task.sourceLibraryKey, operationId, task);
       case 'key-reset.move':
         return this.#moveKey(task, operationId);
       case 'key-reset.settle':
@@ -485,6 +486,7 @@ export class LibraryAdminAuthority {
   async #mergeLocal(
     sourceLibraryKey: string,
     operationId?: string,
+    part: { scope?: 'household' | 'profile'; keep?: true } = {},
   ): Promise<LibraryAuthorityTaskResult> {
     if (sourceLibraryKey === this.options.libraryKey)
       return {
@@ -519,9 +521,17 @@ export class LibraryAdminAuthority {
       };
     try {
       if (!wasWritten) {
-        const rows = source
-          .rows()
-          .filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
+        const rows = source.rows().flatMap((row): Row[] => {
+          if (row.kind === 'set' && row.name === 'recovery') return [];
+          if (!part.scope) return [row];
+          const scoped =
+            part.scope === 'profile'
+              ? profileScoped(row)
+              : profileScoped(row) === row
+                ? null
+                : householdScoped(row);
+          return scoped ? [scoped] : [];
+        });
         if (!(await this.log.writeRows(rows)))
           return {
             result: { kind: 'local-library.merge', outcome: 'unavailable' },
@@ -532,7 +542,7 @@ export class LibraryAdminAuthority {
           await this.log.keep(LOCAL_MERGES, staged.slice(-64));
         }
       }
-      if (!(await source.forget()))
+      if (!part.keep && !(await source.forget()))
         return {
           result: { kind: 'local-library.merge', outcome: 'unavailable' },
           affected: affectedLibrary,

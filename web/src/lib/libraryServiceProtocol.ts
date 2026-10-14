@@ -573,7 +573,31 @@ export type LibraryTask =
   | { kind: 'recovery.abandon'; locator: string }
   | { kind: 'recovery.disable' }
   | { kind: 'history.import'; items: HistoryImportItem[] }
-  | { kind: 'local-library.merge'; sourceLibraryKey: string }
+  /**
+   * A library kept only in this browser written into this one. `scope` takes only the household half or only the
+   * profile half of its rows; `keep` leaves the source in place for the other half to be taken from it.
+   */
+  | {
+      kind: 'local-library.merge';
+      sourceLibraryKey: string;
+      scope?: 'household' | 'profile';
+      keep?: true;
+    }
+  /**
+   * Start, or finish, the household `householdKey` that a browser with no TV makes on its first kept action (den#295):
+   * born at wire minimum 5 with an Owner library and the directory a committed Owner split stores. Idempotent on its
+   * inputs, which the page keeps before it asks.
+   */
+  | {
+      kind: 'household.create';
+      householdKey: string;
+      attempt: string;
+      ownerProfile: string;
+      ownerKey: string;
+      createdAt: number;
+    }
+  /** The household's Kid, made once when its directory has none: no Owner PIN is asked, since none may exist yet. */
+  | { kind: 'profile.create-default' }
   | { kind: 'key-reset.move'; destinationLibraryKey: string }
   | { kind: 'key-reset.settle'; destinationLibraryKey: string }
   | { kind: 'key-reset.adopt'; destinationLibraryKey: string }
@@ -663,6 +687,16 @@ export type LibraryTaskResult =
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
   | { kind: 'local-library.merge'; outcome: 'merged' | 'absent' | 'unavailable' }
+  | {
+      kind: 'household.create';
+      /**
+       * `refused`: den-edge starts no library for this browser (`403 new_libraries_closed`); `throttled`: not now, try
+       * again after `retryAfterMs`; `unavailable`: anything else, to be tried again with the same inputs.
+       */
+      outcome: 'created' | 'refused' | 'throttled' | 'unavailable';
+      retryAfterMs?: number;
+    }
+  | { kind: 'profile.create-default'; outcome: 'created' | 'present' }
   | { kind: 'key-reset.move' | 'key-reset.settle' | 'key-reset.adopt'; outcome: KeyResetOutcome }
   | { kind: 'assistant.consent'; grant: string; key: string; readKey?: string }
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }

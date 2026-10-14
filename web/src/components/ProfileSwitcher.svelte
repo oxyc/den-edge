@@ -16,6 +16,10 @@
   let failed = $state(false);
   let switching = $state(false);
   let pending = $state<ProfileChoice | null>(null);
+  // The first switch to Kid with no Owner PIN yet sets one: entered, then entered again.
+  let settingPin = $state(false);
+  let firstPin = $state<string | null>(null);
+  let mismatch = $state(false);
   let restoreTriggerFocus = false;
   let backdropPress = false;
   let returnFocus = $state<HTMLElement>();
@@ -33,6 +37,9 @@
     failed = false;
     pin = '';
     pending = null;
+    settingPin = false;
+    firstPin = null;
+    mismatch = false;
     returnFocus = opener;
     restoreTriggerFocus = restoreFocus;
     dialog?.showModal();
@@ -76,11 +83,61 @@
     focusPinAfterPaint();
   }
 
+  async function setPin(value: string) {
+    if (!pending || switching || !/^\d{4}$/.test(value)) return;
+    if (firstPin === null) {
+      firstPin = value;
+      pin = '';
+      await tick();
+      focusPinAfterPaint();
+      return;
+    }
+    if (value !== firstPin) {
+      mismatch = true;
+      firstPin = null;
+      pin = '';
+      await tick();
+      focusPinAfterPaint();
+      return;
+    }
+    switching = true;
+    failed = false;
+    let saved: boolean;
+    try {
+      saved = await profiles.setOwnerPin(value);
+    } catch {
+      saved = false;
+    } finally {
+      switching = false;
+      pin = '';
+      firstPin = null;
+    }
+    if (!saved) {
+      failed = true;
+      await tick();
+      focusPinAfterPaint();
+      return;
+    }
+    settingPin = false;
+    await switchTo(pending);
+  }
+
   async function choose(choice: ProfileChoice) {
     denied = false;
     failed = false;
     if (choiceKey(choice) === choiceKey(active)) {
       dialog?.close();
+      return;
+    }
+    if (profiles.setsPin(choice.role)) {
+      flushSync(() => {
+        pending = choice;
+        settingPin = true;
+        firstPin = null;
+        mismatch = false;
+        pin = '';
+      });
+      dialog?.querySelector<HTMLInputElement>('#owner-pin')?.focus({ preventScroll: true });
       return;
     }
     if (!profiles.requiresPin(choice.role) || profiles.parentalPinConfigured === false)
@@ -124,6 +181,9 @@
     denied = false;
     failed = false;
     pending = null;
+    settingPin = false;
+    firstPin = null;
+    mismatch = false;
     requestAnimationFrame(() => {
       if (restoreTriggerFocus) returnFocus?.focus({ preventScroll: true });
       else {
@@ -137,14 +197,54 @@
     method="dialog"
     onsubmit={(event) => {
       event.preventDefault();
-      if (pending && /^\d{4}$/.test(pin)) void switchTo(pending);
+      if (pending && /^\d{4}$/.test(pin)) void (settingPin ? setPin(pin) : switchTo(pending));
     }}
   >
     <h2 id="profile-switcher-title">Who’s watching?</h2>
     {#if failed}<p class="denied" role="alert">
         The profile switch couldn’t be completed. Try again.
       </p>{/if}
-    {#if pending}
+    {#if pending && settingPin}
+      <button
+        class="back"
+        type="button"
+        disabled={switching}
+        onclick={() => ((pending = null), (settingPin = false), (firstPin = null), (pin = ''))}
+        >← Profiles</button
+      >
+      <div class="pending-profile">
+        <ProfileAvatar choice={pending} />
+        <div>
+          <strong>{firstPin === null ? 'Set an Owner PIN' : 'Enter the PIN again'}</strong>
+          <span>Needed to switch from {pending.name} back to the Owner</span>
+        </div>
+      </div>
+      {#key firstPin === null}
+        <PinInput
+          id="owner-pin"
+          label={firstPin === null ? 'New Owner PIN' : 'Confirm Owner PIN'}
+          bind:value={pin}
+          autocomplete="new-password"
+          invalid={mismatch}
+          engaged={!switching}
+          onvalue={() => (mismatch = false)}
+          oncomplete={(value) => void setPin(value)}
+        />
+      {/key}
+      {#if mismatch}<p class="denied" role="alert">
+          Those PINs didn’t match. Choose one again.
+        </p>{/if}
+      <div class="actions">
+        <button
+          class="primary"
+          type="button"
+          disabled={switching || !/^\d{4}$/.test(pin)}
+          onclick={() => void setPin(pin)}
+          >{switching ? 'Saving…' : firstPin === null ? 'Continue' : `Use ${pending.name}`}</button
+        >
+        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
+      </div>
+    {:else if pending}
       <button
         class="back"
         type="button"
