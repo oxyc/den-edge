@@ -586,15 +586,18 @@ async function main() {
     const keysRow = settings.rows.find((row) => row.kind === 'set' && row.name === 'keys');
     check('the Owner PIN is the household’s', !!keysRow?.values?.parentalPIN?.value);
     await page.goto(`${edge.origin}/movie/1002`);
-    // The title's own rating check is atlas's, which this rehearsal does not run; what is checked here is that the
-    // Kid is its own profile under its own policy: not the Owner's watchlist, and 12-and-under in the switcher.
-    await page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor({ timeout: 30_000 });
+    // This rehearsal runs no atlas, so the title has no age: the Kid's policy hides unrated titles, and the page
+    // withholds it, Owner's watchlist and all. 12-and-under is checked in the switcher below.
     check(
-      'the Kid does not see the Owner’s watchlist',
-      (await page
-        .getByRole('button', { name: 'Watchlist', exact: true })
-        .getAttribute('aria-pressed')
-        .catch(() => null)) === 'false',
+      'the Kid is under its own policy: an unrated title is withheld, the Owner’s watchlist with it',
+      await page
+        .getByText('This title isn’t available on this profile.')
+        .waitFor({ timeout: 30_000 })
+        .then(
+          async () =>
+            (await page.getByRole('button', { name: 'Watchlist', exact: true }).count()) === 0,
+          () => false,
+        ),
     );
     await page.locator('button.profile-trigger').first().click();
     const kidChoice = await page
