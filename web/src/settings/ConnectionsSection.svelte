@@ -37,6 +37,8 @@
   } from '../lib/libraryServiceProtocol';
   import type { Immutable } from '../lib/libraryModel.svelte';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { JoinLibrary, JoinLink } from '../lib/browserHousehold';
+  import PinInput from '../components/PinInput.svelte';
 
   let {
     link,
@@ -99,10 +101,10 @@
     /** False when the device's entry wasn't removed. */
     removeDevice: (id: string) => Promise<boolean>;
     /**
-     * For a browser using its own library: moves that library into the one `libraryKey` opens, before the browser
-     * links to it, so what was saved here goes along. False when it couldn't.
+     * For a browser using its own library or household: moves what it keeps into the household `libraryKey` opens,
+     * before the browser links to it, so what was saved here goes along (`JoinAnswer`).
      */
-    onjoin?: (libraryKey: string) => Promise<boolean>;
+    onjoin?: JoinLibrary;
     /**
      * Moves the library to a new key, cutting off every other device (library v4 §12). Null when it moved, else why it
      * didn't. Absent where this browser can't: no linked library, or one not on v4 yet.
@@ -446,30 +448,59 @@
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
     const { host: name, hostDeviceId, libraryKey, linkKey } = result.handover;
-    const key = base64(libraryKey);
-    // What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
-    // fails leaves it where it was.
+    await bringInto(base64(libraryKey), {
+      inboxKey: result.inboxKey,
+      name,
+      linkKey: base64(linkKey),
+      deviceId: hostDeviceId,
+    });
+  }
+
+  // The household joined has an Owner PIN, asked once before this browser's household moves in (den#295). The TV's
+  // code is spent by then, so the handover waits here for it.
+  let joinPin = $state<{ key: string; link: JoinLink } | null>(null);
+  let ownerPin = $state('');
+  let pinDenied = $state(false);
+
+  /**
+   * What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
+   * fails leaves it where it was.
+   */
+  async function bringInto(key: string, target: JoinLink, pin?: string) {
+    const { name } = target;
     if (onjoin) {
       joining = true;
-      const moved = await onjoin(key);
+      joinProblem = null;
+      const answer = await onjoin(key, { link: target, ...(pin ? { pin } : {}) });
       joining = false;
-      if (!moved) {
+      if (answer === 'pin-required' || answer === 'pin-wrong') {
+        joinPin = { key, link: target };
+        pinDenied = answer === 'pin-wrong';
+        ownerPin = '';
+        return;
+      }
+      joinPin = null;
+      if (answer === 'refused-kids') {
+        joinProblem = `${name} doesn’t have profiles yet, so the Kid profiles here have nowhere to go. Set up profiles on ${name} first, then get a new code and link again.`;
+        return;
+      }
+      if (answer !== 'joined') {
         joinProblem = `Couldn’t move what you saved here into ${name}’s library. Check that this device is on your network, then get a new code on the TV and try again.`;
         return;
       }
     }
-    links.add(result.inboxKey, {
+    links.add(target.inboxKey, {
       name,
       libraryKey: key,
-      linkKey: base64(linkKey),
-      deviceId: hostDeviceId,
+      linkKey: target.linkKey,
+      deviceId: target.deviceId,
     });
     joinCode = '';
     if (key === link?.libraryKey) {
       joinProblem = `${name} already shares this library: it's linked to this browser too.`;
       return;
     }
-    links.makeCurrent(result.inboxKey);
+    links.makeCurrent(target.inboxKey);
     // A new library is a new session from the start: reloaded, the app opens the one now first in the list.
     location.assign('/');
   }
@@ -1097,8 +1128,39 @@
           onconfirm={() => void joinLibrary()}
         />
       </form>
+      {#if joinPin}
+        {@const pending = joinPin}
+        <form
+          class="form join-pin"
+          onsubmit={(event) => {
+            event.preventDefault();
+            if (/^\d{4}$/.test(ownerPin)) void bringInto(pending.key, pending.link, ownerPin);
+          }}
+        >
+          <p class="foot">
+            {pending.link.name} has an Owner PIN. Enter it to bring your history and Kid profiles here
+            into
+            {pending.link.name}’s profiles.
+          </p>
+          <PinInput
+            id="join-owner-pin"
+            label="{pending.link.name}’s Owner PIN"
+            bind:value={ownerPin}
+            focusOnMount
+            invalid={pinDenied}
+            onvalue={() => (pinDenied = false)}
+          />
+          {#if pinDenied}<p class="status bad" role="alert">That PIN didn’t match.</p>{/if}
+          <Button
+            type="submit"
+            label={joining ? 'Moving…' : 'Link'}
+            variant="primary"
+            disabled={joining || !/^\d{4}$/.test(ownerPin)}
+          />
+        </form>
+      {/if}
       {#if joining}<p class="status" role="status">
-          Waiting for the TV to allow this browser…
+          {joinPin ? 'Moving what you saved here…' : 'Waiting for the TV to allow this browser…'}
         </p>{/if}
       {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
       <p class="foot">

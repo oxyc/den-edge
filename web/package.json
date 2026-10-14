@@ -15,6 +15,7 @@
     "test:e2e": "playwright test --grep-invert @soak",
     "rehearse": "node scripts/rehearse.mjs",
     "rehearse:household": "node scripts/rehearse-household.mjs",
+    "rehearse:join": "node scripts/rehearse-household-join.mjs",
     "test:e2e:soak": "playwright test --grep @soak",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

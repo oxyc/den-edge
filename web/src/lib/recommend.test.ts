@@ -80,11 +80,38 @@ describe('recommendForEveryone', () => {
     const asked: string[] = [];
     const fetchImpl = (async (url: string) => {
       asked.push(url);
-      return new Response(JSON.stringify({ slides: [] }));
+      return new Response(JSON.stringify({ slides: [{ type: 'movie', id: 1 }] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
     await recommendForEveryone(content('/atlas', fetchImpl), 'home', true, now);
     expect(asked).toEqual(['/atlas/recommend/home.json?day=2026-09-28&fresh=1']);
+  });
+
+  it('falls back to the whole pool when the fresh one is empty, as it is for a Kid', async () => {
+    const asked: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      asked.push(url);
+      const slides = url.includes('fresh=1') ? [] : [{ type: 'movie', id: 2 }];
+      return new Response(JSON.stringify({ slides }));
+    }) as unknown as typeof fetch;
+    const now = new Date('2026-09-27T12:00:00Z');
+    expect(await recommendForEveryone(content('/atlas', fetchImpl), 'home', true, now)).toEqual([
+      { type: 'movie', id: 2, imdbId: undefined, why: undefined },
+    ]);
+    expect(asked).toEqual([
+      '/atlas/recommend/home.json?day=2026-09-27&fresh=1',
+      '/atlas/recommend/home.json?day=2026-09-27',
+    ]);
+    // An atlas that cannot rank is not an empty pool: no second request.
+    asked.length = 0;
+    const down = (async (url: string) => {
+      asked.push(url);
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    expect(
+      await recommendForEveryone(content('/atlas', down), 'home', true, new Date('2026-09-26')),
+    ).toBeNull();
+    expect(asked).toHaveLength(1);
   });
 });
 

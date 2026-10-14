@@ -1433,13 +1433,29 @@ async fn authority(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Result
     }
     let selected = if retired(state, id).await? {
         AUTHORITY_MOVED
-    } else if format_v3(state, id).await? {
+    } else if format_v3(state, id).await? || Box::pin(publish_unpublished(state, slot, id)).await? {
         AUTHORITY_V3
     } else {
         AUTHORITY_V2
     };
     slot.authority.store(selected, Ordering::Release);
     Ok(selected)
+}
+
+/// Publish a v3 database that has no format marker and no v2 log beside it, and say whether there was one. A first
+/// write made it and was dropped before its marker landed; with no log there is nothing else it could be, and reads
+/// already answer from it, so it is published, never replaced. (Boxed by the caller: every library request awaits
+/// `authority`, and this rare path would otherwise grow all of their futures.)
+async fn publish_unpublished(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Result<bool> {
+    if state.store.modified_ms(NS, id, EXT).await?.is_some() {
+        return Ok(false);
+    }
+    let path = state.library_v3.path(id);
+    if !tokio::task::spawn_blocking(move || path.try_exists()).await.map_err(io::Error::other)?? {
+        return Ok(false);
+    }
+    publish_v3(state, slot, id).await?;
+    Ok(true)
 }
 
 async fn publish_v3(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Result<()> {
@@ -1516,19 +1532,22 @@ async fn v3_store(
     }
 
     load(state, slot, loaded, id).await?;
-    if loaded.is_none() && !create {
-        return Ok(None);
-    }
-    let old_bytes = loaded.as_ref().map_or(0, |library| library.bytes);
-    let temporary = loaded.take().unwrap_or(Library {
-        token_hash,
-        member_hash: None,
-        head: 0,
-        rows: HashMap::new(),
-        sequence: BTreeMap::new(),
-        lines: 0,
-        bytes: LIBRARY_OVERHEAD,
-    });
+    let Some(temporary) = loaded.take() else {
+        if !create {
+            return Ok(None);
+        }
+        // A new library's database is made where it stays, never moved over whatever is there: a first write dropped
+        // before its marker landed leaves a database `authority` then publishes, and that later writes keep.
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        let store = tokio::task::spawn_blocking(move || manager.library(&owned_id, token_hash))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(v3_io)?;
+        publish_v3(state, slot, id).await?;
+        return Ok(Some(store));
+    };
+    let old_bytes = temporary.bytes;
     if !constant_time_eq(&temporary.token_hash, &token_hash) {
         *loaded = Some(temporary);
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"));
@@ -3492,6 +3511,53 @@ mod tests {
         assert_eq!(
             second.state.store.get_file(super::NS, LIB, super::FORMAT_EXT).await.unwrap(),
             Some(super::FORMAT_V3.to_vec())
+        );
+    }
+
+    /// What a first write leaves when its request is dropped (the client navigated away) after the database was made
+    /// but before the format marker was written: a database answering reads, with no marker and no v2 log.
+    fn unpublished_database(h: &Harness, rows: &[(&str, &str)]) -> super::v3::Protocol {
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let store = h.state.library_v3.library(LIB, token_hash).unwrap();
+        for (base, (key, value)) in rows.iter().enumerate() {
+            let write =
+                super::v3::Write { key: (*key).to_owned(), base: base as u64, value: (*value).to_owned() };
+            store.apply(&[write]).unwrap();
+        }
+        store.protocol().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_write_after_an_unfinished_first_write_keeps_its_database_and_generation() {
+        let h = Harness::new();
+        let before = unpublished_database(&h, &[]);
+        let (status, body) = batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "prefs" }])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["generation"],
+            super::full_generation(&h.state, &before.generation),
+            "the database the reads already named is the one written, not a new one"
+        );
+        // Reopened from disk, with no handle of the first process left to answer from.
+        let dir = h.dir.clone();
+        drop(h);
+        let restarted = Harness::in_dir(dir);
+        let (_, read) = changes(&restarted, TOKEN, "").await;
+        assert_eq!(read["entries"], json!([{ "k": K1, "seq": 1, "v": "prefs" }]));
+        assert_eq!(read["generation"], super::full_generation(&restarted.state, &before.generation));
+    }
+
+    #[tokio::test]
+    async fn a_write_never_replaces_a_database_that_holds_rows() {
+        let h = Harness::new();
+        unpublished_database(&h, &[(K1, "prefs")]);
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "title" }])).await.0, StatusCode::OK);
+        let dir = h.dir.clone();
+        drop(h);
+        let restarted = Harness::in_dir(dir);
+        assert_eq!(
+            changes(&restarted, TOKEN, "").await.1["entries"],
+            json!([{ "k": K1, "seq": 1, "v": "prefs" }, { "k": K2, "seq": 2, "v": "title" }])
         );
     }
 

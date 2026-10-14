@@ -265,6 +265,16 @@ async function launch(profileDir) {
   await ctx.route('**/tmdb/3/**', (route) =>
     route.fulfill({ json: fixture(route.request().url()) }),
   );
+  // A Kid opens a title only with its age known (unrated titles are blocked): this origin's atlas answers that the
+  // fixture film is for all ages, and nothing else.
+  await ctx.route('**/atlas/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/atlas/manifest.json')
+      return route.fulfill({ json: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } });
+    if (path.startsWith('/atlas/index/title/movie/'))
+      return route.fulfill({ json: { minimumAge: 0 } });
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
   await ctx.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
       contentType: 'image/svg+xml',
@@ -586,18 +596,15 @@ async function main() {
     const keysRow = settings.rows.find((row) => row.kind === 'set' && row.name === 'keys');
     check('the Owner PIN is the household’s', !!keysRow?.values?.parentalPIN?.value);
     await page.goto(`${edge.origin}/movie/1002`);
-    // This rehearsal runs no atlas, so the title has no age: the Kid's policy hides unrated titles, and the page
-    // withholds it, Owner's watchlist and all. 12-and-under is checked in the switcher below.
+    // The title's age is the stubbed atlas's (all ages); what is checked here is that the Kid is its own profile under
+    // its own policy: not the Owner's watchlist, and 12-and-under in the switcher.
+    await page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor({ timeout: 30_000 });
     check(
-      'the Kid is under its own policy: an unrated title is withheld, the Owner’s watchlist with it',
-      await page
-        .getByText('This title isn’t available on this profile.')
-        .waitFor({ timeout: 30_000 })
-        .then(
-          async () =>
-            (await page.getByRole('button', { name: 'Watchlist', exact: true }).count()) === 0,
-          () => false,
-        ),
+      'the Kid does not see the Owner’s watchlist',
+      (await page
+        .getByRole('button', { name: 'Watchlist', exact: true })
+        .getAttribute('aria-pressed')
+        .catch(() => null)) === 'false',
     );
     await page.locator('button.profile-trigger').first().click();
     const kidChoice = await page

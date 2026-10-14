@@ -875,6 +875,12 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile.create-default':
       return exact(value, ['kind']);
+    case 'household.join':
+      return (
+        exact(value, ['kind', 'sourceLibraryKey', 'pin']) &&
+        libraryKey(value.sourceLibraryKey) &&
+        optional(value.pin, pin)
+      );
     case 'key-reset.move':
     case 'key-reset.settle':
     case 'key-reset.adopt':
@@ -2015,6 +2021,21 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       return (
         exact(value, ['kind', 'outcome']) &&
         (value.outcome === 'created' || value.outcome === 'present')
+      );
+    case 'household.join':
+      return (
+        exact(value, ['kind', 'outcome', 'owner', 'kids']) &&
+        (value.outcome === 'joined'
+          ? nullable(value.owner, hexId) &&
+            record(value.kids) &&
+            Object.keys(value.kids).length <= 64 &&
+            Object.entries(value.kids).every(([from, to]) => hexId(from) && hexId(to))
+          : (value.outcome === 'pin-required' ||
+              value.outcome === 'pin-wrong' ||
+              value.outcome === 'refused-kids' ||
+              value.outcome === 'unavailable') &&
+            value.owner === undefined &&
+            value.kids === undefined)
       );
     case 'key-reset.move':
     case 'key-reset.settle':

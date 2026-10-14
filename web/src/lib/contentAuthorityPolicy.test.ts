@@ -34,7 +34,7 @@ interface World {
 /** An atlas that answers `/index/title` from AGES and every other route with `routes`, and a TMDB that records. */
 function world(
   routes: (url: string, init?: RequestInit) => Response | undefined = () => undefined,
-  options: { atlas?: boolean; atlasDown?: boolean } = {},
+  options: { atlas?: boolean; atlasDown?: boolean; eligible?: Record<string, boolean> } = {},
 ): World {
   const credentials = new WorkerContentCredentials();
   if (options.atlas !== false) credentials.configureAtlas('/atlas');
@@ -48,8 +48,15 @@ function world(
       const title = /^\/atlas\/index\/title\/(movie|series)\/(\d+)\.json/.exec(url);
       if (title) {
         const key = `${title[1] === 'series' ? 'tv' : 'movie'}:${title[2]}`;
+        const eligible = options.eligible?.[key];
         return key in AGES
-          ? json({ type: title[1], id: Number(title[2]), indexed: true, minimumAge: AGES[key] })
+          ? json({
+              type: title[1],
+              id: Number(title[2]),
+              indexed: true,
+              minimumAge: AGES[key],
+              ...(eligible === undefined ? {} : { eligible }),
+            })
           : json({ error: 'not_found' }, 404);
       }
       return routes(url, init) ?? json({ error: 'not_found' }, 404);
@@ -409,6 +416,19 @@ describe('every direct boundary asks the same check', () => {
       detail: { reason: 'refused' },
     });
     await expect(none.ask(direct(1)[0]!)).resolves.toMatchObject({ detail: { state: 'ready' } });
+  });
+
+  it('takes atlas’ eligibility over the age alone: its made-for admission and its warning veto', async () => {
+    // movie:4 is unrated but made for children; movie:1 is rated 7 but vetoed (an adult film, leniently rated).
+    const w = world(undefined, { eligible: { 'movie:4': true, 'movie:1': false } });
+    await expect(w.ask(direct(4)[0]!, KID)).resolves.toMatchObject({ detail: { state: 'ready' } });
+    await expect(w.ask(direct(1)[0]!, KID)).resolves.toMatchObject({
+      detail: { reason: 'refused' },
+    });
+    expect(w.atlas.filter((url) => url.includes('/index/title/'))).toEqual([
+      `/atlas/index/title/movie/4.json?${KID_QUERY}`,
+      `/atlas/index/title/movie/1.json?${KID_QUERY}`,
+    ]);
   });
 
   it('treats missing evidence as an unknown maturity, which the policy’s unknownRatings decides', async () => {
