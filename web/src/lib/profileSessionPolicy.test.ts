@@ -165,6 +165,59 @@ describe('the watch region', () => {
     expect(query.mock.calls.map((call) => (call as unknown[])[2])).toEqual([sent, sent]);
   });
 
+  it('is the one this browser last read, at once, and the settled one is kept for next time', async () => {
+    const kept = new Map<string, string>([['den.profile.watch-region.v1', 'SE']]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => kept.get(key) ?? null,
+      setItem: (key: string, value: string) => kept.set(key, value),
+      removeItem: (key: string) => kept.delete(key),
+    });
+    try {
+      let settle!: () => void;
+      const ready = new Promise<void>((resolve) => (settle = resolve));
+      const settings: { value?: unknown } = {};
+      const query = vi.fn(async () => ({ kind: 'collection', titles: [] }));
+      const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
+      const model = {
+        ready,
+        get settings() {
+          return settings;
+        },
+      } as unknown as LibraryModel;
+      const household = new HouseholdSession(
+        { kind: 'legacy', libraryKey: 'household', configurationOnly: false },
+        model,
+        content,
+      );
+      const kid = new ProfileSession(
+        persistentProfileIdentity('b'.repeat(32), 'key'),
+        household,
+        null,
+        false,
+        false,
+        household.policy,
+        null,
+        { maximumAge: 12, unknownRatings: 'block' },
+        null,
+        null,
+        false,
+        true,
+      );
+      // Sent before the settings arrive, under the remembered region.
+      await kid.content.query({ kind: 'collection', id: 1 });
+      expect((query.mock.calls[0] as unknown[])[2]).toMatchObject({ region: 'SE' });
+
+      settings.value = { kind: 'settings', preferences: { watchRegion: 'fi', services: [] } };
+      settle();
+      await expect.poll(() => kept.get('den.profile.watch-region.v1')).toBe('FI');
+      // The session keeps the region it started with, so its cache is never split.
+      await kid.content.query({ kind: 'collection', id: 2 });
+      expect((query.mock.calls[1] as unknown[])[2]).toMatchObject({ region: 'SE' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('is the household’s for Kid and Owner alike, never the Kid’s own setting', async () => {
     const query = vi.fn(async () => ({ kind: 'collection', titles: [] }));
     const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
