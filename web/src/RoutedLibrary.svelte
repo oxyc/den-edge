@@ -126,21 +126,15 @@
   // A remembered Owner is drawn from localStorage on the first frame, before the capability, directory or activity
   // model answer. The coordinator corrects it afterwards; a PIN gate appears only once it decides one is needed.
   const profileHint = untrack(() => (usesProfileDirectory(session) ? readProfileHint() : null));
-  const optimistic = $derived(
-    profileHint !== null &&
-      (profileCapability === 'checking' ||
-        (activeCapability === 'enabled' && !profileCoordinator) ||
-        (!!profileCoordinator && !profileCoordinator.session && profileCoordinator.restoring)),
-  );
-  $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   $effect(() => {
-    if (profileCapability === 'disabled') saveProfileHint(null);
+    if (profileCapability === 'disabled') saveProfileHint(null, null);
   });
   $effect(() => {
     const coordinator = profileCoordinator;
     if (!coordinator) return;
-    if (coordinator.session) saveProfileHint(coordinator.activeChoice);
-    else if (!coordinator.restoring) saveProfileHint(null);
+    if (coordinator.session)
+      saveProfileHint(coordinator.activeChoice, coordinator.session.identity.libraryKey);
+    else if (!coordinator.restoring) saveProfileHint(null, null);
   });
   let profileControlPublished = false;
   let openingCommittedProfiles = false;
@@ -210,6 +204,43 @@
       },
     };
   };
+
+  // The remembered Owner's own library, opened from its local cache while the profile pipeline answers. The household
+  // bootstrap session holds no activity after the split, so drawing it would pop Continue Watching and the Watchlist in
+  // later. The coordinator opens its own session for the same library; this one is closed once that has taken over.
+  let optimisticOwner = $state.raw<ProfileSession | null>(
+    untrack(() => {
+      if (!profileHint) return null;
+      const activity = openProfileActivity(profileHint.libraryKey);
+      return activeProfileSession(
+        persistentProfileIdentity(profileHint.profileId, profileHint.libraryKey),
+        session.household,
+        activity.model,
+        activity.close,
+        null,
+        true,
+      );
+    }),
+  );
+  const optimistic = $derived(
+    profileHint !== null &&
+      optimisticOwner !== null &&
+      (profileCapability === 'checking' ||
+        (activeCapability === 'enabled' && !profileCoordinator) ||
+        (!!profileCoordinator &&
+          // Until the coordinator's session has replaced the bootstrap one, so the swap is never drawn.
+          (profileCoordinator.session
+            ? session !== profileCoordinator.session
+            : profileCoordinator.restoring))),
+  );
+  const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
+  $effect(() => {
+    if (optimistic || !optimisticOwner) return;
+    optimisticOwner.close();
+    optimisticOwner = null;
+  });
+  onDestroy(() => optimisticOwner?.close());
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
   // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
@@ -901,10 +932,10 @@
         Profile preview · filtering and household migration remain off
       </p>
     {/if}
-    {#key session.identity}
-      <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
+    {#key profileSessionKey(shown.identity, shown.policyKey)}
+      <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
       <Router
-        profile={profileSessionKey(session.identity)}
+        profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
@@ -959,8 +990,8 @@
             {/if}
           {:else}
             <Library
-              link={session.identity.kind === 'visitor' ? null : link}
-              {session}
+              link={shown.identity.kind === 'visitor' ? null : link}
+              session={shown}
               {route}
               {active}
               {query}

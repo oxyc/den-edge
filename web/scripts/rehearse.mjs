@@ -10,7 +10,7 @@
 // Needs `cargo build --locked` (or DEN_EDGE_BIN) and `npm run build` first. Real data and keys are only ever read
 // from the paths given; nothing from them is written into the repo.
 
-/* global window, document, MutationObserver -- the browser-side init script and evaluate callbacks below */
+/* global window, document, MutationObserver, requestAnimationFrame -- the browser-side init script and evaluate callbacks below */
 
 import { spawn } from 'node:child_process';
 import { hkdfSync, randomBytes } from 'node:crypto';
@@ -278,6 +278,54 @@ function watchOwnerGate() {
   new MutationObserver((records) =>
     records.forEach((r) => r.addedNodes.forEach((n) => note(n))),
   ).observe(document, { childList: true, subtree: true });
+  // What each painted frame carried, from navigation start. `main` is the library; the bar's own links are not.
+  window.__frames = [];
+  const frame = () => {
+    const text = document.querySelector('main')?.innerText ?? '';
+    window.__frames.push({
+      ms: Math.round(performance.now()),
+      continueWatching: text.includes('Continue Watching'),
+      watchlist: text.includes('Watchlist'),
+      shelves: /Trending|Loading your shelves/.test(text),
+    });
+    if (window.__frames.length < 900) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+/**
+ * Names for the synthetic titles. The rehearsal has no TMDB key, so without this a Continue Watching card has no name
+ * and its shelf is never drawn; what is under test is when the shelf appears, not where its names come from.
+ */
+async function nameSyntheticTitles(ctx) {
+  await ctx.route('**/tmdb/3/**', (route) => {
+    const url = new URL(route.request().url());
+    const [, , , kind, id] = url.pathname.split('/');
+    const headers = { 'cache-control': 'max-age=3600' };
+    if (kind === 'movie')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          title: `Film ${id}`,
+          release_date: '2001-01-01',
+          poster_path: null,
+        },
+      });
+    if (kind === 'tv')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          name: `Series ${id}`,
+          first_air_date: '2001-01-01',
+          poster_path: null,
+          number_of_seasons: 2,
+          seasons: [1, 2].map((n) => ({ season_number: n, episode_count: 8 })),
+        },
+      });
+    return route.fulfill({ status: 404, json: { status_code: 34 } });
+  });
 }
 
 /** Wait for no request to den-edge's library routes for `quietMs`, or give up after `limitMs`. */
@@ -585,6 +633,7 @@ async function main() {
         ],
       );
       await ctx.addInitScript(watchOwnerGate);
+      await nameSyntheticTitles(ctx);
       const ownerPage = await seedLink(ctx, edge, keyText);
       const loop = [];
       // Svelte reports the loop as a thrown error (a page error), and logs it to the console as well.
@@ -620,6 +669,25 @@ async function main() {
         Array.isArray(gate) && gate.length === 0,
         JSON.stringify(gate),
       );
+      // Let the first visit finish syncing and naming, so the second one starts from a warm local cache.
+      if (path === '/') {
+        let attempts = 0;
+        let warm = false;
+        while (!warm && attempts < 3) {
+          if (attempts++) await ownerPage.goto(`${edge.origin}${path}`);
+          warm = await ownerPage
+            .locator('main')
+            .getByText('Continue Watching')
+            .first()
+            .waitFor({ timeout: 25_000 })
+            .then(
+              () => true,
+              () => false,
+            );
+        }
+        check('the first visit syncs and names the Owner shelves', warm, `${attempts} attempt(s)`);
+        await sleep(2000);
+      }
       // The second visit has the remembered Owner in localStorage: nothing waits on the capability, directory or
       // activity model, so the first frame already carries the switcher and no loading or PIN state is ever drawn.
       await ownerPage.goto(`${edge.origin}${path}`);
@@ -631,13 +699,29 @@ async function main() {
           loading: window.__loadingSeen,
           trigger: window.__triggerSeen,
           hint: localStorage.getItem('den.profile.hint.v1') !== null,
+          frames: window.__frames,
         }))
         .catch(() => null);
+      if (path === '/') {
+        // The Owner's own library opens from its local cache on the first frame, so the shelves that come from it
+        // are already in the first frame that draws any shelf, and never pop in afterwards.
+        const first = seen?.frames.findIndex((f) => f.continueWatching || f.watchlist || f.shelves);
+        const at = first >= 0 ? seen.frames[first] : null;
+        check(
+          'a returning Owner paints Continue Watching and Watchlist in the first shelf frame',
+          !!at && at.continueWatching && at.watchlist,
+          JSON.stringify({
+            firstShelfFrame: at,
+            continueWatchingAtMs: seen?.frames.find((f) => f.continueWatching)?.ms ?? null,
+            watchlistAtMs: seen?.frames.find((f) => f.watchlist)?.ms ?? null,
+          }),
+        );
+      }
       check(`the Owner hint was remembered after ${path} settled`, !!seen?.hint);
       check(
         `a returning Owner on ${path} sees no PIN gate and no loading state`,
         !!seen && seen.gate.length === 0 && seen.loading.length === 0,
-        JSON.stringify(seen),
+        JSON.stringify({ ...seen, frames: seen?.frames.length }),
       );
       check(
         `a returning Owner on ${path} has the switcher on the first frame`,
@@ -744,6 +828,7 @@ try {
   await main();
 } catch (error) {
   check('the rehearsal ran to the end', false, String(error?.stack ?? error));
+  console.log(browserLog.slice(-15).join('\n'));
 }
 
 const failed = results.filter((r) => !r.ok);
