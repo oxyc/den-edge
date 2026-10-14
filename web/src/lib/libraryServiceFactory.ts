@@ -15,6 +15,7 @@ import {
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
 import { holdLibraryRelayMembership, useLibraryRelayMembership } from './relayFetch';
+import { startupWorkerCreated, startupWorkerName } from './startupTiming';
 
 export interface LibraryServiceFactoryOptions {
   supervisor?: LibraryServiceSupervisorOptions;
@@ -25,7 +26,10 @@ export interface LibraryServiceFactoryOptions {
 }
 
 const productionWorker = () =>
-  new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), { type: 'module' });
+  new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
+    type: 'module',
+    name: startupWorkerName(),
+  });
 
 // The production trace contained four dead generations before the fifth stayed up. Follow that bounded burst,
 // with a short pause between later generations, but never let one request manufacture Workers for 15 seconds.
@@ -402,21 +406,28 @@ export function createWorkerServiceSession(
   const createWorker = options.createWorker ?? productionWorker;
   let closed = false;
   const contentFacade: { current?: SessionContentService } = {};
-  const connection = () =>
-    createWorkerServiceConnection(createWorker, options.startupTimeoutMs, (opening) => {
-      contentFacade.current?.bootstrap(opening);
-      return holdLibraryRelayMembership(opening);
-    });
+  const connection = (reason: string) => {
+    const created = createWorkerServiceConnection(
+      createWorker,
+      options.startupTimeoutMs,
+      (opening) => {
+        contentFacade.current?.bootstrap(opening);
+        return holdLibraryRelayMembership(opening);
+      },
+    );
+    startupWorkerCreated(reason);
+    return created;
+  };
   let active = {
-    connection: connection(),
+    connection: connection('session start'),
     libraryClaimed: false,
   };
 
-  const activate = (libraryClaimed: boolean) => {
+  const activate = (libraryClaimed: boolean, reason: string) => {
     if (closed) throw new Error('Worker service session is closed');
     const previous = active.connection;
     active = {
-      connection: connection(),
+      connection: connection(`restart: ${reason}`),
       libraryClaimed,
     };
     content.replaced(active.connection.content);
@@ -432,7 +443,7 @@ export function createWorkerServiceSession(
       // before this query follows its content sibling. Letting Content call `activate(false)` here briefly created an
       // anonymous Worker, which the supervisor then replaced again; in-flight detail and trailer work was cancelled
       // in that ping-pong and retry kept following another dead channel.
-      if (!active.libraryClaimed) return activate(false).content;
+      if (!active.libraryClaimed) return activate(false, 'content recovery').content;
       await library.recoverSharedTransport();
       return active.connection.content;
     },
@@ -441,7 +452,7 @@ export function createWorkerServiceSession(
 
   const library = new LibraryServiceSupervisor(() => {
     if (closed) throw new Error('Worker service session is closed');
-    if (active.libraryClaimed) return activate(true).library;
+    if (active.libraryClaimed) return activate(true, 'library supervisor reconnect').library;
     active.libraryClaimed = true;
     content.replaced(active.connection.content);
     return active.connection.library;

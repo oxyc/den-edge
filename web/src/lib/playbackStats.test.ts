@@ -69,6 +69,54 @@ describe('watchPlayback', () => {
     return (JSON.parse(sent.at(-1)!) as { stats: PlaybackStats }).stats.stalls;
   }
 
+  it('hands on hls.js’s bandwidth estimate and the fragments behind it as it stops', () => {
+    vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
+    vi.stubGlobal('HTMLMediaElement', { HAVE_FUTURE_DATA: 3 });
+    const handlers = new Map<string, (event: string, data: unknown) => void>();
+    const Events = { FRAG_LOADING: 'l', FRAG_LOADED: 'f', BUFFER_CREATED: 'b', ERROR: 'e' };
+    const instance = {
+      bandwidthEstimate: 15_162_000,
+      on: (event: string, handler: (event: string, data: unknown) => void) =>
+        handlers.set(event, handler),
+    };
+    const video = Object.assign(new EventTarget(), {
+      currentTime: 0,
+      paused: false,
+      seeking: false,
+      readyState: 4,
+      duration: 600,
+      error: null,
+      buffered: ranges([0, 30]),
+      played: ranges([0, 40], [50, 80]),
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 }),
+    }) as unknown as HTMLVideoElement;
+    const told: unknown[] = [];
+    const watcher = watchPlayback({
+      video,
+      hls: { instance, Hls: { Events } } as never,
+      reportUrl: '/r',
+      send: () => undefined,
+      now: () => 0,
+      onEstimate: (evidence) => told.push(evidence),
+    });
+    for (let sn = 0; sn < 7; sn++)
+      handlers.get('f')!('f', {
+        frag: {
+          sn,
+          type: 'main',
+          stats: {
+            loaded: 1_000_000,
+            total: 1_000_000,
+            loading: { start: 0, first: 100, end: 600 },
+          },
+        },
+        part: undefined,
+      } as unknown as never);
+    watcher.stop();
+    watcher.stop();
+    expect(told).toEqual([{ bps: 15_162_000, fragments: 7, playedSeconds: 70, stalls: 0 }]);
+  });
+
   it('does not take a frame count that moves every two seconds for a frozen picture', () => {
     expect(play(20, () => true)).toEqual([]);
   });

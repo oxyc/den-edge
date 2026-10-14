@@ -38,6 +38,7 @@ import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyReset
 import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
+import { startupMark } from './startupTiming';
 import {
   believe,
   compareStamps,
@@ -2677,8 +2678,10 @@ export class LibraryLog {
       });
       log.restoreProfileDirectory(partial);
     }
+    let firstPage = true;
     for (;;) {
       let res: Response;
+      const askedAt = performance.now();
       try {
         res = await log.send(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, {
           headers: log.headers(),
@@ -2687,6 +2690,13 @@ export class LibraryLog {
         return null;
       }
       await policy;
+      if (firstPage) {
+        firstPage = false;
+        startupMark(
+          'log first changes page',
+          `status ${res.status} in ${Math.round(performance.now() - askedAt)}ms`,
+        );
+      }
       if (res.status === 404) {
         if (!(await log.stageRecovery())) return null;
         log.forgetPartial();

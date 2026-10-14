@@ -10,6 +10,7 @@ import {
 import { activeProfileSession, ProfileSession } from './profileSession.svelte';
 import { isolatedProfilePolicy, type ProfileContentPolicy } from './profilePolicy';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
+import { startupMark } from './startupTiming';
 import {
   crossTabVisitorActivityLock,
   purgeOrphanVisitorNamespaces,
@@ -293,6 +294,11 @@ export class ProfileModeCoordinator {
       }
     }
     this.#events?.addEventListener('storage', this.#storageChanged);
+    // Reads no reactive state: the committed-household constructor runs inside a tracked effect.
+    startupMark(
+      'coordinator created',
+      directory ? (profileModels ? 'household' : 'preview') : 'staging',
+    );
   }
 
   get session(): ProfileSession | null {
@@ -962,10 +968,21 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
   };
 };
 
-/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
 export async function profilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
+): Promise<ProfilesCapability> {
+  const askedAt = performance.now();
+  startupMark('capability requested');
+  const answer = await readProfilesCapability(fetchImpl, visitorLock);
+  startupMark('capability answered', `${answer} in ${Math.round(performance.now() - askedAt)}ms`);
+  return answer;
+}
+
+/** Only an explicit, valid disabled answer may reveal the legacy Owner path. Every failure stays neutral. */
+async function readProfilesCapability(
+  fetchImpl: typeof fetch,
+  visitorLock: VisitorActivityLock,
 ): Promise<ProfilesCapability> {
   try {
     const response = await fetchImpl('/capabilities/profiles', {

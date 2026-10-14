@@ -13,6 +13,7 @@ import { libraryVault, type Vault } from './localVault';
 import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { readApiKey } from './prefs';
 import { useLibraryRelayMembership } from './relayFetch';
+import { startupMark } from './startupTiming';
 import {
   libraryLogMaintenance,
   librarySimklDelivery,
@@ -73,7 +74,9 @@ export async function openLibraryServiceAuthority(
 
   // Seed the durable clock before opening the log so a failed clock cannot leave an opened log behind. Durable
   // clock state wins inside openClockStore; the page-provided value is migration input only.
+  startupMark('log open requested', `${request.mode}, wire ${request.wire}`);
   const clock = await openClockStore(vault, { legacy: request.legacyClock });
+  const openingAt = performance.now();
   let log: LibraryLog | null;
   try {
     log =
@@ -90,6 +93,10 @@ export async function openLibraryServiceAuthority(
       });
     throw error;
   }
+  startupMark(
+    'log opened',
+    `${!log ? 'unavailable' : request.mode === 'local' ? 'local' : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
+  );
   if (!log) return null;
   // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
   // before the authority can answer `ready`: a source query that already carries an IMDb id goes straight from

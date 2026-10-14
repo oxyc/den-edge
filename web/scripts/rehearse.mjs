@@ -250,6 +250,9 @@ function executablePath() {
 const browserLog = [];
 // Where the browser log stood once the split had committed and its page had closed.
 let splitLogMark = 0;
+// The `den: startup` milestones of every page and Worker, printed with the verdict so a run shows where it waited.
+const startupLog = [];
+let launches = 0;
 
 async function launch(profileDir) {
   const ctx = await chromium.launchPersistentContext(profileDir, {
@@ -257,8 +260,13 @@ async function launch(profileDir) {
     executablePath: executablePath(),
     viewport: { width: 1280, height: 900 },
   });
+  const launched = ++launches;
+  const startup = (m) => {
+    if (m.text().startsWith('den: startup')) startupLog.push(`[launch ${launched}] ${m.text()}`);
+  };
   const watch = (page) => {
     page.on('console', (m) => {
+      startup(m);
       if (['error', 'warning'].includes(m.type())) browserLog.push(`[${m.type()}] ${m.text()}`);
     });
     page.on('pageerror', (e) => browserLog.push(`[pageerror] ${e.message}`));
@@ -1061,6 +1069,9 @@ check(
   afterSplit.length === 0,
   `${afterSplit.length} warnings${afterSplit.length ? `, e.g. ${afterSplit[0].split('\n')[0]}` : ''}`,
 );
+
+console.log(`\n== startup milestones (${startupLog.length} lines)`);
+for (const line of startupLog) console.log(line);
 
 const failed = results.filter((r) => !r.ok);
 console.log(

@@ -1,8 +1,14 @@
 // Keep the entry tiny enough for a retained parser-time hero to paint before Svelte evaluates and mounts. The
 // application module is preloaded from index.html, so this changes CPU admission rather than adding a network chain.
 import './app.css';
+import { startupMark } from './lib/startupTiming';
 
-const start = () => void import('./appMain');
+startupMark('page boot');
+
+const start = () => {
+  startupMark('app module requested');
+  void import('./appMain');
+};
 const retainedHero = document.querySelector(
   '[data-den-early-billboard]:not([hidden]) [data-den-early-backdrop][data-path]',
 );
