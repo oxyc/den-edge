@@ -195,6 +195,34 @@ cargo run                       # http://localhost:8080, state in ./data
 cargo test
 ```
 
+### Migration rehearsal
+
+`npm run rehearse` (in `web/`) runs the Owner split end to end: the real `den-edge` binary on a temporary copy of the
+data (profile migration on, `NEW_LIBRARIES=members`, the household enrolled), serving the built web app, driven by real
+Den Web in Chromium. It opens the household, enables Profiles with a PIN, waits for the commit, then reopens a browser
+whose storage was snapshotted before the split, with one tab and then two, and checks that it adopts the committed
+household without writing its old rows back. It needs `cargo build --locked` (or `DEN_EDGE_BIN`), `npm run build`, and
+Chromium (`npx playwright install chromium`, or an installed Chrome).
+
+```
+npm run rehearse                                          # a synthetic household and a generated key
+REHEARSE_DATA=/path/to/edge-data REHEARSE_KEY_FILE=/path/to/key npm run rehearse   # a copy of real data
+```
+
+`REHEARSE_DATA` is a copied `DATA_DIR` (`lib/` and `library-v3-index.json`); `REHEARSE_KEY_FILE` holds the household's
+base64 library key. Both are read only; the data is copied before anything runs, and neither is ever committed, so keep
+real copies outside the repo. Options (env, or `--flag value`): `REHEARSE_PIN` (default `1234`; the Owner PIN if the
+household has one), `REHEARSE_SETTLE_SECONDS` (how long each reopen is watched, default 25), `REHEARSE_MAX_BATCHES`
+(batch writes tolerated per reopen, default 6), `--keep` (keep the temp dir with the den-edge logs and browser
+profiles), `--headed`. `REHEARSE_LEGACY_ROWS=1` adds rows den-core refuses outright to the synthetic household (a
+malformed `set:tracker-event:*` row, v3 `wat`/`snt` rows).
+
+It prints PASS/FAIL per check and exits 1 if any fails: the household commits at wire minimum 5, its directory names an
+Owner library that holds the activity, the committed household holds no activity (title, season and delivery
+documents, `trackers`, `deliver:*`, `handoff:*`, `assistant-applied`, tracker events), and, after each reopen, at most
+`REHEARSE_MAX_BATCHES` `POST /lib/:id/batch` reached den-edge and the decrypted household again holds no activity.
+Each reopen starts from the committed data (den-edge restarted on a copy, same port), so they do not affect each other.
+
 ## Deploy
 
 Main CI builds `ghcr.io/oxyc/den-edge` and `ghcr.io/oxyc/den-cast` together as immutable candidates for
