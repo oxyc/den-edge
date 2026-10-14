@@ -34,6 +34,7 @@
     sight,
     type Sighting,
   } from './lib/livePosition';
+  import { blockedTitles } from './lib/blockedTitles.svelte';
   import { libraryStandings } from './lib/standing.svelte';
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
@@ -119,6 +120,9 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  // The download queue spends household credentials and bandwidth, so only a session that administers the household
+  // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page.
+  const downloadsModel = untrack(() => (session.administersHousehold ? session.model : null));
   // Visitor owns only this device-local activity adapter. It is deliberately independent of LibraryModel, so none
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
@@ -269,8 +273,8 @@
     };
   });
   $effect(() => {
-    if (!model || (route.page !== 'library' && route.page !== 'downloads')) return;
-    const lease = model.downloads();
+    if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
+    const lease = downloadsModel.downloads();
     downloadsLease = lease;
     return () => {
       lease.release();
@@ -419,7 +423,10 @@
       ),
     ),
   );
-  $effect(() => () => libraryStandings.set(new Map()));
+  $effect(() => () => {
+    libraryStandings.set(new Map());
+    blockedTitles.reset();
+  });
 
   /**
    * The clock a Continue Watching card shows while its title plays on some device. It ticks each second only
@@ -1581,7 +1588,7 @@
     {busy}
     {failure}
     {notice}
-    {model}
+    model={downloadsModel}
     onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
     onseen={(title, seen) => fromPage(setSeen(title, seen))}
     onseason={markSeasonSeen}
@@ -1634,7 +1641,9 @@
 {:else if route.page === 'people'}
   <PeopleScreen.current view={people} content={session.content} {atlas} {atlasReady} />
 {:else if route.page === 'downloads'}
-  {#if !model}
+  {#if !session.administersHousehold}
+    <p class="note">Downloads are managed by the Owner.</p>
+  {:else if !downloadsModel}
     <p class="note">
       Downloads live in your library, which this browser can’t keep. <a href="/settings"
         >Link a TV</a
@@ -1643,7 +1652,7 @@
   {:else if !DownloadsScreen.current}
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
-    <DownloadsScreen.current {model} {active} />
+    <DownloadsScreen.current model={downloadsModel} {active} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !model && !profileActivity}

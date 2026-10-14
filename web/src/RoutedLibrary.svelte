@@ -50,6 +50,7 @@
     type ProfilesCapability,
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
+  import { scopeRecentSearches } from './lib/recentSearches';
 
   let {
     link,
@@ -59,6 +60,7 @@
     watchedYear,
     onchange,
     onprofilecontrol = () => {},
+    onhouseholdadmin = () => {},
   }: {
     link: Link | null;
     query: string;
@@ -67,6 +69,8 @@
     watchedYear: string | undefined;
     onchange: (route: Route) => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
+    /** Tells the page whether household-level dialogs (invites, phone links, assistant consent) may open. */
+    onhouseholdadmin?: (allowed: boolean) => void;
   } = $props();
 
   const ownKey = untrack(() => (link ? null : localLibraryKey()));
@@ -129,6 +133,15 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
+  // Linking, invites, assistant consent and the saved search list are the household's. With profiles on they open
+  // only for the active Owner session: every other state — discovery pending, the Owner gate, Kid, Visitor — is closed.
+  const householdAdmin = $derived(
+    profileCapability === 'disabled' ||
+      (profileCoordinator?.session === session && session.administersHousehold),
+  );
+  $effect.pre(() => scopeRecentSearches(householdAdmin));
+  $effect.pre(() => onhouseholdadmin(householdAdmin));
+  onDestroy(() => onhouseholdadmin(true));
 
   // Every retained route owns profile-specific presentation and in-flight work. Before Svelte replaces the keyed
   // route tree, move the old Router to Home with a replace (not a history entry). This also flushes a debounced
@@ -250,6 +263,7 @@
               activity.model,
               activity.close,
               owner.policy ?? null,
+              true,
             );
             legacy.relinquishHouseholdOwnership();
             legacy.close();
@@ -696,6 +710,7 @@
   $effect(() => {
     if (!phoneLanding.request || phoneLanding.phase !== 'idle') return;
     if (!link && !session.local) return;
+    if (!householdAdmin) return;
     void untrack(() => phoneLanding.run(link ? null : joinLibrary));
   });
 

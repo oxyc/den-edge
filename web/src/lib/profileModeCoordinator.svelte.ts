@@ -628,6 +628,7 @@ export class ProfileModeCoordinator {
       handle.model,
       () => handle.close(),
       current.policy ?? null,
+      current.role === 'owner',
     );
   }
 
@@ -719,6 +720,8 @@ export class ProfileModeCoordinator {
       null,
       choice.policy ?? null,
       preferences,
+      null,
+      false,
     );
   }
 

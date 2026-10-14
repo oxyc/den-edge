@@ -5,6 +5,7 @@ import {
   isRecentSearchStorageEvent,
   readRecentSearches,
   rememberSearch,
+  scopeRecentSearches,
 } from './recentSearches';
 
 const storage = (initial: string | null = null): Storage => {
@@ -49,6 +50,25 @@ describe('recent searches', () => {
     } as unknown as Storage;
     expect(readRecentSearches(blocked)).toEqual([]);
     expect(() => rememberSearch('Arrival', blocked)).not.toThrow();
+  });
+
+  it('keeps a profile that does not administer the household out of the saved list, in both directions', () => {
+    const saved = storage(JSON.stringify(['Owner search']));
+    vi.stubGlobal('localStorage', saved);
+    try {
+      expect(readRecentSearches()).toEqual(['Owner search']);
+
+      scopeRecentSearches(false);
+      expect(readRecentSearches()).toEqual([]);
+      expect(rememberSearch('Kid cartoons')).toEqual(['Kid cartoons']);
+      expect(saved.setItem).not.toHaveBeenCalled();
+
+      scopeRecentSearches(true);
+      expect(readRecentSearches()).toEqual(['Owner search']);
+    } finally {
+      scopeRecentSearches(true);
+      vi.unstubAllGlobals();
+    }
   });
 
   it('follows this key and whole-storage clears from another tab', () => {

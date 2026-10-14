@@ -2,17 +2,33 @@ const STORAGE_KEY = 'den.recentSearches';
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
 let memory: string[] = [];
+// The saved list belongs to the household's own browsing. Any other profile keeps its searches in memory for the
+// session, so neither can read, extend or clear the other's after a switch.
+let persisted = true;
 
 export const RECENT_SEARCHES_CHANGED = 'den:recent-searches-changed';
 
 const clean = (value: string) => value.trim().replace(/\s+/g, ' ');
 const browserStorage = (): Storage | undefined => {
+  if (!persisted) return undefined;
   try {
     return globalThis.localStorage;
   } catch {
     return undefined;
   }
 };
+
+/**
+ * Choose whose searches the default storage serves: the saved list for the household, or a fresh in-memory list for
+ * a profile that does not administer it. Changing scope empties the in-memory list, so nothing typed under one
+ * profile is offered to the next.
+ */
+export function scopeRecentSearches(persist: boolean): void {
+  if (persist === persisted) return;
+  persisted = persist;
+  memory = [];
+  changed(readRecentSearches());
+}
 
 /** This browser's recent explicit title searches, newest first. */
 export function readRecentSearches(storage: Storage | undefined = browserStorage()): string[] {

@@ -895,6 +895,49 @@ describe('ProfileModeCoordinator', () => {
     expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
   });
 
+  it('lets only the active Owner administer the household, for preview and real profiles alike', async () => {
+    const storage = memoryStorage();
+    const previewDirectory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: previewDirectory.owner }),
+    );
+    const preview = owner(storage, true, null, undefined, previewDirectory).coordinator;
+    expect(preview.session!.administersHousehold).toBe(true);
+    await preview.switchToKid();
+    expect(preview.session!.administersHousehold).toBe(false);
+    await preview.switchToVisitor('1234');
+    expect(preview.session!.administersHousehold).toBe(false);
+    preview.dispose();
+
+    const realStorage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    realStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const kidOpening = deferred<unknown>();
+    const ownerOpening = deferred<unknown>();
+    const ownerKey = view.profiles.find((profile) => profile.role === 'owner')!.libraryKey;
+    const models = profileModels(
+      new Map([
+        [kid.libraryKey, kidOpening],
+        [ownerKey, ownerOpening],
+      ]),
+    );
+    const real = owner(realStorage, true, null, undefined, directory, models.factory);
+    kidOpening.resolve({});
+    await vi.waitFor(() => expect(real.coordinator.mode).toBe('kid'));
+    expect(real.coordinator.session!.model).not.toBeNull();
+    expect(real.coordinator.session!.administersHousehold).toBe(false);
+
+    ownerOpening.resolve({});
+    await expect(real.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    expect(real.coordinator.session!.administersHousehold).toBe(true);
+  });
+
   it.each([
     null,
     '{broken',

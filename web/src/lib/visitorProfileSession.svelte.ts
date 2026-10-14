@@ -221,6 +221,8 @@ export class VisitorProfileSession extends ProfileSession {
       projection,
       contentPolicy,
       preferences,
+      null,
+      false,
     );
     for (const title of projection.titles) this.rememberTitle(title);
   }
