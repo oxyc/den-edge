@@ -2335,9 +2335,10 @@ export class LibraryLog {
   /**
    * Every row den-edge holds for this library, read from the start to its head and opened: a title or season document
    * as the row it stands for (as `rows`), a delivery document as itself. What is really there, apart from anything
-   * this browser holds or still has to send. Null when it could not be read whole.
+   * this browser holds or still has to send, with how many live rows den-edge holds (`entries`). Null when it could
+   * not be read whole.
    */
-  async heldRows(): Promise<Row[] | null> {
+  async heldRows(): Promise<{ rows: Row[]; entries: number } | null> {
     if (this.offline) return null;
     let read: { entries: RawEntry[] } | null;
     try {
@@ -2347,14 +2348,16 @@ export class LibraryLog {
     }
     if (!read) return null;
     const rows: Row[] = [];
+    let entries = 0;
     for (const { k, v } of read.entries) {
       if (!v) continue;
+      entries++;
       const opened = await openEntry(this.keys, k, v);
       if (!('row' in opened)) continue;
       const row = opened.row;
       rows.push(...(isDocument(row) && row.kind !== 'delivery' ? projectDocument(row) : [row]));
     }
-    return rows;
+    return { rows, entries };
   }
 
   /** How long den-edge last asked this library's writes to wait (`429` with `Retry-After`), or 0. */

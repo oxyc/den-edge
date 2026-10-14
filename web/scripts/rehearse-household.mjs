@@ -505,7 +505,10 @@ async function main() {
     check('the household is made and this browser points at it', committed === kept?.householdKey);
     if (!kept) return;
     await checkHousehold('after the first add', edge, wire, kept);
-    check('the plan is settled once the library moved in', (await plan(page)) === null);
+    check(
+      'the plan records the verified move, and the library kept here waits for the next load',
+      !!(await plan(page))?.verified && !!(await localKey(page)),
+    );
     check(
       'this page shows Owner, Kid and Visitor without a reload',
       await switcherShowsAll(page),
@@ -529,6 +532,7 @@ async function main() {
     const trigger = page.locator('button.profile-trigger').first();
     await trigger.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
     check('no Owner PIN gate on reload', (await page.locator('#owner-gate-pin').count()) === 0);
+    check('the reload re-checks den-edge and retires the library kept here', await retired(page));
     check(
       'lands as the Owner',
       ((await trigger.getAttribute('aria-label').catch(() => '')) ?? '').includes('current Owner'),
@@ -791,18 +795,35 @@ async function seedBrowser(page, edge, rows, options = {}) {
 
 const localKey = (page) => page.evaluate(() => localStorage.getItem('den.localLibrary'));
 
-/** Wait until the browser points at a household and no longer keeps a library of its own; the household key or null. */
+/**
+ * Wait until the browser points at a household and the move into it was verified (the plan says so, or is settled);
+ * the household key or null. The library kept here stays until the next load's re-check.
+ */
 async function movedHousehold(page, limitMs = 180_000) {
   const started = Date.now();
   while (Date.now() - started < limitMs) {
-    const [household, local] = await Promise.all([pointer(page), localKey(page)]).catch(() => [
+    const [household, kept] = await Promise.all([pointer(page), plan(page)]).catch(() => [
       null,
-      'unknown',
+      undefined,
     ]);
-    if (household && !local) return household;
+    if (household && kept !== undefined && (kept === null || kept.verified)) return household;
     await sleep(500);
   }
   return null;
+}
+
+/** Wait until the library kept here is gone and the plan settled (the re-check passed), or give up. */
+async function retired(page, limitMs = 30_000) {
+  const started = Date.now();
+  while (Date.now() - started < limitMs) {
+    const [local, kept] = await Promise.all([localKey(page), plan(page)]).catch(() => [
+      'unknown',
+      'unknown',
+    ]);
+    if (local === null && kept === null) return true;
+    await sleep(250);
+  }
+  return false;
 }
 
 /**
@@ -1005,8 +1026,28 @@ async function existingLibraryMoves(wire) {
       `first paint ${Math.round(firstPaint ?? -1)} ms, moved by ${movedAt} ms`,
     );
     if (!householdKey) return;
-    check('the plan is settled', (await plan(page)) === null);
+    const verifiedPlan = await plan(page);
+    check(
+      'the plan records the verified move, with the rows each library held',
+      !!verifiedPlan?.verified,
+      JSON.stringify(verifiedPlan?.verified ?? null),
+    );
+    check(
+      'after the first load the library kept here still exists',
+      (await localKey(page)) === key,
+    );
+    // Every later load re-checks. Those below see a plan that says den-edge held far more rows than it does: the
+    // re-check fails, the library kept here stays, and the page says why.
+    await page.evaluate(
+      (value) => localStorage.setItem('den.household.plan', value),
+      JSON.stringify({
+        ...verifiedPlan,
+        verified: { ...verifiedPlan?.verified, owner: 1_000_000 },
+      }),
+    );
+    const logged = browserLog.length;
     await checkMoved('after the move', edge, wire, householdKey, seeded);
+    await page.goto(`${edge.origin}/`);
     const trigger = page.locator('button.profile-trigger').first();
     await trigger.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
     check(
@@ -1015,22 +1056,39 @@ async function existingLibraryMoves(wire) {
     );
     await checkTitlesShown('as the Owner', page, edge);
     check('no Owner PIN gate', (await page.locator('#owner-gate-pin').count()) === 0);
+    const why = browserLog.slice(logged).find((line) => line.includes('stays for now'));
+    const keptAfter = await localKey(page);
+    const planAfter = await plan(page);
+    check(
+      'a failed re-check keeps the library kept here, and logs why',
+      keptAfter === key && !!planAfter?.verified && !!why,
+      why ??
+        `nothing logged; library kept here ${keptAfter === key}, plan ${JSON.stringify(planAfter?.verified ?? null)}`,
+    );
+    // The plan as the move left it, for the next load.
+    await page.evaluate(
+      (value) => localStorage.setItem('den.household.plan', value),
+      JSON.stringify(verifiedPlan),
+    );
     await ctx.close();
 
-    // A later load opens the household, and moves nothing again.
+    // The next load re-checks, passes, and retires the library kept here; it moves and writes nothing.
     ctx = await launch(dir);
     page = await firstPage(ctx);
     const mark = edge.log.length;
     await page.goto(`${edge.origin}/`);
+    check('after the re-check passes the library kept here is gone', await retired(page));
     await quiet(edge, 4000);
     const libraries = readdirSync(join(edge.dataDir, 'lib')).filter((name) =>
       name.endsWith('.redb'),
     );
+    const writes = libraryWrites(edge, mark).length;
     check(
-      'a reload opens the same household and starts no other',
-      (await pointer(page)) === householdKey && libraries.length === 3,
-      `${libraries.length} libraries; ${libraryWrites(edge, mark).length} writes on reload`,
+      'that load opens the same household, starts no other and writes nothing',
+      (await pointer(page)) === householdKey && libraries.length === 3 && writes === 0,
+      `${libraries.length} libraries; ${writes} writes`,
     );
+    await checkTitlesShown('after the re-check', page, edge);
   } finally {
     await ctx.close();
     writeFileSync(join(work, 'den-edge-move.log'), edge.log.join('\n'));

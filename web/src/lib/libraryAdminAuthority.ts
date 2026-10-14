@@ -556,10 +556,12 @@ export class LibraryAdminAuthority {
           await this.log.keep(LOCAL_MERGES, staged.slice(-64));
         }
       }
+      let verified: number | undefined;
       if (part.verify) {
         // Read back from den-edge, not from what this browser holds: the source is retired only once den-edge has it.
         const held = await this.log.heldRows();
-        const missing = held ? unaccounted(rows, held) : null;
+        const missing = held ? unaccounted(rows, held.rows) : null;
+        verified = held?.entries;
         if (!missing || missing.length) {
           console.warn(
             missing
@@ -583,7 +585,11 @@ export class LibraryAdminAuthority {
           affected: affectedLibrary,
         };
       return {
-        result: { kind: 'local-library.merge', outcome: 'merged' },
+        result: {
+          kind: 'local-library.merge',
+          outcome: 'merged',
+          ...(verified !== undefined ? { held: verified } : {}),
+        },
         affected: affectedLibrary,
       };
     } finally {

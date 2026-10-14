@@ -69,9 +69,11 @@
     householdPlan,
     observeKeptActions,
     planHousehold,
+    recheckHousehold,
     settledHousehold,
     settleHouseholdPlan,
     startHouseholdPlan,
+    verifyHouseholdPlan,
     type HouseholdPlan,
   } from './lib/browserHousehold';
 
@@ -656,6 +658,8 @@
     try {
       await Promise.all([destination.model!.ready, owner.model.ready]);
       let settled = false;
+      // How many live rows each library held when it was read back: the next load checks against them.
+      let held: { household?: number; owner?: number } = {};
       for (let pass = 0; pass < 3 && !settled; pass++) {
         const seen = keptActions;
         const household = await destination.model!.mergeLocalLibrary(plan.stagingKey, undefined, {
@@ -670,6 +674,10 @@
           verify: true,
         });
         if (!moved(profile.result)) throw new Error('the Owner library did not take its activity');
+        held = {
+          ...('held' in household.result ? { household: household.result.held } : {}),
+          ...('held' in profile.result ? { owner: profile.result.held } : {}),
+        };
         settled = keptActions === seen && keptPending === 0;
       }
       if (!settled) throw new Error('the library kept here kept changing while it moved');
@@ -678,8 +686,15 @@
         destination.close();
         return HOUSEHOLD_RETRY_MS;
       }
-      await dropLocalLibrary(plan.stagingKey);
-      settleHouseholdPlan();
+      if (held.household !== undefined && held.owner !== undefined) {
+        // Verified: the library kept here stays until the next load's `recheckHousehold` passes.
+        if (!verifyHouseholdPlan(plan, { household: held.household, owner: held.owner }))
+          throw new Error('the verified move could not be recorded');
+      } else {
+        // Another tab finished the move and the library kept here is gone already.
+        await dropLocalLibrary(plan.stagingKey);
+        settleHouseholdPlan();
+      }
       plannedHousehold = null;
       // Cancel a queued convergence open before publishing the household.
       convergence++;
@@ -713,6 +728,17 @@
   let stagingProfiles = $state(false);
   let stagingOwner: ProfileSession | null = null;
   onMount(() => {
+    // A move verified on an earlier load: the library kept here is dropped once den-edge still holds what it held then.
+    const verified = ownHousehold ? householdPlan() : null;
+    if (verified?.verified && verified.householdKey === ownHousehold)
+      void recheckHousehold(verified).then(async (failed) => {
+        if (failed) {
+          console.warn(`den: the library kept in this browser stays for now: ${failed}`);
+          return;
+        }
+        await dropLocalLibrary(verified.stagingKey);
+        settleHouseholdPlan();
+      });
     if (!plannedHousehold || !session.local) return;
     void bornHouseholds().then((offered) => {
       const staging = session;
@@ -1080,7 +1106,8 @@
     const retry = () => {
       clearTimeout(convergenceRetry);
       convergenceRetry = setTimeout(() => {
-        if (!current || !alive) return;
+        // Once the household is open, the library kept here (kept until it is re-checked) is never opened again.
+        if (!current || !alive || ownHousehold) return;
         const winner = localLibraryKey();
         if (!winner) return;
         if (session.local && libraryIdentity === winner) void drain(session, winner);
@@ -1107,6 +1134,7 @@
       if (!complete && current && alive && session === owner) retry();
     };
     const converge = (nextKey: string) => {
+      if (ownHousehold) return;
       const run = ++convergence;
       convergenceWork = convergenceWork.then(async () => {
         const next = open(nextKey, true);

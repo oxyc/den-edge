@@ -5,8 +5,10 @@ import {
   keptHousehold,
   observeKeptActions,
   planHousehold,
+  recheckHousehold,
   settledHousehold,
   startHouseholdPlan,
+  verifyHouseholdPlan,
 } from './browserHousehold';
 import { householdScoped, profileScoped } from './householdScope';
 import { ensureSyncPolicy } from './syncLoader';
@@ -57,6 +59,44 @@ it('opens the household only once the library it started from has moved in', () 
   // The library is gone: the plan is done, and its removal is all that was left.
   expect(settledHousehold(null, storage)).toBe(plan.householdKey);
   expect(householdPlan(storage)).toBeNull();
+});
+
+it('opens a verified household while the library kept here waits for the next load’s re-check', () => {
+  const storage = memoryStorage();
+  const plan = planHousehold(LOCAL, storage)!;
+  commitHousehold(plan, storage);
+  expect(verifyHouseholdPlan(plan, { household: 4, owner: 30 }, storage)).toBe(true);
+  expect(settledHousehold(LOCAL, storage)).toBe(plan.householdKey);
+  // Kept until the re-check passes.
+  expect(householdPlan(storage)?.verified).toEqual({ household: 4, owner: 30 });
+});
+
+it('re-checks the household and Owner library on den-edge before the library kept here goes', async () => {
+  const storage = memoryStorage();
+  const plan = planHousehold(LOCAL, storage)!;
+  const verified = { ...plan, verified: { household: 2, owner: 3 } };
+  const serving =
+    (live: number, status = 200) =>
+    async () =>
+      new Response(
+        JSON.stringify({
+          entries: Array.from({ length: live + 1 }, (_, i) => ({
+            seq: i + 1,
+            // One removed row, which is not counted.
+            v: i < live ? 'sealed' : null,
+          })),
+          more: false,
+        }),
+        { status },
+      );
+  expect(await recheckHousehold(verified, serving(3))).toBeNull();
+  expect(await recheckHousehold(verified, serving(2))).toBe(
+    'the Owner library holds 2 rows, 3 when the move was verified',
+  );
+  expect(await recheckHousehold(verified, serving(3, 404))).toBe(
+    'the household could not be read: den-edge answered 404',
+  );
+  expect(await recheckHousehold(plan, serving(3))).toBe('the move was never verified');
 });
 
 it('starts the household on a kept action, never on what the page writes by itself', async () => {

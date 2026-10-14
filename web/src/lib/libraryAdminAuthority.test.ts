@@ -191,7 +191,7 @@ it('keeps the source until den-edge, read back, holds everything moved', async (
   const held: unknown[] = [];
   const log = {
     writeRows: vi.fn(async () => true),
-    heldRows: vi.fn(async () => held),
+    heldRows: vi.fn(async () => ({ rows: held, entries: held.length })),
     retryAfterMs: 0,
   };
   const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
@@ -211,7 +211,7 @@ it('keeps the source until den-edge, read back, holds everything moved', async (
   expect(source.forget).not.toHaveBeenCalled();
 
   held.push(watchlisted);
-  await expect(merge()).resolves.toMatchObject({ result: { outcome: 'merged' } });
+  await expect(merge()).resolves.toMatchObject({ result: { outcome: 'merged', held: 1 } });
   expect(source.forget).toHaveBeenCalledOnce();
   vi.restoreAllMocks();
 });
@@ -231,7 +231,7 @@ it('stops writing a move in batches once den-edge asks it to wait, and says how 
       log.retryAfterMs = 3000;
       return true;
     }),
-    heldRows: vi.fn(async () => []),
+    heldRows: vi.fn(async () => ({ rows: [], entries: 0 })),
     retryAfterMs: 0,
   };
   const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {

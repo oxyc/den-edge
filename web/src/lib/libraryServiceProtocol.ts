@@ -695,6 +695,8 @@ export type LibraryTaskResult =
       /** `unverified`: written, but den-edge's copy read back lacks some of it. `retryAfterMs`: den-edge asked to wait. */
       outcome: 'merged' | 'absent' | 'unavailable' | 'unverified';
       retryAfterMs?: number;
+      /** With `verify`, merged: how many live rows den-edge held when it was read back. */
+      held?: number;
     }
   | {
       kind: 'household.create';

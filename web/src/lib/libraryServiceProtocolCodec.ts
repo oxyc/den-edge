@@ -1993,12 +1993,13 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'local-library.merge':
       return (
-        exact(value, ['kind', 'outcome', 'retryAfterMs']) &&
+        exact(value, ['kind', 'outcome', 'retryAfterMs', 'held']) &&
         (value.outcome === 'merged' ||
           value.outcome === 'absent' ||
           value.outcome === 'unavailable' ||
           value.outcome === 'unverified') &&
-        optional(value.retryAfterMs, integer)
+        optional(value.retryAfterMs, integer) &&
+        optional(value.held, integer)
       );
     case 'household.create':
       return (
