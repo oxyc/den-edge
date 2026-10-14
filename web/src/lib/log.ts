@@ -340,6 +340,8 @@ const PARTIAL = 'log-partial.v1';
 
 /** How long a log den-edge refused to start waits before its kept work is sent again (`refused`). */
 const RECHECK_MS = 10 * 60_000;
+/** How long kept work pauses after den-edge says an exclusive profile migration holds the household. */
+const MIGRATION_RECHECK_MS = 60_000;
 
 /**
  * How long den-edge may take to start answering a request, and then between one piece of its answer and the next.
@@ -446,6 +448,13 @@ export class LibraryLog {
   /** den-edge's code for the last write it refused for good (`library_full`), so a caller can say which it was. */
   refusal: string | null = null;
   /**
+   * When den-edge last refused an ordinary write with `409 migration_in_progress` (`Date.now()`), 0 for never or since
+   * a write landed. An exclusive profile migration holds the household: nothing was applied, the write stays kept
+   * (never `refusal`, which drops a fresh edit), and kept work waits `MIGRATION_RECHECK_MS` instead of being retried
+   * on every refresh.
+   */
+  private migrationLockedAt = 0;
+  /**
    * When den-edge last refused each piece of kept work for good (`failed`), by its key: a full library, a row it will
    * not take. That piece is sent again after `RECHECK_MS`, not on every refresh, where it was refused every 30 seconds
    * for as long as the tab stayed open; the rest of the kept work is sent as before.
@@ -466,6 +475,19 @@ export class LibraryLog {
 
   get wireMinimum(): number {
     return this.wireMin;
+  }
+
+  /**
+   * An exclusive profile migration has held this household since a write last bounced off it (`409
+   * migration_in_progress`). Reads and playback are unaffected; edits are kept on this device meanwhile.
+   */
+  get migrationLocked(): boolean {
+    return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < RECHECK_MS;
+  }
+
+  /** Record what a refused split open or Restore already proved: another attempt holds the household lock. */
+  noteMigrationLocked(): void {
+    this.migrationLockedAt = Date.now();
   }
 
   /** den-edge's store generation as this browser last read it. */
@@ -3424,6 +3446,14 @@ export class LibraryLog {
       return;
     }
     const code = await errorCode(res);
+    if (res.status === 409 && code === 'migration_in_progress') {
+      // Applied nothing and says nothing else. Not a refusal of the write itself: it stays kept, and waits.
+      this.migrationLockedAt = Date.now();
+      console.warn(
+        'den: a profile migration holds this household; the write is kept and will wait',
+      );
+      return code;
+    }
     if (RETRYABLE_REFUSALS.has(code ?? '')) {
       if (code === 'upgrade_required') this.upgradeRequired = this.wireMin;
       this.refusal = code ?? String(res.status);
@@ -3642,6 +3672,7 @@ export class LibraryLog {
 
   /** den-edge applied this browser's write of `row`: it now holds exactly that, at `seq`. */
   private acknowledge(name: string, seq: number, row: Row): void {
+    this.migrationLockedAt = 0;
     this.entries.set(name, { seq, row });
     this.acknowledged.set(name, { seq, row });
     this.dirty = true;
@@ -3926,6 +3957,10 @@ export class LibraryLog {
     const projected = this.projected;
     // Kept, and sent once a read finds the log again (`refresh`).
     if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
+      return this.projectKeptChanged(projected);
+    // A migration holds the household (`migrationLockedAt`): kept work waits a minute between probes, where the
+    // 30-second refresh would otherwise send every piece of it again each time.
+    if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
       return this.projectKeptChanged(projected);
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;

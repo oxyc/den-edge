@@ -15,6 +15,8 @@ const CANDIDATE = '11112222333344445555666677778888';
 const DIGEST = 'a'.repeat(64);
 const fence = { generation: 7, base: 4, head: DIGEST, rewrite: 'rewrite-7' };
 const source = { generation: fence.generation, head: fence.head };
+const bound = { attempt: ATTEMPT, id: 'backup-7', digest: DIGEST };
+const ORIGINAL = 'f'.repeat(32);
 
 describe('Owner split HTTP provider', () => {
   it('uses exact migration routes and never places credential material in a URL', async () => {
@@ -38,7 +40,14 @@ describe('Owner split HTTP provider', () => {
             backup: { id: 'backup-7', digest: DIGEST },
             stagedDigest: DIGEST,
           };
-        return { state: 'open', attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence };
+        return {
+          state: 'open',
+          attempt: ATTEMPT,
+          purpose: 'split',
+          wireMin: 4,
+          fence,
+          backup: bound,
+        };
       }),
       readHousehold: vi.fn(async () => ({
         kind: 'legacy' as const,
@@ -49,7 +58,10 @@ describe('Owner split HTTP provider', () => {
     };
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
     await expect(provider.observeSource()).resolves.toEqual(source);
-    await provider.open(ATTEMPT, 'split', source);
+    await expect(provider.open(ATTEMPT, 'split', source)).resolves.toMatchObject({
+      state: 'open',
+      backup: bound,
+    });
     await provider.lookup(ATTEMPT);
     await provider.abort(ATTEMPT);
     await expect(
@@ -155,6 +167,7 @@ describe('Owner split HTTP provider', () => {
             purpose: 'restore',
             wireMin: 5,
             fence: restoreFence,
+            backup: { ...bound, attempt: ORIGINAL },
           };
         return {
           state: 'restored',
@@ -173,11 +186,16 @@ describe('Owner split HTTP provider', () => {
     };
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
     const recovery = await provider.open(ATTEMPT, 'restore', source);
-    expect(recovery).toMatchObject({ state: 'open', purpose: 'restore', wireMin: 5 });
+    expect(recovery).toMatchObject({
+      state: 'open',
+      purpose: 'restore',
+      wireMin: 5,
+      backup: { attempt: ORIGINAL },
+    });
     if (recovery.state !== 'open' || recovery.purpose !== 'restore') throw new Error('bad fixture');
     const restored = await provider.restore({
       attempt: recovery.attempt,
-      backup: { attempt: 'f'.repeat(32), id: 'backup-7', digest: DIGEST },
+      backup: { attempt: ORIGINAL, id: 'backup-7', digest: DIGEST },
       observation: { kind: 'corrupt', generation: 9, base: 6, head: 'e'.repeat(64) },
       plannerDecision: 'restore-backup',
     });
@@ -203,7 +221,7 @@ describe('Owner split HTTP provider', () => {
         calls.push(input);
         if (input.path.endsWith('/retire-candidate')) return { result: 'retired' };
         if (input.method === 'DELETE') state = 'aborted';
-        return { state, attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence };
+        return { state, attempt: ATTEMPT, purpose: 'split', wireMin: 4, fence, backup: bound };
       }),
       readHousehold: vi.fn(async () => ({
         kind: 'legacy' as const,
@@ -350,5 +368,94 @@ describe('Owner split HTTP provider', () => {
     const provider = new HttpOwnerSplitProvider(HOUSEHOLD, transport);
     await expect(provider.lookup('../secret')).rejects.toThrow();
     expect(transport.request).not.toHaveBeenCalled();
+  });
+
+  describe('exclusive lock: an open answer always carries its bound backup', () => {
+    const open = (purpose: 'split' | 'restore', backup: unknown) => ({
+      state: 'open',
+      attempt: ATTEMPT,
+      purpose,
+      wireMin: purpose === 'restore' ? 5 : 4,
+      fence,
+      ...(backup === undefined ? {} : { backup }),
+    });
+    const provider = (answer: unknown) =>
+      new HttpOwnerSplitProvider(HOUSEHOLD, {
+        request: vi.fn(async () => answer),
+        readHousehold: vi.fn(),
+      });
+
+    it.each([
+      ['a split open without a backup', open('split', undefined)],
+      ['a restore open without a backup', open('restore', undefined)],
+      ['a split bound to another attempt’s backup', open('split', { ...bound, attempt: ORIGINAL })],
+      ['a restore bound to its own attempt’s backup', open('restore', bound)],
+      ['a backup without its attempt', open('split', { id: 'backup-7', digest: DIGEST })],
+      ['a backup with a malformed digest', open('split', { ...bound, digest: 'XYZ' })],
+    ])('rejects %s', async (_name, answer) => {
+      const purpose = answer.purpose as 'split' | 'restore';
+      await expect(provider(answer).open(ATTEMPT, purpose, source)).rejects.toThrow(
+        'invalid migration attempt evidence',
+      );
+      await expect(provider(answer).lookup(ATTEMPT)).rejects.toThrow(
+        'invalid migration attempt evidence',
+      );
+    });
+
+    it('accepts a handoff restore bound to the split’s backup, on open and on lookup alike', async () => {
+      const answer = open('restore', { ...bound, attempt: ORIGINAL });
+      const expected = { state: 'open', purpose: 'restore', backup: { attempt: ORIGINAL } };
+      await expect(provider(answer).open(ATTEMPT, 'restore', source)).resolves.toMatchObject(
+        expected,
+      );
+      await expect(provider(answer).lookup(ATTEMPT)).resolves.toMatchObject(expected);
+    });
+
+    it('does not require a backup on an aborted answer, which no longer carries a lock', async () => {
+      await expect(
+        provider({ ...open('split', undefined), state: 'aborted' }).lookup(ATTEMPT),
+      ).resolves.toMatchObject({ state: 'aborted' });
+    });
+  });
+
+  describe('exclusive lock: reading the bound backup', () => {
+    const manifest = (attempt: string) => ({
+      id: 'backup-7',
+      digest: DIGEST,
+      attempt,
+      householdId: HOUSEHOLD,
+      wireMin: 4,
+      source: fence,
+      authorization: { tokenHash: DIGEST, memberHash: null },
+      rows: [],
+    });
+
+    it('reads through the restore attempt’s route and requires the split’s manifest', async () => {
+      const request = vi.fn(async () => manifest(ORIGINAL));
+      const provider = new HttpOwnerSplitProvider(HOUSEHOLD, { request, readHousehold: vi.fn() });
+      await expect(provider.readBackup(ATTEMPT, ORIGINAL)).resolves.toMatchObject({
+        attempt: ORIGINAL,
+      });
+      expect(request).toHaveBeenCalledWith({
+        method: 'GET',
+        path: `/lib/${HOUSEHOLD}/profile-migration/${ATTEMPT}/backup`,
+      });
+    });
+
+    it('rejects a manifest that names a different attempt than the one it was bound to', async () => {
+      const provider = new HttpOwnerSplitProvider(HOUSEHOLD, {
+        request: vi.fn(async () => manifest(ORIGINAL)),
+        readHousehold: vi.fn(),
+      });
+      await expect(provider.readBackup(ATTEMPT)).rejects.toThrow('invalid backup manifest');
+    });
+
+    it('has no way to create a backup', () => {
+      const provider = new HttpOwnerSplitProvider(HOUSEHOLD, {
+        request: vi.fn(),
+        readHousehold: vi.fn(),
+      });
+      expect('createBackup' in provider).toBe(false);
+    });
   });
 });

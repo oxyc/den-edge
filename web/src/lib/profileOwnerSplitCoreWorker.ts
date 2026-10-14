@@ -28,9 +28,10 @@ export function planOwnerSplitWithCore(
     recoveryIntent: evidence.recoveryIntent,
     attempt: evidence.attempt,
     householdId: evidence.householdId,
-    splitAuthorization: evidence.splitAuthorization,
     wireMin: 5,
   };
+  if (evidence.splitAuthorization) input.splitAuthorization = evidence.splitAuthorization;
+  if (evidence.legacyStaleCandidate === true) input.legacyStaleCandidate = true;
   if (evidence.backupDigest) input.backupDigest = evidence.backupDigest;
   if (evidence.stagedDigest) input.stagedDigest = evidence.stagedDigest;
   if (evidence.fence)

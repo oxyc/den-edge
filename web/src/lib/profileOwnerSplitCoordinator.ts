@@ -7,7 +7,10 @@ import {
 } from './profileMigrationCore';
 import {
   DormantOwnerSplitEffectExecutor,
+  isMigrationInProgress,
+  isMigrationSourceChanged,
   type OwnerSplitAttemptLookup,
+  type OwnerSplitBackupReference,
   type OwnerSplitCandidateHandle,
   type OwnerSplitDurableEvidence,
   type OwnerSplitFence,
@@ -52,6 +55,20 @@ export interface OwnerSplitRecoveryIntent {
 }
 
 /**
+ * Journal-less Owner recovery: this device holds no split journal (lost, cleared, or never held) for a household whose
+ * exclusive migration lock is still held. One fresh Owner PIN against a freshly observed source authorizes a new
+ * restore attempt, durably recorded here BEFORE its open request so a lost answer replays that same attempt. `fence`
+ * and `backup` are the open answer's bound values, recorded together once it arrives.
+ */
+export interface OwnerSplitHandoffRecovery {
+  readonly version: 1;
+  readonly recoveryAttempt: string;
+  readonly source: OwnerSplitSource;
+  readonly fence?: OwnerSplitFence;
+  readonly backup?: OwnerSplitBackupReference;
+}
+
+/**
  * Device-secure durable boundary. The exact core authorization is part of the sealed journal; neither raw candidate
  * keys nor provider tokens are accepted by this interface.
  */
@@ -60,6 +77,11 @@ export interface OwnerSplitJournalStore {
   save(journal: OwnerSplitJournal): Promise<void>;
   authorizeRecovery(intent: OwnerSplitRecoveryIntent): Promise<void>;
   loadRecoveryIntent(attempt: string): Promise<OwnerSplitRecoveryIntent | null>;
+  /** Drop a recovery authorization den-edge refused, keeping the split journal it was recorded beside. */
+  discardRecovery(attempt: string): Promise<void>;
+  loadHandoff(): Promise<OwnerSplitHandoffRecovery | null>;
+  saveHandoff(handoff: OwnerSplitHandoffRecovery): Promise<void>;
+  clearHandoff(recoveryAttempt: string): Promise<void>;
   clear(attempt: string): Promise<void>;
 }
 
@@ -69,6 +91,11 @@ export type OwnerSplitRunResult =
   | { readonly kind: 'active'; readonly attempt: string }
   | { readonly kind: 'restored'; readonly attempt: string }
   | { readonly kind: 'recovery-blocked'; readonly attempt: string }
+  /**
+   * `409 migration_in_progress`: another attempt holds the household's exclusive lock and den-edge named nothing
+   * about it. Nothing was opened here and nothing is retried; only an explicit Owner Restore can take the lock over.
+   */
+  | { readonly kind: 'setup-in-progress' }
   | { readonly kind: 'restart-required' }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'inactive' };
@@ -112,7 +139,7 @@ export class DormantOwnerSplitCoordinator {
   /** A PIN-verified action binds the already observed source and authorizes this exact attempt end to end. */
   async prepare(attempt: string, source: OwnerSplitSource): Promise<OwnerSplitRunResult> {
     checkedAttempt(attempt);
-    if ((await this.#store.load()) !== null)
+    if ((await this.#store.load()) !== null || (await this.#store.loadHandoff()) !== null)
       throw new Error('Owner split already has a durable journal');
     const householdId = this.#householdId();
     const splitAuthorization = await this.#effects.prepareAuthorization({
@@ -163,9 +190,123 @@ export class DormantOwnerSplitCoordinator {
     return this.#drive();
   }
 
+  /**
+   * Owner Restore on a device with no split journal, for a household whose exclusive lock is still held. The restore
+   * attempt and its freshly observed source are recorded durably first; only then does den-edge hand the lock and the
+   * split's exact backup to it. An already durable handoff is resumed as it is: den-edge allows one restore attempt,
+   * so a second would be refused, and the one in flight may already have opened.
+   */
+  async recoverWithoutJournal(
+    recoveryAttempt: string,
+    source: OwnerSplitSource,
+  ): Promise<OwnerSplitRunResult> {
+    checkedAttempt(recoveryAttempt);
+    checkedSource(source, 'Invalid recovery source');
+    if (checkedOwnerSplitJournal(await this.#store.load()) !== null)
+      throw new Error('A split journal exists on this device; recover through it');
+    if ((await this.#store.loadHandoff()) === null)
+      await this.#store.saveHandoff({ version: 1, recoveryAttempt, source });
+    return this.#driveHandoff();
+  }
+
+  async #driveHandoff(): Promise<OwnerSplitRunResult> {
+    let handoff = await this.#store.loadHandoff();
+    if (handoff === null) return { kind: 'inactive' };
+    const { recoveryAttempt } = handoff;
+    if (handoff.fence === undefined) {
+      let opened: OwnerSplitAttemptLookup;
+      try {
+        opened = await this.#effects.open(recoveryAttempt, 'restore', handoff.source);
+      } catch (error) {
+        // Neither refusal opened anything, and the handoff authorizes nothing else: forget it.
+        if (isMigrationInProgress(error)) {
+          await this.#store.clearHandoff(recoveryAttempt);
+          return { kind: 'setup-in-progress' };
+        }
+        if (isMigrationSourceChanged(error)) {
+          await this.#store.clearHandoff(recoveryAttempt);
+          return { kind: 'restart-required' };
+        }
+        throw error;
+      }
+      if (opened.purpose !== 'restore') throw new Error('Recovery attempt did not open');
+      if (opened.state === 'restored') {
+        await this.#store.clearHandoff(recoveryAttempt);
+        return { kind: 'restored', attempt: recoveryAttempt };
+      }
+      if (opened.state === 'aborted') {
+        await this.#store.clearHandoff(recoveryAttempt);
+        return { kind: 'restart-required' };
+      }
+      if (opened.state !== 'open') throw new Error('Recovery attempt did not open');
+      const bound = { fence: opened.fence, backup: opened.backup };
+      await this.#store.saveHandoff({ ...handoff, ...bound });
+      handoff = { ...handoff, ...bound };
+    }
+    const { fence, backup } = handoff;
+    if (fence === undefined || backup === undefined)
+      throw new Error('Recovery handoff lacks its bound backup');
+
+    const authority = await this.#effects.lookupWithFreshAuthority(recoveryAttempt);
+    if (authority.lookup.purpose !== 'restore') throw new Error('Recovery attempt changed purpose');
+    if (authority.lookup.state === 'restored') {
+      await this.#store.clearHandoff(recoveryAttempt);
+      return { kind: 'restored', attempt: recoveryAttempt };
+    }
+    if (authority.lookup.state === 'aborted') {
+      await this.#store.clearHandoff(recoveryAttempt);
+      return { kind: 'restart-required' };
+    }
+    if (authority.lookup.state !== 'open') throw new Error('Recovery attempt is not open');
+    if (
+      authority.lookup.backup.attempt !== backup.attempt ||
+      authority.lookup.backup.id !== backup.id ||
+      authority.lookup.backup.digest !== backup.digest
+    )
+      throw new Error('Recovery attempt’s bound backup changed');
+
+    await this.#effects.verifyBoundBackup({ attempt: recoveryAttempt, fence, backup });
+    const effect = await this.#effects.planNext({
+      state: 'restore-required',
+      explicitIntent: true,
+      fence,
+      backupVerified: true,
+      ownerVerified: false,
+      winnerVerified: false,
+      candidateRetired: false,
+      commitAuthorized: false,
+      cancelRequested: false,
+      attemptAborted: false,
+      attemptLookup: 'open',
+      householdFresh: true,
+      recoveryIntent: true,
+      household: authority.household,
+      attempt: recoveryAttempt,
+      householdId: this.#household,
+      backupDigest: backup.digest,
+    });
+    // den-core is the only authority for restoring. Anything but its restore decision leaves the handoff durable,
+    // the lock held and the household untouched.
+    if (effect !== 'open-recovery-attempt')
+      return { kind: 'recovery-blocked', attempt: recoveryAttempt };
+    const restored = await this.#effects.restore({
+      recoveryAttempt,
+      originalAttempt: backup.attempt,
+      backup: { id: backup.id, digest: backup.digest },
+      household: authority.household,
+    });
+    if (restored.state !== 'restored') throw new Error('Recovery did not reach a durable terminal');
+    await this.#store.clearHandoff(recoveryAttempt);
+    return { kind: 'restored', attempt: recoveryAttempt };
+  }
+
   async #drive(): Promise<OwnerSplitRunResult> {
     let journal = checkedOwnerSplitJournal(await this.#store.load());
-    if (journal === null) return { kind: 'inactive' };
+    if (journal === null) {
+      return (await this.#store.loadHandoff()) === null
+        ? { kind: 'inactive' }
+        : this.#driveHandoff();
+    }
     let lookup: OwnerSplitAttemptLookup | undefined;
     let household: OwnerSplitHouseholdObservation | undefined;
     let householdFresh = false;
@@ -173,12 +314,18 @@ export class DormantOwnerSplitCoordinator {
 
     for (let step = 0; step < 32; step += 1) {
       const recovery = await this.#checkedRecoveryIntent(journal);
-      if (journal.backup && journal.fence && verifiedBackup === undefined)
-        verifiedBackup = await this.#effects.reverifyBackup(
-          journal.attempt,
-          journal.fence,
-          journal.backup,
-        );
+      // A `fenced` journal's backup is verified by the planner's `verify-backup` effect, not ahead of it.
+      if (
+        journal.backup &&
+        journal.fence &&
+        journal.state !== 'fenced' &&
+        verifiedBackup === undefined
+      )
+        verifiedBackup = await this.#effects.verifyBoundBackup({
+          attempt: journal.attempt,
+          fence: journal.fence,
+          backup: { attempt: journal.attempt, ...journal.backup },
+        });
       // The real Worker transport deliberately refuses household reads until a durable fence exists. The initial
       // source is a separate authenticated endpoint and was already persisted by prepare before this loop.
       if (household === undefined && journal.state !== 'idle' && journal.state !== 'commit-unknown')
@@ -202,6 +349,7 @@ export class DormantOwnerSplitCoordinator {
         attemptLookup: lookup?.state,
         householdFresh,
         recoveryIntent: recovery !== null,
+        legacyStaleCandidate: journal.candidate !== undefined && lookup?.state === 'superseded',
         source: journal.state === 'idle' ? journal.source : undefined,
         household,
         attempt: journal.attempt,
@@ -213,33 +361,53 @@ export class DormantOwnerSplitCoordinator {
 
       if (effect === 'no-op') return { kind: 'inactive' };
       if (effect === 'acquire-fence') {
+        // Opening is the lookup too: repeating this attempt, purpose and source is answered from den-edge's stored
+        // result, so a reload or a lost response resumes the same attempt and never mints a second one.
         let opened: OwnerSplitAttemptLookup;
         try {
           opened = await this.#effects.open(journal.attempt, 'split', journal.source);
         } catch (error) {
-          if (error instanceof Error && error.message.includes('migration_source_changed')) {
+          if (isMigrationSourceChanged(error)) {
             await this.#store.clear(journal.attempt);
             return { kind: 'restart-required' };
           }
+          // Definitive: a replay of an attempt den-edge opened is answered, never refused. An `idle` journal has
+          // allocated no candidate and written nothing, so nothing of ours is left to clean up or resume.
+          if (isMigrationInProgress(error)) {
+            await this.#store.clear(journal.attempt);
+            return { kind: 'setup-in-progress' };
+          }
           throw error;
+        }
+        // Another device's Owner Restore took this lock over and tombstoned the split: it can never be resumed.
+        if (opened.state === 'aborted') {
+          await this.#store.clear(journal.attempt);
+          return { kind: 'restart-required' };
         }
         if (opened.state !== 'open' || opened.purpose !== 'split')
           throw new Error('Split attempt did not open');
-        journal = await this.#save({ ...journal, state: 'fenced', fence: opened.fence });
+        if (opened.backup.attempt !== journal.attempt)
+          throw new Error('Split attempt was opened with another attempt’s backup');
+        // The lock exists only together with its provider-verified backup, so fence and backup are recorded as one.
+        journal = await this.#save({
+          ...journal,
+          state: 'fenced',
+          fence: opened.fence,
+          backup: { id: opened.backup.id, digest: opened.backup.digest },
+        });
         household = undefined;
         continue;
       }
-      if (effect === 'create-backup') {
+      if (effect === 'verify-backup') {
         const fence = requiredFence(journal);
-        verifiedBackup = await this.#effects.createVerifiedBackup(journal.attempt, fence);
-        journal = await this.#save({
-          ...journal,
-          state: 'backed-up',
-          backup: {
-            id: verifiedBackup.manifest.id,
-            digest: verifiedBackup.manifest.digest,
-          },
+        if (journal.backup === undefined)
+          throw new Error('Owner split journal lacks the server-bound backup');
+        verifiedBackup = await this.#effects.verifyBoundBackup({
+          attempt: journal.attempt,
+          fence,
+          backup: { attempt: journal.attempt, ...journal.backup },
         });
+        journal = await this.#save({ ...journal, state: 'backed-up' });
         continue;
       }
       if (effect === 'create-owner-library') {
@@ -362,13 +530,31 @@ export class DormantOwnerSplitCoordinator {
       if (effect === 'open-recovery-attempt') {
         if (recovery === null || household === undefined || journal.backup === undefined)
           throw new Error('Recovery effect lacks durable evidence');
-        const opened = await this.#effects.open(
-          recovery.recoveryAttempt,
-          'restore',
-          recovery.source,
-        );
+        let opened: OwnerSplitAttemptLookup;
+        try {
+          opened = await this.#effects.open(recovery.recoveryAttempt, 'restore', recovery.source);
+        } catch (error) {
+          // The split journal stays: only the refused recovery authorization is dropped, so Restore can be asked
+          // for again. Nothing is retried here.
+          if (isMigrationInProgress(error)) {
+            await this.#store.discardRecovery(journal.attempt);
+            return { kind: 'setup-in-progress' };
+          }
+          if (isMigrationSourceChanged(error)) {
+            await this.#store.discardRecovery(journal.attempt);
+            return { kind: 'restart-required' };
+          }
+          throw error;
+        }
         if (opened.state !== 'open' || opened.purpose !== 'restore')
           throw new Error('Recovery attempt did not open');
+        // The handoff binds the exact backup this journal verified; nothing is replaced by inference.
+        if (
+          opened.backup.attempt !== journal.attempt ||
+          opened.backup.id !== journal.backup.id ||
+          opened.backup.digest !== journal.backup.digest
+        )
+          throw new Error('Recovery attempt was bound to a different backup than this journal’s');
         const restored = await this.#effects.restore({
           recoveryAttempt: recovery.recoveryAttempt,
           originalAttempt: journal.attempt,

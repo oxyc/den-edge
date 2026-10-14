@@ -591,7 +591,8 @@ export type LibraryTask =
   | { kind: 'profile-migration.cancel'; attempt: string }
   | {
       kind: 'profile-migration.recover';
-      attempt: string;
+      /** The restore-required split journal on this device, or null for the journal-less Owner Restore. */
+      attempt: string | null;
       recoveryAttempt: string;
       source: { generation: number; head: string };
     }
@@ -661,6 +662,8 @@ export type LibraryTaskResult =
         | 'enabled'
         | 'recovery-required'
         | 'source-changed'
+        /** `409 migration_in_progress`: another attempt holds the household lock; nothing was changed. */
+        | 'setup-in-progress'
         | 'cancelled';
       attempt?: string;
     }
@@ -707,7 +710,7 @@ export type LibraryQuery =
   | { kind: 'assistant.grants' }
   | { kind: 'profile-migration.status' }
   | { kind: 'profile-migration.observe' }
-  | { kind: 'profile-migration.observe-recovery'; attempt: string }
+  | { kind: 'profile-migration.observe-recovery'; attempt: string | null }
   | { kind: 'profile-create.status' };
 
 export type LibraryQueryResult =
@@ -736,7 +739,8 @@ export type LibraryQueryResult =
         | 'ready'
         | 'reconciling'
         | 'enabled'
-        | 'recovery-required';
+        | 'recovery-required'
+        | 'setup-in-progress';
       attempt?: string;
     }
   | {
@@ -746,7 +750,7 @@ export type LibraryQueryResult =
     }
   | {
       kind: 'profile-migration.observe-recovery';
-      attempt: string;
+      attempt: string | null;
       recoveryAttempt: string;
       source: { generation: number; head: string };
     }

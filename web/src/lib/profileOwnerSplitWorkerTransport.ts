@@ -1,4 +1,7 @@
-import type { OwnerSplitHouseholdObservation } from './profileOwnerSplitEngine';
+import {
+  OwnerSplitRefusedError,
+  type OwnerSplitHouseholdObservation,
+} from './profileOwnerSplitEngine';
 import type { OwnerSplitMigrationTransport } from './profileOwnerSplitProvider';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import { ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
@@ -81,10 +84,10 @@ export class OwnerSplitWorkerTransport implements OwnerSplitMigrationTransport {
   }
 
   async #readHousehold(): Promise<OwnerSplitHouseholdObservation> {
-    const journal = await this.#store.load();
-    if (journal?.fence === undefined)
+    const generation = await this.#store.fenceGeneration();
+    if (generation === null)
       throw new Error('Fresh household authority requires a durable migration fence');
-    return this.#network.readProfileMigrationHousehold(journal.fence.generation);
+    return this.#network.readProfileMigrationHousehold(generation);
   }
 }
 
@@ -103,7 +106,7 @@ function checkedCapability(value: unknown): OwnerSplitCapability {
 
 function providerError(status: number, body: unknown): Error {
   const code = record(body) && typeof body.error === 'string' ? body.error : 'provider_error';
-  return new Error(`Profile migration provider refused ${status} ${code}`);
+  return new OwnerSplitRefusedError(status, code);
 }
 
 function safePositive(value: unknown): value is number {

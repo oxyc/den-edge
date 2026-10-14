@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  isMigrationInProgress,
+  isMigrationSourceChanged,
+  OwnerSplitRefusedError,
+} from './profileOwnerSplitEngine';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import {
   OwnerSplitWorkerTransport,
@@ -120,6 +125,37 @@ describe('OwnerSplit Worker authenticated transport', () => {
       }),
     ).rejects.toThrow(/corrupt/);
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('surfaces 409 migration_in_progress as a typed refusal that carries nothing else', async () => {
+    const { transport } = harness(409, { error: 'migration_in_progress' });
+    const error = await transport
+      .request({ method: 'POST', path: `/lib/${HOUSEHOLD}/profile-migration`, body: {} })
+      .then(
+        () => null,
+        (rejected: unknown) => rejected,
+      );
+    expect(error).toBeInstanceOf(OwnerSplitRefusedError);
+    expect(isMigrationInProgress(error)).toBe(true);
+    expect(isMigrationSourceChanged(error)).toBe(false);
+    expect(error).toMatchObject({ status: 409, code: 'migration_in_progress' });
+    expect(
+      isMigrationInProgress(new OwnerSplitRefusedError(409, 'migration_attempt_mismatch')),
+    ).toBe(false);
+    expect(isMigrationInProgress(new Error('migration_in_progress'))).toBe(false);
+  });
+
+  it('reads the household against the fence of a journal-less handoff', async () => {
+    const { transport, store } = harness();
+    await expect(transport.readHousehold()).rejects.toThrow(/durable migration fence/);
+    await store.saveHandoff({
+      version: 1,
+      recoveryAttempt: ATTEMPT,
+      source: { generation: 7, head: 'a'.repeat(64) },
+      fence: { generation: 7, base: 4, head: 'a'.repeat(64), rewrite: 'rewrite-7' },
+      backup: { attempt: 'b'.repeat(32), id: 'backup-7', digest: 'c'.repeat(64) },
+    });
+    await expect(transport.readHousehold()).resolves.toMatchObject({ kind: 'legacy' });
   });
 
   it('rejects suffix, query, dot-segment, method confusion and candidate-token leakage', async () => {

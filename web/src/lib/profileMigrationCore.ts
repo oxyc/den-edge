@@ -91,7 +91,7 @@ export interface ProfileMigrationAuthorization {
 export type ProfileMigrationEffect =
   | 'no-op'
   | 'acquire-fence'
-  | 'create-backup'
+  | 'verify-backup'
   | 'create-owner-library'
   | 'verify-owner-library'
   | 'record-commit-binding'

@@ -238,6 +238,73 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
+  it('tells another device’s migration lock from nothing, offers Restore, and never retries the refused open', async () => {
+    await ensureSyncPolicy();
+    const source = { generation: 7, head: 'a'.repeat(64) };
+    const posts: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input, init) => {
+        const url = String(input);
+        const json = (body: unknown, status = 200) =>
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.endsWith('/profile-capability'))
+          return json({
+            enrollment: 'prepare',
+            wireMin: 4,
+            migrationWire: 5,
+            runtimeHouseholdWire: 5,
+            runtimeProfileWire: 4,
+          });
+        if (url.endsWith('/profile-migration/source')) return json({ source });
+        if (init?.method === 'POST' && url.endsWith('/profile-migration')) {
+          posts.push(String(init.body));
+          // Metadata-free by contract: no attempt, purpose, fence, backup or timing.
+          return json({ error: 'migration_in_progress' }, 409);
+        }
+        throw new Error(`unexpected request ${init?.method} ${url}`);
+      }),
+    );
+    try {
+      const { authority } = await localAuthority();
+      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
+        kind: 'profile-migration.status',
+        phase: 'available',
+      });
+      const observed = await authority.query({ kind: 'profile-migration.observe' });
+      if (observed.kind !== 'profile-migration.observe') throw new Error('wrong result');
+
+      const enabled = await authority.task(
+        { kind: 'profile-migration.enable', attempt: observed.attempt, source: observed.source },
+        'enable-while-locked',
+      );
+      expect(enabled.result).toEqual({
+        kind: 'profile-migration.enable',
+        outcome: 'setup-in-progress',
+      });
+      expect(posts, 'one definitive refusal, no retry').toHaveLength(1);
+      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
+        kind: 'profile-migration.status',
+        phase: 'setup-in-progress',
+      });
+      expect(posts).toHaveLength(1);
+
+      // The journal was cleared with nothing opened, so Restore is journal-less: it names no attempt.
+      await expect(
+        authority.query({ kind: 'profile-migration.observe-recovery', attempt: null }),
+      ).resolves.toMatchObject({
+        kind: 'profile-migration.observe-recovery',
+        attempt: null,
+        source,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('owns minimal runtime discovery and the named retained Home values', async () => {
     const { log, authority } = await localAuthority();
     await expect(authority.select({ kind: 'profiles' })).resolves.toEqual({
@@ -750,6 +817,21 @@ describe('LibraryLogAuthority', () => {
           kind: 'read-only',
           reason:
             'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
+        },
+      },
+    ]);
+
+    // Kept because an exclusive profile migration holds the household: say so, rather than "offline".
+    log.noteMigrationLocked();
+    deferred({ outcome: 'kept', changed: false });
+    expect(events.splice(0)).toEqual([
+      { kind: 'changed', affected: [{ kind: 'connections' }] },
+      {
+        kind: 'status',
+        status: {
+          kind: 'read-only',
+          reason:
+            'Profile setup is in progress on another device. Your change is saved on this device and will sync when it finishes.',
         },
       },
     ]);

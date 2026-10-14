@@ -9,9 +9,18 @@
   const queued = new URLSearchParams(location.search).has('queued');
   const reloadedPending = new URLSearchParams(location.search).has('reloaded-pending');
   const enabled = new URLSearchParams(location.search).has('enabled');
-  let phase = (recovering ? 'recovery-required' : enabled ? 'enabled' : 'available') as
-    'available' | 'enabled' | 'recovery-required';
-  let savedPin = recovering || enabled ? '1234' : '';
+  // Another device (or a lost journal) holds the exclusive migration lock: no split journal on this device.
+  const locked = new URLSearchParams(location.search).has('locked');
+  let phase = (
+    recovering
+      ? 'recovery-required'
+      : locked
+        ? 'setup-in-progress'
+        : enabled
+          ? 'enabled'
+          : 'available'
+  ) as 'available' | 'enabled' | 'recovery-required' | 'setup-in-progress';
+  let savedPin = recovering || enabled || locked ? '1234' : '';
 
   const model = {
     profileMigrationStatus: async () => ({
@@ -28,7 +37,7 @@
       phase = 'enabled';
       return { result: { kind: 'profile-migration.enable', outcome: 'enabled' }, affected: [] };
     },
-    observeProfileRecovery: async (askedAttempt: string) => {
+    observeProfileRecovery: async (askedAttempt: string | null) => {
       events.push(`observe-recovery:${askedAttempt}`);
       return {
         kind: 'profile-migration.observe-recovery' as const,
@@ -38,7 +47,7 @@
       };
     },
     recoverProfileMigration: async (
-      askedAttempt: string,
+      askedAttempt: string | null,
       recoveryAttempt: string,
       askedSource: typeof source,
     ) => {
@@ -79,7 +88,7 @@
 <main style="max-width:760px;margin:40px auto">
   <ProfilesSection
     {model}
-    pinConfigured={recovering || reloadedPending || enabled}
+    pinConfigured={recovering || reloadedPending || enabled || locked}
     pinDelivery={reloadedPending ? 'queued' : 'synced'}
     savePin={async (pin) => {
       events.push(`set:${pin}`);

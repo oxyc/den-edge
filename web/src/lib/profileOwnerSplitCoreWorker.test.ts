@@ -72,6 +72,73 @@ describe('Owner split worker den-core adapter', () => {
     ).toBe('record-commit-binding');
   });
 
+  it('asks to verify the server-bound backup at `fenced`, never to create one', () => {
+    expect(
+      planOwnerSplitWithCore(evidence({ state: 'fenced', fence, backupDigest: 'd'.repeat(64) })),
+    ).toBe('verify-backup');
+    expect(
+      planOwnerSplitWithCore(
+        evidence({ state: 'backed-up', fence, backupVerified: true, backupDigest: 'd'.repeat(64) }),
+      ),
+    ).toBe('create-owner-library');
+  });
+
+  describe('stale candidate cleanup needs den-edge’s legacy evidence', () => {
+    const stale = (values: Partial<OwnerSplitPlannerEvidence>) =>
+      evidence({
+        state: 'ready-to-commit',
+        household: {
+          kind: 'committed',
+          generation: 8,
+          base: 5,
+          head: 'f'.repeat(64),
+          directory: fixture.migrationBase,
+        },
+        candidate: {
+          profileId: '0'.repeat(32),
+          libraryId: '1'.repeat(32),
+          keyRef: 'secure-slot',
+          keyFingerprint: 'b'.repeat(64),
+        },
+        candidateAttempt: 'fedcba9876543210fedcba9876543210',
+        ...values,
+      });
+
+    it('refuses a candidate that is not the committed Owner without that evidence', () => {
+      expect(() => planOwnerSplitWithCore(stale({}), CANDIDATE_KEY)).toThrow(
+        'legacy_cleanup_evidence_required',
+      );
+    });
+
+    it('lets the superseded-lookup evidence through to den-core’s own cleanup rules', () => {
+      expect(planOwnerSplitWithCore(stale({ legacyStaleCandidate: true }), CANDIDATE_KEY)).toBe(
+        'verify-winner',
+      );
+      // Evidence is not a bypass: a live profile key is still never cleanable.
+      expect(
+        planOwnerSplitWithCore(
+          stale({ legacyStaleCandidate: true, state: 'cleaning-loser', winnerVerified: true }),
+          'ERERERERERERERERERERERERERERERERERERERERERE=',
+        ),
+      ).toBe('cleanup_targets_winner');
+    });
+  });
+
+  it('plans a journal-less Restore without any split authorization', () => {
+    expect(
+      planOwnerSplitWithCore(
+        evidence({
+          state: 'restore-required',
+          fence,
+          backupVerified: true,
+          recoveryIntent: true,
+          splitAuthorization: undefined,
+          household: { kind: 'corrupt', generation: 8, base: 5, head: 'f'.repeat(64) },
+        }),
+      ),
+    ).toBe('open-recovery-attempt');
+  });
+
   it('never permits a candidate evidence record without resolving its worker-owned key', () => {
     expect(() =>
       planOwnerSplitWithCore(

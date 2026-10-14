@@ -431,7 +431,8 @@ export class LibraryModel {
     return result;
   }
 
-  async observeProfileRecovery(attempt: string) {
+  /** `attempt` is the restore-required split journal on this device, or null for the journal-less Owner Restore. */
+  async observeProfileRecovery(attempt: string | null) {
     this.#assertOpen();
     const { result } = await this.service.query({
       kind: 'profile-migration.observe-recovery',
@@ -455,7 +456,7 @@ export class LibraryModel {
   }
 
   recoverProfileMigration(
-    attempt: string,
+    attempt: string | null,
     recoveryAttempt: string,
     source: { generation: number; head: string },
     operationId?: string,
