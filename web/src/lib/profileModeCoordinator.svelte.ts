@@ -87,6 +87,17 @@ export function profileDirectoryChoices(
   }
 }
 
+/**
+ * Profiles belong to a linked household. A browser-local library is this browser's own, and a session without a
+ * model has no directory to read, so neither waits on one.
+ */
+export function usesProfileDirectory(session: {
+  readonly local: boolean;
+  readonly model: unknown;
+}): boolean {
+  return !session.local && !!session.model;
+}
+
 export type ProfileDirectoryState =
   | { readonly kind: 'pending' }
   | { readonly kind: 'absent' }

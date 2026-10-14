@@ -59,7 +59,7 @@
 {:else}
   <main style="padding:var(--bar-space) var(--gutter)">
     <RoutedLibrary
-      {link}
+      link={params.has('local') ? null : link}
       query=""
       explore={{}}
       people={{}}
