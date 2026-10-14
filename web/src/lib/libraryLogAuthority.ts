@@ -667,7 +667,9 @@ export class LibraryLogAuthority {
       case 'profile-migration.observe': {
         // profiles-v1 §6.1: the split takes only a converted library. v2/v3 rows in it (a stray tracker event, say)
         // are folded into its documents by the library-v4 switch first, before the source is observed.
-        if (this.#log.needsV4 && !(await this.#log.switchToV4(this.#clock.device)))
+        const needed = this.#log.needsV4;
+        const switched = await this.#log.switchToV4(this.#clock.device, !needed);
+        if ((needed && !switched) || this.#log.switchFailure)
           throw authorityError(
             'unavailable',
             `the library must finish its Library v4 update first${this.#log.switchFailure ? ` (${this.#log.switchFailure})` : ''}`,

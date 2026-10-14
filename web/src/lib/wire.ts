@@ -339,14 +339,19 @@ export async function openMigrationRow(
     } catch {
       return { status: 'unreadable', name: null };
     }
-    const legacy = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
+    const known = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
     let name: string | null;
     try {
-      name = legacy ? rowName(row as Row) : null;
+      name = known ? rowName(row as Row) : null;
     } catch {
       return { status: 'unreadable', name: null };
     }
     if (name !== null && !(await named(name))) return { status: 'unreadable', name: null };
+    // As den-core's `doc_decode`: a settings row is current in v4, except a v1 tracker event.
+    const legacy =
+      known &&
+      (row.kind !== 'set' ||
+        (typeof row.name === 'string' && row.name.startsWith('tracker-event:')));
     return { status: 'row', name, legacy, row };
   }
   const decoded = syncPolicy<{

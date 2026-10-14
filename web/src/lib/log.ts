@@ -249,6 +249,20 @@ const legacy = (row: Row): boolean =>
   row.kind === 'snt' ||
   (row.kind === 'set' && row.name.startsWith('tracker-event:'));
 
+/** `legacy` for a raw opened row this build may not read as a `Row`: matched as den-core's switch matches (§10). */
+const rawLegacy = (row: unknown): boolean => {
+  if (!row || typeof row !== 'object') return false;
+  const { kind, name, schema } = row as { kind?: unknown; name?: unknown; schema?: unknown };
+  return (
+    kind === 'rec' ||
+    kind === 'ep' ||
+    kind === 'wat' ||
+    kind === 'snt' ||
+    (kind === 'set' && typeof name === 'string' && name.startsWith('tracker-event:')) ||
+    (schema === 1 && 'after' in row)
+  );
+};
+
 /**
  * Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach, and whether
  * any of its rows were applied before that.
@@ -1108,8 +1122,11 @@ export class LibraryLog {
    * stays read-only until a later try passes. A difference only in pending tracker commands is logged and the switch
    * goes on. True when it committed.
    */
-  async switchToV4(performer: string): Promise<boolean> {
-    if (!this.needsV4) return false;
+  async switchToV4(performer: string, stray = false): Promise<boolean> {
+    if (stray) {
+      if (this.offline || this.moved || this.upgradeRequired !== null || this.predatesV3)
+        return false;
+    } else if (!this.needsV4) return false;
     await ensureSyncPolicy();
     const switched = await this.fenced(async (base, raw) => {
       const now = Date.now();
@@ -1121,6 +1138,9 @@ export class LibraryLog {
           row: await this.plainRow(k, v),
         })),
       );
+      // `stray`: a v4 library may hold a v2/v3 row this build cannot read as a row (a malformed tracker event), so it
+      // never reaches `needsV4`. den-core's switch removes such rows by name, so it runs whenever the raw log has one.
+      if (stray && !rows.some(({ row }) => rawLegacy(row))) return null;
       let form: V4Form;
       try {
         form = syncPolicy<V4Form>({ op: 'v4_form', rows, base, performer, now });
@@ -1643,11 +1663,38 @@ export class LibraryLog {
       input.candidate.createdAt > newest[0]
         ? [input.candidate.createdAt, 0, input.candidate.handle.profileId.slice(0, 16)]
         : [newest[0], newest[1] + 1, input.candidate.handle.profileId.slice(0, 16)];
-    const partition = profileMigrationPartition({
-      base: backup.source.base,
-      ownerPolicyAt: stamp,
-      rows,
-    });
+    let partition: ReturnType<typeof profileMigrationPartition>;
+    try {
+      partition = profileMigrationPartition({
+        base: backup.source.base,
+        ownerPolicyAt: stamp,
+        rows,
+      });
+    } catch (error) {
+      // Name the rows den-core may hold against the split (names and kinds only, never contents), so a refusal says
+      // which rows instead of only a code.
+      const suspect = rows.flatMap(({ seq, opened }) => {
+        const row = opened as {
+          status: string;
+          name: string | null;
+          legacy?: boolean;
+          row?: { kind?: unknown };
+        };
+        const kind = row.row?.kind;
+        return row.status === 'row' &&
+          (row.legacy === true ||
+            ['rec', 'wat', 'snt', 'ep'].includes(String(kind)) ||
+            /^(rec|wat|snt|ep):|^set:tracker-event:/.test(row.name ?? ''))
+          ? [{ seq, name: row.name, kind: typeof kind === 'string' ? kind : undefined }]
+          : [];
+      });
+      console.error(
+        'den: profile split refused; rows den-core may hold against it',
+        suspect,
+        error,
+      );
+      throw error;
+    }
     const candidateRaw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
       character.charCodeAt(0),
     );
@@ -1801,18 +1848,35 @@ export class LibraryLog {
     keys: LibraryKeys,
     writes: readonly MigrationSealedRow[],
   ): Promise<void> {
+    // The first chunk creates the library at generation 0; each later chunk carries the generation den-edge answered.
+    // A retried attempt finds the library already created, and den-edge's 409 names its generation.
+    let generation = '0';
     for (const chunk of chunks(writes.map((write) => ({ ...write, base: 0 })))) {
-      const response = await this.send(
-        `/lib/${keys.id}/batch`,
-        {
-          method: 'POST',
-          // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
-          headers: ownerSplitCandidateWriteHeaders(this.keys, keys),
-          body: JSON.stringify({ writes: chunk }),
-        },
-        false,
-      );
-      if (!response.ok) throw new Error('Owner candidate write was refused');
+      const post = () =>
+        this.send(
+          `/lib/${keys.id}/batch`,
+          {
+            method: 'POST',
+            // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
+            headers: {
+              ...ownerSplitCandidateWriteHeaders(this.keys, keys),
+              'x-den-generation': generation,
+            },
+            body: JSON.stringify({ writes: chunk }),
+          },
+          false,
+        );
+      let response = await post();
+      const current = response.headers.get('x-den-generation');
+      if (response.status === 409 && current && current !== generation) {
+        generation = current;
+        response = await post();
+      }
+      if (!response.ok)
+        throw new Error(
+          `Owner candidate write was refused (${response.status} ${await response.text().catch(() => '')})`,
+        );
+      generation = response.headers.get('x-den-generation') ?? generation;
       const value = (await response.json()) as unknown;
       if (!migrationBatch(value))
         throw new Error('Owner candidate write returned malformed evidence');
