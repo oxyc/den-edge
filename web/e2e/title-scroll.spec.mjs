@@ -173,6 +173,19 @@ test('late answers leave a title opened from Search where the viewer scrolled it
   await gates.planAsked.promise;
   // Down toward the rows under the cast.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  // Scrolling brings those rows near enough to load, and they settle first. "You might also like" has nothing to
+  // show with atlas empty, so it hides itself once More like this has loaded and the page ends 412px sooner. A
+  // viewer at the bottom is clamped to the new end (scroll anchoring keeps what they see where it was): the page
+  // got shorter, no late answer moved them, so the position to hold is the one measured after that.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document.querySelectorAll('.row-window.gone').length > 0 &&
+          !document.querySelector('[data-related-placeholder], .row-window .skeleton'),
+      ),
+    )
+    .toBe(true);
   await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(300);
   await page.waitForTimeout(300);
   const y = await page.evaluate(() => scrollY);

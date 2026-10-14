@@ -174,7 +174,7 @@
   let notice = $state<string | null>(null);
   /**
    * Where the library's services answer, found once for the session and shared by every page. The parent keys this
-   * whole tree by its library, so the session is fixed for its life.
+   * whole tree by the session object, so the session is fixed for its life.
    */
   const discovered = untrack(() => session.services);
   /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */

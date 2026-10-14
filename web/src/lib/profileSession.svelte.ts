@@ -23,6 +23,26 @@ import { SyncedProfilePreferences, type ProfilePreferences } from './profilePref
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the household settings that name the watch region. */
 const REGION_WAIT_MS = 3_000;
+/** The household watch region this browser last read: a country code, so it needs no protection. */
+const REGION_KEY = 'den.profile.watch-region.v1';
+
+function rememberedRegion(): string | undefined {
+  try {
+    const region = globalThis.localStorage?.getItem(REGION_KEY);
+    return region && /^[A-Z]{2}$/.test(region) ? region : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberRegion(region: string | undefined): void {
+  try {
+    if (region && /^[A-Z]{2}$/.test(region)) globalThis.localStorage?.setItem(REGION_KEY, region);
+    else globalThis.localStorage?.removeItem(REGION_KEY);
+  } catch {
+    // Storage refused (a private window): the next session waits for the settings again.
+  }
+}
 
 /**
  * Active-profile presentation and activity state. Every persistent profile will use this same class; this first
@@ -72,27 +92,39 @@ export class ProfileSession {
   }
 
   /**
-   * The household's watch region, read once for the session after the settings have resolved (bounded), so every
-   * request this session makes names the same region and no cache is split by it arriving late.
+   * The household's watch region, read once for the session so every request this session makes names the same
+   * region and no cache is split by it arriving late. The region this browser last read is used at once, so a
+   * restricted profile's first request does not wait on the household settings; without one, the first request
+   * waits for them (bounded). Either way the settled value is kept for the next session, so a changed region
+   * applies from the next load.
    */
   #watchRegion(): Promise<string | undefined> {
     return (this.#region ??= (async () => {
-      const model = this.household.ownerSettingsModel();
-      if (model) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([
-          Promise.resolve(model.ready).then(
-            () => undefined,
-            () => undefined,
-          ),
-          new Promise<void>((resolve) => (timer = setTimeout(resolve, REGION_WAIT_MS))),
-        ]);
-        clearTimeout(timer);
-      }
-      // Household-scoped (den#234): every profile reads it from the household control log, never from its own
-      // settings, so a Kid latches the same region as Owner.
-      return this.household.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
+      const settled = this.#settledRegion();
+      void settled.then((read) => {
+        if (read.known) rememberRegion(read.region);
+      });
+      return rememberedRegion() ?? (await settled).region;
     })());
+  }
+
+  async #settledRegion(): Promise<{ known: boolean; region?: string }> {
+    const model = this.household.ownerSettingsModel();
+    if (model) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.resolve(model.ready).then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => (timer = setTimeout(resolve, REGION_WAIT_MS))),
+      ]);
+      clearTimeout(timer);
+    }
+    // Household-scoped (den#234): every profile reads it from the household control log, never from its own
+    // settings, so a Kid latches the same region as Owner.
+    const settings = this.household.policy?.settings?.value;
+    return { known: !!settings, region: settings?.preferences.watchRegion?.toUpperCase() };
   }
 
   /**
