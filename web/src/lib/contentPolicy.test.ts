@@ -62,16 +62,17 @@ describe('policy identity', () => {
   it('spells every input, so no two policies share a cache key', () => {
     expect(policyKey(undefined)).toBe('-');
     expect(policyKey({ maximumAge: null, unknownRatings: 'allow' })).toBe('-');
-    expect(policyKey(kid)).toBe('12_block_child-or-teen');
+    expect(policyKey(kid)).toBe('12_block_-_child-or-teen');
     const keys = new Set([
       policyKey(kid),
+      policyKey({ ...kid, region: 'FI' }),
       policyKey({ ...kid, kidAudience: 'child' }),
       policyKey({ ...kid, maximumAge: 13 }),
       policyKey({ ...kid, unknownRatings: 'allow' }),
       policyKey({ maximumAge: null, unknownRatings: 'block' }),
       policyKey(ceilinged),
     ]);
-    expect(keys.size).toBe(6);
+    expect(keys.size).toBe(7);
     expect(isRestricted(ceilinged)).toBe(true);
     expect(isRestricted({ maximumAge: null, unknownRatings: 'allow' })).toBe(false);
   });
@@ -128,7 +129,6 @@ describe('policedAtlasFetch', () => {
     '/index/suggest/movie/603.json?skip=0&limit=24',
     '/index/franchise/movie/603.json',
     '/index/versions/movie/603.json',
-    '/index/title/movie/603.json',
     '/catalog/movie/den-titles/search=heist.json',
     '/catalog/series/nfx-new/country=FI.json',
     '/recommend/home.json?day=2026-10-13',
@@ -137,6 +137,27 @@ describe('policedAtlasFetch', () => {
     expect(url).toBe(
       `/atlas${path}${path.includes('?') ? '&' : '?'}maximumAge=12&unknownRatings=block&kidAudience=child-or-teen`,
     );
+  });
+
+  it('asks a title’s own record by age policy only, never the Kid audience gate', async () => {
+    const [url] = await run({ ...kid, region: 'FI' }, '/index/title/movie/603.json');
+    expect(url).toBe(
+      '/atlas/index/title/movie/603.json?maximumAge=12&unknownRatings=block&region=FI',
+    );
+  });
+
+  it('names the region where the profile has one, after unknownRatings', async () => {
+    const [url] = await run({ ...kid, region: 'SE' }, '/index/similar/movie/1.json');
+    expect(url).toBe(
+      '/atlas/index/similar/movie/1.json?maximumAge=12&unknownRatings=block&region=SE&kidAudience=child-or-teen',
+    );
+    expect(contentPolicyFor({ maximumAge: 8, unknownRatings: 'block' }, true, 'SE')?.region).toBe(
+      'SE',
+    );
+    expect(
+      contentPolicyFor({ maximumAge: 8, unknownRatings: 'block' }, true, 'swe')?.region,
+    ).toBeUndefined();
+    expect(contentPolicyFor(null, false, 'SE')).toBeUndefined();
   });
 
   it('sends an Owner with no policy exactly what it sent before', async () => {

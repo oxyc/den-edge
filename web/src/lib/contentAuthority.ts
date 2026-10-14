@@ -585,7 +585,13 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   ): Promise<boolean> {
     if (!isAgeRestricted(policy)) return true;
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
-    if (!atlas || !validRef(ref)) return false;
+    if (!validRef(ref)) return false;
+    // Missing evidence (no atlas, an outage, an undecodable answer) is an unknown maturity, which the policy's own
+    // `unknownRatings` decides: `block` refuses, `allow` admits. It is logged so an outage is never silent.
+    if (!atlas) {
+      console.warn('den: no atlas to age a title; treating its maturity as unknown');
+      return ageAllowed(policy, null);
+    }
     const url = `${atlas}/index/title/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`;
     try {
       const minimumAge = await this.#wait(
@@ -604,7 +610,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return await ageAllowed(policy, minimumAge);
     } catch (error) {
       if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
-      return false;
+      console.warn('den: atlas could not age a title; treating its maturity as unknown', error);
+      return ageAllowed(policy, null);
     }
   }
 

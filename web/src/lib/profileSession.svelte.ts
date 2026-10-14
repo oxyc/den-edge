@@ -89,15 +89,9 @@ export class ProfileSession {
     return policy ? policyKey(policy) : undefined;
   }
 
-  /** The browser-side retained-state scope: the library key, and the policy it was ranked and filtered under. */
-  get retainedScope(): string | null {
-    const scope = this.identity.retainedScope;
-    const key = this.policyKey;
-    return scope !== null && key ? `${scope}~${key}` : scope;
-  }
-
   #queryPolicy(): ContentPolicy | undefined {
-    return contentPolicyFor(this.contentPolicy, this.kid);
+    const region = this.policy?.settings?.value?.preferences.watchRegion?.toUpperCase();
+    return contentPolicyFor(this.contentPolicy, this.kid, region);
   }
 
   get services() {

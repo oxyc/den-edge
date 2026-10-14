@@ -395,6 +395,23 @@ describe('every direct boundary asks the same check', () => {
     await expect(none.ask(direct(1)[0]!)).resolves.toMatchObject({ detail: { state: 'ready' } });
   });
 
+  it('treats missing evidence as an unknown maturity, which the policy’s unknownRatings decides', async () => {
+    forgetReused();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const down = world(undefined, { atlasDown: true });
+    const ask = (policy: ContentPolicy) =>
+      down.ask({ kind: 'title.eligibility', titles: refs('movie:1') }, policy);
+    await expect(ask(KID)).resolves.toMatchObject({ allowed: [] });
+    // An Owner with a migrated ceiling stays fail-open for what it cannot age (den#234).
+    await expect(ask(CEILING)).resolves.toMatchObject({ allowed: refs('movie:1') });
+    const none = world(undefined, { atlas: false });
+    await expect(
+      none.ask({ kind: 'title.eligibility', titles: refs('movie:1') }, CEILING),
+    ).resolves.toMatchObject({ allowed: refs('movie:1') });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('answers eligibility in the order asked, bounded and in one request kind', async () => {
     const w = world();
     const asked = refs('tv:5', 'movie:3', 'movie:1');

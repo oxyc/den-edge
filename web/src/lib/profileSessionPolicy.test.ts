@@ -107,7 +107,7 @@ describe('a restricted profile names only the titles its policy establishes', ()
   it('holds a Kid with no readable policy to the strictest one', async () => {
     const { session: kid, query } = session({ policy: null, kid: true });
     expect(kid.restricted).toBe(true);
-    expect(kid.policyKey).toBe('0_block_child');
+    expect(kid.policyKey).toBe('0_block_-_child');
     await kid.content.query({ kind: 'collection', id: 1 });
     expect(query).toHaveBeenLastCalledWith({ kind: 'collection', id: 1 }, undefined, {
       maximumAge: 0,

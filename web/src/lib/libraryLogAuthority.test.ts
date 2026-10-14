@@ -421,30 +421,6 @@ describe('LibraryLogAuthority', () => {
       scope: sharedScope,
       value: { kind: 'shared', titles: sharedTitles },
     });
-
-    // A restricted profile's ranking is kept under its policy and never read back by another's (or the legacy).
-    const kidScope = { ...scope, policy: '12_block_child-or-teen' };
-    const littleScope = { ...scope, policy: '7_block_child' };
-    const kidBillboard = {
-      ...billboard,
-      titles: [{ type: 'movie' as const, id: 9, title: 'Nine' }],
-    };
-    await authority.command(
-      { kind: 'retained.billboard.set', scope: kidScope, value: kidBillboard },
-      'kid-billboard',
-    );
-    await expect(
-      log.kept('billboard.personal.v1.all.policy.12_block_child-or-teen'),
-    ).resolves.toMatchObject({ titles: kidBillboard.titles });
-    await expect(
-      authority.query({ kind: 'retained.billboard.get', scope: kidScope }),
-    ).resolves.toMatchObject({ value: kidBillboard });
-    await expect(
-      authority.query({ kind: 'retained.billboard.get', scope: littleScope }),
-    ).resolves.toMatchObject({ value: null });
-    await expect(authority.query({ kind: 'retained.billboard.get', scope })).resolves.toMatchObject(
-      { value: billboard },
-    );
   });
 
   it('fetches a bounded library metadata batch with its private TMDB key and owns TV shapes', async () => {

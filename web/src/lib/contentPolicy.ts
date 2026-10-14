@@ -6,9 +6,6 @@
  * audience. den-core decides the age rule (`profile_policy_allows`); den-atlas applies both gates before ranking and
  * pagination when the same fields arrive on a request. This module only translates between the two and keeps one
  * canonical spelling for cache identity.
- *
- * `region` is deliberately not sent. Atlas' store carries one conservative global age, so a region changes no answer
- * today; it would only split every cache by a setting that loads after the first request.
  */
 
 import type { ContentServiceClientPort } from './contentServiceClient';
@@ -49,6 +46,7 @@ export const kidAudienceFor = (maximumAge: number | null): ContentKidAudience =>
 export function contentPolicyFor(
   policy: ProfileContentPolicy | null,
   kid: boolean,
+  region?: string,
 ): ContentPolicy | undefined {
   const base: ProfileContentPolicy = policy ?? {
     maximumAge: kid ? 0 : null,
@@ -59,7 +57,9 @@ export function contentPolicyFor(
     unknownRatings: base.unknownRatings,
     ...(kid ? { kidAudience: kidAudienceFor(base.maximumAge) } : {}),
   };
-  return isRestricted(effective) ? effective : undefined;
+  if (!isRestricted(effective)) return undefined;
+  // A region alone restricts nothing; it only joins atlas' cache identity once there is a policy to name.
+  return region && /^[A-Z]{2}$/.test(region) ? { ...effective, region } : effective;
 }
 
 /**
@@ -68,7 +68,12 @@ export function contentPolicyFor(
  */
 export function policyKey(policy: ContentPolicy | undefined): string {
   if (!isRestricted(policy)) return '-';
-  return [policy.maximumAge ?? '-', policy.unknownRatings, policy.kidAudience ?? '-'].join('_');
+  return [
+    policy.maximumAge ?? '-',
+    policy.unknownRatings,
+    policy.region ?? '-',
+    policy.kidAudience ?? '-',
+  ].join('_');
 }
 
 /** The fields den-atlas reads (`maturity::Policy`), in the same order everywhere so a URL has one spelling. */
@@ -79,6 +84,7 @@ export function atlasPolicyFields(policy: ContentPolicy | undefined): [string, s
   // Atlas defaults an absent `unknownRatings` to `block` beside a ceiling and to `allow` otherwise, so the
   // profile's own choice is always spelled out.
   fields.push(['unknownRatings', policy.unknownRatings]);
+  if (policy.region) fields.push(['region', policy.region]);
   if (policy.kidAudience) fields.push(['kidAudience', policy.kidAudience]);
   return fields;
 }
@@ -143,11 +149,21 @@ export function policedAtlasFetch(
 ): typeof fetch {
   if (!isRestricted(policy)) return inner;
   const query = new URLSearchParams(atlasPolicyFields(policy)).toString();
+  // A title's own record is a direct read: age policy only, never the Kid catalogue's audience gate.
+  const directQuery = new URLSearchParams(
+    atlasPolicyFields({ ...policy, kidAudience: undefined }),
+  ).toString();
   return (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!href.startsWith(`${atlas}/`)) return inner(input, init);
     const route = href.slice(atlas.length).split(/[?#]/)[0]!;
     if (ATLAS_UNPOLICED.has(route)) return inner(input, init);
+    if (route.startsWith('/index/title/')) {
+      if (!directQuery) return inner(input, init);
+      const separator = href.includes('?') ? '&' : '?';
+      const direct = `${href}${separator}${directQuery}`;
+      return inner(input instanceof Request ? new Request(direct, input) : direct, init);
+    }
     const method = (
       init?.method ?? (input instanceof Request ? input.method : 'GET')
     ).toUpperCase();
@@ -163,6 +179,7 @@ export function policedAtlasFetch(
           ...body,
           maximumAge: policy.maximumAge ?? undefined,
           unknownRatings: policy.unknownRatings,
+          region: policy.region,
           kidAudience: policy.kidAudience,
         }),
       });

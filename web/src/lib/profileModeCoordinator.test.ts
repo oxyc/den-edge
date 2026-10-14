@@ -78,7 +78,15 @@ function owner(
           release,
         }) as unknown as LibraryModelLease<ConnectionsView>,
     );
-    const model = { close, connections, verifyParentalPin } as unknown as LibraryModel;
+    const settings = {
+      connection: 'ready',
+      value: {
+        kind: 'settings',
+        preferences: { watchRegion: 'fi', services: [], servicesConfigured: false },
+        assistant: { read: false, write: false },
+      },
+    };
+    const model = { close, connections, verifyParentalPin, settings } as unknown as LibraryModel;
     return { model, close, connections, release, verifyParentalPin };
   };
   const activity = authority(pinConfigured);
@@ -972,7 +980,7 @@ describe('ProfileModeCoordinator', () => {
       kidAudience: 'child-or-teen',
     });
     expect(kidSession.restricted).toBe(true);
-    expect(kidSession.retainedScope).toBe(`${kid.libraryKey}~12_block_child-or-teen`);
+    expect(kidSession.policyKey).toBe('12_block_-_child-or-teen');
 
     // Owner is restricted by its own ceiling, but is not a Kid catalogue.
     openings.get(ownerProfile.libraryKey)!.resolve({});
@@ -985,7 +993,7 @@ describe('ProfileModeCoordinator', () => {
       maximumAge: 13,
       unknownRatings: 'allow',
     });
-    expect(ownerSession.retainedScope).toBe(`${ownerProfile.libraryKey}~13_allow_-`);
+    expect(ownerSession.policyKey).toBe('13_allow_-_-');
     // A queued assistant request is opened where no policy is asked, so a restricted Owner has none.
     expect(allowsImplicitAssistant(first.coordinator, ownerSession)).toBe(false);
 
@@ -996,8 +1004,9 @@ describe('ProfileModeCoordinator', () => {
     expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
       maximumAge: 13,
       unknownRatings: 'allow',
+      region: 'FI',
     });
-    expect(visitor.retainedScope).toBeNull();
+    expect(visitor.policyKey).toBe('13_allow_FI_-');
   });
 
   it('leaves an Owner with no ceiling on the household port, as before', async () => {
@@ -1016,7 +1025,7 @@ describe('ProfileModeCoordinator', () => {
     const session = first.coordinator.session!;
     expect(session.restricted).toBe(false);
     expect(session.content).toBe(session.household.content);
-    expect(session.retainedScope).toBe(ownerProfile.libraryKey);
+    expect(session.policyKey).toBeUndefined();
     expect(allowsImplicitAssistant(first.coordinator, session)).toBe(true);
   });
 

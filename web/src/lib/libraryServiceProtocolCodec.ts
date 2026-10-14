@@ -216,12 +216,10 @@ const serviceBase = (value: unknown): value is string =>
 function retainedBillboardScope(value: unknown): value is RetainedBillboardScope {
   return (
     record(value) &&
-    exact(value, ['kind', 'facet', 'fresh', 'policy']) &&
+    exact(value, ['kind', 'facet', 'fresh']) &&
     (value.kind === 'shared' || value.kind === 'personal') &&
     (value.facet === null || value.facet === 'movie' || value.facet === 'tv') &&
-    bool(value.fresh) &&
-    (value.policy === undefined ||
-      (typeof value.policy === 'string' && /^[0-9A-Za-z_-]{1,64}$/.test(value.policy)))
+    bool(value.fresh)
   );
 }
 

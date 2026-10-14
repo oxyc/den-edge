@@ -44,6 +44,8 @@ export interface ContentPolicy {
   unknownRatings: 'allow' | 'block';
   /** Present for a Kid only: the audience-relevance gate on browse, search and recommendations. */
   kidAudience?: ContentKidAudience;
+  /** The viewer's ISO 3166-1 region, part of atlas' cache identity. */
+  region?: string;
 }
 
 export type ContentProvider = 'tmdb' | 'ratings' | 'warnings' | 'atlas';

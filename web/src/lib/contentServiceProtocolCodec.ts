@@ -77,7 +77,8 @@ function region(value: unknown): value is string {
 function contentPolicy(value: unknown): value is ContentPolicy {
   return (
     record(value) &&
-    exact(value, ['maximumAge', 'unknownRatings', 'kidAudience']) &&
+    exact(value, ['maximumAge', 'unknownRatings', 'kidAudience', 'region']) &&
+    (value.region === undefined || region(value.region)) &&
     (value.maximumAge === null || (integer(value.maximumAge) && value.maximumAge <= 18)) &&
     (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
     (value.kidAudience === undefined ||
