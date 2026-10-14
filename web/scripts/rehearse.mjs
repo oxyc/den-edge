@@ -402,6 +402,57 @@ async function main() {
       `${strayAfterSplit.length} activity rows`,
     );
 
+    // 4b. A browser paired to the committed household with a persistent Owner profile selected. Home and Settings
+    // must both open: no Svelte effect loop, a page that still answers, the profile switcher in the bar and no modal
+    // over the library.
+    step('reopen as the persistent Owner profile: Home and Settings');
+    for (const path of ['/', '/settings']) {
+      const dir = join(work, `profile-owner${path === '/' ? '-home' : '-settings'}`);
+      ctx = await launch(dir);
+      // A persistent profile selection, as the profile switcher keeps it for an Owner who chose their profile.
+      await ctx.addInitScript(
+        ([key, value]) => localStorage.setItem(key, value),
+        [
+          'den.profile.active.v1',
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+        ],
+      );
+      const ownerPage = await seedLink(ctx, edge, keyText);
+      const loop = [];
+      // Svelte reports the loop as a thrown error (a page error), and logs it to the console as well.
+      ownerPage.on('pageerror', (e) => {
+        if (e.message.includes('effect_update_depth')) loop.push(e.message);
+      });
+      await ownerPage.goto(`${edge.origin}${path}`);
+      await ownerPage
+        .locator('button.profile-trigger')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => {});
+      await sleep(4000);
+      const answers = await Promise.race([
+        ownerPage.evaluate(() => 1 + 1).then(() => true),
+        sleep(10_000).then(() => false),
+      ]).catch(() => false);
+      const state = await (async () => ({
+        trigger: (await ownerPage.locator('button.profile-trigger').count()) > 0,
+        modal: (await ownerPage.locator('dialog[open]').count()) > 0,
+        page: (await ownerPage.locator('body').innerText()).replace(/\s+/g, ' ').slice(0, 160),
+      }))().catch(() => null);
+      check(
+        `Owner profile opens ${path} without an effect loop`,
+        loop.length === 0,
+        loop.length ? `${loop.length} effect_update_depth_exceeded` : '',
+      );
+      check(`Owner profile ${path} still answers`, answers);
+      check(
+        `Owner profile ${path} shows the switcher and no modal`,
+        !!state && state.trigger && !state.modal,
+        JSON.stringify(state),
+      );
+      await ctx.close().catch(() => {});
+    }
+
     // 5. the pre-split browser comes back: one tab (then two with REHEARSE_TWO_TABS=1). Each starts from the committed household as the split
     // left it (den-edge restarted on a copy of its data, same port, so the browser's origin is the one it cached), so
     // one phase's write-back cannot hide or inflate the next one's.
