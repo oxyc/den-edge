@@ -91,6 +91,8 @@ export type OwnerSplitRunResult =
   | { readonly kind: 'active'; readonly attempt: string }
   | { readonly kind: 'restored'; readonly attempt: string }
   | { readonly kind: 'recovery-blocked'; readonly attempt: string }
+  /** The locked household was intact: its restore attempt was aborted, the lock released, nothing else changed. */
+  | { readonly kind: 'released'; readonly attempt: string }
   /**
    * `409 migration_in_progress`: another attempt holds the household's exclusive lock and den-edge named nothing
    * about it. Nothing was opened here and nothing is retried; only an explicit Owner Restore can take the lock over.
@@ -253,51 +255,74 @@ export class DormantOwnerSplitCoordinator {
       await this.#store.clearHandoff(recoveryAttempt);
       return { kind: 'restored', attempt: recoveryAttempt };
     }
-    if (authority.lookup.state === 'aborted') {
-      await this.#store.clearHandoff(recoveryAttempt);
-      return { kind: 'restart-required' };
+    let lookup: OwnerSplitAttemptLookup = authority.lookup;
+    let household: OwnerSplitHouseholdObservation = authority.household;
+    if (lookup.state === 'open') {
+      if (
+        lookup.backup.attempt !== backup.attempt ||
+        lookup.backup.id !== backup.id ||
+        lookup.backup.digest !== backup.digest
+      )
+        throw new Error('Recovery attempt’s bound backup changed');
+      await this.#effects.verifyBoundBackup({ attempt: recoveryAttempt, fence, backup });
+    } else if (lookup.state !== 'aborted') {
+      throw new Error('Recovery attempt is not open');
     }
-    if (authority.lookup.state !== 'open') throw new Error('Recovery attempt is not open');
-    if (
-      authority.lookup.backup.attempt !== backup.attempt ||
-      authority.lookup.backup.id !== backup.id ||
-      authority.lookup.backup.digest !== backup.digest
-    )
-      throw new Error('Recovery attempt’s bound backup changed');
-
-    await this.#effects.verifyBoundBackup({ attempt: recoveryAttempt, fence, backup });
-    const effect = await this.#effects.planNext({
-      state: 'restore-required',
-      explicitIntent: true,
-      fence,
-      backupVerified: true,
-      ownerVerified: false,
-      winnerVerified: false,
-      candidateRetired: false,
-      commitAuthorized: false,
-      cancelRequested: false,
-      attemptAborted: false,
-      attemptLookup: 'open',
-      householdFresh: true,
-      recoveryIntent: true,
-      household: authority.household,
-      attempt: recoveryAttempt,
-      householdId: this.#household,
-      backupDigest: backup.digest,
-    });
-    // den-core is the only authority for restoring. Anything but its restore decision leaves the handoff durable,
-    // the lock held and the household untouched.
-    if (effect !== 'open-recovery-attempt')
+    // An aborted attempt (ours, abandoned between its DELETE and the journal discard) is no longer open, so its
+    // backup is not re-read: den-core only needs the durable lookup and a fresh household read after it.
+    let householdFresh = true;
+    for (let step = 0; step < 8; step += 1) {
+      const effect = await this.#effects.planNext({
+        state: 'restore-required',
+        explicitIntent: true,
+        fence,
+        backupVerified: true,
+        ownerVerified: false,
+        winnerVerified: false,
+        candidateRetired: false,
+        commitAuthorized: false,
+        cancelRequested: false,
+        attemptAborted: lookup.state === 'aborted',
+        attemptLookup: lookup.state,
+        householdFresh,
+        recoveryIntent: true,
+        household,
+        attempt: recoveryAttempt,
+        householdId: this.#household,
+        backupDigest: backup.digest,
+      });
+      // den-core is the only authority for what happens next; this loop performs exactly that effect.
+      if (effect === 'abort-attempt') {
+        // An intact household needs no restore: aborting this restore attempt releases the lock, unchanged.
+        ({ lookup, household } = await this.#effects.abortWithFreshAuthority(recoveryAttempt));
+        householdFresh = true;
+        continue;
+      }
+      if (effect === 'read-household') {
+        household = await this.#effects.readHousehold();
+        householdFresh = true;
+        continue;
+      }
+      if (effect === 'discard-journal') {
+        await this.#store.clearHandoff(recoveryAttempt);
+        return { kind: 'released', attempt: recoveryAttempt };
+      }
+      if (effect === 'open-recovery-attempt') {
+        const restored = await this.#effects.restore({
+          recoveryAttempt,
+          originalAttempt: backup.attempt,
+          backup: { id: backup.id, digest: backup.digest },
+          household,
+        });
+        if (restored.state !== 'restored')
+          throw new Error('Recovery did not reach a durable terminal');
+        await this.#store.clearHandoff(recoveryAttempt);
+        return { kind: 'restored', attempt: recoveryAttempt };
+      }
+      // Anything else leaves the handoff durable, the lock held and the household untouched.
       return { kind: 'recovery-blocked', attempt: recoveryAttempt };
-    const restored = await this.#effects.restore({
-      recoveryAttempt,
-      originalAttempt: backup.attempt,
-      backup: { id: backup.id, digest: backup.digest },
-      household: authority.household,
-    });
-    if (restored.state !== 'restored') throw new Error('Recovery did not reach a durable terminal');
-    await this.#store.clearHandoff(recoveryAttempt);
-    return { kind: 'restored', attempt: recoveryAttempt };
+    }
+    throw new Error('Journal-less recovery exceeded its bounded effect budget');
   }
 
   async #drive(): Promise<OwnerSplitRunResult> {

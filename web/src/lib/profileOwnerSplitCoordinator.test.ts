@@ -222,7 +222,11 @@ function harness(
         stagedDigest: STAGED,
       };
     }),
-    abort: vi.fn(async () => {
+    abort: vi.fn(async (attempt: string) => {
+      if (attempt === RECOVERY) {
+        recovery = 'aborted';
+        return restoreOpen('aborted');
+      }
       aborted = true;
       return { ...splitOpen, state: 'aborted' as const };
     }),
@@ -784,14 +788,35 @@ describe('exclusive migration lock: journal-less Owner Restore', () => {
     expect(value.provider.abort).not.toHaveBeenCalled();
   });
 
-  it('plans through the real den-core: a locked, untouched household gets no restore decision', async () => {
+  it('releases the lock of an intact, locked household exactly as den-core plans it', async () => {
     const value = harness();
     value.setSource(recoverySource);
-    await expect(value.coordinator.recoverWithoutJournal(RECOVERY, recoverySource)).rejects.toThrow(
-      'invalid_state',
-    );
+    await expect(
+      value.coordinator.recoverWithoutJournal(RECOVERY, recoverySource),
+    ).resolves.toEqual({ kind: 'released', attempt: RECOVERY });
+    // abort-attempt (DELETE) -> fresh read -> discard-journal; the household is never rewritten.
+    expect(value.provider.abort).toHaveBeenCalledExactlyOnceWith(RECOVERY);
     expect(value.provider.restore).not.toHaveBeenCalled();
-    // The authorized attempt, its bound backup and the lock all stay; nothing is lost or guessed.
+    const planned = vi.mocked(value.secure.planNext).mock.calls.map(([e]) => e);
+    expect(planned).toHaveLength(2);
+    expect(planned.every((e) => e.recoveryIntent === true && e.state === 'restore-required')).toBe(
+      true,
+    );
+    expect(planned[1]).toMatchObject({ attemptLookup: 'aborted', householdFresh: true });
+    expect(value.store.handoff).toBeNull();
+    // Nothing is left for a later resume to do.
+    await expect(value.coordinator.resume()).resolves.toEqual({ kind: 'inactive' });
+  });
+
+  it('stops with den-core’s source mismatch, aborting nothing, when the household moved', async () => {
+    const value = harness();
+    value.setSource(recoverySource);
+    value.setHousehold({ kind: 'legacy', generation: 8, base: 5, head: 'f'.repeat(64) });
+    await expect(value.coordinator.recoverWithoutJournal(RECOVERY, recoverySource)).rejects.toThrow(
+      'recovery_source_mismatch',
+    );
+    expect(value.provider.abort).not.toHaveBeenCalled();
+    expect(value.provider.restore).not.toHaveBeenCalled();
     expect(value.store.handoff).toMatchObject({
       recoveryAttempt: RECOVERY,
       fence,
@@ -838,7 +863,7 @@ describe('exclusive migration lock: journal-less Owner Restore', () => {
     expect(value.store.handoff).toBeNull();
   });
 
-  it('asks for a fresh authorization when its restore attempt was aborted', async () => {
+  it('finishes releasing when its own abort landed but the journal discard did not', async () => {
     const value = harness();
     value.store.handoff = {
       version: 1,
@@ -848,8 +873,12 @@ describe('exclusive migration lock: journal-less Owner Restore', () => {
       backup: boundBackup,
     };
     value.setRecovery('aborted');
-    await expect(value.coordinator.resume()).resolves.toEqual({ kind: 'restart-required' });
+    await expect(value.coordinator.resume()).resolves.toEqual({
+      kind: 'released',
+      attempt: RECOVERY,
+    });
     expect(value.store.handoff).toBeNull();
+    expect(value.provider.abort).not.toHaveBeenCalled();
     expect(value.provider.restore).not.toHaveBeenCalled();
   });
 

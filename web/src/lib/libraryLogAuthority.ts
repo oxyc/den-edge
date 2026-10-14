@@ -775,6 +775,7 @@ export class LibraryLogAuthority {
         loadJournal: () => store.load(),
         loadHandoff: () => store.loadHandoff(),
         migrationLocked: () => this.#log.migrationLocked,
+        migrationReleased: () => this.#log.noteMigrationReleased(),
       },
       coordinator,
       secure,
@@ -843,20 +844,23 @@ export class LibraryLogAuthority {
           ? await control.cancel(task.attempt)
           : await control.recover(task.attempt, task.recoveryAttempt, task.source);
     if (result.kind === 'setup-in-progress') this.#log.noteMigrationLocked();
+    if (result.kind === 'released') this.#log.noteMigrationReleased();
     const outcome =
       result.kind === 'active' || result.kind === 'restored'
         ? 'enabled'
-        : result.kind === 'recovery-blocked'
-          ? 'recovery-required'
-          : result.kind === 'setup-in-progress'
-            ? 'setup-in-progress'
-            : result.kind === 'restart-required'
-              ? 'source-changed'
-              : result.kind === 'cancelled'
-                ? 'cancelled'
-                : result.kind === 'commit-unknown'
-                  ? 'reconciling'
-                  : 'preparing';
+        : result.kind === 'released'
+          ? 'cancelled'
+          : result.kind === 'recovery-blocked'
+            ? 'recovery-required'
+            : result.kind === 'setup-in-progress'
+              ? 'setup-in-progress'
+              : result.kind === 'restart-required'
+                ? 'source-changed'
+                : result.kind === 'cancelled'
+                  ? 'cancelled'
+                  : result.kind === 'commit-unknown'
+                    ? 'reconciling'
+                    : 'preparing';
     return {
       result: {
         kind: task.kind,

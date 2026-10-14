@@ -25,6 +25,8 @@ export interface OwnerSplitWorkerControlPort {
   loadHandoff(): Promise<OwnerSplitHandoffRecovery | null>;
   /** This browser saw den-edge refuse an ordinary household write because a migration holds the lock. */
   migrationLocked(): boolean;
+  /** A journal-less Restore released the lock, so the browser's memory of it is stale. */
+  migrationReleased?(): void;
 }
 
 /** Status-only service adapter. No lifecycle action is exposed until the product contract has a matching core op. */
@@ -76,6 +78,7 @@ export class OwnerSplitWorkerController {
       return { phase: 'recovery-required' };
     }
     if (resumed.kind === 'restored') return { phase: 'enabled' };
+    if (resumed.kind === 'released') this.port.migrationReleased?.();
     if (resumed.kind === 'recovery-blocked') return { phase: 'recovery-required' };
     if (resumed.kind === 'setup-in-progress') return { phase: 'setup-in-progress' };
     return this.#idleStatus(capability);

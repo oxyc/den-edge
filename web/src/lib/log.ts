@@ -485,6 +485,11 @@ export class LibraryLog {
     return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < RECHECK_MS;
   }
 
+  /** An Owner Restore aborted the migration attempt that held the household: its lock is gone. */
+  noteMigrationReleased(): void {
+    this.migrationLockedAt = 0;
+  }
+
   /** Record what a refused split open or Restore already proved: another attempt holds the household lock. */
   noteMigrationLocked(): void {
     this.migrationLockedAt = Date.now();

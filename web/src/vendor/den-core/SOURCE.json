@@ -5,7 +5,7 @@
   "rust": "1.95.0",
   "uniffi": "0.32.2",
   "wasmBindgen": "0.2.129",
-  "sourceDigest": "b11afc812ea76c8ea5670b8bf985069a5d48d3139c79d6db18db9e641dc2c856",
+  "sourceDigest": "87c5cd5cabcc59f22d4ddf95c1fcda14ab75bfc3f6a6200a5b80e8b91312a6ab",
   "sources": {
     "Cargo.lock": "8c6df78384dc45064ea6a93f75c1fb74ff73885ce1a057a90ebd6613cdb4c7aa",
     "Cargo.toml": "f9a5099f9d5e02d3f86795d33bbd75244ecdc289b5bfe24c5124dddbd2bd8a14",
@@ -48,7 +48,7 @@
     "crates/den-sync/src/library_v4/switch.rs": "dfa1190566a7ec9e236ae2f7ef1a4ae2b4969d48dd73467cc16d270b78f087c1",
     "crates/den-sync/src/library_v4/tests.rs": "12e88e807cdbf292dc0fbae3d6eed7d4ad5d22baa5599fb25bc2d0d9232bcdad",
     "crates/den-sync/src/library_v4/write.rs": "96b4faffcc9b73f722bd8c5dd3b89d24cb77092270beb255d19d66621d32001f",
-    "crates/den-sync/src/profiles.rs": "4438d95695302f27db720b7f8eaba32d5655f6faa965ccd6fcab05dc3518d3c9",
+    "crates/den-sync/src/profiles.rs": "a553b580b420c35d15b140799c6d062893a7acfaaee93affae85c797194a7a9e",
     "crates/den-sync/src/projection.rs": "c028d44b00bc7337fecdbbdefd109a7a30736b17356877d2f42bf94b5d41397f",
     "crates/den-sync/src/recovery.rs": "d4a73f02b84d5e25c30d14619a5197ff8a4713ef24381b19295449d165a049e3",
     "crates/den-sync/src/series.rs": "b2ffe596cda0ee39814ca802252a39caf6101b180eb390ba2d37e61a3f1a9d22",
@@ -60,7 +60,7 @@
     "crates/den-sync/tests/fixtures/policy-v1.json": "caed3d9f20c58dd4924d9626a8db8922931eae69c62fb6792df431a0d393bd85",
     "crates/den-sync/tests/fixtures/policy-v3.json": "042a6a51c7fb9d943363e66ba2bc71eec7c545f2b0cc38d4ee67baa6457cae1f",
     "crates/den-sync/tests/fixtures/policy-v4.json": "24775328d22f4b3da7e3b06af8659cf505fdd63fbe7cdf6b05d60e8418dbbb74",
-    "crates/den-sync/tests/fixtures/profiles-v1.json": "6ed0a91a5468cbbd3304dc4507344d98cecccbfef55044f7eeb0c978f8780577",
+    "crates/den-sync/tests/fixtures/profiles-v1.json": "7506e43009c2d3a1f49d72e179a6587177f208522bab23f0b6c2bae70e35daeb",
     "crates/den-sync/tests/library_v4.rs": "4eedcf0bb3d049ce6a21afa8e65a6c2892a4f413faddca1934fab341bc4fcff6",
     "crates/den-sync/tests/profiles.rs": "09b0b008e39740eda0bb47a7e3f373d17a079e4420a8792b74612a5eb675c865",
     "crates/den-sync/tests/recovery.rs": "dee0cebefd106bb2fdd2588099ecf9a927aa127eba2f667de815dd60e1f54e96",
@@ -83,12 +83,12 @@
     "generated/den_core_assistant.js": "a8805cc46ace04c3e44b1e4c08c927706b266b2799670c793ac485f437a72cfe",
     "generated/den_core_assistant_bg.wasm": "dcdeb98550a5cd74f47d8f3ee68125b147e8bdd1d5b589f50e5a97e6be517fc3",
     "generated/den_core_assistant_bg.wasm.d.ts": "248838783d7c12f7d73cc82d4f6a0323c14aa1fe062dc580e72598a04d4166ce",
-    "generated/den_core_bg.wasm": "c349db1780764892fccaea00c4e82a2e233f704c16fa9d49e700d826171a7d96",
+    "generated/den_core_bg.wasm": "a1463a730dcdfa6c7c72cc123e00a5b3011b5c3ff0485fc6fb6183e5ffff99d9",
     "generated/den_core_bg.wasm.d.ts": "1de059c9adfafeb5d797c76ee1b2277830ae11882cdfecbecec537d52b6a31e3",
     "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
     "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87",
     "policy-v1.json": "caed3d9f20c58dd4924d9626a8db8922931eae69c62fb6792df431a0d393bd85",
     "policy-v3.json": "042a6a51c7fb9d943363e66ba2bc71eec7c545f2b0cc38d4ee67baa6457cae1f",
-    "profiles-v1.json": "6ed0a91a5468cbbd3304dc4507344d98cecccbfef55044f7eeb0c978f8780577"
+    "profiles-v1.json": "7506e43009c2d3a1f49d72e179a6587177f208522bab23f0b6c2bae70e35daeb"
   }
 }
