@@ -87,6 +87,25 @@ export function profileDirectoryChoices(
   }
 }
 
+export type ProfileDirectoryState =
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'present'; readonly directory: PreviewProfileDirectory };
+
+/**
+ * What the directory read says. `pending` is not yet answered; `absent` is answered with no directory (a household
+ * before its Owner split, or a browser-local library); `invalid` is a directory that exists but cannot be opened.
+ */
+export function profileDirectoryState(
+  view: ProfileDirectoryView | undefined,
+): ProfileDirectoryState {
+  if (!view) return { kind: 'pending' };
+  if (!view.owner && view.profiles.length === 0) return { kind: 'absent' };
+  const directory = profileDirectoryChoices(view);
+  return directory ? { kind: 'present', directory } : { kind: 'invalid' };
+}
+
 type StorageEvents = Pick<Window, 'addEventListener' | 'removeEventListener'>;
 
 type StoredActiveProfile =

@@ -10,6 +10,7 @@ import {
   ProfileModeCoordinator,
   previewProfileDirectory,
   profileDirectoryChoices,
+  profileDirectoryState,
   profilesCapability,
   type ProfileActivityModelFactory,
   type PreviewProfileDirectory,
@@ -218,6 +219,29 @@ describe('ProfileModeCoordinator', () => {
         ({ name }) => name,
       ),
     ).toEqual(['Owner', 'Kids', 'Teens']);
+  });
+
+  it('tells an unanswered directory read from an absent and an invalid directory', () => {
+    const valid = realDirectoryView();
+    expect(profileDirectoryState(undefined)).toEqual({ kind: 'pending' });
+    expect(profileDirectoryState({ kind: 'profiles', owner: null, profiles: [] })).toEqual({
+      kind: 'absent',
+    });
+    expect(profileDirectoryState(valid)).toMatchObject({ kind: 'present' });
+    // A directory that exists but cannot be opened is never mistaken for none.
+    expect(profileDirectoryState({ ...valid, owner: null })).toEqual({ kind: 'invalid' });
+    expect(
+      profileDirectoryState({
+        ...valid,
+        profiles: valid.profiles.filter((profile) => profile.role !== 'owner'),
+      }),
+    ).toEqual({ kind: 'invalid' });
+    expect(
+      profileDirectoryState({
+        ...valid,
+        profiles: valid.profiles.map((profile) => ({ ...profile, libraryKey: '' })),
+      }),
+    ).toEqual({ kind: 'invalid' });
   });
 
   it('keeps a failed Owner transition intact and retries the same durable visit', async () => {

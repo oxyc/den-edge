@@ -46,7 +46,7 @@
     profileMarkerPresent,
     ProfileModeCoordinator,
     previewProfileDirectory,
-    profileDirectoryChoices,
+    profileDirectoryState,
     profilesCapability,
     type ProfileActivityModelFactory,
     type ProfilesCapability,
@@ -129,6 +129,14 @@
   let profileCapability = $state<ProfilesCapability | 'checking'>(
     untrack(() => (!libraryIdentity || !session.model ? 'disabled' : 'checking')),
   );
+  // The directory read answered "none": a household before its Owner split, or a browser-local library.
+  let profileDirectoryAbsent = $state(false);
+  // Until a directory exists there is nothing to gate behind, so an absent one behaves as disabled.
+  const activeCapability = $derived(
+    profileCapability === 'enabled' && profileDirectoryAbsent && !profileCoordinator
+      ? 'disabled'
+      : profileCapability,
+  );
   let profileControlPublished = false;
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
@@ -140,7 +148,7 @@
   // keeps them as ever; once profiles are active they open only for the active Owner session.
   const householdAdmin = $derived(
     householdAdministration(
-      profileCapability,
+      activeCapability,
       profileCoordinator?.session === session && session.administersHousehold,
       profileMarkerPresent(),
     ),
@@ -160,16 +168,16 @@
     routedProfile = next;
   });
   const profileActivityReady = $derived(
-    profileCapability === 'disabled' ||
-      profileCapability === 'preview' ||
-      (profileCapability === 'enabled' && profileCoordinator?.session === session),
+    activeCapability === 'disabled' ||
+      activeCapability === 'preview' ||
+      (activeCapability === 'enabled' && profileCoordinator?.session === session),
   );
   const implicitAssistantModel = $derived.by(() => {
     const current = session;
     if (!link || current.local || !current.model) return null;
     // A legacy host becomes eligible reactively once discovery explicitly says profiles are disabled, even when
     // the global consent dialog opened first. Enabled hosts remain fail-closed and expose only an active Owner.
-    if (profileCapability === 'disabled') return current.model;
+    if (activeCapability === 'disabled') return current.model;
     return profileActivityReady && allowsImplicitAssistant(profileCoordinator, current)
       ? current.model
       : null;
@@ -239,10 +247,18 @@
 
   $effect(() => {
     if (profileCapability !== 'enabled') return;
-    const projected = profileDirectoryLease?.snapshot.value;
-    if (!projected) return;
-    const directory = profileDirectoryChoices(projected as ProfileDirectoryView);
+    const state = profileDirectoryState(
+      profileDirectoryLease?.snapshot.value as ProfileDirectoryView | undefined,
+    );
+    if (state.kind === 'pending') return;
+    const directory = state.kind === 'present' ? state.directory : null;
     if (!profileCoordinator) {
+      // Answered with no directory: the library runs as it does with profiles disabled until one appears.
+      profileDirectoryAbsent = state.kind === 'absent';
+      if (state.kind === 'invalid') {
+        profileCapability = 'indeterminate';
+        return;
+      }
       if (!directory || openingCommittedProfiles || !libraryIdentity) return;
       const owner = directory.profiles.find(
         (choice) => choice.id === directory.owner && choice.role === 'owner',
@@ -824,7 +840,7 @@
     <h1 id="profile-unavailable-title">Profiles couldn’t be opened</h1>
     <p>The Owner library remains hidden. Reload Den to try again.</p>
   </section>
-{:else if profileCapability === 'enabled' && !profileCoordinator}
+{:else if activeCapability === 'enabled' && !profileCoordinator}
   <p class="profile-loading" role="status">Opening profile directory…</p>
 {:else if profileCoordinator && !profileCoordinator.session}
   <ProfileOwnerGate profiles={profileCoordinator} />
