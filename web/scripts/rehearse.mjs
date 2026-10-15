@@ -369,8 +369,11 @@ async function nameSyntheticTitles(ctx) {
 // billboard keeps a different lead from the others.
 const SHARED_LEAD_ID = 9201;
 
-/** atlas on the page's own origin, answering what a billboard asks: its manifest, the shared pool and a ranking. */
-async function stubAtlas(ctx, firstLead) {
+/**
+ * atlas on the page's own origin, answering what a billboard asks: its manifest, the shared pool and a ranking. Each
+ * ranking asked for is noted in `ranked` with how many library titles it carried.
+ */
+async function stubAtlas(ctx, firstLead, ranked = []) {
   let lead = firstLead;
   const slides = (first) => ({
     slides: [first, first + 1, first + 2].map((id) => ({ type: 'movie', id })),
@@ -382,8 +385,11 @@ async function stubAtlas(ctx, firstLead) {
       return route.fulfill({ json: { id: 'com.den.atlas', version: '0.0.0' } });
     if (pathname.startsWith('/atlas/recommend/') && request.method() === 'GET')
       return route.fulfill({ json: slides(SHARED_LEAD_ID) });
-    if (pathname === '/atlas/recommend' && request.method() === 'POST')
+    if (pathname === '/atlas/recommend' && request.method() === 'POST') {
+      const body = request.postDataJSON();
+      ranked.push({ library: body?.library?.length ?? 0, owned: body?.owned?.length ?? 0 });
       return route.fulfill({ json: slides((lead += 10)) });
+    }
     return route.fulfill({ status: 404, json: {} });
   });
 }
@@ -1521,9 +1527,11 @@ async function main() {
       );
       await ctx.addInitScript(recordBillboard);
       await nameSyntheticTitles(ctx);
-      await stubAtlas(ctx, 9500);
+      const ranked = [];
+      await stubAtlas(ctx, 9500, ranked);
       const heroPage = await seedLink(ctx, edge, keyText);
       for (const visit of [1, 2, 3]) {
+        ranked.length = 0;
         await heroPage.goto(`${edge.origin}/`);
         await heroPage
           .locator('main')
@@ -1533,6 +1541,19 @@ async function main() {
         await sleep(6000);
         const frames = (await heroPage.evaluate(() => window.__billboards).catch(() => null)) ?? [];
         console.log(`billboard by painted frame, visit ${visit}: ${JSON.stringify(frames)}`);
+        // The Owner's history lives in the Owner library after the split: the ranking asked of atlas carries it, and the
+        // lead on screen is that ranking's, never the shared pool's.
+        const lead = frames.findLast((f) => f.source === 'library')?.title ?? null;
+        check(
+          `the Owner's billboard is ranked against the Owner's history (visit ${visit})`,
+          ranked.length > 0 && ranked.every((asked) => asked.library > 0),
+          `${ranked.length} rankings asked, library titles per request: ${JSON.stringify(ranked.map((asked) => asked.library))}`,
+        );
+        check(
+          `the Owner's billboard lead is from the ranking, not the shared pool (visit ${visit})`,
+          lead !== null && !lead.endsWith(` ${SHARED_LEAD_ID}`),
+          `lead ${JSON.stringify(lead)}`,
+        );
         if (visit === 1) continue;
         const titles = frames.flatMap((f) => (f.title === null ? [] : [f.title]));
         const painted = frames.find((f) => f.title !== null);

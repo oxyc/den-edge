@@ -1252,8 +1252,19 @@
     return left.type === right.type && left.id === right.id;
   }
 
-  function stageFeatured(next: RecommendedTitle[]) {
+  /**
+   * Take atlas's ranking for this library. Behind a kept ranking (`keptShown`) it is staged, so the lead painted on
+   * the first frame is never swapped. Behind anything else — the shared pool or trending, painted because nothing
+   * personal was kept (the first visit of a library, or one whose ranking is older than a week) — the ranking is the
+   * lead: staged behind it, the shared pool's first title stayed the billboard's lead until the viewer moved on.
+   */
+  function stageFeatured(next: RecommendedTitle[], keptShown: boolean) {
     const shown = slideShown;
+    if (!keptShown && (!shown || (featured[0] && sameTitle(shown, featured[0])))) {
+      stagedFeatured = null;
+      featured = next;
+      return;
+    }
     const visible = shown ? featured.find((title) => sameTitle(title, shown)) : featured[0];
     const first = next[0];
     if (!visible || !first || sameTitle(visible, first)) {
@@ -1409,7 +1420,7 @@
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
-        stageFeatured(picked);
+        stageFeatured(picked, !!personal);
         if (model && keepsBillboard()) {
           const keptAt = Date.now();
           void replacePersonalBillboard(
