@@ -49,7 +49,7 @@ use http_body_util::Full;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,6 +91,9 @@ const ADDONS_PER_WINDOW: u32 = 300;
 /// many sources. A source is forgotten after the longest a session lives.
 pub const MAX_SOURCES: usize = 4;
 const SOURCE_TTL_MS: u64 = 6 * 60 * 60 * 1000;
+/// den-remux caps every session at film length plus grace, and at six hours absolutely. A kill is useful only
+/// until that deadline: after it, no session that existed when the grant ended can remain.
+const REMUX_SESSION_MAX_MS: u64 = 6 * 60 * 60 * 1000;
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -103,8 +106,6 @@ pub struct Grants {
     last_used: Mutex<HashMap<String, u64>>,
     /// Source addresses a grant's media listener was opened for, and when.
     sources: Mutex<HashMap<String, Vec<(IpAddr, u64)>>>,
-    /// Ended grants whose remux sessions were already killed, so the sweep asks once rather than every tick.
-    killed: Mutex<HashSet<String>>,
     kill_unconfigured: AtomicBool,
     /// Device tickets by the SHA-256 of the ticket: a restart forgets them, and the guest asks for another.
     tickets: Mutex<HashMap<String, Ticket>>,
@@ -189,6 +190,12 @@ struct Record {
     access_until: Option<u64>,
     redeemed_at: Option<u64>,
     revoked_at: Option<u64>,
+    /// The end event whose den-remux sessions must be killed, and whether den-remux acknowledged it. Kept in the
+    /// grant record so an edge restart cannot forget either a pending kill or a completed one.
+    #[serde(default)]
+    remux_kill_for: Option<u64>,
+    #[serde(default)]
+    remux_kill_acked: bool,
     /// The one synced library this grant reserved. Kept through revocation: the library is the guest's.
     #[serde(default)]
     library: Option<ReservedLibrary>,
@@ -694,6 +701,8 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
         access_until: None,
         redeemed_at: None,
         revoked_at: None,
+        remux_kill_for: None,
+        remux_kill_acked: false,
         library: None,
         usage: Usage::default(),
     };
@@ -782,11 +791,14 @@ async fn update(state: &AppState, host: &str, gid: &str, req: Request) -> Respon
     if body.as_object().and_then(|map| apply(&mut record, map, now, false)).is_none() {
         return bad_request();
     }
+    // An extension can bring an expired grant back to life. Its next expiry is a different kill obligation.
+    if is_live(&record, now) {
+        record.remux_kill_for = None;
+        record.remux_kill_acked = false;
+    }
     if let Err(e) = save(state, &record).await {
         return internal("grant write", e);
     }
-    // An extension can bring an ended grant back to life; its sessions must be ended again when it next lapses.
-    crate::lock(&state.grants.killed).remove(gid);
     json_reply(StatusCode::OK, &json!({ "grant": grant_json(state, &record, now) }))
 }
 
@@ -851,7 +863,11 @@ async fn new_code(state: &AppState, host: &str, gid: &str, req: Request) -> Resp
 
 /// End a grant: it stops answering, its escrow and device secrets are dropped, and its remux sessions are killed.
 async fn end_grant(state: &AppState, record: &mut Record, now: u64) -> io::Result<()> {
-    record.revoked_at.get_or_insert(now);
+    let ended = *record.revoked_at.get_or_insert(now);
+    if record.remux_kill_for != Some(ended) {
+        record.remux_kill_for = Some(ended);
+        record.remux_kill_acked = false;
+    }
     record.devices.clear();
     record.installs.clear();
     save(state, record).await
@@ -1378,9 +1394,36 @@ pub fn strip_manifest(value: &mut Value) {
 pub async fn end_sessions(state: &AppState, gid: &str) -> bool {
     state.grants.forget(gid);
     crate::oauth::end_grant(state, gid).await;
+    let event = match load(state, gid).await {
+        Ok(Some(record)) if record.remux_kill_acked => return true,
+        Ok(Some(record)) => match record.remux_kill_for {
+            Some(at) if state.now() < at.saturating_add(REMUX_SESSION_MAX_MS) => Some(at),
+            Some(_) => return true,
+            None => None,
+        },
+        Ok(None) => return true,
+        Err(e) => {
+            eprintln!("grants: reading pending session kill for {gid}: {e}");
+            None
+        }
+    };
     let done = kill_remux(state, gid).await;
-    if done {
-        crate::lock(&state.grants.killed).insert(gid.to_owned());
+    if done && event.is_some() {
+        let _lock = state.grants.lock.lock().await;
+        match load(state, gid).await {
+            Ok(Some(mut record)) if record.remux_kill_for == event => {
+                record.remux_kill_acked = true;
+                if let Err(e) = save(state, &record).await {
+                    eprintln!("grants: keeping session-kill acknowledgement for {gid}: {e}");
+                    return false;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("grants: reading session-kill acknowledgement for {gid}: {e}");
+                return false;
+            }
+        }
     }
     done
 }
@@ -1452,16 +1495,32 @@ pub async fn sweep(state: &AppState) {
                         continue;
                     }
                     state.grants.forget(&entry.gid);
-                    crate::lock(&state.grants.killed).remove(&entry.gid);
                     gone.push(entry.gid);
                 }
                 Some(_) => {
-                    if !crate::lock(&state.grants.killed).contains(&entry.gid) {
+                    let at = ended_at(&record, now).expect("the ended arm has an end time");
+                    let mut record = record;
+                    if record.remux_kill_for != Some(at) {
+                        record.remux_kill_for = Some(at);
+                        record.remux_kill_acked = false;
+                        if let Err(e) = save(state, &record).await {
+                            eprintln!("grants sweep: keeping session kill for {}: {e}", entry.gid);
+                            continue;
+                        }
+                    }
+                    if !record.remux_kill_acked && now < at.saturating_add(REMUX_SESSION_MAX_MS) {
                         ended.push(entry.gid);
                     }
                 }
                 None => {
-                    crate::lock(&state.grants.killed).remove(&entry.gid);
+                    if record.remux_kill_for.is_some() || record.remux_kill_acked {
+                        let mut record = record;
+                        record.remux_kill_for = None;
+                        record.remux_kill_acked = false;
+                        if let Err(e) = save(state, &record).await {
+                            eprintln!("grants sweep: clearing old session kill for {}: {e}", entry.gid);
+                        }
+                    }
                 }
             },
             Ok(None) => gone.push(entry.gid),
@@ -2760,7 +2819,7 @@ mod tests {
         for gid in [&gid, &other] {
             let stored: Record = load(&h.state, gid).await.unwrap().unwrap();
             assert!(stored.revoked_at.is_some() && stored.installs.is_empty() && stored.devices.is_empty());
-            assert!(crate::lock(&h.state.grants.killed).contains(gid), "its sessions were ended");
+            assert!(stored.remux_kill_acked, "its sessions were ended");
         }
         let after = h.send("GET", "/grant/addons", None, &grant_headers(&header)).await;
         assert_eq!(after.status(), StatusCode::NOT_FOUND);
@@ -3125,12 +3184,87 @@ mod tests {
         let (gid, _) = invited(&h, json!({ "codeExpiresAt": 1_000_000 + DAY_MS })).await;
         h.advance(DAY_MS);
         sweep(&h.state).await;
-        assert!(!crate::lock(&h.state.grants.killed).contains(&gid));
+        assert!(!load(&h.state, &gid).await.unwrap().unwrap().remux_kill_acked);
 
         let quiet = harness().await;
         let (gid, _) = invited(&quiet, json!({})).await;
         assert_eq!(host_call(&quiet, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
-        assert!(crate::lock(&quiet.state.grants.killed).contains(&gid), "nothing to end counts as ended");
+        assert!(
+            load(&quiet.state, &gid).await.unwrap().unwrap().remux_kill_acked,
+            "nothing to end counts as ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_kill_is_not_retried_past_the_longest_remux_session() {
+        fn unavailable(path: &str) -> (StatusCode, &'static str, String) {
+            assert_eq!(path, "/remux/admin/kill");
+            (StatusCode::SERVICE_UNAVAILABLE, "application/json", json!({ "error": "stopped" }).to_string())
+        }
+        let (h, seen) = relaying(unavailable, Some("edge-secret")).await;
+        let (gid, _) = redeemed(&h, json!({})).await;
+        assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        h.advance(REMUX_SESSION_MAX_MS);
+        sweep(&h.state).await;
+        assert_eq!(seen.lock().unwrap().len(), 1, "nothing from the revoked session can still be alive");
+    }
+
+    #[tokio::test]
+    async fn a_revocation_kill_survives_edge_and_remux_restarts() {
+        let dir = temp_dir();
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe); // den-remux is stopped when the grant is revoked.
+        let base = format!("http://{addr}");
+
+        let gid = {
+            let relay = base.clone();
+            let h = members_only(Harness::in_dir_with(dir.clone(), move |s| {
+                s.relays = crate::parse_relays(&format!("/remux={relay}"));
+                s.remux_edge_secret = Some("edge-secret".into());
+            }))
+            .await;
+            let (gid, _) = redeemed(&h, json!({})).await;
+            assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+            let stored = load(&h.state, &gid).await.unwrap().unwrap();
+            assert!(
+                stored.remux_kill_for.is_some() && !stored.remux_kill_acked,
+                "the failed kill is durable"
+            );
+            gid
+        }; // den-edge restarts too.
+
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let counted = Arc::clone(&counted);
+            async move {
+                if req.uri().path() == "/remux/admin/kill" {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }
+                StatusCode::OK
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let restarted = |relay: String| {
+            Harness::in_dir_with(dir.clone(), move |s| {
+                s.relays = crate::parse_relays(&format!("/remux={relay}"));
+                s.remux_edge_secret = Some("edge-secret".into());
+            })
+        };
+        let h = restarted(base.clone());
+        sweep(&h.state).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "remux receives the kill after both services return");
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().remux_kill_acked);
+        drop(h);
+
+        let h = restarted(base);
+        sweep(&h.state).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the durable acknowledgement prevents another kill");
     }
 
     #[tokio::test]
