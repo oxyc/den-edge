@@ -1232,6 +1232,9 @@ fn answer_response(
         header::RETRY_AFTER,
         header::HeaderName::from_static("server-timing"),
         header::HeaderName::from_static("x-den-degraded"),
+        // Atlas binds restricted discovery JSON to the exact policy that shaped it. Forward the proof so the web
+        // client can reject an unrestricted or wrong-policy representation from any intervening cache.
+        header::HeaderName::from_static("x-den-policy"),
         // What the answer is built from, so the deploy that changes it can purge Cloudflare's copy by name
         // (atlas's `atlas`). Cloudflare strips it before a browser sees the answer.
         header::HeaderName::from_static("cache-tag"),
@@ -3846,7 +3849,7 @@ mod tests {
     }
 
     const CHUNKED_JSON: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nset-cookie: a=b\r\n\
-                                etag: \"e\"\r\ntransfer-encoding: chunked\r\n\r\n";
+                                etag: \"e\"\r\nx-den-policy: maturity:v2\r\ntransfer-encoding: chunked\r\n\r\n";
 
     /// An answer nothing here rewrites is passed on as it arrives — the whole of it, with only the allowed headers.
     #[tokio::test]
@@ -3856,6 +3859,7 @@ mod tests {
         let answer = h.send("GET", "/scout/catalog.json", None, &[]).await;
         assert_eq!(answer.status(), StatusCode::OK);
         assert_eq!(answer.headers()["etag"], "\"e\"");
+        assert_eq!(answer.headers()["x-den-policy"], "maturity:v2");
         assert!(!answer.headers().contains_key("set-cookie"), "headers are allowlisted as before");
         let got = axum::body::to_bytes(answer.into_body(), usize::MAX).await.unwrap();
         assert!(got == body, "{} bytes of {}", got.len(), body.len());

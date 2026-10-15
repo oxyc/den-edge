@@ -84,6 +84,13 @@ export function policyKey(policy: ContentPolicy | undefined): string {
   ].join('_');
 }
 
+/** Atlas' canonical response identity (`maturity::Policy::cache_identity`). Restricted catalog answers carry this
+ * in `X-Den-Policy`, so a client can prove an intermediary did not substitute another policy's representation. */
+export function atlasPolicyIdentity(policy: ContentPolicy | undefined): string | undefined {
+  if (!isRestricted(policy)) return undefined;
+  return `maturity:v2;maximumAge=${policy.maximumAge ?? '-'};unknownRatings=${policy.unknownRatings};region=${policy.region ?? '-'};kidAudience=${policy.kidAudience ?? '-'}`;
+}
+
 /** The fields den-atlas reads (`maturity::Policy`), in the same order everywhere so a URL has one spelling. */
 export function atlasPolicyFields(policy: ContentPolicy | undefined): [string, string][] {
   if (!isRestricted(policy)) return [];
