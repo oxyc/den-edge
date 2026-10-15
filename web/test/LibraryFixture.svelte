@@ -206,6 +206,7 @@
       put(row);
       return row;
     },
+    profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
 

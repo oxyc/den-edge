@@ -107,7 +107,9 @@
           personalOnly
           contentPolicy={session.contentPolicy}
           role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
-          onpolicy={profiles && session.identity.kind === 'profile' ? changePolicy : undefined}
+          onpolicy={profiles && !profiles.preview && session.identity.kind === 'profile'
+            ? changePolicy
+            : undefined}
         />
       {/if}
       <AboutSection credits={[...ATLAS_FALLBACK]} />

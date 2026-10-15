@@ -132,6 +132,7 @@
       await this.write(row);
       return true;
     },
+    profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
   const loadSeason = async (seriesId: number, season: number) => {

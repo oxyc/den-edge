@@ -61,6 +61,7 @@
       put(row);
       return true;
     },
+    profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
   const library = fixtureLibraryService({ log, device });

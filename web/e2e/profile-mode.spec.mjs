@@ -319,9 +319,11 @@ test('preview Kid and Visitor Settings are personal while household administrati
   await expect(page.getByRole('link', { name: 'Connections', exact: true })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Profiles', exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Profiles', level: 2 })).toHaveCount(0);
-  await expect(page.getByText('Up to age 12 · managed by Owner')).toBeVisible();
-  await page.getByRole('button', { name: 'Streaming household Finland' }).click();
-  await expect(page.getByText('Region: Finland · 1 shared service')).toBeVisible();
+  // Services and region are the profile's own now, not the household's; the preview's age limit is still the Owner's.
+  await expect(page.getByText('Up to age 12')).toBeVisible();
+  await expect(page.getByRole('button', { name: /My services/ })).toBeVisible();
+  await expect(page.locator('#region')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Streaming household/ })).toHaveCount(0);
   await expect(page.getByText('Parental PIN')).toHaveCount(0);
 
   await page.getByLabel('Audio language').selectOption('da');
