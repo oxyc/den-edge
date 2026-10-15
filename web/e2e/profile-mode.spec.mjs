@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import { existsSync } from 'node:fs';
+import { devices, expect, test, webkit } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { routeLibraryEdge } from './library-edge.mjs';
 import { guardNetwork } from './network.mjs';
@@ -388,6 +389,147 @@ test('preview Kid and Visitor Settings are personal while household administrati
     )
     .toEqual([]);
   await expect(page.getByLabel('Audio language')).toHaveValue('da');
+});
+
+// A Kid's Settings at phone width: the Owner PIN prompt's field fills the prompt, and the Content limit controls are
+// two labelled rows. The PIN field was a few characters wide in WebKit, where a grid item with `justify-items: start`
+// shrinks to its content and the field's `width: 100%` then resolves against that.
+async function kidSettingsAtPhoneWidth(page, name) {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await guardNetwork(page);
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000001',
+      }),
+    ),
+  );
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?settings&locked&contentLimit`);
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+
+  const gate = page.locator('.settings-gate');
+  await expect(gate.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  const box = (locator) => locator.evaluate((el) => el.getBoundingClientRect().toJSON());
+  const form = await box(gate.locator('form'));
+  const pin = await box(gate.locator('.pin-entry'));
+  const slots = await box(gate.locator('.pin-slots'));
+  expect(pin.width).toBeGreaterThan(300);
+  // PinInput caps itself at 360px, as in every other PIN prompt; below that it spans the prompt.
+  const expected = Math.min(form.width, 360);
+  expect(Math.abs(pin.width - expected)).toBeLessThanOrEqual(1);
+  expect(Math.abs(slots.width - expected)).toBeLessThanOrEqual(1);
+  // The switcher's PIN prompt puts 16px between the slots and its button.
+  const submit = await box(gate.getByRole('button', { name: 'Open settings' }));
+  expect(Math.round(submit.top - slots.bottom)).toBe(16);
+  await gate.screenshot({ path: test.info().outputPath(`${name}-owner-pin.png`) });
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  const ageLimit = page.locator('#profile-age-limit');
+  const hideUnrated = page.locator('#profile-hide-unrated');
+  await expect(ageLimit).toBeVisible();
+  await expect(page.getByText(/Changed with the Owner PIN/)).toHaveCount(0);
+  await expect(page.getByText(/applies to this profile on every device/)).toHaveCount(0);
+  for (const [row, label] of [
+    [ageLimit, 'Age limit'],
+    [hideUnrated, 'Hide unrated titles'],
+  ]) {
+    await expect(row.locator('.label')).toHaveText(label);
+    await expect(row.locator('.label')).toBeVisible();
+  }
+  await expect(page.getByRole('combobox', { name: 'Age limit' })).toHaveValue('12');
+  await expect(page.getByRole('switch', { name: 'Hide unrated titles' })).toBeChecked();
+  // Each is a row of the plate like the others: the same height and left edge, one under the other.
+  const [first, second, other] = await Promise.all([
+    box(ageLimit),
+    box(hideUnrated),
+    box(page.locator('#region').first()),
+  ]);
+  expect(second.top).toBeGreaterThan(first.bottom - 1);
+  expect(first.left).toBe(other.left);
+  expect(first.width).toBe(other.width);
+  expect(first.height).toBe(other.height);
+  expect(second.height).toBe(other.height);
+  await page.getByRole('switch', { name: 'Hide unrated titles' }).click();
+  await expect(page.getByRole('switch', { name: 'Hide unrated titles' })).not.toBeChecked();
+  await ageLimit.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: test.info().outputPath(`${name}-content-limit.png`) });
+}
+
+// Switching profile from Settings lands on Home (a replace, so Back never returns to the gated Settings) rather than
+// reloading Settings behind the Kid's Owner PIN prompt.
+async function switchToKidFromSettings(page) {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${ROUTED_FIXTURE}?nav`);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/settings' } })),
+  );
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/settings');
+  const history = await page.evaluate(() => history.length);
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await expect(page.getByRole('dialog', { name: 'Who’s watching?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toHaveCount(0);
+  await expect(page.locator('#settings-gate-pin')).toHaveCount(0);
+  expect(await page.evaluate(() => history.length)).toBe(history);
+}
+
+test('switching to Kid from Settings at 390px in Chromium lands on Home', async ({ page }) => {
+  await switchToKidFromSettings(page);
+});
+
+test('switching to Kid from Settings at 390px in WebKit lands on Home', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    const page = await (await browser.newContext({ ...devices['iPhone 15'] })).newPage();
+    await switchToKidFromSettings(page);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Kid Settings at 390px in Chromium: full-width Owner PIN, labelled Content limit rows', async ({
+  page,
+}) => {
+  await kidSettingsAtPhoneWidth(page, 'chromium');
+});
+
+test('Kid Settings at 390px in WebKit: full-width Owner PIN, labelled Content limit rows', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    const page = await (await browser.newContext({ ...devices['iPhone 15'] })).newPage();
+    await kidSettingsAtPhoneWidth(page, 'webkit');
+  } finally {
+    await browser.close();
+  }
 });
 
 test('an in-flight switch cannot finish behind a dismissed dialog', async ({ page }) => {

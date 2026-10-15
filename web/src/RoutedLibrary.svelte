@@ -525,8 +525,11 @@
     if (session !== active) {
       // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
       // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
-      if (!profileControlPublished)
-        routedProfile = profileSessionKey(active.identity, active.policyKey);
+      const next = profileSessionKey(active.identity, active.policyKey);
+      // The new session's Router is built from the address as it is when `session` changes, so a later switch
+      // retires the address here, first, not in the pre-effect below (which runs after that Router is built).
+      if (profileControlPublished && next !== routedProfile) resetProfileNavigation();
+      routedProfile = next;
       session = active;
     }
     if (!profileControlPublished) {

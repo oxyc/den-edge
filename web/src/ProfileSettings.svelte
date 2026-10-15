@@ -121,9 +121,18 @@
   .settings-gate {
     display: grid;
     gap: 12px;
-    justify-items: start;
     max-width: 420px;
     margin: 64px auto;
+  }
+
+  /* The switcher's PIN prompt spacing. */
+  .settings-gate form {
+    display: grid;
+    gap: 16px;
+  }
+
+  .settings-gate button {
+    justify-self: start;
   }
 
   .settings-gate .denied {

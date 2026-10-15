@@ -564,7 +564,58 @@
     </p>
   </SettingRow>
 
-  {#if personalOnly}
+  {#if personalOnly && onpolicy && contentPolicy}
+    {@const policy = contentPolicy}
+    <SettingRow id="profile-age-limit" label="Age limit">
+      {#snippet control()}
+        <Select
+          labelledby="profile-age-limit-label"
+          value={String(policy.maximumAge ?? '')}
+          options={[
+            { value: '', label: 'No age limit' },
+            ...[
+              ...new Set([
+                0,
+                3,
+                6,
+                8,
+                10,
+                12,
+                13,
+                15,
+                16,
+                18,
+                ...(policy.maximumAge === null ? [] : [policy.maximumAge]),
+              ]),
+            ]
+              .sort((a, b) => a - b)
+              .map((age) => ({ value: String(age), label: `Up to age ${age}` })),
+          ]}
+          {disabled}
+          onchange={(age) =>
+            void onpolicy({
+              maximumAge: age === '' ? null : Number(age),
+              unknownRatings: policy.unknownRatings,
+            })}
+        />
+      {/snippet}
+    </SettingRow>
+
+    <SettingRow id="profile-hide-unrated" label="Hide unrated titles">
+      {#snippet control()}
+        <Switch
+          labelledby="profile-hide-unrated-label"
+          checked={policy.unknownRatings === 'block'}
+          {disabled}
+          onchange={(hide) =>
+            void onpolicy({
+              maximumAge: policy.maximumAge,
+              unknownRatings: hide ? 'block' : 'allow',
+            })}
+        />
+      {/snippet}
+    </SettingRow>
+  {:else if personalOnly}
     <SettingRow
       id="profile-policy"
       label="Content limit"
@@ -574,66 +625,11 @@
           ? `Up to age ${contentPolicy.maximumAge}`
           : 'Managed by Owner'}
     >
-      {#if onpolicy && contentPolicy}
-        {@const policy = contentPolicy}
-        <div class="form">
-          <Select
-            label="Age limit"
-            value={String(policy.maximumAge ?? '')}
-            options={[
-              { value: '', label: 'No age limit' },
-              ...[
-                ...new Set([
-                  0,
-                  3,
-                  6,
-                  8,
-                  10,
-                  12,
-                  13,
-                  15,
-                  16,
-                  18,
-                  ...(policy.maximumAge === null ? [] : [policy.maximumAge]),
-                ]),
-              ]
-                .sort((a, b) => a - b)
-                .map((age) => ({ value: String(age), label: `Up to age ${age}` })),
-            ]}
-            {disabled}
-            onchange={(age) =>
-              void onpolicy({
-                maximumAge: age === '' ? null : Number(age),
-                unknownRatings: policy.unknownRatings,
-              })}
-          />
-          <Segmented
-            name="unknown-ratings"
-            labelledby="profile-policy-label"
-            options={[
-              { value: 'block', label: 'Hide unrated' },
-              { value: 'allow', label: 'Show unrated' },
-            ]}
-            value={policy.unknownRatings}
-            {disabled}
-            onchange={(unknown) =>
-              void onpolicy({
-                maximumAge: policy.maximumAge,
-                unknownRatings: unknown === 'allow' ? 'allow' : 'block',
-              })}
-          />
-        </div>
-        <p class="foot">
-          Changed with the Owner PIN you opened these settings with. It applies to this profile on
-          every device.
-        </p>
-      {:else}
-        <p class="foot">
-          {role === 'kid'
-            ? 'Only Owner can change this profile’s age limit and unrated-title policy.'
-            : 'Visitor follows the content policy chosen by Owner.'}
-        </p>
-      {/if}
+      <p class="foot">
+        {role === 'kid'
+          ? 'Only Owner can change this profile’s age limit and unrated-title policy.'
+          : 'Visitor follows the content policy chosen by Owner.'}
+      </p>
     </SettingRow>
   {:else}
     <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>

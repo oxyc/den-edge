@@ -938,9 +938,8 @@ async function checkProfilePreferences(ctxFor, edge, wire, keyText, people) {
     (await page.locator('#profile-policy').count()) === 0,
   );
   await page.locator('#settings-gate-pin').fill(PIN);
-  await page.locator('#profile-policy').waitFor({ timeout: 30_000 });
-  await page.locator('#profile-policy > button.row').click();
-  await page.locator('#profile-policy-panel select').first().selectOption('8');
+  await page.locator('#profile-age-limit').waitFor({ timeout: 30_000 });
+  await page.locator('#profile-age-limit select').selectOption('8');
   const kidPolicy = async () => {
     const household = await readLibrary(edge, wire, keyText);
     const directory = household.rows.find((row) => row.profileDirectory)?.profileDirectory;
