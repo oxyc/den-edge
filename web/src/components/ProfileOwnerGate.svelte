@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  import Button from './Button.svelte';
   import PinInput from './PinInput.svelte';
 
   let { profiles }: { profiles: ProfileModeCoordinator } = $props();
@@ -61,9 +62,15 @@
       {/if}
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
-      <button type="submit" disabled={establishing || !pinReady}>
-        {establishing ? 'Opening…' : 'Use Owner'}
-      </button>
+      <div class="actions">
+        <Button
+          type="submit"
+          variant="primary"
+          label={establishing ? 'Opening…' : 'Use Owner'}
+          disabled={establishing || !pinReady}
+          busy={establishing}
+        />
+      </div>
     </form>
   {/if}
 </section>
@@ -94,20 +101,8 @@
     gap: 10px;
   }
 
-  button {
+  .actions {
     justify-self: end;
-    min-height: 36px;
-    padding: 0 14px;
-    border: 0;
-    border-radius: 9px;
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
-    cursor: pointer;
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   .denied {
