@@ -11,6 +11,7 @@ import { titlesOf } from './atlasRows';
 import { ContentServiceFault, type ContentServiceAuthority } from './contentServiceCore';
 import {
   ageAllowed,
+  atlasPolicyIdentity,
   failsClosed,
   isAgeRestricted,
   isRestricted,
@@ -1249,6 +1250,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           const response = await this.#atlasFetch(atlas, policy)(url);
           if (response.status === 404) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          const expectedPolicy = atlasPolicyIdentity(policy);
+          if (expectedPolicy && response.headers.get('x-den-policy') !== expectedPolicy)
+            throw new Error('atlas answered a chart for another content policy');
           const titles = this.#atlasChartTitles(await response.json());
           if (!keptByEdge(response)) rememberAtlasMetadata(titles, this.#providerFetch);
           return {

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ContentAuthority, WorkerContentCredentials } from './contentAuthority';
 import type { ContentPolicy, ContentRequest } from './contentServiceProtocol';
 import { forgetReused } from './reuse';
+import { atlasPolicyIdentity } from './contentPolicy';
 
 const KID: ContentPolicy = {
   maximumAge: 12,
@@ -12,8 +13,11 @@ const KID_QUERY = 'maximumAge=12&unknownRatings=block&kidAudience=child-or-teen'
 const LITTLE: ContentPolicy = { maximumAge: 7, unknownRatings: 'block', kidAudience: 'child' };
 const CEILING: ContentPolicy = { maximumAge: 13, unknownRatings: 'allow' };
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  });
 
 /** Public minimum ages by `type:id`; a title absent from the map is one the store has never heard of. */
 const AGES: Record<string, number | null> = {
@@ -97,7 +101,8 @@ describe('policy on every atlas request', () => {
   it('sends a Kid policy on a row, a chart, the shared billboard, related lists and a query', async () => {
     const w = world((url) => {
       if (url.includes('/recommend/')) return json({ slides: [] });
-      if (url.includes('/catalog/')) return json({ metas: [] });
+      if (url.includes('/catalog/'))
+        return json({ metas: [] }, 200, { 'x-den-policy': atlasPolicyIdentity(KID)! });
       if (url.includes('/index/suggest/') || url.includes('/index/similar/'))
         return json({ ids: [1], mixed: [{ type: 'movie', id: 1 }], titles: [] });
       return json({ ...titleBody, order: 'stable', counts: {} });
@@ -305,6 +310,25 @@ describe('a title only a non-atlas source names', () => {
       [],
     );
     expect(w.atlas.every((url) => url.includes(KID_QUERY))).toBe(true);
+  });
+
+  it('refuses a chart response that is not bound to the active Kid policy', async () => {
+    const w = world(() =>
+      json(
+        { metas: [{ type: 'series', moviedb_id: 256721, name: 'Gachiakuta' }] },
+        200,
+        { 'x-den-policy': atlasPolicyIdentity(LITTLE)! },
+      ),
+    );
+    await expect(
+      w.ask(
+        { kind: 'atlas.service.chart', catalog: { id: 'nfx-new', type: 'tv' }, country: 'FI' },
+        KID,
+      ),
+    ).resolves.toEqual({
+      kind: 'atlas.service.chart',
+      titles: { state: 'unavailable', provider: 'atlas', reason: 'network' },
+    });
   });
 
   it('keeps an Owner ceiling that admits unknown ratings on today’s TMDB surfaces, with the boundary check intact', async () => {
