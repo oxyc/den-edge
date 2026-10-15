@@ -1,5 +1,5 @@
 <!-- Settings › Content, as on the TV: what's hidden from browsing, which services get shelves, the region, the
-     year floor, which warnings and ratings show, the player's subtitle list, and the parental limit. Each of the
+     year floor, which warnings and ratings show, the player's subtitle list, and legacy parental controls. Each of the
      TV's pushed screens opens in place here. -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -259,7 +259,8 @@
     save(change.services(on ? [...rest, { id: service.id, country }] : rest));
   }
 
-  // Parental controls: once a PIN is set, the limit changes only after it's entered.
+  // The Owner PIN remains after the one-library maturity ceiling retires: it protects leaving a Kid profile and
+  // opening Kid Settings. In a legacy library the same editor still protects its old maturity ceiling.
   let unlocked = $state(false);
   let pinEntry = $state('');
   let pinWrong = $state(false);
@@ -632,20 +633,26 @@
       </p>
     </SettingRow>
   {:else}
-    <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>
-      <h3 id="maturity-ceiling">Maturity ceiling</h3>
-      <Segmented
-        name="maturity-ceiling"
-        labelledby="maturity-ceiling"
-        options={[
-          { value: 'none', label: 'None' },
-          { value: 'pg13', label: 'PG-13' },
-          { value: 'r', label: 'R' },
-        ]}
-        value={prefs.maturityCeiling ?? 'none'}
-        disabled={disabled || !canChangeLimit}
-        onchange={(v) => save(change.maturityCeiling(v === 'pg13' || v === 'r' ? v : undefined))}
-      />
+    <SettingRow
+      id={pinRemovable ? 'parental-controls' : 'owner-pin'}
+      label={pinRemovable ? 'Parental controls' : 'Owner PIN'}
+      value={pinRemovable ? limitLabel : pinConfigured ? 'Set' : 'Not set'}
+    >
+      {#if pinRemovable}
+        <h3 id="maturity-ceiling">Maturity ceiling</h3>
+        <Segmented
+          name="maturity-ceiling"
+          labelledby="maturity-ceiling"
+          options={[
+            { value: 'none', label: 'None' },
+            { value: 'pg13', label: 'PG-13' },
+            { value: 'r', label: 'R' },
+          ]}
+          value={prefs.maturityCeiling ?? 'none'}
+          disabled={disabled || !canChangeLimit}
+          onchange={(v) => save(change.maturityCeiling(v === 'pg13' || v === 'r' ? v : undefined))}
+        />
+      {/if}
       {#if pinConfigured && !unlocked}
         <form
           bind:this={unlockForm}
@@ -657,16 +664,25 @@
         >
           <PinInput
             id="parental-pin"
-            label="Parental PIN"
+            label={pinRemovable ? 'Parental PIN' : 'Owner PIN'}
             bind:value={pinEntry}
             invalid={pinWrong}
             onvalue={() => (pinWrong = false)}
             oncomplete={() => void unlock()}
           />
-          <Button type="submit" variant="primary" label="Unlock" disabled={pinEntry.length < 4} />
+          <Button
+            type="submit"
+            variant="primary"
+            label={pinRemovable ? 'Unlock' : 'Continue'}
+            disabled={pinEntry.length < 4}
+          />
         </form>
         {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
-        <p class="foot">A PIN protects the maturity ceiling. Enter it to change the ceiling.</p>
+        <p class="foot">
+          {pinRemovable
+            ? 'A PIN protects the maturity ceiling. Enter it to change the ceiling.'
+            : 'Enter your current Owner PIN to change it.'}
+        </p>
       {:else}
         <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
         <form
@@ -679,7 +695,13 @@
         >
           <PinInput
             id="new-parental-pin"
-            label={pinConfigured ? 'New parental PIN' : 'Set a parental PIN'}
+            label={pinConfigured
+              ? pinRemovable
+                ? 'New parental PIN'
+                : 'New Owner PIN'
+              : pinRemovable
+                ? 'Set a parental PIN'
+                : 'Set an Owner PIN'}
             bind:value={newPin}
             autocomplete="new-password"
             oncomplete={() => void setPin()}
@@ -702,8 +724,9 @@
           {/if}
         </form>
         <p class="foot">
-          A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a
-          looser ceiling set here waits on each Apple TV until someone enters the PIN there.
+          {pinRemovable
+            ? 'A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a looser ceiling set here waits on each Apple TV until someone enters the PIN there.'
+            : 'The Owner PIN protects leaving a Kid profile and opens Kid Settings.'}
         </p>
       {/if}
     </SettingRow>

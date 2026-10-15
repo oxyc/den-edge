@@ -344,3 +344,15 @@ test('saving a provider key validates it in the content Worker before storing it
   await expect(row.getByRole('status')).toContainText('ratings are enabled');
   expect(checks).toEqual([{ key: 'candidate-omdb', pageOwned: false }]);
 });
+
+test('a profile household shows Owner PIN management instead of the legacy maturity ceiling', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles`);
+
+  await expect(page.getByRole('button', { name: /Owner PIN Set/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Parental controls/ })).toHaveCount(0);
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  await expect(page.getByRole('heading', { name: 'Maturity ceiling' })).toHaveCount(0);
+  await expect(page.getByText('Enter your current Owner PIN to change it.')).toBeVisible();
+});

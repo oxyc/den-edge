@@ -72,6 +72,9 @@
   const log = {
     readOnly: false,
     wireMinimum: 4,
+    get profileTopologyPresent() {
+      return new URLSearchParams(location.search).has('profiles');
+    },
     currentGeneration: undefined,
     pendingActions: 0,
     libraryId: fixtureLibraryId,
