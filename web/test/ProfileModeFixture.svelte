@@ -4,6 +4,7 @@
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
   import MobileProfileRow from '../src/components/MobileProfileRow.svelte';
   import ProfileSettings from '../src/ProfileSettings.svelte';
+  import ContentSection from '../src/settings/ContentSection.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
   import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
@@ -97,6 +98,10 @@
     false,
     true,
   );
+  let policy = $state<{ maximumAge: number | null; unknownRatings: 'allow' | 'block' }>({
+    maximumAge: 12,
+    unknownRatings: 'block',
+  });
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   let checked = $state(false);
   let capability = $state<ProfilesCapability | 'checking'>('checking');
@@ -247,8 +252,28 @@
     {/if}
     {#if params.has('settings') && profiles.mode !== 'owner'}
       {#key profiles.session.identity}
-        <ProfileSettings session={profiles.session} />
+        <ProfileSettings
+          session={profiles.session}
+          profiles={params.has('locked') ? profiles : null}
+        />
       {/key}
+    {/if}
+    <!-- A Kid's Settings once the Owner PIN has opened them: the preview directory takes no policy writes, so the
+         editable Content limit rows are rendered here with a stand-in writer. -->
+    {#if params.has('contentLimit') && profiles.mode === 'kid' && profiles.session.preferences?.value}
+      <ContentSection
+        prefs={profiles.session.preferences.value}
+        content={profiles.session.content}
+        pinConfigured={false}
+        disabled={false}
+        save={() => {}}
+        savePin={async () => false}
+        verifyPin={async () => false}
+        personalOnly
+        contentPolicy={policy}
+        role="kid"
+        onpolicy={async (next) => ((policy = next), true)}
+      />
     {/if}
   {:else if profiles}
     <ProfileOwnerGate {profiles} />
