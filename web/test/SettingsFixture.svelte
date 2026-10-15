@@ -127,6 +127,7 @@
       for (const next of rows) put(next);
       return true;
     },
+    profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
 

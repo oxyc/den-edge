@@ -165,7 +165,11 @@ const deferred = <T>() => {
   return { promise, resolve, reject };
 };
 
-function profileModels(openings: Map<string, ReturnType<typeof deferred<unknown>>>) {
+/** `region`, when given, is the watch region every opened profile library holds in its own preferences. */
+function profileModels(
+  openings: Map<string, ReturnType<typeof deferred<unknown>>>,
+  region?: string,
+) {
   const handles: Array<{ key: string; model: LibraryModel; close: ReturnType<typeof vi.fn> }> = [];
   const factory: ProfileActivityModelFactory = (key) => {
     const opening = openings.get(key) ?? deferred<unknown>();
@@ -173,7 +177,16 @@ function profileModels(openings: Map<string, ReturnType<typeof deferred<unknown>
     const model = {
       ready: opening.promise,
       close: vi.fn(),
-      settings: { connection: 'connecting' },
+      settings: region
+        ? {
+            connection: 'ready',
+            value: {
+              kind: 'settings',
+              preferences: { watchRegion: region, services: [], servicesConfigured: false },
+              assistant: { read: false, write: false },
+            },
+          }
+        : { connection: 'connecting' },
     } as unknown as LibraryModel;
     const close = vi.fn(() => model.close());
     handles.push({ key, model, close });
@@ -1006,7 +1019,7 @@ describe('ProfileModeCoordinator', () => {
       [ownerProfile.libraryKey, deferred<unknown>()],
       [kid.libraryKey, deferred<unknown>()],
     ]);
-    const models = profileModels(openings);
+    const models = profileModels(openings, 'fi');
     const first = owner(storage, true, null, undefined, directory, models.factory);
     openings.get(kid.libraryKey)!.resolve({});
     await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));

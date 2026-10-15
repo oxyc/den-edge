@@ -71,9 +71,10 @@ export function syntheticRows(now = Date.now(), { legacy = false, large = false 
     setting('prefs', {
       'den.hideAnime': { value: { bool: true }, at: at(40) },
       'den.watchRegion': text('FI', at(60)),
+      'den.myServicePicks': { value: { strings: ['8@FI'] }, at: at(60) },
       'den.audioLanguages': { value: { strings: ['en', 'fi'] }, at: at(60) },
-      // Non-default values for personal keys, which the split moves to the Owner library, so Settings after it can
-      // be told from defaults. The watch region above is the household's and stays.
+      // Non-default values for every preference, which the split moves to the Owner library (all of `set:prefs` is
+      // profile-scoped), so Settings after it can be told from defaults.
       'den.preferredSubtitleLanguage': text('fi', at(50)),
       'den.autoSkipSegments': { value: { bool: true }, at: at(50) },
       'den.excludedLanguages': { value: { strings: ['hi', 'ko'] }, at: at(50) },

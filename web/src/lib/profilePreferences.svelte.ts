@@ -1,6 +1,6 @@
 import { RATING_SOURCES } from '../settings/catalogs';
 import type { PreferenceChanges } from '../settings/preferences';
-import type { LibraryPreferences } from './libraryServiceProtocol';
+import type { LibraryPreferences, ServiceRef } from './libraryServiceProtocol';
 import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { ProfileIdentity } from './profileIdentity';
 import type { ProfilePolicy } from './profilePolicy';
@@ -10,10 +10,12 @@ const KID_PREFIX = 'den.profile.preferences.preview.v1:';
 const VISITOR_DOCUMENT = 'preferences';
 
 type Events = Pick<Window, 'addEventListener' | 'removeEventListener'>;
-type PersonalPreferences = Omit<
-  LibraryPreferences,
-  'watchRegion' | 'services' | 'servicesConfigured' | 'maturityCeiling'
->;
+/**
+ * A preview profile's own document. `watchRegion` and `servicesConfigured` say whether it has chosen its own region and
+ * services yet: until it has, it reads the household's, so a Kid shown before its library opens still sees the list it
+ * would have been seeded with.
+ */
+type PersonalPreferences = Omit<LibraryPreferences, 'maturityCeiling'>;
 
 export interface ProfilePreferences {
   readonly value: LibraryPreferences | undefined;
@@ -36,6 +38,9 @@ const personalDefaults = (): PersonalPreferences => ({
   autoplayTrailers: true,
   ratingSources: RATING_SOURCES.map((source) => source.id) as PersonalPreferences['ratingSources'],
   shownWarnings: [],
+  watchRegion: undefined,
+  services: [],
+  servicesConfigured: false,
 });
 
 const strings = (value: unknown): string[] | undefined =>
@@ -81,16 +86,45 @@ const readPersonal = (value: unknown): PersonalPreferences => {
         RATING_SOURCES.some((known) => known.id === source),
       ) as PersonalPreferences['ratingSources'] | undefined) ?? defaults.ratingSources,
     shownWarnings: strings(stored.shownWarnings) ?? defaults.shownWarnings,
+    watchRegion:
+      typeof stored.watchRegion === 'string' && /^[A-Z]{2}$/.test(stored.watchRegion)
+        ? stored.watchRegion
+        : defaults.watchRegion,
+    ...readServices(stored),
   };
+};
+
+const readServices = (
+  stored: Record<string, unknown>,
+): Pick<PersonalPreferences, 'services' | 'servicesConfigured'> => {
+  const picks = Array.isArray(stored.services)
+    ? stored.services.filter(
+        (pick): pick is ServiceRef =>
+          !!pick &&
+          typeof pick === 'object' &&
+          Number.isInteger((pick as ServiceRef).id) &&
+          typeof (pick as ServiceRef).country === 'string',
+      )
+    : [];
+  return stored.servicesConfigured === true
+    ? { services: picks.map(({ id, country }) => ({ id, country })), servicesConfigured: true }
+    : { services: [], servicesConfigured: false };
 };
 
 const applyPersonalPatch = (
   current: PersonalPreferences,
   patch: PreferenceChanges,
 ): PersonalPreferences => {
-  if ('watchRegion' in patch || 'services' in patch || 'maturityCeiling' in patch)
-    throw new TypeError('A profile cannot write household settings or content policy');
+  assertPersonalPatch(patch);
   const next = structuredClone(current);
+  if (patch.watchRegion !== undefined) next.watchRegion = patch.watchRegion ?? undefined;
+  if (patch.services)
+    Object.assign(
+      next,
+      patch.services.kind === 'default'
+        ? { services: [], servicesConfigured: false }
+        : { services: patch.services.values.map((s) => ({ ...s })), servicesConfigured: true },
+    );
   if (patch.excludedGenres) next.excludedGenres = [...patch.excludedGenres];
   if (patch.excludedLanguages) next.excludedLanguages = [...patch.excludedLanguages];
   if (patch.hideAnime !== undefined) next.hideAnime = patch.hideAnime;
@@ -168,11 +202,12 @@ export class PreviewProfilePreferences implements ProfilePreferences {
   get value(): LibraryPreferences | undefined {
     const household = this.household.settings.value?.preferences;
     if (!household) return undefined;
+    const own = structuredClone(this.#personal);
     return {
-      ...structuredClone(this.#personal),
-      watchRegion: household.watchRegion,
-      services: [...household.services],
-      servicesConfigured: household.servicesConfigured,
+      ...own,
+      watchRegion: own.watchRegion ?? household.watchRegion,
+      services: own.servicesConfigured ? own.services : [...household.services],
+      servicesConfigured: own.servicesConfigured || household.servicesConfigured,
       maturityCeiling: undefined,
     };
   }
@@ -208,8 +243,9 @@ export class PreviewProfilePreferences implements ProfilePreferences {
 }
 
 /**
- * A persistent profile's personal preference document. Reads combine the profile's own encrypted preferences with
- * the household-only region/service values, while writes can reach only the profile activity library.
+ * A persistent profile's preference document: every preference, region and services included, is read from and
+ * written to the profile's own encrypted library, never the household (profiles-v1 §6). Only the content policy is not
+ * here: it lives in the directory.
  */
 export class SyncedProfilePreferences implements ProfilePreferences {
   readonly policy: ProfilePolicy;
@@ -217,27 +253,23 @@ export class SyncedProfilePreferences implements ProfilePreferences {
   constructor(
     readonly identity: ProfileIdentity,
     private readonly model: LibraryModel,
-    private readonly household: ProfilePolicy,
   ) {
     if (identity.kind !== 'profile')
       throw new TypeError('Synced profile preferences require a persistent profile');
     const effectiveSettings = () => {
       const personal = model.settings;
-      const shared = household.settings;
-      const profilePreferences = personal.value?.preferences;
-      const householdPreferences = shared.value?.preferences;
+      const preferences = personal.value?.preferences;
       return {
         connection: personal.connection,
         version: personal.version,
-        error: personal.error ?? shared.error,
-        value:
-          profilePreferences && householdPreferences
-            ? {
-                kind: 'settings' as const,
-                preferences: mergeProfilePreferences(profilePreferences, householdPreferences),
-                assistant: { read: false, write: false },
-              }
-            : undefined,
+        error: personal.error,
+        value: preferences
+          ? {
+              kind: 'settings' as const,
+              preferences: ownPreferences(preferences),
+              assistant: { read: false, write: false },
+            }
+          : undefined,
       };
     };
     this.policy = Object.freeze({
@@ -248,9 +280,8 @@ export class SyncedProfilePreferences implements ProfilePreferences {
   }
 
   get value(): LibraryPreferences | undefined {
-    const personal = this.model.settings.value?.preferences;
-    const household = this.household.settings.value?.preferences;
-    return personal && household ? mergeProfilePreferences(personal, household) : undefined;
+    const preferences = this.model.settings.value?.preferences;
+    return preferences ? ownPreferences(preferences) : undefined;
   }
 
   async patch(changes: PreferenceChanges): Promise<void> {
@@ -262,20 +293,11 @@ export class SyncedProfilePreferences implements ProfilePreferences {
 }
 
 const assertPersonalPatch = (patch: PreferenceChanges): void => {
-  if ('watchRegion' in patch || 'services' in patch || 'maturityCeiling' in patch)
-    throw new TypeError('A profile cannot write household settings or content policy');
+  if ('maturityCeiling' in patch)
+    throw new TypeError('A profile cannot write its content policy through preferences');
 };
 
-const mergeProfilePreferences = (
-  personal: Immutable<LibraryPreferences>,
-  household: Immutable<LibraryPreferences>,
-): LibraryPreferences => {
-  const copy = structuredClone(personal) as LibraryPreferences;
-  return {
-    ...copy,
-    watchRegion: household.watchRegion,
-    services: household.services.map((service) => ({ ...service })),
-    servicesConfigured: household.servicesConfigured,
-    maturityCeiling: undefined,
-  };
-};
+const ownPreferences = (preferences: Immutable<LibraryPreferences>): LibraryPreferences => ({
+  ...(structuredClone(preferences) as LibraryPreferences),
+  maturityCeiling: undefined,
+});

@@ -80,6 +80,28 @@ export class HouseholdSession {
     return (await this.#model?.verifyParentalPin(pin)) ?? false;
   }
 
+  /**
+   * Give a profile library the preferences an older household still holds that it has not decided (profiles-v1
+   * §6.3). The household's values are read and handed over here, never lent to the profile.
+   */
+  async seedProfilePreferences(profile: LibraryModel): Promise<void> {
+    if (!this.#model || profile === this.#model) return;
+    await this.#model.ready;
+    await profile.ready;
+    await profile.seedPreferences(await this.#model.rawPreferences());
+  }
+
+  /** Change a Kid's content policy; the household control model owns the directory, the Owner PIN authorizes it. */
+  async setKidPolicy(
+    profile: string,
+    policy: { maximumAge: number | null; unknownRatings: 'allow' | 'block' },
+    pin: string,
+  ): Promise<boolean> {
+    if (!this.#model) return false;
+    await this.#model.setKidPolicy(profile, policy, pin);
+    return true;
+  }
+
   /** Set the household's Owner PIN; true once den-edge holds it, so every device asks for it. */
   async setParentalPin(pin: string): Promise<boolean> {
     if (!this.#model) return false;

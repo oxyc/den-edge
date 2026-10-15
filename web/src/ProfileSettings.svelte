@@ -1,5 +1,10 @@
-<!-- Personal settings for Kid and Visitor. No household writer is reachable here. -->
+<!--
+  A profile's own settings, services and region included. No household writer is reachable here. A Kid's are behind
+  the Owner PIN, asked once per session and again after any profile switch.
+-->
 <script lang="ts">
+  import PinInput from './components/PinInput.svelte';
+  import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   import AboutSection from './settings/AboutSection.svelte';
   import ContentSection from './settings/ContentSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
@@ -8,11 +13,36 @@
   import type { ProfileSession } from './lib/profileSession.svelte';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
 
-  let { session }: { session: ProfileSession } = $props();
+  let {
+    session,
+    profiles = null,
+  }: { session: ProfileSession; profiles?: ProfileModeCoordinator | null } = $props();
   const prefs = $derived((session.preferences as ProfilePreferences).value);
   let saving = $state(false);
   let failure = $state<string | null>(null);
   const role = $derived(session.identity.kind === 'visitor' ? 'Visitor' : 'Kid');
+  const locked = $derived(profiles?.settingsLocked ?? false);
+  let pin = $state('');
+  let denied = $state(false);
+
+  async function unlock() {
+    if (!profiles || !/^\d{4}$/.test(pin)) return;
+    const entered = pin;
+    pin = '';
+    denied = !(await profiles.unlockSettings(entered));
+  }
+
+  async function changePolicy(policy: {
+    maximumAge: number | null;
+    unknownRatings: 'allow' | 'block';
+  }): Promise<boolean> {
+    saving = true;
+    failure = null;
+    const changed = (await profiles?.setKidPolicy(policy)) ?? false;
+    if (!changed) failure = 'Couldn’t change that. Check your connection and try again.';
+    saving = false;
+    return changed;
+  }
 
   function save(changes: Parameters<ProfilePreferences['patch']>[0]) {
     saving = true;
@@ -27,39 +57,79 @@
   }
 </script>
 
-<div class="settings profile-settings">
-  <SettingsNav variant="rail" sections={['playback', 'content', 'about']} />
-  <div class="page">
-    <div class="title">
-      <div>
-        <h1>Settings</h1>
-        <p>{role} profile</p>
-      </div>
-    </div>
-    <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
-    {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
-    {#if !prefs}
-      <p class="banner" role="status">Loading your settings…</p>
-    {:else}
-      <PlaybackSection {prefs} disabled={saving} {save} />
-      <ContentSection
-        {prefs}
-        content={session.content}
-        pinConfigured={false}
-        disabled={saving}
-        {save}
-        savePin={async () => false}
-        verifyPin={async () => false}
-        personalOnly
-        contentPolicy={session.contentPolicy}
-        role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
+{#if locked}
+  <section class="settings-gate" aria-labelledby="settings-gate-title">
+    <h1 id="settings-gate-title">Owner access</h1>
+    <p>Enter the Owner PIN to open this profile’s settings.</p>
+    <form
+      onsubmit={(event) => {
+        event.preventDefault();
+        void unlock();
+      }}
+    >
+      <PinInput
+        id="settings-gate-pin"
+        label="Owner PIN"
+        bind:value={pin}
+        focusOnMount
+        invalid={denied}
+        onvalue={() => (denied = false)}
+        oncomplete={() => void unlock()}
       />
-    {/if}
-    <AboutSection credits={[...ATLAS_FALLBACK]} />
+      {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
+      <button type="submit" disabled={!/^\d{4}$/.test(pin)}>Open settings</button>
+    </form>
+  </section>
+{:else}
+  <div class="settings profile-settings">
+    <SettingsNav variant="rail" sections={['playback', 'content', 'about']} />
+    <div class="page">
+      <div class="title">
+        <div>
+          <h1>Settings</h1>
+          <p>{role} profile</p>
+        </div>
+      </div>
+      <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
+      {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
+      {#if !prefs}
+        <p class="banner" role="status">Loading your settings…</p>
+      {:else}
+        <PlaybackSection {prefs} disabled={saving} {save} />
+        <ContentSection
+          {prefs}
+          content={session.content}
+          pinConfigured={false}
+          disabled={saving}
+          {save}
+          savePin={async () => false}
+          verifyPin={async () => false}
+          personalOnly
+          contentPolicy={session.contentPolicy}
+          role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
+          onpolicy={profiles && !profiles.preview && session.identity.kind === 'profile'
+            ? changePolicy
+            : undefined}
+        />
+      {/if}
+      <AboutSection credits={[...ATLAS_FALLBACK]} />
+    </div>
   </div>
-</div>
+{/if}
 
 <style>
+  .settings-gate {
+    display: grid;
+    gap: 12px;
+    justify-items: start;
+    max-width: 420px;
+    margin: 64px auto;
+  }
+
+  .settings-gate .denied {
+    color: var(--danger);
+  }
+
   .settings {
     display: grid;
     grid-template-columns: 220px minmax(0, 760px);

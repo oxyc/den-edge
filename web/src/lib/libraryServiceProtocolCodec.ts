@@ -13,6 +13,7 @@ import {
   type LibraryCommand,
   type LibraryObservation,
   type LibraryPreferencesPatch,
+  type StoredPreferenceValues,
   type LibraryQuery,
   type LibraryQueryResult,
   type LibraryMetadataShape,
@@ -464,6 +465,22 @@ function legacyClock(value: unknown): value is {
   );
 }
 
+/** A stored `set:prefs` `values` object: bounded, and each member a stamped value den-core decides about. */
+function storedPreferenceValues(value: unknown): value is StoredPreferenceValues {
+  return (
+    record(value) &&
+    Object.keys(value).length <= 256 &&
+    Object.entries(value).every(
+      ([key, stamped]) =>
+        boundedText(key, 256) &&
+        record(stamped) &&
+        'value' in stamped &&
+        Array.isArray(stamped.at) &&
+        JSON.stringify(stamped).length <= 65_536,
+    )
+  );
+}
+
 function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
   if (
     !record(value) ||
@@ -605,6 +622,8 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'preferences.patch':
       return exact(value, ['kind', 'patch']) && preferencesPatch(value.patch);
+    case 'preferences.seed':
+      return exact(value, ['kind', 'household']) && storedPreferenceValues(value.household);
     case 'api-key.set':
       return (
         exact(value, ['kind', 'service', 'value']) &&
@@ -767,7 +786,11 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'download.artwork')
     return exact(value, ['kind', 'target']) && downloadTarget(value.target);
-  if (value.kind === 'retained.services.get' || value.kind === 'retained.home-continue.get')
+  if (
+    value.kind === 'preferences.raw' ||
+    value.kind === 'retained.services.get' ||
+    value.kind === 'retained.home-continue.get'
+  )
     return exact(value, ['kind']);
   if (value.kind === 'retained.billboard.get')
     return exact(value, ['kind', 'scope']) && retainedBillboardScope(value.scope);
@@ -942,6 +965,15 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile.create.ack':
       return exact(value, ['kind', 'receipt']) && boundedText(value.receipt, 256);
+    case 'profile.policy.set':
+      return (
+        exact(value, ['kind', 'profile', 'maximumAge', 'unknownRatings', 'pin']) &&
+        hexId(value.profile) &&
+        (value.maximumAge === null ||
+          (integer(value.maximumAge) && value.maximumAge >= 0 && value.maximumAge <= 18)) &&
+        (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
+        pin(value.pin)
+      );
     case 'profile-key-reset.start':
       return (
         exact(value, ['kind', 'pin', 'destinationLibraryKey']) &&
@@ -1901,6 +1933,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       exact(value, ['kind', 'stillPath']) &&
       (value.stillPath === null || boundedText(value.stillPath, 2_048))
     );
+  if (value.kind === 'preferences.raw')
+    return exact(value, ['kind', 'values']) && storedPreferenceValues(value.values);
   if (value.kind === 'retained.services')
     return exact(value, ['kind', 'value']) && nullable(value.value, isRetainedServices);
   if (value.kind === 'retained.home-continue')
@@ -2110,6 +2144,11 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'profile.create.ack':
       return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
+    case 'profile.policy.set':
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'changed' || value.outcome === 'unchanged')
+      );
     case 'profile-key-reset.start':
     case 'profile-key-reset.resume':
     case 'profile-key-reset.confirm':

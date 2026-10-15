@@ -89,6 +89,7 @@
     relayMembership: async () => null,
     write: async (row: Row) => row,
     writeAt: async () => true,
+    profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
   const library = guest ? null : fixtureLibraryService({ log });

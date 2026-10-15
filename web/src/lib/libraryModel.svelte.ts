@@ -16,6 +16,7 @@ import type {
   LibraryMetadataShape,
   LibraryOverviewView,
   LibraryPreferencesPatch,
+  StoredPreferenceValues,
   LibraryQuery,
   LibraryQueryResult,
   LibraryTask,
@@ -398,6 +399,22 @@ export class LibraryModel {
     return this.#command({ kind: 'preferences.patch', patch }, operationId);
   }
 
+  /** The stored `set:prefs` values with their stamps: what profile seeding reads from an older household. */
+  async rawPreferences(): Promise<StoredPreferenceValues> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'preferences.raw' });
+    if (result.kind !== 'preferences.raw') throw wrongQueryResult('raw preferences');
+    return result.values;
+  }
+
+  /** Give this profile library the preferences `household` holds that it has not decided (profiles-v1 §6.3). */
+  seedPreferences(
+    household: StoredPreferenceValues,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'preferences.seed', household }, operationId);
+  }
+
   setApiKey(
     service: LibraryApiKeyService,
     value: string | null,
@@ -500,6 +517,17 @@ export class LibraryModel {
     if (created.result.kind !== 'profile.create') throw wrongQueryResult('profile create');
     await this.#ackProfileCreate(created.result.receipt);
     return created;
+  }
+
+  /** Change a Kid's content policy behind the Owner PIN; resolves once the directory holds it. */
+  async setKidPolicy(
+    profile: string,
+    policy: { maximumAge: number | null; unknownRatings: 'allow' | 'block' },
+    pin: string,
+  ): Promise<'changed' | 'unchanged'> {
+    const { result } = await this.task({ kind: 'profile.policy.set', profile, ...policy, pin });
+    if (result.kind !== 'profile.policy.set') throw wrongQueryResult('profile policy');
+    return result.outcome;
   }
 
   /**

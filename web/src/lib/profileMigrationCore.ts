@@ -305,6 +305,24 @@ export function profilesApplyCreate(input: {
   });
 }
 
+/** Set one Kid's content policy through den-core's stamped operation, which validates the complete result. */
+export function profilesApplyPolicy(input: {
+  readonly document: ProfileDirectoryDocument;
+  readonly profile: string;
+  readonly maximumAge: number | null;
+  readonly unknownRatings: 'allow' | 'block';
+  readonly at: Stamp;
+}): ProfileDirectoryDocument {
+  return syncPolicy<ProfileDirectoryDocument>({
+    op: 'profiles_apply',
+    document: input.document,
+    operation: 'policy',
+    profile: input.profile,
+    value: { maximumAge: input.maximumAge, unknownRatings: input.unknownRatings },
+    at: input.at,
+  });
+}
+
 /**
  * Rotate one live profile's library register through den-core's canonical stamped operation. A compound reset
  * applies this once per verified candidate with one durable fresh stamp; Web never patches the register itself.

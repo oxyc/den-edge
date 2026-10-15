@@ -97,6 +97,7 @@ import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
 import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
+import { profilesApplyPolicy } from './profileMigrationCore';
 import { exclusive } from './exclusive';
 import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
 import { validateStoredProfileDirectory } from './profileDirectory';
@@ -107,6 +108,7 @@ import {
 } from './profileKeyResetService';
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
+import { syncPolicy } from './syncCore';
 import { recordTrackerEvent } from './trackerEvents';
 import {
   approveSimklRemovalsWithClock,
@@ -608,6 +610,8 @@ export class LibraryLogAuthority {
         return this.#progress(command);
       case 'preferences.patch':
         return this.#patchPreferences(command.patch);
+      case 'preferences.seed':
+        return this.#seedPreferences(command.household);
       case 'api-key.set':
         return this.#setApiKey(command.service, command.value);
       case 'parental-pin.set':
@@ -746,6 +750,8 @@ export class LibraryLogAuthority {
           kind: 'download.artwork',
           stillPath: (await this.#options.downloadArtwork?.(query.target)) ?? null,
         };
+      case 'preferences.raw':
+        return { kind: 'preferences.raw', values: this.#log.settings('prefs')?.values ?? {} };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
         return {
@@ -916,6 +922,7 @@ export class LibraryLogAuthority {
     if (task.kind === 'profile.create-default') return this.#createDefaultKid();
     if (task.kind === 'household.join') return this.#joinHousehold(task);
     if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
+    if (task.kind === 'profile.policy.set') return this.#profilePolicyTask(task);
     if (task.kind === 'profile.create.ack') {
       await this.#profileKidCreate().acknowledge(task.receipt);
       return {
@@ -978,6 +985,48 @@ export class LibraryLogAuthority {
   async #ownerPinMatches(pin: string): Promise<boolean> {
     const stored = readApiKey(this.#log.settings('keys'), 'parentalPIN');
     return this.#parentalPinDelivery() === 'synced' && !!stored && (await pinMatches(stored, pin));
+  }
+
+  /**
+   * Change a Kid's content policy: a stamped directory operation (den-core `profiles_apply`) written with the same
+   * exact-row compare-and-swap as creating a Kid, behind the Owner PIN. A conflict or a lost response is read again,
+   * and a policy the directory already holds is left as it is.
+   */
+  async #profilePolicyTask(
+    task: Extract<LibraryTask, { kind: 'profile.policy.set' }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    if (!(await this.#ownerPinMatches(task.pin)))
+      throw authorityError(
+        'unauthorized',
+        'Owner PIN is required to change a Kid’s content policy',
+      );
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const { directory, authority } = await this.#log.readKidProfileDirectory();
+      const entry = directory.profiles[task.profile];
+      if (!entry || entry.role !== 'kid' || entry.deleted.value)
+        throw authorityError('invalid-request', 'that is not a live Kid profile');
+      if (
+        entry.policy.value.maximumAge === task.maximumAge &&
+        entry.policy.value.unknownRatings === task.unknownRatings
+      )
+        return {
+          result: { kind: 'profile.policy.set', outcome: 'unchanged' },
+          affected: [{ kind: 'profiles' }],
+        };
+      const next = profilesApplyPolicy({
+        document: directory,
+        profile: task.profile,
+        maximumAge: task.maximumAge,
+        unknownRatings: task.unknownRatings,
+        at: await this.#clock.issue(),
+      });
+      if ((await this.#log.casKidProfileDirectory(authority, next)) === 'committed')
+        return {
+          result: { kind: 'profile.policy.set', outcome: 'changed' },
+          affected: [{ kind: 'profiles' }],
+        };
+    }
+    throw authorityError('conflict', 'the profile directory kept changing; try again');
   }
 
   async #profileCreateTask(
@@ -1487,7 +1536,10 @@ export class LibraryLogAuthority {
   }
 
   async #settings(): Promise<Extract<LibrarySelectionValue, { kind: 'settings' }>> {
-    const stored = readSyncedPrefs(this.#log.settings('prefs'));
+    // A profile-aware household holds no preferences (profiles-v1 §6): any `set:prefs` an older one still carries is a
+    // stale seed, never drawn, so no frame is painted from it while the profile's own library opens.
+    const profileAware = this.#log.wireMinimum >= 5 || this.#log.profileDirectory() !== null;
+    const stored = readSyncedPrefs(profileAware ? undefined : this.#log.settings('prefs'));
     const validLanguage = (value: string | undefined): value is string =>
       value !== undefined && /^[a-z]{2}$/.test(value);
     const services = [
@@ -2016,6 +2068,30 @@ export class LibraryLogAuthority {
     const values = { ...base.values };
     for (const [name, value] of changed) values[name] = { value, at };
     return this.#writeRow({ ...base, values }, [{ kind: 'settings' }]);
+  }
+
+  /**
+   * profiles-v1 §6.3: den-core decides which of an older household's preferences this profile has not decided, and
+   * they are written with the household's own stamps, so seeding the same profile twice (or from two devices) is the
+   * same write.
+   */
+  async #seedPreferences(
+    household: Extract<LibraryCommand, { kind: 'preferences.seed' }>['household'],
+  ): Promise<LibraryAuthorityCommandResult> {
+    const base = this.#log.settings('prefs') ?? {
+      kind: 'set' as const,
+      schema: 2,
+      name: 'prefs',
+      values: {},
+    };
+    const { values } = syncPolicy<{ values: SettingsRow['values'] }>({
+      op: 'profiles_seed_preferences',
+      input: { household, profile: base.values },
+    });
+    if (!Object.keys(values).length) return this.#unchanged();
+    return this.#writeRow({ ...base, values: { ...base.values, ...values } }, [
+      { kind: 'settings' },
+    ]);
   }
 
   #keyName(service: 'tmdb' | 'omdb' | 'content-warnings'): string {

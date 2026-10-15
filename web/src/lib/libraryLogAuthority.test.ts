@@ -10,7 +10,10 @@ import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './library
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
+import type { ProfileDirectoryDocument } from './profileDirectory';
+import { profilesApplyCreate } from './profileMigrationCore';
 import { ensureSyncPolicy } from './syncLoader';
+import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
@@ -201,6 +204,81 @@ describe('LibraryLogAuthority', () => {
       matches: true,
     });
     reopenedLog.close();
+  });
+
+  it('changes a Kid’s policy in the directory only behind the Owner PIN', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'policy-pin-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const owned = authority(log, clock, 'online');
+    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'set-pin');
+    await expect(
+      owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'confirm-pin'),
+    ).resolves.toMatchObject({ delivery: 'synced' });
+
+    // An Owner and a Kid at 12 and under, read fresh from "den-edge" on every attempt.
+    const ownerEntry = Object.values(
+      (structuredClone(profileFixture.migrationBase) as unknown as ProfileDirectoryDocument)
+        .profiles,
+    )[0]!;
+    const kid = 'b'.repeat(32);
+    const entry = structuredClone(ownerEntry) as unknown as {
+      library: { value: unknown };
+      policy: { value: unknown };
+    } & Record<string, unknown>;
+    Object.assign(entry, { id: kid, role: 'kid' });
+    entry.library.value = {
+      keyVersion: 1,
+      key: btoa(String.fromCharCode(...new Uint8Array(32).fill(9))),
+    };
+    entry.policy.value = { maximumAge: 12, unknownRatings: 'block' };
+    let directory = profilesApplyCreate({
+      document: structuredClone(
+        profileFixture.migrationBase,
+      ) as unknown as ProfileDirectoryDocument,
+      profile: kid,
+      entry,
+    });
+    const read = vi
+      .spyOn(log, 'readKidProfileDirectory')
+      .mockImplementation(async () => ({ directory, authority: { base: 1, generation: 'g' } }));
+    const write = vi
+      .spyOn(log, 'casKidProfileDirectory')
+      .mockImplementation(async (_authority, next) => {
+        directory = next;
+        return 'committed';
+      });
+    const policy = (pin: string) =>
+      owned.task(
+        { kind: 'profile.policy.set', profile: kid, maximumAge: 8, unknownRatings: 'block', pin },
+        `policy-${pin}`,
+      );
+
+    await expect(policy('0000')).rejects.toMatchObject({ failure: { code: 'unauthorized' } });
+    expect(write).not.toHaveBeenCalled();
+    expect(directory.profiles[kid]!.policy.value.maximumAge).toBe(12);
+
+    await expect(policy('1234')).resolves.toMatchObject({
+      result: { kind: 'profile.policy.set', outcome: 'changed' },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(directory.profiles[kid]!.policy.value).toEqual({
+      maximumAge: 8,
+      unknownRatings: 'block',
+    });
+    // The same policy again writes nothing.
+    await expect(policy('1234')).resolves.toMatchObject({
+      result: { kind: 'profile.policy.set', outcome: 'unchanged' },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalled();
+    log.close();
   });
 
   it('queries the authenticated profile capability without starting a migration', async () => {
@@ -1225,6 +1303,36 @@ describe('LibraryLogAuthority', () => {
       delivery: 'local',
       affected: [],
     });
+  });
+
+  it('gives a profile library the household preferences it has not decided, with their stamps, once', async () => {
+    const { log, authority } = await localAuthority();
+    const stamp = [1_000, 0, 'a1b2c3d4e5f60718'] as [number, number, string];
+    const household = {
+      'den.watchRegion': { value: { string: 'SE' }, at: stamp },
+      'den.myServicePicks': { value: { strings: ['337@SE'] }, at: stamp },
+    };
+    await authority.command(
+      { kind: 'preferences.patch', patch: { watchRegion: 'FI' } },
+      'region-1',
+    );
+    await authority.command(
+      { kind: 'preferences.patch', patch: { watchRegion: null } },
+      'region-2',
+    );
+    await expect(authority.query({ kind: 'preferences.raw' })).resolves.toMatchObject({
+      kind: 'preferences.raw',
+    });
+    await expect(
+      authority.command({ kind: 'preferences.seed', household }, 'seed-1'),
+    ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'settings' }] });
+    const values = log.settings('prefs')!.values;
+    expect(values['den.myServicePicks']).toEqual(household['den.myServicePicks']);
+    // The region was cleared in the profile before: a decision, so the household's is not given over it.
+    expect(values['den.watchRegion']?.value).toBeNull();
+    await expect(
+      authority.command({ kind: 'preferences.seed', household }, 'seed-2'),
+    ).resolves.toMatchObject({ outcome: 'unchanged' });
   });
 
   it('owns normalized connections and semantic settings commands without exposing rows', async () => {

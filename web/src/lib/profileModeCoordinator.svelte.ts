@@ -212,6 +212,12 @@ const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void =
  */
 export class ProfileModeCoordinator {
   #session = $state.raw<ProfileSession | null>(null);
+  /**
+   * The Kid whose Settings the Owner PIN has opened, and the switch count it was opened under: any profile switch
+   * moves the count on, so it relocks. A session the directory replaces (its policy changed) is not a switch.
+   */
+  #settingsUnlock = $state.raw<{ profile: string; epoch: number; pin: string } | null>(null);
+  #switches = $state(0);
   readonly #ownerActivityModel;
   readonly #ownerIdentity;
   readonly #household;
@@ -262,6 +268,8 @@ export class ProfileModeCoordinator {
     this.#profileModels = profileModels;
     this.#preview = directory !== null && profileModels === null;
     this.#pendingOwner = owner;
+    // The Owner library the page already opened is a profile library too.
+    if (profileModels) this.#seedPreferences(owner.model);
 
     const saved = readActiveProfile(storage);
     const savedVisit =
@@ -328,6 +336,51 @@ export class ProfileModeCoordinator {
    */
   get restoring(): boolean {
     return this.#restoring > 0;
+  }
+
+  /**
+   * Whether the active Kid's Settings are still behind the Owner PIN. The unlock lasts for the session only: leaving
+   * the profile and coming back opens a new session, which is locked again. With no PIN set there is nothing to ask.
+   */
+  get settingsLocked(): boolean {
+    const session = this.#session;
+    const unlock = this.#settingsUnlock;
+    return (
+      this.mode === 'kid' &&
+      this.parentalPinConfigured !== false &&
+      !(unlock && session?.identity.id === unlock.profile && unlock.epoch === this.#switches)
+    );
+  }
+
+  /** Open the active Kid's Settings with the Owner PIN (the one that switches Kid to Owner); false when it is wrong. */
+  async unlockSettings(pin: string): Promise<boolean> {
+    this.#assertOpen();
+    const session = this.#session;
+    if (this.mode !== 'kid' || !session) return true;
+    if (!(await this.#verifyPin(pin))) return false;
+    if (this.#session !== session) return false;
+    // Kept in memory for this unlock only: changing the Kid's policy from its Settings is authorized by the same PIN.
+    this.#settingsUnlock = { profile: session.identity.id, epoch: this.#switches, pin };
+    return true;
+  }
+
+  /**
+   * Change the active Kid's content policy from its unlocked Settings (profiles-v1 §5): the owner-authorized directory
+   * write, authorized by the PIN that unlocked them. False when Settings are locked or the write was refused.
+   */
+  async setKidPolicy(policy: {
+    maximumAge: number | null;
+    unknownRatings: 'allow' | 'block';
+  }): Promise<boolean> {
+    this.#assertOpen();
+    const unlock = this.#settingsUnlock;
+    if (this.mode !== 'kid' || this.settingsLocked || !unlock) return false;
+    try {
+      return await this.#household.setKidPolicy(unlock.profile, policy, unlock.pin);
+    } catch (error) {
+      console.warn('den: the Kid’s content policy could not be changed', error);
+      return false;
+    }
   }
 
   get mode(): ActiveProfileMode | null {
@@ -431,6 +484,7 @@ export class ProfileModeCoordinator {
       next.close();
       throw error;
     }
+    this.#switches += 1;
     this.#session = next;
     previous.close();
     return true;
@@ -471,6 +525,7 @@ export class ProfileModeCoordinator {
     }
     const next = nextPersistent ?? this.#pendingOwner ?? this.#newOwner();
     this.#releasePendingOwner(next);
+    this.#switches += 1;
     this.#session = next;
     previous?.close();
     return true;
@@ -518,6 +573,7 @@ export class ProfileModeCoordinator {
     }
     const next = nextPersistent ?? this.#newKid(kid);
     this.#releasePendingOwner(next);
+    this.#switches += 1;
     this.#session = next;
     previous?.close();
     return true;
@@ -733,6 +789,16 @@ export class ProfileModeCoordinator {
     return { id, role, name, avatar, ...(policy ? { policy } : {}) };
   }
 
+  /**
+   * Preferences are per profile (profiles-v1 §6): a profile library that has not decided one yet is given the older
+   * household's, once. Writes carry the household's stamps, so repeating this on every open changes nothing.
+   */
+  #seedPreferences(profile: LibraryModel): void {
+    void Promise.resolve()
+      .then(() => this.#household.seedProfilePreferences(profile))
+      .catch((error: unknown) => console.warn('den: profile preference seeding failed', error));
+  }
+
   async #preparePersistent(choice: ProfileChoice): Promise<ProfileSession | null> {
     if (!choice.id || !choice.libraryKey || !this.#profileModels) return null;
     this.#cancelOpenings();
@@ -758,6 +824,7 @@ export class ProfileModeCoordinator {
       handle.close();
       return null;
     }
+    this.#seedPreferences(handle.model);
     return activeProfileSession(
       persistentProfileIdentity(choice.id, key),
       this.#household,
