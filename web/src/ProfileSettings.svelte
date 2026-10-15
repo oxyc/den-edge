@@ -3,6 +3,7 @@
   the Owner PIN, asked once per session and again after any profile switch.
 -->
 <script lang="ts">
+  import Button from './components/Button.svelte';
   import PinInput from './components/PinInput.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   import AboutSection from './settings/AboutSection.svelte';
@@ -77,7 +78,14 @@
         oncomplete={() => void unlock()}
       />
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
-      <button type="submit" disabled={!/^\d{4}$/.test(pin)}>Open settings</button>
+      <div class="actions">
+        <Button
+          type="submit"
+          variant="primary"
+          label="Open settings"
+          disabled={!/^\d{4}$/.test(pin)}
+        />
+      </div>
     </form>
   </section>
 {:else}
@@ -131,7 +139,7 @@
     gap: 16px;
   }
 
-  .settings-gate button {
+  .settings-gate .actions {
     justify-self: start;
   }
 
