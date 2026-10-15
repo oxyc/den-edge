@@ -465,6 +465,53 @@ async function kidSettingsAtPhoneWidth(page, name) {
   await page.screenshot({ path: test.info().outputPath(`${name}-content-limit.png`) });
 }
 
+// Switching profile from Settings lands on Home (a replace, so Back never returns to the gated Settings) rather than
+// reloading Settings behind the Kid's Owner PIN prompt.
+async function switchToKidFromSettings(page) {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${ROUTED_FIXTURE}?nav`);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/settings' } })),
+  );
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/settings');
+  const history = await page.evaluate(() => history.length);
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await expect(page.getByRole('dialog', { name: 'Who’s watching?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toHaveCount(0);
+  await expect(page.locator('#settings-gate-pin')).toHaveCount(0);
+  expect(await page.evaluate(() => history.length)).toBe(history);
+}
+
+test('switching to Kid from Settings at 390px in Chromium lands on Home', async ({ page }) => {
+  await switchToKidFromSettings(page);
+});
+
+test('switching to Kid from Settings at 390px in WebKit lands on Home', async () => {
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+  const browser = await webkit.launch();
+  try {
+    const page = await (await browser.newContext({ ...devices['iPhone 15'] })).newPage();
+    await switchToKidFromSettings(page);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Kid Settings at 390px in Chromium: full-width Owner PIN, labelled Content limit rows', async ({
   page,
 }) => {

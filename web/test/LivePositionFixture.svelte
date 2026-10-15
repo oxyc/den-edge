@@ -4,6 +4,9 @@
      (`fixturePlay`), as the Apple TV does every few seconds. -->
 <script lang="ts">
   import RoutedLibrary from '../src/RoutedLibrary.svelte';
+  import NavigationBar from '../src/components/NavigationBar.svelte';
+  import { parseRoute } from '../src/lib/route';
+  import type { ProfileModeCoordinator } from '../src/lib/profileModeCoordinator.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import type { Link } from '../src/lib/links.svelte';
@@ -19,6 +22,8 @@
     linkKey: 'fixture',
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
+  let route = $state(parseRoute(location.pathname + location.search));
+  let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   const writer = params.has('writer');
   let ready = $state(false);
 
@@ -57,6 +62,8 @@
 {#if writer}
   {#if ready}<p role="status">Writer ready</p>{/if}
 {:else}
+  <!-- `?nav`: the app's own bar, fed the profile control the way App does, for the profile switcher. -->
+  {#if params.has('nav')}<NavigationBar {route} query="" {profiles} />{/if}
   <main style="padding:var(--bar-space) var(--gutter)">
     <RoutedLibrary
       link={params.has('local') ? null : link}
@@ -64,7 +71,8 @@
       explore={{}}
       people={{}}
       watchedYear={undefined}
-      onchange={() => {}}
+      onchange={(next) => (route = next)}
+      onprofilecontrol={(control) => (profiles = control)}
     />
   </main>
 {/if}
