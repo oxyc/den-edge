@@ -428,6 +428,9 @@ async function kidSettingsAtPhoneWidth(page, name) {
   const expected = Math.min(form.width, 360);
   expect(Math.abs(pin.width - expected)).toBeLessThanOrEqual(1);
   expect(Math.abs(slots.width - expected)).toBeLessThanOrEqual(1);
+  // The switcher's PIN prompt puts 16px between the slots and its button.
+  const submit = await box(gate.getByRole('button', { name: 'Open settings' }));
+  expect(Math.round(submit.top - slots.bottom)).toBe(16);
   await gate.screenshot({ path: test.info().outputPath(`${name}-owner-pin.png`) });
 
   await page.getByLabel('Owner PIN').fill('1234');
