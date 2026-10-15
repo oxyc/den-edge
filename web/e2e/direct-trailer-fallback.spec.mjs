@@ -208,7 +208,10 @@ const integrationCases = new Map([
   ['webkit billboard', new Set(['away', 'public-failure'])],
 ]);
 
-/** Opens the surface on `origin`; the time until its trailer is playing (null if it never does) and what played. */
+/**
+ * Opens the surface on `origin`; the time from the element's first copy until its trailer is playing (null if it
+ * never does) and what played.
+ */
 async function play(launch, surface, origin, network, wait = 15_000) {
   const browser = await launch();
   try {
@@ -244,9 +247,14 @@ async function play(launch, surface, origin, network, wait = 15_000) {
       });
     });
     const seen = await mock(page, origin, network);
-    const began = Date.now();
     await surface.open(page, origin);
     const video = page.locator(surface.video);
+    // `wait` and `took` measure the playback under test, not the page boot. Before the element is handed its first
+    // copy the page loads its module graph, decodes the still, settles and asks reel, all of which run on whatever
+    // CPU the runner has left; on a starved one that alone outlasts a short `wait`, leaving no <video> to read a src
+    // from. The deadlines under test start at that first copy, so the clock does too.
+    await expect(video).toHaveAttribute('src', /./, { timeout: 60_000 });
+    const began = Date.now();
     const played = await expect(video)
       .toHaveClass(/playing/, { timeout: wait })
       .then(() => true)
