@@ -1791,13 +1791,14 @@ for (const fresh of [false, true])
       await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
       let answer;
       const ranked = new Promise((resolve) => (answer = resolve));
+      let rankingGate = ranked;
       let sharedGate = Promise.resolve();
       await page.route('**/atlas/recommend**', async (r) => {
         if (r.request().method() !== 'POST') {
           await sharedGate;
           return r.fallback();
         }
-        await ranked;
+        await rankingGate;
         return r.fulfill({
           json: {
             version: 1,
@@ -1873,9 +1874,16 @@ for (const fresh of [false, true])
       if (fresh) {
         // The only-new-titles ranking is kept apart: with fresh off, the page opens on the shared billboard.
         sharedGate = Promise.resolve();
+        let release;
+        rankingGate = new Promise((resolve) => (release = resolve));
         await page.goto(`${FIXTURE}?fixtureWatched=101,102&billboard-fresh=0`);
         await expect(onScreen).toContainText('Film 501');
         expect(asked.gets.at(-1)).not.toContain('fresh');
+        // With nothing kept to open on, the shared billboard is only the first paint: the ranking, once it answers,
+        // is the lead while the viewer is still on that first slide.
+        release();
+        await expect(onScreen).toContainText('Film 601');
+        await expect(hero.locator('.slide')).toHaveCount(3);
       }
     } finally {
       await browser.close();
