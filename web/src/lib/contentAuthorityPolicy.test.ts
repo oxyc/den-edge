@@ -314,11 +314,9 @@ describe('a title only a non-atlas source names', () => {
 
   it('refuses a chart response that is not bound to the active Kid policy', async () => {
     const w = world(() =>
-      json(
-        { metas: [{ type: 'series', moviedb_id: 256721, name: 'Gachiakuta' }] },
-        200,
-        { 'x-den-policy': atlasPolicyIdentity(LITTLE)! },
-      ),
+      json({ metas: [{ type: 'series', moviedb_id: 256721, name: 'Gachiakuta' }] }, 200, {
+        'x-den-policy': atlasPolicyIdentity(LITTLE)!,
+      }),
     );
     await expect(
       w.ask(
