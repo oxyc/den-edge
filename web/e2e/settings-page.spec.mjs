@@ -105,19 +105,12 @@ for (const width of [320, 390, 820, 1280]) {
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
 
       await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
-      for (const section of ['Connections', 'Playback', 'Content', 'Profiles', 'Advanced', 'About'])
+      for (const section of ['Connections', 'Playback', 'Content', 'Advanced', 'About'])
         await expect(page.getByRole('heading', { name: section, level: 2 })).toBeVisible();
-      // Playback, Content and the Owner-only profile control lead the page, ahead of Connections.
+      // Playback and Content lead the page, ahead of Connections.
       const sections = await page.getByRole('heading', { level: 2 }).allTextContents();
-      expect(sections.slice(0, 4).map((section) => section.split('Separate Owner')[0])).toEqual([
-        'Playback',
-        'Content',
-        'Profiles',
-        'Connections',
-      ]);
+      expect(sections.slice(0, 3)).toEqual(['Playback', 'Content', 'Connections']);
       expect(sections.slice(-2)).toEqual(['Advanced', 'About']);
-      await expect(page.getByText('Profile libraries').locator('..')).toContainText('Unavailable');
-      await expect(page.getByRole('button', { name: 'Enable Profiles' })).toHaveCount(0);
       await expectViewportWidth();
 
       // The seeded library, said the way the TV's rows say it.

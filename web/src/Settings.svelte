@@ -8,7 +8,6 @@
   import ContentSection from './settings/ContentSection.svelte';
   import ImportSection from './settings/ImportSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
-  import ProfilesSection from './settings/ProfilesSection.svelte';
   import RecoveryCode from './settings/RecoveryCode.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
@@ -294,14 +293,6 @@
         savePin={(pin) => run(() => model.setParentalPin(pin))}
         verifyPin={(pin) => model.verifyParentalPin(pin)}
         pinRemovable={!profileTopology}
-      />
-      <ProfilesSection
-        {model}
-        pinConfigured={connections?.parentalPinConfigured ?? false}
-        pinDelivery={connections?.parentalPinDelivery ?? 'queued'}
-        {disabled}
-        savePin={async (pin) => (await model.setParentalPin(pin)).delivery}
-        verifyPin={(pin) => model.verifyParentalPin(pin)}
       />
       <ConnectionsSection
         {link}
