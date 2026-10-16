@@ -371,7 +371,7 @@ for (const width of [390, 834, 1280])
     }
   });
 
-test('season requests cannot overwrite a newer selection and retained detail and actor tabs survive history', async () => {
+test('season requests cannot overwrite a newer selection and retained detail and person filters survive history', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -400,22 +400,19 @@ test('season requests cannot overwrite a newer selection and retained detail and
     });
     await expect(personHeading).toHaveAttribute('href', '/person/7-a-person');
     await active().getByRole('link', { name: 'A Person Detective', exact: true }).click();
-    await expect(active().getByRole('tab', { name: 'Movies' })).toHaveAttribute(
-      'aria-selected',
+    await expect(active().getByRole('button', { name: 'All' })).toHaveAttribute(
+      'aria-pressed',
       'true',
     );
-    await active().getByRole('tab', { name: 'Series' }).click();
+    await active().getByRole('button', { name: 'Series' }).click();
     await expect(active().getByRole('link', { name: 'Guest Series 2024' })).toBeVisible();
     await expect(active().getByRole('link', { name: 'Latest acting 2025' })).toHaveCount(0);
-    await active().getByRole('tab', { name: 'Movies' }).click();
-    await expect(active().getByRole('tab', { name: 'Directing' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
+    await active().getByRole('button', { name: 'Movies' }).click();
+    await expect(active().getByRole('heading', { name: 'Director', exact: true })).toBeVisible();
     const portrait = await active().locator('.portrait').boundingBox();
     expect(portrait.height / portrait.width).toBeCloseTo(1.5, 3);
     await active().getByRole('button', { name: 'More', exact: true }).click();
-    await active().getByRole('tab', { name: 'Production', exact: true }).click();
+    await expect(active().getByRole('heading', { name: 'Producer', exact: true })).toBeVisible();
     const card = active().getByRole('link', { name: 'Production 8 2018' });
     await card.scrollIntoViewIfNeeded();
     const scroll = await page.evaluate(() => scrollY);
@@ -425,8 +422,8 @@ test('season requests cannot overwrite a newer selection and retained detail and
     expect(await page.evaluate(() => scrollY)).toBe(0);
     await page.goBack();
     await expect(active().locator('h1')).toHaveText('A Person');
-    await expect(active().getByRole('tab', { name: 'Production', exact: true })).toHaveAttribute(
-      'aria-selected',
+    await expect(active().getByRole('button', { name: 'Movies' })).toHaveAttribute(
+      'aria-pressed',
       'true',
     );
     await expect(active().getByRole('button', { name: 'Less', exact: true })).toBeVisible();
