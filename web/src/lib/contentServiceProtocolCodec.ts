@@ -251,22 +251,30 @@ function kidsHomeSource(value: unknown): boolean {
   if (!record(value) || !text(value.kind, 32)) return false;
   if (value.kind === 'query')
     return (
-      exact(value, ['kind', 'query', 'minimumScore']) &&
+      exact(value, ['kind', 'query', 'minimumScore', 'affinity']) &&
       text(value.query, CONTENT_SERVICE_WIRE_LIMITS.queryText) &&
       typeof value.minimumScore === 'number' &&
       Number.isFinite(value.minimumScore) &&
       value.minimumScore >= 0 &&
-      value.minimumScore <= 10
+      value.minimumScore <= 10 &&
+      (value.affinity === undefined ||
+        (Array.isArray(value.affinity) &&
+          value.affinity.length <= 32 &&
+          value.affinity.every((candidate) => titleRef(candidate))))
     );
   if (value.kind === 'franchise')
     return exact(value, ['kind', 'type', 'id']) && media(value.type) && integer(value.id, 1);
   return (
     value.kind === 'filter' &&
-    exact(value, ['kind', 'type', 'selection']) &&
+    exact(value, ['kind', 'type', 'selection', 'affinity']) &&
     exploreType(value.type) &&
     Array.isArray(value.selection) &&
     value.selection.length <= CONTENT_SERVICE_WIRE_LIMITS.filters &&
-    value.selection.every((item) => text(item, 320))
+    value.selection.every((item) => text(item, 320)) &&
+    (value.affinity === undefined ||
+      (Array.isArray(value.affinity) &&
+        value.affinity.length <= 32 &&
+        value.affinity.every((candidate) => titleRef(candidate))))
   );
 }
 
