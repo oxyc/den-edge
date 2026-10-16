@@ -95,6 +95,10 @@ pub(crate) const MAX_BODY_IN_FLIGHT: usize = MAX_IN_FLIGHT * 2;
 /// so the larger allowance never multiplies across `MAX_BODY_IN_FLIGHT`.
 pub(crate) const RECOMMEND_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const RECOMMEND_BODIES_IN_FLIGHT: usize = 2;
+/// One legacy migration may carry Scout, Subtitles and Reel install segments plus the TV's target proof. Keep this
+/// explicit and small: unlike recommendations it never contains a library, while 16 KiB left too little room for
+/// the proof and three sealed configs at their bounded sizes.
+pub(crate) const MIGRATION_BODY_BYTES: usize = 32 * 1024;
 
 /// Whether a relayed path is atlas's `/recommend` (an install's config may sit between the prefix and it).
 pub(crate) fn is_recommend(path: &str) -> bool {
@@ -1048,6 +1052,8 @@ async fn relay_with(
     };
     let limit = if playback {
         16 * 1024
+    } else if migration {
+        MIGRATION_BODY_BYTES
     } else if recommend {
         RECOMMEND_BODY_BYTES
     } else {
@@ -1312,7 +1318,7 @@ async fn relay_with(
                 rid.to_owned(),
                 upstream,
             ),
-            public_session || playback || guest_configure || playground || speed,
+            public_session || playback || migration || guest_configure || playground || speed,
             member_only || grant.is_some(),
             playback || guest_configure,
             None,
@@ -1431,7 +1437,7 @@ async fn relay_with(
     answer_response(
         &parts,
         collected_body(bytes, charge),
-        public_session || playback || guest_configure || playground || speed,
+        public_session || playback || migration || guest_configure || playground || speed,
         member_only || grant.is_some(),
         playback || guest_configure,
         scope,
@@ -3217,7 +3223,9 @@ mod tests {
         let app = axum::Router::new().fallback(move |req: Request| {
             let sent = sent.clone();
             async move {
-                sent.send(req.headers().clone()).unwrap();
+                let (parts, body) = req.into_parts();
+                let body = axum::body::to_bytes(body, super::MIGRATION_BODY_BYTES).await.unwrap();
+                sent.send((parts.headers, body)).unwrap();
                 let mut response =
                     Response::new(Body::from(json!({ "url": "https://flux.tb-cdn.io/x.m3u8" }).to_string()));
                 response
@@ -3251,6 +3259,16 @@ mod tests {
             .await;
         assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
         assert!(received.try_recv().is_err(), "a visitor reached Hearth");
+        let visitor_migration = h
+            .send(
+                "POST",
+                "/den/migrate",
+                Some(r#"{"target":"tv-proof"}"#.into()),
+                &[("host", "d.oxy.fi"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(visitor_migration.status(), StatusCode::NOT_FOUND);
+        assert!(received.try_recv().is_err(), "an unauthenticated migration reached Hearth");
 
         let claim = registered_library(&h).await;
         Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
@@ -3276,7 +3294,7 @@ mod tests {
         assert_eq!(answer.headers()[header::CACHE_CONTROL], "no-store");
         assert!(!answer.headers().contains_key(header::ETAG));
         assert!(!answer.headers().contains_key(header::VARY));
-        let headers = received.recv().await.unwrap();
+        let (headers, _) = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert_eq!(headers["x-den-managed-playback"], "1");
         assert_eq!(headers["idempotency-key"], "attempt-1");
@@ -3289,7 +3307,7 @@ mod tests {
             .send(
                 "POST",
                 "/den/migrate",
-                Some(r#"{"scout":"legacy"}"#.into()),
+                Some(r#"{"scout":"legacy","target":"tv-proof"}"#.into()),
                 &[
                     ("host", "d.oxy.fi"),
                     ("content-type", "application/json"),
@@ -3301,10 +3319,29 @@ mod tests {
             )
             .await;
         assert_eq!(migration.status(), StatusCode::OK);
-        let headers = received.recv().await.unwrap();
+        assert_eq!(migration.headers()[header::CACHE_CONTROL], "no-store");
+        let (headers, body) = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert_eq!(headers["x-den-migration-owner"], "1");
         assert!(!headers.contains_key("x-den-owner"));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["target"], "tv-proof");
+
+        let too_large = json!({ "target": "x".repeat(super::MIGRATION_BODY_BYTES) }).to_string();
+        let refused = h
+            .send(
+                "POST",
+                "/den/migrate",
+                Some(too_large),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                ],
+            )
+            .await;
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(refused.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(received.try_recv().is_err(), "an oversized migration reached Hearth");
     }
 
     #[tokio::test]

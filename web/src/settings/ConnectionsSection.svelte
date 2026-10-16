@@ -951,10 +951,11 @@
       {#if configureGuestProblem}<p class="status bad" role="alert">{configureGuestProblem}</p>{/if}
     {/if}
     <p class="foot">
-      A plugin sees what you browse and supplies what you play, so an Apple TV installs one only
-      once it's approved — on the TV, or here, which approves it on the TVs this browser is linked
-      to. Removing one declines it. A dataset plugin can sign what it publishes: pin its key and Den
-      will only accept an index that plugin signed.
+      A plugin sees what you browse and supplies what you play, so each Apple TV normally asks for
+      approval before installing one. A first-party Hearth migration is approved automatically only
+      when that TV proves it exactly replaces Den plugins already installed there. Removing one
+      declines it. A dataset plugin can sign what it publishes: pin its key and Den will only accept
+      an index that plugin signed.
     </p>
     <h3>Add manually</h3>
     <form
