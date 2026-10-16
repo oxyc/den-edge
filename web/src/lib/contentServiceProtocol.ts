@@ -16,9 +16,10 @@ import type {
 /**
  * The read-only content protocol is versioned independently from encrypted library state. Version 5 added the
  * per-query `policy`: a Worker from the earlier build, which would ignore it and answer unrestricted, is refused.
- * Version 6 added the Atlas-owned Kid Home catalogue and its policy-bound rows.
+ * Version 6 added the Atlas-owned Kid Home catalogue and its policy-bound rows. Version 7 carries the catalogue's
+ * optional affinity references so the page can order every row for the active profile without preloading it.
  */
-export const CONTENT_SERVICE_PROTOCOL = 6 as const;
+export const CONTENT_SERVICE_PROTOCOL = 7 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -58,9 +59,14 @@ export interface ContentTitleRef {
 }
 
 export type ContentKidsHomeSource =
-  | { kind: 'query'; query: string; minimumScore: number }
+  | { kind: 'query'; query: string; minimumScore: number; affinity?: ContentTitleRef[] }
   | { kind: 'franchise'; type: MediaType; id: number }
-  | { kind: 'filter'; type: 'movie' | 'tv' | 'all'; selection: string[] };
+  | {
+      kind: 'filter';
+      type: 'movie' | 'tv' | 'all';
+      selection: string[];
+      affinity?: ContentTitleRef[];
+    };
 
 export interface ContentKidsHomeRow {
   id: string;

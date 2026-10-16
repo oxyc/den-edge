@@ -84,6 +84,7 @@
   } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
   import { kidsHomeRows } from './lib/kidsHome';
+  import { rankHomeRows, type HomeTasteTitle } from './lib/homeRowRanking';
   import type { LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
     ContinueItem,
@@ -1109,6 +1110,27 @@
       at: updatedAt,
     }));
   });
+  /**
+   * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche its personal
+   * shelves already named. Ranking never wakes dormant history metadata; absent names leave the old order intact.
+   */
+  let homeTaste = $state.raw<HomeTasteTitle[]>([]);
+  $effect(() => {
+    const policyReady = atlasReady;
+    const shelvesNamed = shelvesReady;
+    const entries = [...weighted]
+      .filter(({ weight }) => Number.isFinite(weight) && weight !== 0)
+      .sort((left, right) => right.at - left.at)
+      .slice(0, 4);
+    if (!shelvesNamed || !entries.length || (session.kid && !policyReady)) {
+      homeTaste = [];
+      return;
+    }
+    homeTaste = entries.flatMap(({ ref, weight, at }): HomeTasteTitle[] => {
+      const title = session.displayTitle(ref);
+      return title ? [{ title, weight, updatedAt: at }] : [];
+    });
+  });
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(contentPages(session.content));
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -1180,7 +1202,7 @@
     }
     // Kid Home is its own catalogue. Continue Watching and Watchlist are drawn separately below; the adult TMDB
     // spine, service-arrival rows and personal recommendation recipes must never fill in behind this list.
-    if (session.kid) return kidHome;
+    if (session.kid) return rankHomeRows(kidHome, homeTaste);
     // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
     //
     // What has just landed on this household's services does not get a row of its own here: it leads New
@@ -1198,14 +1220,17 @@
       ? home.map((row) => (row.id === 'new-releases' ? mergeNewRow(arrivals, row) : row))
       : home;
     const coming = pooled.filter((row) => row !== arrivals);
-    return [
-      ...personalRows(pages, seeds),
-      ...spine.slice(0, 2),
-      ...coming,
-      ...spine.slice(2, 7),
-      ...plot,
-      ...spine.slice(7),
-    ];
+    return rankHomeRows(
+      [
+        ...personalRows(pages, seeds),
+        ...spine.slice(0, 2),
+        ...coming,
+        ...spine.slice(2, 7),
+        ...plot,
+        ...spine.slice(7),
+      ],
+      homeTaste,
+    );
   });
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
@@ -1398,7 +1423,7 @@
     const named = shelvesReady;
     if (session.kid) {
       const ready = kidHomeReady;
-      const available = kidHome.length;
+      const available = rankHomeRows(kidHome, homeTaste).length;
       if (here && ready && available) untrack(buildKidBillboard);
       return;
     }
@@ -1424,7 +1449,7 @@
   function buildKidBillboard() {
     const run = ++billboardRun;
     stagedFeatured = null;
-    const rows = kidHome.slice(0, 4);
+    const rows = rankHomeRows(kidHome, homeTaste).slice(0, 4);
     void Promise.all(rows.map((row) => row.load(1).catch(() => [])))
       .then(async (pages) => {
         if (run !== billboardRun) return;

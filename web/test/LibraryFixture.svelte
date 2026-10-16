@@ -120,6 +120,15 @@
           ...[1003, 1004, 1005].map((id) =>
             markWatched(blankTitle({ type: 'movie', id }, id), [id, 0, 'test']),
           ),
+          ...(params.has('bluey')
+            ? [
+                markWatched(blankTitle({ type: 'tv', id: 82728 }, Date.now()), [
+                  Date.now(),
+                  0,
+                  'test',
+                ]),
+              ]
+            : []),
           // The Watchlist page also lists series: one on the watchlist, one part-watched.
           ...(route.page === 'watchlist'
             ? [

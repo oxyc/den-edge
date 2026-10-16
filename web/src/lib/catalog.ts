@@ -8,6 +8,7 @@ import type { MediaType, Title } from './library';
 import { titleHref } from './route';
 import type { ContentCatalogSpec } from './contentServiceProtocol';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { HomeRowAffinity } from './homeRowRanking';
 
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
 export interface DiscoverQuery {
@@ -793,6 +794,8 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** Optional profile signals used only to order Home's discovery rows; membership and paging stay unchanged. */
+  affinity?: HomeRowAffinity;
   /** Personal explanations may use a second heading line on a narrow screen; ordinary labels never do. */
   mobileHeadingLines?: 2;
   /** A more specific accessible name where the visible heading is deliberately shared between several rows. */
@@ -858,9 +861,38 @@ export const discoverRow = (
   query: DiscoverQuery,
 ): RowDef => {
   const { primaryGenre: _primaryGenre, ...contentQuery } = query;
+  const from = query.releaseDateGte ? Number(query.releaseDateGte.slice(0, 4)) : undefined;
+  const to = query.releaseDateLte ? Number(query.releaseDateLte.slice(0, 4)) : undefined;
+  const decade =
+    Number.isInteger(from) &&
+    Number.isInteger(to) &&
+    Math.floor(from! / 10) === Math.floor(to! / 10)
+      ? Math.floor(from! / 10) * 10
+      : undefined;
+  const affinity: HomeRowAffinity = {
+    group: id.startsWith('genre-')
+      ? 'genre'
+      : id.startsWith('recipe-')
+        ? 'recipe'
+        : id.startsWith('decade-')
+          ? 'decade'
+          : id.startsWith('country-')
+            ? 'country'
+            : 'discover',
+    ...(query.genres?.length ? { genres: [...query.genres] } : {}),
+    ...(decade === undefined ? {} : { decades: [decade] }),
+    ...(query.originalLanguage ? { languages: query.originalLanguage.split('|') } : {}),
+    ...(query.originCountry?.length ? { countries: [...query.originCountry] } : {}),
+  };
+  const rankable =
+    affinity.genres !== undefined ||
+    affinity.decades !== undefined ||
+    affinity.languages !== undefined ||
+    affinity.countries !== undefined;
   return {
     id,
     title,
+    ...(rankable ? { affinity } : {}),
     filter:
       query.primaryGenre === undefined
         ? undefined
@@ -1023,13 +1055,16 @@ export function homeRows(
       load: (page) =>
         catalogPage(pages, { kind: 'trending', media: 'movie', window: 'week' }, page),
     },
-    discoverRow(pages, 'new-releases', 'New Releases', {
-      mediaType: 'movie',
-      voteCountGte: 50,
-      releaseDateGte: day(since),
-      releaseDateLte: day(now),
-      sortBy: 'primary_release_date.desc',
-    }),
+    {
+      ...discoverRow(pages, 'new-releases', 'New Releases', {
+        mediaType: 'movie',
+        voteCountGte: 50,
+        releaseDateGte: day(since),
+        releaseDateLte: day(now),
+        sortBy: 'primary_release_date.desc',
+      }),
+      affinity: undefined,
+    },
     {
       id: 'top-series',
       title: 'Top Rated Series',
