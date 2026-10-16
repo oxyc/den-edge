@@ -105,19 +105,12 @@ for (const width of [320, 390, 820, 1280]) {
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
 
       await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
-      for (const section of ['Connections', 'Playback', 'Content', 'Profiles', 'Advanced', 'About'])
+      for (const section of ['Connections', 'Playback', 'Content', 'Advanced', 'About'])
         await expect(page.getByRole('heading', { name: section, level: 2 })).toBeVisible();
-      // Playback, Content and the Owner-only profile control lead the page, ahead of Connections.
+      // Playback and Content lead the page, ahead of Connections.
       const sections = await page.getByRole('heading', { level: 2 }).allTextContents();
-      expect(sections.slice(0, 4).map((section) => section.split('Separate Owner')[0])).toEqual([
-        'Playback',
-        'Content',
-        'Profiles',
-        'Connections',
-      ]);
+      expect(sections.slice(0, 3)).toEqual(['Playback', 'Content', 'Connections']);
       expect(sections.slice(-2)).toEqual(['Advanced', 'About']);
-      await expect(page.getByText('Profile libraries').locator('..')).toContainText('Unavailable');
-      await expect(page.getByRole('button', { name: 'Enable Profiles' })).toHaveCount(0);
       await expectViewportWidth();
 
       // The seeded library, said the way the TV's rows say it.
@@ -350,4 +343,16 @@ test('saving a provider key validates it in the content Worker before storing it
   await row.getByRole('button', { name: 'Save & validate' }).click();
   await expect(row.getByRole('status')).toContainText('ratings are enabled');
   expect(checks).toEqual([{ key: 'candidate-omdb', pageOwned: false }]);
+});
+
+test('a profile household shows Owner PIN management instead of the legacy maturity ceiling', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles`);
+
+  await expect(page.getByRole('button', { name: /Owner PIN Set/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Parental controls/ })).toHaveCount(0);
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  await expect(page.getByRole('heading', { name: 'Maturity ceiling' })).toHaveCount(0);
+  await expect(page.getByText('Enter your current Owner PIN to change it.')).toBeVisible();
 });
