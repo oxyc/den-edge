@@ -1054,9 +1054,21 @@ async fn redeem(state: &AppState, req: Request) -> Response {
             return internal("grant write", e);
         }
     }
+    let mut addons = record.addons.clone();
+    let inherited_hearth =
+        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
+    if state.den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+        addons.push("den".into());
+    }
     json_reply(
         StatusCode::OK,
-        &json!({ "gid": record.gid, "name": record.name, "addons": record.addons, "expiresAt": end(&record) }),
+        &json!({
+            "gid": record.gid,
+            "name": record.name,
+            "addons": addons,
+            "expiresAt": end(&record),
+            "overrides": if record.den_install.is_some() { vec!["den"] } else { vec![] },
+        }),
     )
 }
 
@@ -1080,7 +1092,13 @@ async fn addons(state: &AppState, req: Request) -> Response {
             }
             json_reply(
                 StatusCode::OK,
-                &json!({ "gid": live.gid, "name": live.name, "expiresAt": live.expires_at, "addons": addons }),
+                &json!({
+                    "gid": live.gid,
+                    "name": live.name,
+                    "expiresAt": live.expires_at,
+                    "addons": addons,
+                    "overrides": if live.den_install.is_some() { vec!["den"] } else { vec![] },
+                }),
             )
         }
         Err(Denied::Expired(at)) => expired_reply(at),
@@ -1222,10 +1240,22 @@ async fn reserve_library(state: &AppState, req: Request) -> Response {
 }
 
 /// The device a ticket spends is a new one: this answer carries no secret, only what a redeem would say.
-fn redeemed_reply(record: &Record) -> Response {
+fn redeemed_reply(record: &Record, den_playback_enabled: bool) -> Response {
+    let mut addons = record.addons.clone();
+    let inherited_hearth =
+        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
+    if den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+        addons.push("den".into());
+    }
     json_reply(
         StatusCode::OK,
-        &json!({ "gid": record.gid, "name": record.name, "addons": record.addons, "expiresAt": end(record) }),
+        &json!({
+            "gid": record.gid,
+            "name": record.name,
+            "addons": addons,
+            "expiresAt": end(record),
+            "overrides": if record.den_install.is_some() { vec!["den"] } else { vec![] },
+        }),
     )
 }
 
@@ -1305,7 +1335,7 @@ async fn redeem_ticket(state: &AppState, req: Request) -> Response {
         }
     }
     crate::lock(&state.grants.tickets).remove(&key);
-    redeemed_reply(&record)
+    redeemed_reply(&record, state.den_playback_enabled)
 }
 
 /// The guest leaves. The simplest honest meaning of it: the grant is revoked, which drops the device's secret
@@ -1723,9 +1753,15 @@ mod tests {
     async fn an_existing_guest_keeps_the_same_hearth_url_while_replacing_or_removing_their_override() {
         let mut h = harness().await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
-        let (gid, credential) = redeemed(&h, json!({})).await;
+        let (gid, code) = invited(&h, json!({})).await;
+        let (status, redeemed) = redeem_with(&h, &code, SECRET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(redeemed["addons"], json!(["scout", "atlas", "den"]));
+        assert_eq!(redeemed["overrides"], json!([]));
+        let credential = format!("{gid}:{SECRET}");
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!([]));
         assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
 
         assert_eq!(
@@ -1741,6 +1777,7 @@ mod tests {
         );
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!(["den"]));
         assert_eq!(load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(), Some(SCOUT));
 
         assert_eq!(
@@ -1762,6 +1799,7 @@ mod tests {
         assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!([]));
     }
 
     #[tokio::test]
@@ -2130,7 +2168,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             got,
-            json!({ "gid": gid, "name": "Sam", "addons": ["scout", "atlas"], "expiresAt": 1_001_000 + 7 * DAY_MS })
+            json!({
+                "gid": gid,
+                "name": "Sam",
+                "addons": ["scout", "atlas"],
+                "overrides": [],
+                "expiresAt": 1_001_000 + 7 * DAY_MS,
+            })
         );
 
         // A lost answer is retried with the same hash, and nothing moves.
