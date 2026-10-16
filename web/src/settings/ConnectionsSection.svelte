@@ -218,9 +218,12 @@
     guestGrants.list.flatMap((grant) =>
       grant.ended
         ? []
-        : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) =>
-            addon === 'den' ? [] : [{ gid: grant.gid, addon }],
-          ),
+        : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) => {
+            // Hearth is the media facade. Once it is available, the legacy Scout/Subtitles/Reel escrow remains
+            // an implementation detail for fallback; Atlas is still the one separate discovery addon.
+            if (addon === 'den' || (grant.addons.den && addon !== 'atlas')) return [];
+            return [{ gid: grant.gid, addon }];
+          }),
     ),
   );
   const sharedHosts = $derived(guestGrants.list.filter((grant) => !grant.ended && grant.secret));
