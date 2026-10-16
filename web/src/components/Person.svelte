@@ -1,11 +1,11 @@
 <script lang="ts">
   import Loading from './Loading.svelte';
-  import DetailTabs from './DetailTabs.svelte';
   import PosterCard from './PosterCard.svelte';
+  import TypeFilter from './TypeFilter.svelte';
   import { titleHref } from '../lib/route';
   import {
     filmographyMediaTypes,
-    groupFilmography,
+    groupFilmographyByRole,
     type FilmCredit,
     type PersonDetail,
   } from '../lib/detail';
@@ -25,23 +25,19 @@
     shown?: (title: Title) => boolean;
   } = $props();
   const panel = $props.id();
-  const mediaPanel = `${panel}-media`;
-  const departmentPanel = `${panel}-department`;
   let person = $state<PersonDetail | null | undefined>();
   // The page names itself once it knows whose it is; until then the address is all anything has to go on.
   nameTab(() => (active && person?.name ? named(person.name) : null));
   let films = $state<FilmCredit[] | null | undefined>();
   let expanded = $state(false);
-  let department = $state<string | null>(null);
-  let media = $state<MediaType | null>(null);
+  let mediaType = $state<MediaType | null>(null);
   let counts = $state<Record<string, number>>({});
   let personRetry = $state(0),
     filmsRetry = $state(0);
   $effect(() => {
     void id;
     expanded = false;
-    department = null;
-    media = null;
+    mediaType = null;
     counts = {};
   });
   $effect(() => {
@@ -80,36 +76,42 @@
   // Explicit person pages include their full career, just as on TV; discovery hide rules must not erase credits.
   const safeCredits = $derived((films ?? []).filter((credit) => !credit.title.adult));
   const mediaTypes = $derived(filmographyMediaTypes(safeCredits));
-  const selectedMedia = $derived(
-    mediaTypes.includes(media as MediaType) ? media! : (mediaTypes[0] ?? 'movie'),
-  );
   const groups = $derived(
-    groupFilmography(safeCredits.filter((credit) => credit.title.type === selectedMedia)),
+    groupFilmographyByRole(safeCredits, person?.knownFor)
+      .map((group) => ({
+        ...group,
+        films: group.films.filter(
+          (credit) => mediaType === null || credit.title.type === mediaType,
+        ),
+      }))
+      .filter((group) => group.films.length > 0),
   );
-  const selected = $derived(
-    (groups.some((group) => group.department === department) ? department! : null) ??
-      (groups.some((group) => group.department === person?.knownFor)
-        ? person!.knownFor!
-        : (groups[0]?.department ?? 'Acting')),
-  );
-  const credits = $derived(groups.find((g) => g.department === selected)?.films ?? []);
-  const countKey = $derived(`${selectedMedia}:${selected}`);
-  const visibleCount = $derived(counts[countKey] ?? 20);
-  function more() {
-    counts = { ...counts, [countKey]: visibleCount + 20 };
+  function more(group: string) {
+    counts = { ...counts, [group]: (counts[group] ?? 20) + 20 };
   }
-  function reachEnd(node: HTMLElement) {
-    $effect(() => {
-      if (!active || visibleCount >= credits.length) return;
-      const observer = new IntersectionObserver(
-        (entries) => {
-          if (entries.some((e) => e.isIntersecting)) more();
-        },
-        { rootMargin: '200px' },
-      );
-      observer.observe(node);
-      return () => observer.disconnect();
-    });
+  function reachEnd(node: HTMLElement, params: { group: string; total: number; active: boolean }) {
+    let current = params;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          current.active &&
+          entries.some((entry) => entry.isIntersecting) &&
+          (counts[current.group] ?? 20) < current.total
+        ) {
+          more(current.group);
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(node);
+    return {
+      update(next: typeof params) {
+        current = next;
+      },
+      destroy() {
+        observer.disconnect();
+      },
+    };
   }
 </script>
 
@@ -142,68 +144,53 @@
     </div>
   </header>
   <section aria-label="Filmography">
-    <h2>Filmography</h2>
-    {#if mediaTypes.length > 1}
-      <DetailTabs
-        tabs={mediaTypes.map((type) => ({
-          value: type,
-          label: type === 'movie' ? 'Movies' : 'Series',
-        }))}
-        value={selectedMedia}
-        label="Media type"
-        panel={mediaPanel}
-        onchange={(value) => (media = value as MediaType)}
-      />
-    {/if}
-    <div
-      id={mediaPanel}
-      role={mediaTypes.length > 1 ? 'tabpanel' : undefined}
-      aria-labelledby={mediaTypes.length > 1
-        ? `${mediaPanel}-tab-${mediaTypes.indexOf(selectedMedia)}`
-        : undefined}
-    >
-      {#if groups.length > 1}
-        <DetailTabs
-          tabs={groups.map((group) => ({ value: group.department, label: group.department }))}
-          value={selected}
-          label="Credits"
-          panel={departmentPanel}
-          onchange={(value) => (department = value)}
+    <div class="heading">
+      <h2>Filmography</h2>
+      {#if mediaTypes.length > 1}
+        <TypeFilter
+          value={mediaType}
+          onchange={(value) => {
+            mediaType = value;
+            counts = {};
+          }}
+          label="Show in Filmography"
         />
       {/if}
-      <div
-        id={departmentPanel}
-        role={groups.length > 1 ? 'tabpanel' : undefined}
-        aria-labelledby={groups.length > 1
-          ? `${departmentPanel}-tab-${groups.findIndex((group) => group.department === selected)}`
-          : undefined}
-      >
-        {#if films === undefined}<Loading label="Loading filmography" />
-        {:else if films === null}<p class="note">Couldn’t load the filmography.</p>
-          <button class="more" onclick={() => filmsRetry++}>Try again</button>
-        {:else if !credits.length}<p class="note">No credits available yet.</p>
-        {:else}
-          <div class="films">
-            {#each credits.slice(0, visibleCount) as c (`${c.title.type}:${c.title.id}`)}
-              <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
-                 which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
-                 corner button made the two disagree by a few stray pixels (focus/hover state the clone doesn't
-                 carry the same way), without changing either page's actual content. -->
-              <PosterCard
-                title={c.title}
-                caption={c.title.year ? String(c.title.year) : undefined}
-                href={titleHref(c.title)}
-                menu={false}
-              />
-            {/each}
-          </div>
-          {#if visibleCount < credits.length}
-            <button class="more load-more" use:reachEnd onclick={more}
-              >Show more ({credits.length - visibleCount})</button
-            >
-          {/if}
-        {/if}
-      </div>
+    </div>
+    <div id={panel}>
+      {#if films === undefined}<Loading label="Loading filmography" />
+      {:else if films === null}<p class="note">Couldn’t load the filmography.</p>
+        <button class="more" onclick={() => filmsRetry++}>Try again</button>
+      {:else if !groups.length}<p class="note">No credits available yet.</p>
+      {:else}
+        {#each groups as group (group.id)}
+          <section class="role" aria-labelledby={`${panel}-${group.id}`}>
+            <h3 id={`${panel}-${group.id}`}>{group.label}</h3>
+            <div class="films">
+              {#each group.films.slice(0, counts[group.id] ?? 20) as c (`${c.title.type}:${c.title.id}`)}
+                <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
+                     which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
+                     corner button made the two disagree by a few stray pixels (focus/hover state the clone doesn't
+                     carry the same way), without changing either page's actual content. -->
+                <PosterCard
+                  title={c.title}
+                  caption={c.title.year ? String(c.title.year) : undefined}
+                  href={titleHref(c.title)}
+                  menu={false}
+                />
+              {/each}
+            </div>
+            {#if (counts[group.id] ?? 20) < group.films.length}
+              <button
+                class="more load-more"
+                use:reachEnd={{ group: group.id, total: group.films.length, active }}
+                onclick={() => more(group.id)}
+                >Show more ({group.films.length - (counts[group.id] ?? 20)})</button
+              >
+            {/if}
+          </section>
+        {/each}
+      {/if}
     </div>
   </section>
 {/if}
@@ -281,8 +268,27 @@
   }
 
   h2 {
-    margin: 0 0 20px;
+    margin: 0;
     font-size: 24px;
+  }
+
+  .heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin-bottom: 20px;
+  }
+
+  .role + .role {
+    margin-top: 36px;
+  }
+
+  h3 {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 17px;
   }
 
   .films {

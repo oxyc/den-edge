@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   filmographyMediaTypes,
   groupFilmography,
+  groupFilmographyByRole,
   parseDetail,
   parseFilmography,
   parseSeason,
@@ -337,6 +338,33 @@ describe('full actor filmography', () => {
     expect(
       groupFilmography(parsed.filter((credit) => credit.title.type === 'tv'))[0]!.films,
     ).toHaveLength(1);
+  });
+
+  it('separates writers from screenwriters and leads with the known-for role', () => {
+    const title = (id: number) => ({
+      id,
+      media_type: 'movie',
+      title: `Movie ${id}`,
+      release_date: '2025-01-01',
+    });
+    const groups = groupFilmographyByRole(
+      parseFilmography({
+        cast: [title(1)],
+        crew: [
+          { ...title(2), department: 'Writing', job: 'Writer' },
+          { ...title(3), department: 'Writing', job: 'Screenplay' },
+          { ...title(4), department: 'Directing', job: 'Director' },
+        ],
+      }),
+      'Directing',
+    );
+
+    expect(groups.map((group) => group.label)).toEqual([
+      'Director',
+      'Actor',
+      'Writer',
+      'Screenwriter',
+    ]);
   });
 });
 

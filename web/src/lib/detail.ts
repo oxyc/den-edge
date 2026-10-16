@@ -348,6 +348,12 @@ export interface FilmCredit {
   role?: string;
 }
 
+export interface FilmographyGroup {
+  id: 'actor' | 'director' | 'writer' | 'screenwriter' | 'producer' | 'crew';
+  label: string;
+  films: FilmCredit[];
+}
+
 /** The media lanes a person's credits can show, in the same order on every client. */
 export function filmographyMediaTypes(credits: FilmCredit[]): MediaType[] {
   const present = new Set(credits.map((credit) => credit.title.type));
@@ -395,6 +401,69 @@ export function groupFilmography(
           const id = `${c.title.type}:${c.title.id}`;
           if (seen.has(id)) return false;
           seen.add(id);
+          return true;
+        }),
+    };
+  });
+}
+
+/** Human-readable role sections used by the explicit person page. */
+export function groupFilmographyByRole(
+  credits: FilmCredit[],
+  knownFor?: string,
+): FilmographyGroup[] {
+  type GroupID = FilmographyGroup['id'];
+  const idFor = (credit: FilmCredit): GroupID => {
+    const department = credit.department.toLowerCase();
+    const role = credit.role?.toLowerCase() ?? '';
+    if (department === 'acting') return 'actor';
+    if (department === 'directing' || role === 'director') return 'director';
+    if (department === 'writing') {
+      return role.includes('screenplay') || role.includes('screenwriter')
+        ? 'screenwriter'
+        : 'writer';
+    }
+    if (department === 'production') return 'producer';
+    return 'crew';
+  };
+  const labels: Record<GroupID, string> = {
+    actor: 'Actor',
+    director: 'Director',
+    writer: 'Writer',
+    screenwriter: 'Screenwriter',
+    producer: 'Producer',
+    crew: 'Crew',
+  };
+  const priority: GroupID[] = ['actor', 'director', 'writer', 'screenwriter', 'producer', 'crew'];
+  const ids = [...new Set(credits.map(idFor))].sort(
+    (a, b) => priority.indexOf(a) - priority.indexOf(b),
+  );
+  const prominent: GroupID[] = !knownFor
+    ? []
+    : knownFor.toLowerCase() === 'acting'
+      ? ['actor']
+      : knownFor.toLowerCase() === 'directing'
+        ? ['director']
+        : knownFor.toLowerCase() === 'writing'
+          ? ['writer', 'screenwriter']
+          : knownFor.toLowerCase() === 'production'
+            ? ['producer']
+            : ['crew'];
+  const lead = prominent.find((id) => ids.includes(id));
+  if (lead) ids.splice(0, 0, ...ids.splice(ids.indexOf(lead), 1));
+
+  return ids.map((id) => {
+    const seen = new Set<string>();
+    return {
+      id,
+      label: labels[id],
+      films: credits
+        .filter((credit) => idFor(credit) === id)
+        .sort(compareFilmCredits)
+        .filter((credit) => {
+          const key = `${credit.title.type}:${credit.title.id}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
           return true;
         }),
     };
