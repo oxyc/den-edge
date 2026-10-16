@@ -2263,7 +2263,8 @@ mod tests {
         assert_eq!(
             got,
             json!({ "gid": gid, "name": "Sam", "expiresAt": 1_000_000 + 3 * DAY_MS,
-                    "addons": { "scout": format!("/scout/~{gid}"), "atlas": format!("/atlas/~{gid}") } })
+                    "addons": { "scout": format!("/scout/~{gid}"), "atlas": format!("/atlas/~{gid}") },
+                    "overrides": [] })
         );
 
         let wrong = format!("{gid}:not-the-secret");
