@@ -3,7 +3,7 @@
 
 import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
-import type { Failure, Refused, Session, Want } from './remux';
+import type { Failure, Session, Want } from './remux';
 import { directSubtitles } from './directSubtitles';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
@@ -14,8 +14,43 @@ export type PlaybackWant = Omit<Want, 'scout' | 'subtitles' | 'ipv4Hint' | 'noHi
   directFailed?: boolean;
 };
 
-/** `legacy` is a rollout-race answer: Edge concealed a route that answered discovery moments earlier. */
-export type PlaybackRefused = Refused | { failure: 'legacy' };
+export type PlaybackErrorCode =
+  | 'bad_request'
+  | 'idempotency_conflict'
+  | 'no_release'
+  | 'playback_busy'
+  | 'playback_timeout'
+  | 'playback_unavailable'
+  | 'replacement_pending'
+  | 'source_unavailable'
+  | 'unexpected_response';
+
+/** Hearth's closed, non-secret reason why managed preparation fell back before the final operation failed. */
+export type PlaybackCause =
+  | 'managed_prepare_timeout'
+  | 'torbox_authentication_failed'
+  | 'torbox_item_not_found'
+  | 'torbox_malformed_response'
+  | 'torbox_managed_streaming_unavailable_for_plan'
+  | 'torbox_playlist_unavailable'
+  | 'torbox_rate_limited'
+  | 'torbox_refused'
+  | 'torbox_unavailable'
+  | 'torbox_unreachable'
+  | 'torbox_unsafe_stream_url';
+
+/** Safe diagnostics for the page console. Arbitrary upstream bodies and provider identifiers never cross this type. */
+interface PlaybackDiagnostics {
+  retryMs?: number;
+  code?: PlaybackErrorCode;
+  cause?: PlaybackCause;
+  httpStatus?: number;
+}
+
+export type PlaybackRefused =
+  | ({ failure: Failure } & PlaybackDiagnostics)
+  /** `legacy` is a rollout race: Edge concealed a route that answered discovery moments earlier. */
+  | ({ failure: 'legacy' } & PlaybackDiagnostics);
 
 type Json = Record<string, unknown>;
 
@@ -41,6 +76,13 @@ function href(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function origin(value: unknown): string | undefined {
+  const absolute = href(value);
+  if (!absolute) return undefined;
+  const url = new URL(absolute);
+  return url.pathname === '/' && !url.search && !url.hash ? url.origin : undefined;
 }
 
 function releaseOf(value: unknown): Session['release'] | null {
@@ -83,11 +125,22 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
     heartbeat: href(nested.heartbeatUrl),
     report: href(nested.reportUrl),
   };
+  // Edge opens and describes the public listener on the facade's outer answer. Hearth keeps Remux's original
+  // relative playlist inside `session`, which is what lets the cast page prefer the LAN base without accidentally
+  // resolving the already-public outer URL back to itself.
+  const publicBase = href(answer.publicBase) ?? href(nested.publicBase);
+  const lanBase = href(answer.lanBase) ?? href(nested.lanBase);
+  const relativePlaylist = text(nested.playlist);
   return {
     ...(nested as unknown as Session),
     sid: text(nested.id) ?? text(nested.sid),
     playlist,
     speed: href(nested.speedUrl) ?? href(nested.speed),
+    publicBase,
+    lanBase,
+    lanPlaylist: lanBase && relativePlaylist ? new URL(relativePlaylist, lanBase).href : undefined,
+    castOrigin: origin(answer.castOrigin) ?? origin(nested.castOrigin),
+    hinted: answer.hinted === true || nested.hinted === true || undefined,
     release,
     duration: number(nested.duration) ?? 0,
     audioTrack: number(nested.audioTrack) ?? 0,
@@ -102,11 +155,50 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   };
 }
 
-async function errorCode(response: Response): Promise<string | undefined> {
+async function errorBody(response: Response): Promise<{ error?: string; cause?: PlaybackCause }> {
   try {
-    return text(((await response.json()) as { error?: unknown }).error);
+    const body = record(await response.json());
+    return {
+      error: text(body?.error),
+      cause: knownCause(text(body?.cause)),
+    };
   } catch {
-    return undefined;
+    return {};
+  }
+}
+
+function knownCause(cause: string | undefined): PlaybackCause | undefined {
+  switch (cause) {
+    case 'managed_prepare_timeout':
+    case 'torbox_authentication_failed':
+    case 'torbox_item_not_found':
+    case 'torbox_malformed_response':
+    case 'torbox_managed_streaming_unavailable_for_plan':
+    case 'torbox_playlist_unavailable':
+    case 'torbox_rate_limited':
+    case 'torbox_refused':
+    case 'torbox_unavailable':
+    case 'torbox_unreachable':
+    case 'torbox_unsafe_stream_url':
+      return cause;
+    default:
+      return undefined;
+  }
+}
+
+function knownCode(error: string | undefined): PlaybackErrorCode | undefined {
+  switch (error) {
+    case 'bad_request':
+    case 'idempotency_conflict':
+    case 'no_release':
+    case 'playback_busy':
+    case 'playback_timeout':
+    case 'playback_unavailable':
+    case 'replacement_pending':
+    case 'source_unavailable':
+      return error;
+    default:
+      return undefined;
   }
 }
 
@@ -114,9 +206,13 @@ function failureOf(status: number, error: string | undefined): Failure | 'legacy
   if (status === 404 && error === 'no_release') return 'none';
   if (status === 404 && error !== 'no_release') return 'legacy';
   if (status === 409 && error === 'replacement_pending') return 'starting';
+  if (status === 400 || status === 409) return 'request';
   if (status === 429) return 'busy';
   if (status === 401) return 'login';
   if (status === 410) return 'ended';
+  if (status === 502) return 'sourceUnavailable';
+  if (status === 503) return 'temporarilyUnavailable';
+  if (status === 504) return 'timedOut';
   return 'unreachable';
 }
 
@@ -156,6 +252,9 @@ export async function startPlayback(
       });
     } catch {
       if (signal?.aborted || attempt > 0) return { failure: 'unreachable' };
+      console.warn(
+        'Managed playback got no complete HTTP answer; retrying the same operation idempotently.',
+      );
       continue;
     }
     if (response.ok) {
@@ -176,16 +275,34 @@ export async function startPlayback(
         }
         return session;
       }
-      if (attempt === 0 && !signal?.aborted) continue;
-      return { failure: 'unreachable' };
+      if (attempt === 0 && !signal?.aborted) {
+        console.warn(
+          'Managed playback returned an incomplete success response; replaying the same operation idempotently.',
+        );
+        continue;
+      }
+      return {
+        failure: 'protocol',
+        code: 'unexpected_response',
+        httpStatus: response.status,
+      };
     }
-    const failure = failureOf(response.status, await errorCode(response));
+    const { error, cause } = await errorBody(response);
+    const failure = failureOf(response.status, error);
+    const retryMs =
+      response.status === 429 ||
+      response.status === 503 ||
+      response.status === 504 ||
+      cause === 'torbox_rate_limited'
+        ? retryAfterMs(response, 0) || undefined
+        : undefined;
     return {
       failure,
-      ...(response.status === 429 || response.status === 503
-        ? { retryMs: retryAfterMs(response, 0) || undefined }
-        : {}),
-    } as PlaybackRefused;
+      code: knownCode(error) ?? 'unexpected_response',
+      ...(cause ? { cause } : {}),
+      httpStatus: response.status,
+      ...(retryMs ? { retryMs } : {}),
+    };
   }
   return { failure: 'unreachable' };
 }

@@ -160,6 +160,16 @@ export type Failure =
   | 'starting'
   | 'transcode'
   | 'unreachable'
+  /** Hearth rejected a well-formed browser request. Usually a Web/Hearth version mismatch. */
+  | 'request'
+  /** Hearth reached neither a usable managed source nor a usable Remux source. */
+  | 'sourceUnavailable'
+  /** Hearth's bounded playback operation expired before either delivery path was ready. */
+  | 'timedOut'
+  /** Hearth is up but cannot serve playback yet. The caller waits out Retry-After before asking again. */
+  | 'temporarilyUnavailable'
+  /** A successful Hearth response did not match the public playback contract. */
+  | 'protocol'
   | 'ended'
   | 'public'
   | 'ipv6'

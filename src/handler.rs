@@ -507,14 +507,6 @@ async fn dispatch(
     if migration_disabled {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
-    // A live, no-store capability probe for Web's separately shipped build. Disabled is concealed above; enabled
-    // says only that the unified POST route exists and never reaches Hearth or performs authentication work.
-    if route == "/den/:config/playback" && req.method() == Method::OPTIONS {
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::NO_CONTENT;
-        response.headers_mut().insert(header::ALLOW, HeaderValue::from_static("POST"));
-        return response;
-    }
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
@@ -1013,6 +1005,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET: &[Method] = &[Method::GET];
     const GET_PUT: &[Method] = &[Method::GET, Method::PUT];
     const POST: &[Method] = &[Method::POST];
+    const POST_OPTIONS: &[Method] = &[Method::POST, Method::OPTIONS];
     const PUT: &[Method] = &[Method::PUT];
     const DELETE: &[Method] = &[Method::DELETE];
     const GET_POST: &[Method] = &[Method::GET, Method::POST];
@@ -1072,7 +1065,9 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/playback/page-error"
         | "/playback/outcome"
         | "/playback/cast" => Some(POST),
-        "/den/:config/playback" => Some(POST),
+        // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
+        // dispatch and never enter the relay.
+        "/den/:config/playback" => Some(POST_OPTIONS),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -1426,7 +1421,7 @@ pub mod tests {
             assert_eq!(route_label(path), "/den/:config/playback");
         }
         assert!(!den_playback_path("/den/sealed-config/playback/extra"));
-        assert_eq!(allowed_methods("/den/:config/playback"), Some(&[Method::POST][..]));
+        assert_eq!(allowed_methods("/den/:config/playback"), Some(&[Method::POST, Method::OPTIONS][..]));
         assert_eq!(body_cap("/den/:config/playback"), 16 * 1024);
         assert!(!is_control("/den/:config/playback"));
         assert_eq!(route_label("/grant/den-install"), "/grant/den-install");
@@ -1434,17 +1429,12 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn den_playback_capability_probe_is_exact_and_default_off() {
-        let mut h = Harness::new();
+    async fn den_playback_capability_probe_is_default_off() {
+        let h = Harness::new();
         assert_eq!(
             h.send("OPTIONS", "/den/sealed/playback", None, &[]).await.status(),
             StatusCode::NOT_FOUND
         );
-        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
-        let enabled = h.send("OPTIONS", "/den/sealed/playback", None, &[]).await;
-        assert_eq!(enabled.status(), StatusCode::NO_CONTENT);
-        assert_eq!(enabled.headers()[header::ALLOW], "POST");
-        assert_eq!(enabled.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[test]

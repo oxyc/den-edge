@@ -52,8 +52,13 @@ describe('startPlayback', () => {
       json({
         url: '/remux/s/id/sig/master.m3u8',
         release,
+        publicBase: 'https://media.example',
+        lanBase: 'https://remux.home:8443',
+        castOrigin: 'https://cast.example',
+        hinted: true,
         session: {
           id: 'id',
+          playlist: '/remux/s/id/sig/master.m3u8',
           duration: 7200,
           audioTrack: 0,
           audioTracks: [{ language: 'eng', channels: 6, commentary: false }],
@@ -66,6 +71,11 @@ describe('startPlayback', () => {
     expect(result).toMatchObject({
       sid: 'id',
       playlist: 'https://den.example/remux/s/id/sig/master.m3u8',
+      publicBase: 'https://media.example/',
+      lanBase: 'https://remux.home:8443/',
+      lanPlaylist: 'https://remux.home:8443/remux/s/id/sig/master.m3u8',
+      castOrigin: 'https://cast.example',
+      hinted: true,
       duration: 7200,
       control: {
         end: 'https://den.example/remux/s/id/sig',
@@ -100,7 +110,9 @@ describe('startPlayback', () => {
     );
     expect(await startPlayback('/den/config/playback', want, fetchImpl)).toEqual({
       failure: 'busy',
-      retryMs: expect.any(Number),
+      code: 'playback_busy',
+      httpStatus: 429,
+      retryMs: 3_000,
     });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
@@ -110,11 +122,126 @@ describe('startPlayback', () => {
       await startPlayback('/den/config/playback', want, async () =>
         json({ error: 'not_found' }, 404),
       ),
-    ).toEqual({ failure: 'legacy' });
+    ).toEqual({
+      failure: 'legacy',
+      code: 'unexpected_response',
+      httpStatus: 404,
+    });
     expect(
       await startPlayback('/den/config/playback', want, async () =>
         json({ error: 'no_release' }, 404),
       ),
-    ).toEqual({ failure: 'none' });
+    ).toEqual({ failure: 'none', code: 'no_release', httpStatus: 404 });
+  });
+
+  it.each([
+    [400, 'bad_request', 'request'],
+    [502, 'source_unavailable', 'sourceUnavailable'],
+    [503, 'playback_unavailable', 'temporarilyUnavailable'],
+    [504, 'playback_timeout', 'timedOut'],
+  ] as const)('keeps the safe meaning of HTTP %s (%s)', async (status, code, failure) => {
+    const result = await startPlayback('/den/config/playback', want, async () =>
+      json({ error: code, detail: 'provider token must never be returned' }, status),
+    );
+    expect(result).toEqual({ failure, code, httpStatus: status });
+    expect(JSON.stringify(result)).not.toContain('provider token');
+  });
+
+  it('honours Retry-After on temporary and timed-out answers without retrying HTTP itself', async () => {
+    for (const [status, code] of [
+      [503, 'playback_unavailable'],
+      [504, 'playback_timeout'],
+    ] as const) {
+      const fetchImpl = vi.fn(async () => json({ error: code }, status, { 'retry-after': '7' }));
+      await expect(startPlayback('/den/config/playback', want, fetchImpl)).resolves.toMatchObject({
+        retryMs: 7_000,
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('never returns an arbitrary provider error or body detail', async () => {
+    const result = await startPlayback('/den/config/playback', want, async () =>
+      json(
+        {
+          error: 'torbox_key_dead_abc123',
+          cause: 'torbox_secret_account_abc123',
+          detail: 'secret account response',
+        },
+        502,
+      ),
+    );
+    expect(result).toEqual({
+      failure: 'sourceUnavailable',
+      code: 'unexpected_response',
+      httpStatus: 502,
+    });
+  });
+
+  it.each([
+    'managed_prepare_timeout',
+    'torbox_authentication_failed',
+    'torbox_item_not_found',
+    'torbox_malformed_response',
+    'torbox_managed_streaming_unavailable_for_plan',
+    'torbox_playlist_unavailable',
+    'torbox_rate_limited',
+    'torbox_refused',
+    'torbox_unavailable',
+    'torbox_unreachable',
+    'torbox_unsafe_stream_url',
+  ] as const)('keeps only the documented managed cause %s', async (cause) => {
+    const result = await startPlayback('/den/config/playback', want, async () =>
+      json({ error: 'source_unavailable', cause, detail: 'private provider response' }, 502),
+    );
+    expect(result).toMatchObject({
+      failure: 'sourceUnavailable',
+      code: 'source_unavailable',
+      cause,
+      httpStatus: 502,
+    });
+    expect(JSON.stringify(result)).not.toContain('private provider response');
+  });
+
+  it('honours a TorBox rate-limit wait attached to a final source failure', async () => {
+    await expect(
+      startPlayback('/den/config/playback', want, async () =>
+        json({ error: 'source_unavailable', cause: 'torbox_rate_limited' }, 502, {
+          'retry-after': '11',
+        }),
+      ),
+    ).resolves.toEqual({
+      failure: 'sourceUnavailable',
+      code: 'source_unavailable',
+      cause: 'torbox_rate_limited',
+      httpStatus: 502,
+      retryMs: 11_000,
+    });
+  });
+
+  it('reports a repeatably malformed success as a protocol failure with one idempotent replay', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => json({ url: 'not a usable answer' }));
+    await expect(startPlayback('/den/config/playback', want, fetchImpl)).resolves.toEqual({
+      failure: 'protocol',
+      code: 'unexpected_response',
+      httpStatus: 200,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const keys = fetchImpl.mock.calls.map((call) =>
+      new Headers(call[1]?.headers).get('idempotency-key'),
+    );
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it('does not replay an operation the caller cancelled', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      controller.abort();
+      throw init?.signal?.reason ?? new DOMException('cancelled', 'AbortError');
+    });
+    await expect(
+      startPlayback('/den/config/playback', want, fetchImpl, controller.signal),
+    ).resolves.toEqual({ failure: 'unreachable' });
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });

@@ -118,6 +118,16 @@ export function unchangedNotice(failure: Failure, ended?: string | null): string
   switch (failure) {
     case 'unreachable':
       return `Couldn’t reach Den’s player for that, so ${carriesOn}`;
+    case 'request':
+      return `Den’s player couldn’t use that request, so ${carriesOn}`;
+    case 'sourceUnavailable':
+      return `Den couldn’t prepare that change through its available playback paths, so ${carriesOn}`;
+    case 'timedOut':
+      return `Den’s player took too long to prepare that change, so ${carriesOn}`;
+    case 'temporarilyUnavailable':
+      return `Den’s player is temporarily unavailable, so ${carriesOn}`;
+    case 'protocol':
+      return `Den’s player returned an answer this page couldn’t use, so ${carriesOn}`;
     case 'busy':
       return `Den is already playing as much as it can right now, so ${carriesOn}`;
     case 'starting':

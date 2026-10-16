@@ -17,3 +17,36 @@ export function signedMedia(url: string): boolean {
     return false;
   }
 }
+
+/** A TorBox-managed HLS capability. Its query explicitly disables provider scrobbling before it may leave Den. */
+export function managedMedia(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const scrobbling = parsed.searchParams.getAll('scrobbling_enabled');
+    return (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.port &&
+      parsed.hostname.endsWith('.tb-cdn.io') &&
+      parsed.hostname.length > '.tb-cdn.io'.length &&
+      parsed.pathname !== '/' &&
+      !parsed.hash &&
+      scrobbling.length === 1 &&
+      scrobbling[0] === 'false'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The exact load whose lifecycle the Cast page owns, independent of a newer load still being prepared. */
+export interface PlayingMedia {
+  url: string;
+  external: boolean;
+}
+
+/** Only a Remux load has Den report/end operations. A managed CDN URL must never receive either request. */
+export function denLifecycleMedia(playing: PlayingMedia | undefined): string | null {
+  return playing && !playing.external ? playing.url : null;
+}

@@ -97,7 +97,7 @@
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
-  import { startPlayback } from '../lib/playback';
+  import { startPlayback, type PlaybackCause } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import {
     activeAt,
@@ -228,13 +228,23 @@
     | 'cast'
     | 'noCopy'
     | 'noFit'
+    | 'request'
+    | 'sourceUnavailable'
+    | 'protocol'
     | 'engine',
     string
   > = {
     public: 'Playback isn’t available from this network yet.',
     ...guestLimits,
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
-    unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
+    unreachable:
+      'Couldn’t reach Den’s player. Check this device’s connection, then try again. If it continues, ask your host to check Den Hearth.',
+    request:
+      'Den’s player couldn’t use this playback request. Refresh the page. If it continues, ask your host to update Den Hearth.',
+    sourceUnavailable:
+      'Den couldn’t prepare this release through its available playback paths. Try again. If it continues, check Den Hearth and the home player.',
+    protocol:
+      'Den’s player returned an answer this page can’t use. Refresh the page. If it continues, ask your host to update Den Hearth.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
     playback: 'This browser couldn’t play this release. Try it on your TV.',
@@ -245,14 +255,45 @@
       'No release of this fits this connection as it is. Try it again on a faster one, or on your TV.',
     engine: 'Couldn’t load the player. Check the connection, then reload the page.',
   };
-  /** Waiting on den-remux, which is asked again every RETRY_MS. */
-  const waits: Record<'busy' | 'starting' | 'transcode', string> = {
+  /** Waiting on the playback coordinator, which is asked again after its Retry-After or RETRY_MS. */
+  const waits: Record<
+    'busy' | 'starting' | 'transcode' | 'timedOut' | 'temporarilyUnavailable',
+    string
+  > = {
     busy: 'Den is already playing as much as it can right now. Waiting for one to stop…',
     // Distinct from `busy`: this browser or install's own last attempt is still opening — nobody else's
     // slot to wait out, so this says so rather than naming an imaginary "two things".
     starting: 'Den is still finishing your last attempt at this. One moment…',
     transcode:
       'This needs converting for this browser, and the homelab is converting another. Waiting for it to finish…',
+    timedOut:
+      'Den’s player took too long to prepare this. Waiting before trying the provider and home player again…',
+    temporarilyUnavailable:
+      'Den’s player is temporarily unavailable. Waiting as requested before trying again…',
+  };
+  const managedCauseMessages: Record<PlaybackCause, string> = {
+    torbox_authentication_failed:
+      'Your TorBox API key was rejected. Update the key in Den Hearth settings, then try again.',
+    torbox_managed_streaming_unavailable_for_plan:
+      'Your TorBox plan doesn’t support streaming links. Update the TorBox plan or remove TorBox from this Den Hearth install.',
+    torbox_rate_limited:
+      'TorBox asked Den to wait before trying again. The home player could not prepare this release either, so Den is waiting as requested…',
+    torbox_item_not_found:
+      'TorBox no longer has this release, and the home player could not prepare it either. Try again.',
+    torbox_refused:
+      'TorBox refused to prepare this stream, and the home player could not prepare it either. Check your TorBox account, then try again.',
+    torbox_playlist_unavailable:
+      'TorBox’s playlist is temporarily unavailable, and the home player could not prepare this release either. Try again.',
+    torbox_unavailable:
+      'TorBox is temporarily unavailable, and the home player could not prepare this release either. Try again.',
+    torbox_unreachable:
+      'Den could not reach TorBox, and the home player could not prepare this release either. Try again.',
+    torbox_malformed_response:
+      'TorBox returned an answer Den could not use, and the home player could not prepare this release either. Try again.',
+    torbox_unsafe_stream_url:
+      'TorBox returned a stream address Den would not trust, and the home player could not prepare this release either. Try again.',
+    managed_prepare_timeout:
+      'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
   };
 
   let video = $state<HTMLVideoElement>();
@@ -276,6 +317,8 @@
   /** The cast page, loaded unseen beside the playing video to look for a receiver; unset while not looking. */
   let lookOrigin = $state<string>();
   let lookFrame = $state<HTMLIFrameElement>();
+  /** The trusted Cast-page origin that discovered the receiver now receiving an external managed stream. */
+  let directCastOrigin: string | undefined;
   /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
   let castOffered = false;
   let publicMaxBitrate: number | undefined;
@@ -300,6 +343,8 @@
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
   >(null);
+  /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
+  let managedCause = $state<PlaybackCause>();
   /**
    * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
    * which is waited out rather than acted on. One per hls.js instance.
@@ -593,6 +638,7 @@
       // come back and load it again, and den-remux would hold its slot until the player closed.
       letGo();
       failure = null;
+      managedCause = undefined;
     }
     swapped = null;
     unchanged = null;
@@ -683,7 +729,14 @@
     let result = playback
       ? await startPlayback(
           playback,
-          { ...fields, ...(delivery === 'fallback' ? { directFailed: true } : {}) },
+          {
+            ...fields,
+            // Browser-local subtitle blobs cannot reach a Cast receiver. This direct capability is unsuitable in
+            // exactly the same way as a failed direct load, so Hearth chooses its caption-carrying fallback.
+            ...(delivery === 'fallback' || (castMode && subtitleChoice)
+              ? { directFailed: true }
+              : {}),
+          },
           undefined,
           attempt.signal,
         )
@@ -698,13 +751,29 @@
       return false;
     }
     if ('failure' in result) {
+      // Only `startPlayback` adds this field, after its closed allow-list parser. Legacy Remux refusals do not.
+      const cause = 'cause' in result ? (result.cause as PlaybackCause | undefined) : undefined;
+      if (playback) {
+        console.warn('Managed playback could not start.', {
+          failure: result.failure,
+          code: 'code' in result ? result.code : undefined,
+          cause,
+          httpStatus: 'httpStatus' in result ? result.httpStatus : undefined,
+          retryMs: result.retryMs,
+        });
+      }
       if (replacing) {
-        // Said nowhere else: the viewer sees what plays carry on, and the caller decides what to tell them.
-        console.warn(
-          `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
-        );
+        // A failed external session is kept only long enough for `broke` to judge recovery; unlike an ordinary
+        // Remux track/release change, it does not carry on. Keep the two log messages truthful and URL-free.
+        if (replacing.external)
+          console.warn(`Managed direct media recovery failed (${result.failure}).`);
+        else
+          console.warn(
+            `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
+          );
         return result.failure;
       }
+      managedCause = cause;
       // Everything left earlier in the visit leaves nothing to start on: those are only kept off an automatic
       // pick while there is another to make, so the start is asked for again with none left out.
       if ((result.failure === 'none' || result.failure === 'noCopy') && excluded.length) {
@@ -716,13 +785,20 @@
       if (
         result.failure === 'busy' ||
         result.failure === 'starting' ||
-        result.failure === 'transcode'
+        result.failure === 'transcode' ||
+        result.failure === 'timedOut' ||
+        result.failure === 'temporarilyUnavailable' ||
+        cause === 'torbox_rate_limited'
       )
-        // What it asked for, where it said: a converting GPU can mean minutes, and knocking every
+        // What the server asked for, when it said: a converting GPU can mean minutes, and knocking every
         // twenty seconds until then is work for a box that is already the reason we are waiting.
         retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
       return false;
     }
+    // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
+    // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
+    if (castOffered && result.external && directCastOrigin)
+      result = { ...result, castOrigin: directCastOrigin };
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
       watcher?.stop();
@@ -782,7 +858,7 @@
     }
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
-    if (castOffered && !(result.castOrigin && result.publicBase)) {
+    if (castOffered && !result.castOrigin) {
       castOffer = 'none';
       leaveCast();
       return true;
@@ -1470,9 +1546,13 @@
         id: current.playlist,
         media: {
           url: current.playlist,
-          lanUrl: current.lanPlaylist,
-          speed: current.speed,
-          measure: publicMaxBitrate === undefined,
+          ...(current.external
+            ? {}
+            : {
+                lanUrl: current.lanPlaylist,
+                speed: current.speed,
+                measure: publicMaxBitrate === undefined,
+              }),
           mode: castMode ? 'cast' : 'browser',
           title: title.title,
           subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
@@ -1480,11 +1560,20 @@
           currentTime: started ?? resume.seconds ?? 0,
           subtitleLanguage: subtitleChoice,
           terminal: degraded || current.video?.transcoded === true || castProfile === 'legacy',
+          external: current.external === true,
         },
       },
       current.castOrigin,
     );
   }
+
+  // The iframe origin stays the same when Hearth replaces a failed managed URL with Remux, so it does not reload.
+  // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
+  $effect(() => {
+    const [current, frame] = [session, castFrame];
+    if (!current?.castOrigin || !frame) return;
+    untrack(sendToCastFrame);
+  });
 
   function castMessage(event: MessageEvent<unknown>): void {
     const looking = lookFrame?.contentWindow;
@@ -1586,6 +1675,12 @@
       endCastSession();
       castFailed = true;
       castFailReason = castFailReasonOf(message.message ?? '');
+      // A receiver failure of a managed direct URL is one explicit Hearth fallback. It keeps Cast intent and sends
+      // directFailed=true, so Hearth alone chooses the Remux session that replaces it.
+      if (current.external) {
+        void broke(0, message.message ?? 'cast player failed', 'decode');
+        return;
+      }
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
       if (degraded || current.video?.transcoded || castProfile === 'legacy') castMode = false;
       if (returnsFromCast(castOffered, castMode)) {
@@ -1602,6 +1697,11 @@
 
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
   const castable = canOfferCast();
+
+  /** WebKit's non-standard opt-in keeps native HLS available to the system AirPlay picker. */
+  function allowAirPlay(element: HTMLVideoElement) {
+    element.setAttribute('x-webkit-airplay', 'allow');
+  }
 
   const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
   /** Moves `castFunnel` to `stage`, never back: den-edge's own cast report (`finish()`) names the furthest
@@ -1628,10 +1728,11 @@
   }
 
   // The Cast control was available to press — the same condition the header's button renders under — whether or
-  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened.
+  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened. A direct
+  // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
+  // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.external && !session.castOrigin && route !== RELAY)
-      reachCast('offered');
+    if (castable && session && !session.castOrigin && route !== RELAY) reachCast('offered');
   });
 
   /**
@@ -1656,24 +1757,32 @@
 
   /** A step of the look for a receiver; one seen moves playback to the relay at the second the video is at. */
   function look(event: CastLook) {
+    const discoveredOrigin = lookOrigin;
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer !== 'looking') lookOrigin = undefined;
     if (!next.move || !session) return;
     castOffered = true;
+    directCastOrigin = discoveredOrigin;
     routeBeforeCast = route;
     route = RELAY;
+    // Managed playback states receiver capability to Hearth up front. Legacy Remux keeps its existing two-step
+    // profile negotiation with the Cast page.
+    castMode = playback !== undefined;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     restart({ filename: session.release.filename }, () => {
       castOffered = false;
+      directCastOrigin = undefined;
       route = routeBeforeCast;
+      castMode = false;
     });
   }
 
   /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
   function leaveCast() {
     castOffered = false;
+    directCastOrigin = undefined;
     casting = false;
     route = routeBeforeCast;
     castMode = false;
@@ -1777,7 +1886,17 @@
     watcher?.spent();
     reportFailure(current, code, message);
     if (current.external) {
-      const recovery = directRecovery(played, directAttempt ?? 'initial');
+      const recovery =
+        current.castOrigin && castOffered
+          ? 'fallback'
+          : directRecovery(played, directAttempt ?? 'initial');
+      // The browser's native error may contain a signed media URL, so log only this closed recovery state. The
+      // eventual Hearth refusal, if any, is logged separately with its allow-listed status/code/cause.
+      console.warn('Managed direct media failed; recovering through Hearth.', {
+        stage: played ? 'mid-playback' : 'startup',
+        attempt: directAttempt ?? 'initial',
+        action: recovery,
+      });
       carryPosition();
       const moved = await begin(
         undefined,
@@ -2323,7 +2442,7 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
-    {#if castable && session && !session.external && !session.castOrigin && route !== RELAY}
+    {#if castable && session && !session.castOrigin && route !== RELAY}
       <Button
         variant="player"
         size="icon"
@@ -2407,7 +2526,14 @@
             That isn’t one of the homelab’s browser keys.
           </p>{/if}
       </form>
-    {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode'}
+    {:else if failure === 'sourceUnavailable' && managedCause === 'torbox_rate_limited'}
+      <p class="note" role="status">{managedCauseMessages[managedCause]}</p>
+    {:else if failure === 'sourceUnavailable' && managedCause}
+      <p class="error" role="alert">{managedCauseMessages[managedCause]}</p>
+      {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
+        <Button variant="primary" label="Try again" onclick={() => void begin()} />
+      {/if}
+    {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode' || failure === 'timedOut' || failure === 'temporarilyUnavailable'}
       <p class="note" role="status">{waits[failure]}</p>
     {:else if failure === 'lost'}
       <div class="lost" role="alert">
@@ -2433,6 +2559,11 @@
              with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
         <Button variant="primary" label="Reload" onclick={() => location.reload()} />
       {/if}
+      {#if failure === 'request' || failure === 'protocol'}
+        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
+      {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
+        <Button variant="primary" label="Try again" onclick={() => void begin()} />
+      {/if}
     {:else if !session}
       {#if notice}
         <p class="note startup" role="status">
@@ -2442,7 +2573,7 @@
         </p>
       {/if}
     {:else}
-      {#if session.castOrigin && session.publicBase}
+      {#if session.castOrigin}
         <!-- `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
              and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
         <iframe
@@ -2460,6 +2591,7 @@
           controls
           autoplay
           playsinline
+          use:allowAirPlay
           onloadedmetadata={() => {
             seekToStart();
             void loadSegments();
