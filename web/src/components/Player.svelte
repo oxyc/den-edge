@@ -292,7 +292,7 @@
     torbox_malformed_response:
       'TorBox returned an answer Den could not use, and the home player could not prepare this release either. Try again.',
     torbox_unsafe_stream_url:
-      'TorBox returned a stream address Den would not trust, and the home player could not prepare this release either. Try again.',
+      'TorBox returned a stream link from a CDN Den did not recognize. Den did not open it, and the home player could not prepare this release either. Try again.',
     managed_prepare_timeout:
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
   };
@@ -2534,9 +2534,9 @@
             That isn’t one of the homelab’s browser keys.
           </p>{/if}
       </form>
-    {:else if failure === 'sourceUnavailable' && managedCause === 'torbox_rate_limited'}
+    {:else if managedCause === 'torbox_rate_limited'}
       <p class="note" role="status">{managedCauseMessages[managedCause]}</p>
-    {:else if failure === 'sourceUnavailable' && managedCause}
+    {:else if managedCause}
       <p class="error" role="alert">{managedCauseMessages[managedCause]}</p>
       {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
         <Button variant="primary" label="Try again" onclick={() => void begin()} />
