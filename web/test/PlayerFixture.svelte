@@ -11,6 +11,7 @@
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
   const query = new URLSearchParams(location.search);
   const remux = query.get('remux') ?? `${location.origin}/direct`;
+  const playback = query.get('playback') ?? undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const services = createWorkerServiceSession();
@@ -29,6 +30,7 @@
     {content}
     scout={{ install: 'http://scout.test/config', base: '/scout/config' }}
     {remux}
+    {playback}
     subtitles={[]}
     resume={{ fraction: 0 }}
     {castDiscoveryMs}

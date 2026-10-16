@@ -3177,6 +3177,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_playback_bounds_both_the_request_and_collected_answer() {
+        use axum::http::{header, HeaderValue};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let requests = Arc::clone(&requests);
+            move || {
+                let requests = Arc::clone(&requests);
+                async move {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    let mut response =
+                        Response::new(Body::from(vec![b'x'; super::PUBLIC_SESSION_MAX_BYTES + 1]));
+                    response
+                        .headers_mut()
+                        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    response
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let headers = [
+            ("host", "d.oxy.fi"),
+            ("content-type", "application/json"),
+            ("x-den-library-member", claim.as_str()),
+        ];
+
+        let too_large =
+            h.send("POST", "/den/config/playback", Some("x".repeat(16 * 1024 + 1)), &headers).await;
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(requests.load(Ordering::Relaxed), 0, "an oversized request reached Hearth");
+
+        let answer = h.send("POST", "/den/config/playback", Some("{}".into()), &headers).await;
+        assert_eq!(answer.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn a_remux_playback_without_a_public_listener_is_refused_and_cleaned_up() {
         let sid = "A".repeat(22);
         let sig = "b".repeat(22);

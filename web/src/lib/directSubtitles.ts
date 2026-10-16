@@ -4,6 +4,9 @@
 import type { Session } from './remux';
 
 const MAX_SUBTITLE_BYTES = 2 * 1024 * 1024;
+// A candidate list is a small JSON document. Keep its browser-side allocation bounded independently of Edge's
+// relay cap, both for direct/private deployments and so a changed relay limit cannot silently make this larger.
+const MAX_LIST_BYTES = 256 * 1024;
 const SUBTITLE_DEADLINE_MS = 10_000;
 
 interface Candidate {
@@ -71,11 +74,11 @@ function webvtt(srt: string): string {
   )}`;
 }
 
-async function boundedText(response: Response): Promise<string | null> {
+async function boundedText(response: Response, limit = MAX_SUBTITLE_BYTES): Promise<string | null> {
   const declared = Number(response.headers.get('content-length'));
   const reader = response.body?.getReader();
   if (!reader) return null;
-  if (Number.isFinite(declared) && declared > MAX_SUBTITLE_BYTES) {
+  if (Number.isFinite(declared) && declared > limit) {
     await reader.cancel();
     return null;
   }
@@ -85,7 +88,7 @@ async function boundedText(response: Response): Promise<string | null> {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_SUBTITLE_BYTES) {
+    if (size > limit) {
       await reader.cancel();
       return null;
     }
@@ -122,7 +125,9 @@ export async function directSubtitles(
   try {
     const listed = await fetchImpl(url, { cache: 'no-store', signal: boundedSignal() });
     if (!listed.ok) return null;
-    const body = (await listed.json()) as { subtitles?: unknown };
+    const encoded = await boundedText(listed, MAX_LIST_BYTES);
+    if (encoded === null) return null;
+    const body = JSON.parse(encoded) as { subtitles?: unknown };
     if (!Array.isArray(body.subtitles)) return null;
     const available = new Map<string, string>();
     for (const wantedLanguage of wanted) {
