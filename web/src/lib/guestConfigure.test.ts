@@ -7,14 +7,11 @@ afterEach(() => {
 });
 
 describe('openGuestConfigure', () => {
-  it('fetches HTML with the grant, opens only its blob, and revokes it after load time', async () => {
-    vi.useFakeTimers();
+  it('establishes setup before navigating the reserved tab to the real Hearth page', async () => {
     const order: string[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async () => {
       order.push('fetch');
-      return new Response('<!doctype html><script>configured()</script>', {
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      });
+      return new Response(null, { status: 204 });
     });
     const replace = vi.fn();
     const opened = { opener: {}, location: { replace }, close: vi.fn() } as unknown as Window;
@@ -22,30 +19,24 @@ describe('openGuestConfigure', () => {
       order.push('open');
       return opened;
     });
-    const createObjectURL = vi.fn(() => 'blob:https://den.example/setup');
-    const revokeObjectURL = vi.fn();
     await expect(
       openGuestConfigure('a1b2c3d4', 'secret', {
         fetchImpl,
         openImpl,
-        createObjectURL,
-        revokeObjectURL,
       }),
     ).resolves.toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith('/den/~a1b2c3d4/configure', {
+    expect(fetchImpl).toHaveBeenCalledWith('/grant/den-configure', {
+      method: 'POST',
       headers: { 'x-den-grant': 'a1b2c3d4:secret' },
       cache: 'no-store',
     });
     expect(openImpl).toHaveBeenCalledWith('', '_blank');
     expect(order).toEqual(['open', 'fetch']);
     expect(opened.opener).toBeNull();
-    expect(replace).toHaveBeenCalledWith('blob:https://den.example/setup');
-    expect(revokeObjectURL).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:https://den.example/setup');
+    expect(replace).toHaveBeenCalledWith('/den/~a1b2c3d4/configure');
   });
 
-  it('does not fetch or make a blob when the browser refuses the new tab', async () => {
+  it('does not establish setup when the browser refuses the new tab', async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     await expect(
       openGuestConfigure('a1b2c3d4', 'secret', {

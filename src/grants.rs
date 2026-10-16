@@ -9,6 +9,7 @@
 //!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
+//!   POST   /grant/den-configure      (x-den-grant) → 204 + a short-lived, HttpOnly setup cookie
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
 //!   POST   /grant/library            (x-den-grant) { id, tokenHash } reserves the one library this grant may start → 204
 //!   POST   /grant/device-ticket      (x-den-grant) → { ticket, expiresAt }: one more device may join, once, soon
@@ -58,6 +59,8 @@ use std::time::Duration;
 
 /// The guest's credential, `<gid>:<secret>`. Same origin only, never in a URL.
 pub const HEADER: &str = "x-den-grant";
+const CONFIGURE_COOKIE: &str = "den_guest_configure";
+const CONFIGURE_COOKIE_MAX_AGE: u64 = 15 * 60;
 /// The addons a grant may hand out: the ones the relay table names and the web app browses with.
 pub const ADDONS: [&str; 4] = ["scout", "atlas", "reel", "subtitles"];
 
@@ -529,8 +532,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match (path.as_str(), req.method().clone()) {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
         ("/grant/addons", Method::GET | Method::HEAD) => addons(state, req).await,
+        ("/grant/den-configure", Method::POST) if state.den_playback_enabled => {
+            den_configure(state, req).await
+        }
         ("/grant/den-install", Method::PUT | Method::DELETE) if state.den_playback_enabled => {
-            den_install(state, req).await
+            let claim = header_of(&req);
+            den_install(state, req, claim).await
         }
         ("/grant/usage", Method::POST) => usage_report(state, req).await,
         ("/grant/library", Method::POST) => reserve_library(state, req).await,
@@ -546,6 +553,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             | "/grant/library"
             | "/grant/device-ticket"
             | "/grant/device"
+            | "/grant/den-configure"
             | "/grant/den-install",
             _,
         ) => method_not_allowed(),
@@ -1000,6 +1008,49 @@ fn header_of(req: &Request) -> Option<String> {
     req.headers().get(HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
 }
 
+/// The setup cookie carries the same per-device claim the browser already owns, but keeps it HttpOnly and
+/// short-lived while Hearth's real configure document runs. Its path is one stable guest Hearth URL, and it is
+/// deliberately honoured only by that URL's setup routes; it never turns ambient cookies into general guest auth.
+pub(crate) fn configure_claim(req: &Request) -> Option<String> {
+    if let Some(claim) = header_of(req) {
+        return Some(claim);
+    }
+    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|cookie| {
+        let (name, value) = cookie.trim().split_once('=')?;
+        if name != CONFIGURE_COOKIE {
+            return None;
+        }
+        let (gid, secret) = value.split_once('.')?;
+        Some(format!("{gid}:{secret}"))
+    })
+}
+
+/// Establish a narrowly used browser setup session. Navigations cannot attach `x-den-grant`, so the Web UI first
+/// proves the grant with fetch and then opens Hearth's ordinary, real document. This avoids putting the credential
+/// in a URL and avoids executing fetched addon HTML from a CSP-incompatible blob document.
+async fn den_configure(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-den-configure", ADDONS_PER_WINDOW) {
+        return limited;
+    }
+    let claim = header_of(&req);
+    let live = match authenticate(state, claim.as_deref(), None).await {
+        Ok(live) => live,
+        Err(Denied::Expired(at)) => return expired_reply(at),
+        Err(Denied::NotFound) => return not_found(),
+    };
+    let Some((_, secret)) = claim.as_deref().and_then(parse_header) else { return not_found() };
+    let cookie = format!(
+        "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
+        live.gid, secret, live.gid
+    );
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else { return not_found() };
+    let mut response = no_content();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response
+}
+
 async fn redeem(state: &AppState, req: Request) -> Response {
     // Counted before anything is read: the point is to not do work for a flood, and every attempt counts.
     let ip = crate::handler::client_ip(state, &req);
@@ -1108,12 +1159,12 @@ async fn addons(state: &AppState, req: Request) -> Response {
 
 /// Replace or remove the live guest's own opaque combined-Den config. Edge can validate that it is one safe path
 /// segment, but never opens it: Hearth alone holds the sealing key and sees the plaintext credentials.
-async fn den_install(state: &AppState, req: Request) -> Response {
+pub(crate) async fn den_install(state: &AppState, req: Request, claim: Option<String>) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, &ip, "grant-den-install", ADDONS_PER_WINDOW) {
         return limited;
     }
-    let gid = match authenticate(state, header_of(&req).as_deref(), None).await {
+    let gid = match authenticate(state, claim.as_deref(), None).await {
         Ok(live) => live.gid,
         Err(Denied::Expired(at)) => return expired_reply(at),
         Err(Denied::NotFound) => return not_found(),
@@ -2726,21 +2777,54 @@ mod tests {
         let (mut h, seen) = relaying(den_configure, Some("edge-secret")).await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
         let (gid, credential) = redeemed(&h, json!({})).await;
-        let response =
-            h.send("GET", &format!("/den/~{gid}/configure"), None, &[(HEADER, credential.as_str())]).await;
+        let bootstrap = h
+            .send("POST", "/grant/den-configure", None, &[(HEADER, credential.as_str())])
+            .await;
+        assert_eq!(bootstrap.status(), StatusCode::NO_CONTENT);
+        let set_cookie = bootstrap.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.contains(&format!("Path=/den/~{gid}")), "{set_cookie}");
+        for attribute in ["HttpOnly", "Secure", "SameSite=Strict", "Max-Age=900"] {
+            assert!(set_cookie.contains(attribute), "{set_cookie}");
+        }
+        let cookie = set_cookie.split(';').next().unwrap();
+        let response = h
+            .send("GET", &format!("/den/~{gid}/configure"), None, &[("cookie", cookie)])
+            .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert!(!response.headers().contains_key(header::ETAG));
         let page = axum::body::to_bytes(response.into_body(), 256 * 1024).await.unwrap();
         let page = std::str::from_utf8(&page).unwrap();
         assert!(page.contains(&format!(r#""base":"/den/~{gid}""#)), "{page}");
-        assert!(page.contains(&format!(r#""claim":"{credential}""#)), "{page}");
-        assert!(page.contains(r#""saveUrl":"/grant/den-install""#), "{page}");
-        assert!(page.contains(r#""v":1"#), "{page}");
+        assert!(page.contains(&format!(r#""saveUrl":"/den/~{gid}/config""#)), "{page}");
+        assert!(page.contains(r#""v":2"#), "{page}");
+        assert!(!page.contains(&credential), "the page exposed its grant claim: {page}");
         assert!(!page.contains(crate::relay::DEN_GUEST_CONTEXT_MARKER), "{page}");
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.last().unwrap().0, "/den/configure");
-        assert!(!seen.last().unwrap().1.contains_key(HEADER));
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.last().unwrap().0, "/den/configure");
+            for private in [HEADER, "cookie"] {
+                assert!(!seen.last().unwrap().1.contains_key(private));
+            }
+        }
+
+        let saved = h
+            .send(
+                "PUT",
+                &format!("/den/~{gid}/config"),
+                Some(json!({ "install": PERSONAL_HEARTH }).to_string()),
+                &[("cookie", cookie), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            h.send("GET", &format!("/den/~{gid}/config"), None, &[("cookie", cookie)])
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert_eq!(listed["overrides"], json!(["den"]));
     }
 
     #[tokio::test]

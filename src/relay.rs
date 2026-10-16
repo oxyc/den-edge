@@ -486,8 +486,8 @@ struct Guest {
     /// This request is the stable guest Hearth overlay. Edge builds its bounded internal envelope exclusively from
     /// this authenticated grant; the browser can neither name nor replace any host install inside it.
     overlay: bool,
-    /// The authenticated configure page uses this claim to save the sealed segment behind a stable guest URL.
-    configure_claim: Option<String>,
+    /// This is the authenticated, real Hearth configure document. Its short-lived credential stays HttpOnly.
+    configure: bool,
 }
 
 impl Guest {
@@ -499,14 +499,14 @@ impl Guest {
     /// addon whose answers name the install. Everything else a guest is answered goes through as it came.
     fn rewrites(&self, headers: &axum::http::HeaderMap) -> bool {
         let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
-        self.configure_claim.is_some() && content_type.is_some_and(|t| t.starts_with("text/html"))
+        self.configure && content_type.is_some_and(|t| t.starts_with("text/html"))
             || (self.segment.is_some() || self.overlay)
                 && (self.scrub || self.manifest)
                 && content_type.is_some_and(|t| t.contains("json"))
     }
 
     fn collected_limit(&self) -> usize {
-        if self.configure_claim.is_some() {
+        if self.configure {
             256 * 1024
         } else if self.manifest {
             MANIFEST_MAX_BYTES
@@ -525,8 +525,8 @@ impl Guest {
 
     /// An answer as the guest may see it, or `None` when it cannot be made so (an encoding this cannot read).
     fn answer(&self, headers: &axum::http::HeaderMap, body: &Bytes) -> Option<Bytes> {
-        if let Some(claim) = self.configure_claim.as_deref().filter(|_| self.rewrites(headers)) {
-            return guest_configure_page(body, claim, &format!("/den/~{}", self.gid));
+        if self.configure && self.rewrites(headers) {
+            return guest_configure_page(body, &format!("/den/~{}", self.gid));
         }
         if !self.rewrites(headers) {
             return Some(body.clone());
@@ -561,18 +561,17 @@ impl Guest {
 pub(crate) const DEN_GUEST_CONTEXT_MARKER: &str = "/*__DEN_HEARTH_GUEST_CONTEXT_V1__*/ null";
 
 /// Supply Hearth's explicit guest-configuration bridge. Hearth owns the form, validation, sealing, save flow and
-/// displayed URL; Edge contributes only the authenticated grant claim and its stable virtual base. A missing or
-/// duplicated versioned marker fails closed instead of falling back to Hearth's credential-bearing install URL.
-fn guest_configure_page(body: &Bytes, claim: &str, base: &str) -> Option<Bytes> {
+/// displayed URL; Edge contributes only the stable virtual base and an HttpOnly-authenticated save URL. A missing
+/// or duplicated versioned marker fails closed instead of falling back to Hearth's credential-bearing install URL.
+fn guest_configure_page(body: &Bytes, base: &str) -> Option<Bytes> {
     let page = std::str::from_utf8(body).ok()?;
     if page.matches(DEN_GUEST_CONTEXT_MARKER).count() != 1 {
         return None;
     }
     let context = serde_json::to_string(&serde_json::json!({
-        "v": 1,
+        "v": 2,
         "base": base,
-        "saveUrl": "/grant/den-install",
-        "claim": claim,
+        "saveUrl": format!("{base}/config"),
     }))
     .ok()?;
     Some(Bytes::from(page.replacen(DEN_GUEST_CONTEXT_MARKER, &context, 1)))
@@ -608,7 +607,17 @@ pub async fn guest(
         Some(Err(())) => return Ok(not_found()),
         None => None,
     };
-    let claim = req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let configure_route = parsed.as_ref().is_some_and(|parsed| {
+        parsed.as_ref().is_ok_and(|p| {
+            p.addon == "den"
+                && matches!(p.rest.as_str(), "/configure" | "/configure/" | "/config-key" | "/validate" | "/config")
+        })
+    });
+    let claim = if configure_route {
+        crate::grants::configure_claim(&req)
+    } else {
+        req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    };
     let live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
         Ok(live) => live,
         Err(crate::grants::Denied::NotFound) => return Ok(not_found()),
@@ -623,6 +632,14 @@ pub async fn guest(
         crate::link::throttled_per_minute(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
     {
         return Ok(limited(wait));
+    }
+    if parsed.as_ref().is_some_and(|parsed| {
+        parsed.as_ref().is_ok_and(|p| p.addon == "den" && p.rest == "/config")
+    }) {
+        if req.method() != Method::PUT {
+            return Ok(json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        return Ok(crate::grants::den_install(state, req, claim).await);
     }
     let query = req.uri().query().map(str::to_owned);
     let (target, guest) = match parsed {
@@ -673,9 +690,7 @@ pub async fn guest(
             let real =
                 if overlay { real } else { query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}")) };
             let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
-            let configure_claim = (personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/"))
-                .then(|| claim.clone())
-                .flatten();
+            let configure = personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/");
             let guest = Guest {
                 gid: live.gid,
                 scrub: personal_den || p.addon != "atlas",
@@ -683,7 +698,7 @@ pub async fn guest(
                 segment,
                 personal_den,
                 overlay,
-                configure_claim,
+                configure,
                 installs: live.installs,
             };
             (target, guest)
@@ -712,7 +727,7 @@ pub async fn guest(
                 manifest: false,
                 personal_den: false,
                 overlay: false,
-                configure_claim: None,
+                configure: false,
             };
             (target, guest)
         }
@@ -1005,7 +1020,7 @@ async fn relay_with(
     let guest_playback = face == crate::handler::Face::Web
         && playback
         && grant.as_ref().is_some_and(|guest| guest.personal_den);
-    let guest_configure = grant.as_ref().is_some_and(|guest| guest.configure_claim.is_some());
+    let guest_configure = grant.as_ref().is_some_and(|guest| guest.configure);
     // A grant asked again for an open session opens the listener as a start does, and goes through the same checks.
     let regrant = req.uri().path() == GRANT;
     let public_session = (member_only || guest_remux)
