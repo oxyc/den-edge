@@ -1772,10 +1772,11 @@
     routeBeforeCast = route;
     // A receiver can fetch a signed Hearth playlist over private-LAN HTTP. Keep that already-proven route instead
     // of replacing it with Edge's public relay; the HTTPS Cast sender only hands the URL to the receiver.
-    if (!privateLanRemuxPlaylist(session.playlist)) route = RELAY;
+    const directLanCast = privateLanRemuxPlaylist(session.playlist);
+    if (!directLanCast) route = RELAY;
     // Managed playback states receiver capability to Hearth up front. Legacy Remux keeps its existing two-step
-    // profile negotiation with the Cast page.
-    castMode = playback !== undefined;
+    // profile negotiation with the Cast page, except for private HTTP: the sender must never try to play that URL.
+    castMode = playback !== undefined || directLanCast;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     restart({ filename: session.release.filename }, () => {
