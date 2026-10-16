@@ -77,6 +77,8 @@ const NAME_MAX: usize = 60;
 /// A config segment is a few hundred bytes; this is room, not a target.
 const SEGMENT_MAX: usize = 2048;
 const SEGMENT_MIN: usize = 16;
+/// A combined Den config may decode to 16 KiB in Hearth. Its unpadded base64url path segment is at most this long.
+const DEN_SEGMENT_MAX: usize = 21_848;
 /// Grant records across every host, ended ones included, so the index and the sweep stay small.
 const MAX_TOTAL: usize = 200;
 /// Redeem attempts per address per minute. A code is 128 bits, so this is about not doing work for a flood.
@@ -184,6 +186,9 @@ struct Record {
     addons: Vec<String>,
     /// The escrow: addon → the host's real config segment.
     installs: BTreeMap<String, String>,
+    /// This guest's own sealed combined-Den config. It is never part of the host's shared-install escrow.
+    #[serde(default)]
+    den_install: Option<String>,
     created_at: u64,
     code_expires_at: u64,
     access_days: Option<u32>,
@@ -395,6 +400,11 @@ fn valid_segment(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
+fn valid_den_segment(s: &str) -> bool {
+    (SEGMENT_MIN..=DEN_SEGMENT_MAX).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
 /// A name a host can read back without it being disguised: no control, bidi or zero-width format characters.
 fn valid_name(s: &str) -> bool {
     (1..=NAME_MAX).contains(&s.chars().count())
@@ -519,6 +529,9 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match (path.as_str(), req.method().clone()) {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
         ("/grant/addons", Method::GET | Method::HEAD) => addons(state, req).await,
+        ("/grant/den-install", Method::PUT | Method::DELETE) if state.den_playback_enabled => {
+            den_install(state, req).await
+        }
         ("/grant/usage", Method::POST) => usage_report(state, req).await,
         ("/grant/library", Method::POST) => reserve_library(state, req).await,
         ("/grant/device-ticket", Method::POST) => device_ticket(state, req).await,
@@ -532,7 +545,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             | "/grant/usage"
             | "/grant/library"
             | "/grant/device-ticket"
-            | "/grant/device",
+            | "/grant/device"
+            | "/grant/den-install",
             _,
         ) => method_not_allowed(),
         _ => not_found(),
@@ -695,6 +709,7 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
         max_devices: 1,
         addons: Vec::new(),
         installs: BTreeMap::new(),
+        den_install: None,
         created_at: now,
         code_expires_at: now + CODE_DEFAULT_MS,
         access_days: None,
@@ -870,6 +885,7 @@ async fn end_grant(state: &AppState, record: &mut Record, now: u64) -> io::Resul
     }
     record.devices.clear();
     record.installs.clear();
+    record.den_install = None;
     save(state, record).await
 }
 
@@ -908,6 +924,7 @@ pub struct Live {
     pub host: String,
     pub addons: Vec<String>,
     pub installs: BTreeMap<String, String>,
+    pub den_install: Option<String>,
     pub expires_at: Option<u64>,
 }
 
@@ -971,6 +988,7 @@ pub async fn authenticate(
         host: record.host,
         addons: record.addons,
         installs: record.installs,
+        den_install: record.den_install,
     })
 }
 
@@ -1049,8 +1067,11 @@ async fn addons(state: &AppState, req: Request) -> Response {
     }
     match authenticate(state, header_of(&req).as_deref(), None).await {
         Ok(live) => {
-            let addons: Map<String, Value> =
+            let mut addons: Map<String, Value> =
                 live.addons.iter().map(|a| (a.clone(), json!(format!("/{a}/~{}", live.gid)))).collect();
+            if live.den_install.is_some() && state.den_playback_enabled {
+                addons.insert("den".into(), json!(format!("/den/~{}", live.gid)));
+            }
             json_reply(
                 StatusCode::OK,
                 &json!({ "gid": live.gid, "name": live.name, "expiresAt": live.expires_at, "addons": addons }),
@@ -1059,6 +1080,54 @@ async fn addons(state: &AppState, req: Request) -> Response {
         Err(Denied::Expired(at)) => expired_reply(at),
         Err(Denied::NotFound) => not_found(),
     }
+}
+
+/// Replace or remove the live guest's own opaque combined-Den config. Edge can validate that it is one safe path
+/// segment, but never opens it: Hearth alone holds the sealing key and sees the plaintext credentials.
+async fn den_install(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-den-install", ADDONS_PER_WINDOW) {
+        return limited;
+    }
+    let gid = match authenticate(state, header_of(&req).as_deref(), None).await {
+        Ok(live) => live.gid,
+        Err(Denied::Expired(at)) => return expired_reply(at),
+        Err(Denied::NotFound) => return not_found(),
+    };
+    let replacement = if req.method() == Method::PUT {
+        let json = req.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(
+            |value| value.split(';').next().is_some_and(|kind| kind.trim() == "application/json"),
+        );
+        if !json {
+            return json_reply(StatusCode::UNSUPPORTED_MEDIA_TYPE, &error("unsupported_media_type"));
+        }
+        let Ok(bytes) = axum::body::to_bytes(req.into_body(), DEN_SEGMENT_MAX + 1024).await else {
+            return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"));
+        };
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return bad_request() };
+        let Some(map) = body.as_object().filter(|map| map.len() == 1) else { return bad_request() };
+        let Some(segment) = map.get("install").and_then(Value::as_str).filter(|s| valid_den_segment(s))
+        else {
+            return bad_request();
+        };
+        Some(segment.to_owned())
+    } else {
+        None
+    };
+    let now = state.now();
+    let _lock = state.grants.lock.lock().await;
+    let mut record = match load(state, &gid).await {
+        Ok(Some(r)) if r.redeemed_at.is_some() && is_live(&r, now) => r,
+        Ok(_) => return not_found(),
+        Err(e) => return internal("grant read", e),
+    };
+    if record.den_install != replacement {
+        record.den_install = replacement;
+        if let Err(e) = save(state, &record).await {
+            return internal("grant write", e);
+        }
+    }
+    no_content()
 }
 
 fn library_key(id: &str) -> String {
@@ -1294,7 +1363,7 @@ pub struct GuestPath {
 /// anywhere after it. Those are refused rather than let through to be read differently upstream.
 pub fn parse_guest_path(path: &str) -> Option<Result<GuestPath, ()>> {
     let (addon, tail) = path.strip_prefix('/')?.split_once('/')?;
-    let addon = *ADDONS.iter().find(|a| **a == addon)?;
+    let addon = if addon == "den" { "den" } else { *ADDONS.iter().find(|a| **a == addon)? };
     let (segment, rest) = tail.find('/').map_or((tail, ""), |i| tail.split_at(i));
     let Some(decoded) = percent_decode(segment) else { return Some(Err(())) };
     if decoded.first() != Some(&b'~') {
@@ -1322,6 +1391,11 @@ pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
         return read;
     }
     match addon {
+        "den" => {
+            (read && matches!(rest, "/configure" | "/configure/" | "/config-key" | "/manifest.json"))
+                || (*method == Method::POST && matches!(rest, "/playback" | "/availability" | "/validate"))
+                || (read && (under("/subtitle") || under("/subtitles") || under("/meta")))
+        }
         "scout" => *method == Method::POST && rest == "/availability",
         "atlas" => {
             (read
@@ -1634,6 +1708,73 @@ mod tests {
 
     fn grant_headers(header: &str) -> [(&str, &str); 1] {
         [(HEADER, header)]
+    }
+
+    #[tokio::test]
+    async fn a_guest_keeps_replaces_and_removes_only_their_own_den_install() {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let (gid, credential) = redeemed(&h, json!({})).await;
+        assert_eq!(
+            h.send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": SCOUT }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(), Some(SCOUT));
+
+        assert_eq!(
+            h.send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": SUBS }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(), Some(SUBS));
+        assert_eq!(
+            h.send("DELETE", "/grant/den-install", None, &grant_headers(&credential)).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert!(listed["addons"].get("den").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_guest_den_install_surface_is_absent_by_default() {
+        let h = harness().await;
+        let (_, credential) = redeemed(&h, json!({})).await;
+        let response = h
+            .send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": SCOUT }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            h.send(
+                "POST",
+                "/den/sealed/playback",
+                Some("{}".into()),
+                &[("content-type", "application/json")],
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]
@@ -2306,11 +2447,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_grant_has_no_escrow_and_cannot_be_edited() {
-        let h = harness().await;
-        let (gid, _) = redeemed(&h, json!({})).await;
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let (gid, credential) = redeemed(&h, json!({})).await;
+        assert_eq!(
+            h.send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": SCOUT }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
         host_call(&h, "DELETE", &format!("/{gid}"), None).await;
         let stored: Record = load(&h.state, &gid).await.unwrap().unwrap();
-        assert!(stored.installs.is_empty() && stored.devices.is_empty());
+        assert!(stored.installs.is_empty() && stored.devices.is_empty() && stored.den_install.is_none());
         assert_eq!(
             host_call(&h, "PUT", &format!("/{gid}"), Some(json!({ "name": "x" }))).await.0,
             StatusCode::NOT_FOUND
@@ -2356,6 +2509,27 @@ mod tests {
         (StatusCode::OK, "application/json", json!({ "metas": [] }).to_string())
     }
 
+    fn direct_playback(path: &str) -> (StatusCode, &'static str, String) {
+        let body = if path.contains("/subtitles/") {
+            json!([{ "url": format!("https://d.oxy.fi/den/{SCOUT}/subtitle.vtt") }])
+        } else {
+            json!({ "url": "https://flux.tb-cdn.io/x.m3u8" })
+        };
+        (StatusCode::OK, "application/json", body.to_string())
+    }
+
+    fn den_configure(_: &str) -> (StatusCode, &'static str, String) {
+        (
+            StatusCode::OK,
+            "text/html; charset=utf-8",
+            format!(
+                "<!doctype html><script>\n{}\nfunction build() {{\n{}\n}}</script>",
+                crate::relay::DEN_CONFIGURE_BASE,
+                crate::relay::DEN_CONFIGURE_BUILD
+            ),
+        )
+    }
+
     /// A harness relaying every addon, and the remux control plane, to one stand-in.
     async fn relaying(
         reply: fn(&str) -> (StatusCode, &'static str, String),
@@ -2365,11 +2539,90 @@ mod tests {
         let secret = secret.map(str::to_owned);
         let h = Harness::in_dir_with(temp_dir(), move |s| {
             s.relays = crate::parse_relays(&format!(
-                "/scout={base}, /atlas={base}, /reel={base}, /subtitles={base}, /remux={base}"
+                "/scout={base}, /atlas={base}, /reel={base}, /subtitles={base}, /remux={base}, /den={base}"
             ));
             s.remux_edge_secret = secret;
         });
         (members_only(h).await, seen)
+    }
+
+    #[tokio::test]
+    async fn a_guest_den_path_uses_only_the_personal_install_and_gets_trusted_playback_identity() {
+        let (mut h, seen) = relaying(direct_playback, Some("edge-secret")).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.den_playback_enabled = true;
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let (gid, credential) = redeemed(&h, json!({})).await;
+        assert_eq!(
+            h.send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": SCOUT }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        let answer = h
+            .send(
+                "POST",
+                &format!("/den/~{gid}/playback"),
+                Some(json!({ "imdb": "tt1" }).to_string()),
+                &[
+                    (HEADER, credential.as_str()),
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("idempotency-key", "guest-attempt"),
+                    ("x-den-owner", "forged"),
+                ],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let seen = seen.lock().unwrap();
+        let (path, headers, _) = seen.last().unwrap();
+        assert_eq!(path, &format!("/den/{SCOUT}/playback"));
+        assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+        assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+        assert_eq!(headers["x-den-managed-playback"], "1");
+        assert_eq!(headers["idempotency-key"], "guest-attempt");
+
+        drop(seen);
+        let subtitles = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/subtitles/movie/tt1/filename=movie.mkv&videoSize=1.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        let subtitles = axum::body::to_bytes(subtitles.into_body(), 4096).await.unwrap();
+        let subtitles = std::str::from_utf8(&subtitles).unwrap();
+        assert!(subtitles.contains(&format!("/den/~{gid}/subtitle.vtt")), "{subtitles}");
+        assert!(!subtitles.contains(SCOUT), "{subtitles}");
+    }
+
+    #[tokio::test]
+    async fn the_guest_configure_page_saves_the_segment_and_exposes_only_its_stable_url() {
+        let (mut h, seen) = relaying(den_configure, Some("edge-secret")).await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let (gid, credential) = redeemed(&h, json!({})).await;
+        let response =
+            h.send("GET", &format!("/den/~{gid}/configure"), None, &[(HEADER, credential.as_str())]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!response.headers().contains_key(header::ETAG));
+        let page = axum::body::to_bytes(response.into_body(), 256 * 1024).await.unwrap();
+        let page = std::str::from_utf8(&page).unwrap();
+        assert!(page.contains("fetch(\"/grant/den-install\""), "{page}");
+        assert!(page.contains(&format!("\"x-den-grant\": \"{credential}\"")), "{page}");
+        assert!(page.contains("options.headers.set(\"x-den-grant\", DEN_GUEST_GRANT)"), "{page}");
+        assert!(page.contains(&format!("var BASE = \"/den/~{gid}\";")), "{page}");
+        assert!(page.contains("location.origin + BASE + \"/manifest.json\""), "{page}");
+        assert!(!page.contains("BASE + \"/\" + toSegment(install)"), "{page}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.last().unwrap().0, "/den/configure");
+        assert!(!seen.last().unwrap().1.contains_key(HEADER));
     }
 
     #[tokio::test]
