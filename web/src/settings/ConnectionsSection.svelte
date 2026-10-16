@@ -5,7 +5,9 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
+  import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
+  import DetailIcon from '../components/DetailIcon.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -33,6 +35,7 @@
   import type { Routes } from '../lib/routes';
   import { routePath } from '../lib/route';
   import { denAddonOf, denConfigureURL } from '../lib/scout';
+  import type { MenuItem } from '../lib/titleActions';
   import type {
     ConnectionsView,
     KeyResetOutcome,
@@ -235,6 +238,10 @@
   let configuringOwner = $state(false);
   let resettingGuest = $state<string | null>(null);
   let configureGuestProblem = $state<string | null>(null);
+  let pluginMenus = $state<Record<string, ActionMenu | undefined>>({});
+  let guestMenus = $state<Record<string, ActionMenu | undefined>>({});
+  let pluginConfirm = $state<{ kind: 'remove' | 'unverify'; url: string } | null>(null);
+  let pluginConfirmNext: { kind: 'remove' | 'unverify'; url: string } | null = null;
 
   async function configureGuest(gid: string, secret: string) {
     configuringGuest = gid;
@@ -261,6 +268,65 @@
     if (!(await guestGrants.useSharedSettings(gid)))
       configureGuestProblem = 'Couldn’t switch to shared settings. Try again in a moment.';
     if (resettingGuest === gid) resettingGuest = null;
+  }
+
+  function pluginItems(
+    url: string,
+    configureURL: string | null | undefined,
+    pinned: string | null | undefined,
+  ): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (configureURL)
+      items.push({
+        kind: 'item',
+        label: configuringOwner ? 'Opening settings…' : 'Edit Hearth settings',
+        disabled: disabled || configuringOwner,
+        onselect: () => void configureOwner(configureURL),
+      });
+    if (pinned)
+      items.push({
+        kind: 'item',
+        label: 'Stop verifying signature…',
+        disabled,
+        onselect: () => (pluginConfirmNext = { kind: 'unverify', url }),
+      });
+    else
+      items.push({
+        kind: 'item',
+        label: 'Pin signing key',
+        disabled,
+        onselect: () => {
+          pinning = url;
+          keyDraft = '';
+          keyInvalid = false;
+        },
+      });
+    items.push({
+      kind: 'item',
+      label: 'Remove add-on…',
+      disabled,
+      onselect: () => (pluginConfirmNext = { kind: 'remove', url }),
+    });
+    return items;
+  }
+
+  function guestItems(gid: string, secret: string, hasOverride: boolean): MenuItem[] {
+    const items: MenuItem[] = [
+      {
+        kind: 'item',
+        label: configuringGuest === gid ? 'Opening settings…' : 'Edit my Hearth settings',
+        disabled: configuringGuest !== null || resettingGuest !== null,
+        onselect: () => void configureGuest(gid, secret),
+      },
+    ];
+    if (hasOverride)
+      items.push({
+        kind: 'item',
+        label: resettingGuest === gid ? 'Switching…' : 'Use shared settings',
+        disabled: configuringGuest !== null || resettingGuest !== null,
+        onselect: () => void useSharedSettings(gid),
+      });
+    return items;
   }
 
   // Plugins, and the signing key each can be pinned to.
@@ -872,7 +938,7 @@
           {@const configureURL = denConfigureURL(url, routes)}
           {@const pinned = plugin.signingKey}
           {@const waitingOn = plugin.pendingApprovalOn}
-          <li class="line">
+          <li class="line addon-line">
             <span class="label"
               >{den?.label ?? hostOf(url)}<small
                 >{den ? `${den.role} · ${hostOf(url)}` : 'Plugin'}</small
@@ -882,45 +948,51 @@
                   there under Settings › Plugins</small
                 >{:else if added === url}<small
                   >Approve it on your Apple TV under Settings › Plugins</small
+                >{/if}{#if configureURL}<small
+                  >Edit settings to update this installed add-on on your linked devices. You don’t
+                  need to remove or add it again.</small
                 >{/if}</span
             >
-            <span class="actions">
-              {#if configureURL}
-                <Button
-                  variant="secondary"
-                  label={configuringOwner ? 'Opening…' : 'Configure'}
-                  {disabled}
-                  onclick={() => void configureOwner(configureURL)}
-                />
-              {/if}
-              {#if pinned}
-                <Confirm
-                  label="Stop verifying"
-                  question="Stop verifying this plugin?"
-                  detail="Den will accept its index without checking a signature, as before."
-                  {disabled}
-                  onconfirm={() => void setPluginTrust(url, null)}
-                />
-              {:else if pinning !== url}
-                <Button
-                  variant="secondary"
-                  label="Pin signing key"
-                  {disabled}
-                  onclick={() => {
-                    pinning = url;
-                    keyDraft = '';
-                    keyInvalid = false;
-                  }}
-                />
-              {/if}
-              <Confirm
-                label={configureURL ? 'Remove addon' : 'Remove'}
-                question="Remove {den?.label ?? hostOf(url)}?"
-                detail="You can add it back by its URL."
-                {disabled}
-                onconfirm={() => void removePlugin(url)}
+            <span class="addon-menu">
+              <ActionMenu
+                bind:this={pluginMenus[url]}
+                items={() => pluginItems(url, configureURL, pinned)}
+                label="More actions for {den?.label ?? hostOf(url)}"
+                heading={den?.label ?? hostOf(url)}
+                triggerClass="addon-trigger"
+                onclose={() => {
+                  if (pluginConfirmNext?.url === url) pluginConfirm = pluginConfirmNext;
+                  pluginConfirmNext = null;
+                }}
+                glyph={more}
               />
             </span>
+            <Confirm
+              hideTrigger
+              bind:asking={
+                () => pluginConfirm?.kind === 'unverify' && pluginConfirm.url === url,
+                (asked) => (pluginConfirm = asked ? { kind: 'unverify', url } : null)
+              }
+              label="Stop verifying"
+              question="Stop verifying this add-on?"
+              detail="Den will accept its index without checking a signature, as before."
+              {disabled}
+              onclose={() => pluginMenus[url]?.focus()}
+              onconfirm={() => void setPluginTrust(url, null)}
+            />
+            <Confirm
+              hideTrigger
+              bind:asking={
+                () => pluginConfirm?.kind === 'remove' && pluginConfirm.url === url,
+                (asked) => (pluginConfirm = asked ? { kind: 'remove', url } : null)
+              }
+              label="Remove add-on"
+              question="Remove {den?.label ?? hostOf(url)}?"
+              detail="This removes the existing add-on from your library. You can add it back by its URL."
+              {disabled}
+              onclose={() => pluginMenus[url]?.focus()}
+              onconfirm={() => void removePlugin(url)}
+            />
             {#if pinning === url}
               <form
                 class="form wide"
@@ -962,22 +1034,29 @@
       <h3>Shared with you</h3>
       <ul class="list">
         {#each sharedHosts as grant (grant.gid)}
-          <li class="line">
-            <span class="label">Your Den Hearth<small>Personal provider settings</small></span>
-            <Button
-              variant="secondary"
-              label={configuringGuest === grant.gid ? 'Opening…' : 'Configure'}
-              disabled={configuringGuest !== null || resettingGuest !== null}
-              onclick={() => void configureGuest(grant.gid, grant.secret)}
-            />
-            {#if grant.addons.den && grant.overrides?.includes('den') && hasSharedMediaSettings(grant.addons)}
-              <Button
-                variant="secondary"
-                label={resettingGuest === grant.gid ? 'Switching…' : 'Use shared settings'}
-                disabled={configuringGuest !== null || resettingGuest !== null}
-                onclick={() => void useSharedSettings(grant.gid)}
+          {@const hasOverride = Boolean(
+            grant.addons.den &&
+            grant.overrides?.includes('den') &&
+            hasSharedMediaSettings(grant.addons),
+          )}
+          <li class="line addon-line">
+            <span class="label"
+              >Den Hearth<small>Your personal provider settings for this shared access</small><small
+                >Editing updates this connection; it does not add another add-on. {hasOverride
+                  ? 'Use shared settings to remove your overrides and inherit its defaults.'
+                  : 'You currently inherit its shared settings.'}</small
+              ></span
+            >
+            <span class="addon-menu">
+              <ActionMenu
+                bind:this={guestMenus[grant.gid]}
+                items={() => guestItems(grant.gid, grant.secret, Boolean(hasOverride))}
+                label="More actions for Den Hearth"
+                heading="Den Hearth"
+                triggerClass="addon-trigger"
+                glyph={more}
               />
-            {/if}
+            </span>
           </li>
         {/each}
         {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
@@ -1244,6 +1323,10 @@
   </SettingRow>
 </SettingsSection>
 
+{#snippet more()}
+  <DetailIcon name="more" />
+{/snippet}
+
 <style>
   .icon {
     flex-shrink: 0;
@@ -1317,5 +1400,33 @@
 
   .wide {
     flex-basis: 100%;
+  }
+
+  /* Keep an add-on row to its identity and one compact action at every width. ActionMenu turns the same control
+     into a bottom sheet for a narrow or touch screen. */
+  .addon-line .label {
+    flex-basis: 0;
+  }
+
+  .addon-menu {
+    position: relative;
+    flex: 0 0 auto;
+  }
+
+  .addon-menu :global(.addon-trigger) {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    color: var(--muted);
+  }
+
+  .addon-menu :global(.addon-trigger:hover),
+  .addon-menu :global(.addon-trigger[aria-expanded='true']) {
+    background: #fff2;
+    color: var(--fg);
+  }
+
+  .addon-menu :global(.addon-trigger:focus-visible) {
+    outline: 2px solid var(--accent);
   }
 </style>

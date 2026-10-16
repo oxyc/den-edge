@@ -148,10 +148,13 @@ for (const width of [320, 390, 820, 1280]) {
       // A delete asks first, in place.
       await page.getByRole('button', { name: /Plugins/ }).click();
       const plugins = page.getByRole('region', { name: 'Plugins' });
-      await plugins.getByRole('button', { name: 'Remove' }).click();
+      const pluginActions = plugins.getByRole('button', { name: /More actions for/ });
+      await expect(pluginActions).toBeVisible();
+      await pluginActions.click();
+      await page.getByRole('menuitem', { name: 'Remove add-on…' }).click();
       await expect(plugins.getByRole('button', { name: 'Cancel' })).toBeFocused();
       await page.keyboard.press('Escape');
-      await expect(plugins.getByRole('button', { name: 'Remove' })).toBeVisible();
+      await expect(pluginActions).toBeVisible();
 
       await page.getByRole('button', { name: /Linked devices/ }).click();
       const devices = page.getByRole('region', { name: 'Linked devices' });
