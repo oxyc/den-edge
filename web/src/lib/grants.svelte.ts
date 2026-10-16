@@ -9,7 +9,7 @@ import {
   redeem,
   redeemTicket,
   ticketGrant,
-  type GrantAddon,
+  type GuestAddon,
 } from './grants';
 import { forgetGrant, onGrantEnded, rememberGrant } from './relayFetch';
 
@@ -20,7 +20,7 @@ export interface GuestGrant {
   /** Empty once den-edge no longer knows the grant: an ended grant that still has one may be extended. */
   secret: string;
   /** `/<addon>/~<gid>` for each addon shared. */
-  addons: Partial<Record<GrantAddon, string>>;
+  addons: Partial<Record<GuestAddon, string>>;
   expiresAt: number | null;
   /** den-edge said the access ended (`grant_expired`), or no longer knows this grant. */
   ended: boolean;

@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Routes } from './routes';
 import {
   denAddonOf,
+  DEN,
   findAddon,
   findAtlas,
   findReel,
+  findScout,
   hostedInstalls,
   installsOf,
   SCOUT,
 } from './scout';
 
 const ROUTES: Routes = {
+  den: [{ url: 'http://192.168.86.193:8090/den' }],
   scout: [
     { url: 'http://192.168.86.193:8080' },
     { url: 'https://pve.example:8443/scout' },
@@ -66,6 +69,54 @@ describe('findAddon', () => {
   it('is null when no plugin is scout, or the table has none', async () => {
     expect(await findAddon([THEIRS], ROUTES, SCOUT, addons({}).fetchImpl)).toBeNull();
     expect(await findAddon([SCOUT_LAN], {}, SCOUT, addons({}).fetchImpl)).toBeNull();
+  });
+});
+
+describe('findScout', () => {
+  const install = 'http://192.168.86.193:8090/den/sealed-cfg/manifest.json';
+
+  it('opts into unified playback only when the configured route answers OPTIONS with 204', async () => {
+    const asked: [string, RequestInit | undefined][] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      asked.push([String(input), init]);
+      return init?.method === 'OPTIONS'
+        ? new Response(null, { status: 204 })
+        : new Response(JSON.stringify({ id: DEN.id }));
+    };
+    expect(await findScout([install], ROUTES, fetchImpl)).toEqual({
+      install: install.replace('/manifest.json', ''),
+      base: '/den/sealed-cfg',
+      playback: '/den/sealed-cfg/playback',
+    });
+    expect(asked.map(([url]) => url)).toEqual([
+      '/den/sealed-cfg/manifest.json',
+      '/den/sealed-cfg/playback',
+    ]);
+    expect(asked[1]?.[1]).toMatchObject({ method: 'OPTIONS', cache: 'no-store' });
+  });
+
+  it('keeps combined installs on legacy playback for a concealed route or any non-204 answer', async () => {
+    for (const status of [200, 404, 405, 500]) {
+      const fetchImpl: typeof fetch = async (_input, init) =>
+        init?.method === 'OPTIONS'
+          ? new Response(null, { status })
+          : new Response(JSON.stringify({ id: DEN.id }));
+      expect(await findScout([install], ROUTES, fetchImpl)).toEqual({
+        install: install.replace('/manifest.json', ''),
+        base: '/den/sealed-cfg',
+      });
+    }
+  });
+
+  it('keeps combined installs on legacy playback when the live probe fails', async () => {
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if (init?.method === 'OPTIONS') throw new TypeError('offline');
+      return new Response(JSON.stringify({ id: DEN.id }));
+    };
+    expect(await findScout([install], ROUTES, fetchImpl)).toEqual({
+      install: install.replace('/manifest.json', ''),
+      base: '/den/sealed-cfg',
+    });
   });
 });
 

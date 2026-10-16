@@ -293,6 +293,9 @@ pub struct AppState {
     /// as a session's owner and end its sessions. Unset, a guest is offered no remux at all — without it remux
     /// would count the guest's sessions as the host's.
     pub remux_edge_secret: Option<String>,
+    /// The unified Den playback surface and guest-owned Den installs (env `DEN_PLAYBACK_ENABLED`). The feature is
+    /// built dormant: an operator must explicitly enable Edge as well as Hearth before any new route is exposed.
+    pub den_playback_enabled: bool,
     /// The authorization server for Den's MCP connector (`oauth.rs`; env `OAUTH_ISSUER`, `OAUTH_SIGNING_KEY`).
     /// `None` turns `/oauth/…` and `/mcp` off.
     pub oauth: Option<oauth::OAuth>,
@@ -424,6 +427,7 @@ impl AppState {
             member_hints: Mutex::new(HashMap::new()),
             reel_hints: Mutex::new(HashMap::new()),
             remux_edge_secret: None,
+            den_playback_enabled: false,
             oauth: None,
         }
     }
@@ -549,6 +553,7 @@ async fn main() {
     state.tmdb_daily_max = env_number("TMDB_DAILY_MAX");
     state.media_daily_max = env_number("MEDIA_DAILY_MAX_BYTES");
     state.remux_edge_secret = env_opt("REMUX_EDGE_SECRET");
+    state.den_playback_enabled = env_flag("DEN_PLAYBACK_ENABLED", false);
     state.segments_key = env_opt("SEGMENTS_KEY");
     // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
     // a browser that cannot ask doesthedogdie itself. Built whether or not a key is lent — gated on the TMDB
@@ -610,7 +615,7 @@ async fn main() {
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
          web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
-         oauth={} assistant_writes={}",
+         den_playback={} oauth={} assistant_writes={}",
         release_version(),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -648,6 +653,7 @@ async fn main() {
             (Some(_), Some(max)) => format!("household-key(max {max}/day)"),
         },
         on(state.remux_edge_secret.is_some()),
+        on(state.den_playback_enabled),
         // The public key is what den-mcp's TOKEN_PUBLIC_KEYS must hold; it is not a secret.
         state.oauth.as_ref().map_or_else(
             || "off".to_owned(),

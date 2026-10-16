@@ -5,7 +5,7 @@
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import type Hls from 'hls.js';
-  import { untrack } from 'svelte';
+  import { tick as renderTick, untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
@@ -97,6 +97,8 @@
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import { startPlayback } from '../lib/playback';
+  import { directRecovery } from '../lib/playbackRecovery';
   import {
     activeAt,
     canAutoSkip,
@@ -130,6 +132,7 @@
     content,
     scout,
     remux,
+    playback,
     subtitles,
     audioLanguage,
     subtitleLanguage,
@@ -152,6 +155,8 @@
     scout: Addon;
     /** Where den-remux answers (`findRemux`): '' for this origin, else the tailnet's address. */
     remux: string;
+    /** Hearth's unified operation; absent unless its configured route passed live capability discovery. */
+    playback?: string;
     /** The library's other LAN addons: den-subtitles is among them. */
     subtitles: string[];
     /** Settings › Playback's audio language (ISO 639-1); undefined is each title's original language. */
@@ -287,6 +292,7 @@
    */
   let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
   let session = $state<Session | null>(null);
+  let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
   /** The last session's `subtitleSource`, kept past a `letGo`/`session = null` the same way `sessionRoute` is. */
@@ -569,6 +575,7 @@
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
+    delivery: 'ordinary' | 'refresh' | 'fallback' = 'ordinary',
   ): Promise<boolean | Failure> {
     clearTimeout(retry);
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
@@ -666,7 +673,24 @@
     startingSession?.abort(new DOMException('superseded session start', 'AbortError'));
     const attempt = new AbortController();
     startingSession = attempt;
-    const result = await startSession(request, undefined, on, undefined, attempt.signal);
+    const {
+      scout: _scout,
+      subtitles: _subtitles,
+      ipv4Hint: _ipv4Hint,
+      noHint: _noHint,
+      ...fields
+    } = request;
+    let result = playback
+      ? await startPlayback(
+          playback,
+          { ...fields, ...(delivery === 'fallback' ? { directFailed: true } : {}) },
+          undefined,
+          attempt.signal,
+        )
+      : await startSession(request, undefined, on, undefined, attempt.signal);
+    // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled.
+    if ('failure' in result && result.failure === 'legacy')
+      result = await startSession(request, undefined, on, undefined, attempt.signal);
     if (startingSession === attempt) startingSession = undefined;
     // Another start (a retry and the key form, say) may have got there first.
     if (attempt.signal.aborted || ended || session !== (replacing ?? null)) {
@@ -734,6 +758,7 @@
     // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     session = result;
+    directAttempt = result.external ? (delivery === 'ordinary' ? 'initial' : 'refreshed') : null;
     sessionRoute = on;
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
@@ -745,6 +770,7 @@
         result.subtitles ?? [],
       );
     }
+    if (result.external && subtitleChoice) await loadExternalSubtitle(result, subtitleChoice);
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
     lastSubtitleSource = result.subtitleSource;
@@ -769,6 +795,8 @@
         result,
         (name) => releases.find((r) => r.filename === name)?.label ?? name,
       );
+    // The release list remains useful for managed HLS: it contains names, never media URLs, and every filename the
+    // viewer picks still comes back through this configured Hearth playback operation.
     if (!releases.length) {
       void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
         videoCodecs: request.videoCodecs,
@@ -1260,7 +1288,9 @@
       element.addEventListener('loadeddata', firstFrame, { once: true });
       cancelLoadedFrame = () => element.removeEventListener('loadeddata', firstFrame);
     }
-    const reportUrl = reportUrlOf(current.playlist);
+    const reportUrl = current.external
+      ? undefined
+      : (current.control?.report ?? reportUrlOf(current.playlist));
     const stopWatching = () => {
       cleanup();
       cancelFirstFrame();
@@ -1313,7 +1343,7 @@
         letGo();
         return;
       }
-      hls = engine = new Hls(hlsConfig(started, 'page', connection));
+      hls = engine = new Hls(hlsConfig(started, 'page', current.external ? undefined : connection));
       // A request starting is no progress; its bytes, counted as they come in (`arrived`), are.
       hls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
         if (data.frag.type !== 'subtitle') loading = data.frag.stats;
@@ -1345,7 +1375,7 @@
         hls: { instance: hls, Hls },
         reportUrl,
         // Bound to this route and session now: both can change before the watcher stops.
-        onEstimate: estimateToLink(route, playedSession(current)),
+        onEstimate: current.external ? undefined : estimateToLink(route, playedSession(current)),
       });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal, and the session moves to a copy
@@ -1600,7 +1630,8 @@
   // The Cast control was available to press — the same condition the header's button renders under — whether or
   // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened.
   $effect(() => {
-    if (castable && session && !session.castOrigin && route !== RELAY) reachCast('offered');
+    if (castable && session && !session.external && !session.castOrigin && route !== RELAY)
+      reachCast('offered');
   });
 
   /**
@@ -1745,6 +1776,19 @@
     });
     watcher?.spent();
     reportFailure(current, code, message);
+    if (current.external) {
+      const recovery = directRecovery(played, directAttempt ?? 'initial');
+      carryPosition();
+      const moved = await begin(
+        undefined,
+        {},
+        current,
+        recovery === 'refresh' ? 'refresh' : 'fallback',
+      );
+      if (session === current && moved !== true)
+        failure = typeof moved === 'string' && moved !== 'busy' ? moved : 'source';
+      return;
+    }
     // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
     // carrier NAT with an address per destination, or a middlebox answering the lookup). Asked again once without it.
     if (retryWithoutHint(current, played, noHint)) {
@@ -1901,7 +1945,7 @@
    */
   function applySubtitles() {
     const choice = subtitleChoice;
-    if (hls) {
+    if (hls && !session?.externalSubtitles?.length) {
       hls.subtitleDisplay = choice !== null;
       hls.subtitleTrack =
         choice === null ? -1 : hls.subtitleTracks.findIndex((track) => track.lang === choice);
@@ -1909,6 +1953,17 @@
     }
     for (const track of Array.from(video?.textTracks ?? []))
       track.mode = choice !== null && track.language === choice ? 'showing' : 'disabled';
+  }
+
+  async function loadExternalSubtitle(current: Session, language: string): Promise<void> {
+    const track = await current.loadExternalSubtitle?.(language);
+    if (!track || session !== current) return;
+    // The loader owns and deduplicates blobs; this array is render state for the `<track>` children.
+    current.externalSubtitles = [
+      ...(current.externalSubtitles ?? []).filter((one) => one.language !== track.language),
+      track,
+    ];
+    await renderTick();
   }
 
   function sendSubtitleChoice() {
@@ -2268,7 +2323,7 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
-    {#if castable && session && !session.castOrigin && route !== RELAY}
+    {#if castable && session && !session.external && !session.castOrigin && route !== RELAY}
       <Button
         variant="player"
         size="icon"
@@ -2426,7 +2481,11 @@
             if (video?.error) void broke();
             else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
-        ></video>
+        >
+          {#each session.externalSubtitles ?? [] as track (track.language)}
+            <track kind="subtitles" src={track.url} srclang={track.language} label={track.name} />
+          {/each}
+        </video>
         {#if reconnecting}
           <p class="countdown" role="status">Reconnecting…</p>
         {:else if startsIn}
@@ -2524,7 +2583,7 @@
             <select
               aria-label="Subtitles"
               value={subtitleChoice ?? ''}
-              onchange={(event) => {
+              onchange={async (event) => {
                 const next = event.currentTarget.value || null;
                 // A change once playback has already shown a frame is a signal the file first chosen was wrong,
                 // for den-edge's own outcome report (`finish()`) — the very first pick, before anything played, is
@@ -2534,6 +2593,7 @@
                   else subtitleSwitchedMidPlay = true;
                 }
                 subtitleChoice = next;
+                if (next && session) await loadExternalSubtitle(session, next);
                 applySubtitles();
                 sendSubtitleChoice();
               }}

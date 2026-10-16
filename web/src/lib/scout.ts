@@ -14,9 +14,12 @@ export interface Addon {
   install: string;
   /** Where this page asks it. */
   base: string;
+  /** Hearth's unified playback operation, discovered live for this browser session. */
+  playback?: string;
 }
 
 export const SCOUT = { name: 'scout', id: 'com.den.scout', path: '/scout' };
+export const DEN = { name: 'den', id: 'com.den.addon', path: '/den' };
 export const ATLAS = { name: 'atlas', id: 'com.den.atlas', path: '/atlas' };
 export const REEL = { name: 'reel', id: 'com.den.reel', path: '/reel' };
 
@@ -100,12 +103,32 @@ function configOf(install: string, mount: string): string | null {
   return path === '' || /^\/[\w.~%-]+$/.test(path) ? path : null;
 }
 
-async function manifestIs(manifest: string, id: string, fetchImpl: typeof fetch): Promise<boolean> {
+async function readManifest(
+  manifest: string,
+  id: string,
+  fetchImpl: typeof fetch,
+): Promise<Record<string, unknown> | null> {
   try {
     const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
-    return res.ok && ((await res.json()) as { id?: unknown }).id === id;
+    if (!res.ok) return null;
+    const body = (await res.json()) as Record<string, unknown> | null;
+    return body?.id === id ? body : null;
   } catch {
-    return false; // out of reach, or not an addon at all
+    return null; // out of reach, or not an addon at all
+  }
+}
+
+/** A live, deliberately uncached probe of Hearth's runtime/default-off playback route. */
+async function hasPlayback(base: string, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    const response = await fetchImpl(`${base}/playback`, {
+      method: 'OPTIONS',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+    return response.status === 204;
+  } catch {
+    return false;
   }
 }
 
@@ -118,7 +141,31 @@ export async function findAddon(
 ): Promise<Addon | null> {
   for (const url of plugins) {
     const addon = place(url, routes, want);
-    if (addon && (await manifestIs(`${addon.base}${MANIFEST}`, want.id, fetchImpl))) return addon;
+    if (addon && (await readManifest(`${addon.base}${MANIFEST}`, want.id, fetchImpl))) return addon;
+  }
+  return null;
+}
+
+/**
+ * The stream source used by playback: legacy Scout, or the combined Den addon. The latter opts the browser into
+ * Hearth-owned playback only when its configured playback route answers the live capability probe with exactly 204.
+ * A concealed 404, any other answer, or a failed probe keeps the existing Remux client, so shipping these bytes does
+ * not turn the feature on.
+ */
+export async function findScout(
+  plugins: string[],
+  routes: Routes,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Addon | null> {
+  const legacy = await findAddon(plugins, routes, SCOUT, fetchImpl);
+  if (legacy) return legacy;
+  for (const url of plugins) {
+    const addon = place(url, routes, DEN);
+    if (!addon) continue;
+    if (!(await readManifest(`${addon.base}${MANIFEST}`, DEN.id, fetchImpl))) continue;
+    return (await hasPlayback(addon.base, fetchImpl))
+      ? { ...addon, playback: `${addon.base}/playback` }
+      : addon;
   }
   return null;
 }
@@ -131,7 +178,7 @@ export async function findAtlas(
 ): Promise<Addon | null> {
   const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl);
   if (plugin) return plugin;
-  const here = await manifestIs(`${ATLAS.path}${MANIFEST}`, ATLAS.id, fetchImpl);
+  const here = await readManifest(`${ATLAS.path}${MANIFEST}`, ATLAS.id, fetchImpl);
   return here ? { install: ATLAS.path, base: ATLAS.path } : null;
 }
 
@@ -148,7 +195,7 @@ export async function findReel(
 ): Promise<Addon | null> {
   const plugin = await findAddon(plugins, routes, REEL, fetchImpl);
   if (plugin) return plugin;
-  const here = await manifestIs(`${REEL.path}${MANIFEST}`, REEL.id, fetchImpl);
+  const here = await readManifest(`${REEL.path}${MANIFEST}`, REEL.id, fetchImpl);
   return here ? { install: REEL.path, base: REEL.path } : null;
 }
 

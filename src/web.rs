@@ -93,9 +93,9 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
          img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
          https://live.metahub.space; \
          media-src 'self' blob: data: https: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
-         https://*.ts.net:8443{media}; \
+         https://*.ts.net:8443 https://*.tb-cdn.io{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 {DIRECT_MEDIA_CONNECT} \
-         https://1.1.1.1 https://api.ipify.org https://api.simkl.com{media}; \
+         https://*.tb-cdn.io https://1.1.1.1 https://api.ipify.org https://api.simkl.com{media}; \
          frame-src https://www.youtube-nocookie.com{cast}; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -802,6 +802,15 @@ mod tests {
         assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
         // Bounded: https, and the one port `tailscale serve` publishes.
         assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
+    }
+
+    #[test]
+    fn policy_allows_only_the_torbox_cdn_zone_for_script_driven_media() {
+        let policy = super::csp(&[], None);
+        let directive = |name: &str| policy.split(name).nth(1).unwrap().split(';').next().unwrap().to_owned();
+        assert!(directive("connect-src").split_whitespace().any(|s| s == "https://*.tb-cdn.io"));
+        assert!(directive("media-src").split_whitespace().any(|s| s == "https://*.tb-cdn.io"));
+        assert!(!policy.contains("https://*.torbox.app"));
     }
 
     #[test]
