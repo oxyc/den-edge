@@ -642,7 +642,10 @@ pub async fn guest(
     let configure_route = parsed.as_ref().is_some_and(|parsed| {
         parsed.as_ref().is_ok_and(|p| {
             p.addon == "den"
-                && matches!(p.rest.as_str(), "/configure" | "/configure/" | "/config-key" | "/validate" | "/config")
+                && matches!(
+                    p.rest.as_str(),
+                    "/configure" | "/configure/" | "/config-key" | "/validate" | "/config"
+                )
         })
     });
     let claim = if configure_route {
@@ -665,9 +668,10 @@ pub async fn guest(
     {
         return Ok(limited(wait));
     }
-    if parsed.as_ref().is_some_and(|parsed| {
-        parsed.as_ref().is_ok_and(|p| p.addon == "den" && p.rest == "/config")
-    }) {
+    if parsed
+        .as_ref()
+        .is_some_and(|parsed| parsed.as_ref().is_ok_and(|p| p.addon == "den" && p.rest == "/config"))
+    {
         if req.method() != Method::PUT {
             return Ok(json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
         }

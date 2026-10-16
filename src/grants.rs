@@ -2777,9 +2777,7 @@ mod tests {
         let (mut h, seen) = relaying(den_configure, Some("edge-secret")).await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
         let (gid, credential) = redeemed(&h, json!({})).await;
-        let bootstrap = h
-            .send("POST", "/grant/den-configure", None, &[(HEADER, credential.as_str())])
-            .await;
+        let bootstrap = h.send("POST", "/grant/den-configure", None, &[(HEADER, credential.as_str())]).await;
         assert_eq!(bootstrap.status(), StatusCode::NO_CONTENT);
         let set_cookie = bootstrap.headers()[header::SET_COOKIE].to_str().unwrap();
         assert!(set_cookie.contains(&format!("Path=/den/~{gid}")), "{set_cookie}");
@@ -2787,9 +2785,7 @@ mod tests {
             assert!(set_cookie.contains(attribute), "{set_cookie}");
         }
         let cookie = set_cookie.split(';').next().unwrap();
-        let response = h
-            .send("GET", &format!("/den/~{gid}/configure"), None, &[("cookie", cookie)])
-            .await;
+        let response = h.send("GET", &format!("/den/~{gid}/configure"), None, &[("cookie", cookie)]).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert!(!response.headers().contains_key(header::ETAG));
@@ -2818,9 +2814,7 @@ mod tests {
             .await;
         assert_eq!(saved.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            h.send("GET", &format!("/den/~{gid}/config"), None, &[("cookie", cookie)])
-                .await
-                .status(),
+            h.send("GET", &format!("/den/~{gid}/config"), None, &[("cookie", cookie)]).await.status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
