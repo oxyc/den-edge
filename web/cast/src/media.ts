@@ -39,3 +39,14 @@ export function managedMedia(url: string): boolean {
     return false;
   }
 }
+
+/** The exact load whose lifecycle the Cast page owns, independent of a newer load still being prepared. */
+export interface PlayingMedia {
+  url: string;
+  external: boolean;
+}
+
+/** Only a Remux load has Den report/end operations. A managed CDN URL must never receive either request. */
+export function denLifecycleMedia(playing: PlayingMedia | undefined): string | null {
+  return playing && !playing.external ? playing.url : null;
+}

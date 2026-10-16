@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { managedMedia, signedMedia } from '../../cast/src/media';
+import { denLifecycleMedia, managedMedia, signedMedia } from '../../cast/src/media';
 
 const path = `/remux/s/${'A'.repeat(22)}/${'b'.repeat(22)}/master.m3u8`;
 
@@ -48,5 +48,30 @@ describe('managed media URLs the Cast sender accepts', () => {
       false,
     );
     expect(managedMedia('https://tb-cdn.io.example/x?scrobbling_enabled=false')).toBe(false);
+  });
+});
+
+describe('Cast media lifecycle ownership during replacements', () => {
+  const direct = {
+    url: 'https://video.eu.tb-cdn.io/stream/master.m3u8?scrobbling_enabled=false',
+    external: true,
+  };
+  const remux = {
+    url: `https://media.example${path}`,
+    external: false,
+  };
+
+  it('does not turn the old managed URL into a Den endpoint while Remux is preparing', () => {
+    const playing = direct;
+    const current = remux;
+    expect(current.external).toBe(false);
+    expect(denLifecycleMedia(playing)).toBeNull();
+  });
+
+  it('still owns the old Remux lifecycle while managed playback is preparing', () => {
+    const playing = remux;
+    const current = direct;
+    expect(current.external).toBe(true);
+    expect(denLifecycleMedia(playing)).toBe(remux.url);
   });
 });

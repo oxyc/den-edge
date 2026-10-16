@@ -12,7 +12,7 @@ import {
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
-import { managedMedia, signedMedia } from './media';
+import { denLifecycleMedia, managedMedia, signedMedia, type PlayingMedia } from './media';
 import { keepProfile, keptProfile } from './profile';
 import './style.css';
 
@@ -161,7 +161,7 @@ const RECONNECTING = 'Reconnecting…';
  * The playlist of the session this page plays, or hands to a receiver: where its failures are reported and its end is
  * sent. The player outside can't do either for a session on the public address — its page may not connect there.
  */
-let playing: string | undefined;
+let playing: PlayingMedia | undefined;
 /** How long a measured load waits for the player to say play on, before it plays on regardless. */
 const CONTINUE_WAIT_MS = 5_000;
 /** The measured load waiting for the player's `den-continue`. */
@@ -200,10 +200,11 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
 }
 
 /** Tell den-remux why the session couldn't play — its log sees nothing of it otherwise — and then the player. */
-function fail(message: string, code = 0): void {
-  if (playing && !current?.media.external) {
+function fail(message: string, code = 0, owner: PlayingMedia | undefined = playing): void {
+  const lifecycle = denLifecycleMedia(owner);
+  if (lifecycle) {
     watcher?.spent();
-    sendReport(reportUrlOf(playing), reportBody(code, message));
+    sendReport(reportUrlOf(lifecycle), reportBody(code, message));
   }
   tell('den-error', { message });
 }
@@ -211,12 +212,10 @@ function fail(message: string, code = 0): void {
 /** End the session this page played, so it stops holding den-remux and the media listener open. */
 function endPlaying(): void {
   if (!playing) return;
-  if (current?.media.external) {
-    playing = undefined;
-    return;
-  }
-  const url = playing.replace(/\/master\.m3u8$/, '');
+  const lifecycle = denLifecycleMedia(playing);
   playing = undefined;
+  if (!lifecycle) return;
+  const url = lifecycle.replace(/\/master\.m3u8$/, '');
   void fetch(url, { method: 'DELETE', keepalive: true }).catch((error: unknown) =>
     // It ends on its own once idle; this only says why it lingered.
     console.warn('ending the session failed:', error),
@@ -274,7 +273,7 @@ function watchLink(connection: Link): void {
 async function loadLocal(media: Media, url: string): Promise<void> {
   stopLocal();
   video.removeAttribute('src');
-  playing = url;
+  playing = { url, external: media.external === true };
   const start = Math.max(0, media.currentTime ?? 0);
   // The player's own rule (`nativeHls`): Chrome claims HLS too, but hls.js plays there, and only hls.js rides out a
   // dropped connection with `resumingLoader`.
@@ -416,8 +415,9 @@ async function loadCast(): Promise<void> {
     tell('den-cast-request', { profile: profile.value });
     return;
   }
-  playing = playUrl(id, media);
-  const info = new chrome.media.MediaInfo(playing, 'application/x-mpegURL');
+  const url = playUrl(id, media);
+  const requested = { url, external: media.external === true };
+  const info = new chrome.media.MediaInfo(url, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
   info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
   info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.FMP4;
@@ -433,6 +433,9 @@ async function loadCast(): Promise<void> {
   try {
     replacingCast = castStarted;
     await session.loadMedia(request);
+    // A LOAD replaces the receiver only once it succeeds. Until then its events and lifecycle still belong to
+    // the previous media, even though `current` already describes the requested replacement.
+    playing = requested;
     if (current?.id !== id) {
       void loadCast();
       return;
@@ -453,7 +456,7 @@ async function loadCast(): Promise<void> {
       castContext?.endCurrentSession(true);
     const message = 'Chromecast could not load this release';
     setStatus(message);
-    fail(message);
+    fail(message, 0, requested);
   }
 }
 
