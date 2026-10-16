@@ -790,10 +790,11 @@ async fn relay_with(
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !playback_probe && !cancel {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
-    // On the public web name, scout answers only to a device that holds a library here.
+    // On the public web name, Scout and the combined Den addon answer only to a device that holds a household
+    // library here. A grant guest has already passed its separate authentication above and skips this gate.
     //
-    // Not about bandwidth: scout's `/configure` and `/config-key` are reachable through this relay, and
-    // scout still takes an unsealed config — so a stranger could mint an install carrying their own
+    // Not about bandwidth: the addons' `/configure` and `/config-key` are reachable through this relay, and
+    // Scout still takes an unsealed config — so a stranger could mint an install carrying their own
     // debrid key, and the indexer scraping that install causes would leave from this house's address.
     // What that costs is the address itself: indexers rate-limit and blocklist by IP, and the household
     // is what gets blocked. It is also the reason the public `d-scout` name sits behind Access.
@@ -809,11 +810,10 @@ async fn relay_with(
     let target = if speed { speed_target(&target) } else { Some(target) };
     let Some(target) = target else { return json(StatusCode::BAD_REQUEST, "bad_request") };
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
-    // `/scout` itself and `/scout?…` are relayed to scout's `/` (`target`), so they are scout's too.
+    // `/scout` and `/den` themselves (including a query) belong to those addons too.
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
-    let member_only = grant.is_none()
-        && face == crate::handler::Face::Web
-        && (scout || remux || playback || playback_probe);
+    let den = req.uri().path() == "/den" || req.uri().path().starts_with("/den/");
+    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || den || remux);
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -823,7 +823,7 @@ async fn relay_with(
             return limited(wait);
         }
         // Membership is only a meaningful public gate when strangers cannot create a library for themselves.
-        if remux && !state.new_libraries.gates_households() {
+        if (remux || den) && !state.new_libraries.gates_households() {
             return json(StatusCode::NOT_FOUND, "not_found");
         }
         let claim = member_claim(&req);
@@ -2691,7 +2691,45 @@ mod tests {
         assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
         assert!(received.try_recv().is_err(), "an untrusted probe reached Hearth");
 
+        // The gate covers the whole combined addon, not only playback. Otherwise a stranger could fetch the
+        // public config key, seal their own debrid account, and exercise Scout through this household's address.
+        for path in ["/den/configure", "/den/compatible/stream/movie/tt1.json"] {
+            let visitor = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
+            assert_eq!(visitor.status(), StatusCode::NOT_FOUND, "{path}");
+            assert!(received.try_recv().is_err(), "an untrusted {path} reached Hearth");
+        }
+
+        // LAN/tailnet requests retain the direct-addon behavior; only the public Web face needs the member proof.
+        let local = h.send("GET", "/den/compatible/stream/movie/tt1.json", None, &[]).await;
+        assert_eq!(local.status(), StatusCode::NO_CONTENT);
+        let (method, path, _) = received.recv().await.unwrap();
+        assert_eq!((method, path.as_str()), (Method::GET, "/den/compatible/stream/movie/tt1.json"));
+
         let claim = registered_library(&h).await;
+        let open = h
+            .send(
+                "GET",
+                "/den/compatible/stream/movie/tt1.json",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(open.status(), StatusCode::NOT_FOUND);
+        assert!(received.try_recv().is_err(), "an open-created library reached Hearth");
+
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let member = h
+            .send(
+                "GET",
+                "/den/compatible/stream/movie/tt1.json",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(member.status(), StatusCode::NO_CONTENT);
+        let (method, path, _) = received.recv().await.unwrap();
+        assert_eq!((method, path.as_str()), (Method::GET, "/den/compatible/stream/movie/tt1.json"));
+
         for (config, expected) in [
             ("compatible", StatusCode::NO_CONTENT),
             ("missing", StatusCode::NOT_FOUND),

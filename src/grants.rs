@@ -1380,10 +1380,11 @@ pub fn parse_guest_path(path: &str) -> Option<Result<GuestPath, ()>> {
     })
 }
 
-/// What a guest may ask of an addon, by the path after `~<gid>`: the routes each addon serves under its config
-/// that the web app calls, and never an install's own — `/configure`, `/config-key`, scout's `/stream` (its
-/// lists carry play tickets) and `/play`. Reel's `/play`, `/hls`, `/m` and the like are served at its root, not
-/// under a config, so a guest never names them with `~<gid>` and none is allowed here.
+/// What a guest may ask of an addon, by the path after `~<gid>`: the routes the web app calls. A shared host Scout
+/// install never exposes `/stream` (its lists carry play tickets) or `/play`. The combined Den addon is different:
+/// its sealed config and debrid account belong to this guest, so its read-only `/stream` route is allowed while
+/// `/play` and root media routes remain forbidden. Reel's `/play`, `/hls`, `/m` and the like are served at its root,
+/// not under a config, so a guest never names them with `~<gid>` and none is allowed here.
 pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
     let read = matches!(*method, Method::GET | Method::HEAD);
     let under = |dir: &str| rest.strip_prefix(dir).is_some_and(|r| r.is_empty() || r.starts_with('/'));
@@ -1395,7 +1396,7 @@ pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
             (read && matches!(rest, "/configure" | "/configure/" | "/config-key" | "/manifest.json"))
                 || (matches!(*method, Method::POST | Method::OPTIONS) && rest == "/playback")
                 || (*method == Method::POST && matches!(rest, "/availability" | "/validate"))
-                || (read && (under("/subtitle") || under("/subtitles") || under("/meta")))
+                || (read && (under("/stream") || under("/subtitle") || under("/subtitles") || under("/meta")))
         }
         "scout" => *method == Method::POST && rest == "/availability",
         "atlas" => {
@@ -1901,6 +1902,9 @@ mod tests {
             assert!(!allowed("subtitles", &get, path), "{path}");
         }
         assert!(!allowed("remux", &get, "/subtitle/x"), "only the four addons have a guest allowlist");
+        assert!(allowed("den", &get, "/stream/movie/tt1.json"));
+        assert!(!allowed("den", &post, "/stream/movie/tt1.json"));
+        assert!(!allowed("den", &get, "/play/ticket"));
         assert!(allowed("den", &options, "/playback"));
         assert!(!allowed("den", &options, "/validate"));
     }
@@ -2567,6 +2571,35 @@ mod tests {
             .status(),
             StatusCode::NO_CONTENT
         );
+
+        let stream = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/stream/movie/tt1.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(stream.status(), StatusCode::OK);
+        {
+            let seen = seen.lock().unwrap();
+            let (path, headers, _) = seen.last().unwrap();
+            assert_eq!(path, &format!("/den/{SCOUT}/stream/movie/tt1.json"));
+            assert!(!headers.contains_key(HEADER));
+        }
+
+        let before = seen.lock().unwrap().len();
+        let refused = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/play/ticket"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        assert_eq!(seen.lock().unwrap().len(), before, "a forbidden guest play reached Hearth");
+
         let answer = h
             .send(
                 "POST",
