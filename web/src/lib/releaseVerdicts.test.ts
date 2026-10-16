@@ -151,6 +151,11 @@ describe('unchangedNotice', () => {
       'public',
       'ipv6',
       'cast',
+      'request',
+      'sourceUnavailable',
+      'timedOut',
+      'temporarilyUnavailable',
+      'protocol',
     ] as const)
       expect(nothingFits(failure), failure).toBe(false);
     expect(unchangedNotice('unreachable')).toContain('Couldn’t reach Den’s player');
@@ -159,6 +164,11 @@ describe('unchangedNotice', () => {
     // install's own last attempt still opening.
     expect(unchangedNotice('starting')).toContain('finishing this browser');
     expect(unchangedNotice('login')).toContain('key');
+    expect(unchangedNotice('request')).toContain('couldn’t use that request');
+    expect(unchangedNotice('sourceUnavailable')).toContain('available playback paths');
+    expect(unchangedNotice('timedOut')).toContain('took too long');
+    expect(unchangedNotice('temporarilyUnavailable')).toContain('temporarily unavailable');
+    expect(unchangedNotice('protocol')).toContain('answer this page couldn’t use');
     expect(unchangedNotice('ended', 'Your access to Kim’s library ended')).toBe(
       'Your access to Kim’s library ended, so this carries on as it was.',
     );

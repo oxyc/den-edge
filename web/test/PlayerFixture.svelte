@@ -11,7 +11,9 @@
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
   const query = new URLSearchParams(location.search);
   const remux = query.get('remux') ?? `${location.origin}/direct`;
-  const playback = query.get('playback') ?? undefined;
+  const playbackQuery = query.get('playback');
+  const playback =
+    playbackQuery === 'managed' ? '/den/config/playback' : (playbackQuery ?? undefined);
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const services = createWorkerServiceSession();
