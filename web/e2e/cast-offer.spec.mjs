@@ -181,10 +181,14 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     await expect.poll(() => asked.managed.length).toBeGreaterThanOrEqual(2);
     expect(asked.managed[1].player).toBe('cast');
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
-    const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
     await expect
-      .poll(() => cast?.evaluate(() => window.loads?.length ?? 0))
+      .poll(async () => {
+        const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+        return cast?.evaluate(() => window.loads?.length ?? 0) ?? 0;
+      })
       .toBeGreaterThanOrEqual(1);
+    const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+    expect(cast, 'the Cast receiver frame is attached after discovery').toBeDefined();
     const directLoad = await cast.evaluate(() => window.loads[0]);
     expect(directLoad).toMatchObject({
       url: `${CDN}/stream/master.m3u8?token=fixture&scrobbling_enabled=false`,
