@@ -46,6 +46,23 @@ const castPage = (mode) => `<!doctype html><script>
   parent.postMessage({ type: 'den-ready' }, '*');
 </script>`;
 
+/** Read the receiver stub without turning its normal replacement into a test failure. */
+async function castLoads(page) {
+  const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+  if (!cast) return [];
+  try {
+    return await cast.evaluate(() => window.loads ?? []);
+  } catch (error) {
+    // The player deliberately replaces this frame as its Cast offer changes. Poll the replacement instead.
+    if (
+      cast.isDetached() ||
+      /Frame was detached|Execution context was destroyed/.test(String(error))
+    )
+      return [];
+    throw error;
+  }
+}
+
 const session = (base, n) => ({
   sid: n,
   playlist: `/${base}/s/${n}/sig/master.m3u8`,
@@ -209,15 +226,13 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     await expect.poll(() => asked.managed.length).toBeGreaterThanOrEqual(2);
     expect(asked.managed[1].player).toBe('cast');
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
+    let directLoad;
     await expect
       .poll(async () => {
-        const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
-        return cast?.evaluate(() => window.loads?.length ?? 0) ?? 0;
+        [directLoad] = await castLoads(page);
+        return directLoad ?? null;
       })
-      .toBeGreaterThanOrEqual(1);
-    const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
-    expect(cast, 'the Cast receiver frame is attached after discovery').toBeDefined();
-    const directLoad = await cast.evaluate(() => window.loads[0]);
+      .not.toBeNull();
     expect(directLoad).toMatchObject({
       url: `${CDN}/stream/master.m3u8?token=fixture&scrobbling_enabled=false`,
       external: true,
@@ -230,8 +245,8 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     expect(asked.managed[2]).toMatchObject({ player: 'cast', directFailed: true });
     await expect
       .poll(async () => {
-        const fallback = page.frames().find((frame) => frame.url().startsWith(CAST));
-        return fallback?.evaluate(() => window.loads?.at(-1)?.url ?? '') ?? '';
+        const loads = await castLoads(page);
+        return loads.at(-1)?.url ?? '';
       })
       .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
     expect(asked.direct, 'managed playback never posts to the legacy direct facade').toEqual([]);
@@ -252,13 +267,12 @@ test('a signed LAN HTTP session stays on Hearth and is handed directly to Chrome
 
     await expect
       .poll(async () => {
-        const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
-        return cast?.evaluate(() => window.loads?.at(-1)?.url ?? '') ?? '';
+        const loads = await castLoads(page);
+        return loads.at(-1)?.url ?? '';
       })
       .toBe(`${LAN}/remux/s/${'L'.repeat(22)}/${'s'.repeat(22)}/master.m3u8`);
-    const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
-    expect(cast, 'the Cast receiver frame is attached after discovery').toBeDefined();
-    expect(await cast.evaluate(() => window.loads.at(-1).mode)).toBe('cast');
+    const loads = await castLoads(page);
+    expect(loads.at(-1)?.mode).toBe('cast');
   } finally {
     await browser.close();
   }
@@ -276,8 +290,8 @@ test('a selected subtitle makes Hearth choose receiver-safe Remux before Cast', 
     expect(asked.managed[1]).toMatchObject({ player: 'cast', directFailed: true });
     await expect
       .poll(async () => {
-        const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
-        return cast?.evaluate(() => window.loads?.at(-1)?.url ?? '') ?? '';
+        const loads = await castLoads(page);
+        return loads.at(-1)?.url ?? '';
       })
       .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
     expect(asked.managed).toHaveLength(2);
