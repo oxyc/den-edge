@@ -12,7 +12,7 @@ import {
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
-import { signedMedia } from './media';
+import { managedMedia, signedMedia } from './media';
 import { keepProfile, keptProfile } from './profile';
 import './style.css';
 
@@ -29,6 +29,8 @@ interface Media {
   currentTime?: number;
   subtitleLanguage?: string | null;
   terminal?: boolean;
+  /** Externally managed media has no Den lifecycle endpoint; this URL is the only capability handed to Cast. */
+  external?: boolean;
 }
 
 interface LoadMessage {
@@ -199,7 +201,7 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
 
 /** Tell den-remux why the session couldn't play — its log sees nothing of it otherwise — and then the player. */
 function fail(message: string, code = 0): void {
-  if (playing) {
+  if (playing && !current?.media.external) {
     watcher?.spent();
     sendReport(reportUrlOf(playing), reportBody(code, message));
   }
@@ -209,6 +211,10 @@ function fail(message: string, code = 0): void {
 /** End the session this page played, so it stops holding den-remux and the media listener open. */
 function endPlaying(): void {
   if (!playing) return;
+  if (current?.media.external) {
+    playing = undefined;
+    return;
+  }
   const url = playing.replace(/\/master\.m3u8$/, '');
   playing = undefined;
   void fetch(url, { method: 'DELETE', keepalive: true }).catch((error: unknown) =>
@@ -274,7 +280,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   // dropped connection with `resumingLoader`.
   if (nativeHls(video)) {
     video.src = url;
-    watcher = watchPlayback({ video, reportUrl: reportUrlOf(url) });
+    watcher = watchPlayback({ video, reportUrl: media.external ? undefined : reportUrlOf(url) });
     // A native player takes a start position once it knows the stream; set before that it is ignored.
     video.addEventListener(
       'loadedmetadata',
@@ -289,7 +295,11 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     const connection = (link = new Link());
     watchLink(connection);
     hls = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver', connection));
-    watcher = watchPlayback({ video, hls: { instance: hls, Hls }, reportUrl: reportUrlOf(url) });
+    watcher = watchPlayback({
+      video,
+      hls: { instance: hls, Hls },
+      reportUrl: media.external ? undefined : reportUrlOf(url),
+    });
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (!data.fatal) return;
@@ -575,7 +585,11 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
   if (
-    !signedMedia(message.media.url) ||
+    (message.media.external ? !managedMedia(message.media.url) : !signedMedia(message.media.url)) ||
+    (message.media.external &&
+      (message.media.lanUrl !== undefined ||
+        message.media.speed !== undefined ||
+        message.media.measure === true)) ||
     (message.media.lanUrl !== undefined && !signedMedia(message.media.lanUrl)) ||
     !signedSpeed(message.media)
   ) {

@@ -52,8 +52,13 @@ describe('startPlayback', () => {
       json({
         url: '/remux/s/id/sig/master.m3u8',
         release,
+        publicBase: 'https://media.example',
+        lanBase: 'https://remux.home:8443',
+        castOrigin: 'https://cast.example',
+        hinted: true,
         session: {
           id: 'id',
+          playlist: '/remux/s/id/sig/master.m3u8',
           duration: 7200,
           audioTrack: 0,
           audioTracks: [{ language: 'eng', channels: 6, commentary: false }],
@@ -66,6 +71,11 @@ describe('startPlayback', () => {
     expect(result).toMatchObject({
       sid: 'id',
       playlist: 'https://den.example/remux/s/id/sig/master.m3u8',
+      publicBase: 'https://media.example/',
+      lanBase: 'https://remux.home:8443/',
+      lanPlaylist: 'https://remux.home:8443/remux/s/id/sig/master.m3u8',
+      castOrigin: 'https://cast.example',
+      hinted: true,
       duration: 7200,
       control: {
         end: 'https://den.example/remux/s/id/sig',

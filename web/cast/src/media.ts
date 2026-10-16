@@ -17,3 +17,25 @@ export function signedMedia(url: string): boolean {
     return false;
   }
 }
+
+/** A TorBox-managed HLS capability. Its query explicitly disables provider scrobbling before it may leave Den. */
+export function managedMedia(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const scrobbling = parsed.searchParams.getAll('scrobbling_enabled');
+    return (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.port &&
+      parsed.hostname.endsWith('.tb-cdn.io') &&
+      parsed.hostname.length > '.tb-cdn.io'.length &&
+      parsed.pathname !== '/' &&
+      !parsed.hash &&
+      scrobbling.length === 1 &&
+      scrobbling[0] === 'false'
+    );
+  } catch {
+    return false;
+  }
+}

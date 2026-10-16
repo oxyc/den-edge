@@ -317,6 +317,8 @@
   /** The cast page, loaded unseen beside the playing video to look for a receiver; unset while not looking. */
   let lookOrigin = $state<string>();
   let lookFrame = $state<HTMLIFrameElement>();
+  /** The trusted Cast-page origin that discovered the receiver now receiving an external managed stream. */
+  let directCastOrigin: string | undefined;
   /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
   let castOffered = false;
   let publicMaxBitrate: number | undefined;
@@ -727,7 +729,14 @@
     let result = playback
       ? await startPlayback(
           playback,
-          { ...fields, ...(delivery === 'fallback' ? { directFailed: true } : {}) },
+          {
+            ...fields,
+            // Browser-local subtitle blobs cannot reach a Cast receiver. This direct capability is unsuitable in
+            // exactly the same way as a failed direct load, so Hearth chooses its caption-carrying fallback.
+            ...(delivery === 'fallback' || (castMode && subtitleChoice)
+              ? { directFailed: true }
+              : {}),
+          },
           undefined,
           attempt.signal,
         )
@@ -786,6 +795,10 @@
         retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
       return false;
     }
+    // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
+    // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
+    if (castOffered && result.external && directCastOrigin)
+      result = { ...result, castOrigin: directCastOrigin };
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
       watcher?.stop();
@@ -845,7 +858,7 @@
     }
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
-    if (castOffered && !(result.castOrigin && result.publicBase)) {
+    if (castOffered && !result.castOrigin) {
       castOffer = 'none';
       leaveCast();
       return true;
@@ -1533,9 +1546,13 @@
         id: current.playlist,
         media: {
           url: current.playlist,
-          lanUrl: current.lanPlaylist,
-          speed: current.speed,
-          measure: publicMaxBitrate === undefined,
+          ...(current.external
+            ? {}
+            : {
+                lanUrl: current.lanPlaylist,
+                speed: current.speed,
+                measure: publicMaxBitrate === undefined,
+              }),
           mode: castMode ? 'cast' : 'browser',
           title: title.title,
           subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
@@ -1543,11 +1560,20 @@
           currentTime: started ?? resume.seconds ?? 0,
           subtitleLanguage: subtitleChoice,
           terminal: degraded || current.video?.transcoded === true || castProfile === 'legacy',
+          external: current.external === true,
         },
       },
       current.castOrigin,
     );
   }
+
+  // The iframe origin stays the same when Hearth replaces a failed managed URL with Remux, so it does not reload.
+  // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
+  $effect(() => {
+    const [current, frame] = [session, castFrame];
+    if (!current?.castOrigin || !frame) return;
+    untrack(sendToCastFrame);
+  });
 
   function castMessage(event: MessageEvent<unknown>): void {
     const looking = lookFrame?.contentWindow;
@@ -1649,6 +1675,12 @@
       endCastSession();
       castFailed = true;
       castFailReason = castFailReasonOf(message.message ?? '');
+      // A receiver failure of a managed direct URL is one explicit Hearth fallback. It keeps Cast intent and sends
+      // directFailed=true, so Hearth alone chooses the Remux session that replaces it.
+      if (current.external) {
+        void broke(0, message.message ?? 'cast player failed', 'decode');
+        return;
+      }
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
       if (degraded || current.video?.transcoded || castProfile === 'legacy') castMode = false;
       if (returnsFromCast(castOffered, castMode)) {
@@ -1665,6 +1697,11 @@
 
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
   const castable = canOfferCast();
+
+  /** WebKit's non-standard opt-in keeps native HLS available to the system AirPlay picker. */
+  function allowAirPlay(element: HTMLVideoElement) {
+    element.setAttribute('x-webkit-airplay', 'allow');
+  }
 
   const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
   /** Moves `castFunnel` to `stage`, never back: den-edge's own cast report (`finish()`) names the furthest
@@ -1691,10 +1728,11 @@
   }
 
   // The Cast control was available to press — the same condition the header's button renders under — whether or
-  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened.
+  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened. A direct
+  // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
+  // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.external && !session.castOrigin && route !== RELAY)
-      reachCast('offered');
+    if (castable && session && !session.castOrigin && route !== RELAY) reachCast('offered');
   });
 
   /**
@@ -1719,24 +1757,32 @@
 
   /** A step of the look for a receiver; one seen moves playback to the relay at the second the video is at. */
   function look(event: CastLook) {
+    const discoveredOrigin = lookOrigin;
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer !== 'looking') lookOrigin = undefined;
     if (!next.move || !session) return;
     castOffered = true;
+    directCastOrigin = discoveredOrigin;
     routeBeforeCast = route;
     route = RELAY;
+    // Managed playback states receiver capability to Hearth up front. Legacy Remux keeps its existing two-step
+    // profile negotiation with the Cast page.
+    castMode = playback !== undefined;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     restart({ filename: session.release.filename }, () => {
       castOffered = false;
+      directCastOrigin = undefined;
       route = routeBeforeCast;
+      castMode = false;
     });
   }
 
   /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
   function leaveCast() {
     castOffered = false;
+    directCastOrigin = undefined;
     casting = false;
     route = routeBeforeCast;
     castMode = false;
@@ -1840,7 +1886,10 @@
     watcher?.spent();
     reportFailure(current, code, message);
     if (current.external) {
-      const recovery = directRecovery(played, directAttempt ?? 'initial');
+      const recovery =
+        current.castOrigin && castOffered
+          ? 'fallback'
+          : directRecovery(played, directAttempt ?? 'initial');
       // The browser's native error may contain a signed media URL, so log only this closed recovery state. The
       // eventual Hearth refusal, if any, is logged separately with its allow-listed status/code/cause.
       console.warn('Managed direct media failed; recovering through Hearth.', {
@@ -2393,7 +2442,7 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
-    {#if castable && session && !session.external && !session.castOrigin && route !== RELAY}
+    {#if castable && session && !session.castOrigin && route !== RELAY}
       <Button
         variant="player"
         size="icon"
@@ -2524,7 +2573,7 @@
         </p>
       {/if}
     {:else}
-      {#if session.castOrigin && session.publicBase}
+      {#if session.castOrigin}
         <!-- `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
              and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
         <iframe
@@ -2542,6 +2591,7 @@
           controls
           autoplay
           playsinline
+          use:allowAirPlay
           onloadedmetadata={() => {
             seekToStart();
             void loadSegments();

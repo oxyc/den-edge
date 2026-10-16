@@ -78,6 +78,13 @@ function href(value: unknown): string | undefined {
   }
 }
 
+function origin(value: unknown): string | undefined {
+  const absolute = href(value);
+  if (!absolute) return undefined;
+  const url = new URL(absolute);
+  return url.pathname === '/' && !url.search && !url.hash ? url.origin : undefined;
+}
+
 function releaseOf(value: unknown): Session['release'] | null {
   const release = record(value);
   const label = text(release?.label);
@@ -118,11 +125,22 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
     heartbeat: href(nested.heartbeatUrl),
     report: href(nested.reportUrl),
   };
+  // Edge opens and describes the public listener on the facade's outer answer. Hearth keeps Remux's original
+  // relative playlist inside `session`, which is what lets the cast page prefer the LAN base without accidentally
+  // resolving the already-public outer URL back to itself.
+  const publicBase = href(answer.publicBase) ?? href(nested.publicBase);
+  const lanBase = href(answer.lanBase) ?? href(nested.lanBase);
+  const relativePlaylist = text(nested.playlist);
   return {
     ...(nested as unknown as Session),
     sid: text(nested.id) ?? text(nested.sid),
     playlist,
     speed: href(nested.speedUrl) ?? href(nested.speed),
+    publicBase,
+    lanBase,
+    lanPlaylist: lanBase && relativePlaylist ? new URL(relativePlaylist, lanBase).href : undefined,
+    castOrigin: origin(answer.castOrigin) ?? origin(nested.castOrigin),
+    hinted: answer.hinted === true || nested.hinted === true || undefined,
     release,
     duration: number(nested.duration) ?? 0,
     audioTrack: number(nested.audioTrack) ?? 0,

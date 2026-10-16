@@ -14,6 +14,7 @@
   const playbackQuery = query.get('playback');
   const playback =
     playbackQuery === 'managed' ? '/den/config/playback' : (playbackQuery ?? undefined);
+  const subtitleLanguage = query.get('subtitleLanguage') ?? undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const services = createWorkerServiceSession();
@@ -33,6 +34,7 @@
     scout={{ install: 'http://scout.test/config', base: '/scout/config' }}
     {remux}
     {playback}
+    {subtitleLanguage}
     subtitles={[]}
     resume={{ fraction: 0 }}
     {castDiscoveryMs}
