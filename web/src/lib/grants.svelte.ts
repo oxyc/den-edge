@@ -9,6 +9,7 @@ import {
   redeem,
   redeemTicket,
   ticketGrant,
+  GUEST_ADDONS,
   type GuestAddon,
 } from './grants';
 import { clearGuestConfigure, hasSharedMediaSettings } from './guestConfigure';
@@ -22,6 +23,8 @@ export interface GuestGrant {
   secret: string;
   /** `/<addon>/~<gid>` for each addon shared. */
   addons: Partial<Record<GuestAddon, string>>;
+  /** Personal configs layered over shared services; absent in storage written before overlays were explicit. */
+  overrides?: GuestAddon[];
   expiresAt: number | null;
   /** den-edge said the access ended (`grant_expired`), or no longer knows this grant. */
   ended: boolean;
@@ -70,6 +73,12 @@ function isGuestGrant(value: unknown): value is GuestGrant {
     typeof v.secret === 'string' &&
     !!v.addons &&
     typeof v.addons === 'object' &&
+    (v.overrides === undefined ||
+      (Array.isArray(v.overrides) &&
+        v.overrides.every(
+          (override) =>
+            typeof override === 'string' && (GUEST_ADDONS as readonly string[]).includes(override),
+        ))) &&
     (v.expiresAt === null || typeof v.expiresAt === 'number') &&
     typeof v.ended === 'boolean'
   );
@@ -203,12 +212,13 @@ export class GuestGrants {
     }
     this.pending.delete(code);
     keepSecret(code, null);
-    const { gid, name, addons, expiresAt } = reply.value;
+    const { gid, name, addons, overrides, expiresAt } = reply.value;
     const grant: GuestGrant = {
       gid,
       name,
       secret,
       addons: Object.fromEntries(addons.map((addon) => [addon, `/${addon}/~${gid}`])),
+      overrides,
       expiresAt,
       ended: false,
     };
@@ -251,12 +261,13 @@ export class GuestGrants {
     }
     this.pending.delete(ticket);
     keepSecret(ticket, null);
-    const { name, addons, expiresAt } = reply.value;
+    const { name, addons, overrides, expiresAt } = reply.value;
     const grant: GuestGrant = {
       gid: reply.value.gid,
       name,
       secret,
       addons: Object.fromEntries(addons.map((addon) => [addon, `/${addon}/~${reply.value.gid}`])),
+      overrides,
       expiresAt,
       ended: false,
     };
@@ -298,14 +309,15 @@ export class GuestGrants {
     return true;
   }
 
-  /** Drop only this grant's personal Hearth override, then expose its shared services again. */
+  /** Drop only this grant's personal override; its stable Hearth facade continues with inherited services. */
   async useSharedSettings(gid: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
-    const grant = this.list.find((g) => g.gid === gid && !g.ended && g.secret && g.addons.den);
+    const grant = this.list.find(
+      (g) => g.gid === gid && !g.ended && g.secret && g.addons.den && g.overrides?.includes('den'),
+    );
     if (!grant || !hasSharedMediaSettings(grant.addons)) return false;
     if (!(await clearGuestConfigure(gid, grant.secret, fetchImpl))) return false;
-    const addons = { ...grant.addons };
-    delete addons.den;
-    this.set(this.list.map((g) => (g.gid === gid ? { ...g, addons } : g)));
+    const overrides = grant.overrides?.filter((override) => override !== 'den');
+    this.set(this.list.map((g) => (g.gid === gid ? { ...g, overrides } : g)));
     return true;
   }
 

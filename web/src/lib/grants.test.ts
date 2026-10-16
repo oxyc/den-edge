@@ -302,14 +302,21 @@ test('redeeming sends the code and the hash of the secret, never the secret', as
   const spy = answering(200, {
     gid: 'a1b2c3d4',
     name: 'Sam',
-    addons: ['scout', 'bogus'],
+    addons: ['scout', 'den', 'bogus'],
+    overrides: ['den', 'bogus'],
     expiresAt: 5,
   });
   const secret = newSecret();
   const reply = await redeem(CODE, secret, spy);
   expect(reply).toEqual({
     ok: true,
-    value: { gid: 'a1b2c3d4', name: 'Sam', addons: ['scout'], expiresAt: 5 },
+    value: {
+      gid: 'a1b2c3d4',
+      name: 'Sam',
+      addons: ['scout', 'den'],
+      overrides: ['den'],
+      expiresAt: 5,
+    },
   });
   const [url, init] = spy.mock.calls[0]!;
   expect(url).toBe('/grant/redeem');
@@ -330,6 +337,7 @@ test('the guest’s calls carry the grant header explicitly, and the addons are 
       atlas: '/atlas/~ffffffff',
       reel: 'https://evil.example/x',
     },
+    overrides: ['den', 'bogus'],
   });
   const reply = await grantAddons('a1b2c3d4', 'sekrit', spy);
   expect(reply).toEqual({
@@ -338,6 +346,7 @@ test('the guest’s calls carry the grant header explicitly, and the addons are 
       name: 'Sam',
       expiresAt: null,
       addons: { scout: '/scout/~a1b2c3d4', den: '/den/~a1b2c3d4' },
+      overrides: ['den'],
     },
   });
   expect(new Headers(spy.mock.calls[0]![1]?.headers).get('x-den-grant')).toBe('a1b2c3d4:sekrit');
@@ -466,7 +475,13 @@ test('spending a ticket sends a hash of the new device’s own secret; a full gr
   const ticket = 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA';
   expect(await redeemTicket(ticket, secret, ok)).toEqual({
     ok: true,
-    value: { gid: 'a1b2c3d4', name: 'Sam', addons: ['scout'], expiresAt: null },
+    value: {
+      gid: 'a1b2c3d4',
+      name: 'Sam',
+      addons: ['scout'],
+      overrides: [],
+      expiresAt: null,
+    },
   });
   const [url, init] = ok.mock.calls[0]!;
   expect(url).toBe('/grant/device');

@@ -953,7 +953,7 @@
               disabled={configuringGuest !== null || resettingGuest !== null}
               onclick={() => void configureGuest(grant.gid, grant.secret)}
             />
-            {#if grant.addons.den && hasSharedMediaSettings(grant.addons)}
+            {#if grant.addons.den && grant.overrides?.includes('den') && hasSharedMediaSettings(grant.addons)}
               <Button
                 variant="secondary"
                 label={resettingGuest === grant.gid ? 'Switching…' : 'Use shared settings'}
