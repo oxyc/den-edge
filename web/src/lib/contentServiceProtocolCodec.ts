@@ -200,8 +200,17 @@ const filterItems = (value: unknown): boolean =>
   );
 
 function atlasQuery(value: unknown): value is ContentAtlasQuery {
-  if (!record(value) || !text(value.operation, 32) || !exploreType(value.type)) return false;
-  if (!filterItems(value.items)) return false;
+  if (!record(value) || !text(value.operation, 32)) return false;
+  if (value.operation === 'kids-home') return exact(value, ['operation']);
+  if (value.operation === 'kids-row')
+    return (
+      exact(value, ['operation', 'cursor', 'source', 'page']) &&
+      text(value.cursor, CONTENT_SERVICE_WIRE_LIMITS.cursor) &&
+      kidsHomeSource(value.source) &&
+      integer(value.page, 1) &&
+      value.page <= CONTENT_SERVICE_WIRE_LIMITS.page
+    );
+  if (!exploreType(value.type) || !filterItems(value.items)) return false;
   switch (value.operation) {
     case 'titles':
       return (
@@ -236,6 +245,29 @@ function atlasQuery(value: unknown): value is ContentAtlasQuery {
     default:
       return false;
   }
+}
+
+function kidsHomeSource(value: unknown): boolean {
+  if (!record(value) || !text(value.kind, 32)) return false;
+  if (value.kind === 'query')
+    return (
+      exact(value, ['kind', 'query', 'minimumScore']) &&
+      text(value.query, CONTENT_SERVICE_WIRE_LIMITS.queryText) &&
+      typeof value.minimumScore === 'number' &&
+      Number.isFinite(value.minimumScore) &&
+      value.minimumScore >= 0 &&
+      value.minimumScore <= 10
+    );
+  if (value.kind === 'franchise')
+    return exact(value, ['kind', 'type', 'id']) && media(value.type) && integer(value.id, 1);
+  return (
+    value.kind === 'filter' &&
+    exact(value, ['kind', 'type', 'selection']) &&
+    exploreType(value.type) &&
+    Array.isArray(value.selection) &&
+    value.selection.length <= CONTENT_SERVICE_WIRE_LIMITS.filters &&
+    value.selection.every((item) => text(item, 320))
+  );
 }
 
 function relatedQuery(value: unknown): value is ContentRelatedQuery {

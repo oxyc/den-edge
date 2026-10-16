@@ -1,7 +1,11 @@
 import { ContentAuthority } from '../src/lib/contentAuthority';
 import { setContentServiceContext } from '../src/lib/contentContext';
 import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
-import type { ContentRequest, ContentResultFor } from '../src/lib/contentServiceProtocol';
+import type {
+  ContentPolicy,
+  ContentRequest,
+  ContentResultFor,
+} from '../src/lib/contentServiceProtocol';
 
 /** Test-only in-page authority for focused component fixtures; production always uses the DedicatedWorker. */
 export function fixtureContentService(
@@ -18,8 +22,12 @@ export function fixtureContentService(
     configureAtlas: (base) => (atlas = base?.replace(/\/$/, '') ?? undefined),
   });
   return {
-    query<Request extends ContentRequest>(request: Request, signal?: AbortSignal) {
-      return authority.query(request, signal ?? new AbortController().signal) as Promise<
+    query<Request extends ContentRequest>(
+      request: Request,
+      signal?: AbortSignal,
+      policy?: ContentPolicy,
+    ) {
+      return authority.query(request, signal ?? new AbortController().signal, policy) as Promise<
         ContentResultFor<Request>
       >;
     },

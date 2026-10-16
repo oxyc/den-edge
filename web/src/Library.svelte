@@ -21,7 +21,14 @@
     ServiceScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
-  import { browseRows, contentPages, homeRows, interleave, personalRows } from './lib/catalog';
+  import {
+    browseRows,
+    contentPages,
+    homeRows,
+    interleave,
+    personalRows,
+    type RowDef,
+  } from './lib/catalog';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
@@ -76,6 +83,7 @@
     type RecommendedTitle,
   } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
+  import { kidsHomeRows } from './lib/kidsHome';
   import type { LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
     ContinueItem,
@@ -187,6 +195,39 @@
   const remux = $derived(discovered.remux);
   const remuxAway = $derived(discovered.remuxAway);
   const remuxBlocked = $derived(discovered.remuxBlocked);
+
+  /** Atlas owns Kid Home's labels and source recipes; every source is still read through this Kid session. */
+  let kidHome = $state.raw<RowDef[]>([]);
+  let kidHomeReady = $state(false);
+  $effect(() => {
+    const here = atlas;
+    if (!session.kid) {
+      kidHome = [];
+      kidHomeReady = true;
+      return;
+    }
+    if (!here) {
+      if (atlasReady) kidHomeReady = true;
+      return;
+    }
+    let current = true;
+    kidHomeReady = false;
+    void kidsHomeRows(session.content)
+      .then(
+        (rows) => {
+          if (current) kidHome = rows;
+        },
+        () => {
+          if (current) kidHome = [];
+        },
+      )
+      .finally(() => {
+        if (current) kidHomeReady = true;
+      });
+    return () => {
+      current = false;
+    };
+  });
 
   const overview = $derived(model?.overview.value);
   // One lookup index per immutable service snapshot; billboard renders and actions never scan the whole library.
@@ -1134,6 +1175,9 @@
       const own = atlas ? atlasRows(session.content, type) : [];
       return [...browse.slice(0, 4), ...radar(type), ...interleave([own, browse.slice(4)])];
     }
+    // Kid Home is its own catalogue. Continue Watching and Watchlist are drawn separately below; the adult TMDB
+    // spine, service-arrival rows and personal recommendation recipes must never fill in behind this list.
+    if (session.kid) return kidHome;
     // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
     //
     // What has just landed on this household's services does not get a row of its own here: it leads New
@@ -1349,6 +1393,12 @@
       return;
     const here = atlas;
     const named = shelvesReady;
+    if (session.kid) {
+      const ready = kidHomeReady;
+      const available = kidHome.length;
+      if (here && ready && available) untrack(buildKidBillboard);
+      return;
+    }
     // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
     // first-paint naming tranche before sending its one personalized ranking.
     if (!here) {
@@ -1365,6 +1415,36 @@
   async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
     const answer = await session.content.query({ kind: 'titles', titles: [ref] });
     return answer.titles[0] ?? null;
+  }
+
+  /** A Kid's hero comes from the same policy-bound worlds that make up the shelves, never shared trending. */
+  function buildKidBillboard() {
+    const run = ++billboardRun;
+    stagedFeatured = null;
+    const rows = kidHome.slice(0, 4);
+    void Promise.all(rows.map((row) => row.load(1).catch(() => [])))
+      .then(async (pages) => {
+        if (run !== billboardRun) return;
+        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- local deduplication for this completed build.
+        const seen = new Set<string>();
+        const candidates = pages
+          .flat()
+          .filter((title) => {
+            const key = titleKey(title);
+            if (seen.has(key) || seeds.owned.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, EVERYONE_NAMED);
+        const picked = await nameSlides(
+          candidates.map(({ type, id, imdbId }) => ({ type, id, imdbId })),
+          new Map(),
+          lookupTitle,
+          LOOKUPS,
+        );
+        if (run === billboardRun) featured = picked;
+      })
+      .catch(() => undefined);
   }
 
   /**

@@ -16,8 +16,9 @@ import type {
 /**
  * The read-only content protocol is versioned independently from encrypted library state. Version 5 added the
  * per-query `policy`: a Worker from the earlier build, which would ignore it and answer unrestricted, is refused.
+ * Version 6 added the Atlas-owned Kid Home catalogue and its policy-bound rows.
  */
-export const CONTENT_SERVICE_PROTOCOL = 5 as const;
+export const CONTENT_SERVICE_PROTOCOL = 6 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -56,6 +57,18 @@ export interface ContentTitleRef {
   id: number;
 }
 
+export type ContentKidsHomeSource =
+  | { kind: 'query'; query: string; minimumScore: number }
+  | { kind: 'franchise'; type: MediaType; id: number }
+  | { kind: 'filter'; type: 'movie' | 'tv' | 'all'; selection: string[] };
+
+export interface ContentKidsHomeRow {
+  id: string;
+  title: string;
+  group: string;
+  source: ContentKidsHomeSource;
+}
+
 export interface ContentDiscoverQuery {
   mediaType: MediaType;
   genres?: number[];
@@ -83,6 +96,13 @@ export type ContentCatalogSpec =
   | { kind: 'recommendations'; title: ContentTitleRef };
 
 export type ContentAtlasQuery =
+  | { operation: 'kids-home' }
+  | {
+      operation: 'kids-row';
+      cursor: string;
+      source: ContentKidsHomeSource;
+      page: number;
+    }
   | {
       operation: 'titles';
       cursor: string;
@@ -122,6 +142,8 @@ export type ContentAtlasQuery =
     };
 
 export type ContentAtlasAnswer =
+  | { operation: 'kids-home'; rows: ContentKidsHomeRow[] }
+  | { operation: 'kids-row'; titles: Title[] }
   | { operation: 'titles'; titles: Title[] }
   | { operation: 'counts'; counts: FilterCounts | null }
   | { operation: 'values'; values: FilterValue[] | null }

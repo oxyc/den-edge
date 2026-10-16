@@ -15,8 +15,8 @@
     updateProgress,
   } from '../src/lib/actions';
   import { parseRoute, type Route } from '../src/lib/route';
-  import type { ProfileSession } from '../src/lib/profileSession.svelte';
-  import { visitorVisitId } from '../src/lib/profileIdentity';
+  import { activeProfileSession, type ProfileSession } from '../src/lib/profileSession.svelte';
+  import { persistentProfileIdentity, visitorVisitId } from '../src/lib/profileIdentity';
   import {
     visitorProfileSession,
     type VisitorProfileSession,
@@ -221,13 +221,25 @@
   });
   publish = () => library.publish();
   const visitor = params.has('visitor');
+  const kid = params.has('kid');
   const session: ProfileSession = visitor
     ? visitorProfileSession(
         library.session.household,
         localStorage,
         visitorVisitId('11111111111111111111111111111111'),
       )
-    : library.session;
+    : kid
+      ? activeProfileSession(
+          persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid'),
+          library.session.household,
+          library.session.model!,
+          null,
+          { maximumAge: 12, unknownRatings: 'block' },
+          false,
+          true,
+        )
+      : library.session;
+  if (kid) void session.model?.ready.then(() => session.configureServices());
   let visitorReady = $state(!visitor);
   if (visitor) {
     const activity = (session as VisitorProfileSession).profileActivity!;
