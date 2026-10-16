@@ -99,6 +99,67 @@ test('a guest Hearth exposes one media facade plus shared Atlas, without legacy 
   ]);
 });
 
+test('using shared settings clears only personal Hearth and restores shared media routes', async () => {
+  kept.set(
+    KEY,
+    JSON.stringify([
+      {
+        gid: GID,
+        name: 'Sam',
+        secret: 'guest-secret',
+        addons: {
+          scout: `/scout/~${GID}`,
+          subtitles: `/subtitles/~${GID}`,
+          atlas: `/atlas/~${GID}`,
+          den: `/den/~${GID}`,
+        },
+        expiresAt: null,
+        ended: false,
+      },
+    ]),
+  );
+  const grants = new GuestGrants();
+  const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(true);
+  expect(fetchImpl).toHaveBeenCalledWith('/grant/den-install', {
+    method: 'DELETE',
+    headers: { 'x-den-grant': `${GID}:guest-secret` },
+    cache: 'no-store',
+  });
+  expect(grants.list[0]?.addons.den).toBeUndefined();
+  expect(grants.pluginUrls()).toEqual([
+    `https://den.example/scout/~${GID}/manifest.json`,
+    `https://den.example/subtitles/~${GID}/manifest.json`,
+    `https://den.example/atlas/~${GID}/manifest.json`,
+  ]);
+});
+
+test('shared-settings reset is unavailable without a shared media fallback and keeps state on failure', async () => {
+  kept.set(
+    KEY,
+    JSON.stringify([
+      {
+        gid: GID,
+        name: 'Sam',
+        secret: 'guest-secret',
+        addons: { atlas: `/atlas/~${GID}`, den: `/den/~${GID}` },
+        expiresAt: null,
+        ended: false,
+      },
+    ]),
+  );
+  const grants = new GuestGrants();
+  const fetchImpl = vi.fn<typeof fetch>();
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(false);
+  expect(fetchImpl).not.toHaveBeenCalled();
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
+
+  grants.list[0]!.addons.scout = `/scout/~${GID}`;
+  fetchImpl.mockResolvedValue(new Response(null, { status: 503 }));
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(false);
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
+});
+
 test('a retry after a lost answer redeems with the same secret', async () => {
   const grants = new GuestGrants();
   const hashes: string[] = [];

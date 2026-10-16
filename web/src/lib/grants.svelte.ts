@@ -11,6 +11,7 @@ import {
   ticketGrant,
   type GuestAddon,
 } from './grants';
+import { clearGuestConfigure, hasSharedMediaSettings } from './guestConfigure';
 import { forgetGrant, onGrantEnded, rememberGrant } from './relayFetch';
 
 export interface GuestGrant {
@@ -294,6 +295,17 @@ export class GuestGrants {
       if (!reply.ok && reply.status !== 404 && reply.status !== 410) return false;
     }
     this.set(this.list.filter((g) => g.gid !== gid));
+    return true;
+  }
+
+  /** Drop only this grant's personal Hearth override, then expose its shared services again. */
+  async useSharedSettings(gid: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+    const grant = this.list.find((g) => g.gid === gid && !g.ended && g.secret && g.addons.den);
+    if (!grant || !hasSharedMediaSettings(grant.addons)) return false;
+    if (!(await clearGuestConfigure(gid, grant.secret, fetchImpl))) return false;
+    const addons = { ...grant.addons };
+    delete addons.den;
+    this.set(this.list.map((g) => (g.gid === gid ? { ...g, addons } : g)));
     return true;
   }
 
