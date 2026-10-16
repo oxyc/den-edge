@@ -923,6 +923,7 @@ export class LibraryLogAuthority {
     if (task.kind === 'household.join') return this.#joinHousehold(task);
     if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
     if (task.kind === 'profile.policy.set') return this.#profilePolicyTask(task);
+    if (task.kind === 'kid-title-approval.set') return this.#kidTitleApprovalTask(task);
     if (task.kind === 'profile.create.ack') {
       await this.#profileKidCreate().acknowledge(task.receipt);
       return {
@@ -1027,6 +1028,48 @@ export class LibraryLogAuthority {
         };
     }
     throw authorityError('conflict', 'the profile directory kept changing; try again');
+  }
+
+  async #kidTitleApprovalTask(
+    task: Extract<LibraryTask, { kind: 'kid-title-approval.set' }>,
+  ): Promise<LibraryAuthorityTaskResult> {
+    if (!(await this.#ownerPinMatches(task.pin)))
+      throw authorityError('unauthorized', 'Owner PIN is required to change Kid title access');
+    const title = `${task.title.type}:${task.title.id}`;
+    const wanted: 'allow' | 'tombstone' = task.allow ? 'allow' : 'tombstone';
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const current = await this.#log.readKidTitleApprovals(task.profile);
+      if (current.document?.approvals[title]?.value === wanted)
+        return {
+          result: { kind: 'kid-title-approval.set', outcome: 'unchanged' },
+          affected: [{ kind: 'profiles' }],
+        };
+      const next = {
+        ...(current.document ?? {
+          format: 4 as const,
+          kind: 'kid-title-approvals' as const,
+          schema: 1 as const,
+          kid: task.profile,
+          approvals: {},
+        }),
+        approvals: {
+          ...(current.document?.approvals ?? {}),
+          [title]: { value: wanted, at: await this.#clock.issue() },
+        },
+      };
+      if (
+        (await this.#log.casKidTitleApprovals(
+          { base: current.base, generation: current.generation },
+          next,
+          current.directory,
+        )) === 'committed'
+      )
+        return {
+          result: { kind: 'kid-title-approval.set', outcome: 'changed' },
+          affected: [{ kind: 'profiles' }],
+        };
+    }
+    throw authorityError('conflict', 'Kid title access kept changing; try again');
   }
 
   async #profileCreateTask(
@@ -1773,6 +1816,13 @@ export class LibraryLogAuthority {
           maximumAge: profile.policy.value.maximumAge,
           unknownRatings: profile.policy.value.unknownRatings,
         },
+        approvals: this.#log.approvedTitleKeys(profile.id).flatMap((key) => {
+          const [type, raw] = key.split(':');
+          const id = Number(raw);
+          return (type === 'movie' || type === 'tv') && Number.isSafeInteger(id) && id > 0
+            ? [{ type, id }]
+            : [];
+        }),
         deleted: profile.deleted.value,
       })),
     };

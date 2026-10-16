@@ -4,6 +4,7 @@
 
 import { hex, hkdf } from './crypto';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
+import { kidApprovalName, type KidTitleApprovalsDocument } from './kidTitleApprovals';
 import { syncPolicy } from './syncCore';
 
 const utf8 = new TextEncoder();
@@ -311,6 +312,7 @@ export function encodeDocument(
 export type Opened =
   | { row: Row; newer?: true; dropped?: unknown[] }
   | { profileDirectory: ProfileDirectoryDocument }
+  | { kidTitleApprovals: KidTitleApprovalsDocument }
   | { invalidProfileDirectory: true }
   | { unknown: Record<string, unknown> }
   | { newerFraming: true }
@@ -435,6 +437,12 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
   if (decoded.status === 'newer' && !decoded.document) return { newerFraming: true };
   if (decoded.status === 'row') {
     const row = decoded.row ?? {};
+    if (row.kind === 'kid-title-approvals') {
+      const kid = row.kid;
+      if (typeof kid !== 'string' || !/^[0-9a-f]{32}$/.test(kid)) return { unknown: row };
+      if (!(await named(kidApprovalName(kid)))) return { unreadable: 'identity' };
+      return { kidTitleApprovals: row as unknown as KidTitleApprovalsDocument };
+    }
     if (row.kind !== 'profiles') return { unknown: row };
     if (!(await named('profiles'))) return { unreadable: 'identity' };
     try {

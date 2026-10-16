@@ -5,7 +5,8 @@
  * implementation that projects them are private to the service.
  */
 
-export const LIBRARY_SERVICE_PROTOCOL = 6 as const;
+/** Version 7 adds Owner-authorized Kid title exceptions to tasks and the profile projection. */
+export const LIBRARY_SERVICE_PROTOCOL = 7 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -331,6 +332,8 @@ export interface ProfileDirectoryView {
     libraryKey: string;
     keyVersion: number;
     policy: { maximumAge: number | null; unknownRatings: 'allow' | 'block' };
+    /** Effective allow entries from this Kid's validated household approval document. */
+    approvals?: TitleRef[];
     deleted: boolean;
   }>;
 }
@@ -659,6 +662,13 @@ export type LibraryTask =
       unknownRatings: 'allow' | 'block';
       pin: string;
     }
+  | {
+      kind: 'kid-title-approval.set';
+      profile: string;
+      title: TitleRef;
+      allow: boolean;
+      pin: string;
+    }
   /** The compound key reset (profiles-v1 §9) of a profile household, behind a fresh Owner PIN. */
   | { kind: 'profile-key-reset.start'; pin: string; destinationLibraryKey: string }
   /** Continue the journaled attempt on this device; the journal already holds the authorization. */
@@ -786,6 +796,7 @@ export type LibraryTaskResult =
     }
   | { kind: 'profile.create.ack'; outcome: 'acknowledged' }
   | { kind: 'profile.policy.set'; outcome: 'changed' | 'unchanged' }
+  | { kind: 'kid-title-approval.set'; outcome: 'changed' | 'unchanged' }
   | {
       kind:
         | 'profile-key-reset.start'

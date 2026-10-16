@@ -11,6 +11,7 @@ import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import type { ProfileDirectoryDocument } from './profileDirectory';
+import { validateKidTitleApprovals, type KidTitleApprovalsDocument } from './kidTitleApprovals';
 import { profilesApplyCreate } from './profileMigrationCore';
 import { ensureSyncPolicy } from './syncLoader';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
@@ -278,6 +279,65 @@ describe('LibraryLogAuthority', () => {
     });
     expect(write).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalled();
+    log.close();
+  });
+
+  it('allows and tombstones one Kid title only behind the Owner PIN', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'approval-pin-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const owned = authority(log, clock, 'online');
+    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'set-pin');
+    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'confirm-pin');
+
+    const ownerDirectory = structuredClone(
+      profileFixture.migrationBase,
+    ) as unknown as ProfileDirectoryDocument;
+    const owner = Object.values(ownerDirectory.profiles)[0]!;
+    const kid = 'b'.repeat(32);
+    const entry = structuredClone(owner) as unknown as {
+      library: { value: unknown };
+      policy: { value: unknown };
+    } & Record<string, unknown>;
+    Object.assign(entry, { id: kid, role: 'kid' });
+    entry.library.value = {
+      keyVersion: 1,
+      key: btoa(String.fromCharCode(...new Uint8Array(32).fill(9))),
+    };
+    entry.policy.value = { maximumAge: 8, unknownRatings: 'block' };
+    const directory = profilesApplyCreate({ document: ownerDirectory, profile: kid, entry });
+    let document: KidTitleApprovalsDocument | null = null;
+    vi.spyOn(log, 'readKidTitleApprovals').mockImplementation(async () => ({
+      directory,
+      document,
+      base: document ? 2 : 0,
+      generation: 'g',
+    }));
+    const write = vi.spyOn(log, 'casKidTitleApprovals').mockImplementation(async (_a, next) => {
+      document = validateKidTitleApprovals(next, directory);
+      return 'committed';
+    });
+    const set = (allow: boolean, pin: string) =>
+      owned.task({ kind: 'kid-title-approval.set', profile: kid, title: movie, allow, pin }, 'set');
+
+    await expect(set(true, '0000')).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    });
+    expect(write).not.toHaveBeenCalled();
+    await expect(set(true, '1234')).resolves.toMatchObject({
+      result: { kind: 'kid-title-approval.set', outcome: 'changed' },
+    });
+    expect(document!.approvals['movie:7']!.value).toBe('allow');
+    await expect(set(false, '1234')).resolves.toMatchObject({
+      result: { kind: 'kid-title-approval.set', outcome: 'changed' },
+    });
+    expect(document!.approvals['movie:7']!.value).toBe('tombstone');
     log.close();
   });
 

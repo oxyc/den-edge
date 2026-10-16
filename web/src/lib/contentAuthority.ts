@@ -589,8 +589,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     signal: AbortSignal,
   ): Promise<boolean> {
     if (!isAgeRestricted(policy)) return true;
-    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!validRef(ref)) return false;
+    if (policy?.approvals?.some((title) => title.type === ref.type && title.id === ref.id))
+      return true;
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     // Missing evidence (no atlas, an outage, an undecodable answer) is an unknown maturity, which the policy's own
     // `unknownRatings` decides: `block` refuses, `allow` admits. It is logged so an outage is never silent.
     if (!atlas) {

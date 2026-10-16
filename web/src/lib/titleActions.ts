@@ -31,6 +31,9 @@ export interface TitleActionsContext {
   play?: (title: Title) => void;
   /** Play it in this browser; absent where nothing here can. */
   playHere?: (title: Title) => void;
+  /** Owner-only Kid exceptions. Selecting one opens the fresh Owner-PIN gate owned by Library. */
+  readonly kids?: readonly { id: string; name: string; approvals: readonly string[] }[];
+  changeKidAccess?: (kid: { id: string; name: string }, title: Title, allow: boolean) => void;
 }
 
 export function setTitleActionsContext(context: TitleActionsContext) {
@@ -121,6 +124,15 @@ export function titleMenuItems(
         label: 'Remove from Continue Watching',
         disabled: busy,
         onselect: () => ctx.dismissContinueWatching(title),
+      });
+    }
+    for (const kid of ctx.kids ?? []) {
+      const approved = kid.approvals.includes(`${title.type}:${title.id}`);
+      items.push({
+        kind: 'item',
+        label: `${approved ? 'Remove' : 'Allow'} for ${kid.name}`,
+        disabled: busy,
+        onselect: () => ctx.changeKidAccess?.(kid, title, !approved),
       });
     }
   }
