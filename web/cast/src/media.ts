@@ -1,3 +1,5 @@
+import { privateLanHost, privateLanRemuxPlaylist } from '../../src/lib/localNetwork';
+
 const PLAYLIST = /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/master\.m3u8$/;
 const DNS_NAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/;
 
@@ -11,11 +13,22 @@ export function signedMedia(url: string): boolean {
   try {
     const parsed = new URL(url);
     return (
-      parsed.protocol === 'https:' && mediaHost(parsed.hostname) && PLAYLIST.test(parsed.pathname)
+      ((parsed.protocol === 'https:' && mediaHost(parsed.hostname)) ||
+        (parsed.protocol === 'http:' && privateLanHost(parsed.hostname))) &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.hash &&
+      !parsed.search &&
+      PLAYLIST.test(parsed.pathname)
     );
   } catch {
     return false;
   }
+}
+
+/** A signed playlist explicitly confined to a receiver-reachable private LAN host. */
+export function lanHttpMedia(url: string): boolean {
+  return privateLanRemuxPlaylist(url) && signedMedia(url);
 }
 
 /** A TorBox-managed HLS capability. Its query explicitly disables provider scrobbling before it may leave Den. */
@@ -44,9 +57,15 @@ export function managedMedia(url: string): boolean {
 export interface PlayingMedia {
   url: string;
   external: boolean;
+  /** HTTPS control capability when the receiver uses the same session through its LAN HTTP media alias. */
+  lifecycleUrl?: string;
 }
 
 /** Only a Remux load has Den report/end operations. A managed CDN URL must never receive either request. */
 export function denLifecycleMedia(playing: PlayingMedia | undefined): string | null {
-  return playing && !playing.external ? playing.url : null;
+  // An HTTPS sender does not fetch a private HTTP media capability. The parent page already reached the local
+  // Remux control plane and owns this session's heartbeat, report, and end requests.
+  if (!playing || playing.external) return null;
+  if (playing.lifecycleUrl && signedMedia(playing.lifecycleUrl)) return playing.lifecycleUrl;
+  return !lanHttpMedia(playing.url) ? playing.url : null;
 }

@@ -3,13 +3,15 @@
 
 import type { Entry } from './routes';
 import { relayFetch } from './relayFetch';
+import { localHost, localRequest } from './localNetwork';
 
 /** A direct LAN/tailnet probe must finish even when an unreachable route silently drops packets. */
 export const REMUX_PROBE_TIMEOUT_MS = 3_000;
 
 /**
  * Where den-remux answers for this page: the first of its routes-table entries (den-spec routes-v1) this page can use
- * whose `/health` answers — none behind Access (a browser holds no token), and no plain http from an https page — or
+ * whose `/health` answers — none behind Access (a browser holds no token), and plain HTTP only for an explicitly
+ * local host — or
  * null, off the tailnet where no address reaches it.
  */
 export async function findRemux(
@@ -18,7 +20,14 @@ export async function findRemux(
   secure = globalThis.location?.protocol !== 'http:',
 ): Promise<string | null> {
   for (const entry of entries) {
-    if (entry.access || (secure && entry.url.startsWith('http:'))) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(entry.url);
+    } catch {
+      continue;
+    }
+    const localHttp = parsed.protocol === 'http:' && localHost(parsed.hostname);
+    if (entry.access || (secure && parsed.protocol === 'http:' && !localHttp)) continue;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<never>((_resolve, reject) => {
@@ -29,7 +38,8 @@ export async function findRemux(
     });
     try {
       const probe = async () => {
-        const res = await fetchImpl(`${entry.url}/health`, { signal: controller.signal });
+        const init = { signal: controller.signal };
+        const res = await fetchImpl(`${entry.url}/health`, localHttp ? localRequest(init) : init);
         return res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string';
       };
       if (await Promise.race([probe(), expired])) return entry.url;

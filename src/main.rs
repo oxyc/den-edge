@@ -528,8 +528,8 @@ async fn main() {
         })
     });
     state.lan_media_base = env_opt("LAN_MEDIA_BASE").and_then(|value| {
-        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
-            eprintln!("LAN_MEDIA_BASE must be a bare https origin — disabling it");
+        origin(&value).filter(|value| lan_media_origin(value)).or_else(|| {
+            eprintln!("LAN_MEDIA_BASE must be a bare https origin or private-LAN http origin — disabling it");
             None
         })
     });
@@ -788,6 +788,29 @@ fn origin(o: &str) -> Option<String> {
             && !host.contains(['/', '?', '#', '@', ' ', ';', ','])
     });
     ok.then_some(o)
+}
+
+/// HTTPS anywhere, or HTTP only where a Cast receiver on the same LAN can route it. Loopback is intentionally
+/// excluded: on a Chromecast it names the Chromecast, not the Hearth host.
+fn lan_media_origin(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else { return false };
+    if url.origin().ascii_serialization() != value {
+        return false;
+    }
+    if url.scheme() == "https" {
+        return true;
+    }
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase()) else {
+        return false;
+    };
+    if host.ends_with(".local") && host != "localhost.local" {
+        return true;
+    }
+    let Ok(address) = host.parse::<std::net::Ipv4Addr>() else { return false };
+    address.is_private()
 }
 
 /// The MCP connector's authorization server, when `OAUTH_ISSUER` (its public https origin) and `OAUTH_SIGNING_KEY` (an
@@ -1355,6 +1378,29 @@ mod tests {
             Err(r#"TMDB_DAILY_MAX is "5k": expected a whole number"#.to_owned())
         );
         assert!(parse_number::<u16>("PORT", "80800").is_err(), "out of range");
+    }
+
+    #[test]
+    fn lan_media_may_be_https_or_private_http_but_never_loopback_or_public_http() {
+        for accepted in [
+            "https://media.example",
+            "http://10.0.0.8:8090",
+            "http://172.20.1.8",
+            "http://192.168.86.8:8090",
+            "http://hearth.local:8090",
+        ] {
+            assert!(lan_media_origin(accepted), "{accepted}");
+        }
+        for refused in [
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://169.254.1.8:8090",
+            "http://203.0.113.8:8090",
+            "http://media.example",
+            "http://192.168.1.8:8090/path",
+        ] {
+            assert!(!lan_media_origin(refused), "{refused}");
+        }
     }
 
     #[tokio::test]

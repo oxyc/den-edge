@@ -109,6 +109,7 @@
   } from '../lib/skipdb';
   import { shouldWarmNext } from '../lib/binge';
   import { titleAllowed } from '../lib/playGuard';
+  import { privateLanRemuxPlaylist } from '../lib/localNetwork';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import {
@@ -797,7 +798,11 @@
     }
     // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
     // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
-    if (castOffered && result.external && directCastOrigin)
+    if (
+      castOffered &&
+      directCastOrigin &&
+      (result.external || privateLanRemuxPlaylist(result.playlist))
+    )
       result = { ...result, castOrigin: directCastOrigin };
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
@@ -1765,7 +1770,9 @@
     castOffered = true;
     directCastOrigin = discoveredOrigin;
     routeBeforeCast = route;
-    route = RELAY;
+    // A receiver can fetch a signed Hearth playlist over private-LAN HTTP. Keep that already-proven route instead
+    // of replacing it with Edge's public relay; the HTTPS Cast sender only hands the URL to the receiver.
+    if (!privateLanRemuxPlaylist(session.playlist)) route = RELAY;
     // Managed playback states receiver capability to Hearth up front. Legacy Remux keeps its existing two-step
     // profile negotiation with the Cast page.
     castMode = playback !== undefined;

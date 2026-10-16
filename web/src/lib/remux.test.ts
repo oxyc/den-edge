@@ -520,10 +520,19 @@ describe('findRemux', () => {
     };
 
   it('takes the first entry this page can use whose health answers', async () => {
+    let lanInit: RequestInit | undefined;
+    const localFetch: typeof fetch = async (input, init) => {
+      if (String(input) !== `${lan}/health`) throw new TypeError('unreachable');
+      lanInit = init;
+      return new Response('{"status":"ok"}', { status: 200 });
+    };
     expect(
-      await findRemux(entries, answering([`${lan}/health`, `${tailnet}/health`]), true),
-      'no http from https',
-    ).toBe(tailnet);
+      await findRemux(entries, localFetch, true),
+      'an HTTPS page may request an explicit private-LAN route through LNA',
+    ).toBe(lan);
+    expect((lanInit as RequestInit & { targetAddressSpace?: string }).targetAddressSpace).toBe(
+      'local',
+    );
     expect(
       await findRemux(entries, answering([`${lan}/health`]), false),
       'an http page may use the LAN',
@@ -531,6 +540,10 @@ describe('findRemux', () => {
     expect(
       await findRemux(entries, answering(['https://d-remux.example/remux/health']), true),
       'no Access token',
+    ).toBeNull();
+    expect(
+      await findRemux([{ url: 'http://media.example/remux' }], answering([]), true),
+      'a public HTTP route is still mixed content',
     ).toBeNull();
     const shell: typeof fetch = async () => new Response('<!doctype html>', { status: 200 });
     expect(await findRemux(entries, shell, true), 'the app shell is not den-remux').toBeNull();
