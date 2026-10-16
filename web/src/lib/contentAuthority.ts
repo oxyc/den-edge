@@ -56,6 +56,7 @@ import { parseRecommendationSlides } from './recommend';
 import { discoverParams } from './catalog';
 import { searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
+import { parseKidsHomeCatalogue } from './kidsHome';
 import { ContentImportAuthority } from './contentImportAuthority';
 import {
   fetchFilterCounts,
@@ -873,6 +874,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const fetchImpl: typeof fetch = (input, init) => policed(input, { ...init, signal });
     try {
       switch (query.operation) {
+        case 'kids-home':
+          return this.#atlasKidsHome(atlas, signal, policy);
+        case 'kids-row':
+          return this.#atlasKidsRow(atlas, query, signal, policy);
         case 'titles': {
           return {
             state: 'ready',
@@ -951,6 +956,117 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       if (error instanceof FilterUnavailable) return { state: 'absent' };
       if (error instanceof ContentServiceFault) throw error;
       if ((error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasKidsHome(
+    atlas: string,
+    signal: AbortSignal,
+    policy: ContentPolicy | undefined,
+  ): Promise<OptionalContent<import('./contentServiceProtocol').ContentAtlasAnswer>> {
+    const url = `${atlas}/index/kids-home.json`;
+    try {
+      return await this.#wait(
+        reuse(`content:kids-home:${atlas}`, async () => {
+          const response = await this.#atlasFetch(atlas, policy)(url);
+          if (response.status === 404) return { state: 'absent' } as const;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          return {
+            state: 'ready',
+            value: { operation: 'kids-home', rows: parseKidsHomeCatalogue(await response.json()) },
+          } as const;
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  async #atlasKidsRow(
+    atlas: string,
+    query: Extract<
+      Extract<ContentRequest, { kind: 'atlas.query' }>['query'],
+      { operation: 'kids-row' }
+    >,
+    signal: AbortSignal,
+    policy: ContentPolicy | undefined,
+  ): Promise<OptionalContent<import('./contentServiceProtocol').ContentAtlasAnswer>> {
+    const source = query.source;
+    const policed = this.#atlasFetch(atlas, policy);
+    try {
+      let titles: import('./library').Title[];
+      if (source.kind === 'filter') {
+        const items = source.selection.map((item) => {
+          const at = item.indexOf(':');
+          return { kind: item.slice(0, at), id: item.slice(at + 1) };
+        });
+        const selection = JSON.stringify([atlas, 'kids', source, policyKey(policy)]);
+        let cursor = this.#atlasTitleCursors.get(query.cursor);
+        if (cursor && cursor.selection !== selection)
+          throw new ContentServiceFault({
+            code: 'invalid-request',
+            message: 'Kids Home cursor selection cannot change',
+            retryable: false,
+            provider: 'atlas',
+          });
+        if (!cursor) {
+          while (this.#atlasTitleCursors.size >= MAX_ATLAS_TITLE_CURSORS) {
+            const oldest = this.#atlasTitleCursors.keys().next().value as string | undefined;
+            if (oldest === undefined) break;
+            this.#atlasTitleCursors.delete(oldest);
+          }
+          cursor = {
+            selection,
+            load: filterTitles(atlas, source.type, items, { fetchImpl: policed }),
+          };
+        } else this.#atlasTitleCursors.delete(query.cursor);
+        this.#atlasTitleCursors.set(query.cursor, cursor);
+        titles = await cursor.load(query.page, signal);
+        if (!titles.length && this.#atlasTitleCursors.get(query.cursor) === cursor)
+          this.#atlasTitleCursors.delete(query.cursor);
+      } else {
+        const pageSize = source.kind === 'query' ? 40 : 24;
+        const skip = (query.page - 1) * pageSize;
+        const url =
+          source.kind === 'query'
+            ? `${atlas}/index/query.json?${new URLSearchParams({
+                q: source.query,
+                skip: String(skip),
+                limit: String(pageSize),
+              })}`
+            : `${atlas}/index/franchise/${source.type === 'tv' ? 'series' : 'movie'}/${source.id}.json`;
+        const body = await reuse(`content:${policyKey(policy)}:${url}`, async () => {
+          const response = await policed(url, { signal });
+          if (response.status === 404) return null;
+          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+          return object(await response.json());
+        });
+        if (!body) return { state: 'absent' };
+        const raw = source.kind === 'query' ? body.hits : body.members;
+        const candidates = Array.isArray(raw)
+          ? source.kind === 'query'
+            ? raw.filter(
+                (candidate) =>
+                  object(candidate) &&
+                  typeof object(candidate)!.score === 'number' &&
+                  Number(object(candidate)!.score) >= source.minimumScore,
+              )
+            : raw.slice(skip, skip + pageSize)
+          : [];
+        titles = await withSharedTitleMetadata(
+          titlesOf({ titles: candidates }),
+          this.#providerFetch,
+        );
+      }
+      return { state: 'ready', value: { operation: 'kids-row', titles } };
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      if (this.#atlasTitleCursors.has(query.cursor)) this.#atlasTitleCursors.delete(query.cursor);
+      if (error instanceof ContentServiceFault) throw error;
+      if (error instanceof FilterUnavailable) return { state: 'absent' };
       return { state: 'unavailable', provider: 'atlas', reason: 'network' };
     }
   }

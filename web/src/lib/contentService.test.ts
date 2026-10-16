@@ -92,6 +92,30 @@ it('validates bounded semantic requests and unversioned content replies', () => 
       request: { kind: 'sources.configure', atlas: 'javascript:alert(1)' },
     }).ok,
   ).toBe(false);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'kids-home',
+      request: { kind: 'atlas.query', query: { operation: 'kids-home' } },
+    }).ok,
+  ).toBe(true);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'kids-row',
+      request: {
+        kind: 'atlas.query',
+        query: {
+          operation: 'kids-row',
+          cursor: 'row',
+          source: { kind: 'query', query: 'Moomins', minimumScore: 0.69 },
+          page: 1,
+        },
+      },
+    }).ok,
+  ).toBe(true);
   const reply = {
     type: 'content-result',
     protocol: CONTENT_SERVICE_PROTOCOL,
