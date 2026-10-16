@@ -219,7 +219,7 @@
       grant.ended
         ? []
         : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) =>
-            addon === 'den' ? [] : [{ gid: grant.gid, host: grant.name, addon }],
+            addon === 'den' ? [] : [{ gid: grant.gid, addon }],
           ),
     ),
   );
@@ -928,10 +928,7 @@
       <ul class="list">
         {#each sharedHosts as grant (grant.gid)}
           <li class="line">
-            <span class="label"
-              >Your Den Hearth<small>Hosted by {grant.name} · uses your own provider keys</small
-              ></span
-            >
+            <span class="label">Your Den Hearth<small>Personal provider settings</small></span>
             <Button
               variant="secondary"
               label={configuringGuest === grant.gid ? 'Opening…' : 'Configure'}
@@ -943,7 +940,7 @@
         {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
           <li class="line">
             <span class="label"
-              >{sharedLabels[shared.addon]}<small>Shared by {shared.host} · read-only</small></span
+              >{sharedLabels[shared.addon]}<small>Shared access · read-only</small></span
             >
           </li>
         {/each}

@@ -162,10 +162,9 @@ export class GuestGrants {
   }
 
   /**
-   * A guest's configured Hearth is personal: den-edge stored it from this grant's credential, never from the host's
-   * escrow. Once it exists, it replaces the host's legacy Scout/Subtitles/Reel paths as one unit. Atlas remains the
-   * separately shared discovery addon. This ordering rule is also the privacy fence that prevents `findScout` from
-   * selecting the host's debrid install ahead of the guest's own TorBox account.
+   * A guest's configured Hearth is one media facade: once advertised, legacy Scout/Subtitles/Reel paths must not be
+   * exposed beside it. Atlas remains the separately shared discovery addon. Hearth can then compose inherited and
+   * personal providers behind its stable route without duplicate plugins or `findScout` selecting a legacy route.
    */
   private activeAddonPaths(grant: GuestGrant): string[] {
     const personal = grant.addons.den;
@@ -175,10 +174,10 @@ export class GuestGrants {
     );
   }
 
-  /** "Your access to <name> ended", for the first grant that did; null when none has. */
+  /** The guest-facing ended notice, without identifying who operates the shared service. */
   endedText(): string | null {
     const ended = this.list.find((grant) => grant.ended);
-    return ended ? `Your access to ${ended.name} ended` : null;
+    return ended ? 'Your shared access ended' : null;
   }
 
   /** Redeem a pasted code or link. */

@@ -11,12 +11,11 @@
   });
 
   const addonLine = $derived.by(() => {
-    const host = phoneLanding.host || 'the host';
     switch (phoneLanding.addons) {
       case 'granted':
-        return `${host}’s addons are on this phone too.`;
+        return 'Your shared addons are on this phone too.';
       case 'full':
-        return `${host}’s addons aren’t: ${host} has allowed as many devices as are using them. Ask ${host} to allow another device, then open the link again.`;
+        return 'Your shared addons aren’t: as many devices as allowed are already using them. Ask for another device, then open the link again.';
       case 'expired':
         return 'The access to shared addons in that link has lapsed. Make a new link on your laptop to add it.';
       default:
