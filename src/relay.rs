@@ -363,7 +363,7 @@ fn member_claim(req: &Request) -> Option<String> {
 fn idempotency_key(req: &Request) -> Result<Option<axum::http::HeaderValue>, ()> {
     let Some(value) = req.headers().get("idempotency-key") else { return Ok(None) };
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 128 || !bytes.iter().all(|b| b.is_ascii_graphic()) {
+    if bytes.is_empty() || bytes.len() > 128 || !bytes.iter().all(|b| b.is_ascii_graphic() && *b != b',') {
         return Err(());
     }
     Ok(Some(value.clone()))
@@ -780,12 +780,14 @@ async fn relay_with(
 ) -> Response {
     let started = tokio::time::Instant::now();
     let method = req.method().clone();
-    let playback = crate::handler::den_playback_path(req.uri().path()) && method == Method::POST;
-    if playback && !state.den_playback_enabled {
+    let playback_path = crate::handler::den_playback_path(req.uri().path());
+    let playback = playback_path && method == Method::POST;
+    let playback_probe = playback_path && method == Method::OPTIONS;
+    if (playback || playback_probe) && !state.den_playback_enabled {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     let cancel = method == Method::DELETE && scout_cancel(req.uri().path(), req.uri().query());
-    if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !cancel {
+    if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !playback_probe && !cancel {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     // On the public web name, scout answers only to a device that holds a library here.
@@ -809,7 +811,9 @@ async fn relay_with(
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
     // `/scout` itself and `/scout?…` are relayed to scout's `/` (`target`), so they are scout's too.
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
-    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || remux || playback);
+    let member_only = grant.is_none()
+        && face == crate::handler::Face::Web
+        && (scout || remux || playback || playback_probe);
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -966,7 +970,7 @@ async fn relay_with(
     if regrant && !public_session {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
-    if playback && state.remux_edge_secret.is_none() {
+    if (playback || playback_probe) && state.remux_edge_secret.is_none() {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     // A guest's play refused at its start, counted by code on `/metrics`.
@@ -991,10 +995,13 @@ async fn relay_with(
         return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
     }
     // An answer that has to be rewritten cannot be read compressed, so a guest's is asked for as it is.
-    let identity = playback || guest_configure || grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
+    let identity = playback
+        || playback_probe
+        || guest_configure
+        || grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
-        .filter(|name| !playback || *name == header::ACCEPT_ENCODING)
+        .filter(|name| !(playback || playback_probe) || *name == header::ACCEPT_ENCODING)
         .filter(|name| !(identity && *name == header::ACCEPT_ENCODING))
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
@@ -1194,14 +1201,16 @@ async fn relay_with(
         .uri(&target)
         .header(header::ACCEPT, if guest_configure { "text/html" } else { "application/json" })
         .header("x-request-id", rid);
-    if let Some(content_type) = content_type {
+    if let Some(content_type) = content_type.filter(|_| !playback_probe) {
         out = out.header(header::CONTENT_TYPE, content_type);
     }
     if identity {
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
-    if let Some(secret) =
-        state.remux_edge_secret.as_deref().filter(|_| playback || grant.as_ref().is_some_and(Guest::remux))
+    if let Some(secret) = state
+        .remux_edge_secret
+        .as_deref()
+        .filter(|_| playback || playback_probe || grant.as_ref().is_some_and(Guest::remux))
     {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
@@ -1251,6 +1260,20 @@ async fn relay_with(
         }
     };
     let (parts, body) = answer.into_parts();
+    // Capability discovery reflects Hearth's live route, not merely Edge's flag. Its body and headers are not part
+    // of the public contract: only an exact 204 opts Web in, while other statuses let it keep legacy playback.
+    if playback_probe {
+        drop(slot);
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = parts.status;
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+        if parts.status == StatusCode::NO_CONTENT {
+            response.headers_mut().insert(header::ALLOW, axum::http::HeaderValue::from_static("POST"));
+        }
+        return response;
+    }
     // An answer that says it is too large is refused whole, before any of it is passed on.
     if http_body::Body::size_hint(&body).lower() > MAX_ANSWER_BYTES as u64 {
         state.metrics.stream_terminated(
@@ -2626,6 +2649,78 @@ mod tests {
         assert_eq!(super::idempotency_key(&request("attempt-1")).unwrap().unwrap(), "attempt-1");
         assert!(super::idempotency_key(&request("")).is_err());
         assert!(super::idempotency_key(&request(&"a".repeat(129))).is_err());
+        assert!(super::idempotency_key(&request("combined,keys")).is_err());
+    }
+
+    #[tokio::test]
+    async fn playback_probe_is_authenticated_live_and_headerless() {
+        use axum::http::{header, HeaderValue};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            async move {
+                sent.send((req.method().clone(), req.uri().path().to_owned(), req.headers().clone()))
+                    .unwrap();
+                let status = if req.uri().path().contains("/compatible/") {
+                    StatusCode::NO_CONTENT
+                } else if req.uri().path().contains("/missing/") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                let mut response = Response::new(Body::from("private upstream detail"));
+                *response.status_mut() = status;
+                response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("secret=value"));
+                response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("99"));
+                response
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+
+        let visitor = h.send("OPTIONS", "/den/compatible/playback", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
+        assert!(received.try_recv().is_err(), "an untrusted probe reached Hearth");
+
+        let claim = registered_library(&h).await;
+        for (config, expected) in [
+            ("compatible", StatusCode::NO_CONTENT),
+            ("missing", StatusCode::NOT_FOUND),
+            ("failing", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = h
+                .send(
+                    "OPTIONS",
+                    &format!("/den/{config}/playback"),
+                    None,
+                    &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)],
+                )
+                .await;
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response.headers().get(header::ALLOW).map(HeaderValue::as_bytes),
+                (expected == StatusCode::NO_CONTENT).then_some(b"POST".as_slice())
+            );
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert!(!response.headers().contains_key(header::RETRY_AFTER));
+            assert!(crate::handler::tests::body_text(response).await.is_empty());
+
+            let (method, path, headers) = received.recv().await.unwrap();
+            assert_eq!(method, Method::OPTIONS);
+            assert_eq!(path, format!("/den/{config}/playback"));
+            assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+            assert!(!headers.contains_key("x-den-managed-playback"));
+        }
     }
 
     #[test]

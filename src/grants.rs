@@ -1393,7 +1393,8 @@ pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
     match addon {
         "den" => {
             (read && matches!(rest, "/configure" | "/configure/" | "/config-key" | "/manifest.json"))
-                || (*method == Method::POST && matches!(rest, "/playback" | "/availability" | "/validate"))
+                || (matches!(*method, Method::POST | Method::OPTIONS) && rest == "/playback")
+                || (*method == Method::POST && matches!(rest, "/availability" | "/validate"))
                 || (read && (under("/subtitle") || under("/subtitles") || under("/meta")))
         }
         "scout" => *method == Method::POST && rest == "/availability",
@@ -1863,7 +1864,7 @@ mod tests {
 
     #[test]
     fn a_guest_may_browse_and_never_reach_streams_or_setup() {
-        let (get, post) = (Method::GET, Method::POST);
+        let (get, post, options) = (Method::GET, Method::POST, Method::OPTIONS);
         assert!(allowed("scout", &get, "/manifest.json"));
         assert!(allowed("scout", &post, "/availability"));
         for path in [
@@ -1900,6 +1901,8 @@ mod tests {
             assert!(!allowed("subtitles", &get, path), "{path}");
         }
         assert!(!allowed("remux", &get, "/subtitle/x"), "only the four addons have a guest allowlist");
+        assert!(allowed("den", &options, "/playback"));
+        assert!(!allowed("den", &options, "/validate"));
     }
 
     #[test]
