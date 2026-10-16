@@ -108,6 +108,28 @@ describe('directSubtitles', () => {
     found?.dispose();
   });
 
+  it('cancels a candidate list as soon as streaming crosses its 256 KiB ceiling', async () => {
+    const cancel = vi.fn();
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(256 * 1024));
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel,
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(oversized));
+    await expect(
+      directSubtitles(
+        '/den/config/playback',
+        { imdb: 'tt0111161', subtitleLanguages: ['en'] },
+        release,
+        fetchImpl,
+      ),
+    ).resolves.toBeNull();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
   it('does not fetch a candidate outside the Den relay', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async (input) =>
       String(input).includes('/subtitles/')
