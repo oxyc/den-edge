@@ -12,7 +12,13 @@ import {
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
-import { denLifecycleMedia, managedMedia, signedMedia, type PlayingMedia } from './media';
+import {
+  denLifecycleMedia,
+  lanHttpMedia,
+  managedMedia,
+  signedMedia,
+  type PlayingMedia,
+} from './media';
 import { keepProfile, keptProfile } from './profile';
 import './style.css';
 
@@ -273,7 +279,11 @@ function watchLink(connection: Link): void {
 async function loadLocal(media: Media, url: string): Promise<void> {
   stopLocal();
   video.removeAttribute('src');
-  playing = { url, external: media.external === true };
+  playing = {
+    url,
+    external: media.external === true,
+    ...(url !== media.url && !media.external ? { lifecycleUrl: media.url } : {}),
+  };
   const start = Math.max(0, media.currentTime ?? 0);
   // The player's own rule (`nativeHls`): Chrome claims HLS too, but hls.js plays there, and only hls.js rides out a
   // dropped connection with `resumingLoader`.
@@ -416,7 +426,11 @@ async function loadCast(): Promise<void> {
     return;
   }
   const url = playUrl(id, media);
-  const requested = { url, external: media.external === true };
+  const requested = {
+    url,
+    external: media.external === true,
+    ...(url !== media.url && !media.external ? { lifecycleUrl: media.url } : {}),
+  };
   const info = new chrome.media.MediaInfo(url, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
   info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
@@ -478,9 +492,15 @@ function continued(id: string): Promise<void> {
 }
 
 async function open(message: LoadMessage): Promise<void> {
+  // Google permits a secure Web Sender to hand an HTTP media URL to its receiver. Do not fetch that URL from this
+  // HTTPS iframe: the parent already proved the local route and holds Chrome's Local Network Access permission.
+  if (lanHttpMedia(message.media.url) || lanHttpMedia(message.media.lanUrl ?? '')) {
+    onLan.add(message.id);
+    if (current?.id === message.id) tell('den-lan');
+  }
   // Home first: on home Wi-Fi the router never loops a request for the public address back in, so only the
   // home-network address can play. Anywhere else this fails fast and the public address is used as before.
-  if (await lanReachable(message.media.lanUrl)) {
+  if (!onLan.has(message.id) && (await lanReachable(message.media.lanUrl))) {
     onLan.add(message.id);
     // A link limit the player remembered from away doesn't belong here.
     if (current?.id === message.id) tell('den-lan');

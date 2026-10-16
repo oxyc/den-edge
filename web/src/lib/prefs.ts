@@ -5,6 +5,7 @@ import type { Title } from './library';
 import { RATING_SOURCES } from '../settings/catalogs';
 import { isDirectMatch } from './search';
 import type { ConfigValue, SettingsRow } from './wire';
+import { localHost } from './localNetwork';
 
 /** A streaming service the viewer has, in one country: the same provider in two countries is two picks. */
 export interface ServicePick {
@@ -99,7 +100,7 @@ export function acceptsAddonURL(url: string): boolean {
     return false;
   }
   if (parsed.protocol === 'https:') return true;
-  return parsed.protocol === 'http:' && lanHost(parsed.hostname);
+  return parsed.protocol === 'http:' && localHost(parsed.hostname);
 }
 
 /** An http or https URL to a LAN host: an addon on the homelab, not a public one. */
@@ -110,21 +111,9 @@ export function isLanURL(url: string): boolean {
   } catch {
     return false;
   }
-  return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && lanHost(parsed.hostname);
-}
-
-/** localhost, `*.local`, or an RFC 1918 address. */
-function lanHost(host: string): boolean {
-  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.local'))
-    return true;
-  const labels = host.split('.');
-  if (
-    labels.length !== 4 ||
-    !labels.every((label) => /^\d{1,3}$/.test(label) && Number(label) <= 255)
-  )
-    return false;
-  const [a = -1, b = -1] = labels.map(Number);
-  return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  return (
+    (parsed.protocol === 'http:' || parsed.protocol === 'https:') && localHost(parsed.hostname)
+  );
 }
 
 /**

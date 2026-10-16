@@ -13,6 +13,7 @@ const ORIGIN = E2E_ORIGIN;
 const CAST = 'https://cast.test';
 const MEDIA = 'https://media.test';
 const CDN = 'https://video.eu.tb-cdn.io';
+const LAN = 'http://192.168.86.20:8090';
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 const hls = new URL('./media/hls/', import.meta.url);
@@ -39,6 +40,8 @@ const castPage = (mode) => `<!doctype html><script>
       parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
     else if (${mode === 'receiver'})
       parent.postMessage({ type: 'den-error', id: message.id, message: 'hls.js networkError manifestLoadError' }, event.origin);
+    else if (${mode === 'playing'})
+      parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
   });
   parent.postMessage({ type: 'den-ready' }, '*');
 </script>`;
@@ -53,7 +56,16 @@ const session = (base, n) => ({
   audioTracks: [],
 });
 
-async function open(mode, { releases = [], managed = false, subtitleLanguage } = {}) {
+const lanSession = (n) => ({
+  ...session('remux', n),
+  sid: 'L'.repeat(22),
+  playlist: `${LAN}/remux/s/${'L'.repeat(22)}/${'s'.repeat(22)}/master.m3u8`,
+});
+
+async function open(
+  mode,
+  { releases = [], managed = false, subtitleLanguage, lanHttp = false } = {},
+) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -70,7 +82,12 @@ async function open(mode, { releases = [], managed = false, subtitleLanguage } =
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
   await page.route(`${ORIGIN}/direct/session`, (r) => {
     asked.direct.push(r.request().postDataJSON());
-    return r.fulfill({ status: 201, json: session('direct', `d${asked.direct.length}`) });
+    return r.fulfill({
+      status: 201,
+      json: lanHttp
+        ? lanSession(`d${asked.direct.length}`)
+        : session('direct', `d${asked.direct.length}`),
+    });
   });
   await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/den/config/playback`, (r) => {
@@ -141,6 +158,17 @@ async function open(mode, { releases = [], managed = false, subtitleLanguage } =
       body: await readFile(new URL(file, hls)),
     });
   });
+  await page.route(`${LAN}/remux/s/**`, async (r) => {
+    const request = r.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() !== 'GET') return r.fulfill({ status: 204 });
+    const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
+    return r.fulfill({
+      contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+      headers: { 'access-control-allow-origin': '*' },
+      body: await readFile(new URL(file, hls)),
+    });
+  });
   // The relay, which only a move to cast asks: its sessions carry the public address and the cast page.
   await page.route(`${ORIGIN}/remux/session`, (r) => {
     asked.relay.push(r.request().postDataJSON());
@@ -208,6 +236,29 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
       .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
     expect(asked.direct, 'managed playback never posts to the legacy direct facade').toEqual([]);
     expect(asked.relay, 'Hearth, not Web, chooses the Remux implementation').toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a signed LAN HTTP session stays on Hearth and is handed directly to Chromecast', async () => {
+  const { browser, page, asked } = await open('playing', { lanHttp: true });
+  try {
+    await playingPast(page, 3);
+    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await expect.poll(() => asked.direct.length).toBe(2);
+    expect(asked.direct[1]).toMatchObject({ player: 'cast' });
+    expect(asked.relay, 'LAN HTTP media does not need Edge public-media ingress').toEqual([]);
+
+    await expect
+      .poll(async () => {
+        const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+        return cast?.evaluate(() => window.loads?.at(-1)?.url ?? '') ?? '';
+      })
+      .toBe(`${LAN}/remux/s/${'L'.repeat(22)}/${'s'.repeat(22)}/master.m3u8`);
+    const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+    expect(cast, 'the Cast receiver frame is attached after discovery').toBeDefined();
+    expect(await cast.evaluate(() => window.loads.at(-1).mode)).toBe('cast');
   } finally {
     await browser.close();
   }
