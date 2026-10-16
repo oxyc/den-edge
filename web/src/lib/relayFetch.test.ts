@@ -46,6 +46,7 @@ test('claims membership on the relayed addon and household API paths', async () 
     '/remux/health',
     '/remux/session',
     '/remux/releases',
+    '/grant/den-configure',
   ]) {
     await relayFetch(path);
     expect(sent(spy)[HEADER]).toBe('abc123:def456');

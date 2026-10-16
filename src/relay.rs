@@ -425,7 +425,16 @@ enum Admitted {
 
 /// The membership this request claims, if any: `<id>:<member-proof>` as the app sends it.
 fn member_claim(req: &Request) -> Option<String> {
-    req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned).or_else(
+        || {
+            matches!(
+                req.uri().path(),
+                "/den/configure" | "/den/configure/" | "/den/config-key" | "/den/validate"
+            )
+            .then(|| crate::grants::member_configure_claim(req))
+            .flatten()
+        },
+    )
 }
 
 fn idempotency_key(req: &Request) -> Result<Option<axum::http::HeaderValue>, ()> {

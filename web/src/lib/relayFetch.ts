@@ -57,6 +57,8 @@ const HOST_GRANTS = /^\/lib\/([0-9a-f]+)\/grants(?:\/|$)/;
 const OAUTH = /^\/oauth\/(?:request\/[0-9a-f]{32}\/approve|connections(?:\/[0-9a-f]{32})?)$/;
 /** Assistant writes' member routes (`assistant.rs`): the drop-box key, and draining and acknowledging the queue. */
 const ASSISTANT = /^\/assistant\/(?:dropbox|drain|ack)$/;
+/** Establishes a short-lived HttpOnly session for the owner's real Hearth setup document. */
+const DEN_CONFIGURE_SESSION = '/grant/den-configure';
 
 let credential: string | null = null;
 let libraryId: string | null = null;
@@ -184,6 +186,7 @@ function relayed(href: string): boolean {
       REMUX_CONTROL.has(url.pathname) ||
       OAUTH.test(url.pathname) ||
       ASSISTANT.test(url.pathname) ||
+      url.pathname === DEN_CONFIGURE_SESSION ||
       (libraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === libraryId))
   );
 }
@@ -195,6 +198,7 @@ function membershipSensitive(url: URL): boolean {
     REMUX_CONTROL.has(url.pathname) ||
     OAUTH.test(url.pathname) ||
     ASSISTANT.test(url.pathname) ||
+    url.pathname === DEN_CONFIGURE_SESSION ||
     HOST_GRANTS.test(url.pathname)
   );
 }

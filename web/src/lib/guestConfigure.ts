@@ -1,3 +1,5 @@
+import { relayFetch } from './relayFetch';
+
 const SHARED_MEDIA = ['scout', 'subtitles', 'reel'] as const;
 
 /** Whether clearing a personal Hearth install leaves this guest with shared media services. */
@@ -55,6 +57,49 @@ export async function openGuestConfigure(
   }
   try {
     opened.location.replace(`/den/~${gid}/configure`);
+  } catch {
+    opened.close();
+    return false;
+  }
+  return true;
+}
+
+/** Open the owner's real Hearth setup page after establishing its narrow HttpOnly member session. */
+export async function openOwnerConfigure(
+  configureURL: string,
+  deps: {
+    fetchImpl?: typeof fetch;
+    openImpl?: (url: string, target: string) => Window | null;
+  } = {},
+): Promise<boolean> {
+  let destination: URL;
+  try {
+    destination = new URL(
+      configureURL,
+      configureURL.startsWith('/') ? 'https://den.invalid' : undefined,
+    );
+  } catch {
+    return false;
+  }
+  if (!/^\/den\/configure\/?$/.test(destination.pathname)) return false;
+  const opened = (deps.openImpl ?? window.open.bind(window))('', '_blank');
+  if (!opened) return false;
+  opened.opener = null;
+  let response: Response | null;
+  try {
+    response = await (deps.fetchImpl ?? relayFetch)('/grant/den-configure', {
+      method: 'POST',
+      cache: 'no-store',
+    });
+  } catch {
+    response = null;
+  }
+  if (!response?.ok) {
+    opened.close();
+    return false;
+  }
+  try {
+    opened.location.replace(configureURL);
   } catch {
     opened.close();
     return false;
