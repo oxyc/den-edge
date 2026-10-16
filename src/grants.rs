@@ -9,7 +9,7 @@
 //!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
-//!   POST   /grant/den-configure      (x-den-grant) → 204 + a short-lived, HttpOnly setup cookie
+//!   POST   /grant/den-configure      (grant or member proof) → 204 + a short-lived, HttpOnly setup cookie
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
 //!   POST   /grant/library            (x-den-grant) { id, tokenHash } reserves the one library this grant may start → 204
 //!   POST   /grant/device-ticket      (x-den-grant) → { ticket, expiresAt }: one more device may join, once, soon
@@ -60,6 +60,7 @@ use std::time::Duration;
 /// The guest's credential, `<gid>:<secret>`. Same origin only, never in a URL.
 pub const HEADER: &str = "x-den-grant";
 const CONFIGURE_COOKIE: &str = "den_guest_configure";
+const MEMBER_CONFIGURE_COOKIE: &str = "den_member_configure";
 const CONFIGURE_COOKIE_MAX_AGE: u64 = 15 * 60;
 /// The addons a grant may hand out: the ones the relay table names and the web app browses with.
 pub const ADDONS: [&str; 4] = ["scout", "atlas", "reel", "subtitles"];
@@ -1026,6 +1027,16 @@ pub(crate) fn configure_claim(req: &Request) -> Option<String> {
     })
 }
 
+/// The member proof established specifically for Hearth's owner setup routes. It is never ambient membership for
+/// another addon or for an installed Hearth URL.
+pub(crate) fn member_configure_claim(req: &Request) -> Option<String> {
+    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|cookie| {
+        let (name, value) = cookie.trim().split_once('=')?;
+        (name == MEMBER_CONFIGURE_COOKIE && !value.is_empty()).then(|| value.to_owned())
+    })
+}
+
 /// Establish a narrowly used browser setup session. Navigations cannot attach `x-den-grant`, so the Web UI first
 /// proves the grant with fetch and then opens Hearth's ordinary, real document. This avoids putting the credential
 /// in a URL and avoids executing fetched addon HTML from a CSP-incompatible blob document.
@@ -1034,17 +1045,28 @@ async fn den_configure(state: &AppState, req: Request) -> Response {
     if let Some(limited) = gate(state, &ip, "grant-den-configure", ADDONS_PER_WINDOW) {
         return limited;
     }
-    let claim = header_of(&req);
-    let live = match authenticate(state, claim.as_deref(), None).await {
-        Ok(live) => live,
-        Err(Denied::Expired(at)) => return expired_reply(at),
-        Err(Denied::NotFound) => return not_found(),
+    let cookie = if let Some(claim) = header_of(&req) {
+        let live = match authenticate(state, Some(&claim), None).await {
+            Ok(live) => live,
+            Err(Denied::Expired(at)) => return expired_reply(at),
+            Err(Denied::NotFound) => return not_found(),
+        };
+        let Some((_, secret)) = parse_header(&claim) else { return not_found() };
+        format!(
+            "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
+            live.gid, secret, live.gid
+        )
+    } else {
+        let claim = req.headers().get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
+        if !state.new_libraries.gates_households() || !crate::library::is_household_member(state, claim).await
+        {
+            return not_found();
+        }
+        let Some(claim) = claim else { return not_found() };
+        format!(
+            "{MEMBER_CONFIGURE_COOKIE}={claim}; Path=/den; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"
+        )
     };
-    let Some((_, secret)) = claim.as_deref().and_then(parse_header) else { return not_found() };
-    let cookie = format!(
-        "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
-        live.gid, secret, live.gid
-    );
     let Ok(cookie) = HeaderValue::from_str(&cookie) else { return not_found() };
     let mut response = no_content();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -2819,6 +2841,54 @@ mod tests {
         );
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["overrides"], json!(["den"]));
+    }
+
+    #[tokio::test]
+    async fn the_owner_configure_page_uses_a_short_lived_member_cookie_only_for_setup() {
+        let (mut h, seen) = relaying(den_configure, Some("edge-secret")).await;
+        {
+            let state = Arc::get_mut(&mut h.state).unwrap();
+            state.den_playback_enabled = true;
+            state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        }
+        start_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let claim = member();
+        let bootstrap = h
+            .send(
+                "POST",
+                "/grant/den-configure",
+                None,
+                &[(crate::library::MEMBER_HEADER, claim.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(bootstrap.status(), StatusCode::NO_CONTENT);
+        let set_cookie = bootstrap.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.starts_with(&format!("{MEMBER_CONFIGURE_COOKIE}={claim};")), "{set_cookie}");
+        for attribute in ["Path=/den", "HttpOnly", "Secure", "SameSite=Strict", "Max-Age=900"] {
+            assert!(set_cookie.contains(attribute), "{set_cookie}");
+        }
+        let cookie = set_cookie.split(';').next().unwrap();
+        let response =
+            h.send("GET", "/den/configure", None, &[("cookie", cookie), ("host", "d.oxy.fi")]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.last().unwrap().0, "/den/configure");
+            assert!(!seen.last().unwrap().1.contains_key("cookie"));
+        }
+
+        let before = seen.lock().unwrap().len();
+        let installed = h
+            .send(
+                "GET",
+                "/den/not-an-install/stream/movie/tt1.json",
+                None,
+                &[("cookie", cookie), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(installed.status(), StatusCode::NOT_FOUND);
+        assert_eq!(seen.lock().unwrap().len(), before, "the setup cookie escaped its route allowlist");
     }
 
     #[tokio::test]

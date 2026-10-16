@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearGuestConfigure, hasSharedMediaSettings, openGuestConfigure } from './guestConfigure';
+import {
+  clearGuestConfigure,
+  hasSharedMediaSettings,
+  openGuestConfigure,
+  openOwnerConfigure,
+} from './guestConfigure';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -57,6 +62,48 @@ describe('openGuestConfigure', () => {
       }),
     ).resolves.toBe(false);
     expect(opened.opener).toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+  });
+});
+
+describe('openOwnerConfigure', () => {
+  it('establishes the member setup session before navigating the reserved tab', async () => {
+    const order: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      order.push('fetch');
+      return new Response(null, { status: 204 });
+    });
+    const replace = vi.fn();
+    const opened = { opener: {}, location: { replace }, close: vi.fn() } as unknown as Window;
+    const openImpl = vi.fn(() => {
+      order.push('open');
+      return opened;
+    });
+    await expect(openOwnerConfigure('/den/configure', { fetchImpl, openImpl })).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledWith('/grant/den-configure', {
+      method: 'POST',
+      cache: 'no-store',
+    });
+    expect(order).toEqual(['open', 'fetch']);
+    expect(opened.opener).toBeNull();
+    expect(replace).toHaveBeenCalledWith('/den/configure');
+  });
+
+  it('refuses a route that is not Hearth setup and closes on failed bootstrap', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    await expect(
+      openOwnerConfigure('/atlas/configure', { fetchImpl, openImpl: () => null }),
+    ).resolves.toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const close = vi.fn();
+    const opened = { opener: {}, location: { replace: vi.fn() }, close } as unknown as Window;
+    await expect(
+      openOwnerConfigure('/den/configure', {
+        fetchImpl: async () => new Response(null, { status: 404 }),
+        openImpl: () => opened,
+      }),
+    ).resolves.toBe(false);
     expect(close).toHaveBeenCalledOnce();
   });
 });

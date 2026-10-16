@@ -21,7 +21,11 @@
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
-  import { hasSharedMediaSettings, openGuestConfigure } from '../lib/guestConfigure';
+  import {
+    hasSharedMediaSettings,
+    openGuestConfigure,
+    openOwnerConfigure,
+  } from '../lib/guestConfigure';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
@@ -228,6 +232,7 @@
   );
   const sharedHosts = $derived(guestGrants.list.filter((grant) => !grant.ended && grant.secret));
   let configuringGuest = $state<string | null>(null);
+  let configuringOwner = $state(false);
   let resettingGuest = $state<string | null>(null);
   let configureGuestProblem = $state<string | null>(null);
 
@@ -239,6 +244,15 @@
       configureGuestProblem =
         'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
     if (configuringGuest === gid) configuringGuest = null;
+  }
+
+  async function configureOwner(url: string) {
+    configuringOwner = true;
+    addonProblem = null;
+    if (!(await openOwnerConfigure(url)))
+      addonProblem =
+        'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
+    configuringOwner = false;
   }
 
   async function useSharedSettings(gid: string) {
@@ -874,9 +888,9 @@
               {#if configureURL}
                 <Button
                   variant="secondary"
-                  label="Configure"
+                  label={configuringOwner ? 'Opening…' : 'Configure'}
                   {disabled}
-                  onclick={() => window.open(configureURL, '_blank', 'noopener')}
+                  onclick={() => void configureOwner(configureURL)}
                 />
               {/if}
               {#if pinned}
