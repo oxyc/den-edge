@@ -9,6 +9,8 @@ import {
   findScout,
   hostedInstalls,
   installsOf,
+  legacyMediaSuperseded,
+  migrateLegacyMedia,
   SCOUT,
 } from './scout';
 
@@ -42,13 +44,13 @@ const SUBS_PUBLIC = 'https://d-subs.oxy.fi/subs-cfg/manifest.json';
 const THEIRS = 'https://torrentio.example/debrid-token/manifest.json';
 
 /** Manifests by URL; anything else is this origin's app shell, which is not JSON. */
-function addons(manifests: Record<string, string>) {
+function addons(manifests: Record<string, string | Record<string, unknown>>) {
   const asked: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {
     asked.push(String(input));
-    const id = manifests[String(input)];
-    return id
-      ? new Response(JSON.stringify({ id }))
+    const manifest = manifests[String(input)];
+    return manifest
+      ? new Response(JSON.stringify(typeof manifest === 'string' ? { id: manifest } : manifest))
       : new Response('<!doctype html>', { status: 200 });
   };
   return { asked, fetchImpl };
@@ -117,6 +119,121 @@ describe('findScout', () => {
       install: install.replace('/manifest.json', ''),
       base: '/den/sealed-cfg',
     });
+  });
+
+  it('accepts Hearth’s canonical id and the deployed transition id', async () => {
+    for (const id of ['com.den.hearth', 'com.den.addon']) {
+      const fetchImpl: typeof fetch = async (_input, init) =>
+        init?.method === 'OPTIONS'
+          ? new Response(null, { status: 404 })
+          : new Response(JSON.stringify({ id }));
+      expect(await findScout([install], ROUTES, fetchImpl)).toMatchObject({
+        base: '/den/sealed-cfg',
+      });
+    }
+  });
+});
+
+describe('legacyMediaSuperseded', () => {
+  const hearth = 'http://192.168.86.193:8090/den/hearth-cfg/manifest.json';
+  const reel = 'http://192.168.86.193:8092/reel-cfg/manifest.json';
+
+  it('removes only legacy resources that an approved Hearth manifest proves it replaces', async () => {
+    const { fetchImpl } = addons({
+      '/den/hearth-cfg/manifest.json': {
+        id: 'com.den.hearth',
+        resources: ['stream', { name: 'subtitles' }],
+      },
+      '/scout/sealed-cfg/manifest.json': 'com.den.scout',
+      '/subtitles/subs-cfg/manifest.json': 'com.den.subtitles',
+      '/reel/reel-cfg/manifest.json': 'com.den.reel',
+    });
+    expect(
+      await legacyMediaSuperseded([hearth, SCOUT_LAN, SUBS_LAN, reel], ROUTES, fetchImpl),
+    ).toEqual([SCOUT_LAN, SUBS_LAN]);
+  });
+
+  it('keeps every legacy install until Hearth answers with a recognized id and resources', async () => {
+    for (const manifest of [
+      { id: 'some.other.addon', resources: ['stream', 'subtitles', 'meta'] },
+      { id: 'com.den.hearth', resources: [] },
+    ]) {
+      const { fetchImpl } = addons({ '/den/hearth-cfg/manifest.json': manifest });
+      expect(
+        await legacyMediaSuperseded([hearth, SCOUT_LAN, SUBS_LAN, reel], ROUTES, fetchImpl),
+      ).toEqual([]);
+    }
+  });
+
+  it('accepts the transition id during a rolling Hearth upgrade', async () => {
+    const { fetchImpl } = addons({
+      '/den/hearth-cfg/manifest.json': { id: 'com.den.addon', resources: ['meta'] },
+      '/reel/reel-cfg/manifest.json': 'com.den.reel',
+    });
+    expect(await legacyMediaSuperseded([hearth, reel], ROUTES, fetchImpl)).toEqual([reel]);
+  });
+});
+
+describe('migrateLegacyMedia', () => {
+  const reel = 'http://192.168.86.193:8092/reel-cfg/manifest.json';
+
+  it('proves first-party manifests, exchanges their segments in a POST body, and returns a Hearth route', async () => {
+    const asked: Array<[string, RequestInit | undefined]> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      asked.push([url, init]);
+      if (url === '/den/migrate')
+        return new Response(JSON.stringify({ manifestUrl: '/den/new-sealed/manifest.json' }));
+      const ids: Record<string, string> = {
+        '/scout/sealed-cfg/manifest.json': 'com.den.scout',
+        '/subtitles/subs-cfg/manifest.json': 'com.den.subtitles',
+        '/reel/reel-cfg/manifest.json': 'com.den.reel',
+      };
+      return ids[url]
+        ? new Response(JSON.stringify({ id: ids[url] }))
+        : new Response(null, { status: 404 });
+    };
+
+    expect(await migrateLegacyMedia([SCOUT_LAN, SUBS_LAN, reel], ROUTES, fetchImpl)).toBe(
+      'http://192.168.86.193:8090/den/new-sealed/manifest.json',
+    );
+    const migration = asked.find(([url]) => url === '/den/migrate')?.[1];
+    expect(migration).toMatchObject({ method: 'POST', cache: 'no-store' });
+    expect(JSON.parse(String(migration?.body))).toEqual({
+      scout: 'sealed-cfg',
+      subs: 'subs-cfg',
+      reel: 'reel-cfg',
+    });
+  });
+
+  it('never exchanges unproved configs, and does nothing when Hearth is already installed', async () => {
+    const post = vi.fn();
+    const foreign: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST') post();
+      return new Response(
+        JSON.stringify({ id: String(input).startsWith('/den/') ? DEN.id : 'some.other.addon' }),
+      );
+    };
+    expect(await migrateLegacyMedia([SCOUT_LAN], ROUTES, foreign)).toBeNull();
+    expect(post).not.toHaveBeenCalled();
+
+    const hearth = 'http://192.168.86.193:8090/den/existing/manifest.json';
+    expect(await migrateLegacyMedia([hearth, SCOUT_LAN], ROUTES, foreign)).toBeNull();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('refuses an endpoint answer that is not exactly a relative Den Hearth manifest path', async () => {
+    for (const manifestUrl of [
+      'https://attacker.example/manifest.json',
+      '/den/../manifest.json',
+      '/scout/new/manifest.json',
+    ]) {
+      const fetchImpl: typeof fetch = async (input) =>
+        String(input) === '/den/migrate'
+          ? new Response(JSON.stringify({ manifestUrl }))
+          : new Response(JSON.stringify({ id: 'com.den.scout' }));
+      expect(await migrateLegacyMedia([SCOUT_LAN], ROUTES, fetchImpl)).toBeNull();
+    }
   });
 });
 

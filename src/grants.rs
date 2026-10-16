@@ -1907,6 +1907,7 @@ mod tests {
         assert!(!allowed("den", &get, "/play/ticket"));
         assert!(allowed("den", &options, "/playback"));
         assert!(!allowed("den", &options, "/validate"));
+        assert!(!allowed("den", &post, "/migrate"), "a guest never exchanges the host's configs");
     }
 
     #[test]
