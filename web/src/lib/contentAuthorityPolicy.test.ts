@@ -453,6 +453,16 @@ describe('every direct boundary asks the same check', () => {
     ]);
   });
 
+  it('admits only the title explicitly approved for this Kid before the age and atlas gates', async () => {
+    const w = world(undefined, { eligible: { 'movie:1': false, 'movie:3': false } });
+    const policy: ContentPolicy = { ...LITTLE, approvals: refs('movie:3') };
+    await expect(
+      w.ask({ kind: 'title.eligibility', titles: refs('movie:1', 'movie:3') }, policy),
+    ).resolves.toEqual({ kind: 'title.eligibility', allowed: refs('movie:3') });
+    expect(w.atlas.filter((url) => url.includes('/index/title/'))).toHaveLength(1);
+    expect(w.atlas[0]).toContain('/movie/1.json');
+  });
+
   it('treats missing evidence as an unknown maturity, which the policy’s unknownRatings decides', async () => {
     forgetReused();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

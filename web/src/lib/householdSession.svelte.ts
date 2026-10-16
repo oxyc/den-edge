@@ -1,6 +1,7 @@
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
 import type { ConnectionsView } from './libraryServiceProtocol';
+import type { TitleRef } from './libraryServiceProtocol';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
 import type { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
@@ -99,6 +100,17 @@ export class HouseholdSession {
   ): Promise<boolean> {
     if (!this.#model) return false;
     await this.#model.setKidPolicy(profile, policy, pin);
+    return true;
+  }
+
+  async setKidTitleApproval(
+    profile: string,
+    title: TitleRef,
+    allow: boolean,
+    pin: string,
+  ): Promise<boolean> {
+    if (!this.#model) return false;
+    await this.#model.setKidTitleApproval(profile, title, allow, pin);
     return true;
   }
 

@@ -974,6 +974,14 @@ function task(value: unknown): value is LibraryTask {
         (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
         pin(value.pin)
       );
+    case 'kid-title-approval.set':
+      return (
+        exact(value, ['kind', 'profile', 'title', 'allow', 'pin']) &&
+        hexId(value.profile) &&
+        titleRef(value.title) &&
+        bool(value.allow) &&
+        pin(value.pin)
+      );
     case 'profile-key-reset.start':
       return (
         exact(value, ['kind', 'pin', 'destinationLibraryKey']) &&
@@ -1709,6 +1717,7 @@ function profileDirectoryView(
           'libraryKey',
           'keyVersion',
           'policy',
+          'approvals',
           'deleted',
         ]) &&
         typeof profile.id === 'string' &&
@@ -1730,6 +1739,12 @@ function profileDirectoryView(
           (age): age is number => integer(age) && age >= 0 && age <= 18,
         ) &&
         (profile.policy.unknownRatings === 'allow' || profile.policy.unknownRatings === 'block') &&
+        optional(
+          profile.approvals,
+          (approvals): approvals is TitleRef[] =>
+            list(approvals, titleRef, 10_000) &&
+            unique(approvals, (title) => `${title.type}:${title.id}`),
+        ) &&
         bool(profile.deleted),
       LIBRARY_SERVICE_WIRE_LIMITS.profileEntries,
     )
@@ -2168,6 +2183,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
     case 'profile.create.ack':
       return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
     case 'profile.policy.set':
+    case 'kid-title-approval.set':
       return (
         exact(value, ['kind', 'outcome']) &&
         (value.outcome === 'changed' || value.outcome === 'unchanged')

@@ -18,8 +18,9 @@ import type {
  * per-query `policy`: a Worker from the earlier build, which would ignore it and answer unrestricted, is refused.
  * Version 6 added the Atlas-owned Kid Home catalogue and its policy-bound rows. Version 7 carries the catalogue's
  * optional affinity references so the page can order every row for the active profile without preloading it.
+ * Version 8 carries the active Kid's exact-title approvals with every restricted content query.
  */
-export const CONTENT_SERVICE_PROTOCOL = 7 as const;
+export const CONTENT_SERVICE_PROTOCOL = 8 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -48,6 +49,8 @@ export interface ContentPolicy {
   kidAudience?: ContentKidAudience;
   /** The viewer's ISO 3166-1 region, part of atlas' cache identity. */
   region?: string;
+  /** Per-title Owner approvals for this Kid, validated from household control state. */
+  approvals?: ContentTitleRef[];
 }
 
 export type ContentProvider = 'tmdb' | 'ratings' | 'warnings' | 'atlas';

@@ -88,10 +88,17 @@ export class ProfileSession {
     readonly administersHousehold: boolean = true,
     /** A Kid is held to the audience-relevance gate on top of its age policy (profiles-v1 §5). */
     readonly kid: boolean = false,
+    /** Validated effective approvals for this Kid; empty for Owner and Visitor. */
+    readonly approvedTitles: readonly TitleRef[] = [],
   ) {
     this.#policed = this.restricted
       ? new PolicedContent(household.content, async () =>
-          contentPolicyFor(this.contentPolicy, this.kid, await this.#watchRegion()),
+          contentPolicyFor(
+            this.contentPolicy,
+            this.kid,
+            await this.#watchRegion(),
+            this.approvedTitles,
+          ),
         )
       : null;
   }
@@ -289,6 +296,7 @@ export function activeProfileSession(
   contentPolicy: ProfileContentPolicy | null = null,
   administersHousehold = false,
   kid = false,
+  approvedTitles: readonly TitleRef[] = [],
 ): ProfileSession {
   const preferences = household.policy ? new SyncedProfilePreferences(identity, model) : null;
   return new ProfileSession(
@@ -304,6 +312,7 @@ export function activeProfileSession(
     closeActivityModel,
     administersHousehold,
     kid,
+    approvedTitles,
   );
 }
 

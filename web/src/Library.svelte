@@ -94,6 +94,8 @@
     TitleView,
   } from './lib/libraryServiceProtocol';
   import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
+  import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
+  import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
 
   let {
     link,
@@ -104,6 +106,7 @@
     explore = {},
     people = {},
     watchedYear,
+    profiles = null,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -117,6 +120,7 @@
     people?: PeopleView;
     /** The year Watched shows, from the address as `people` is. */
     watchedYear?: string;
+    profiles?: ProfileModeCoordinator | null;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -178,6 +182,11 @@
   let watchlistCachedPrefix = $state(0);
   let shelfBaselinesCaptured = false;
   let busy = $state(false);
+  let kidAccessRequest = $state.raw<{
+    kid: { id: string; name: string };
+    title: Title;
+    allow: boolean;
+  } | null>(null);
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -880,6 +889,23 @@
           run: () => void restore(title),
         }),
       );
+    },
+    get kids() {
+      if (profiles?.mode !== 'owner' || profiles.parentalPinConfigured !== true) return [];
+      return profiles.choices.flatMap((choice) =>
+        choice.role === 'kid' && choice.id
+          ? [
+              {
+                id: choice.id,
+                name: choice.name,
+                approvals: (choice.approvals ?? []).map(({ type, id }) => `${type}:${id}`),
+              },
+            ]
+          : [],
+      );
+    },
+    changeKidAccess: (kid, title, allow) => {
+      kidAccessRequest = { kid, title, allow };
     },
     get play() {
       return play;
@@ -1681,6 +1707,26 @@
     }
   }
 </script>
+
+<KidTitleAccessDialog
+  request={kidAccessRequest}
+  onclose={() => (kidAccessRequest = null)}
+  onconfirm={async (pin) => {
+    const request = kidAccessRequest;
+    if (!request || !profiles) return false;
+    const saved = await profiles.setKidTitleApproval(
+      request.kid.id,
+      { type: request.title.type, id: request.title.id },
+      request.allow,
+      pin,
+    );
+    if (saved)
+      session.notify(
+        `${request.allow ? 'Allowed' : 'Removed'} “${request.title.title}” ${request.allow ? 'for' : 'from'} ${request.kid.name}`,
+      );
+    return saved;
+  }}
+/>
 
 {#if tmdbLimited}
   <p class="tmdb-limit" role="alert">
