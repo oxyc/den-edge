@@ -202,8 +202,14 @@ function knownCode(error: string | undefined): PlaybackErrorCode | undefined {
   }
 }
 
-function failureOf(status: number, error: string | undefined): Failure | 'legacy' {
-  if (status === 404 && error === 'no_release') return 'none';
+function failureOf(
+  status: number,
+  error: string | undefined,
+  cause?: PlaybackCause,
+): Failure | 'legacy' {
+  // Hearth includes a closed, non-secret cause when its preferred source failed and its fallback then found
+  // nothing usable. That is a source failure with an actionable explanation, not an ordinary empty result.
+  if (status === 404 && error === 'no_release') return cause ? 'sourceUnavailable' : 'none';
   if (status === 404 && error !== 'no_release') return 'legacy';
   if (status === 409 && error === 'replacement_pending') return 'starting';
   if (status === 400 || status === 409) return 'request';
@@ -288,7 +294,7 @@ export async function startPlayback(
       };
     }
     const { error, cause } = await errorBody(response);
-    const failure = failureOf(response.status, error);
+    const failure = failureOf(response.status, error, cause);
     const retryMs =
       response.status === 429 ||
       response.status === 503 ||

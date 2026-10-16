@@ -115,6 +115,29 @@ test('a rejected TorBox key tells the guest exactly what to update', async () =>
   }
 });
 
+test('a no-release fallback still shows the specific managed-provider failure', async () => {
+  const { browser, page } = await playerPage((route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: 'no_release',
+        cause: 'torbox_unsafe_stream_url',
+      }),
+    }),
+  );
+  try {
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect(page.getByRole('alert')).toHaveText(
+      'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
+    );
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    await expect(page.getByText('No release of this that plays in a browser')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a TorBox plan without streaming support explains the required configuration change', async () => {
   const { browser, page } = await playerPage((route) =>
     route.fulfill({

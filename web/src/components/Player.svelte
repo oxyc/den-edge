@@ -292,7 +292,7 @@
     torbox_malformed_response:
       'TorBox returned an answer Den could not use, and the home player could not prepare this release either. Try again.',
     torbox_unsafe_stream_url:
-      'TorBox returned a stream address Den would not trust, and the home player could not prepare this release either. Try again.',
+      'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
     managed_prepare_timeout:
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
   };
