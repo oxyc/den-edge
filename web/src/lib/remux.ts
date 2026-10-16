@@ -14,6 +14,22 @@ import { relayFetch } from './relayFetch';
 export { nativeHls } from './nativeHls';
 
 export interface Session {
+  /** A URL Hearth returned without a Remux lifecycle. Client-only; never sent by Hearth. */
+  external?: boolean;
+  /** Blob-backed WebVTT tracks fetched through Den for an externally managed media playlist. */
+  externalSubtitles?: { language: string; name: string; url: string }[];
+  /** Materializes one selected external subtitle language; repeated calls reuse its blob. */
+  loadExternalSubtitle?: (
+    language: string,
+  ) => Promise<{ language: string; name: string; url: string } | null>;
+  /** Releases client-owned media artifacts such as external subtitle blob URLs. */
+  dispose?: () => void;
+  /** Explicit Remux lifecycle capabilities returned by Hearth's playback facade. */
+  control?: {
+    end?: string;
+    heartbeat?: string;
+    report?: string;
+  };
   /** den-remux's id for the session, which a replacement names (`Want.replaces`). */
   sid?: string;
   /** `/remux/s/<sid>/<sig>/master.m3u8`: a signed URL, so AirPlay can play it too. */
@@ -989,8 +1005,12 @@ export function playedInCastPage(session: Session): boolean {
  * for a browser with no `sendBeacon` (or whose call to it failed outright).
  */
 export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
+  if (session.external) {
+    session.dispose?.();
+    return;
+  }
   if (playedInCastPage(session)) return;
-  const base = session.playlist.replace(/\/master\.m3u8$/, '');
+  const base = session.control?.end ?? session.playlist.replace(/\/master\.m3u8$/, '');
   if (globalThis.navigator?.sendBeacon?.(`${base}/end`, '')) return;
   void fetchImpl(base, {
     method: 'DELETE',
@@ -1008,8 +1028,9 @@ export function endSession(session: Session, fetchImpl: typeof fetch = fetch): v
  * pause of this page's own to protect: its own frame, not this one, is what would go away.
  */
 export function sendHeartbeat(session: Session, fetchImpl: typeof fetch = fetch): void {
-  if (playedInCastPage(session)) return;
-  const url = session.playlist.replace(/\/master\.m3u8$/, '/heartbeat');
+  if (session.external || playedInCastPage(session)) return;
+  const url =
+    session.control?.heartbeat ?? session.playlist.replace(/\/master\.m3u8$/, '/heartbeat');
   void fetchImpl(url, { method: 'POST' }).catch(() => undefined);
 }
 
@@ -1064,8 +1085,8 @@ export function reportFailure(
   message: string,
   fetchImpl: typeof fetch = fetch,
 ): void {
-  if (playedInCastPage(session)) return;
-  const url = session.playlist.replace(/\/master\.m3u8$/, '/report');
+  if (session.external || playedInCastPage(session)) return;
+  const url = session.control?.report ?? session.playlist.replace(/\/master\.m3u8$/, '/report');
   const body = JSON.stringify({ code, message: message.slice(0, 200) });
   if (globalThis.navigator?.sendBeacon?.(url, body)) return;
   void fetchImpl(url, { method: 'POST', body, keepalive: true }).catch(() => undefined);
@@ -1093,6 +1114,7 @@ export async function sourceFailed(
   at: number,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
+  if (session.external) return false;
   return (await segmentAnswer(session, at, fetchImpl))?.status === 502;
 }
 
@@ -1106,6 +1128,7 @@ export async function segmentAnswer(
   fetchImpl: typeof fetch = fetch,
   deadlineMs = REMUX_ANSWER_MS,
 ): Promise<{ status: number; ms: number } | undefined> {
+  if (session.external) return undefined;
   // One deadline for the whole check: past it, not knowing is the answer.
   const signal = AbortSignal.timeout(deadlineMs);
   try {

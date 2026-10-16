@@ -121,7 +121,10 @@ export class SessionServices {
               entries.map((entry) => ({ ...entry })),
             ]),
           );
-          this.scout = saved.scout ? { ...saved.scout } : null;
+          // A playback route is a live runtime capability, never a durable retained hint.
+          this.scout = saved.scout
+            ? { install: saved.scout.install, base: saved.scout.base }
+            : null;
           this.#configureAtlas(saved.atlas, () => current);
           this.reel = saved.reel;
           this.remux = saved.remux;
@@ -197,10 +200,13 @@ export class SessionServices {
     clearTimeout(this.#keep);
     this.#keep = setTimeout(() => {
       if (!Object.keys(this.routes).length) return;
+      const retainedScout = this.scout
+        ? { install: this.scout.install, base: this.scout.base }
+        : null;
       void this.#model
         ?.retainServices({
           routes: this.routes,
-          scout: this.scout,
+          scout: retainedScout,
           atlas: this.atlas,
           reel: this.reel,
           remux: this.remux,

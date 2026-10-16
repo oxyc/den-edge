@@ -12,14 +12,20 @@ vi.mock('./discoverServices', () => ({
     _installed: string[],
     _routes: unknown,
     publish: {
-      scout?: (value: { base: string; install: string } | null) => void;
+      scout?: (value: { base: string; install: string; playback?: string } | null) => void;
       atlas: (value: { base: string } | null) => void;
       reel: (value: { base: string } | null) => void;
       remux?: (value: string | null) => void;
     },
   ) => {
     const run = ++discoveries;
-    queueMicrotask(() => publish.scout?.({ base: `/scout-${run}`, install: '/scout' }));
+    queueMicrotask(() =>
+      publish.scout?.({
+        base: `/scout-${run}`,
+        install: '/scout',
+        playback: `/scout-${run}/playback`,
+      }),
+    );
     queueMicrotask(() => publish.atlas({ base: `/atlas-${run}` }));
     queueMicrotask(() => publish.reel({ base: `/reel-${run}` }));
     if (reaches) queueMicrotask(() => publish.remux?.(reaches!));
@@ -99,7 +105,12 @@ describe('SessionServices', () => {
     const model = fakeModel({
       retainedServices: vi.fn().mockResolvedValue({
         routes: { retained: [{ url: '/retained' }] },
-        scout: { base: '/retained-scout', install: '/scout' },
+        scout: {
+          base: '/retained-scout',
+          install: '/scout',
+          // Simulates a retained value written by an earlier build. Runtime capability must be reprobed.
+          playback: '/retained-scout/playback',
+        },
         atlas: '/retained-atlas',
         reel: '/retained-reel',
         remux: null,
@@ -108,6 +119,7 @@ describe('SessionServices', () => {
     const services = new SessionServices(model, content, () => routes);
     services.configure(runtime());
     await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
+    expect(services.scout).toEqual({ base: '/retained-scout', install: '/scout' });
     release({ live: [{ url: '/live' }] });
     await vi.waitFor(() => expect(services.atlas).not.toBe('/retained-atlas'));
     services.stop();
@@ -202,6 +214,7 @@ describe('SessionServices', () => {
       atlas: '/atlas-2',
       reel: '/reel-2',
     });
+    expect(retainServices.mock.calls[0]?.[0].scout).not.toHaveProperty('playback');
     services.stop();
   });
 

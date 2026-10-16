@@ -39,6 +39,7 @@ test('claims membership on the relayed addon and household API paths', async () 
   useLibraryCredential(KEYS);
   for (const path of [
     '/scout/abc/manifest.json',
+    '/den/abc/playback',
     '/atlas/recommend',
     '/reel/meta/movie/x.json',
     '/tmdb/3/movie/550',
@@ -96,6 +97,7 @@ test('claims nothing anywhere else, on this origin or another', async () => {
     // Another origin borrowing a relayed path is the case this allow-list exists for: the token opens
     // the library to whoever holds it, so a matching path is not enough to be given one.
     'https://elsewhere.example/scout/stream/movie/tt1.json',
+    'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
     'https://api.themoviedb.org/3/movie/157336',
     // Ours, but not relayed: remux and the library log take their own credentials, not this one.
     '/remux/hls/x.m3u8',
@@ -151,6 +153,7 @@ test('a shared addon’s ~gid base carries the grant and never the library’s c
   rememberGrant(GID, 'sekrit');
   for (const path of [
     `/scout/~${GID}/manifest.json`,
+    `/den/~${GID}/playback`,
     `/atlas/~${GID}/recommend`,
     `/reel/~${GID}/meta/movie/x.json`,
     `/subtitles/~${GID}/x`,

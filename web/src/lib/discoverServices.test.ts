@@ -1,10 +1,10 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { discoverServices } from './discoverServices';
-import { findAddon, findAtlas, findReel } from './scout';
+import { findAtlas, findReel, findScout } from './scout';
 import { findRemux } from './remuxRoute';
 
 vi.mock('./scout', () => ({
-  findAddon: vi.fn(),
+  findScout: vi.fn(),
   findAtlas: vi.fn(),
   findReel: vi.fn(),
   SCOUT: { name: 'scout' },
@@ -13,10 +13,7 @@ vi.mock('./scout', () => ({
 vi.mock('./remuxRoute', () => ({ findRemux: vi.fn() }));
 
 beforeEach(() => {
-  vi.mocked(findAddon).mockImplementation(async (_installed, _routes, kind) => ({
-    base: `/${kind.name}`,
-    install: `/${kind.name}`,
-  }));
+  vi.mocked(findScout).mockResolvedValue({ base: '/scout', install: '/scout' });
   vi.mocked(findAtlas).mockResolvedValue({ base: '/atlas', install: '/atlas' });
   // reel is found the same way atlas is, so that a guest — who lists no plugins — still gets trailers.
   vi.mocked(findReel).mockResolvedValue({ base: '/reel', install: '/reel' });
@@ -51,7 +48,7 @@ it('asks scout and den-remux nothing for a guest', async () => {
   const publish = { atlas: vi.fn(), reel: vi.fn() };
   discoverServices([], {}, publish);
   await Promise.resolve();
-  expect(findAddon).not.toHaveBeenCalled();
+  expect(findScout).not.toHaveBeenCalled();
   expect(findRemux).not.toHaveBeenCalled();
   expect(publish.atlas).toHaveBeenCalledWith({ base: '/atlas', install: '/atlas' });
   expect(publish.reel).toHaveBeenCalledWith({ base: '/reel', install: '/reel' });

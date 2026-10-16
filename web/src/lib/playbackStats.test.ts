@@ -69,6 +69,27 @@ describe('watchPlayback', () => {
     return (JSON.parse(sent.at(-1)!) as { stats: PlaybackStats }).stats.stalls;
   }
 
+  it('records external playback locally without posting to a URL beside its playlist', () => {
+    vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
+    vi.stubGlobal('HTMLMediaElement', { HAVE_FUTURE_DATA: 3 });
+    const video = Object.assign(new EventTarget(), {
+      currentTime: 0,
+      paused: false,
+      seeking: false,
+      readyState: 4,
+      duration: 600,
+      error: null,
+      buffered: ranges([0, 30]),
+      played: ranges(),
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 }),
+    }) as unknown as HTMLVideoElement;
+    const send = vi.fn();
+    const watcher = watchPlayback({ video, send, now: () => 0 });
+    video.dispatchEvent(new Event('playing'));
+    watcher.stop();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('hands on hls.js’s bandwidth estimate and the fragments behind it as it stops', () => {
     vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
     vi.stubGlobal('HTMLMediaElement', { HAVE_FUTURE_DATA: 3 });

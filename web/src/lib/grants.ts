@@ -11,6 +11,8 @@ import { relayFetch } from './relayFetch';
 
 export const GRANT_ADDONS = ['scout', 'atlas', 'reel', 'subtitles'] as const;
 export type GrantAddon = (typeof GRANT_ADDONS)[number];
+/** A guest may additionally own one combined Den install; it is never one of the host's lent installs. */
+export type GuestAddon = GrantAddon | 'den';
 export type GrantStatus = 'invited' | 'active' | 'expired' | 'revoked';
 
 /** What den-edge lists of a grant: never a secret, never an install. */
@@ -68,7 +70,8 @@ export function cappedCodeExpiry(now: number, ahead: number): number {
 /** A config segment as den-edge accepts it: base64url, and never a `~` (a virtual install can't be re-shared). */
 export const SEGMENT = /^[A-Za-z0-9_-]{1,2048}$/;
 const CODE = /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/;
-const SHARED_INSTALL = /^\/(scout|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/manifest\.json)?\/?$/;
+const SHARED_INSTALL =
+  /^\/(scout|den|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/manifest\.json)?\/?$/;
 
 export function b64url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes))
@@ -139,7 +142,7 @@ export function keepCode(
 /** The shared addon a manifest or install URL on this origin names, or null for any other. */
 export function sharedInstallOf(
   url: string,
-): { addon: GrantAddon; gid: string; path: string; install: string } | null {
+): { addon: GuestAddon; gid: string; path: string; install: string } | null {
   const here = globalThis.location?.href;
   if (!here) return null;
   try {
@@ -148,7 +151,7 @@ export function sharedInstallOf(
     if (parsed.origin !== new URL(here).origin || !match) return null;
     const path = `/${match[1]}/~${match[2]}`;
     return {
-      addon: match[1] as GrantAddon,
+      addon: match[1] as GuestAddon,
       gid: match[2]!,
       path,
       install: `${parsed.origin}${path}`,
@@ -498,7 +501,7 @@ export async function grantAddons(
   secret: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<
-  Reply<{ name: string; expiresAt: number | null; addons: Partial<Record<GrantAddon, string>> }>
+  Reply<{ name: string; expiresAt: number | null; addons: Partial<Record<GuestAddon, string>> }>
 > {
   const reply = await ask(fetchImpl, '/grant/addons', {
     headers: { 'x-den-grant': `${gid}:${secret}` },
@@ -511,8 +514,8 @@ export async function grantAddons(
   } | null;
   if (typeof body?.name !== 'string' || !body.addons)
     return { ok: false, status: 0, error: 'failed' };
-  const addons: Partial<Record<GrantAddon, string>> = {};
-  for (const addon of GRANT_ADDONS) {
+  const addons: Partial<Record<GuestAddon, string>> = {};
+  for (const addon of [...GRANT_ADDONS, 'den'] as const) {
     const path = body.addons[addon];
     // Only this grant's own base for that addon: anything else isn't something to ask.
     if (path === `/${addon}/~${gid}`) addons[addon] = path;

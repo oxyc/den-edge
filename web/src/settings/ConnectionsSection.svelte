@@ -21,6 +21,7 @@
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
+  import { openGuestConfigure } from '../lib/guestConfigure';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
@@ -217,13 +218,24 @@
     guestGrants.list.flatMap((grant) =>
       grant.ended
         ? []
-        : (Object.keys(grant.addons) as GrantAddon[]).map((addon) => ({
-            gid: grant.gid,
-            host: grant.name,
-            addon,
-          })),
+        : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) =>
+            addon === 'den' ? [] : [{ gid: grant.gid, host: grant.name, addon }],
+          ),
     ),
   );
+  const sharedHosts = $derived(guestGrants.list.filter((grant) => !grant.ended && grant.secret));
+  let configuringGuest = $state<string | null>(null);
+  let configureGuestProblem = $state<string | null>(null);
+
+  async function configureGuest(gid: string, secret: string) {
+    configuringGuest = gid;
+    configureGuestProblem = null;
+    const opened = await openGuestConfigure(gid, secret);
+    if (!opened)
+      configureGuestProblem =
+        'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
+    if (configuringGuest === gid) configuringGuest = null;
+  }
 
   // Plugins, and the signing key each can be pinned to.
   let addonDraft = $state('');
@@ -911,9 +923,23 @@
     {:else if !sharedAddons.length}
       <p class="status">No plugins yet. Add a manifest URL below.</p>
     {/if}
-    {#if sharedAddons.length}
+    {#if sharedHosts.length}
       <h3>Shared with you</h3>
       <ul class="list">
+        {#each sharedHosts as grant (grant.gid)}
+          <li class="line">
+            <span class="label"
+              >Your Den Hearth<small>Hosted by {grant.name} · uses your own provider keys</small
+              ></span
+            >
+            <Button
+              variant="secondary"
+              label={configuringGuest === grant.gid ? 'Opening…' : 'Configure'}
+              disabled={configuringGuest !== null}
+              onclick={() => void configureGuest(grant.gid, grant.secret)}
+            />
+          </li>
+        {/each}
         {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
           <li class="line">
             <span class="label"
@@ -922,6 +948,7 @@
           </li>
         {/each}
       </ul>
+      {#if configureGuestProblem}<p class="status bad" role="alert">{configureGuestProblem}</p>{/if}
     {/if}
     <p class="foot">
       A plugin sees what you browse and supplies what you play, so an Apple TV installs one only
