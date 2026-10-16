@@ -2579,15 +2579,16 @@ mod tests {
             )
             .await;
         assert_eq!(answer.status(), StatusCode::OK);
-        let seen = seen.lock().unwrap();
-        let (path, headers, _) = seen.last().unwrap();
-        assert_eq!(path, &format!("/den/{SCOUT}/playback"));
-        assert_eq!(headers["x-den-edge-secret"], "edge-secret");
-        assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
-        assert_eq!(headers["x-den-managed-playback"], "1");
-        assert_eq!(headers["idempotency-key"], "guest-attempt");
+        {
+            let seen = seen.lock().unwrap();
+            let (path, headers, _) = seen.last().unwrap();
+            assert_eq!(path, &format!("/den/{SCOUT}/playback"));
+            assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+            assert_eq!(headers["x-den-managed-playback"], "1");
+            assert_eq!(headers["idempotency-key"], "guest-attempt");
+        }
 
-        drop(seen);
         let subtitles = h
             .send(
                 "GET",
