@@ -277,6 +277,15 @@ async fn discard_failed_playback_session(state: &AppState, body: &[u8], rid: &st
 
 /// Tell Hearth whether a provisional managed Remux answer became externally reachable. Hearth owns replay state;
 /// Edge owns the public listener, so this small authenticated callback is the only fact the two layers must share.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaybackFinalization {
+    Accepted,
+    Rejected,
+    Ambiguous,
+}
+
+type PlaybackFinalizer = (String, Bytes, Option<String>, axum::http::HeaderValue);
+
 async fn finalize_playback(
     state: &AppState,
     target: &str,
@@ -285,8 +294,8 @@ async fn finalize_playback(
     owner: Option<&str>,
     key: axum::http::HeaderValue,
     outcome: &'static str,
-) -> bool {
-    let Some(secret) = state.remux_edge_secret.as_deref() else { return false };
+) -> PlaybackFinalization {
+    let Some(secret) = state.remux_edge_secret.as_deref() else { return PlaybackFinalization::Rejected };
     let mut request = axum::http::Request::builder()
         .method(Method::POST)
         .uri(target)
@@ -295,16 +304,39 @@ async fn finalize_playback(
         .header("x-request-id", rid)
         .header("x-den-edge-secret", secret)
         .header("x-den-managed-playback", "1")
+        .header("x-den-playback-finalization", "1")
         .header("x-den-playback-finalize", outcome)
         .header("idempotency-key", key);
     if let Some(owner) = owner {
         request = request.header("x-den-owner", owner);
     }
-    let Ok(request) = request.body(Full::new(body)) else { return false };
-    matches!(
-        tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await,
-        Ok(Ok(response)) if response.status() == StatusCode::NO_CONTENT
-    )
+    let Ok(request) = request.body(Full::new(body)) else { return PlaybackFinalization::Rejected };
+    match tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await {
+        Ok(Ok(response)) if response.status() == StatusCode::NO_CONTENT => PlaybackFinalization::Accepted,
+        Ok(Ok(_)) => PlaybackFinalization::Rejected,
+        Ok(Err(_)) | Err(_) => PlaybackFinalization::Ambiguous,
+    }
+}
+
+async fn abort_playback(
+    state: &AppState,
+    finalizer: Option<PlaybackFinalizer>,
+    session: &[u8],
+    rid: &str,
+    owner: Option<&str>,
+) -> PlaybackFinalization {
+    let outcome = match finalizer {
+        Some((target, request, owner, key)) => {
+            finalize_playback(state, &target, request, rid, owner.as_deref(), key, "abort").await
+        }
+        None => PlaybackFinalization::Accepted,
+    };
+    // A rejected or ambiguous abort may mean this idempotency key was already committed. Deleting that shared
+    // session would poison its valid replay. Legacy playback has no finalizer and retains its prior cleanup path.
+    if outcome == PlaybackFinalization::Accepted {
+        discard_failed_playback_session(state, session, rid, owner).await;
+    }
+    outcome
 }
 
 async fn discard_failed_public_session(state: &AppState, target: &str, body: &[u8], rid: &str) {
@@ -1346,7 +1378,7 @@ async fn relay_with(
         out = out.header("x-den-migration-owner", "1");
     }
     if public_playback {
-        out = out.header("x-den-managed-playback", "1");
+        out = out.header("x-den-managed-playback", "1").header("x-den-playback-finalization", "1");
     }
     if let Some(key) = idempotency {
         out = out.header("idempotency-key", key);
@@ -1468,18 +1500,17 @@ async fn relay_with(
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
     {
         let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
-        discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
-        if let Some((target, request, owner, key)) = playback_finalizer.clone() {
-            if !finalize_playback(state, &target, request, rid, owner.as_deref(), key, "abort").await {
-                log_relay_error(
-                    "error",
-                    "playback_abort_failed",
-                    &upstream,
-                    StatusCode::BAD_GATEWAY,
-                    started,
-                    rid,
-                );
-            }
+        if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref()).await
+            != PlaybackFinalization::Accepted
+        {
+            log_relay_error(
+                "error",
+                "playback_abort_failed",
+                &upstream,
+                StatusCode::BAD_GATEWAY,
+                started,
+                rid,
+            );
         }
         return json(StatusCode::BAD_GATEWAY, "source_unavailable");
     }
@@ -1496,9 +1527,26 @@ async fn relay_with(
                             finalize_playback(state, &target, request, rid, owner.as_deref(), key, "commit")
                                 .await
                         }
-                        None => false,
+                        None => PlaybackFinalization::Rejected,
                     };
-                    if !committed {
+                    if committed == PlaybackFinalization::Ambiguous {
+                        log_relay_error(
+                            "error",
+                            "playback_commit_unknown",
+                            &upstream,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            started,
+                            rid,
+                        );
+                        // The commit may already have landed. Ending the session here could turn a committed replay
+                        // into a dead URL; leave the live session and terminal decision intact for the same-key retry.
+                        return crate::handler::retry_after(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            &error("playback_pending"),
+                            1_000,
+                        );
+                    }
+                    if committed == PlaybackFinalization::Rejected {
                         log_relay_error(
                             "error",
                             "playback_commit_failed",
@@ -1508,28 +1556,18 @@ async fn relay_with(
                             rid,
                         );
                         let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
-                        discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
-                        if let Some((target, request, owner, key)) = playback_finalizer.clone() {
-                            if !finalize_playback(
-                                state,
-                                &target,
-                                request,
-                                rid,
-                                owner.as_deref(),
-                                key,
-                                "abort",
-                            )
+                        if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref())
                             .await
-                            {
-                                log_relay_error(
-                                    "error",
-                                    "playback_abort_failed",
-                                    &upstream,
-                                    StatusCode::BAD_GATEWAY,
-                                    started,
-                                    rid,
-                                );
-                            }
+                            != PlaybackFinalization::Accepted
+                        {
+                            log_relay_error(
+                                "error",
+                                "playback_abort_failed",
+                                &upstream,
+                                StatusCode::BAD_GATEWAY,
+                                started,
+                                rid,
+                            );
                         }
                         return crate::handler::retry_after(
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -1588,20 +1626,17 @@ async fn relay_with(
                 // A session that plays on is never ended for this: only one this call just made.
                 if playback_session {
                     let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
-                    discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
-                    if let Some((target, request, owner, key)) = playback_finalizer.clone() {
-                        if !finalize_playback(state, &target, request, rid, owner.as_deref(), key, "abort")
-                            .await
-                        {
-                            log_relay_error(
-                                "error",
-                                "playback_abort_failed",
-                                &upstream,
-                                StatusCode::BAD_GATEWAY,
-                                started,
-                                rid,
-                            );
-                        }
+                    if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref()).await
+                        != PlaybackFinalization::Accepted
+                    {
+                        log_relay_error(
+                            "error",
+                            "playback_abort_failed",
+                            &upstream,
+                            StatusCode::BAD_GATEWAY,
+                            started,
+                            rid,
+                        );
                     }
                 } else if !regrant {
                     discard_failed_public_session(state, &target, &bytes, rid).await;
@@ -3481,6 +3516,7 @@ mod tests {
         let (headers, _) = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert_eq!(headers["x-den-managed-playback"], "1");
+        assert_eq!(headers["x-den-playback-finalization"], "1");
         assert_eq!(headers["idempotency-key"], "attempt-1");
         assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
@@ -3559,6 +3595,7 @@ mod tests {
         let headers = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert!(!headers.contains_key("x-den-managed-playback"));
+        assert!(!headers.contains_key("x-den-playback-finalization"));
         assert!(!headers.contains_key("x-den-public-session"));
     }
 
@@ -3613,6 +3650,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_remux_playback_without_a_public_listener_is_refused_and_cleaned_up() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let sid = "A".repeat(22);
         let sig = "b".repeat(22);
         let playlist = format!("/remux/s/{sid}/{sig}/master.m3u8");
@@ -3620,10 +3659,14 @@ mod tests {
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let accept_abort = Arc::new(AtomicBool::new(true));
         let answer = playlist.clone();
-        let app = axum::Router::new().fallback(move |req: Request| {
+        let app = axum::Router::new().fallback({
+            let accept_abort = Arc::clone(&accept_abort);
+            move |req: Request| {
             let sent = sent.clone();
             let answer = answer.clone();
+            let accept_abort = Arc::clone(&accept_abort);
             async move {
                 let finalize = req
                     .headers()
@@ -3634,15 +3677,18 @@ mod tests {
                 if req.method() == Method::DELETE {
                     return Response::new(Body::empty());
                 }
+                assert_eq!(req.headers()["x-den-playback-finalization"], "1");
                 if finalize.is_some() {
-                    return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
+                    let status =
+                        if accept_abort.load(Ordering::Relaxed) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT };
+                    return Response::builder().status(status).body(Body::empty()).unwrap();
                 }
                 crate::handler::json_reply(
                     StatusCode::OK,
                     &json!({ "url": answer, "session": { "endUrl": answer.trim_end_matches("/master.m3u8") } }),
                 )
             }
-        });
+        }});
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
 
         let mut h = Harness::new();
@@ -3669,11 +3715,33 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into(), None));
-        assert_eq!(received.recv().await.unwrap(), (Method::DELETE, end, None));
         assert_eq!(
             received.recv().await.unwrap(),
             (Method::POST, "/den/config/playback".into(), Some("abort".into()))
         );
+        assert_eq!(received.recv().await.unwrap(), (Method::DELETE, end.clone(), None));
+
+        accept_abort.store(false, Ordering::Relaxed);
+        let response = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some("{}".into()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                    ("idempotency-key", "attempt-already-committed"),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into(), None));
+        assert_eq!(
+            received.recv().await.unwrap(),
+            (Method::POST, "/den/config/playback".into(), Some("abort".into()))
+        );
+        assert!(received.try_recv().is_err(), "a rejected abort must preserve the committed session");
     }
 
     #[cfg(unix)]
@@ -3688,6 +3756,7 @@ mod tests {
         let app = axum::Router::new().fallback(move |req: Request| {
             let sent = sent.clone();
             async move {
+                assert_eq!(req.headers()["x-den-playback-finalization"], "1");
                 let finalize = req
                     .headers()
                     .get("x-den-playback-finalize")
