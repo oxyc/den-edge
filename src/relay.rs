@@ -483,6 +483,9 @@ struct Guest {
     manifest: bool,
     /// This route uses the guest's own combined-Den config, never one of the host's escrowed installs.
     personal_den: bool,
+    /// This request is the stable guest Hearth overlay. Edge builds its bounded internal envelope exclusively from
+    /// this authenticated grant; the browser can neither name nor replace any host install inside it.
+    overlay: bool,
     /// The authenticated configure page uses this claim to save the sealed segment behind a stable guest URL.
     configure_claim: Option<String>,
 }
@@ -497,7 +500,7 @@ impl Guest {
     fn rewrites(&self, headers: &axum::http::HeaderMap) -> bool {
         let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
         self.configure_claim.is_some() && content_type.is_some_and(|t| t.starts_with("text/html"))
-            || self.segment.is_some()
+            || (self.segment.is_some() || self.overlay)
                 && (self.scrub || self.manifest)
                 && content_type.is_some_and(|t| t.contains("json"))
     }
@@ -525,9 +528,9 @@ impl Guest {
         if let Some(claim) = self.configure_claim.as_deref().filter(|_| self.rewrites(headers)) {
             return guest_configure_page(body, claim, &format!("/den/~{}", self.gid));
         }
-        let Some(segment) = self.segment.as_ref().filter(|_| self.rewrites(headers)) else {
+        if !self.rewrites(headers) {
             return Some(body.clone());
-        };
+        }
         if body.is_empty() {
             return Some(body.clone());
         }
@@ -535,7 +538,17 @@ impl Guest {
             return None;
         }
         let text = std::str::from_utf8(body).ok()?;
-        let scrubbed = self.scrub.then(|| text.replace(segment.as_str(), &format!("~{}", self.gid)));
+        let scrubbed = self.scrub.then(|| {
+            let replacement = format!("~{}", self.gid);
+            let mut value = text.to_owned();
+            if let Some(segment) = &self.segment {
+                value = value.replace(segment, &replacement);
+            }
+            for segment in self.installs.values() {
+                value = value.replace(segment, &replacement);
+            }
+            value
+        });
         if !self.manifest {
             return Some(scrubbed.map_or_else(|| body.clone(), Bytes::from));
         }
@@ -671,7 +684,10 @@ pub async fn guest(
                 let shared = live.addons.iter().any(|a| a == p.addon);
                 live.installs.get(p.addon).filter(|_| shared).cloned()
             };
-            if segment.is_none() && !bare_den {
+            let overlay = personal_den && !bare_den;
+            let host_scout =
+                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
+            if segment.is_none() && !bare_den && !(overlay && host_scout) {
                 return Ok(not_found());
             }
             // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
@@ -682,11 +698,16 @@ pub async fn guest(
             {
                 return Ok(not_found());
             }
-            let real = segment.as_ref().map_or_else(
-                || format!("/{}{}", p.addon, p.rest),
-                |segment| format!("/{}/{segment}{}", p.addon, p.rest),
-            );
-            let real = query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}"));
+            let real = if overlay {
+                "/den/_guest".to_owned()
+            } else {
+                segment.as_ref().map_or_else(
+                    || format!("/{}{}", p.addon, p.rest),
+                    |segment| format!("/{}/{segment}{}", p.addon, p.rest),
+                )
+            };
+            let real =
+                if overlay { real } else { query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}")) };
             let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
             let configure_claim = (personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/"))
                 .then(|| claim.clone())
@@ -697,8 +718,9 @@ pub async fn guest(
                 manifest: p.rest == "/manifest.json",
                 segment,
                 personal_den,
+                overlay,
                 configure_claim,
-                installs: Default::default(),
+                installs: live.installs,
             };
             (target, guest)
         }
@@ -725,6 +747,7 @@ pub async fn guest(
                 scrub: false,
                 manifest: false,
                 personal_den: false,
+                overlay: false,
                 configure_claim: None,
             };
             (target, guest)
@@ -745,6 +768,53 @@ fn remux_body(relays: &[(String, String)], guest: &Guest, body: &[u8]) -> Option
         *field = serde_json::Value::String(real_install(relays, guest, addon, field.as_str()?)?);
     }
     serde_json::to_vec(&value).ok().map(Bytes::from)
+}
+
+/// The closed Edge -> Hearth guest-overlay envelope. Every credential comes from the authenticated grant record;
+/// the public request contributes only its method, route, query and bounded operation body. Keeping credentials out
+/// of the target URL also keeps them out of ordinary proxy/request logs.
+fn guest_overlay_body(
+    guest: &Guest,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+) -> Option<Bytes> {
+    if !guest.overlay {
+        return None;
+    }
+    let prefix = format!("/den/~{}", guest.gid);
+    let rest = path.strip_prefix(&prefix)?;
+    if rest.is_empty() || !rest.starts_with('/') {
+        return None;
+    }
+
+    let mut host = serde_json::Map::new();
+    for (stored, wire) in [("scout", "scout"), ("subtitles", "subs"), ("reel", "reel")] {
+        if let Some(segment) = guest.installs.get(stored) {
+            host.insert(wire.into(), serde_json::Value::String(segment.clone()));
+        }
+    }
+    let mut request = serde_json::Map::from_iter([
+        ("method".into(), serde_json::Value::String(method.as_str().to_owned())),
+        ("path".into(), serde_json::Value::String(rest.to_owned())),
+    ]);
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        request.insert("query".into(), serde_json::Value::String(query.to_owned()));
+    }
+    if !body.is_empty() {
+        let original: serde_json::Value = serde_json::from_slice(body).ok()?;
+        request.insert("body".into(), original);
+    }
+    let mut envelope = serde_json::Map::from_iter([
+        ("host".into(), serde_json::Value::Object(host)),
+        ("request".into(), serde_json::Value::Object(request)),
+    ]);
+    if let Some(personal) = &guest.segment {
+        envelope.insert("personal".into(), serde_json::Value::String(personal.clone()));
+    }
+    let encoded = serde_json::to_vec(&serde_json::Value::Object(envelope)).ok()?;
+    (encoded.len() <= MIGRATION_BODY_BYTES).then(|| Bytes::from(encoded))
 }
 
 fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: &str) -> Option<String> {
@@ -789,6 +859,7 @@ async fn relay_with(
 ) -> Response {
     let started = tokio::time::Instant::now();
     let method = req.method().clone();
+    let original_query = req.uri().query().map(str::to_owned);
     let playback_path = crate::handler::den_playback_path(req.uri().path());
     let playback = playback_path && method == Method::POST;
     let playback_probe = playback_path && method == Method::OPTIONS;
@@ -1104,7 +1175,11 @@ async fn relay_with(
     } else {
         (body, None, false)
     };
-    let cast = public_session
+    // A managed Hearth operation may fall back to Remux. Preserve the caller's Cast intent at this outer boundary:
+    // if the direct TorBox path is unavailable, the listener must be opened for the receiver rather than only the
+    // browser's address. The guest's legacy `/remux/session` path keeps its stricter refusal below; only Hearth's
+    // authenticated, per-operation fallback reaches this branch.
+    let cast = (public_session || public_playback)
         && serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("player").and_then(serde_json::Value::as_str).map(str::to_owned))
@@ -1172,7 +1247,16 @@ async fn relay_with(
     // shared id the two are impossible to put side by side afterwards, which is exactly when you want to.
     // What den-remux is asked: for a grant, whether the named session is live — its signed playlist, which only the
     // session's holder can name, and which counts as the session being used.
-    let (method, target, body) = if regrant {
+    let overlay = grant.as_ref().is_some_and(|guest| guest.overlay);
+    let (method, target, body) = if overlay {
+        let Some(body) = grant
+            .as_ref()
+            .and_then(|guest| guest_overlay_body(guest, &method, &control, original_query.as_deref(), &body))
+        else {
+            return json(StatusCode::BAD_REQUEST, "bad_request");
+        };
+        (Method::POST, target, body)
+    } else if regrant {
         match session_end_url(&target, &body) {
             Some(root) => (Method::HEAD, format!("{root}/master.m3u8"), Bytes::new()),
             None => return json(StatusCode::BAD_REQUEST, "bad_request"),
@@ -1213,17 +1297,20 @@ async fn relay_with(
         .uri(&target)
         .header(header::ACCEPT, if guest_configure { "text/html" } else { "application/json" })
         .header("x-request-id", rid);
-    if let Some(content_type) = content_type.filter(|_| !playback_probe) {
+    if overlay {
+        out = out.header(header::CONTENT_TYPE, "application/json");
+    } else if let Some(content_type) = content_type.filter(|_| !playback_probe) {
         out = out.header(header::CONTENT_TYPE, content_type);
     }
     if identity {
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
-    if let Some(secret) = state
-        .remux_edge_secret
-        .as_deref()
-        .filter(|_| playback || playback_probe || migration || grant.as_ref().is_some_and(Guest::remux))
-    {
+    if let Some(secret) = state.remux_edge_secret.as_deref().filter(|_| {
+        playback
+            || playback_probe
+            || migration
+            || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
+    }) {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
             // Hearth uses the same owner for idempotency and for a Remux fallback; never accept this value from Web.

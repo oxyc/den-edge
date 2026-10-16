@@ -1069,7 +1069,13 @@ async fn addons(state: &AppState, req: Request) -> Response {
         Ok(live) => {
             let mut addons: Map<String, Value> =
                 live.addons.iter().map(|a| (a.clone(), json!(format!("/{a}/~{}", live.gid)))).collect();
-            if live.den_install.is_some() && state.den_playback_enabled {
+            // A guest's stable Hearth URL is an overlay, not merely the guest's optional personal config. An
+            // existing grant that already escrows the host's Scout install can therefore use Hearth immediately:
+            // host playback stays behind Remux, while a personal config may later add direct playback or override
+            // subtitles without changing this URL or redeeming another invite.
+            let hearth =
+                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
+            if state.den_playback_enabled && (hearth || live.den_install.is_some()) {
                 addons.insert("den".into(), json!(format!("/den/~{}", live.gid)));
             }
             json_reply(
@@ -1640,6 +1646,7 @@ mod tests {
     const ATLAS: &str = "YXRsYXMtY29uZmln";
     const SUBS: &str = "c3Vicy1jb25maWctc2VnbWVudA";
     const REEL: &str = "cmVlbC1jb25maWctc2VnbWVudA";
+    const PERSONAL_HEARTH: &str = "Z3Vlc3QtaGVhcnRoLWNvbmZpZw";
     const SECRET: &str = "the-guests-device-secret-of-43-chars-000000";
     const SECRET2: &str = "a-second-device-secret-of-43-chars-0000000";
 
@@ -1713,10 +1720,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_keeps_replaces_and_removes_only_their_own_den_install() {
+    async fn an_existing_guest_keeps_the_same_hearth_url_while_replacing_or_removing_their_override() {
         let mut h = harness().await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
         let (gid, credential) = redeemed(&h, json!({})).await;
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+
         assert_eq!(
             h.send(
                 "PUT",
@@ -1750,7 +1761,7 @@ mod tests {
         );
         assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
-        assert!(listed["addons"].get("den").is_none());
+        assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
     }
 
     #[tokio::test]
@@ -2555,17 +2566,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_den_path_uses_only_the_personal_install_and_gets_trusted_playback_identity() {
+    async fn a_guest_den_path_sends_a_closed_personal_over_host_overlay_to_hearth() {
         let (mut h, seen) = relaying(direct_playback, Some("edge-secret")).await;
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.den_playback_enabled = true;
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
-        let (gid, credential) = redeemed(&h, json!({})).await;
+        let (gid, credential) = redeemed(
+            &h,
+            json!({
+                "addons": ["scout", "subtitles", "reel"],
+                "installs": { "scout": SCOUT, "subtitles": SUBS, "reel": REEL },
+            }),
+        )
+        .await;
+        let inherited = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/stream/movie/tt0.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(inherited.status(), StatusCode::OK);
+        {
+            let seen = seen.lock().unwrap();
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert!(envelope.get("personal").is_none());
+            assert_eq!(envelope["host"]["scout"], SCOUT);
+            assert_eq!(envelope["request"]["path"], "/stream/movie/tt0.json");
+        }
         assert_eq!(
             h.send(
                 "PUT",
                 "/grant/den-install",
-                Some(json!({ "install": SCOUT }).to_string()),
+                Some(json!({ "install": PERSONAL_HEARTH }).to_string()),
                 &[(HEADER, credential.as_str()), ("content-type", "application/json")],
             )
             .await
@@ -2584,9 +2621,18 @@ mod tests {
         assert_eq!(stream.status(), StatusCode::OK);
         {
             let seen = seen.lock().unwrap();
-            let (path, headers, _) = seen.last().unwrap();
-            assert_eq!(path, &format!("/den/{SCOUT}/stream/movie/tt1.json"));
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
             assert!(!headers.contains_key(HEADER));
+            assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(envelope["personal"], PERSONAL_HEARTH);
+            assert_eq!(envelope["host"]["scout"], SCOUT);
+            assert_eq!(envelope["host"]["subs"], SUBS);
+            assert_eq!(envelope["host"]["reel"], REEL);
+            assert_eq!(envelope["request"]["method"], "GET");
+            assert_eq!(envelope["request"]["path"], "/stream/movie/tt1.json");
         }
 
         let before = seen.lock().unwrap().len();
@@ -2618,26 +2664,17 @@ mod tests {
         assert_eq!(answer.status(), StatusCode::OK);
         {
             let seen = seen.lock().unwrap();
-            let (path, headers, _) = seen.last().unwrap();
-            assert_eq!(path, &format!("/den/{SCOUT}/playback"));
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
             assert_eq!(headers["x-den-edge-secret"], "edge-secret");
             assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
             assert_eq!(headers["x-den-managed-playback"], "1");
             assert_eq!(headers["idempotency-key"], "guest-attempt");
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(envelope["request"]["method"], "POST");
+            assert_eq!(envelope["request"]["path"], "/playback");
+            assert_eq!(envelope["request"]["body"]["imdb"], "tt1");
         }
-
-        let subtitles = h
-            .send(
-                "GET",
-                &format!("/den/~{gid}/subtitles/movie/tt1/filename=movie.mkv&videoSize=1.json"),
-                None,
-                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
-            )
-            .await;
-        let subtitles = axum::body::to_bytes(subtitles.into_body(), 4096).await.unwrap();
-        let subtitles = std::str::from_utf8(&subtitles).unwrap();
-        assert!(subtitles.contains(&format!("/den/~{gid}/subtitle.vtt")), "{subtitles}");
-        assert!(!subtitles.contains(SCOUT), "{subtitles}");
     }
 
     #[tokio::test]
