@@ -134,6 +134,19 @@ describe('startPlayback', () => {
     ).toEqual({ failure: 'none', code: 'no_release', httpStatus: 404 });
   });
 
+  it('keeps Hearth source detail when its fallback also found no release', async () => {
+    expect(
+      await startPlayback('/den/config/playback', want, async () =>
+        json({ error: 'no_release', cause: 'torbox_unsafe_stream_url' }, 404),
+      ),
+    ).toEqual({
+      failure: 'sourceUnavailable',
+      code: 'no_release',
+      cause: 'torbox_unsafe_stream_url',
+      httpStatus: 404,
+    });
+  });
+
   it.each([
     [400, 'bad_request', 'request'],
     [502, 'source_unavailable', 'sourceUnavailable'],

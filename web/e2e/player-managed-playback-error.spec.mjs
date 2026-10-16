@@ -129,7 +129,7 @@ test('a no-release fallback still shows the specific managed-provider failure', 
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
     await expect(page.getByRole('alert')).toHaveText(
-      'TorBox returned a stream link from a CDN Den did not recognize. Den did not open it, and the home player could not prepare this release either. Try again.',
+      'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
     );
     await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
     await expect(page.getByText('No release of this that plays in a browser')).toHaveCount(0);
