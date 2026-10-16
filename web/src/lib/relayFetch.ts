@@ -24,7 +24,16 @@ export interface LibraryRelayMembership {
  * The paths den-edge relays to the addons (`ADDON_RELAY`), and the same-origin APIs where membership changes
  * the allowance or permits spending a household key. Anything else is somebody else's server.
  */
-const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/', '/metadata/', '/tmdb/'];
+const RELAYED = [
+  '/scout/',
+  '/den/',
+  '/atlas/',
+  '/reel/',
+  '/warnings/',
+  '/ratings/',
+  '/metadata/',
+  '/tmdb/',
+];
 const REMUX_CONTROL = new Set([
   '/remux/health',
   '/remux/session',
@@ -36,9 +45,9 @@ const MEMBER_HEADER = 'x-den-library-member';
 /** A shared library's own credential (`x-den-grant: <gid>:<secret>`): a guest is never a member. */
 const GRANT_HEADER = 'x-den-grant';
 /** `/<addon>/~<gid>/…`: an addon shared through a grant, which is asked with the grant and never the library. */
-const GRANT_BASE = /^\/(?:scout|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/|$)/;
+const GRANT_BASE = /^\/(?:scout|den|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/|$)/;
 /** The install a session body names, `<origin>/scout/~<gid>`. */
-const GRANT_INSTALL = /\/(?:scout|subtitles)\/~([0-9a-f]{8})\/?$/;
+const GRANT_INSTALL = /\/(?:scout|den|subtitles)\/~([0-9a-f]{8})\/?$/;
 /** The host's own grant routes, which prove membership of the library in the path. */
 const HOST_GRANTS = /^\/lib\/([0-9a-f]+)\/grants(?:\/|$)/;
 /**

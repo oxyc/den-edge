@@ -371,7 +371,8 @@ export interface WatchOptions {
   video: HTMLVideoElement;
   /** hls.js playing into `video`, with its class for the event names; absent where the browser plays HLS itself. */
   hls?: { instance: Hls; Hls: typeof Hls };
-  reportUrl: string;
+  /** Remux's explicit report capability. Absent for externally managed HLS. */
+  reportUrl?: string;
   send?: (url: string, body: string) => void;
   now?: () => number;
   /** Told, as the watcher stops, what hls.js's bandwidth estimate came to and how much playing it rests on. */
@@ -439,14 +440,13 @@ export function watchPlayback(options: WatchOptions): Watcher {
       totalFrames: quality?.totalVideoFrames ?? null,
     };
   };
-  const schedule = new ReportSchedule(
-    (event) =>
+  const schedule = new ReportSchedule((event) => {
+    if (reportUrl)
       send(
         reportUrl,
         reportBody(0, `playback stats (${event})`, recorder.snapshot(event, now(), live())),
-      ),
-    now,
-  );
+      );
+  }, now);
 
   const ahead = (time: number): Pick<Stall, 'videoAhead' | 'audioAhead'> => {
     if (sources.video && sources.audio) {

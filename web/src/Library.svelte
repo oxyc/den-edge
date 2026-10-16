@@ -789,7 +789,7 @@
    * no episode named picks up where Continue Watching would, or starts at the beginning.
    */
   const playHere = $derived(
-    scout && remux !== null
+    scout && (scout.playback || remux !== null)
       ? async (title: Title, season?: number, episode?: number, filename?: string) => {
           const blocked = await playGuard(title, {
             content: session.content,
@@ -1937,14 +1937,14 @@
   {/if}
 {/if}
 
-{#if playing && scout && remux !== null && !PlayerScreen.current}
+{#if playing && scout && (scout.playback || remux !== null) && !PlayerScreen.current}
   <!-- Over the page as the player would be, which it has made inactive: without this a player whose chunk couldn't
        be had left Play doing nothing, and the page's trailer stopped. -->
   <div class="player-screen" role="dialog" aria-modal="true" aria-label={playing.title.title}>
     <ScreenLoading screen={PlayerScreen} />
     <button class="close" onclick={() => (playing = null)}>Close</button>
   </div>
-{:else if playing && scout && remux !== null && PlayerScreen.current}
+{:else if playing && scout && (scout.playback || remux !== null) && PlayerScreen.current}
   {@const target = playing}
   {@const after = following}
   <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
@@ -1957,7 +1957,8 @@
       filename={target.filename}
       content={session.content}
       {scout}
-      {remux}
+      remux={remux ?? '/remux'}
+      playback={scout.playback}
       subtitles={installsOf(plugins, routes, 'subs').filter(
         (install) => !!sharedInstallOf(install) === guestSource,
       )}

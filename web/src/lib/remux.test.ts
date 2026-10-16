@@ -1200,6 +1200,24 @@ describe('login', () => {
 });
 
 describe('endSession', () => {
+  it('never derives Remux controls beside an externally managed playlist', async () => {
+    const calls: string[] = [];
+    const external = {
+      ...session,
+      external: true,
+      playlist: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
+    };
+    const fetchImpl: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    };
+    endSession(external, fetchImpl);
+    sendHeartbeat(external, fetchImpl);
+    reportFailure(external, 4, 'failed', fetchImpl);
+    expect(await sourceFailed(external, 12, fetchImpl)).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   it('deletes the session by its signed path when sendBeacon is unavailable (this environment has none)', async () => {
     const calls: [string, RequestInit | undefined][] = [];
     endSession(session, async (input, init) => {
@@ -1207,6 +1225,39 @@ describe('endSession', () => {
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+  });
+
+  it('uses Hearth’s explicit lifecycle capabilities instead of deriving them from the URL', () => {
+    const calls: [string, string | undefined][] = [];
+    const coordinated = {
+      ...session,
+      playlist: '/opaque/playback-url',
+      control: {
+        end: '/control/end-base',
+        heartbeat: '/control/heartbeat',
+        report: '/control/report',
+      },
+    };
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push([String(input), init?.method]);
+      return new Response(null, { status: 204 });
+    };
+    endSession(coordinated, fetchImpl);
+    sendHeartbeat(coordinated, fetchImpl);
+    reportFailure(coordinated, 3, 'decode', fetchImpl);
+    expect(calls).toEqual([
+      ['/control/end-base', 'DELETE'],
+      ['/control/heartbeat', 'POST'],
+      ['/control/report', 'POST'],
+    ]);
+  });
+
+  it('releases direct playback’s client-owned subtitle blobs and sends no lifecycle request', () => {
+    const dispose = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>();
+    endSession({ ...session, external: true, dispose }, fetchImpl);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   describe('with a working sendBeacon', () => {

@@ -134,6 +134,11 @@ test('a shared install is one of this origin’s own ~gid bases, and nothing els
     path: '/scout/~a1b2c3d4',
     install: 'https://den.example/scout/~a1b2c3d4',
   });
+  expect(sharedInstallOf('https://den.example/den/~a1b2c3d4/manifest.json')).toMatchObject({
+    addon: 'den',
+    gid: 'a1b2c3d4',
+    path: '/den/~a1b2c3d4',
+  });
   for (const other of [
     'https://elsewhere.example/scout/~a1b2c3d4/manifest.json',
     'https://den.example/scout/sealed/manifest.json',
@@ -321,6 +326,7 @@ test('the guest’s calls carry the grant header explicitly, and the addons are 
     expiresAt: null,
     addons: {
       scout: '/scout/~a1b2c3d4',
+      den: '/den/~a1b2c3d4',
       atlas: '/atlas/~ffffffff',
       reel: 'https://evil.example/x',
     },
@@ -328,7 +334,11 @@ test('the guest’s calls carry the grant header explicitly, and the addons are 
   const reply = await grantAddons('a1b2c3d4', 'sekrit', spy);
   expect(reply).toEqual({
     ok: true,
-    value: { name: 'Sam', expiresAt: null, addons: { scout: '/scout/~a1b2c3d4' } },
+    value: {
+      name: 'Sam',
+      expiresAt: null,
+      addons: { scout: '/scout/~a1b2c3d4', den: '/den/~a1b2c3d4' },
+    },
   });
   expect(new Headers(spy.mock.calls[0]![1]?.headers).get('x-den-grant')).toBe('a1b2c3d4:sekrit');
   expect(spy.mock.calls[0]![0]).toBe('/grant/addons');

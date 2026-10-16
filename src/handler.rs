@@ -103,7 +103,9 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
     let migration_path = profile_migration_path(&path);
-    let globally_disabled = migration_path && !state.profile_migration_enabled;
+    let den_disabled =
+        (den_playback_path(&path) || path == "/grant/den-install") && !state.den_playback_enabled;
+    let globally_disabled = migration_path && !state.profile_migration_enabled || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
     let route = if globally_disabled { "other" } else { route_label(&path) };
@@ -483,7 +485,7 @@ fn preflight() -> Response {
         HeaderValue::from_static(
             "content-type, x-den-link, x-den-library-token, x-den-library-member, \
              x-den-candidate-library-token, x-den-exclusive-attempt, x-den-successor-token, x-den-grant, \
-             x-den-wire, x-den-wire-min, x-den-generation",
+             x-den-wire, x-den-wire-min, x-den-generation, idempotency-key",
         ),
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
@@ -504,6 +506,14 @@ async fn dispatch(
     // uniformly absent. `handle` also labels it as `other` and suppresses preflight before reaching here.
     if migration_disabled {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
+    }
+    // A live, no-store capability probe for Web's separately shipped build. Disabled is concealed above; enabled
+    // says only that the unified POST route exists and never reaches Hearth or performs authentication work.
+    if route == "/den/:config/playback" && req.method() == Method::OPTIONS {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        response.headers_mut().insert(header::ALLOW, HeaderValue::from_static("POST"));
+        return response;
     }
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
@@ -868,6 +878,14 @@ fn reel_route(rest: &str) -> &'static str {
     }
 }
 
+/// A configured or virtual combined-Den install's one playback operation. Keeping this structural avoids ever
+/// treating a config segment as a metric label.
+pub(crate) fn den_playback_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/den/") else { return false };
+    let Some((config, operation)) = rest.split_once('/') else { return false };
+    !config.is_empty() && operation == "playback"
+}
+
 /// A stable label per route, so a key in a path never becomes a metric label or a log field.
 pub fn route_label(path: &str) -> &'static str {
     if let Some(rest) = path.strip_prefix("/reel/") {
@@ -904,6 +922,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/grant/library" => "/grant/library",
         "/grant/device-ticket" => "/grant/device-ticket",
         "/grant/device" => "/grant/device",
+        "/grant/den-install" => "/grant/den-install",
         p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
         // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
         p if crate::grants::is_host_path(p) && p.matches('/').count() == 3 => "/lib/:id/grants",
@@ -974,6 +993,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
         p if p.starts_with("/subtitles/") => "/subtitles",
+        p if den_playback_path(p) => "/den/:config/playback",
+        p if p == "/den" || p.starts_with("/den/") => "/den",
         p if p.starts_with("/remux/") => "/remux",
         "/mcp" => "/mcp",
         "/oauth/authorize" => "/oauth/authorize",
@@ -1015,6 +1036,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/grant/library"
         | "/grant/device-ticket"
         | "/grant/device" => Some(POST),
+        "/grant/den-install" => Some(PUT_DELETE),
         "/grant/addons" => Some(GET),
         "/health"
         | "/version"
@@ -1050,6 +1072,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/playback/page-error"
         | "/playback/outcome"
         | "/playback/cast" => Some(POST),
+        "/den/:config/playback" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -1075,6 +1098,7 @@ fn body_cap(route: &str) -> usize {
         // A dozen durations and a few short labels: a few hundred bytes, generously.
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
+        "/den/:config/playback" => 16 * 1024,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
@@ -1393,6 +1417,34 @@ pub mod tests {
             assert!(face.serves("/playback/startup"), "{face:?} must answer the startup beacon");
         }
         assert!(!Face::Invalid.serves("/playback/startup"));
+    }
+
+    #[test]
+    fn den_playback_and_guest_install_have_fixed_bounded_routes() {
+        for path in ["/den/sealed-config/playback", "/den/~deadbeef/playback"] {
+            assert!(den_playback_path(path));
+            assert_eq!(route_label(path), "/den/:config/playback");
+        }
+        assert!(!den_playback_path("/den/sealed-config/playback/extra"));
+        assert_eq!(allowed_methods("/den/:config/playback"), Some(&[Method::POST][..]));
+        assert_eq!(body_cap("/den/:config/playback"), 16 * 1024);
+        assert!(!is_control("/den/:config/playback"));
+        assert_eq!(route_label("/grant/den-install"), "/grant/den-install");
+        assert_eq!(allowed_methods("/grant/den-install"), Some(&[Method::PUT, Method::DELETE][..]));
+    }
+
+    #[tokio::test]
+    async fn den_playback_capability_probe_is_exact_and_default_off() {
+        let mut h = Harness::new();
+        assert_eq!(
+            h.send("OPTIONS", "/den/sealed/playback", None, &[]).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let enabled = h.send("OPTIONS", "/den/sealed/playback", None, &[]).await;
+        assert_eq!(enabled.status(), StatusCode::NO_CONTENT);
+        assert_eq!(enabled.headers()[header::ALLOW], "POST");
+        assert_eq!(enabled.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[test]
@@ -1800,7 +1852,8 @@ pub mod tests {
         assert!(
             csp.contains(
                 "media-src 'self' blob: data: https: https://*.googlevideo.com \
-                 https://video-ssl.itunes.apple.com https://*.ts.net:8443 https://pve.example:8443;"
+                 https://video-ssl.itunes.apple.com https://*.ts.net:8443 \
+                 https://*.tb-cdn.io https://pve.example:8443;"
             ),
             "{csp}"
         );
@@ -1809,7 +1862,7 @@ pub mod tests {
         assert!(
             csp.contains(
                 "connect-src 'self' https://api.themoviedb.org \
-                 https://*.ts.net:8443 https://*.481920.xyz:8449 https://1.1.1.1 \
+                 https://*.ts.net:8443 https://*.481920.xyz:8449 https://*.tb-cdn.io https://1.1.1.1 \
                  https://api.ipify.org https://api.simkl.com \
                  https://pve.example:8443;"
             ),

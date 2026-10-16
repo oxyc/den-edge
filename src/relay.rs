@@ -41,6 +41,8 @@ pub fn client() -> RelayClient {
 
 /// Past scout's scrape timeout on a slow indexer (8 s), with its answer still to come.
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Longer than Hearth's bounded direct-then-Remux operation, and shorter than Web's 150-second caller deadline.
+const PLAYBACK_TIMEOUT: Duration = Duration::from_secs(130);
 /// An addon's JSON answer — a catalog page, an index slice — is far under this. An answer passed on as it arrives
 /// (`Passed`) is cut off past it, and one collected to be rewritten is refused.
 const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
@@ -162,9 +164,9 @@ struct LegacyReelActivation {
 pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<String> {
     relays.iter().find_map(|(prefix, origin)| {
         let rest = path_and_query.strip_prefix(prefix.as_str())?;
-        // den-remux is mounted at /remux in its own HTTP API as well as in the web relay. The other
-        // addons are mounted only by den-edge and therefore have their relay prefix stripped.
-        let keep_prefix = prefix == "/remux";
+        // den-remux and the combined Den addon own their mounts in Hearth's HTTP API as well as in the web relay.
+        // The older individual addons are mounted only by den-edge and therefore have their relay prefix stripped.
+        let keep_prefix = matches!(prefix.as_str(), "/remux" | "/den");
         match rest.chars().next() {
             None if keep_prefix => Some(format!("{origin}{prefix}/")),
             None => Some(format!("{origin}/")),
@@ -218,9 +220,7 @@ fn speed_target(target: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-fn session_end_url(target: &str, body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let playlist = value.get("playlist")?.as_str()?;
+fn signed_session_root(playlist: &str) -> Option<&str> {
     let root = playlist.strip_suffix("/master.m3u8")?;
     let mut pieces = root.strip_prefix("/remux/s/")?.split('/');
     let safe = |piece: &str| {
@@ -229,10 +229,46 @@ fn session_end_url(target: &str, body: &[u8]) -> Option<String> {
     if !pieces.next().is_some_and(safe) || !pieces.next().is_some_and(safe) || pieces.next().is_some() {
         return None;
     }
+    Some(root)
+}
+
+fn session_end_url(target: &str, body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let playlist = value.get("playlist")?.as_str()?;
+    let root = signed_session_root(playlist)?;
     let mut url = url::Url::parse(target).ok()?;
     url.set_path(root);
     url.set_query(None);
     Some(url.to_string())
+}
+
+fn playback_session(body: &[u8]) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value.get("session")?.as_object()?;
+    let playlist = value.get("url")?.as_str()?;
+    let root = signed_session_root(playlist)?.to_owned();
+    let end = value
+        .pointer("/session/endUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| *path == root)
+        .unwrap_or(&root)
+        .to_owned();
+    Some((playlist.to_owned(), end))
+}
+
+async fn discard_failed_playback_session(state: &AppState, body: &[u8], rid: &str, owner: Option<&str>) {
+    let Some((_, end)) = playback_session(body) else { return };
+    let Some(url) = target(&state.relays, &end) else { return };
+    let mut request =
+        axum::http::Request::builder().method(Method::DELETE).uri(url).header("x-request-id", rid);
+    if let Some(secret) = &state.remux_edge_secret {
+        request = request.header("x-den-edge-secret", secret);
+    }
+    if let Some(owner) = owner {
+        request = request.header("x-den-owner", owner);
+    }
+    let Ok(request) = request.body(Full::new(Bytes::new())) else { return };
+    let _ = tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await;
 }
 
 async fn discard_failed_public_session(state: &AppState, target: &str, body: &[u8], rid: &str) {
@@ -322,6 +358,15 @@ enum Admitted {
 /// The membership this request claims, if any: `<id>:<member-proof>` as the app sends it.
 fn member_claim(req: &Request) -> Option<String> {
     req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
+}
+
+fn idempotency_key(req: &Request) -> Result<Option<axum::http::HeaderValue>, ()> {
+    let Some(value) = req.headers().get("idempotency-key") else { return Ok(None) };
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 128 || !bytes.iter().all(|b| b.is_ascii_graphic()) {
+        return Err(());
+    }
+    Ok(Some(value.clone()))
 }
 
 /// The video a request is for, when it names one.
@@ -432,26 +477,31 @@ struct Guest {
     scrub: bool,
     /// A manifest, which loses the host's install id and the name of their debrid service.
     manifest: bool,
+    /// This route uses the guest's own combined-Den config, never one of the host's escrowed installs.
+    personal_den: bool,
+    /// The authenticated configure page uses this claim to save the sealed segment behind a stable guest URL.
+    configure_claim: Option<String>,
 }
 
 impl Guest {
     fn remux(&self) -> bool {
-        self.segment.is_none()
+        self.segment.is_none() && !self.personal_den
     }
 
     /// Whether `answer` rewrites an answer with these headers, which then has to be collected whole: JSON from an
     /// addon whose answers name the install. Everything else a guest is answered goes through as it came.
     fn rewrites(&self, headers: &axum::http::HeaderMap) -> bool {
-        self.segment.is_some()
-            && (self.scrub || self.manifest)
-            && headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|t| t.contains("json"))
+        let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+        self.configure_claim.is_some() && content_type.is_some_and(|t| t.starts_with("text/html"))
+            || self.segment.is_some()
+                && (self.scrub || self.manifest)
+                && content_type.is_some_and(|t| t.contains("json"))
     }
 
     fn collected_limit(&self) -> usize {
-        if self.manifest {
+        if self.configure_claim.is_some() {
+            256 * 1024
+        } else if self.manifest {
             MANIFEST_MAX_BYTES
         } else {
             MAX_ANSWER_BYTES
@@ -468,6 +518,9 @@ impl Guest {
 
     /// An answer as the guest may see it, or `None` when it cannot be made so (an encoding this cannot read).
     fn answer(&self, headers: &axum::http::HeaderMap, body: &Bytes) -> Option<Bytes> {
+        if let Some(claim) = self.configure_claim.as_deref().filter(|_| self.rewrites(headers)) {
+            return guest_configure_page(body, claim, &format!("/den/~{}", self.gid));
+        }
         let Some(segment) = self.segment.as_ref().filter(|_| self.rewrites(headers)) else {
             return Some(body.clone());
         };
@@ -486,6 +539,62 @@ impl Guest {
         crate::grants::strip_manifest(&mut value);
         serde_json::to_vec(&value).ok().map(Bytes::from)
     }
+}
+
+pub(crate) const DEN_CONFIGURE_BUILD: &str = r#"    $("url").value = location.origin + BASE + "/" + toSegment(install) + "/manifest.json";
+    $("installId").textContent = install.iid;
+    $("out").classList.remove("hidden");
+    renderSecurityNote();
+    copyInstallURL();"#;
+pub(crate) const DEN_CONFIGURE_BASE: &str =
+    r#"var BASE = location.pathname.replace(/\/(configure\/?)?$/, "");"#;
+
+/// Adapt only Hearth's known configure-page seam. Edge stores the opaque segment; Stremio sees only the stable
+/// virtual URL. A changed upstream page fails closed instead of accidentally exposing the segment in its link.
+fn guest_configure_page(body: &Bytes, claim: &str, base: &str) -> Option<Bytes> {
+    let page = std::str::from_utf8(body).ok()?;
+    if !page.contains(DEN_CONFIGURE_BASE) || !page.contains(DEN_CONFIGURE_BUILD) {
+        return None;
+    }
+    let claim = serde_json::to_string(claim).ok()?;
+    let base = serde_json::to_string(base).ok()?;
+    let bridge = format!(
+        r#"var BASE = {base};
+var DEN_GUEST_GRANT = {claim};
+var denGuestFetch = window.fetch.bind(window);
+window.fetch = function (input, options) {{
+  options = options || {{}};
+  if (typeof input === "string" && (input.indexOf(BASE + "/") === 0 || input === "/grant/den-install")) {{
+    options.headers = new Headers(options.headers || {{}});
+    options.headers.set("x-den-grant", DEN_GUEST_GRANT);
+  }}
+  return denGuestFetch(input, options);
+}};"#
+    );
+    let replacement = format!(
+        r#"    var guestSegment = toSegment(install);
+    $("url").value = "";
+    $("installId").textContent = install.iid;
+    $("out").classList.remove("hidden");
+    renderSecurityNote();
+    fetch("/grant/den-install", {{
+      method: "PUT",
+      cache: "no-store",
+      headers: {{ "content-type": "application/json", "x-den-grant": {claim} }},
+      body: JSON.stringify({{ install: guestSegment }})
+    }})
+      .then(function (r) {{ if (!r.ok) throw new Error("save failed");
+        $("url").value = location.origin + BASE + "/manifest.json";
+        copyInstallURL();
+      }})
+      .catch(function () {{
+        $("url").value = "";
+        $("sealNote").textContent = "Could not save this guest install. Please try again.";
+        $("sealNote").className = "note unsealed";
+      }});"#
+    );
+    let page = page.replacen(DEN_CONFIGURE_BASE, &bridge, 1);
+    Some(Bytes::from(page.replacen(DEN_CONFIGURE_BUILD, &replacement, 1)))
 }
 
 /// A guest's call to a grant's addon (`/<addon>/~<gid>/…`) or to the `/remux` control plane with `x-den-grant`,
@@ -537,10 +646,25 @@ pub async fn guest(
     let query = req.uri().query().map(str::to_owned);
     let (target, guest) = match parsed {
         Some(Ok(p)) => {
-            let shared = live.addons.iter().any(|a| a == p.addon);
-            let Some(segment) = live.installs.get(p.addon).filter(|_| shared).cloned() else {
+            let personal_den = p.addon == "den";
+            if personal_den && !state.den_playback_enabled {
                 return Ok(not_found());
+            }
+            let bare_den = personal_den
+                && matches!(p.rest.as_str(), "/configure" | "/configure/" | "/config-key" | "/validate");
+            let segment = if personal_den {
+                if bare_den {
+                    None
+                } else {
+                    live.den_install.clone()
+                }
+            } else {
+                let shared = live.addons.iter().any(|a| a == p.addon);
+                live.installs.get(p.addon).filter(|_| shared).cloned()
             };
+            if segment.is_none() && !bare_den {
+                return Ok(not_found());
+            }
             // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
             // leave through `stream`, only through the session remux opens for it.
             if !crate::grants::allowed(p.addon, req.method(), &p.rest)
@@ -549,14 +673,22 @@ pub async fn guest(
             {
                 return Ok(not_found());
             }
-            let real = format!("/{}/{segment}{}", p.addon, p.rest);
+            let real = segment.as_ref().map_or_else(
+                || format!("/{}{}", p.addon, p.rest),
+                |segment| format!("/{}/{segment}{}", p.addon, p.rest),
+            );
             let real = query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}"));
             let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
+            let configure_claim = (personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/"))
+                .then(|| claim.clone())
+                .flatten();
             let guest = Guest {
                 gid: live.gid,
-                scrub: p.addon != "atlas",
+                scrub: personal_den || p.addon != "atlas",
                 manifest: p.rest == "/manifest.json",
-                segment: Some(segment),
+                segment,
+                personal_den,
+                configure_claim,
                 installs: Default::default(),
             };
             (target, guest)
@@ -583,6 +715,8 @@ pub async fn guest(
                 installs: live.installs,
                 scrub: false,
                 manifest: false,
+                personal_den: false,
+                configure_claim: None,
             };
             (target, guest)
         }
@@ -646,6 +780,10 @@ async fn relay_with(
 ) -> Response {
     let started = tokio::time::Instant::now();
     let method = req.method().clone();
+    let playback = crate::handler::den_playback_path(req.uri().path()) && method == Method::POST;
+    if playback && !state.den_playback_enabled {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
     let cancel = method == Method::DELETE && scout_cancel(req.uri().path(), req.uri().query());
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !cancel {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
@@ -671,7 +809,7 @@ async fn relay_with(
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
     // `/scout` itself and `/scout?…` are relayed to scout's `/` (`target`), so they are scout's too.
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
-    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || remux);
+    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || remux || playback);
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -815,12 +953,20 @@ async fn relay_with(
     // A guest's session gets the public listener as a member's does, but only on the public name, where a member's
     // does too.
     let guest_remux = face == crate::handler::Face::Web && grant.as_ref().is_some_and(Guest::remux);
+    let guest_playback = face == crate::handler::Face::Web
+        && playback
+        && grant.as_ref().is_some_and(|guest| guest.personal_den);
+    let guest_configure = grant.as_ref().is_some_and(|guest| guest.configure_claim.is_some());
     // A grant asked again for an open session opens the listener as a start does, and goes through the same checks.
     let regrant = req.uri().path() == GRANT;
     let public_session = (member_only || guest_remux)
         && (req.uri().path() == "/remux/session" || regrant)
         && method == Method::POST;
+    let public_playback = playback && (member_only || guest_playback);
     if regrant && !public_session {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
+    if playback && state.remux_edge_secret.is_none() {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     // A guest's play refused at its start, counted by code on `/metrics`.
@@ -830,6 +976,14 @@ async fn relay_with(
         }
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let idempotency = if playback {
+        match idempotency_key(&req) {
+            Ok(key) => key,
+            Err(()) => return json(StatusCode::BAD_REQUEST, "bad_request"),
+        }
+    } else {
+        None
+    };
     if public_session
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
     {
@@ -837,9 +991,10 @@ async fn relay_with(
         return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
     }
     // An answer that has to be rewritten cannot be read compressed, so a guest's is asked for as it is.
-    let identity = grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
+    let identity = playback || guest_configure || grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
+        .filter(|name| !playback || *name == header::ACCEPT_ENCODING)
         .filter(|name| !(identity && *name == header::ACCEPT_ENCODING))
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
@@ -878,7 +1033,13 @@ async fn relay_with(
     } else {
         None
     };
-    let limit = if recommend { RECOMMEND_BODY_BYTES } else { MAX_BODY_BYTES };
+    let limit = if playback {
+        16 * 1024
+    } else if recommend {
+        RECOMMEND_BODY_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
     let body = match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), limit)).await {
         Ok(Ok(body)) => body,
         Ok(Err(_)) => return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
@@ -1004,7 +1165,8 @@ async fn relay_with(
     // A public session's successful answer must be collected so the listener can be opened and the JSON amended.
     // Reserve that bounded work before den-remux is asked to create anything; refusing afterwards could strand a
     // live session whose signed playlist we never retained well enough to end.
-    let mut session_charge = if public_session {
+    let session_operation = public_session || public_playback;
+    let mut session_charge = if session_operation {
         match Arc::clone(&state.relay_collect_budget).try_acquire_many_owned(PUBLIC_SESSION_CHARGE_BYTES) {
             Ok(permit) => Some(CollectedCharge {
                 _accounting: vec![state.metrics.byte_admitted(
@@ -1030,7 +1192,7 @@ async fn relay_with(
     let mut out = axum::http::Request::builder()
         .method(method)
         .uri(&target)
-        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT, if guest_configure { "text/html" } else { "application/json" })
         .header("x-request-id", rid);
     if let Some(content_type) = content_type {
         out = out.header(header::CONTENT_TYPE, content_type);
@@ -1038,19 +1200,33 @@ async fn relay_with(
     if identity {
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
-    if let (Some(g), Some(secret)) = (grant.as_ref().filter(|g| g.remux()), &state.remux_edge_secret) {
-        // What tells remux this session is a guest's, to be counted, capped and ended apart from the host's.
-        out = out
-            .header("x-den-edge-secret", secret.as_str())
-            .header("x-den-owner", format!("grant:{}", g.gid));
+    if let Some(secret) =
+        state.remux_edge_secret.as_deref().filter(|_| playback || grant.as_ref().is_some_and(Guest::remux))
+    {
+        out = out.header("x-den-edge-secret", secret);
+        if let Some(g) = grant.as_ref() {
+            // Hearth uses the same owner for idempotency and for a Remux fallback; never accept this value from Web.
+            out = out.header("x-den-owner", format!("grant:{}", g.gid));
+        }
+    }
+    if public_playback {
+        out = out.header("x-den-managed-playback", "1");
+    }
+    if let Some(key) = idempotency {
+        out = out.header("idempotency-key", key);
     }
     // Only den-remux consumes this for its per-viewer start budget. Do not broaden the visitor-address data
     // handed to unrelated addons merely because they share the relay implementation.
-    if remux {
+    if remux || public_playback {
         if let Some(address) = address {
             out = out.header("x-forwarded-for", address.to_string());
         }
-        if public_session {
+        if public_session
+            || public_playback
+                && state.public_media_base.is_some()
+                && state.public_media_socket.is_some()
+                && address.is_some()
+        {
             // Internal signal for remux's public-session gauge. It lets the root gate close while unrelated LAN
             // playback continues; the public listener still trusts only den-edge's root-owned Unix-socket call.
             out = out.header("x-den-public-session", "1");
@@ -1062,7 +1238,7 @@ async fn relay_with(
     let Ok(out) = out.body(Full::new(body)) else { return json(StatusCode::BAD_REQUEST, "bad_request") };
     // One deadline for the head and the body: an addon that answered its head and then stalled held a relay slot
     // for as long as it stayed silent.
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + if playback { PLAYBACK_TIMEOUT } else { TIMEOUT };
     let answer = match tokio::time::timeout_at(deadline, state.relay_client.request(out)).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
@@ -1086,7 +1262,9 @@ async fn relay_with(
     // Only an answer something here reads or rewrites is collected whole. Every other one — most of them — is passed
     // on as it arrives: collected, sixteen slots' answers of up to eight megabytes each could be in memory at once.
     let rewrites = grant.as_ref().is_some_and(|g| g.rewrites(&parts.headers));
-    let collect = (public_session && parts.status == opened) || rewrites;
+    let collect = (public_session && parts.status == opened)
+        || (public_playback && parts.status.is_success())
+        || rewrites;
     if !collect {
         return answer_response(
             &parts,
@@ -1100,12 +1278,13 @@ async fn relay_with(
                 rid.to_owned(),
                 upstream,
             ),
-            public_session || playground || speed,
+            public_session || playback || guest_configure || playground || speed,
             member_only || grant.is_some(),
+            playback || guest_configure,
             None,
         );
     }
-    let (budget, multiplier, limit) = if public_session {
+    let (budget, multiplier, limit) = if session_operation {
         (None, 1, PUBLIC_SESSION_MAX_BYTES)
     } else if let Some(g) = grant.as_ref().filter(|_| rewrites) {
         (Some(&state.relay_collect_budget), g.collected_multiplier(), g.collected_limit())
@@ -1125,7 +1304,7 @@ async fn relay_with(
             }
             Err((status, code)) => return json(status, code),
         };
-    let charge = if public_session { session_charge.take() } else { collected_charge };
+    let charge = if session_operation { session_charge.take() } else { collected_charge };
     if let Some(g) = &grant {
         // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
         match g.answer(&parts.headers, &bytes) {
@@ -1134,14 +1313,22 @@ async fn relay_with(
         }
     }
     let mut scope = None;
-    if public_session && parts.status == opened {
+    let playback_session = public_playback && parts.status.is_success() && playback_session(&bytes).is_some();
+    if playback_session
+        && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
+    {
+        let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
+        discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
+        return json(StatusCode::BAD_GATEWAY, "source_unavailable");
+    }
+    if (public_session && parts.status == opened) || playback_session {
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
         {
             let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, address) };
             scope = Some(ListenerScope(asked));
             if open_public_listener(socket, hinted.unwrap_or(address), cast).await {
-                let who = if guest_remux { "guest" } else { "member" };
+                let who = if guest_remux || guest_playback { "guest" } else { "member" };
                 if hinted.is_some() {
                     state.metrics.record_public_media_hinted(who);
                 } else if let Some(reason) = asked.strip_prefix("wide:") {
@@ -1157,13 +1344,18 @@ async fn relay_with(
                 }
                 // A fresh session, not a regrant of one already open: once per play, never per segment, and only
                 // a guest's own, counted against their grant (`grants::record_start`, oxyc/den#100's follow-up).
-                if guest_remux {
+                if guest_remux || guest_playback && playback_session {
                     if let Some(g) = &grant {
                         crate::grants::record_start(state, &g.gid).await;
                     }
                 }
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
+                    if playback_session {
+                        if let Some(relative) = value.get("url").and_then(serde_json::Value::as_str) {
+                            value["url"] = serde_json::Value::String(format!("{base}{relative}"));
+                        }
+                    }
                     // Opened for the page's reported address: if it was wrong, the page asks again without it.
                     if hinted.is_some() {
                         value["hinted"] = serde_json::Value::Bool(true);
@@ -1184,7 +1376,10 @@ async fn relay_with(
                 }
             } else {
                 // A session that plays on is never ended for this: only one this call just made.
-                if !regrant {
+                if playback_session {
+                    let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
+                    discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
+                } else if !regrant {
                     discard_failed_public_session(state, &target, &bytes, rid).await;
                 }
                 guest_refused("public_listener_unavailable");
@@ -1202,8 +1397,9 @@ async fn relay_with(
     answer_response(
         &parts,
         collected_body(bytes, charge),
-        public_session || playground || speed,
+        public_session || playback || guest_configure || playground || speed,
         member_only || grant.is_some(),
+        playback || guest_configure,
         scope,
     )
 }
@@ -1214,6 +1410,7 @@ fn answer_response(
     body: Body,
     no_store: bool,
     private_only: bool,
+    playback: bool,
     scope: Option<ListenerScope>,
 ) -> Response {
     // Only the answer's cache policy, its validators and diagnostic fields cross this boundary. In particular
@@ -1239,6 +1436,9 @@ fn answer_response(
         // (atlas's `atlas`). Cloudflare strips it before a browser sees the answer.
         header::HeaderName::from_static("cache-tag"),
     ] {
+        if playback && matches!(name, header::ETAG | header::LAST_MODIFIED | header::VARY) {
+            continue;
+        }
         if let Some(value) = parts.headers.get(&name) {
             resp.headers_mut().insert(name, value.clone());
         }
@@ -2311,7 +2511,10 @@ fn limited(after_ms: u64) -> Response {
 mod tests {
     use crate::handler::tests::Harness;
     use crate::handler::ListenerScope;
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::extract::Request;
+    use axum::http::{Method, StatusCode};
+    use axum::response::Response;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -2396,8 +2599,40 @@ mod tests {
     }
 
     #[test]
+    fn a_playback_session_is_recognised_only_by_its_strict_relative_signed_url() {
+        let sid = "A".repeat(22);
+        let sig = "b".repeat(22);
+        let playlist = format!("/remux/s/{sid}/{sig}/master.m3u8");
+        let body = json!({ "url": playlist, "session": { "endUrl": format!("/remux/s/{sid}/{sig}") } });
+        assert_eq!(
+            super::playback_session(body.to_string().as_bytes()),
+            Some((playlist, format!("/remux/s/{sid}/{sig}")))
+        );
+        assert!(
+            super::playback_session(br#"{"url":"https://evil.example/master.m3u8","session":{}}"#).is_none()
+        );
+        assert!(super::playback_session(br#"{"url":"/remux/s/a/b/master.m3u8"}"#).is_none());
+    }
+
+    #[test]
+    fn idempotency_keys_are_small_visible_and_opaque() {
+        let request = |value: &str| {
+            axum::http::Request::builder()
+                .uri("/den/config/playback")
+                .header("idempotency-key", value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(super::idempotency_key(&request("attempt-1")).unwrap().unwrap(), "attempt-1");
+        assert!(super::idempotency_key(&request("")).is_err());
+        assert!(super::idempotency_key(&request(&"a".repeat(129))).is_err());
+    }
+
+    #[test]
     fn remux_keeps_the_prefix_its_upstream_api_owns() {
-        let relays = crate::parse_relays("/scout=http://scout:8080, /remux=http://remux:8095");
+        let relays = crate::parse_relays(
+            "/scout=http://scout:8080, /remux=http://remux:8095, /den=http://hearth:8090",
+        );
         assert_eq!(
             super::target(&relays, "/remux/session?x=1").as_deref(),
             Some("http://remux:8095/remux/session?x=1")
@@ -2405,6 +2640,10 @@ mod tests {
         assert_eq!(
             super::target(&relays, "/scout/cfg/manifest.json").as_deref(),
             Some("http://scout:8080/cfg/manifest.json")
+        );
+        assert_eq!(
+            super::target(&relays, "/den/cfg/playback").as_deref(),
+            Some("http://hearth:8090/den/cfg/playback")
         );
     }
 
@@ -2823,6 +3062,170 @@ mod tests {
             .send("GET", "/remux/health", None, &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)])
             .await;
         assert_eq!(relayed.status(), StatusCode::BAD_GATEWAY, "member reached the absent upstream");
+    }
+
+    #[tokio::test]
+    async fn public_den_playback_is_household_only_and_forwards_only_its_trusted_headers() {
+        use axum::http::{header, HeaderValue};
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            async move {
+                sent.send(req.headers().clone()).unwrap();
+                let mut response =
+                    Response::new(Body::from(json!({ "url": "https://flux.tb-cdn.io/x.m3u8" }).to_string()));
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300"));
+                response.headers_mut().insert(header::ETAG, HeaderValue::from_static("\"provider\""));
+                response.headers_mut().insert(header::VARY, HeaderValue::from_static("authorization"));
+                response
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("real-edge-secret".into());
+
+        let body = json!({ "imdb": "tt1" }).to_string();
+        let visitor = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some(body.clone()),
+                &[("host", "d.oxy.fi"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
+        assert!(received.try_recv().is_err(), "a visitor reached Hearth");
+
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let answer = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some(body),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                    ("idempotency-key", "attempt-1"),
+                    ("if-none-match", "\"cached\""),
+                    ("accept-encoding", "gzip"),
+                    ("x-den-edge-secret", "forged"),
+                    ("x-den-owner", "forged"),
+                    ("x-den-managed-playback", "0"),
+                ],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(answer.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!answer.headers().contains_key(header::ETAG));
+        assert!(!answer.headers().contains_key(header::VARY));
+        let headers = received.recv().await.unwrap();
+        assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
+        assert_eq!(headers["x-den-managed-playback"], "1");
+        assert_eq!(headers["idempotency-key"], "attempt-1");
+        assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
+        assert!(!headers.contains_key(header::IF_NONE_MATCH));
+        assert!(!headers.contains_key("x-den-owner"));
+        assert!(!headers.contains_key("x-den-public-session"));
+    }
+
+    #[tokio::test]
+    async fn lan_den_playback_is_trusted_but_not_marked_as_managed_public_playback() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            async move {
+                sent.send(req.headers().clone()).unwrap();
+                crate::handler::json_reply(StatusCode::OK, &json!({ "url": "https://flux.tb-cdn.io/x.m3u8" }))
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("real-edge-secret".into());
+        let answer = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some("{}".into()),
+                &[("host", "192.168.86.193:8094"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let headers = received.recv().await.unwrap();
+        assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
+        assert!(!headers.contains_key("x-den-managed-playback"));
+        assert!(!headers.contains_key("x-den-public-session"));
+    }
+
+    #[tokio::test]
+    async fn a_remux_playback_without_a_public_listener_is_refused_and_cleaned_up() {
+        let sid = "A".repeat(22);
+        let sig = "b".repeat(22);
+        let playlist = format!("/remux/s/{sid}/{sig}/master.m3u8");
+        let end = format!("/remux/s/{sid}/{sig}");
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let answer = playlist.clone();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            let answer = answer.clone();
+            async move {
+                sent.send((req.method().clone(), req.uri().path().to_owned())).unwrap();
+                if req.method() == Method::DELETE {
+                    return Response::new(Body::empty());
+                }
+                crate::handler::json_reply(
+                    StatusCode::OK,
+                    &json!({ "url": answer, "session": { "endUrl": answer.trim_end_matches("/master.m3u8") } }),
+                )
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays =
+            crate::parse_relays(&format!("/den=http://{upstream_addr}, /remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let response = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some("{}".into()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into()));
+        assert_eq!(received.recv().await.unwrap(), (Method::DELETE, end));
     }
 
     /// The TV asks for a segment scan on the LAN face: a POST to the one scan route goes through, and nothing else
