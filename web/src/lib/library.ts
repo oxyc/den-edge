@@ -165,6 +165,9 @@ export interface ContinueEntry {
   /** Where it was last playing, in seconds, and when that was written (epoch ms): `livePosition`. */
   seconds?: number;
   at?: number;
+  /** The episode and fraction that supplied a live position, when Continue Watching offers another episode. */
+  liveEpisode?: { season: number; episode: number };
+  liveFraction?: number;
   /** The name the device that wrote `seconds` gives itself in `set:devices`. */
   device?: string;
 }
@@ -759,21 +762,21 @@ function continueCandidates(
     });
     if (answer.action === 'none' || !answer.episode || seen.has(key)) continue;
     seen.add(key);
-    // The position is the mark's only when the entry resumes the episode that mark is of.
-    const resumes =
-      answer.action === 'resume' &&
-      mark?.seconds !== undefined &&
-      mark.season === answer.episode.season &&
-      mark.episode === answer.episode.episode;
+    // Continue Watching may already offer the next episode while the TV is still playing the opening or ending
+    // of this one. Keep that policy answer in `episode`/`fraction`, but carry the latest physical position beside
+    // it so the live clock never disappears merely because the resume policy crossed one of its thresholds.
+    const positioned = mark?.seconds !== undefined;
     entries.push({
       ref,
       display: mark ? 'mark' : 'record',
       fraction: answer.fraction,
       episode: answer.episode,
-      ...(resumes
+      ...(positioned
         ? {
             seconds: mark.seconds,
             at: mark.updatedAt,
+            liveEpisode: { season: mark.season, episode: mark.episode },
+            liveFraction: mark.fraction,
             ...(mark.updatedBy ? { by: mark.updatedBy } : {}),
           }
         : {}),

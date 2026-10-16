@@ -1128,7 +1128,16 @@ function progress(
 function continueItem(value: unknown): value is ContinueItem {
   return (
     record(value) &&
-    exact(value, ['title', 'fraction', 'episode', 'seconds', 'updatedAt', 'device']) &&
+    exact(value, [
+      'title',
+      'fraction',
+      'episode',
+      'seconds',
+      'updatedAt',
+      'liveEpisode',
+      'liveFraction',
+      'device',
+    ]) &&
     titleRef(value.title) &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
@@ -1143,6 +1152,20 @@ function continueItem(value: unknown): value is ContinueItem {
         candidate.episode > 0,
     ) &&
     (value.episode === undefined || value.title.type === 'tv') &&
+    optional(
+      value.liveEpisode,
+      (candidate): candidate is { season: number; episode: number } =>
+        record(candidate) &&
+        exact(candidate, ['season', 'episode']) &&
+        integer(candidate.season) &&
+        integer(candidate.episode) &&
+        candidate.episode > 0,
+    ) &&
+    (value.liveEpisode === undefined || value.title.type === 'tv') &&
+    optional(
+      value.liveFraction,
+      (candidate): candidate is number => finite(candidate) && candidate >= 0 && candidate <= 1,
+    ) &&
     optional(value.seconds, finite) &&
     optional(value.updatedAt, integer) &&
     optional(value.device, text)

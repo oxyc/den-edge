@@ -5,7 +5,7 @@
  * implementation that projects them are private to the service.
  */
 
-export const LIBRARY_SERVICE_PROTOCOL = 5 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 6 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -351,6 +351,9 @@ export interface ContinueItem {
   episode?: { season: number; episode: number };
   seconds?: number;
   updatedAt?: number;
+  /** The episode and fraction supplying `seconds`, when the resume target above is already another episode. */
+  liveEpisode?: { season: number; episode: number };
+  liveFraction?: number;
   /** The name the device that wrote `seconds` gives itself in `set:devices`. */
   device?: string;
 }

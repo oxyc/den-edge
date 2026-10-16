@@ -433,6 +433,8 @@
             ...(entry.episode ? { episode: entry.episode } : {}),
             ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
             ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
+            ...(entry.liveEpisode === undefined ? {} : { liveEpisode: entry.liveEpisode }),
+            ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
             ...(entry.device === undefined ? {} : { device: entry.device }),
           },
         ]
@@ -531,10 +533,11 @@
       continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
     const at = entry ? liveSeconds(entry) : undefined;
     if (!entry || at === undefined) return undefined;
-    const runtime = entry.seconds && entry.fraction > 0 ? entry.seconds / entry.fraction : 0;
+    const positionFraction = entry.liveFraction ?? entry.fraction;
+    const runtime = entry.seconds && positionFraction > 0 ? entry.seconds / positionFraction : 0;
     return {
       clock: timecode(at),
-      episode: entry.episode,
+      episode: entry.liveEpisode ?? entry.episode,
       device: entry.device,
       fraction: runtime ? Math.min(1, at / runtime) : undefined,
     };

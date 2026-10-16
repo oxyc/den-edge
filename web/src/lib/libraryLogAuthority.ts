@@ -1483,7 +1483,7 @@ export class LibraryLogAuthority {
       kind: 'continue',
       items: this.#continueProjector
         .project(library)
-        .map(({ ref, fraction, episode, seconds, at, by }) => {
+        .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
           const device = by && deviceName(devices, by)?.slice(0, 256);
           return {
             title: { type: ref.type, id: ref.id },
@@ -1491,6 +1491,8 @@ export class LibraryLogAuthority {
             ...(episode ? { episode } : {}),
             ...(seconds !== undefined ? { seconds } : {}),
             ...(at !== undefined ? { updatedAt: at } : {}),
+            ...(liveEpisode ? { liveEpisode } : {}),
+            ...(liveFraction !== undefined ? { liveFraction } : {}),
             ...(device ? { device } : {}),
           };
         }),

@@ -447,6 +447,28 @@ describe("the TV's rows", () => {
     ).toEqual([['tv:9', { season: 1, episode: 5 }]]);
   });
 
+  it('keeps a TV live position when Continue Watching already offers another episode', () => {
+    const finished = mark(9, 1, 4, 1, 1_700_000_000_000);
+    const playing: Library = {
+      records: [record('tv', 9, 'inProgress')],
+      marks: [{ ...finished, seconds: 2_690, updatedBy: 'living-room' }],
+      flags: new Map(),
+      shapes: new Map([['tv:9', { counts: new Map([[1, 6]]) }]]),
+      dismissed: new Map(),
+    };
+
+    expect(continueWatching(playing)).toEqual([
+      expect.objectContaining({
+        episode: { season: 1, episode: 5 },
+        fraction: 0,
+        seconds: 2_690,
+        at: 1_700_000_000_000,
+        liveEpisode: { season: 1, episode: 4 },
+        liveFraction: 1,
+      }),
+    ]);
+  });
+
   it('lets a flag ahead of the newest mark decide where the series is', () => {
     // The newest mark is E2; the flag says E4 was watched. The front is the further of the two, so the row
     // offers E5 rather than resuming E2.
