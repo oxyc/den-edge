@@ -1096,7 +1096,7 @@ fn body_cap(route: &str) -> usize {
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
-        "/den/migrate" => 16 * 1024,
+        "/den/migrate" => crate::relay::MIGRATION_BODY_BYTES,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
@@ -1429,7 +1429,7 @@ pub mod tests {
         assert!(!is_control("/den/:config/playback"));
         assert_eq!(route_label("/den/migrate"), "/den/migrate");
         assert_eq!(allowed_methods("/den/migrate"), Some(&[Method::POST][..]));
-        assert_eq!(body_cap("/den/migrate"), 16 * 1024);
+        assert_eq!(body_cap("/den/migrate"), 32 * 1024);
         assert_eq!(route_label("/grant/den-install"), "/grant/den-install");
         assert_eq!(allowed_methods("/grant/den-install"), Some(&[Method::PUT, Method::DELETE][..]));
     }
@@ -2275,6 +2275,9 @@ pub mod tests {
         // A batch carries a library's rows while every other route keeps the small cap.
         let over_small = declared(MAX_BODY_BYTES + 1);
         let r = h.send("POST", "/inbox/append", None, &[("content-length", &over_small)]).await;
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let over_migration = declared(crate::relay::MIGRATION_BODY_BYTES + 1);
+        let r = h.send("POST", "/den/migrate", None, &[("content-length", &over_migration)]).await;
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         // ...and a body that declares no length is held to the same cap as it is read.
         let big = format!(r#"{{"inboxKey":"abcdef0123456789","sealed":"{}"}}"#, "x".repeat(MAX_BODY_BYTES));
