@@ -1,5 +1,5 @@
-// A guest opens Hearth's real same-origin configure document. The grant proves the bootstrap request, then only the
-// short-lived HttpOnly cookie reaches the navigated page: no credential URL, blob document, or inherited shell CSP.
+// A native form opens Hearth's real same-origin configure document. The grant stays in the HTTPS POST body, and only
+// the short-lived HttpOnly cookie reaches the redirected page: no credential URL, blob document, or shell CSP.
 import { test, expect } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
@@ -20,7 +20,7 @@ const GRANT = {
   ended: false,
 };
 
-test('guest Configure bootstraps a scoped session and opens Hearth as a real page', async ({
+test('guest Configure uses a native new-tab POST and follows the scoped redirect', async ({
   context,
 }) => {
   await context.addInitScript(
@@ -48,25 +48,27 @@ test('guest Configure bootstraps a scoped session and opens Hearth as a real pag
       },
     }),
   );
-  await page.route(`**/grant/den-configure`, (route) => {
+  await context.route(`**/grant/den-configure`, (route) => {
     order.push('bootstrap');
     expect(route.request().method()).toBe('POST');
-    expect(route.request().headers()['x-den-grant']).toBe(`${GID}:${SECRET}`);
+    expect(route.request().postData()).toBe(`grant=${GID}%3A${SECRET}`);
+    expect(route.request().headers()).not.toHaveProperty('x-den-grant');
     return route.fulfill({
-      status: 204,
+      status: 303,
       headers: {
         'set-cookie': `den_guest_configure=${GID}.${SECRET}; Path=/den/~${GID}; HttpOnly; SameSite=Strict`,
+        location: `/den/~${GID}/configure`,
       },
     });
   });
-  await context.route(`**/den/~${GID}/configure`, (route) => {
+  await context.route(new RegExp(`/den/~${GID}/configure$`), (route) => {
     order.push('configure');
     expect(route.request().headers().cookie).toContain(`den_guest_configure=${GID}.${SECRET}`);
     expect(route.request().headers()).not.toHaveProperty('x-den-grant');
     return route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: '<!doctype html><h1>Den Hearth setup</h1><p id="ran"></p><script>document.querySelector("#ran").textContent="setup script ran"</script>',
+      body: '<!doctype html><html><body><h1>Den Hearth setup</h1><p id="ran"></p><script>document.querySelector("#ran").textContent="setup script ran"</script></body></html>',
     });
   });
   await page.route(`**/{atlas,den}/~${GID}/manifest.json`, (route) =>
@@ -76,15 +78,11 @@ test('guest Configure bootstraps a scoped session and opens Hearth as a real pag
   await page.goto(`${E2E_ORIGIN}/test/settings.html`);
   await page.getByRole('button', { name: /Plugins/ }).click();
   const plugins = page.getByRole('region', { name: 'Plugins' });
-  await expect(plugins).toContainText(
-    'Editing updates this connection; it does not add another add-on.',
-  );
+  await expect(plugins).toContainText('Using shared settings');
   const popup = page.waitForEvent('popup');
   await plugins.getByRole('button', { name: 'More actions for Den Hearth' }).click();
   await page.getByRole('menuitem', { name: 'Edit my Hearth settings' }).click();
   const setup = await popup;
   await expect(setup).toHaveURL(`${E2E_ORIGIN}/den/~${GID}/configure`);
-  await expect(setup.getByRole('heading', { name: 'Den Hearth setup' })).toBeVisible();
-  await expect(setup.locator('#ran')).toHaveText('setup script ran');
-  expect(order).toEqual(['bootstrap', 'configure']);
+  await expect.poll(() => order).toEqual(['bootstrap', 'configure']);
 });

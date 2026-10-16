@@ -1,4 +1,4 @@
-import { relayFetch } from './relayFetch';
+import { libraryConfigureClaim } from './relayFetch';
 
 const SHARED_MEDIA = ['scout', 'subtitles', 'reel'] as const;
 
@@ -26,52 +26,63 @@ export async function clearGuestConfigure(
   }
 }
 
-/** Open Hearth's real setup page after establishing its short-lived, HttpOnly guest setup session. */
-export async function openGuestConfigure(
+export interface ConfigureSubmission {
+  action: string;
+  target: '_blank';
+  fields: Record<string, string>;
+}
+
+function submitNative({ action, target, fields }: ConfigureSubmission): void {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = action;
+  form.target = target;
+  form.rel = 'noopener';
+  form.hidden = true;
+  for (const [name, value] of Object.entries(fields)) {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  document.body.append(form);
+  try {
+    form.submit();
+  } finally {
+    form.remove();
+  }
+}
+
+/** Open Hearth through a native POST so mobile browsers keep the user-requested new tab. */
+export function openGuestConfigure(
   gid: string,
   secret: string,
   deps: {
-    fetchImpl?: typeof fetch;
-    openImpl?: (url: string, target: string) => Window | null;
+    submitImpl?: (submission: ConfigureSubmission) => void;
   } = {},
-): Promise<boolean> {
+): boolean {
   if (!/^[0-9a-f]{8}$/.test(gid) || !secret) return false;
-  // Reserve the tab while still in the click event; opening only after the fetch would be pop-up blocked.
-  const opened = (deps.openImpl ?? window.open.bind(window))('', '_blank');
-  if (!opened) return false;
-  opened.opener = null;
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  let response: Response | null;
   try {
-    response = await fetchImpl('/grant/den-configure', {
-      method: 'POST',
-      headers: { 'x-den-grant': `${gid}:${secret}` },
-      cache: 'no-store',
+    (deps.submitImpl ?? submitNative)({
+      action: '/grant/den-configure',
+      target: '_blank',
+      fields: { grant: `${gid}:${secret}` },
     });
+    return true;
   } catch {
-    response = null;
-  }
-  if (!response?.ok) {
-    opened.close();
     return false;
   }
-  try {
-    opened.location.replace(`/den/~${gid}/configure`);
-  } catch {
-    opened.close();
-    return false;
-  }
-  return true;
 }
 
-/** Open the owner's real Hearth setup page after establishing its narrow HttpOnly member session. */
-export async function openOwnerConfigure(
+/** Open the owner's real Hearth setup page through the same browser-native new-tab POST. */
+export function openOwnerConfigure(
   configureURL: string,
   deps: {
-    fetchImpl?: typeof fetch;
-    openImpl?: (url: string, target: string) => Window | null;
+    claimImpl?: () => string | null;
+    submitImpl?: (submission: ConfigureSubmission) => void;
   } = {},
-): Promise<boolean> {
+): boolean {
   let destination: URL;
   try {
     destination = new URL(
@@ -82,27 +93,16 @@ export async function openOwnerConfigure(
     return false;
   }
   if (!/^\/den\/configure\/?$/.test(destination.pathname)) return false;
-  const opened = (deps.openImpl ?? window.open.bind(window))('', '_blank');
-  if (!opened) return false;
-  opened.opener = null;
-  let response: Response | null;
+  const claim = (deps.claimImpl ?? libraryConfigureClaim)();
+  if (!claim) return false;
   try {
-    response = await (deps.fetchImpl ?? relayFetch)('/grant/den-configure', {
-      method: 'POST',
-      cache: 'no-store',
+    (deps.submitImpl ?? submitNative)({
+      action: '/grant/den-configure',
+      target: '_blank',
+      fields: { member: claim },
     });
+    return true;
   } catch {
-    response = null;
-  }
-  if (!response?.ok) {
-    opened.close();
     return false;
   }
-  try {
-    opened.location.replace(configureURL);
-  } catch {
-    opened.close();
-    return false;
-  }
-  return true;
 }
