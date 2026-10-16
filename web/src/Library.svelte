@@ -1131,6 +1131,8 @@
       return title ? [{ title, weight, updatedAt: at }] : [];
     });
   });
+  /** One ranking shared by Kid shelves and their billboard, recomputed only when its rows or taste change. */
+  const rankedKidHome = $derived(rankHomeRows(kidHome, homeTaste));
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(contentPages(session.content));
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -1202,7 +1204,7 @@
     }
     // Kid Home is its own catalogue. Continue Watching and Watchlist are drawn separately below; the adult TMDB
     // spine, service-arrival rows and personal recommendation recipes must never fill in behind this list.
-    if (session.kid) return rankHomeRows(kidHome, homeTaste);
+    if (session.kid) return rankedKidHome;
     // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
     //
     // What has just landed on this household's services does not get a row of its own here: it leads New
@@ -1423,7 +1425,7 @@
     const named = shelvesReady;
     if (session.kid) {
       const ready = kidHomeReady;
-      const available = rankHomeRows(kidHome, homeTaste).length;
+      const available = rankedKidHome.length;
       if (here && ready && available) untrack(buildKidBillboard);
       return;
     }
@@ -1449,7 +1451,7 @@
   function buildKidBillboard() {
     const run = ++billboardRun;
     stagedFeatured = null;
-    const rows = rankHomeRows(kidHome, homeTaste).slice(0, 4);
+    const rows = rankedKidHome.slice(0, 4);
     void Promise.all(rows.map((row) => row.load(1).catch(() => [])))
       .then(async (pages) => {
         if (run !== billboardRun) return;
