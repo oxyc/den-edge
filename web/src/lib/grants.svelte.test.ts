@@ -73,7 +73,7 @@ test('redeeming keeps the grant in browser storage, and only there', async () =>
   expect(new Headers(spy.mock.calls[0]![1]?.headers).get('x-den-grant')).toBe(`${GID}:${secret}`);
 });
 
-test('a guest personal Hearth replaces the host’s legacy media addons but keeps shared Atlas', () => {
+test('a guest Hearth exposes one media facade plus shared Atlas, without legacy duplicates', () => {
   kept.set(
     KEY,
     JSON.stringify([
@@ -88,6 +88,7 @@ test('a guest personal Hearth replaces the host’s legacy media addons but keep
           atlas: `/atlas/~${GID}`,
           den: `/den/~${GID}`,
         },
+        overrides: ['den'],
         expiresAt: null,
         ended: false,
       },
@@ -97,6 +98,77 @@ test('a guest personal Hearth replaces the host’s legacy media addons but keep
     `https://den.example/atlas/~${GID}/manifest.json`,
     `https://den.example/den/~${GID}/manifest.json`,
   ]);
+});
+
+test('using shared settings clears only the personal override and keeps Atlas plus stable Hearth', async () => {
+  kept.set(
+    KEY,
+    JSON.stringify([
+      {
+        gid: GID,
+        name: 'Sam',
+        secret: 'guest-secret',
+        addons: {
+          scout: `/scout/~${GID}`,
+          subtitles: `/subtitles/~${GID}`,
+          atlas: `/atlas/~${GID}`,
+          den: `/den/~${GID}`,
+        },
+        overrides: ['den'],
+        expiresAt: null,
+        ended: false,
+      },
+    ]),
+  );
+  const grants = new GuestGrants();
+  const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(true);
+  expect(fetchImpl).toHaveBeenCalledWith('/grant/den-install', {
+    method: 'DELETE',
+    headers: { 'x-den-grant': `${GID}:guest-secret` },
+    cache: 'no-store',
+  });
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
+  expect(grants.list[0]?.overrides).toEqual([]);
+  expect(grants.pluginUrls()).toEqual([
+    `https://den.example/atlas/~${GID}/manifest.json`,
+    `https://den.example/den/~${GID}/manifest.json`,
+  ]);
+});
+
+test('shared-settings reset needs a personal marker and media fallback, and keeps state on failure', async () => {
+  kept.set(
+    KEY,
+    JSON.stringify([
+      {
+        gid: GID,
+        name: 'Sam',
+        secret: 'guest-secret',
+        addons: { atlas: `/atlas/~${GID}`, den: `/den/~${GID}` },
+        overrides: ['den'],
+        expiresAt: null,
+        ended: false,
+      },
+    ]),
+  );
+  const grants = new GuestGrants();
+  const fetchImpl = vi.fn<typeof fetch>();
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(false);
+  expect(fetchImpl).not.toHaveBeenCalled();
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
+  expect(grants.list[0]?.overrides).toEqual(['den']);
+
+  grants.list[0]!.addons.scout = `/scout/~${GID}`;
+  fetchImpl.mockResolvedValue(new Response(null, { status: 503 }));
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(false);
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
+  expect(grants.list[0]?.overrides).toEqual(['den']);
+
+  fetchImpl.mockClear();
+  grants.list[0]!.overrides = [];
+  await expect(grants.useSharedSettings(GID, fetchImpl)).resolves.toBe(false);
+  expect(fetchImpl).not.toHaveBeenCalled();
+  expect(grants.list[0]?.addons.den).toBe(`/den/~${GID}`);
 });
 
 test('a retry after a lost answer redeems with the same secret', async () => {
@@ -201,7 +273,7 @@ test('a grant den-edge says has expired is kept, said so, and no longer asked wi
     }),
   );
   expect(grants.list[0]!.ended).toBe(true);
-  expect(grants.endedText()).toBe('Your access to Sam ended');
+  expect(grants.endedText()).toBe('Your shared access ended');
   expect(grants.pluginUrls()).toEqual([]);
   const spy = vi.fn(async () => new Response('{}'));
   vi.stubGlobal('fetch', spy);
@@ -248,7 +320,7 @@ test('a grant den-edge no longer knows ended for good: its secret is dropped and
     edge({ 'GET /grant/addons': () => new Response('{"error":"not_found"}', { status: 404 }) }),
   );
   expect(grants.list[0]).toMatchObject({ ended: true, secret: '' });
-  expect(grants.endedText()).toBe('Your access to Sam ended');
+  expect(grants.endedText()).toBe('Your shared access ended');
   const again = vi.fn();
   await grants.refresh(again);
   expect(again).not.toHaveBeenCalled();

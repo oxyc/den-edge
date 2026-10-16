@@ -319,9 +319,23 @@ export async function migrateLegacyMedia(
 }
 
 /** Which of Den's addons the plugin at `url` is, by the routes table's entries; null for anyone else's. */
-export function denAddonOf(url: string, routes: Routes): { label: string; role: string } | null {
+export function denAddonOf(
+  url: string,
+  routes: Routes,
+): { name: string; label: string; role: string } | null {
   const install = url.endsWith(MANIFEST) ? url.slice(0, -MANIFEST.length) : url;
   return DEN_ADDONS.find((addon) => within(install, routes[addon.name]) !== null) ?? null;
+}
+
+/**
+ * Hearth's configure page for an installed first-party route. The address comes only from signed-in route metadata,
+ * never by trimming or otherwise trusting an arbitrary plugin URL.
+ */
+export function denConfigureURL(url: string, routes: Routes): string | null {
+  if (!url.endsWith(MANIFEST)) return null;
+  const install = url.slice(0, -MANIFEST.length);
+  const entry = routes.den?.find((candidate) => within(install, [candidate]) !== null);
+  return entry ? `${entry.url.replace(/\/+$/, '')}/configure` : null;
 }
 
 /**

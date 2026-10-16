@@ -387,13 +387,13 @@
       return;
     }
     pasted = '';
-    redeemNote = { text: `You can now use ${result.name}’s addons.`, bad: false };
+    redeemNote = { text: 'Your shared addons are ready.', bad: false };
   }
 
   const held = $derived(guestGrants.list);
   const accessLine = (grant: (typeof held)[number]) =>
     grant.ended
-      ? `Your access to ${grant.name} ended`
+      ? 'Your shared access ended'
       : grant.expiresAt === null
         ? 'No end date'
         : `Access ends in ${timeLeft(grant.expiresAt)}`;
@@ -653,7 +653,7 @@
         {#each held as grant (grant.gid)}
           <li class="line">
             <span class="label"
-              >Shared by {grant.name}<small>{accessLine(grant)}</small><small
+              >Shared addons<small>{accessLine(grant)}</small><small
                 >{Object.keys(grant.addons)
                   .map((addon) => NAMES[addon as GrantAddon].label)
                   .join(', ')}</small
@@ -661,8 +661,8 @@
             >
             <Confirm
               label="Leave"
-              ariaLabel="Leave {grant.name}’s invite"
-              question="Leave {grant.name}’s invite?"
+              ariaLabel="Leave this shared access"
+              question="Leave this shared access?"
               detail="You stop using their addons on this browser. They can invite you again."
               onconfirm={() => void guestGrants.leave(grant.gid)}
             />

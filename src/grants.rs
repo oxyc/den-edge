@@ -9,6 +9,7 @@
 //!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
+//!   POST   /grant/den-configure      (x-den-grant) → 204 + a short-lived, HttpOnly setup cookie
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
 //!   POST   /grant/library            (x-den-grant) { id, tokenHash } reserves the one library this grant may start → 204
 //!   POST   /grant/device-ticket      (x-den-grant) → { ticket, expiresAt }: one more device may join, once, soon
@@ -58,6 +59,8 @@ use std::time::Duration;
 
 /// The guest's credential, `<gid>:<secret>`. Same origin only, never in a URL.
 pub const HEADER: &str = "x-den-grant";
+const CONFIGURE_COOKIE: &str = "den_guest_configure";
+const CONFIGURE_COOKIE_MAX_AGE: u64 = 15 * 60;
 /// The addons a grant may hand out: the ones the relay table names and the web app browses with.
 pub const ADDONS: [&str; 4] = ["scout", "atlas", "reel", "subtitles"];
 
@@ -529,8 +532,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match (path.as_str(), req.method().clone()) {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
         ("/grant/addons", Method::GET | Method::HEAD) => addons(state, req).await,
+        ("/grant/den-configure", Method::POST) if state.den_playback_enabled => {
+            den_configure(state, req).await
+        }
         ("/grant/den-install", Method::PUT | Method::DELETE) if state.den_playback_enabled => {
-            den_install(state, req).await
+            let claim = header_of(&req);
+            den_install(state, req, claim).await
         }
         ("/grant/usage", Method::POST) => usage_report(state, req).await,
         ("/grant/library", Method::POST) => reserve_library(state, req).await,
@@ -546,6 +553,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             | "/grant/library"
             | "/grant/device-ticket"
             | "/grant/device"
+            | "/grant/den-configure"
             | "/grant/den-install",
             _,
         ) => method_not_allowed(),
@@ -1000,6 +1008,49 @@ fn header_of(req: &Request) -> Option<String> {
     req.headers().get(HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
 }
 
+/// The setup cookie carries the same per-device claim the browser already owns, but keeps it HttpOnly and
+/// short-lived while Hearth's real configure document runs. Its path is one stable guest Hearth URL, and it is
+/// deliberately honoured only by that URL's setup routes; it never turns ambient cookies into general guest auth.
+pub(crate) fn configure_claim(req: &Request) -> Option<String> {
+    if let Some(claim) = header_of(req) {
+        return Some(claim);
+    }
+    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|cookie| {
+        let (name, value) = cookie.trim().split_once('=')?;
+        if name != CONFIGURE_COOKIE {
+            return None;
+        }
+        let (gid, secret) = value.split_once('.')?;
+        Some(format!("{gid}:{secret}"))
+    })
+}
+
+/// Establish a narrowly used browser setup session. Navigations cannot attach `x-den-grant`, so the Web UI first
+/// proves the grant with fetch and then opens Hearth's ordinary, real document. This avoids putting the credential
+/// in a URL and avoids executing fetched addon HTML from a CSP-incompatible blob document.
+async fn den_configure(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(limited) = gate(state, &ip, "grant-den-configure", ADDONS_PER_WINDOW) {
+        return limited;
+    }
+    let claim = header_of(&req);
+    let live = match authenticate(state, claim.as_deref(), None).await {
+        Ok(live) => live,
+        Err(Denied::Expired(at)) => return expired_reply(at),
+        Err(Denied::NotFound) => return not_found(),
+    };
+    let Some((_, secret)) = claim.as_deref().and_then(parse_header) else { return not_found() };
+    let cookie = format!(
+        "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
+        live.gid, secret, live.gid
+    );
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else { return not_found() };
+    let mut response = no_content();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response
+}
+
 async fn redeem(state: &AppState, req: Request) -> Response {
     // Counted before anything is read: the point is to not do work for a flood, and every attempt counts.
     let ip = crate::handler::client_ip(state, &req);
@@ -1054,9 +1105,21 @@ async fn redeem(state: &AppState, req: Request) -> Response {
             return internal("grant write", e);
         }
     }
+    let mut addons = record.addons.clone();
+    let inherited_hearth =
+        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
+    if state.den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+        addons.push("den".into());
+    }
     json_reply(
         StatusCode::OK,
-        &json!({ "gid": record.gid, "name": record.name, "addons": record.addons, "expiresAt": end(&record) }),
+        &json!({
+            "gid": record.gid,
+            "name": record.name,
+            "addons": addons,
+            "expiresAt": end(&record),
+            "overrides": if record.den_install.is_some() { vec!["den"] } else { vec![] },
+        }),
     )
 }
 
@@ -1069,12 +1132,24 @@ async fn addons(state: &AppState, req: Request) -> Response {
         Ok(live) => {
             let mut addons: Map<String, Value> =
                 live.addons.iter().map(|a| (a.clone(), json!(format!("/{a}/~{}", live.gid)))).collect();
-            if live.den_install.is_some() && state.den_playback_enabled {
+            // A guest's stable Hearth URL is an overlay, not merely the guest's optional personal config. An
+            // existing grant that already escrows the host's Scout install can therefore use Hearth immediately:
+            // host playback stays behind Remux, while a personal config may later add direct playback or override
+            // subtitles without changing this URL or redeeming another invite.
+            let hearth =
+                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
+            if state.den_playback_enabled && (hearth || live.den_install.is_some()) {
                 addons.insert("den".into(), json!(format!("/den/~{}", live.gid)));
             }
             json_reply(
                 StatusCode::OK,
-                &json!({ "gid": live.gid, "name": live.name, "expiresAt": live.expires_at, "addons": addons }),
+                &json!({
+                    "gid": live.gid,
+                    "name": live.name,
+                    "expiresAt": live.expires_at,
+                    "addons": addons,
+                    "overrides": if live.den_install.is_some() { vec!["den"] } else { vec![] },
+                }),
             )
         }
         Err(Denied::Expired(at)) => expired_reply(at),
@@ -1084,12 +1159,12 @@ async fn addons(state: &AppState, req: Request) -> Response {
 
 /// Replace or remove the live guest's own opaque combined-Den config. Edge can validate that it is one safe path
 /// segment, but never opens it: Hearth alone holds the sealing key and sees the plaintext credentials.
-async fn den_install(state: &AppState, req: Request) -> Response {
+pub(crate) async fn den_install(state: &AppState, req: Request, claim: Option<String>) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, &ip, "grant-den-install", ADDONS_PER_WINDOW) {
         return limited;
     }
-    let gid = match authenticate(state, header_of(&req).as_deref(), None).await {
+    let gid = match authenticate(state, claim.as_deref(), None).await {
         Ok(live) => live.gid,
         Err(Denied::Expired(at)) => return expired_reply(at),
         Err(Denied::NotFound) => return not_found(),
@@ -1216,10 +1291,22 @@ async fn reserve_library(state: &AppState, req: Request) -> Response {
 }
 
 /// The device a ticket spends is a new one: this answer carries no secret, only what a redeem would say.
-fn redeemed_reply(record: &Record) -> Response {
+fn redeemed_reply(record: &Record, den_playback_enabled: bool) -> Response {
+    let mut addons = record.addons.clone();
+    let inherited_hearth =
+        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
+    if den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+        addons.push("den".into());
+    }
     json_reply(
         StatusCode::OK,
-        &json!({ "gid": record.gid, "name": record.name, "addons": record.addons, "expiresAt": end(record) }),
+        &json!({
+            "gid": record.gid,
+            "name": record.name,
+            "addons": addons,
+            "expiresAt": end(record),
+            "overrides": if record.den_install.is_some() { vec!["den"] } else { vec![] },
+        }),
     )
 }
 
@@ -1299,7 +1386,7 @@ async fn redeem_ticket(state: &AppState, req: Request) -> Response {
         }
     }
     crate::lock(&state.grants.tickets).remove(&key);
-    redeemed_reply(&record)
+    redeemed_reply(&record, state.den_playback_enabled)
 }
 
 /// The guest leaves. The simplest honest meaning of it: the grant is revoked, which drops the device's secret
@@ -1640,6 +1727,7 @@ mod tests {
     const ATLAS: &str = "YXRsYXMtY29uZmln";
     const SUBS: &str = "c3Vicy1jb25maWctc2VnbWVudA";
     const REEL: &str = "cmVlbC1jb25maWctc2VnbWVudA";
+    const PERSONAL_HEARTH: &str = "Z3Vlc3QtaGVhcnRoLWNvbmZpZw";
     const SECRET: &str = "the-guests-device-secret-of-43-chars-000000";
     const SECRET2: &str = "a-second-device-secret-of-43-chars-0000000";
 
@@ -1713,10 +1801,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_keeps_replaces_and_removes_only_their_own_den_install() {
+    async fn an_existing_guest_keeps_the_same_hearth_url_while_replacing_or_removing_their_override() {
         let mut h = harness().await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
-        let (gid, credential) = redeemed(&h, json!({})).await;
+        let (gid, code) = invited(&h, json!({})).await;
+        let (status, redeemed) = redeem_with(&h, &code, SECRET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(redeemed["addons"], json!(["scout", "atlas", "den"]));
+        assert_eq!(redeemed["overrides"], json!([]));
+        let credential = format!("{gid}:{SECRET}");
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!([]));
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+
         assert_eq!(
             h.send(
                 "PUT",
@@ -1730,6 +1828,7 @@ mod tests {
         );
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!(["den"]));
         assert_eq!(load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(), Some(SCOUT));
 
         assert_eq!(
@@ -1750,7 +1849,8 @@ mod tests {
         );
         assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
-        assert!(listed["addons"].get("den").is_none());
+        assert_eq!(listed["addons"]["den"], format!("/den/~{gid}"));
+        assert_eq!(listed["overrides"], json!([]));
     }
 
     #[tokio::test]
@@ -2119,7 +2219,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             got,
-            json!({ "gid": gid, "name": "Sam", "addons": ["scout", "atlas"], "expiresAt": 1_001_000 + 7 * DAY_MS })
+            json!({
+                "gid": gid,
+                "name": "Sam",
+                "addons": ["scout", "atlas"],
+                "overrides": [],
+                "expiresAt": 1_001_000 + 7 * DAY_MS,
+            })
         );
 
         // A lost answer is retried with the same hash, and nothing moves.
@@ -2208,7 +2314,8 @@ mod tests {
         assert_eq!(
             got,
             json!({ "gid": gid, "name": "Sam", "expiresAt": 1_000_000 + 3 * DAY_MS,
-                    "addons": { "scout": format!("/scout/~{gid}"), "atlas": format!("/atlas/~{gid}") } })
+                    "addons": { "scout": format!("/scout/~{gid}"), "atlas": format!("/atlas/~{gid}") },
+                    "overrides": [] })
         );
 
         let wrong = format!("{gid}:not-the-secret");
@@ -2531,9 +2638,8 @@ mod tests {
             StatusCode::OK,
             "text/html; charset=utf-8",
             format!(
-                "<!doctype html><script>\n{}\nfunction build() {{\n{}\n}}</script>",
-                crate::relay::DEN_CONFIGURE_BASE,
-                crate::relay::DEN_CONFIGURE_BUILD
+                "<!doctype html><script>const DEN_GUEST_CONTEXT = {};</script>",
+                crate::relay::DEN_GUEST_CONTEXT_MARKER
             ),
         )
     }
@@ -2555,17 +2661,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_den_path_uses_only_the_personal_install_and_gets_trusted_playback_identity() {
+    async fn a_guest_den_path_sends_a_closed_personal_over_host_overlay_to_hearth() {
         let (mut h, seen) = relaying(direct_playback, Some("edge-secret")).await;
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.den_playback_enabled = true;
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
-        let (gid, credential) = redeemed(&h, json!({})).await;
+        let (gid, credential) = redeemed(
+            &h,
+            json!({
+                "addons": ["scout", "subtitles", "reel"],
+                "installs": { "scout": SCOUT, "subtitles": SUBS, "reel": REEL },
+            }),
+        )
+        .await;
+        let inherited = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/stream/movie/tt0.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(inherited.status(), StatusCode::OK);
+        {
+            let seen = seen.lock().unwrap();
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert!(envelope.get("personal").is_none());
+            assert_eq!(envelope["host"]["scout"], SCOUT);
+            assert_eq!(envelope["request"]["path"], "/stream/movie/tt0.json");
+        }
         assert_eq!(
             h.send(
                 "PUT",
                 "/grant/den-install",
-                Some(json!({ "install": SCOUT }).to_string()),
+                Some(json!({ "install": PERSONAL_HEARTH }).to_string()),
                 &[(HEADER, credential.as_str()), ("content-type", "application/json")],
             )
             .await
@@ -2584,9 +2716,18 @@ mod tests {
         assert_eq!(stream.status(), StatusCode::OK);
         {
             let seen = seen.lock().unwrap();
-            let (path, headers, _) = seen.last().unwrap();
-            assert_eq!(path, &format!("/den/{SCOUT}/stream/movie/tt1.json"));
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
             assert!(!headers.contains_key(HEADER));
+            assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(envelope["personal"], PERSONAL_HEARTH);
+            assert_eq!(envelope["host"]["scout"], SCOUT);
+            assert_eq!(envelope["host"]["subs"], SUBS);
+            assert_eq!(envelope["host"]["reel"], REEL);
+            assert_eq!(envelope["request"]["method"], "GET");
+            assert_eq!(envelope["request"]["path"], "/stream/movie/tt1.json");
         }
 
         let before = seen.lock().unwrap().len();
@@ -2618,26 +2759,17 @@ mod tests {
         assert_eq!(answer.status(), StatusCode::OK);
         {
             let seen = seen.lock().unwrap();
-            let (path, headers, _) = seen.last().unwrap();
-            assert_eq!(path, &format!("/den/{SCOUT}/playback"));
+            let (path, headers, body) = seen.last().unwrap();
+            assert_eq!(path, "/den/_guest");
             assert_eq!(headers["x-den-edge-secret"], "edge-secret");
             assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
             assert_eq!(headers["x-den-managed-playback"], "1");
             assert_eq!(headers["idempotency-key"], "guest-attempt");
+            let envelope: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(envelope["request"]["method"], "POST");
+            assert_eq!(envelope["request"]["path"], "/playback");
+            assert_eq!(envelope["request"]["body"]["imdb"], "tt1");
         }
-
-        let subtitles = h
-            .send(
-                "GET",
-                &format!("/den/~{gid}/subtitles/movie/tt1/filename=movie.mkv&videoSize=1.json"),
-                None,
-                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
-            )
-            .await;
-        let subtitles = axum::body::to_bytes(subtitles.into_body(), 4096).await.unwrap();
-        let subtitles = std::str::from_utf8(&subtitles).unwrap();
-        assert!(subtitles.contains(&format!("/den/~{gid}/subtitle.vtt")), "{subtitles}");
-        assert!(!subtitles.contains(SCOUT), "{subtitles}");
     }
 
     #[tokio::test]
@@ -2645,22 +2777,48 @@ mod tests {
         let (mut h, seen) = relaying(den_configure, Some("edge-secret")).await;
         Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
         let (gid, credential) = redeemed(&h, json!({})).await;
-        let response =
-            h.send("GET", &format!("/den/~{gid}/configure"), None, &[(HEADER, credential.as_str())]).await;
+        let bootstrap = h.send("POST", "/grant/den-configure", None, &[(HEADER, credential.as_str())]).await;
+        assert_eq!(bootstrap.status(), StatusCode::NO_CONTENT);
+        let set_cookie = bootstrap.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.contains(&format!("Path=/den/~{gid}")), "{set_cookie}");
+        for attribute in ["HttpOnly", "Secure", "SameSite=Strict", "Max-Age=900"] {
+            assert!(set_cookie.contains(attribute), "{set_cookie}");
+        }
+        let cookie = set_cookie.split(';').next().unwrap();
+        let response = h.send("GET", &format!("/den/~{gid}/configure"), None, &[("cookie", cookie)]).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert!(!response.headers().contains_key(header::ETAG));
         let page = axum::body::to_bytes(response.into_body(), 256 * 1024).await.unwrap();
         let page = std::str::from_utf8(&page).unwrap();
-        assert!(page.contains("fetch(\"/grant/den-install\""), "{page}");
-        assert!(page.contains(&format!("\"x-den-grant\": \"{credential}\"")), "{page}");
-        assert!(page.contains("options.headers.set(\"x-den-grant\", DEN_GUEST_GRANT)"), "{page}");
-        assert!(page.contains(&format!("var BASE = \"/den/~{gid}\";")), "{page}");
-        assert!(page.contains("location.origin + BASE + \"/manifest.json\""), "{page}");
-        assert!(!page.contains("BASE + \"/\" + toSegment(install)"), "{page}");
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.last().unwrap().0, "/den/configure");
-        assert!(!seen.last().unwrap().1.contains_key(HEADER));
+        assert!(page.contains(&format!(r#""base":"/den/~{gid}""#)), "{page}");
+        assert!(page.contains(&format!(r#""saveUrl":"/den/~{gid}/config""#)), "{page}");
+        assert!(page.contains(r#""v":2"#), "{page}");
+        assert!(!page.contains(&credential), "the page exposed its grant claim: {page}");
+        assert!(!page.contains(crate::relay::DEN_GUEST_CONTEXT_MARKER), "{page}");
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.last().unwrap().0, "/den/configure");
+            for private in [HEADER, "cookie"] {
+                assert!(!seen.last().unwrap().1.contains_key(private));
+            }
+        }
+
+        let saved = h
+            .send(
+                "PUT",
+                &format!("/den/~{gid}/config"),
+                Some(json!({ "install": PERSONAL_HEARTH }).to_string()),
+                &[("cookie", cookie), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            h.send("GET", &format!("/den/~{gid}/config"), None, &[("cookie", cookie)]).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
+        assert_eq!(listed["overrides"], json!(["den"]));
     }
 
     #[tokio::test]

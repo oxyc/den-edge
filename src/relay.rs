@@ -275,6 +275,70 @@ async fn discard_failed_playback_session(state: &AppState, body: &[u8], rid: &st
     let _ = tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await;
 }
 
+/// Tell Hearth whether a provisional managed Remux answer became externally reachable. Hearth owns replay state;
+/// Edge owns the public listener, so this small authenticated callback is the only fact the two layers must share.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaybackFinalization {
+    Accepted,
+    Rejected,
+    Ambiguous,
+}
+
+type PlaybackFinalizer = (String, Bytes, Option<String>, axum::http::HeaderValue);
+
+async fn finalize_playback(
+    state: &AppState,
+    target: &str,
+    body: Bytes,
+    rid: &str,
+    owner: Option<&str>,
+    key: axum::http::HeaderValue,
+    outcome: &'static str,
+) -> PlaybackFinalization {
+    let Some(secret) = state.remux_edge_secret.as_deref() else { return PlaybackFinalization::Rejected };
+    let mut request = axum::http::Request::builder()
+        .method(Method::POST)
+        .uri(target)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header("x-request-id", rid)
+        .header("x-den-edge-secret", secret)
+        .header("x-den-managed-playback", "1")
+        .header("x-den-playback-finalization", "1")
+        .header("x-den-playback-finalize", outcome)
+        .header("idempotency-key", key);
+    if let Some(owner) = owner {
+        request = request.header("x-den-owner", owner);
+    }
+    let Ok(request) = request.body(Full::new(body)) else { return PlaybackFinalization::Rejected };
+    match tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await {
+        Ok(Ok(response)) if response.status() == StatusCode::NO_CONTENT => PlaybackFinalization::Accepted,
+        Ok(Ok(_)) => PlaybackFinalization::Rejected,
+        Ok(Err(_)) | Err(_) => PlaybackFinalization::Ambiguous,
+    }
+}
+
+async fn abort_playback(
+    state: &AppState,
+    finalizer: Option<PlaybackFinalizer>,
+    session: &[u8],
+    rid: &str,
+    owner: Option<&str>,
+) -> PlaybackFinalization {
+    let outcome = match finalizer {
+        Some((target, request, owner, key)) => {
+            finalize_playback(state, &target, request, rid, owner.as_deref(), key, "abort").await
+        }
+        None => PlaybackFinalization::Accepted,
+    };
+    // A rejected or ambiguous abort may mean this idempotency key was already committed. Deleting that shared
+    // session would poison its valid replay. Legacy playback has no finalizer and retains its prior cleanup path.
+    if outcome == PlaybackFinalization::Accepted {
+        discard_failed_playback_session(state, session, rid, owner).await;
+    }
+    outcome
+}
+
 async fn discard_failed_public_session(state: &AppState, target: &str, body: &[u8], rid: &str) {
     let Some(url) = session_end_url(target, body) else { return };
     let Ok(request) = axum::http::Request::builder()
@@ -483,8 +547,11 @@ struct Guest {
     manifest: bool,
     /// This route uses the guest's own combined-Den config, never one of the host's escrowed installs.
     personal_den: bool,
-    /// The authenticated configure page uses this claim to save the sealed segment behind a stable guest URL.
-    configure_claim: Option<String>,
+    /// This request is the stable guest Hearth overlay. Edge builds its bounded internal envelope exclusively from
+    /// this authenticated grant; the browser can neither name nor replace any host install inside it.
+    overlay: bool,
+    /// This is the authenticated, real Hearth configure document. Its short-lived credential stays HttpOnly.
+    configure: bool,
 }
 
 impl Guest {
@@ -496,14 +563,14 @@ impl Guest {
     /// addon whose answers name the install. Everything else a guest is answered goes through as it came.
     fn rewrites(&self, headers: &axum::http::HeaderMap) -> bool {
         let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
-        self.configure_claim.is_some() && content_type.is_some_and(|t| t.starts_with("text/html"))
-            || self.segment.is_some()
+        self.configure && content_type.is_some_and(|t| t.starts_with("text/html"))
+            || (self.segment.is_some() || self.overlay)
                 && (self.scrub || self.manifest)
                 && content_type.is_some_and(|t| t.contains("json"))
     }
 
     fn collected_limit(&self) -> usize {
-        if self.configure_claim.is_some() {
+        if self.configure {
             256 * 1024
         } else if self.manifest {
             MANIFEST_MAX_BYTES
@@ -522,12 +589,12 @@ impl Guest {
 
     /// An answer as the guest may see it, or `None` when it cannot be made so (an encoding this cannot read).
     fn answer(&self, headers: &axum::http::HeaderMap, body: &Bytes) -> Option<Bytes> {
-        if let Some(claim) = self.configure_claim.as_deref().filter(|_| self.rewrites(headers)) {
-            return guest_configure_page(body, claim, &format!("/den/~{}", self.gid));
+        if self.configure && self.rewrites(headers) {
+            return guest_configure_page(body, &format!("/den/~{}", self.gid));
         }
-        let Some(segment) = self.segment.as_ref().filter(|_| self.rewrites(headers)) else {
+        if !self.rewrites(headers) {
             return Some(body.clone());
-        };
+        }
         if body.is_empty() {
             return Some(body.clone());
         }
@@ -535,7 +602,17 @@ impl Guest {
             return None;
         }
         let text = std::str::from_utf8(body).ok()?;
-        let scrubbed = self.scrub.then(|| text.replace(segment.as_str(), &format!("~{}", self.gid)));
+        let scrubbed = self.scrub.then(|| {
+            let replacement = format!("~{}", self.gid);
+            let mut value = text.to_owned();
+            if let Some(segment) = &self.segment {
+                value = value.replace(segment, &replacement);
+            }
+            for segment in self.installs.values() {
+                value = value.replace(segment, &replacement);
+            }
+            value
+        });
         if !self.manifest {
             return Some(scrubbed.map_or_else(|| body.clone(), Bytes::from));
         }
@@ -545,60 +622,23 @@ impl Guest {
     }
 }
 
-pub(crate) const DEN_CONFIGURE_BUILD: &str = r#"    $("url").value = location.origin + BASE + "/" + toSegment(install) + "/manifest.json";
-    $("installId").textContent = install.iid;
-    $("out").classList.remove("hidden");
-    renderSecurityNote();
-    copyInstallURL();"#;
-pub(crate) const DEN_CONFIGURE_BASE: &str =
-    r#"var BASE = location.pathname.replace(/\/(configure\/?)?$/, "");"#;
+pub(crate) const DEN_GUEST_CONTEXT_MARKER: &str = "/*__DEN_HEARTH_GUEST_CONTEXT_V1__*/ null";
 
-/// Adapt only Hearth's known configure-page seam. Edge stores the opaque segment; Stremio sees only the stable
-/// virtual URL. A changed upstream page fails closed instead of accidentally exposing the segment in its link.
-fn guest_configure_page(body: &Bytes, claim: &str, base: &str) -> Option<Bytes> {
+/// Supply Hearth's explicit guest-configuration bridge. Hearth owns the form, validation, sealing, save flow and
+/// displayed URL; Edge contributes only the stable virtual base and an HttpOnly-authenticated save URL. A missing
+/// or duplicated versioned marker fails closed instead of falling back to Hearth's credential-bearing install URL.
+fn guest_configure_page(body: &Bytes, base: &str) -> Option<Bytes> {
     let page = std::str::from_utf8(body).ok()?;
-    if !page.contains(DEN_CONFIGURE_BASE) || !page.contains(DEN_CONFIGURE_BUILD) {
+    if page.matches(DEN_GUEST_CONTEXT_MARKER).count() != 1 {
         return None;
     }
-    let claim = serde_json::to_string(claim).ok()?;
-    let base = serde_json::to_string(base).ok()?;
-    let bridge = format!(
-        r#"var BASE = {base};
-var DEN_GUEST_GRANT = {claim};
-var denGuestFetch = window.fetch.bind(window);
-window.fetch = function (input, options) {{
-  options = options || {{}};
-  if (typeof input === "string" && (input.indexOf(BASE + "/") === 0 || input === "/grant/den-install")) {{
-    options.headers = new Headers(options.headers || {{}});
-    options.headers.set("x-den-grant", DEN_GUEST_GRANT);
-  }}
-  return denGuestFetch(input, options);
-}};"#
-    );
-    let replacement = format!(
-        r#"    var guestSegment = toSegment(install);
-    $("url").value = "";
-    $("installId").textContent = install.iid;
-    $("out").classList.remove("hidden");
-    renderSecurityNote();
-    fetch("/grant/den-install", {{
-      method: "PUT",
-      cache: "no-store",
-      headers: {{ "content-type": "application/json", "x-den-grant": {claim} }},
-      body: JSON.stringify({{ install: guestSegment }})
-    }})
-      .then(function (r) {{ if (!r.ok) throw new Error("save failed");
-        $("url").value = location.origin + BASE + "/manifest.json";
-        copyInstallURL();
-      }})
-      .catch(function () {{
-        $("url").value = "";
-        $("sealNote").textContent = "Could not save this guest install. Please try again.";
-        $("sealNote").className = "note unsealed";
-      }});"#
-    );
-    let page = page.replacen(DEN_CONFIGURE_BASE, &bridge, 1);
-    Some(Bytes::from(page.replacen(DEN_CONFIGURE_BUILD, &replacement, 1)))
+    let context = serde_json::to_string(&serde_json::json!({
+        "v": 2,
+        "base": base,
+        "saveUrl": format!("{base}/config"),
+    }))
+    .ok()?;
+    Some(Bytes::from(page.replacen(DEN_GUEST_CONTEXT_MARKER, &context, 1)))
 }
 
 /// A guest's call to a grant's addon (`/<addon>/~<gid>/…`) or to the `/remux` control plane with `x-den-grant`,
@@ -631,7 +671,20 @@ pub async fn guest(
         Some(Err(())) => return Ok(not_found()),
         None => None,
     };
-    let claim = req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let configure_route = parsed.as_ref().is_some_and(|parsed| {
+        parsed.as_ref().is_ok_and(|p| {
+            p.addon == "den"
+                && matches!(
+                    p.rest.as_str(),
+                    "/configure" | "/configure/" | "/config-key" | "/validate" | "/config"
+                )
+        })
+    });
+    let claim = if configure_route {
+        crate::grants::configure_claim(&req)
+    } else {
+        req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    };
     let live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
         Ok(live) => live,
         Err(crate::grants::Denied::NotFound) => return Ok(not_found()),
@@ -646,6 +699,15 @@ pub async fn guest(
         crate::link::throttled_per_minute(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
     {
         return Ok(limited(wait));
+    }
+    if parsed
+        .as_ref()
+        .is_some_and(|parsed| parsed.as_ref().is_ok_and(|p| p.addon == "den" && p.rest == "/config"))
+    {
+        if req.method() != Method::PUT {
+            return Ok(json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"));
+        }
+        return Ok(crate::grants::den_install(state, req, claim).await);
     }
     let query = req.uri().query().map(str::to_owned);
     let (target, guest) = match parsed {
@@ -671,7 +733,10 @@ pub async fn guest(
                 let shared = live.addons.iter().any(|a| a == p.addon);
                 live.installs.get(p.addon).filter(|_| shared).cloned()
             };
-            if segment.is_none() && !bare_den {
+            let overlay = personal_den && !bare_den;
+            let host_scout =
+                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
+            if segment.is_none() && !bare_den && !(overlay && host_scout) {
                 return Ok(not_found());
             }
             // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
@@ -682,23 +747,27 @@ pub async fn guest(
             {
                 return Ok(not_found());
             }
-            let real = segment.as_ref().map_or_else(
-                || format!("/{}{}", p.addon, p.rest),
-                |segment| format!("/{}/{segment}{}", p.addon, p.rest),
-            );
-            let real = query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}"));
+            let real = if overlay {
+                "/den/_guest".to_owned()
+            } else {
+                segment.as_ref().map_or_else(
+                    || format!("/{}{}", p.addon, p.rest),
+                    |segment| format!("/{}/{segment}{}", p.addon, p.rest),
+                )
+            };
+            let real =
+                if overlay { real } else { query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}")) };
             let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
-            let configure_claim = (personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/"))
-                .then(|| claim.clone())
-                .flatten();
+            let configure = personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/");
             let guest = Guest {
                 gid: live.gid,
                 scrub: personal_den || p.addon != "atlas",
                 manifest: p.rest == "/manifest.json",
                 segment,
                 personal_den,
-                configure_claim,
-                installs: Default::default(),
+                overlay,
+                configure,
+                installs: live.installs,
             };
             (target, guest)
         }
@@ -725,7 +794,8 @@ pub async fn guest(
                 scrub: false,
                 manifest: false,
                 personal_den: false,
-                configure_claim: None,
+                overlay: false,
+                configure: false,
             };
             (target, guest)
         }
@@ -745,6 +815,53 @@ fn remux_body(relays: &[(String, String)], guest: &Guest, body: &[u8]) -> Option
         *field = serde_json::Value::String(real_install(relays, guest, addon, field.as_str()?)?);
     }
     serde_json::to_vec(&value).ok().map(Bytes::from)
+}
+
+/// The closed Edge -> Hearth guest-overlay envelope. Every credential comes from the authenticated grant record;
+/// the public request contributes only its method, route, query and bounded operation body. Keeping credentials out
+/// of the target URL also keeps them out of ordinary proxy/request logs.
+fn guest_overlay_body(
+    guest: &Guest,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+) -> Option<Bytes> {
+    if !guest.overlay {
+        return None;
+    }
+    let prefix = format!("/den/~{}", guest.gid);
+    let rest = path.strip_prefix(&prefix)?;
+    if rest.is_empty() || !rest.starts_with('/') {
+        return None;
+    }
+
+    let mut host = serde_json::Map::new();
+    for (stored, wire) in [("scout", "scout"), ("subtitles", "subs"), ("reel", "reel")] {
+        if let Some(segment) = guest.installs.get(stored) {
+            host.insert(wire.into(), serde_json::Value::String(segment.clone()));
+        }
+    }
+    let mut request = serde_json::Map::from_iter([
+        ("method".into(), serde_json::Value::String(method.as_str().to_owned())),
+        ("path".into(), serde_json::Value::String(rest.to_owned())),
+    ]);
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        request.insert("query".into(), serde_json::Value::String(query.to_owned()));
+    }
+    if !body.is_empty() {
+        let original: serde_json::Value = serde_json::from_slice(body).ok()?;
+        request.insert("body".into(), original);
+    }
+    let mut envelope = serde_json::Map::from_iter([
+        ("host".into(), serde_json::Value::Object(host)),
+        ("request".into(), serde_json::Value::Object(request)),
+    ]);
+    if let Some(personal) = &guest.segment {
+        envelope.insert("personal".into(), serde_json::Value::String(personal.clone()));
+    }
+    let encoded = serde_json::to_vec(&serde_json::Value::Object(envelope)).ok()?;
+    (encoded.len() <= MIGRATION_BODY_BYTES).then(|| Bytes::from(encoded))
 }
 
 fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: &str) -> Option<String> {
@@ -789,6 +906,7 @@ async fn relay_with(
 ) -> Response {
     let started = tokio::time::Instant::now();
     let method = req.method().clone();
+    let original_query = req.uri().query().map(str::to_owned);
     let playback_path = crate::handler::den_playback_path(req.uri().path());
     let playback = playback_path && method == Method::POST;
     let playback_probe = playback_path && method == Method::OPTIONS;
@@ -970,7 +1088,7 @@ async fn relay_with(
     let guest_playback = face == crate::handler::Face::Web
         && playback
         && grant.as_ref().is_some_and(|guest| guest.personal_den);
-    let guest_configure = grant.as_ref().is_some_and(|guest| guest.configure_claim.is_some());
+    let guest_configure = grant.as_ref().is_some_and(|guest| guest.configure);
     // A grant asked again for an open session opens the listener as a start does, and goes through the same checks.
     let regrant = req.uri().path() == GRANT;
     let public_session = (member_only || guest_remux)
@@ -1104,7 +1222,11 @@ async fn relay_with(
     } else {
         (body, None, false)
     };
-    let cast = public_session
+    // A managed Hearth operation may fall back to Remux. Preserve the caller's Cast intent at this outer boundary:
+    // if the direct TorBox path is unavailable, the listener must be opened for the receiver rather than only the
+    // browser's address. The guest's legacy `/remux/session` path keeps its stricter refusal below; only Hearth's
+    // authenticated, per-operation fallback reaches this branch.
+    let cast = (public_session || public_playback)
         && serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("player").and_then(serde_json::Value::as_str).map(str::to_owned))
@@ -1172,13 +1294,30 @@ async fn relay_with(
     // shared id the two are impossible to put side by side afterwards, which is exactly when you want to.
     // What den-remux is asked: for a grant, whether the named session is live — its signed playlist, which only the
     // session's holder can name, and which counts as the session being used.
-    let (method, target, body) = if regrant {
+    let overlay = grant.as_ref().is_some_and(|guest| guest.overlay);
+    let (method, target, body) = if overlay {
+        let Some(body) = grant
+            .as_ref()
+            .and_then(|guest| guest_overlay_body(guest, &method, &control, original_query.as_deref(), &body))
+        else {
+            return json(StatusCode::BAD_REQUEST, "bad_request");
+        };
+        (Method::POST, target, body)
+    } else if regrant {
         match session_end_url(&target, &body) {
             Some(root) => (Method::HEAD, format!("{root}/master.m3u8"), Bytes::new()),
             None => return json(StatusCode::BAD_REQUEST, "bad_request"),
         }
     } else {
         (method, target, body)
+    };
+    let playback_finalizer = if public_playback {
+        idempotency.clone().map(|key| {
+            let owner = grant.as_ref().map(|guest| format!("grant:{}", guest.gid));
+            (target.clone(), body.clone(), owner, key)
+        })
+    } else {
+        None
     };
     let opened = if regrant { StatusCode::OK } else { StatusCode::CREATED };
     // A public session's successful answer must be collected so the listener can be opened and the JSON amended.
@@ -1213,17 +1352,20 @@ async fn relay_with(
         .uri(&target)
         .header(header::ACCEPT, if guest_configure { "text/html" } else { "application/json" })
         .header("x-request-id", rid);
-    if let Some(content_type) = content_type.filter(|_| !playback_probe) {
+    if overlay {
+        out = out.header(header::CONTENT_TYPE, "application/json");
+    } else if let Some(content_type) = content_type.filter(|_| !playback_probe) {
         out = out.header(header::CONTENT_TYPE, content_type);
     }
     if identity {
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
-    if let Some(secret) = state
-        .remux_edge_secret
-        .as_deref()
-        .filter(|_| playback || playback_probe || migration || grant.as_ref().is_some_and(Guest::remux))
-    {
+    if let Some(secret) = state.remux_edge_secret.as_deref().filter(|_| {
+        playback
+            || playback_probe
+            || migration
+            || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
+    }) {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
             // Hearth uses the same owner for idempotency and for a Remux fallback; never accept this value from Web.
@@ -1236,7 +1378,7 @@ async fn relay_with(
         out = out.header("x-den-migration-owner", "1");
     }
     if public_playback {
-        out = out.header("x-den-managed-playback", "1");
+        out = out.header("x-den-managed-playback", "1").header("x-den-playback-finalization", "1");
     }
     if let Some(key) = idempotency {
         out = out.header("idempotency-key", key);
@@ -1358,7 +1500,18 @@ async fn relay_with(
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
     {
         let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
-        discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
+        if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref()).await
+            != PlaybackFinalization::Accepted
+        {
+            log_relay_error(
+                "error",
+                "playback_abort_failed",
+                &upstream,
+                StatusCode::BAD_GATEWAY,
+                started,
+                rid,
+            );
+        }
         return json(StatusCode::BAD_GATEWAY, "source_unavailable");
     }
     if (public_session && parts.status == opened) || playback_session {
@@ -1368,6 +1521,61 @@ async fn relay_with(
             let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, address) };
             scope = Some(ListenerScope(asked));
             if open_public_listener(socket, hinted.unwrap_or(address), cast).await {
+                if playback_session {
+                    let committed = match playback_finalizer.clone() {
+                        Some((target, request, owner, key)) => {
+                            finalize_playback(state, &target, request, rid, owner.as_deref(), key, "commit")
+                                .await
+                        }
+                        None => PlaybackFinalization::Rejected,
+                    };
+                    if committed == PlaybackFinalization::Ambiguous {
+                        log_relay_error(
+                            "error",
+                            "playback_commit_unknown",
+                            &upstream,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            started,
+                            rid,
+                        );
+                        // The commit may already have landed. Ending the session here could turn a committed replay
+                        // into a dead URL; leave the live session and terminal decision intact for the same-key retry.
+                        return crate::handler::retry_after(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            &error("playback_pending"),
+                            1_000,
+                        );
+                    }
+                    if committed == PlaybackFinalization::Rejected {
+                        log_relay_error(
+                            "error",
+                            "playback_commit_failed",
+                            &upstream,
+                            StatusCode::BAD_GATEWAY,
+                            started,
+                            rid,
+                        );
+                        let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
+                        if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref())
+                            .await
+                            != PlaybackFinalization::Accepted
+                        {
+                            log_relay_error(
+                                "error",
+                                "playback_abort_failed",
+                                &upstream,
+                                StatusCode::BAD_GATEWAY,
+                                started,
+                                rid,
+                            );
+                        }
+                        return crate::handler::retry_after(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            &error("source_unavailable"),
+                            1_000,
+                        );
+                    }
+                }
                 let who = if guest_remux || guest_playback { "guest" } else { "member" };
                 if hinted.is_some() {
                     state.metrics.record_public_media_hinted(who);
@@ -1418,7 +1626,18 @@ async fn relay_with(
                 // A session that plays on is never ended for this: only one this call just made.
                 if playback_session {
                     let owner = grant.as_ref().map(|g| format!("grant:{}", g.gid));
-                    discard_failed_playback_session(state, &bytes, rid, owner.as_deref()).await;
+                    if abort_playback(state, playback_finalizer.clone(), &bytes, rid, owner.as_deref()).await
+                        != PlaybackFinalization::Accepted
+                    {
+                        log_relay_error(
+                            "error",
+                            "playback_abort_failed",
+                            &upstream,
+                            StatusCode::BAD_GATEWAY,
+                            started,
+                            rid,
+                        );
+                    }
                 } else if !regrant {
                     discard_failed_public_session(state, &target, &bytes, rid).await;
                 }
@@ -3297,6 +3516,7 @@ mod tests {
         let (headers, _) = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert_eq!(headers["x-den-managed-playback"], "1");
+        assert_eq!(headers["x-den-playback-finalization"], "1");
         assert_eq!(headers["idempotency-key"], "attempt-1");
         assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
@@ -3375,6 +3595,7 @@ mod tests {
         let headers = received.recv().await.unwrap();
         assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
         assert!(!headers.contains_key("x-den-managed-playback"));
+        assert!(!headers.contains_key("x-den-playback-finalization"));
         assert!(!headers.contains_key("x-den-public-session"));
     }
 
@@ -3429,6 +3650,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_remux_playback_without_a_public_listener_is_refused_and_cleaned_up() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let sid = "A".repeat(22);
         let sig = "b".repeat(22);
         let playlist = format!("/remux/s/{sid}/{sig}/master.m3u8");
@@ -3436,21 +3659,36 @@ mod tests {
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let accept_abort = Arc::new(AtomicBool::new(true));
         let answer = playlist.clone();
-        let app = axum::Router::new().fallback(move |req: Request| {
+        let app = axum::Router::new().fallback({
+            let accept_abort = Arc::clone(&accept_abort);
+            move |req: Request| {
             let sent = sent.clone();
             let answer = answer.clone();
+            let accept_abort = Arc::clone(&accept_abort);
             async move {
-                sent.send((req.method().clone(), req.uri().path().to_owned())).unwrap();
+                let finalize = req
+                    .headers()
+                    .get("x-den-playback-finalize")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                sent.send((req.method().clone(), req.uri().path().to_owned(), finalize.clone())).unwrap();
                 if req.method() == Method::DELETE {
                     return Response::new(Body::empty());
+                }
+                assert_eq!(req.headers()["x-den-playback-finalization"], "1");
+                if finalize.is_some() {
+                    let status =
+                        if accept_abort.load(Ordering::Relaxed) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT };
+                    return Response::builder().status(status).body(Body::empty()).unwrap();
                 }
                 crate::handler::json_reply(
                     StatusCode::OK,
                     &json!({ "url": answer, "session": { "endUrl": answer.trim_end_matches("/master.m3u8") } }),
                 )
             }
-        });
+        }});
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
 
         let mut h = Harness::new();
@@ -3471,12 +3709,113 @@ mod tests {
                     ("host", "d.oxy.fi"),
                     ("content-type", "application/json"),
                     ("x-den-library-member", &claim),
+                    ("idempotency-key", "attempt-no-listener"),
                 ],
             )
             .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into()));
-        assert_eq!(received.recv().await.unwrap(), (Method::DELETE, end));
+        assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into(), None));
+        assert_eq!(
+            received.recv().await.unwrap(),
+            (Method::POST, "/den/config/playback".into(), Some("abort".into()))
+        );
+        assert_eq!(received.recv().await.unwrap(), (Method::DELETE, end.clone(), None));
+
+        accept_abort.store(false, Ordering::Relaxed);
+        let response = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some("{}".into()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                    ("idempotency-key", "attempt-already-committed"),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(received.recv().await.unwrap(), (Method::POST, "/den/config/playback".into(), None));
+        assert_eq!(
+            received.recv().await.unwrap(),
+            (Method::POST, "/den/config/playback".into(), Some("abort".into()))
+        );
+        assert!(received.try_recv().is_err(), "a rejected abort must preserve the committed session");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_remux_replay_is_committed_only_after_the_listener_opens() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let playlist = "/remux/s/AAAAAAAAAAAAAAAAAAAAAA/bbbbbbbbbbbbbbbbbbbbbb/master.m3u8";
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            async move {
+                assert_eq!(req.headers()["x-den-playback-finalization"], "1");
+                let finalize = req
+                    .headers()
+                    .get("x-den-playback-finalize")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                sent.send(finalize.clone()).unwrap();
+                if finalize.is_some() {
+                    return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
+                }
+                crate::handler::json_reply(
+                    StatusCode::OK,
+                    &json!({ "url": playlist, "session": { "endUrl": playlist.trim_end_matches("/master.m3u8") } }),
+                )
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let socket = h.dir.join("managed-listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (opened, opening) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = unix.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            opened.send(line).unwrap();
+            stream.into_inner().write_all(b"ok\n").await.unwrap();
+        });
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays =
+            crate::parse_relays(&format!("/den=http://{upstream_addr}, /remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+
+        let response = h
+            .send(
+                "POST",
+                "/den/config/playback",
+                Some(json!({ "imdb": "tt1" }).to_string()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                    ("idempotency-key", "attempt-listener-open"),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(received.recv().await.unwrap(), None);
+        assert!(opening.await.unwrap().contains(r#""open":true"#));
+        assert_eq!(received.recv().await.unwrap().as_deref(), Some("commit"));
+        let body = crate::handler::tests::body_json(response).await;
+        assert_eq!(body["url"], format!("https://203.0.113.10{playlist}"));
     }
 
     /// The TV asks for a segment scan on the LAN face: a POST to the one scan route goes through, and nothing else

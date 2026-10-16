@@ -11,8 +11,9 @@ import { relayFetch } from './relayFetch';
 
 export const GRANT_ADDONS = ['scout', 'atlas', 'reel', 'subtitles'] as const;
 export type GrantAddon = (typeof GRANT_ADDONS)[number];
-/** A guest may additionally own one combined Den install; it is never one of the host's lent installs. */
-export type GuestAddon = GrantAddon | 'den';
+/** A guest may additionally use the stable combined-Den facade over shared and personal settings. */
+export const GUEST_ADDONS = [...GRANT_ADDONS, 'den'] as const;
+export type GuestAddon = (typeof GUEST_ADDONS)[number];
 export type GrantStatus = 'invited' | 'active' | 'expired' | 'revoked';
 
 /** What den-edge lists of a grant: never a secret, never an install. */
@@ -398,7 +399,9 @@ export async function reuploadInstalls(
 export type Redeemed = {
   gid: string;
   name: string;
-  addons: GrantAddon[];
+  addons: GuestAddon[];
+  /** Personal service configs layered over the shared grant; empty for older den-edge responses. */
+  overrides: GuestAddon[];
   expiresAt: number | null;
 };
 
@@ -426,7 +429,10 @@ function readRedeemed(reply: Reply<unknown>): Reply<Redeemed> {
     value: {
       gid: body.gid,
       name: body.name,
-      addons: body.addons.filter((a): a is GrantAddon => GRANT_ADDONS.includes(a)),
+      addons: body.addons.filter((a): a is GuestAddon => GUEST_ADDONS.includes(a as GuestAddon)),
+      overrides: Array.isArray(body.overrides)
+        ? body.overrides.filter((a): a is GuestAddon => GUEST_ADDONS.includes(a as GuestAddon))
+        : [],
       expiresAt: typeof body.expiresAt === 'number' ? body.expiresAt : null,
     },
   };
@@ -501,7 +507,12 @@ export async function grantAddons(
   secret: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<
-  Reply<{ name: string; expiresAt: number | null; addons: Partial<Record<GuestAddon, string>> }>
+  Reply<{
+    name: string;
+    expiresAt: number | null;
+    addons: Partial<Record<GuestAddon, string>>;
+    overrides: GuestAddon[];
+  }>
 > {
   const reply = await ask(fetchImpl, '/grant/addons', {
     headers: { 'x-den-grant': `${gid}:${secret}` },
@@ -511,11 +522,12 @@ export async function grantAddons(
     name?: unknown;
     expiresAt?: unknown;
     addons?: Record<string, unknown>;
+    overrides?: unknown;
   } | null;
   if (typeof body?.name !== 'string' || !body.addons)
     return { ok: false, status: 0, error: 'failed' };
   const addons: Partial<Record<GuestAddon, string>> = {};
-  for (const addon of [...GRANT_ADDONS, 'den'] as const) {
+  for (const addon of GUEST_ADDONS) {
     const path = body.addons[addon];
     // Only this grant's own base for that addon: anything else isn't something to ask.
     if (path === `/${addon}/~${gid}`) addons[addon] = path;
@@ -526,6 +538,12 @@ export async function grantAddons(
       name: body.name,
       expiresAt: typeof body.expiresAt === 'number' ? body.expiresAt : null,
       addons,
+      overrides: Array.isArray(body.overrides)
+        ? body.overrides.filter(
+            (addon): addon is GuestAddon =>
+              typeof addon === 'string' && (GUEST_ADDONS as readonly string[]).includes(addon),
+          )
+        : [],
     },
   };
 }

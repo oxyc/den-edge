@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Routes } from './routes';
 import {
   denAddonOf,
+  denConfigureURL,
   DEN,
   findAddon,
   findAtlas,
@@ -42,6 +43,19 @@ const SCOUT_PUBLIC = 'https://d-scout.oxy.fi/sealed-cfg/manifest.json';
 const SUBS_LAN = 'http://192.168.86.193:8093/subs-cfg/manifest.json';
 const SUBS_PUBLIC = 'https://d-subs.oxy.fi/subs-cfg/manifest.json';
 const THEIRS = 'https://torrentio.example/debrid-token/manifest.json';
+
+describe('Den addon settings routes', () => {
+  it('derives Hearth configure only from matching first-party route metadata', () => {
+    expect(denConfigureURL('http://192.168.86.193:8090/den/sealed-cfg/manifest.json', ROUTES)).toBe(
+      'http://192.168.86.193:8090/den/configure',
+    );
+    expect(denConfigureURL(THEIRS, ROUTES)).toBeNull();
+    expect(
+      denConfigureURL('http://192.168.86.193:8090/den/sealed-cfg/manifest.json', {}),
+    ).toBeNull();
+    expect(denConfigureURL('http://192.168.86.193:8090/den/sealed-cfg', ROUTES)).toBeNull();
+  });
+});
 
 /** Manifests by URL; anything else is this origin's app shell, which is not JSON. */
 function addons(manifests: Record<string, string | Record<string, unknown>>) {

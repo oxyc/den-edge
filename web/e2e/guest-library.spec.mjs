@@ -109,7 +109,7 @@ test('the phone link pairs the phone with the laptop, which allows it, and the g
 
     const done = phone.getByRole('dialog', { name: 'Your library is on this phone' });
     await expect(done).toBeVisible({ timeout: 30_000 });
-    await expect(done).toContainText('Oskar’s addons are on this phone too');
+    await expect(done).toContainText('Your shared addons are on this phone too');
     await done.getByRole('button', { name: 'Open Den' }).click();
 
     await expect.poll(async () => (await stored(phone, 'den.grants'))?.[0]?.gid).toBe(GID);
@@ -180,7 +180,7 @@ test('at the device limit the phone still gets the library, without addons, and 
     await allow(laptop).click();
     const done = phone.getByRole('dialog', { name: 'Your library is on this phone' });
     await expect(done).toBeVisible({ timeout: 30_000 });
-    await expect(done).toContainText('Ask Oskar to allow another device');
+    await expect(done).toContainText('Ask for another device');
     await done.getByRole('button', { name: 'Open Den' }).click();
 
     expect(edge.grant.devices.size, 'no slot was taken').toBe(1);

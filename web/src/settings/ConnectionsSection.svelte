@@ -21,14 +21,14 @@
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
-  import { openGuestConfigure } from '../lib/guestConfigure';
+  import { hasSharedMediaSettings, openGuestConfigure } from '../lib/guestConfigure';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
   import { routePath } from '../lib/route';
-  import { denAddonOf } from '../lib/scout';
+  import { denAddonOf, denConfigureURL } from '../lib/scout';
   import type {
     ConnectionsView,
     KeyResetOutcome,
@@ -218,13 +218,17 @@
     guestGrants.list.flatMap((grant) =>
       grant.ended
         ? []
-        : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) =>
-            addon === 'den' ? [] : [{ gid: grant.gid, host: grant.name, addon }],
-          ),
+        : (Object.keys(grant.addons) as Array<GrantAddon | 'den'>).flatMap((addon) => {
+            // Hearth is the media facade. Once it is available, the legacy Scout/Subtitles/Reel escrow remains
+            // an implementation detail for fallback; Atlas is still the one separate discovery addon.
+            if (addon === 'den' || (grant.addons.den && addon !== 'atlas')) return [];
+            return [{ gid: grant.gid, addon }];
+          }),
     ),
   );
   const sharedHosts = $derived(guestGrants.list.filter((grant) => !grant.ended && grant.secret));
   let configuringGuest = $state<string | null>(null);
+  let resettingGuest = $state<string | null>(null);
   let configureGuestProblem = $state<string | null>(null);
 
   async function configureGuest(gid: string, secret: string) {
@@ -235,6 +239,14 @@
       configureGuestProblem =
         'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
     if (configuringGuest === gid) configuringGuest = null;
+  }
+
+  async function useSharedSettings(gid: string) {
+    resettingGuest = gid;
+    configureGuestProblem = null;
+    if (!(await guestGrants.useSharedSettings(gid)))
+      configureGuestProblem = 'Couldn’t switch to shared settings. Try again in a moment.';
+    if (resettingGuest === gid) resettingGuest = null;
   }
 
   // Plugins, and the signing key each can be pinned to.
@@ -843,6 +855,7 @@
         {#each plugins as plugin (plugin.manifestUrl)}
           {@const url = plugin.manifestUrl}
           {@const den = denAddonOf(url, routes)}
+          {@const configureURL = denConfigureURL(url, routes)}
           {@const pinned = plugin.signingKey}
           {@const waitingOn = plugin.pendingApprovalOn}
           <li class="line">
@@ -858,6 +871,14 @@
                 >{/if}</span
             >
             <span class="actions">
+              {#if configureURL}
+                <Button
+                  variant="secondary"
+                  label="Configure"
+                  {disabled}
+                  onclick={() => window.open(configureURL, '_blank', 'noopener')}
+                />
+              {/if}
               {#if pinned}
                 <Confirm
                   label="Stop verifying"
@@ -879,7 +900,7 @@
                 />
               {/if}
               <Confirm
-                label="Remove"
+                label={configureURL ? 'Remove addon' : 'Remove'}
                 question="Remove {den?.label ?? hostOf(url)}?"
                 detail="You can add it back by its URL."
                 {disabled}
@@ -928,22 +949,27 @@
       <ul class="list">
         {#each sharedHosts as grant (grant.gid)}
           <li class="line">
-            <span class="label"
-              >Your Den Hearth<small>Hosted by {grant.name} · uses your own provider keys</small
-              ></span
-            >
+            <span class="label">Your Den Hearth<small>Personal provider settings</small></span>
             <Button
               variant="secondary"
               label={configuringGuest === grant.gid ? 'Opening…' : 'Configure'}
-              disabled={configuringGuest !== null}
+              disabled={configuringGuest !== null || resettingGuest !== null}
               onclick={() => void configureGuest(grant.gid, grant.secret)}
             />
+            {#if grant.addons.den && grant.overrides?.includes('den') && hasSharedMediaSettings(grant.addons)}
+              <Button
+                variant="secondary"
+                label={resettingGuest === grant.gid ? 'Switching…' : 'Use shared settings'}
+                disabled={configuringGuest !== null || resettingGuest !== null}
+                onclick={() => void useSharedSettings(grant.gid)}
+              />
+            {/if}
           </li>
         {/each}
         {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
           <li class="line">
             <span class="label"
-              >{sharedLabels[shared.addon]}<small>Shared by {shared.host} · read-only</small></span
+              >{sharedLabels[shared.addon]}<small>Shared access · read-only</small></span
             >
           </li>
         {/each}

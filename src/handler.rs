@@ -103,8 +103,9 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
     let migration_path = profile_migration_path(&path);
-    let den_disabled =
-        (den_playback_path(&path) || path == "/grant/den-install") && !state.den_playback_enabled;
+    let den_disabled = (den_playback_path(&path)
+        || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
+        && !state.den_playback_enabled;
     let globally_disabled = migration_path && !state.profile_migration_enabled || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
@@ -281,6 +282,7 @@ fn is_control(route: &str) -> bool {
             | "/grant/library"
             | "/grant/device-ticket"
             | "/grant/device"
+            | "/grant/den-configure"
             | "/grant/:gid"
             | "/reel/transport"
             | "/reel/activate"
@@ -914,6 +916,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/grant/library" => "/grant/library",
         "/grant/device-ticket" => "/grant/device-ticket",
         "/grant/device" => "/grant/device",
+        "/grant/den-configure" => "/grant/den-configure",
         "/grant/den-install" => "/grant/den-install",
         p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
         // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
@@ -1029,7 +1032,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/grant/usage"
         | "/grant/library"
         | "/grant/device-ticket"
-        | "/grant/device" => Some(POST),
+        | "/grant/device"
+        | "/grant/den-configure" => Some(POST),
         "/grant/den-install" => Some(PUT_DELETE),
         "/grant/addons" => Some(GET),
         "/health"
