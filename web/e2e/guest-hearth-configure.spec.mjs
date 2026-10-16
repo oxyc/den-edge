@@ -75,11 +75,13 @@ test('guest Configure bootstraps a scoped session and opens Hearth as a real pag
 
   await page.goto(`${E2E_ORIGIN}/test/settings.html`);
   await page.getByRole('button', { name: /Plugins/ }).click();
+  const plugins = page.getByRole('region', { name: 'Plugins' });
+  await expect(plugins).toContainText(
+    'Editing updates this connection; it does not add another add-on.',
+  );
   const popup = page.waitForEvent('popup');
-  await page
-    .getByRole('region', { name: 'Plugins' })
-    .getByRole('button', { name: 'Configure' })
-    .click();
+  await plugins.getByRole('button', { name: 'More actions for Den Hearth' }).click();
+  await page.getByRole('menuitem', { name: 'Edit my Hearth settings' }).click();
   const setup = await popup;
   await expect(setup).toHaveURL(`${E2E_ORIGIN}/den/~${GID}/configure`);
   await expect(setup.getByRole('heading', { name: 'Den Hearth setup' })).toBeVisible();
