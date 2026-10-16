@@ -355,7 +355,11 @@ test('the document starts its exact personalized hero before the app module answ
     });
   });
 
-  const navigating = page.goto(`${E2E_ORIGIN}/#pair=ABCD-EFGH`);
+  // Finish the navigation command as soon as the response commits. Keeping an unawaited
+  // `page.goto()` alive while inspecting parser-time DOM races Playwright's navigation
+  // bookkeeping under a busy parallel worker, even though the entry module is intentionally
+  // still blocked below.
+  await page.goto(`${E2E_ORIGIN}/#pair=ABCD-EFGH`, { waitUntil: 'commit' });
   await moduleRequest;
   await imageRequest;
   expect(typeof releaseModule, 'the image starts while the entry module is still blocked').toBe(
@@ -377,7 +381,7 @@ test('the document starts its exact personalized hero before the app module answ
   await page.waitForTimeout(100);
   expect(imageRequests, 'the responsive preload and shell image share one request').toBe(1);
   releaseModule();
-  await navigating;
+  await page.waitForLoadState('load');
   await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(
     'href',
     /\/parser-early\.jpg$/,
