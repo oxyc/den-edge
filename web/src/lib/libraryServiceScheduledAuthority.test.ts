@@ -141,6 +141,7 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(work.run).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(work.run).toHaveBeenCalledTimes(3);
+    expect(work.run).toHaveBeenLastCalledWith({ waitSeconds: 5 });
 
     await scheduled.close();
   });

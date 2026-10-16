@@ -20,7 +20,7 @@ export interface LibraryMaintenanceResult {
 /** The scheduler depends on one semantic maintenance operation, not LibraryLog internals. */
 export interface LibraryMaintenance {
   readonly mode: 'online' | 'local';
-  run(): Promise<LibraryMaintenanceResult>;
+  run(options?: { waitSeconds?: number }): Promise<LibraryMaintenanceResult>;
 }
 
 /** Optional provider work run by the same authority scheduler after foreground content is released. */
@@ -192,7 +192,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     const started = this.#now();
     const running = (async () => {
       try {
-        const result = await this.maintenance.run();
+        const result = await this.maintenance.run(
+          this.#lifecycle.playbackActive
+            ? { waitSeconds: ACTIVE_PLAYBACK_REFRESH_MS / 1000 }
+            : undefined,
+        );
         if (this.#closed) return;
         if (result.changed) this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
         if (!sameStatus(this.#lastStatus, result.status)) {
@@ -308,8 +312,8 @@ export function libraryLogMaintenance(
 ): LibraryMaintenance {
   return {
     mode,
-    async run() {
-      let changed = mode === 'online' ? await log.refresh() : false;
+    async run(options) {
+      let changed = mode === 'online' ? await log.refresh(options?.waitSeconds) : false;
       if (log.moved) return { changed, status: logStatus(log) };
       changed = (await upgradeLibrary(log, mode === 'local', Date.now(), clock)) || changed;
       changed = (await switchLibraryToV4(log, Date.now(), fetchImpl, clock.device)) || changed;

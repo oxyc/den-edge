@@ -37,10 +37,16 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   let deviceWrote = 0;
   let pushedWrite = 0;
   let pulledWrite = 0;
+  const waiters = new Set();
+  const wake = () => {
+    for (const resolve of waiters) resolve();
+    waiters.clear();
+  };
   const push = () => {
     for (const [k, entry] of unpushed) rows.set(k, entry);
     unpushed.clear();
     pushedWrite = deviceWrote;
+    wake();
   };
   const pushing = pushEveryMs ? setInterval(push, pushEveryMs) : undefined;
   const route = async (page, name) => {
@@ -79,8 +85,23 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
         pulls.get(name).push(Date.now());
         const since = Number(url.searchParams.get('since') ?? 0);
         // The device reads its own log, pushed or not; this page reads only what has reached den-edge.
-        const held = new Map([...rows, ...(name === 'device' ? unpushed : [])]);
-        const entries = [...held.values()].filter((entry) => entry.seq > since);
+        const visible = () => new Map([...rows, ...(name === 'device' ? unpushed : [])]);
+        let held = visible();
+        let entries = [...held.values()].filter((entry) => entry.seq > since);
+        const wait = Number(url.searchParams.get('wait') ?? 0);
+        if (!entries.length && wait > 0) {
+          await new Promise((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              waiters.delete(done);
+              resolve();
+            };
+            const timer = setTimeout(done, wait * 1_000);
+            waiters.add(done);
+          });
+          held = visible();
+          entries = [...held.values()].filter((entry) => entry.seq > since);
+        }
         if (name === 'page' && pushedWrite > pulledWrite) {
           arrivals.push(Date.now() - pushedWrite);
           pulledWrite = pushedWrite;
@@ -109,12 +130,21 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
           deviceWrote = Date.now();
           if (!held) pushedWrite = deviceWrote;
         }
+        if (!held) wake();
         return route.fulfill({ headers, json: { applied, conflicts } });
       }
       return route.abort('blockedbyclient');
     });
   };
-  return { route, pulls, arrivals, close: () => clearInterval(pushing) };
+  return {
+    route,
+    pulls,
+    arrivals,
+    close: () => {
+      clearInterval(pushing);
+      wake();
+    },
+  };
 }
 
 /** This page on the paired library, seeded once, and the other device beside it. */

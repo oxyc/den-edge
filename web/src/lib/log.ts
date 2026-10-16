@@ -3077,12 +3077,12 @@ export class LibraryLog {
    * this browser holds: a row arrived, the log was reset, or kept work reached den-edge. A poll that finds nothing
    * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
    */
-  async refresh(): Promise<boolean> {
-    return (await this.pass()).changed;
+  async refresh(waitSeconds = 0): Promise<boolean> {
+    return (await this.pass(waitSeconds)).changed;
   }
 
   /** One `refresh` pass: whether it changed what this browser holds, and whether it read the log to its head. */
-  private async pass(): Promise<{ changed: boolean; reachedHead: boolean }> {
+  private async pass(waitSeconds = 0): Promise<{ changed: boolean; reachedHead: boolean }> {
     // Nothing else writes a library kept only here but another tab, whose rows each save takes up (`takeKept`).
     if (this.offline) return { changed: false, reachedHead: false };
     const generationsBefore = this.generationChanges;
@@ -3091,8 +3091,9 @@ export class LibraryLog {
     const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
+          const wait = Math.max(0, Math.min(25, Math.floor(waitSeconds)));
           const res = await this.send(
-            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
+            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000${wait ? `&wait=${wait}` : ''}`,
             { headers: this.headers() },
           );
           if (res.status === 410) this.moved = true;

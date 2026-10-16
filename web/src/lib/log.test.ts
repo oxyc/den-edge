@@ -1273,6 +1273,23 @@ describe('LibraryLog', () => {
     expect(await log.refresh()).toBe(false);
   });
 
+  it('asks den-edge to hold an active-playback refresh without changing ordinary refreshes', async () => {
+    const server = await edge([row(1)]);
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = (input, init) => {
+      asked.push(String(input));
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!;
+    asked.length = 0;
+
+    await log.refresh();
+    await log.refresh(5);
+
+    expect(asked[0]).not.toContain('wait=');
+    expect(asked[1]).toContain('&wait=5');
+  });
+
   /**
    * A refresh that read one page and failed on the next keeps the rows of the first, and said nothing: the next one,
    * finding only this browser's own write, said nothing either, and the TV's rows were never drawn.
