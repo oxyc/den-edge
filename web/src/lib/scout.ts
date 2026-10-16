@@ -19,7 +19,9 @@ export interface Addon {
 }
 
 export const SCOUT = { name: 'scout', id: 'com.den.scout', path: '/scout' };
-export const DEN = { name: 'den', id: 'com.den.addon', path: '/den' };
+/** Hearth's canonical id. The former id stays readable while already-deployed nodes roll forward. */
+export const DEN = { name: 'den', id: 'com.den.hearth', path: '/den' };
+export const DEN_IDS = [DEN.id, 'com.den.addon'] as const;
 export const ATLAS = { name: 'atlas', id: 'com.den.atlas', path: '/atlas' };
 export const REEL = { name: 'reel', id: 'com.den.reel', path: '/reel' };
 
@@ -105,14 +107,15 @@ function configOf(install: string, mount: string): string | null {
 
 async function readManifest(
   manifest: string,
-  id: string,
+  id: string | readonly string[],
   fetchImpl: typeof fetch,
 ): Promise<Record<string, unknown> | null> {
   try {
     const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return null;
     const body = (await res.json()) as Record<string, unknown> | null;
-    return body?.id === id ? body : null;
+    const ids = typeof id === 'string' ? [id] : id;
+    return typeof body?.id === 'string' && ids.includes(body.id) ? body : null;
   } catch {
     return null; // out of reach, or not an addon at all
   }
@@ -162,7 +165,7 @@ export async function findScout(
   for (const url of plugins) {
     const addon = place(url, routes, DEN);
     if (!addon) continue;
-    if (!(await readManifest(`${addon.base}${MANIFEST}`, DEN.id, fetchImpl))) continue;
+    if (!(await readManifest(`${addon.base}${MANIFEST}`, DEN_IDS, fetchImpl))) continue;
     return (await hasPlayback(addon.base, fetchImpl))
       ? { ...addon, playback: `${addon.base}/playback` }
       : addon;
@@ -201,11 +204,119 @@ export async function findReel(
 
 /** Den's own addons, as Settings names them. */
 const DEN_ADDONS = [
+  { name: 'den', label: 'Den Hearth', role: 'Streams, subtitles and trailers' },
   { name: 'scout', label: 'Den Scout', role: 'Streams' },
   { name: 'subs', label: 'Den Subtitles', role: 'Subtitles' },
   { name: 'atlas', label: 'Den Atlas', role: 'Discovery' },
   { name: 'reel', label: 'Den Reel', role: 'Trailers' },
 ];
+
+const LEGACY_MEDIA = [
+  { want: SCOUT, resource: 'stream' },
+  { want: { name: 'subs', id: 'com.den.subtitles', path: '/subtitles' }, resource: 'subtitles' },
+  { want: REEL, resource: 'meta' },
+] as const;
+
+function resourcesOf(manifest: Record<string, unknown>): string[] {
+  if (!Array.isArray(manifest.resources)) return [];
+  return manifest.resources.flatMap((resource) => {
+    if (typeof resource === 'string') return [resource];
+    if (resource && typeof resource === 'object' && !Array.isArray(resource)) {
+      const name = (resource as Record<string, unknown>).name;
+      return typeof name === 'string' ? [name] : [];
+    }
+    return [];
+  });
+}
+
+/**
+ * Legacy media installs that an approved Hearth install can safely replace.
+ *
+ * The replacement is proved live first, and each old install is removed only when the configured Hearth manifest
+ * advertises its resource. Atlas is deliberately absent: it remains the separate shared discovery addon. Returned
+ * values are the exact manifest URLs the library stores.
+ */
+export async function legacyMediaSuperseded(
+  plugins: readonly string[],
+  routes: Routes,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<string[]> {
+  let resources: string[] | null = null;
+  for (const url of plugins) {
+    const addon = place(url, routes, DEN);
+    if (!addon) continue;
+    const manifest = await readManifest(`${addon.base}${MANIFEST}`, DEN_IDS, fetchImpl);
+    if (manifest) {
+      resources = resourcesOf(manifest);
+      break;
+    }
+  }
+  if (!resources) return [];
+
+  const old: string[] = [];
+  for (const legacy of LEGACY_MEDIA) {
+    if (!resources.includes(legacy.resource)) continue;
+    for (const url of plugins) {
+      const addon = place(url, routes, legacy.want);
+      if (!addon) continue;
+      if (await readManifest(`${addon.base}${MANIFEST}`, legacy.want.id, fetchImpl)) old.push(url);
+    }
+  }
+  return old;
+}
+
+/**
+ * Exchange live, first-party legacy installs for one sealed Hearth install URL.
+ *
+ * The configs travel only in the authenticated POST body. The endpoint validates them with each legacy service's
+ * keyring; this client still proves each manifest first so a route typo or third-party addon is never submitted.
+ * A guest has no library membership and cannot call this owner-only endpoint.
+ */
+export async function migrateLegacyMedia(
+  plugins: readonly string[],
+  routes: Routes,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<string | null> {
+  for (const url of plugins) {
+    const addon = place(url, routes, DEN);
+    if (addon && (await readManifest(`${addon.base}${MANIFEST}`, DEN_IDS, fetchImpl))) return null;
+  }
+
+  const configs: Record<string, string> = {};
+  for (const legacy of LEGACY_MEDIA) {
+    for (const url of plugins) {
+      const addon = place(url, routes, legacy.want);
+      if (!addon || !(await readManifest(`${addon.base}${MANIFEST}`, legacy.want.id, fetchImpl)))
+        continue;
+      const segment = addon.base.slice(legacy.want.path.length + 1);
+      if (!SEGMENT.test(segment)) continue;
+      configs[legacy.want.name === 'subs' ? 'subs' : legacy.want.name] = segment;
+      break;
+    }
+  }
+  if (!Object.keys(configs).length) return null;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(`${DEN.path}/migrate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(configs),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  const body = (await response.json().catch(() => null)) as { manifestUrl?: unknown } | null;
+  const match =
+    typeof body?.manifestUrl === 'string'
+      ? /^\/den\/([A-Za-z0-9_-]+)\/manifest\.json$/.exec(body.manifestUrl)
+      : null;
+  const base = routes.den?.find((entry) => !entry.access)?.url ?? routes.den?.[0]?.url;
+  return match && base ? `${base.replace(/\/+$/, '')}/${match[1]}/manifest.json` : null;
+}
 
 /** Which of Den's addons the plugin at `url` is, by the routes table's entries; null for anyone else's. */
 export function denAddonOf(url: string, routes: Routes): { label: string; role: string } | null {

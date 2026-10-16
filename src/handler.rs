@@ -985,6 +985,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
         p if p.starts_with("/subtitles/") => "/subtitles",
+        "/den/migrate" => "/den/migrate",
         p if den_playback_path(p) => "/den/:config/playback",
         p if p == "/den" || p.starts_with("/den/") => "/den",
         p if p.starts_with("/remux/") => "/remux",
@@ -1068,6 +1069,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
         // dispatch and never enter the relay.
         "/den/:config/playback" => Some(POST_OPTIONS),
+        "/den/migrate" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -1094,6 +1096,7 @@ fn body_cap(route: &str) -> usize {
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
+        "/den/migrate" => 16 * 1024,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
@@ -1424,6 +1427,9 @@ pub mod tests {
         assert_eq!(allowed_methods("/den/:config/playback"), Some(&[Method::POST, Method::OPTIONS][..]));
         assert_eq!(body_cap("/den/:config/playback"), 16 * 1024);
         assert!(!is_control("/den/:config/playback"));
+        assert_eq!(route_label("/den/migrate"), "/den/migrate");
+        assert_eq!(allowed_methods("/den/migrate"), Some(&[Method::POST][..]));
+        assert_eq!(body_cap("/den/migrate"), 16 * 1024);
         assert_eq!(route_label("/grant/den-install"), "/grant/den-install");
         assert_eq!(allowed_methods("/grant/den-install"), Some(&[Method::PUT, Method::DELETE][..]));
     }

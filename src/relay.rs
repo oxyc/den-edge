@@ -647,6 +647,11 @@ pub async fn guest(
     let (target, guest) = match parsed {
         Some(Ok(p)) => {
             let personal_den = p.addon == "den";
+            // Migration consumes the owner's legacy bearer configs. A grant guest may configure and use only their
+            // own personal Hearth install; it can never exchange the host's escrowed installs.
+            if personal_den && p.rest == "/migrate" {
+                return Ok(not_found());
+            }
             if personal_den && !state.den_playback_enabled {
                 return Ok(not_found());
             }
@@ -783,6 +788,7 @@ async fn relay_with(
     let playback_path = crate::handler::den_playback_path(req.uri().path());
     let playback = playback_path && method == Method::POST;
     let playback_probe = playback_path && method == Method::OPTIONS;
+    let migration = req.uri().path() == "/den/migrate" && method == Method::POST;
     if (playback || playback_probe) && !state.den_playback_enabled {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
@@ -1210,13 +1216,18 @@ async fn relay_with(
     if let Some(secret) = state
         .remux_edge_secret
         .as_deref()
-        .filter(|_| playback || playback_probe || grant.as_ref().is_some_and(Guest::remux))
+        .filter(|_| playback || playback_probe || migration || grant.as_ref().is_some_and(Guest::remux))
     {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
             // Hearth uses the same owner for idempotency and for a Remux fallback; never accept this value from Web.
             out = out.header("x-den-owner", format!("grant:{}", g.gid));
         }
+    }
+    if migration && grant.is_none() {
+        // Set only after the public household membership gate above. Browser-supplied internal headers are never
+        // copied into `out`, so Hearth can distinguish an owner migration from every guest and forged request.
+        out = out.header("x-den-migration-owner", "1");
     }
     if public_playback {
         out = out.header("x-den-managed-playback", "1");
@@ -3273,6 +3284,27 @@ mod tests {
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
         assert!(!headers.contains_key("x-den-owner"));
         assert!(!headers.contains_key("x-den-public-session"));
+
+        let migration = h
+            .send(
+                "POST",
+                "/den/migrate",
+                Some(r#"{"scout":"legacy"}"#.into()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                    ("x-den-edge-secret", "forged"),
+                    ("x-den-owner", "grant:deadbeef"),
+                    ("x-den-migration-owner", "0"),
+                ],
+            )
+            .await;
+        assert_eq!(migration.status(), StatusCode::OK);
+        let headers = received.recv().await.unwrap();
+        assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
+        assert_eq!(headers["x-den-migration-owner"], "1");
+        assert!(!headers.contains_key("x-den-owner"));
     }
 
     #[tokio::test]

@@ -73,6 +73,32 @@ test('redeeming keeps the grant in browser storage, and only there', async () =>
   expect(new Headers(spy.mock.calls[0]![1]?.headers).get('x-den-grant')).toBe(`${GID}:${secret}`);
 });
 
+test('a guest personal Hearth replaces the host’s legacy media addons but keeps shared Atlas', () => {
+  kept.set(
+    KEY,
+    JSON.stringify([
+      {
+        gid: GID,
+        name: 'Sam',
+        secret: 'guest-secret',
+        addons: {
+          scout: `/scout/~${GID}`,
+          subtitles: `/subtitles/~${GID}`,
+          reel: `/reel/~${GID}`,
+          atlas: `/atlas/~${GID}`,
+          den: `/den/~${GID}`,
+        },
+        expiresAt: null,
+        ended: false,
+      },
+    ]),
+  );
+  expect(new GuestGrants().pluginUrls()).toEqual([
+    `https://den.example/atlas/~${GID}/manifest.json`,
+    `https://den.example/den/~${GID}/manifest.json`,
+  ]);
+});
+
 test('a retry after a lost answer redeems with the same secret', async () => {
   const grants = new GuestGrants();
   const hashes: string[] = [];
