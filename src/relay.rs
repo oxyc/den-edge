@@ -558,60 +558,24 @@ impl Guest {
     }
 }
 
-pub(crate) const DEN_CONFIGURE_BUILD: &str = r#"    $("url").value = location.origin + BASE + "/" + toSegment(install) + "/manifest.json";
-    $("installId").textContent = install.iid;
-    $("out").classList.remove("hidden");
-    renderSecurityNote();
-    copyInstallURL();"#;
-pub(crate) const DEN_CONFIGURE_BASE: &str =
-    r#"var BASE = location.pathname.replace(/\/(configure\/?)?$/, "");"#;
+pub(crate) const DEN_GUEST_CONTEXT_MARKER: &str = "/*__DEN_HEARTH_GUEST_CONTEXT_V1__*/ null";
 
-/// Adapt only Hearth's known configure-page seam. Edge stores the opaque segment; Stremio sees only the stable
-/// virtual URL. A changed upstream page fails closed instead of accidentally exposing the segment in its link.
+/// Supply Hearth's explicit guest-configuration bridge. Hearth owns the form, validation, sealing, save flow and
+/// displayed URL; Edge contributes only the authenticated grant claim and its stable virtual base. A missing or
+/// duplicated versioned marker fails closed instead of falling back to Hearth's credential-bearing install URL.
 fn guest_configure_page(body: &Bytes, claim: &str, base: &str) -> Option<Bytes> {
     let page = std::str::from_utf8(body).ok()?;
-    if !page.contains(DEN_CONFIGURE_BASE) || !page.contains(DEN_CONFIGURE_BUILD) {
+    if page.matches(DEN_GUEST_CONTEXT_MARKER).count() != 1 {
         return None;
     }
-    let claim = serde_json::to_string(claim).ok()?;
-    let base = serde_json::to_string(base).ok()?;
-    let bridge = format!(
-        r#"var BASE = {base};
-var DEN_GUEST_GRANT = {claim};
-var denGuestFetch = window.fetch.bind(window);
-window.fetch = function (input, options) {{
-  options = options || {{}};
-  if (typeof input === "string" && (input.indexOf(BASE + "/") === 0 || input === "/grant/den-install")) {{
-    options.headers = new Headers(options.headers || {{}});
-    options.headers.set("x-den-grant", DEN_GUEST_GRANT);
-  }}
-  return denGuestFetch(input, options);
-}};"#
-    );
-    let replacement = format!(
-        r#"    var guestSegment = toSegment(install);
-    $("url").value = "";
-    $("installId").textContent = install.iid;
-    $("out").classList.remove("hidden");
-    renderSecurityNote();
-    fetch("/grant/den-install", {{
-      method: "PUT",
-      cache: "no-store",
-      headers: {{ "content-type": "application/json", "x-den-grant": {claim} }},
-      body: JSON.stringify({{ install: guestSegment }})
-    }})
-      .then(function (r) {{ if (!r.ok) throw new Error("save failed");
-        $("url").value = location.origin + BASE + "/manifest.json";
-        copyInstallURL();
-      }})
-      .catch(function () {{
-        $("url").value = "";
-        $("sealNote").textContent = "Could not save this guest install. Please try again.";
-        $("sealNote").className = "note unsealed";
-      }});"#
-    );
-    let page = page.replacen(DEN_CONFIGURE_BASE, &bridge, 1);
-    Some(Bytes::from(page.replacen(DEN_CONFIGURE_BUILD, &replacement, 1)))
+    let context = serde_json::to_string(&serde_json::json!({
+        "v": 1,
+        "base": base,
+        "saveUrl": "/grant/den-install",
+        "claim": claim,
+    }))
+    .ok()?;
+    Some(Bytes::from(page.replacen(DEN_GUEST_CONTEXT_MARKER, &context, 1)))
 }
 
 /// A guest's call to a grant's addon (`/<addon>/~<gid>/…`) or to the `/remux` control plane with `x-den-grant`,

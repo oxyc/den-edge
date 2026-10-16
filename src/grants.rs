@@ -2542,9 +2542,8 @@ mod tests {
             StatusCode::OK,
             "text/html; charset=utf-8",
             format!(
-                "<!doctype html><script>\n{}\nfunction build() {{\n{}\n}}</script>",
-                crate::relay::DEN_CONFIGURE_BASE,
-                crate::relay::DEN_CONFIGURE_BUILD
+                "<!doctype html><script>const DEN_GUEST_CONTEXT = {};</script>",
+                crate::relay::DEN_GUEST_CONTEXT_MARKER
             ),
         )
     }
@@ -2689,12 +2688,11 @@ mod tests {
         assert!(!response.headers().contains_key(header::ETAG));
         let page = axum::body::to_bytes(response.into_body(), 256 * 1024).await.unwrap();
         let page = std::str::from_utf8(&page).unwrap();
-        assert!(page.contains("fetch(\"/grant/den-install\""), "{page}");
-        assert!(page.contains(&format!("\"x-den-grant\": \"{credential}\"")), "{page}");
-        assert!(page.contains("options.headers.set(\"x-den-grant\", DEN_GUEST_GRANT)"), "{page}");
-        assert!(page.contains(&format!("var BASE = \"/den/~{gid}\";")), "{page}");
-        assert!(page.contains("location.origin + BASE + \"/manifest.json\""), "{page}");
-        assert!(!page.contains("BASE + \"/\" + toSegment(install)"), "{page}");
+        assert!(page.contains(&format!(r#""base":"/den/~{gid}""#)), "{page}");
+        assert!(page.contains(&format!(r#""claim":"{credential}""#)), "{page}");
+        assert!(page.contains(r#""saveUrl":"/grant/den-install""#), "{page}");
+        assert!(page.contains(r#""v":1"#), "{page}");
+        assert!(!page.contains(crate::relay::DEN_GUEST_CONTEXT_MARKER), "{page}");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.last().unwrap().0, "/den/configure");
         assert!(!seen.last().unwrap().1.contains_key(HEADER));
