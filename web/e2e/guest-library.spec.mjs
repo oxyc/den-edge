@@ -116,6 +116,35 @@ test('on a profile host an invite starts the guest’s own profile household', a
   });
 });
 
+test('a profile household this browser saw bootstrapped reopens on wire 5 without the 426', async () => {
+  const edge = newEdge({ profiles: true });
+  await browserOf(edge, async (_browser, open) => {
+    const laptop = await laptopAcceptingAnInvite(open, edge);
+    const switcher = laptop.getByRole('button', { name: 'Switch profile, current Owner' });
+    await expect(switcher).toBeVisible({ timeout: 30_000 });
+    const households = [...edge.libraries].filter(([, library]) => library.wireMin === 5);
+    expect(households, 'only the household is fenced to wire 5').toHaveLength(1);
+    const [household] = households[0];
+    const opened = () =>
+      edge.libraryRequests.filter(({ id, action }) => id === household && action === 'changes');
+    // Once the invite made it a profile household, the page opened it on wire 4, was refused, and bootstrapped.
+    expect(opened().some(({ wire }) => wire === '4')).toBe(true);
+    expect(opened().some(({ wire }) => wire === '5')).toBe(true);
+    expect(edge.refused).toBeGreaterThan(0);
+
+    // Seen bootstrapped once, it opens on wire 5 first on every load, and nothing is refused.
+    for (let load = 0; load < 2; load++) {
+      edge.libraryRequests.length = 0;
+      edge.refused = 0;
+      await laptop.goto(`${E2E_ORIGIN}/`);
+      await expect(switcher).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => opened().length).toBeGreaterThan(0);
+      expect(new Set(opened().map(({ wire }) => wire))).toEqual(new Set(['5']));
+      expect(edge.refused).toBe(0);
+    }
+  });
+});
+
 test('the phone link pairs the phone with the laptop, which allows it, and the grant ending leaves the library', async () => {
   const edge = newEdge({ devices: 2 });
   await browserOf(edge, async (_browser, open) => {

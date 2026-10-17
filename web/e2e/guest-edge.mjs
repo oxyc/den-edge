@@ -22,6 +22,9 @@ export function newEdge({ devices = 2, host = 'Oskar', profiles = false } = {}) 
     /** Libraries by id: the write token's hash, and the rows. */
     libraries: new Map(),
     refusedStarts: 0,
+    /** Every `/lib` request: library id, action and wire; `refused` counts the 426s for an older wire. */
+    libraryRequests: [],
+    refused: 0,
     /** Guest Hearth capability probes, retained so specs can prove the grant—not library membership—authorized it. */
     playbackProbes: [],
     /** Pairing sessions by sid: the relay's four slots, as pairing v1 uses them. */
@@ -145,9 +148,21 @@ async function routeLibraries(page, edge) {
     const url = new URL(request.url());
     const [, , id, action] = url.pathname.split('/');
     const token = request.headers()['x-den-library-token'];
+    const wire = request.headers()['x-den-wire'];
+    let library = edge.libraries.get(id);
+    edge.libraryRequests.push({ id, action, wire });
+    // den-edge fences a library against clients on an older wire.
+    if (library && Number(wire) < library.wireMin) {
+      edge.refused++;
+      return json(
+        route,
+        426,
+        { error: 'upgrade_required' },
+        { ...HEADERS, 'x-den-wire-min': String(library.wireMin) },
+      );
+    }
     if (action === 'member' && request.method() === 'PUT')
       return route.fulfill({ status: 200, headers: HEADERS });
-    let library = edge.libraries.get(id);
     if (action === 'batch' && request.method() === 'POST') {
       if (!library) {
         // `NEW_LIBRARIES=members`: only the library a grant reserved for exactly this key may start.

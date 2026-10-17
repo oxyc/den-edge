@@ -13,8 +13,11 @@
   import '../src/app.css';
 
   const params = new URLSearchParams(location.search);
-  // The key WorkerHydrationFixture seeds, so `?seed` there prepares this page's library.
-  const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(29)));
+  // The key WorkerHydrationFixture seeds, so `?seed` there prepares this page's library. `?household=<byte>` pairs a
+  // different one instead.
+  const libraryKey = btoa(
+    String.fromCharCode(...new Uint8Array(32).fill(Number(params.get('household') ?? 29))),
+  );
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
