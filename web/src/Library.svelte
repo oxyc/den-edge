@@ -1487,31 +1487,37 @@
   /** A Kid's hero comes from the same policy-bound worlds that make up the shelves, never shared trending. */
   function buildKidBillboard() {
     const run = ++billboardRun;
+    const type = facet;
     stagedFeatured = null;
-    const rows = rankedKidHome.slice(0, 4);
-    void Promise.all(rows.map((row) => row.load(1).catch(() => [])))
-      .then(async (pages) => {
-        if (run !== billboardRun) return;
-        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- local deduplication for this completed build.
-        const seen = new Set<string>();
-        const candidates = pages
-          .flat()
-          .filter((title) => {
-            const key = titleKey(title);
-            if (seen.has(key) || seeds.owned.has(key)) return false;
-            seen.add(key);
-            return true;
-          })
-          .slice(0, EVERYONE_NAMED);
-        const picked = await nameSlides(
-          candidates.map(({ type, id, imdbId }) => ({ type, id, imdbId })),
-          new Map(),
-          lookupTitle,
-          LOOKUPS,
+    // Home reads the four leading worlds. Movies and Series lead with their own type only, which may sit past
+    // those (the leading worlds are often series), so they read on four rows at a time, up to twelve.
+    const reach = Math.min(rankedKidHome.length, type ? 12 : 4);
+    void (async () => {
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- local deduplication for this completed build.
+      const seen = new Set<string>();
+      const candidates: Title[] = [];
+      for (let at = 0; at < reach && candidates.length < EVERYONE_NAMED; at += 4) {
+        const pages = await Promise.all(
+          rankedKidHome
+            .slice(at, Math.min(at + 4, reach))
+            .map((row) => row.load(1).catch(() => [])),
         );
-        if (run === billboardRun) featured = picked;
-      })
-      .catch(() => undefined);
+        if (run !== billboardRun) return;
+        for (const title of pages.flat()) {
+          const key = titleKey(title);
+          if ((type && title.type !== type) || seen.has(key) || seeds.owned.has(key)) continue;
+          seen.add(key);
+          candidates.push(title);
+        }
+      }
+      const picked = await nameSlides(
+        candidates.slice(0, EVERYONE_NAMED).map(({ type, id, imdbId }) => ({ type, id, imdbId })),
+        new Map(),
+        lookupTitle,
+        LOOKUPS,
+      );
+      if (run === billboardRun) featured = picked;
+    })().catch(() => undefined);
   }
 
   /**
