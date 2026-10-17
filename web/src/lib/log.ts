@@ -1742,6 +1742,13 @@ export class LibraryLog {
     if (candidateKeys.id !== input.candidate.handle.libraryId)
       throw new Error('Candidate library identity changed');
     const ownerWrites = await this.materializeMigration(partition.owner, candidateKeys);
+    // An Owner with no activity yet (a fresh guest) would write nothing, and den-edge starts a library only with its
+    // first write, so the readback would find no library at all. Start it with the empty `set:prefs` a born
+    // household's Owner library also begins with.
+    if (ownerWrites.length === 0)
+      ownerWrites.push(
+        await seal(candidateKeys, { kind: 'set', schema: 2, name: 'prefs', values: {} }),
+      );
     await this.writeMigrationCandidate(candidateKeys, ownerWrites);
     const ownerRows = await this.readMigrationCandidate(candidateKeys);
     const expectedOwnerRows = new Map(ownerWrites.map((row) => [row.k, row]));
