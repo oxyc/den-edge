@@ -138,6 +138,24 @@ test('a no-release fallback still shows the specific managed-provider failure', 
   }
 });
 
+test('a title with only TS and AVI releases says those are what the browser can’t play', async () => {
+  const { browser, page } = await playerPage((route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'no_release', formats: ['.ts', '.avi'] }),
+    }),
+  );
+  try {
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect(page.getByRole('alert')).toHaveText(
+      'The releases of this that are ready are TS and AVI files, which Den can’t play in a browser yet. Try again once another release is out, or play it on your TV.',
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a TorBox plan without streaming support explains the required configuration change', async () => {
   const { browser, page } = await playerPage((route) =>
     route.fulfill({

@@ -45,6 +45,8 @@ interface PlaybackDiagnostics {
   code?: PlaybackErrorCode;
   cause?: PlaybackCause;
   httpStatus?: number;
+  /** On `none`: the containers (`.ts`, `.avi`, …) of cached releases Remux left out because it can't open them. */
+  formats?: string[];
 }
 
 export type PlaybackRefused =
@@ -155,12 +157,23 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   };
 }
 
-async function errorBody(response: Response): Promise<{ error?: string; cause?: PlaybackCause }> {
+async function errorBody(
+  response: Response,
+): Promise<{ error?: string; cause?: PlaybackCause; formats?: string[] }> {
   try {
     const body = record(await response.json());
+    const formats: unknown = body?.formats;
     return {
       error: text(body?.error),
       cause: knownCause(text(body?.cause)),
+      formats: Array.isArray(formats)
+        ? formats
+            .filter(
+              (ext: unknown): ext is string =>
+                typeof ext === 'string' && /^\.[a-z0-9]{1,5}$/i.test(ext),
+            )
+            .slice(0, 20)
+        : undefined,
     };
   } catch {
     return {};
@@ -293,7 +306,7 @@ export async function startPlayback(
         httpStatus: response.status,
       };
     }
-    const { error, cause } = await errorBody(response);
+    const { error, cause, formats } = await errorBody(response);
     const failure = failureOf(response.status, error, cause);
     const retryMs =
       response.status === 429 ||
@@ -306,6 +319,7 @@ export async function startPlayback(
       failure,
       code: knownCode(error) ?? 'unexpected_response',
       ...(cause ? { cause } : {}),
+      ...(failure === 'none' && formats?.length ? { formats } : {}),
       httpStatus: response.status,
       ...(retryMs ? { retryMs } : {}),
     };
