@@ -73,15 +73,16 @@ jobs:
       - run: npm run test:worker-build
       - run: npm run build:cast
 
-  # Playwright already uses all four CPUs on one hosted runner. File sharding supplies two runners without changing
-  # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server.
+  # Playwright already uses all four CPUs on one hosted runner. File sharding supplies three runners without changing
+  # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards
+  # left the first with roughly 200 tests and a six-minute critical path while the second finished near four minutes.
   e2e:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
-    name: e2e (${{ matrix.shard }}/2)
+        shard: [1, 2, 3]
+    name: e2e (${{ matrix.shard }}/3)
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble
       options: --ipc=host
@@ -110,7 +111,7 @@ jobs:
         if: matrix.shard == 1
         run: node test/sync-policy-browser.mjs
       - name: Browser behavior
-        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/2
+        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/3
 
   # Preserve the stable `web` check name while making it represent both the once-only checks and every shard.
   web:

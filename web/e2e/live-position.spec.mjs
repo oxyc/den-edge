@@ -8,9 +8,15 @@ import { E2E_ORIGIN } from './base-url.mjs';
 import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
 import { routeTmdb } from './network.mjs';
 
+// These real-time scenarios each own their browser contexts and in-memory edge state.
+// Let Playwright run them concurrently instead of making one shard wait for all three.
+test.describe.configure({ mode: 'parallel' });
+
 const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
 const WRITE_EVERY_MS = 3_000;
-const PLAYING_MS = 45_000;
+const BETWEEN_PUSHES_MS = 32_000;
+const SHORT_PLAYING_MS = 12_000;
+const EXPIRE_LIVE_MS = 46_000;
 /** A held read of den-edge (25 s) and the sync after it: how often the Apple TV's log reaches den-edge. */
 const TV_PUSH_MS = 27_000;
 
@@ -151,7 +157,9 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
 async function openWithDevice(browser, page, options) {
   const edge = sharedEdge(options);
   await edge.route(page, 'page');
-  await page.goto(`${SEED_FIXTURE}?seed`);
+  // Keep wall time for the Worker's real pull cadence, but let expiry advance without sleeping for LIVE_MS.
+  await page.clock.install();
+  await page.goto(`${SEED_FIXTURE}?seed&stale-live`);
   await page
     .getByRole('status')
     .filter({ hasText: 'Worker library seeded' })
@@ -220,20 +228,20 @@ const runs = (samples) => {
   return out.map(({ state, count }) => `${state} ${(count / 4).toFixed(1)}s`).join(', ');
 };
 
-/** Watches `clock` for PLAYING_MS and expects it shown, and ticking, the whole time. */
-async function expectTicking(clock, edge) {
+/** Watches `clock` and expects it shown, and ticking, the whole time. */
+async function expectTicking(clock, edge, duration) {
   const pullsBefore = edge.pulls.get('page').length;
-  const samples = await watch(clock, PLAYING_MS);
+  const samples = await watch(clock, duration);
   const pulled = edge.pulls.get('page').slice(pullsBefore);
   console.log(`page pulls while playing, ms apart: ${gaps(pulled).join(' ')}`);
   console.log(`newest write's age when a pull carried it, ms: ${edge.arrivals.join(' ')}`);
   console.log(`clock while playing: ${runs(samples)}`);
   const hidden = samples.filter((text) => text === null).length;
   expect(hidden, `the clock was gone for ${hidden} of ${samples.length} samples`).toBe(0);
-  expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(PLAYING_MS / 1000 - 5);
+  expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(duration / 1000 - 5);
 }
 
-// Not the seeded resume point (Movie 1001), whose own write is fresh enough to tick while the page opens.
+// Not either seeded resume point, so each test observes only the writes it creates.
 const PLAYED = { type: 'movie', id: 1002 };
 const homeClock = (page) => page.locator('.card', { hasText: 'Movie 1002' }).locator('.live');
 
@@ -258,15 +266,13 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     const badge = await clock.boundingBox();
     expect(art.x + art.width - (badge.x + badge.width)).toBeCloseTo(8, 0);
     expect(art.y + art.height - (badge.y + badge.height)).toBeCloseTo(18, 0);
-    await expectTicking(clock, edge);
+    // Long enough to span the TV's next real 27-second push and several of this page's 5-second pulls.
+    await expectTicking(clock, edge, BETWEEN_PUSHES_MS);
 
     // Stopped on the TV: no more writes. The clock runs on until the last one is LIVE_MS (45 s) old.
     stop();
-    const stopped = Date.now();
-    await expect(clock).toBeHidden({ timeout: 60_000 });
-    const after = Date.now() - stopped;
-    console.log(`clock gone ${after} ms after the last write`);
-    expect(after).toBeLessThanOrEqual(50_000);
+    await page.clock.fastForward(EXPIRE_LIVE_MS);
+    await expect(clock).toBeHidden();
   } finally {
     await close();
   }
@@ -336,7 +342,8 @@ test('a title paused on another device stops its clock at the next write that di
     const clock = homeClock(page);
     const playing = play(PLAYED, 600);
     await expect(clock).toBeVisible({ timeout: 40_000 });
-    await expectTicking(clock, edge);
+    // Two live pulls are enough to prove that fresh writes keep the clock moving before the pause check.
+    await expectTicking(clock, edge, SHORT_PLAYING_MS);
 
     // Paused on the device: it goes on writing every three seconds, at one position.
     playing.pause();
