@@ -382,7 +382,9 @@
       watchlistCachedPrefix = cachedPrefix(overview.watchlist);
       shelfBaselinesCaptured = true;
     });
-    if (!model || homeNamingSet === undefined) {
+    // A Kid's names pass atlas's age check, which fails closed until discovery has found atlas: a pass started
+    // earlier names nothing, and is never asked again, so Home ranked its worlds without the Kid's history.
+    if (!model || homeNamingSet === undefined || (session.kid && !atlasReady)) {
       shelvesReady = model === null;
       shelfPlan = null;
       return;
