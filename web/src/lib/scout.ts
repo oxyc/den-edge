@@ -339,7 +339,7 @@ export function denConfigureURL(url: string, routes: Routes): string | null {
 }
 
 /**
- * The single config segment of each of the library's own scout, atlas, reel and subtitles installs — what a grant
+ * The single config segment of each of the library's own Hearth, scout, atlas, reel and subtitles installs — what a grant
  * escrows, so den-edge builds the address itself. An addon with no install, or one whose segment isn't plain base64url,
  * is left out.
  */
@@ -349,6 +349,7 @@ export function hostedInstalls(
 ): Partial<Record<GrantAddon, string>> {
   const installs: Partial<Record<GrantAddon, string>> = {};
   const wants: [GrantAddon, { name: string; path: string }][] = [
+    ['den', DEN],
     ['scout', SCOUT],
     ['atlas', ATLAS],
     ['reel', REEL],

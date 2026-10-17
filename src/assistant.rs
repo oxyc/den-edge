@@ -889,6 +889,12 @@ mod tests {
     /// drains say whether the TV is awake. den-mcp learns whether a request it appended was taken, never how it ended.
     #[tokio::test]
     async fn the_tv_queue_is_its_own_and_its_drains_say_the_tv_is_awake() {
+        Box::pin(tv_queue_scenario()).await;
+    }
+
+    // This scenario's many sequential HTTP futures make its generated async state larger than macOS's test-thread
+    // stack. Poll it from the heap, as production requests are, so the exact test also runs under that smaller stack.
+    async fn tv_queue_scenario() {
         let h = write_harness().await;
         let (_, access) = write_access(&h).await;
         let tv = || Some(json!({ "sealed": sealed(), "queue": "tv" }));

@@ -21,6 +21,7 @@ import {
   revokeGrant,
   secretHash,
   sharedInstallOf,
+  shareableAddons,
   ticketGrant,
   timeLeft,
   updateGrant,
@@ -36,6 +37,19 @@ import {
 test('a code expiry stays a day inside den-edge’s 90-day limit, whatever the browser clock says', () => {
   expect(cappedCodeExpiry(1000, 14 * DAY)).toBe(1000 + 14 * DAY);
   expect(cappedCodeExpiry(1000, 200 * DAY)).toBe(1000 + 89 * DAY);
+});
+
+test('a combined Hearth replaces its legacy services while preserving separate Atlas discovery', () => {
+  expect(shareableAddons({ den: 'hearth', scout: 'scout', atlas: 'atlas', reel: 'reel' })).toEqual([
+    'den',
+    'atlas',
+  ]);
+  expect(shareableAddons({ den: 'hearth', scout: 'scout', reel: 'reel' })).toEqual(['den']);
+  expect(shareableAddons({ scout: 'scout', atlas: 'atlas', reel: 'reel' })).toEqual([
+    'scout',
+    'atlas',
+    'reel',
+  ]);
 });
 
 const HERE = 'https://den.example/settings';
@@ -444,6 +458,7 @@ test('escrow is re-uploaded only for a live grant whose addons changed, and only
   expect(spy).toHaveBeenCalledTimes(1);
   // Only the addons this grant shares travel with it.
   expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
+    addons: ['scout', 'atlas'],
     installs: { scout: 'one', atlas: 'two' },
   });
 
@@ -457,6 +472,34 @@ test('escrow is re-uploaded only for a live grant whose addons changed, and only
     ['a1b2c3d4'],
   );
   expect(spy).toHaveBeenCalledTimes(2);
+});
+
+test('a migrated combined Hearth replaces missing legacy installs on an existing grant', async () => {
+  const spy = answering(200, { grant: { ...GRANT, addons: ['den'] } });
+  expect(await reuploadInstalls('abc123', [GRANT], { den: 'opaque-hearth' }, spy)).toEqual([
+    'a1b2c3d4',
+  ]);
+  expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
+    addons: ['den'],
+    installs: { den: 'opaque-hearth' },
+  });
+  expect(String(spy.mock.calls[0]![1]?.body)).not.toContain('scout');
+});
+
+test('a migrated combined Hearth keeps and adds installed Atlas discovery', async () => {
+  const spy = answering(200, { grant: { ...GRANT, addons: ['den', 'atlas'] } });
+  expect(
+    await reuploadInstalls(
+      'abc123',
+      [{ ...GRANT, addons: ['scout'] }],
+      { den: 'hearth', atlas: 'atlas' },
+      spy,
+    ),
+  ).toEqual(['a1b2c3d4']);
+  expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
+    addons: ['den', 'atlas'],
+    installs: { den: 'hearth', atlas: 'atlas' },
+  });
 });
 
 test('a failed upload is tried again next time', async () => {

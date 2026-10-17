@@ -18,7 +18,6 @@
     createGrant,
     DAY,
     DEFAULT_REDEEM_DAYS,
-    GRANT_ADDONS,
     inviteLink,
     keepCode,
     keepUploaded,
@@ -26,6 +25,7 @@
     listGrants,
     newGrantCode,
     reuploadInstalls,
+    shareableAddons,
     revokeGrant,
     timeLeft,
     updateGrant,
@@ -71,6 +71,7 @@
   } = $props();
 
   const NAMES: Record<GrantAddon, { label: string; role: string }> = {
+    den: { label: 'Den Hearth', role: 'Streams, subtitles and trailers' },
     scout: { label: 'Den Scout', role: 'Streams' },
     atlas: { label: 'Den Atlas', role: 'Discovery' },
     reel: { label: 'Den Reel', role: 'Trailers' },
@@ -113,10 +114,9 @@
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
   let codes = $state<Record<string, string>>({});
 
-  // A new invite always carries every install that can actually be escrowed. The grant protocol keeps the legacy
-  // service names because Edge derives the stable guest Hearth overlay from them; bare or foreign plugins never
-  // enter `hostedInstalls`, so "all" cannot accidentally widen beyond this household's shareable sealed configs.
-  const shareable = $derived(GRANT_ADDONS.filter((addon) => installs[addon]));
+  // Combined Hearth replaces its legacy Scout, Reel and Subtitles installs; Atlas remains separate discovery. Edge
+  // never opens an opaque segment, and legacy first-party installs are shared only where Hearth is absent.
+  const shareable = $derived(shareableAddons(installs));
   const clamp = (n: number, low: number, high: number) =>
     Math.min(high, Math.max(low, Math.round(Number.isFinite(n) ? n : low)));
 
@@ -533,10 +533,9 @@
       {/if}
       {#if problem}<p class="status bad" role="alert">{problem}</p>{/if}
       <p class="foot">
-        Guests watch through your home connection and never see your addons, keys or watchlist.
-        Anything that needs converting for their browser isn’t converted for them. Guests use your
-        debrid account, so share it with people you trust. Revoking ends their access, playing
-        included.
+        Guests never see your addons, keys or watchlist. They can fall back to your debrid account
+        through your home connection, where your Hearth can convert video for their browser. Share
+        with people you trust. Revoking ends their access, playing included.
       </p>
 
       <h3>Your guests</h3>
@@ -669,10 +668,9 @@
       </ul>
     {/if}
     <p class="foot">
-      Their addons are used alongside yours and can’t be seen or changed here. Some releases can’t
-      be played in a browser that lacks their video format, because shared libraries don’t convert
-      video. Your own library and watchlist are yours alone: they sync to your other devices, never
-      to whoever lent you these.
+      Their addons are used alongside yours and can’t be seen or changed here. Their Hearth can
+      convert video for your browser. Your own library and watchlist are yours alone: they sync to
+      your other devices, never to whoever lent you these.
     </p>
   </SettingRow>
   <PhoneLink {sealHandover} {selfId} />

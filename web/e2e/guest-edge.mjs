@@ -22,6 +22,8 @@ export function newEdge({ devices = 2, host = 'Oskar', profiles = false } = {}) 
     /** Libraries by id: the write token's hash, and the rows. */
     libraries: new Map(),
     refusedStarts: 0,
+    /** Guest Hearth capability probes, retained so specs can prove the grant—not library membership—authorized it. */
+    playbackProbes: [],
     /** Pairing sessions by sid: the relay's four slots, as pairing v1 uses them. */
     pairs: new Map(),
     /** Ends every pairing session, as ten minutes do. */
@@ -88,7 +90,8 @@ async function routeGrants(page, edge) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const body = request.postDataJSON?.() ?? {};
-    const granted = { gid: GID, name: edge.host, addons: ['scout'], expiresAt: null };
+    // A migrated owner keeps one combined Hearth install; no legacy Scout bearer remains in their library.
+    const granted = { gid: GID, name: edge.host, addons: ['den'], expiresAt: null };
     if (path === '/grant/redeem') {
       if (body.code !== CODE || !edge.grant.live)
         return json(route, 404, { error: 'invalid_code' });
@@ -103,7 +106,7 @@ async function routeGrants(page, edge) {
         gid: GID,
         name: edge.host,
         expiresAt: null,
-        addons: { scout: `/scout/~${GID}` },
+        addons: { den: `/den/~${GID}` },
       });
     }
     if (path === '/grant/library') {
@@ -235,6 +238,19 @@ export async function routeGuestEdge(page, edge) {
       json: { id: 'com.den.scout', name: 'Scout', version: '1.0.0', resources: [] },
     }),
   );
+  await page.route(`${E2E_ORIGIN}/den/~${GID}/**`, (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === `/den/~${GID}/manifest.json`)
+      return route.fulfill({
+        json: { id: 'com.den.hearth', name: 'Hearth', version: '1.0.0', resources: ['stream'] },
+      });
+    if (path === `/den/~${GID}/playback` && request.method() === 'OPTIONS') {
+      edge.playbackProbes.push({ url: request.url(), headers: request.headers() });
+      return route.fulfill({ status: 204 });
+    }
+    return route.fulfill({ status: 404, json: {} });
+  });
   await routeGrants(page, edge);
   await routeLibraries(page, edge);
   await routePairs(page, edge);

@@ -64,7 +64,7 @@ const CONFIGURE_COOKIE: &str = "den_guest_configure";
 const MEMBER_CONFIGURE_COOKIE: &str = "den_member_configure";
 const CONFIGURE_COOKIE_MAX_AGE: u64 = 15 * 60;
 /// The addons a grant may hand out: the ones the relay table names and the web app browses with.
-pub const ADDONS: [&str; 4] = ["scout", "atlas", "reel", "subtitles"];
+pub const ADDONS: [&str; 5] = ["den", "scout", "atlas", "reel", "subtitles"];
 
 const NS: &str = "grants";
 const INDEX: &str = "index";
@@ -938,6 +938,12 @@ pub struct Live {
     pub expires_at: Option<u64>,
 }
 
+/// Whether the grant both names and escrows an addon. Keep both halves of that invariant at every capability
+/// boundary: a stale or malformed record must not advertise a facade the relay will refuse.
+pub(crate) fn shares_install(addons: &[String], installs: &BTreeMap<String, String>, addon: &str) -> bool {
+    addons.iter().any(|shared| shared == addon) && installs.contains_key(addon)
+}
+
 /// Whether a grant is live now, without its secret: for what a grant's holder was given in its name (an assistant's
 /// connection, `oauth.rs`), which must stop the moment the grant is revoked, expires or is shortened. The end of
 /// access, if it has one, when it is. A record that cannot be read is an error, not a revocation.
@@ -1180,9 +1186,12 @@ async fn redeem(state: &AppState, req: Request) -> Response {
         }
     }
     let mut addons = record.addons.clone();
-    let inherited_hearth =
-        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
-    if state.den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+    let inherited_hearth = shares_install(&record.addons, &record.installs, "den")
+        || shares_install(&record.addons, &record.installs, "scout");
+    if state.den_playback_enabled
+        && (inherited_hearth || record.den_install.is_some())
+        && !addons.iter().any(|addon| addon == "den")
+    {
         addons.push("den".into());
     }
     json_reply(
@@ -1207,11 +1216,11 @@ async fn addons(state: &AppState, req: Request) -> Response {
             let mut addons: Map<String, Value> =
                 live.addons.iter().map(|a| (a.clone(), json!(format!("/{a}/~{}", live.gid)))).collect();
             // A guest's stable Hearth URL is an overlay, not merely the guest's optional personal config. An
-            // existing grant that already escrows the host's Scout install can therefore use Hearth immediately:
-            // host playback stays behind Remux, while a personal config may later add direct playback or override
-            // subtitles without changing this URL or redeeming another invite.
-            let hearth =
-                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
+            // Existing grants that escrow a host's legacy Scout or combined Hearth install can therefore use Hearth
+            // immediately: host playback stays behind Remux, while a personal config may later add direct playback
+            // or override subtitles without changing this URL or redeeming another invite.
+            let hearth = shares_install(&live.addons, &live.installs, "den")
+                || shares_install(&live.addons, &live.installs, "scout");
             if state.den_playback_enabled && (hearth || live.den_install.is_some()) {
                 addons.insert("den".into(), json!(format!("/den/~{}", live.gid)));
             }
@@ -1393,9 +1402,12 @@ async fn reserve_library(state: &AppState, req: Request) -> Response {
 /// The device a ticket spends is a new one: this answer carries no secret, only what a redeem would say.
 fn redeemed_reply(record: &Record, den_playback_enabled: bool) -> Response {
     let mut addons = record.addons.clone();
-    let inherited_hearth =
-        record.addons.iter().any(|addon| addon == "scout") && record.installs.contains_key("scout");
-    if den_playback_enabled && (inherited_hearth || record.den_install.is_some()) {
+    let inherited_hearth = shares_install(&record.addons, &record.installs, "den")
+        || shares_install(&record.addons, &record.installs, "scout");
+    if den_playback_enabled
+        && (inherited_hearth || record.den_install.is_some())
+        && !addons.iter().any(|addon| addon == "den")
+    {
         addons.push("den".into());
     }
     json_reply(
@@ -2437,6 +2449,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_migrated_host_hearth_is_offered_only_as_the_stable_guest_facade() {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let host_hearth = "H".repeat(64);
+        let (gid, header) =
+            redeemed(&h, json!({ "addons": ["den"], "installs": { "den": host_hearth } })).await;
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&header)).await).await;
+        assert_eq!(listed["addons"], json!({ "den": format!("/den/~{gid}") }));
+        assert!(!listed.to_string().contains(&"H".repeat(16)), "the escrowed bearer was exposed");
+    }
+
+    #[tokio::test]
+    async fn an_unshared_hearth_install_never_advertises_a_dead_guest_facade() {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let (gid, header) =
+            redeemed(&h, json!({ "addons": ["den"], "installs": { "den": "H".repeat(64) } })).await;
+        let mut malformed = load(&h.state, &gid).await.unwrap().unwrap();
+        malformed.addons.clear();
+        save(&h.state, &malformed).await.unwrap();
+
+        let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&header)).await).await;
+        assert_eq!(listed["addons"], json!({}));
+        let redeemed = body_json(redeemed_reply(&malformed, true)).await;
+        assert_eq!(redeemed["addons"], json!([]));
+    }
+
+    #[tokio::test]
     async fn last_use_is_kept_in_memory_and_shown_to_the_host() {
         let h = harness().await;
         let (gid, header) = redeemed(&h, json!({})).await;
@@ -2870,6 +2910,93 @@ mod tests {
             assert_eq!(envelope["request"]["path"], "/playback");
             assert_eq!(envelope["request"]["body"]["imdb"], "tt1");
         }
+    }
+
+    #[tokio::test]
+    async fn a_migrated_host_hearth_reaches_only_live_guest_overlays_without_exposing_its_bearer() {
+        let (mut h, seen) = relaying(direct_playback, Some("edge-secret")).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.den_playback_enabled = true;
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let host_hearth = "H".repeat(64);
+        let (gid, credential) =
+            redeemed(&h, json!({ "addons": ["den"], "installs": { "den": host_hearth }, "accessDays": 1 }))
+                .await;
+        // Simulate a stale stored install that is not in the grant's authorized addon list. It must not enter the
+        // private envelope alongside the valid Hearth capability.
+        let mut malformed = load(&h.state, &gid).await.unwrap().unwrap();
+        malformed.installs.insert("scout".into(), "S".repeat(64));
+        save(&h.state, &malformed).await.unwrap();
+        let response = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/manifest.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (path, headers, body) = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(path, "/den/_guest");
+        assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+        let envelope: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["host"]["den"], "H".repeat(64));
+        assert!(envelope["host"].get("scout").is_none());
+        assert!(envelope.get("personal").is_none());
+        let answer = crate::handler::tests::body_text(response).await;
+        assert!(!answer.contains(&"H".repeat(16)), "the host bearer returned to the guest: {answer}");
+
+        let cast = h
+            .send(
+                "POST",
+                &format!("/den/~{gid}/playback"),
+                Some(json!({ "imdb": "tt1", "player": "cast" }).to_string()),
+                &[
+                    (HEADER, credential.as_str()),
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("idempotency-key", "guest-cast-1"),
+                ],
+            )
+            .await;
+        assert_eq!(cast.status(), StatusCode::OK);
+        let cast_answer = crate::handler::tests::body_text(cast).await;
+        assert!(cast_answer.contains("https://flux.tb-cdn.io/x.m3u8"));
+        assert!(!cast_answer.contains(&"H".repeat(16)));
+        let (_, headers, body) = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(headers["x-den-owner"], format!("grant:{gid}"));
+        let envelope: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["request"]["path"], "/playback");
+        assert_eq!(envelope["request"]["body"]["player"], "cast");
+        assert_eq!(envelope["host"]["den"], "H".repeat(64));
+
+        let before = seen.lock().unwrap().len();
+        h.advance(DAY_MS);
+        let expired = h
+            .send(
+                "GET",
+                &format!("/den/~{gid}/manifest.json"),
+                None,
+                &[(HEADER, credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(expired.status(), StatusCode::GONE);
+        assert_eq!(seen.lock().unwrap().len(), before, "an expired grant reached Hearth");
+
+        let (revoked_gid, revoked_credential) =
+            redeemed(&h, json!({ "addons": ["den"], "installs": { "den": "R".repeat(64) } })).await;
+        assert_eq!(host_call(&h, "DELETE", &format!("/{revoked_gid}"), None).await.0, StatusCode::NO_CONTENT);
+        let after_revoke = seen.lock().unwrap().len();
+        let revoked = h
+            .send(
+                "GET",
+                &format!("/den/~{revoked_gid}/manifest.json"),
+                None,
+                &[(HEADER, revoked_credential.as_str()), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(revoked.status(), StatusCode::NOT_FOUND);
+        assert_eq!(seen.lock().unwrap().len(), after_revoke, "a revoked grant reached Hearth");
     }
 
     #[tokio::test]
