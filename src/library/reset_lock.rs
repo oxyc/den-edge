@@ -9,14 +9,15 @@
 //! * `model` is the pure decision function the spec's `resetLockContract` vectors pin.
 //! * This module builds a world from what is stored, asks the model, and performs exactly the decided effect.
 //!
-//! Everything here is dormant behind `PROFILE_MIGRATION_ENABLED`: with it off none of these routes exist, and a
-//! `DELETE` carrying the exclusive headers is an ordinary `DELETE`.
+//! Everything here is dormant behind `PROFILE_RESET_ENABLED` (which follows `PROFILE_MIGRATION_ENABLED` when
+//! unset): with it off none of these routes exist, and a `DELETE` carrying the exclusive headers is an ordinary
+//! `DELETE`.
 
 pub(crate) mod model;
 #[cfg(test)]
 mod tests;
 
-use super::profile_migration::migration_source;
+use super::snapshot;
 use super::v3::{ExclusiveEdit, LibraryStore, LockChange, LockExpect, Protocol, StoreError};
 use super::{
     authority, full_generation, library_store_locked, moved, owned, retire_owned_marked, retired, v3_io,
@@ -46,7 +47,9 @@ const SWEEP: &str = "exclusive:sweep";
 /// A sweep hint is a file in this namespace naming a household that may have successors to delete, so a restart
 /// finds them without opening every library. It is written before the decision and is only ever a hint: the
 /// household's own `SWEEP` record is the authority.
-const HINT_NS: &str = "lib-profile-migration";
+const HINT_NS: &str = "lib-profile-reset";
+/// Where releases before `HINT_NS` wrote their hints. Still read and cleared, so a hint left by one is swept.
+const LEGACY_HINT_NS: &str = "lib-profile-migration";
 const HINT_EXT: &str = "hint";
 const SUCCESSOR_TOKEN_HEADER: &str = "x-den-successor-token";
 
@@ -403,14 +406,14 @@ struct View {
 
 fn observed(id: &str, store: &dyn LibraryStore) -> Result<(Source, Fence), StoreError> {
     let snapshot = store.snapshot()?;
-    let source = migration_source(id, &snapshot)
+    let (generation, head) = snapshot::source(id, &snapshot)
         .map_err(|reason| StoreError::Invalid(format!("library source is unusable: {reason:?}")))?;
     let fence = Fence {
         generation: snapshot.protocol.migration_generation,
         base: snapshot.protocol.head,
-        head: source.head.clone(),
+        head: head.clone(),
     };
-    Ok((Source { generation: source.generation, head: source.head }, fence))
+    Ok((Source { generation, head }, fence))
 }
 
 /// A library as the model sees it. `None` when there is no such library. The source is computed only when the
@@ -1541,8 +1544,10 @@ async fn write_hint(state: &AppState, household: &str) {
 }
 
 async fn clear_hint(state: &AppState, household: &str) {
-    if let Err(reason) = state.store.delete_file(HINT_NS, &hint_key(household), HINT_EXT).await {
-        eprintln!("key reset sweep hint: {reason}");
+    for namespace in [HINT_NS, LEGACY_HINT_NS] {
+        if let Err(reason) = state.store.delete_file(namespace, &hint_key(household), HINT_EXT).await {
+            eprintln!("key reset sweep hint: {reason}");
+        }
     }
 }
 
@@ -1665,19 +1670,24 @@ async fn delete_successor(state: &AppState, id: &str) -> io::Result<()> {
 
 /// At startup: every hint names a household that may owe a sweep; the household's own record decides.
 pub async fn sweep_startup(state: Arc<AppState>) {
-    let directory = state.store.namespace_dir(HINT_NS);
     let mut hinted = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(&directory).await else { return };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != HINT_EXT) {
+    for namespace in [HINT_NS, LEGACY_HINT_NS] {
+        let Ok(mut entries) = tokio::fs::read_dir(state.store.namespace_dir(namespace)).await else {
             continue;
-        }
-        match tokio::fs::read_to_string(&path).await {
-            Ok(household) if valid_hex_id(household.trim()) => hinted.push(household.trim().to_owned()),
-            Ok(_) | Err(_) => {}
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != HINT_EXT) {
+                continue;
+            }
+            match tokio::fs::read_to_string(&path).await {
+                Ok(household) if valid_hex_id(household.trim()) => hinted.push(household.trim().to_owned()),
+                Ok(_) | Err(_) => {}
+            }
         }
     }
+    hinted.sort();
+    hinted.dedup();
     for household in hinted {
         crate::lock(&state.reset_sweeps).insert(household.clone());
         if let Err(reason) = sweep(&state, &household).await {
@@ -1697,7 +1707,7 @@ pub async fn sweep_startup(state: Arc<AppState>) {
 /// A successor that already existed when the lock was acquired was not made by the reset, and an ended or retiring
 /// lock declares nothing to start; both are ordinary new libraries.
 pub(super) async fn declared_successor(state: &AppState, prover: &str, id: &str) -> bool {
-    if !state.profile_migration_enabled {
+    if !state.profile_reset_enabled {
         return false;
     }
     match declares(state, prover, id).await {

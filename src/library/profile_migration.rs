@@ -6,6 +6,10 @@
 //! generation/base/digest fenced in-place rewrite, and retirement while the freshly checked household authority
 //! remains locked.
 
+use super::snapshot::{
+    self, authenticated_head, canonical_json, hex_digest, snapshot_rows, SnapshotAuthority, SnapshotError,
+    SnapshotRow,
+};
 use super::v3::{
     LibrarySnapshot, LibraryStore, MigrationCommit, MigrationResultKind, Protocol, RestorePlan, RestoreRow,
     RewriteRow, StoreError,
@@ -189,27 +193,14 @@ impl From<StoreError> for MigrationError {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct SnapshotRow {
-    #[serde(rename = "k")]
-    key: String,
-    #[serde(rename = "seq")]
-    sequence: u64,
-    #[serde(rename = "v")]
-    value: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SnapshotAuthority<'a> {
-    #[serde(rename = "libraryId")]
-    library_id: &'a str,
-    #[serde(rename = "generation")]
-    migration_generation: u64,
-    #[serde(rename = "base")]
-    head: u64,
-    #[serde(rename = "wireMin")]
-    wire_minimum: u64,
-    rows: &'a [SnapshotRow],
+impl From<SnapshotError> for MigrationError {
+    fn from(value: SnapshotError) -> Self {
+        match value {
+            SnapshotError::Corrupt => Self::BackupCorrupt,
+            SnapshotError::Invalid(message) => Self::Invalid(message),
+            SnapshotError::Storage(reason) => Self::Storage(reason),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -264,13 +255,6 @@ pub(crate) enum AttemptState {
     Restored,
     Superseded,
     Aborted,
-}
-
-#[derive(Deserialize)]
-struct Fragment {
-    k: String,
-    seq: u64,
-    v: String,
 }
 
 pub(crate) struct ProfileMigrationStorage<'a> {
@@ -1460,36 +1444,6 @@ impl<'a> ProfileMigrationStorage<'a> {
     }
 }
 
-fn snapshot_rows(snapshot: &LibrarySnapshot) -> Result<Vec<SnapshotRow>, MigrationError> {
-    let mut rows = snapshot
-        .rows
-        .iter()
-        .map(|stored| {
-            let fragment: Fragment =
-                serde_json::from_slice(&stored.fragment).map_err(|_| MigrationError::BackupCorrupt)?;
-            if fragment.seq != stored.sequence {
-                return Err(MigrationError::BackupCorrupt);
-            }
-            Ok(SnapshotRow { key: fragment.k, sequence: fragment.seq, value: fragment.v })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
-    Ok(rows)
-}
-
-fn authenticated_head(library_id: &str, snapshot: &LibrarySnapshot) -> Result<String, MigrationError> {
-    let rows = snapshot_rows(snapshot)?;
-    let authority = SnapshotAuthority {
-        library_id,
-        migration_generation: snapshot.protocol.migration_generation,
-        head: snapshot.protocol.head,
-        wire_minimum: snapshot.protocol.wire_min,
-        rows: &rows,
-    };
-    let bytes = canonical_json(&authority)?;
-    Ok(hex_digest(&bytes))
-}
-
 fn backup_head(manifest: &BackupManifest) -> Result<String, MigrationError> {
     let authority = SnapshotAuthority {
         library_id: &manifest.household_id,
@@ -1583,16 +1537,9 @@ fn fence(
     })
 }
 
-pub(super) fn migration_source(
-    library_id: &str,
-    snapshot: &LibrarySnapshot,
-) -> Result<MigrationSource, MigrationError> {
-    let source = MigrationSource {
-        generation: snapshot.protocol.migration_generation,
-        head: authenticated_head(library_id, snapshot)?,
-    };
-    valid_source(&source)?;
-    Ok(source)
+fn migration_source(library_id: &str, snapshot: &LibrarySnapshot) -> Result<MigrationSource, MigrationError> {
+    let (generation, head) = snapshot::source(library_id, snapshot)?;
+    Ok(MigrationSource { generation, head })
 }
 
 fn source_from_fence(fence: &MigrationFence) -> MigrationSource {
@@ -1651,17 +1598,6 @@ fn valid_backup_rows(rows: &[SnapshotRow]) -> bool {
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-/// serde_json's value maps are ordered without the `preserve_order` feature. Round-tripping through `Value` sorts
-/// every object recursively, yielding RFC 8785's representation for this integer/string-only schema.
-fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, MigrationError> {
-    let value = serde_json::to_value(value).map_err(io::Error::other)?;
-    serde_json::to_vec(&value).map_err(io::Error::other).map_err(Into::into)
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    crate::hex(&Sha256::digest(bytes))
 }
 
 fn staged_digest(rows: &[RewriteRow]) -> Result<String, MigrationError> {
@@ -4334,24 +4270,6 @@ mod tests {
                 .unwrap(),
             RetirementResult::Absent,
             "loser cleanup is idempotent"
-        );
-    }
-
-    #[test]
-    fn authenticated_authority_uses_jcs_key_order() {
-        let rows = [SnapshotRow { key: ACTIVITY.into(), sequence: 1, value: "é".into() }];
-        let authority = SnapshotAuthority {
-            library_id: HOUSEHOLD,
-            migration_generation: 7,
-            head: 1,
-            wire_minimum: 4,
-            rows: &rows,
-        };
-        assert_eq!(
-            String::from_utf8(canonical_json(&authority).unwrap()).unwrap(),
-            format!(
-                r#"{{"base":1,"generation":7,"libraryId":"{HOUSEHOLD}","rows":[{{"k":"{ACTIVITY}","seq":1,"v":"é"}}],"wireMin":4}}"#
-            )
         );
     }
 }

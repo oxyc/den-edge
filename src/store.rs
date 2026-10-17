@@ -99,7 +99,7 @@ fn load_generation(dir: &Path) -> io::Result<String> {
 }
 
 /// The kinds of record, one directory each.
-pub const NAMESPACES: [&str; 11] = [
+pub const NAMESPACES: [&str; 12] = [
     "inbox",
     "plugins",
     "settings",
@@ -107,6 +107,7 @@ pub const NAMESPACES: [&str; 11] = [
     "lib",
     "lib-rewrite",
     "lib-profile-migration",
+    "lib-profile-reset",
     "grants",
     "oauth",
     "recovery",

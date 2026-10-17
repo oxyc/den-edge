@@ -24,8 +24,8 @@ import type { ProfileKidCreateVault } from './profileKidCreateWorker';
 import { deriveKeys, fromBase64url, seal, sealPlaintext, type Row } from './wire';
 
 /*
- * The Web adapter against the real den-edge: the binary, started on a free port with the profile migration surface on,
- * and the real LibraryLog primitives over HTTP. Nothing in den-edge is faked, so every response shape the adapter
+ * The Web adapter against the real den-edge: the binary, started on a free port with the key reset's surface on and the
+ * profile migration's off, and the real LibraryLog primitives over HTTP. Nothing in den-edge is faked, so every response shape the adapter
  * relies on, the source digest, the generation on a retirement and the new-library guards are the production ones.
  *
  * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one.
@@ -54,7 +54,13 @@ afterEach(async () => {
 async function startEdge(extra: Record<string, string> = {}): Promise<Edge> {
   const data = await mkdtemp(join(tmpdir(), 'den-edge-reset-'));
   const child: ChildProcess = spawn(BINARY, [], {
-    env: { PORT: '0', DATA_DIR: data, PROFILE_MIGRATION_ENABLED: '1', ...extra },
+    env: {
+      PORT: '0',
+      DATA_DIR: data,
+      PROFILE_RESET_ENABLED: '1',
+      PROFILE_MIGRATION_ENABLED: '0',
+      ...extra,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const base = await new Promise<string>((done, fail) => {
@@ -343,6 +349,21 @@ describe.skipIf(!available)(
         kind: 'blocked',
       });
       expect(await status(w.edge, keyOf(9), 5)).toBe(200);
+    });
+
+    it('follows PROFILE_MIGRATION_ENABLED when PROFILE_RESET_ENABLED is unset', async () => {
+      const observe = async (env: Record<string, string>) => {
+        const edge = await startEdge(env);
+        await seed(edge, keyOf(10), 5, [preferences('household')], directory());
+        const household = await LibraryLog.forReset(keyOf(10), 5, edge.fetch, undefined, null);
+        return observeResetSource(household, 5);
+      };
+      await expect(
+        observe({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '1' }),
+      ).resolves.not.toBeNull();
+      await expect(
+        observe({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '0' }),
+      ).rejects.toMatchObject({ reason: 'library-unavailable' });
     });
   },
 );
