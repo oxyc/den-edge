@@ -79,6 +79,32 @@ export function libraryCredentialId(): string | null {
   return libraryId;
 }
 
+/**
+ * A fetcher scoped to one household's host-grant routes. Profile mode keeps the household control library and the
+ * active person's library open together, so the singleton relay credential may belong to Owner while Sharing must
+ * still administer grants owned by the household. This capability is explicit and cannot escape that household's
+ * `/lib/:id/grants` subtree.
+ */
+export function hostGrantsFetch(membership: LibraryRelayMembership): typeof fetch {
+  const claim = `${membership.libraryId}:${membership.memberToken}`;
+  return async (input, init) => {
+    const href =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    const url = ours(href);
+    if (!url || HOST_GRANTS.exec(url.pathname)?.[1] !== membership.libraryId)
+      return fetch(input, init);
+    const inherited = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+    const headers = new Headers(inherited);
+    headers.delete(GRANT_HEADER);
+    headers.set(MEMBER_HEADER, claim);
+    return fetch(input, { ...init, headers });
+  };
+}
+
 /** Remember a grant's secret, so calls to its `~<gid>` addons can carry it. */
 export function rememberGrant(gid: string, secret: string): void {
   grantSecrets.set(gid, secret);

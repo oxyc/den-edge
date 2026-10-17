@@ -26,7 +26,12 @@ import {
   updateGrant,
   type Grant,
 } from './grants';
-import { forgetLibraryCredential, relayFetch, useLibraryCredential } from './relayFetch';
+import {
+  forgetLibraryCredential,
+  hostGrantsFetch,
+  relayFetch,
+  useLibraryCredential,
+} from './relayFetch';
 
 test('a code expiry stays a day inside den-edge’s 90-day limit, whatever the browser clock says', () => {
   expect(cappedCodeExpiry(1000, 14 * DAY)).toBe(1000 + 14 * DAY);
@@ -194,6 +199,69 @@ test('another library’s grants route never gets this library’s membership pr
   useLibraryCredential({ id: 'abc123', member: 'def456' });
   await relayFetch('/lib/ffff/grants');
   expect(new Headers(spy.mock.calls[0]![1]?.headers).get(MEMBER)).toBeNull();
+});
+
+test('household grant administration stays on its explicit membership while Owner is active', async () => {
+  const spy = answering(200, { grants: [] });
+  vi.stubGlobal('fetch', spy);
+  useLibraryCredential({ id: '0a0a0a', member: 'owner-token' });
+  const householdFetch = hostGrantsFetch({
+    libraryId: '1b1b1b',
+    memberToken: 'household-token',
+  });
+
+  await householdFetch('/lib/1b1b1b/grants');
+  await relayFetch('/scout/manifest.json');
+
+  expect(new Headers(spy.mock.calls[0]![1]?.headers).get(MEMBER)).toBe('1b1b1b:household-token');
+  expect(new Headers(spy.mock.calls[1]![1]?.headers).get(MEMBER)).toBe('0a0a0a:owner-token');
+});
+
+test('a household grant fetch cannot leak or redirect its authority', async () => {
+  const spy = answering(200, { grants: [] });
+  vi.stubGlobal('fetch', spy);
+  const householdFetch = hostGrantsFetch({
+    libraryId: '1b1b1b',
+    memberToken: 'household-token',
+  });
+
+  await householdFetch('/lib/1b1b1b/grants', {
+    headers: { 'x-den-grant': 'forged:secret', 'x-den-library-member': 'forged:member' },
+  });
+  await householdFetch('/lib/2c2c2c/grants');
+  await householdFetch('/lib/1b1b1b/grants-not');
+  await householdFetch('/scout/manifest.json');
+  await householdFetch('https://elsewhere.example/lib/1b1b1b/grants');
+
+  const matching = new Headers(spy.mock.calls[0]![1]?.headers);
+  expect(matching.get(MEMBER)).toBe('1b1b1b:household-token');
+  expect(matching.get('x-den-grant')).toBeNull();
+  for (const call of spy.mock.calls.slice(1))
+    expect(new Headers(call[1]?.headers).get(MEMBER)).toBeNull();
+});
+
+test('concurrent household sessions keep their own grant membership', async () => {
+  const release: Array<() => void> = [];
+  const seen: string[] = [];
+  const spy = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get(MEMBER) ?? '');
+    await new Promise<void>((resolve) => release.push(resolve));
+    return new Response(JSON.stringify({ grants: [] }), { status: 200 });
+  });
+  vi.stubGlobal('fetch', spy);
+  const first = hostGrantsFetch({ libraryId: 'aaaa11', memberToken: 'first' });
+  const second = hostGrantsFetch({ libraryId: 'bbbb22', memberToken: 'second' });
+
+  const requests = Promise.all([
+    first('/lib/aaaa11/grants'),
+    second('/lib/bbbb22/grants'),
+    first('/lib/aaaa11/grants/a1b2c3d4'),
+  ]);
+  await vi.waitFor(() => expect(release).toHaveLength(3));
+  release.reverse().forEach((resolve) => resolve());
+  await requests;
+
+  expect(seen).toEqual(['aaaa11:first', 'bbbb22:second', 'aaaa11:first']);
 });
 
 test('listing, changing and revoking use the grant’s route and read the answer', async () => {

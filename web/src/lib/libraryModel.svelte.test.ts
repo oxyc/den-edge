@@ -102,6 +102,14 @@ class FakeService {
         result: { kind: 'retained.home-continue', present: true },
         version: version(6),
       };
+    if (query.kind === 'relay.membership')
+      return {
+        result: {
+          kind: 'relay.membership',
+          capability: { libraryId: 'household-1', memberToken: 'member-1' },
+        },
+        version: version(6),
+      };
     if (query.kind === 'retained.billboard.get')
       return {
         result: {
@@ -701,6 +709,19 @@ it('narrows rich display titles to the strict service wire references', async ()
   });
   lease.release();
   presence.release();
+  model.close();
+});
+
+it('exposes the open model’s relay membership without consulting global profile state', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  await expect(model.relayMembership()).resolves.toEqual({
+    libraryId: 'household-1',
+    memberToken: 'member-1',
+  });
+  expect(service.queries.at(-1)).toEqual({ kind: 'relay.membership' });
   model.close();
 });
 

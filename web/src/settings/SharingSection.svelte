@@ -38,12 +38,14 @@
   import { guestGrants, type RedeemFailure } from '../lib/grants.svelte';
   import type { MenuItem } from '../lib/titleActions';
   import type { Link } from '../lib/links.svelte';
-  import { libraryCredentialId } from '../lib/relayFetch';
+  import type { LibraryModel } from '../lib/libraryModel.svelte';
+  import { hostGrantsFetch } from '../lib/relayFetch';
   import type { Routes } from '../lib/routes';
   import { hostedInstalls, installsOf } from '../lib/scout';
 
   let {
     link,
+    model,
     plugins,
     routes,
     ready,
@@ -52,6 +54,8 @@
   }: {
     /** Null for a browser using its own library: it proves no membership, so it has nothing to lend. */
     link: Link | null;
+    /** The household control model. Grants belong to it even while a separate Owner profile is active. */
+    model: LibraryModel;
     /** The library's own plugins, which a grant's installs come from. */
     plugins: string[];
     routes: Routes;
@@ -127,10 +131,21 @@
   const said = (reply: Extract<Reply<unknown>, { ok: false }>) =>
     failures[reply.error] ?? 'That didn’t work. Try again in a moment.';
 
+  async function host() {
+    try {
+      const membership = await model.relayMembership();
+      if (membership) return { id: membership.libraryId, fetch: hostGrantsFetch(membership) };
+    } catch (error) {
+      console.error('Could not read the household sharing membership', error);
+    }
+    problem = 'Couldn’t open household sharing. Try again.';
+    return null;
+  }
+
   async function refresh() {
-    const id = libraryCredentialId();
-    if (!id) return;
-    const listed = await listGrants(id);
+    const household = await host();
+    if (!household) return;
+    const listed = await listGrants(household.id, household.fetch);
     if (!listed.ok) {
       problem = said(listed);
       return;
@@ -139,7 +154,7 @@
     grants = listed.value;
     codes = keptCodes(listed.value.filter((g) => g.status === 'invited').map((g) => g.gid));
     // The plugin list may have changed since the escrow was made: what den-edge holds follows it.
-    await reuploadInstalls(id, listed.value, installs);
+    await reuploadInstalls(household.id, listed.value, installs, household.fetch);
   }
 
   // Listed once the library is open, and again whenever what would be escrowed changes: its content, as a string,
@@ -151,25 +166,29 @@
   });
 
   async function invite() {
-    const id = libraryCredentialId();
-    if (!id || !name.trim() || !chosen.length) return;
+    const household = await host();
+    if (!household || !name.trim() || !chosen.length) return;
     working = true;
     problem = null;
     const picks = Object.fromEntries(chosen.map((addon) => [addon, installs[addon]]));
-    const reply = await createGrant(id, {
-      name: name.trim(),
-      addons: chosen,
-      installs: picks,
-      // Left out at the default, so den-edge's own clock sets it; a chosen one stays under its 90-day limit even
-      // when this browser's clock runs ahead.
-      ...(redeemBy === DEFAULT_REDEEM_DAYS
-        ? {}
-        : { codeExpiresAt: cappedCodeExpiry(Date.now(), clamp(redeemBy, 1, 89) * DAY) }),
-      devices: clamp(devices, 1, 5),
-      ...(trial === 'none'
-        ? {}
-        : { accessDays: trial === 'custom' ? clamp(customDays, 1, 365) : Number(trial) }),
-    });
+    const reply = await createGrant(
+      household.id,
+      {
+        name: name.trim(),
+        addons: chosen,
+        installs: picks,
+        // Left out at the default, so den-edge's own clock sets it; a chosen one stays under its 90-day limit even
+        // when this browser's clock runs ahead.
+        ...(redeemBy === DEFAULT_REDEEM_DAYS
+          ? {}
+          : { codeExpiresAt: cappedCodeExpiry(Date.now(), clamp(redeemBy, 1, 89) * DAY) }),
+        devices: clamp(devices, 1, 5),
+        ...(trial === 'none'
+          ? {}
+          : { accessDays: trial === 'custom' ? clamp(customDays, 1, 365) : Number(trial) }),
+      },
+      household.fetch,
+    );
     working = false;
     if (!reply.ok) {
       problem = said(reply);
@@ -209,11 +228,11 @@
   }
 
   async function change(grant: Grant, patch: GrantChange): Promise<boolean> {
-    const id = libraryCredentialId();
-    if (!id) return false;
+    const household = await host();
+    if (!household) return false;
     working = true;
     problem = null;
-    const reply = await updateGrant(id, grant.gid, patch);
+    const reply = await updateGrant(household.id, grant.gid, patch, household.fetch);
     working = false;
     if (!reply.ok) {
       problem = said(reply);
@@ -226,11 +245,11 @@
 
   /** A new link for a guest who already exists (their phone, say): the previous one stops working. */
   async function newLink(grant: Grant) {
-    const id = libraryCredentialId();
-    if (!id) return;
+    const household = await host();
+    if (!household) return;
     working = true;
     problem = null;
-    const reply = await newGrantCode(id, grant.gid);
+    const reply = await newGrantCode(household.id, grant.gid, household.fetch);
     working = false;
     if (!reply.ok) {
       problem =
@@ -288,9 +307,9 @@
   }
 
   async function revoke(grant: Grant) {
-    const id = libraryCredentialId();
-    if (!id) return;
-    const reply = await revokeGrant(id, grant.gid);
+    const household = await host();
+    if (!household) return;
+    const reply = await revokeGrant(household.id, grant.gid, household.fetch);
     if (!reply.ok) {
       problem = said(reply);
       return;
