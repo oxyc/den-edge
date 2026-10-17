@@ -5,9 +5,19 @@
   import SharingSection from '../src/settings/SharingSection.svelte';
   import { useLibraryCredential } from '../src/lib/relayFetch';
   import type { Link } from '../src/lib/links.svelte';
+  import type { LibraryModel } from '../src/lib/libraryModel.svelte';
   import '../src/app.css';
 
-  useLibraryCredential({ id: 'fixturelib01', member: 'proof' });
+  const membership = { libraryId: 'f'.repeat(32), memberToken: 'proof' };
+  // Profile mode has a different global Owner credential. Sharing must deliberately use the household model below.
+  useLibraryCredential({ id: 'e'.repeat(32), member: 'owner-proof' });
+  const model = {
+    relayMembership: async () => {
+      if (new URLSearchParams(location.search).has('membership-fails'))
+        throw new Error('fixture membership failure');
+      return membership;
+    },
+  } as LibraryModel;
 
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
@@ -21,5 +31,5 @@
 </script>
 
 <main style="padding:24px; max-width:420px">
-  <SharingSection {link} {plugins} routes={{}} ready={true} />
+  <SharingSection {link} {model} {plugins} routes={{}} ready={true} />
 </main>
