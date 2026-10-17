@@ -27,6 +27,11 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: E2E_ORIGIN,
+    // Playwright applies these to the browsers a spec launches itself as well as to the fixture's. Left at their
+    // default of none, a step that never completes runs to the test timeout and fails with no step or line.
+    actionTimeout: 30_000,
+    navigationTimeout: 30_000,
+    trace: 'retain-on-failure',
   },
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,

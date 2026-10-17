@@ -4,6 +4,33 @@ import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { E2E_ORIGIN } from './base-url.mjs';
 
+/**
+ * The router loads its page copies and its swipe handling lazily, and a navigation waits for them. Until they are
+ * in, a swipe is ignored and no loading cover is made, so a test that gestures first asks for the same module: once
+ * the router has mounted, its own `.then` has attached them by the time this one settles.
+ */
+async function swipeReady(page) {
+  await page.waitForSelector('[data-active="true"]');
+  await page.evaluate(async () => {
+    await import('/src/lib/touchNavigation.ts');
+    await new Promise((resolve) => setTimeout(resolve));
+  });
+}
+
+/**
+ * A navigation shows its page, then restores scroll over three Svelte ticks (a frame or a timer each) before it is
+ * done. One begun inside that window does not save the page it leaves, so the next navigation or swipe waits it out:
+ * four ticks started after the page showed end after those three.
+ */
+const routed = (page) =>
+  page.evaluate(async () => {
+    for (let tick = 0; tick < 4; tick++)
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => resolve());
+        setTimeout(() => resolve());
+      });
+  });
+
 test('a profile reset retires the current route without leaving it behind Back', async ({
   page,
 }) => {
@@ -56,6 +83,7 @@ test('navigation regressions', async () => {
         });
         page.on('pageerror', (error) => errors.push(String(error)));
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
+        await swipeReady(page);
         const active = page.locator('[data-route-page][data-active="true"]');
         await active.getByLabel('Search').fill('my query');
         await active.getByText('Load more').click();
@@ -244,16 +272,27 @@ test('navigation regressions', async () => {
           if (r.isNavigationRequest() && r.frame() === page.mainFrame()) documents++;
         });
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
-        await page.waitForSelector('[data-active="true"]');
-        for (const path of ['/tv/1399', '/person/287']) {
+        await swipeReady(page);
+        for (const [path, heading] of [
+          ['/tv/1399', 'title'],
+          ['/person/287', 'person'],
+        ]) {
           await page.evaluate(
             (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
             path,
           );
-          await page.waitForTimeout(300);
+          await page.waitForFunction(
+            (expected) =>
+              document.querySelector('[data-active="true"] h1')?.textContent === expected,
+            heading,
+          );
+          await routed(page);
         }
         await page.goBack();
-        await page.waitForTimeout(300);
+        await page.waitForFunction(
+          () => document.querySelector('[data-active="true"] h1')?.textContent === 'title',
+        );
+        await routed(page);
         const overlays = await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
           const send = (type, x, id) => {
@@ -296,7 +335,8 @@ test('navigation regressions', async () => {
           false,
           'swipes must not also click through to a title or person',
         );
-        await page.waitForTimeout(700);
+        // The swipe lands once its preview is gone.
+        await page.waitForSelector('[data-swipe-preview]', { state: 'detached' });
         assert.equal(await page.locator('[data-active="true"] h1').innerText(), 'library');
         assert.equal(documents, 1, 'gestures must not cause another document request');
         console.log('gesture overlap: single owner and no document reload passed');
@@ -310,13 +350,16 @@ test('navigation regressions', async () => {
         const page = await context.newPage();
         await guardNetwork(page);
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
-        await page.waitForSelector('[data-active="true"]');
+        await swipeReady(page);
         await page.evaluate(() =>
           document.dispatchEvent(
             new CustomEvent('den:navigate', { detail: { path: '/person/287' } }),
           ),
         );
-        await page.waitForTimeout(300);
+        await page.waitForFunction(
+          () => document.querySelector('[data-active="true"] h1')?.textContent === 'person',
+        );
+        await routed(page);
         for (const [from, to, selector, expected] of [
           [90, 220, 'section', 'library'],
           [300, 150, 'section', 'person'],
@@ -398,13 +441,13 @@ test('navigation regressions', async () => {
         const page = await context.newPage();
         await guardNetwork(page);
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
-        await page.waitForSelector('[data-active="true"]');
+        await swipeReady(page);
         const go = async (path) => {
           await page.evaluate(
             (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
             path,
           );
-          await page.waitForTimeout(80);
+          await routed(page);
         };
         await go('/movie/1');
         // Returning Home can overlap a background refresh/loading cover. The cover is movie 1,
@@ -454,7 +497,7 @@ test('navigation regressions', async () => {
         const page = await context.newPage();
         await guardNetwork(page);
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
-        await page.waitForSelector('[data-active="true"]');
+        await swipeReady(page);
         // An entry from an earlier mount, or one the address bar made: a history position the router holds
         // no ledger entry for, which must start a fresh segment rather than inherit Home's.
         await page.evaluate(() => {
@@ -464,12 +507,14 @@ test('navigation regressions', async () => {
         await page.waitForFunction(
           () => document.querySelector('[data-active="true"] h1')?.textContent === 'person',
         );
+        await routed(page);
         await page.evaluate(() =>
           document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/2' } })),
         );
         await page.waitForFunction(
           () => document.querySelector('[data-active="true"] h1')?.textContent === 'title',
         );
+        await routed(page);
         const heading = await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
           for (const [type, x] of [
