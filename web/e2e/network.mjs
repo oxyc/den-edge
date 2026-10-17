@@ -22,6 +22,23 @@ export async function routeTmdb(page, handler) {
   await page.route('**/tmdb/3/**', handler);
 }
 
+/**
+ * Answer the household's host-grant listing, while proving the page used the household capability rather than the
+ * ambient active-profile credential. The exact route deliberately leaves another library id or grant mutation for
+ * `guardNetwork` to report as unexpected.
+ */
+export async function routeHostGrantList(page, { libraryId, memberToken, grants = [] }) {
+  const calls = [];
+  await page.route(`${E2E_ORIGIN}/lib/${libraryId}/grants`, (route) => {
+    const request = route.request();
+    expect(request.method()).toBe('GET');
+    expect(request.headers()['x-den-library-member']).toBe(`${libraryId}:${memberToken}`);
+    calls.push(request.url());
+    return route.fulfill({ json: { grants } });
+  });
+  return calls;
+}
+
 /** `origin` is where the page is served from: the dev server's address, or a name a spec points at it. */
 export async function guardNetwork(page, origin = E2E_ORIGIN) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
