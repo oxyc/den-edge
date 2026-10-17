@@ -23,6 +23,10 @@ pub struct Holds {
     state: Mutex<State>,
     max_total: usize,
     max_per_owner: usize,
+    /// Set once, when the process starts to stop (`release_all`). A held request is then answered at once with what
+    /// it would have got at its timeout, so a restart's drain is not kept open up to 25 s by a request that is only
+    /// waiting, and is cut at the drain deadline with no answer at all.
+    stopping: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -36,13 +40,26 @@ struct State {
 
 impl Holds {
     pub fn new(max_total: usize, max_per_owner: usize) -> Self {
-        Self { state: Mutex::default(), max_total, max_per_owner }
+        Self {
+            state: Mutex::default(),
+            max_total,
+            max_per_owner,
+            stopping: tokio::sync::watch::Sender::new(false),
+        }
+    }
+
+    /// The process is stopping: answer every held request now, and hold no more.
+    pub fn release_all(&self) {
+        self.stopping.send_replace(true);
     }
 
     /// A place for a request charged to `owner`, woken by a write to any of `keys`, or `None` when a cap is
-    /// reached. Taken before the request reads what it would answer, so a write that lands between that read and
-    /// the wait still wakes it.
+    /// reached or the process is stopping. Taken before the request reads what it would answer, so a write that
+    /// lands between that read and the wait still wakes it.
     pub fn hold(&self, owner: &str, keys: &[&str]) -> Option<Hold<'_>> {
+        if *self.stopping.borrow() {
+            return None;
+        }
         let mut state = crate::lock(&self.state);
         if state.total >= self.max_total
             || state.owners.get(owner).copied().unwrap_or(0) >= self.max_per_owner
@@ -82,9 +99,14 @@ pub struct Hold<'a> {
 }
 
 impl Hold<'_> {
-    /// Until a write to one of its keys, or `wait` passes.
+    /// Until a write to one of its keys, `wait` passes, or the process starts to stop.
     pub async fn wait(&self, wait: Duration) {
-        let _ = tokio::time::timeout(wait, self.notify.notified()).await;
+        // `wait_for` looks at the current value first, so a stop that came before this subscribed still ends it.
+        let mut stopping = self.holds.stopping.subscribe();
+        tokio::select! {
+            _ = tokio::time::timeout(wait, self.notify.notified()) => {}
+            _ = stopping.wait_for(|stopping| *stopping) => {}
+        }
     }
 }
 
@@ -138,6 +160,23 @@ mod tests {
         assert!(holds.hold("three", &["k"]).is_none(), "in total");
         drop(first);
         assert!(holds.hold("one", &["k"]).is_some());
+    }
+
+    /// A stop ends a wait already under way and one that starts after it, and no new request is held.
+    #[tokio::test]
+    async fn a_stop_ends_every_wait_and_holds_no_more() {
+        let holds = Holds::new(8, 8);
+        let before = holds.hold("o", &["k"]).unwrap();
+        let mut waiting = Box::pin(before.wait(Duration::from_secs(25)));
+        assert!(tokio::time::timeout(SHORT, &mut waiting).await.is_err(), "held until the stop");
+        let late = holds.hold("o", &["k"]).unwrap();
+        holds.release_all();
+        assert!(tokio::time::timeout(SHORT, waiting).await.is_ok(), "a wait under way");
+        assert!(
+            tokio::time::timeout(SHORT, late.wait(Duration::from_secs(25))).await.is_ok(),
+            "a wait after"
+        );
+        assert!(holds.hold("o", &["k"]).is_none(), "nothing more is held");
     }
 
     #[test]
