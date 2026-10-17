@@ -35,6 +35,7 @@
     dismissContinueWatching: 0,
     play: 0,
     playHere: 0,
+    changeKidAccess: 0,
   };
   let at: Stamp = [1, 0, 'web1'];
   const key = (title: Title) => `${title.type}:${title.id}`;
@@ -95,6 +96,10 @@
         label: 'Undo',
         run: () => calls.dismissContinueWatching--,
       });
+    },
+    kids: [{ id: '1'.repeat(32), name: 'Kids', approvals: [] }],
+    changeKidAccess: () => {
+      calls.changeKidAccess += 1;
     },
     play: () => {
       calls.play += 1;

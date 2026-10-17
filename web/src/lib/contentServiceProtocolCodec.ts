@@ -77,10 +77,17 @@ function region(value: unknown): value is string {
 function contentPolicy(value: unknown): value is ContentPolicy {
   return (
     record(value) &&
-    exact(value, ['maximumAge', 'unknownRatings', 'kidAudience', 'region']) &&
+    exact(value, ['maximumAge', 'unknownRatings', 'kidAudience', 'region', 'approvals']) &&
     (value.region === undefined || region(value.region)) &&
     (value.maximumAge === null || (integer(value.maximumAge) && value.maximumAge <= 18)) &&
     (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
+    optional(
+      value.approvals,
+      (candidate): candidate is ContentTitleRef[] =>
+        Array.isArray(candidate) &&
+        candidate.length <= 10_000 &&
+        candidate.every((approval) => titleRef(approval)),
+    ) &&
     (value.kidAudience === undefined ||
       value.kidAudience === 'child' ||
       value.kidAudience === 'child-or-teen')

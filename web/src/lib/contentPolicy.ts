@@ -55,6 +55,7 @@ export function contentPolicyFor(
   policy: ProfileContentPolicy | null,
   kid: boolean,
   region?: string,
+  approvals: readonly { type: 'movie' | 'tv'; id: number }[] = [],
 ): ContentPolicy | undefined {
   const base: ProfileContentPolicy = policy ?? {
     maximumAge: kid ? 0 : null,
@@ -64,6 +65,7 @@ export function contentPolicyFor(
     maximumAge: base.maximumAge,
     unknownRatings: base.unknownRatings,
     ...(kid ? { kidAudience: kidAudienceFor(base.maximumAge) } : {}),
+    ...(kid && approvals.length ? { approvals: [...approvals] } : {}),
   };
   if (!isRestricted(effective)) return undefined;
   // A region alone restricts nothing; it only joins atlas' cache identity once there is a policy to name.
@@ -76,12 +78,17 @@ export function contentPolicyFor(
  */
 export function policyKey(policy: ContentPolicy | undefined): string {
   if (!isRestricted(policy)) return '-';
-  return [
+  const base = [
     policy.maximumAge ?? '-',
     policy.unknownRatings,
     policy.region ?? '-',
     policy.kidAudience ?? '-',
   ].join('_');
+  const approvals = policy.approvals
+    ?.map(({ type, id }) => `${type}-${id}`)
+    .sort()
+    .join('.');
+  return approvals ? `${base}_${approvals}` : base;
 }
 
 /** Atlas' canonical response identity (`maturity::Policy::cache_identity`). Restricted catalog answers carry this
@@ -111,6 +118,7 @@ export function atlasPolicyFields(policy: ContentPolicy | undefined): [string, s
 export async function ageAllowed(
   policy: ContentPolicy | undefined,
   minimumAge: number | null,
+  explicitApproval = false,
 ): Promise<boolean> {
   if (!isAgeRestricted(policy)) return true;
   try {
@@ -119,7 +127,7 @@ export async function ageAllowed(
       op: 'profile_policy_allows',
       policy: { maximumAge: policy.maximumAge, unknownRatings: policy.unknownRatings },
       minimumAge,
-      explicitApproval: false,
+      explicitApproval,
     });
   } catch (error) {
     console.error('den: the age policy could not be evaluated; the title stays hidden', error);

@@ -1470,6 +1470,7 @@
               {explore}
               {people}
               {watchedYear}
+              profiles={profileCoordinator}
             />
           {/if}
         {/snippet}

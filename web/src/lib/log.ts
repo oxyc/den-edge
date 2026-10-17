@@ -12,6 +12,11 @@ import { libraryVault, type Vault } from './localVault';
 import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
+  kidApprovalName,
+  validateKidTitleApprovals,
+  type KidTitleApprovalsDocument,
+} from './kidTitleApprovals';
+import {
   profileMigrationAuthorizationFingerprint,
   profileMigrationConstructDirectory,
   profileMigrationDigest,
@@ -316,6 +321,7 @@ interface Snapshot {
   entries: [name: string, seq: number, row: Row][];
   /** A null document records a newer, correctly named directory that failed validation (fail closed offline too). */
   profileDirectory?: [seq: number, document: ProfileDirectoryDocument | null];
+  kidTitleApprovals?: [kid: string, seq: number, document: KidTitleApprovalsDocument][];
   memberRegistered?: boolean;
   /**
    * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
@@ -392,6 +398,10 @@ export class LibraryLog {
   private profileDirectoryEntry?: { seq: number; document: ProfileDirectoryDocument };
   /** Highest transport sequence seen for the control row, including an invalid replacement. */
   private profileDirectorySeq = 0;
+  private readonly kidApprovalEntries = new Map<
+    string,
+    { seq: number; document: KidTitleApprovalsDocument }
+  >();
   /** A page of den-edge's log was read in the generation it now answers at, by this instance (not only a kept copy). */
   private readCurrentGeneration = false;
   /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
@@ -893,6 +903,7 @@ export class LibraryLog {
       log.entries.set(name, { seq, row });
     });
     log.restoreProfileDirectory(saved);
+    log.restoreKidTitleApprovals(saved);
     return log;
   }
 
@@ -1963,6 +1974,40 @@ export class LibraryLog {
     };
   }
 
+  /** Fresh, validated authority for one Kid's household approval document. */
+  async readKidTitleApprovals(kid: string): Promise<{
+    readonly directory: ProfileDirectoryDocument;
+    readonly document: KidTitleApprovalsDocument | null;
+    readonly base: number;
+    readonly generation: string;
+  }> {
+    const snapshot = await this.readAll();
+    if (!snapshot || !snapshot.generation)
+      throw new Error('Profile-aware household could not be read to a stable generation');
+    let directory: ProfileDirectoryDocument | undefined;
+    let approval: { seq: number; document: KidTitleApprovalsDocument } | undefined;
+    for (const row of snapshot.entries) {
+      const opened = await openEntry(this.keys, row.k, row.v);
+      if ('invalidProfileDirectory' in opened) throw new Error('Profile directory is corrupt');
+      if ('profileDirectory' in opened) directory = opened.profileDirectory;
+      if ('kidTitleApprovals' in opened && opened.kidTitleApprovals.kid === kid)
+        approval = { seq: row.seq, document: opened.kidTitleApprovals };
+    }
+    if (!directory) throw new Error('Kid approvals require an active Owner split');
+    const entry = directory.profiles[kid];
+    if (!entry || entry.role !== 'kid' || entry.deleted.value)
+      throw new Error('That is not a live Kid profile');
+    let document: KidTitleApprovalsDocument | null = null;
+    if (approval)
+      try {
+        document = validateKidTitleApprovals(approval.document, directory);
+      } catch {
+        // Preserve the invalid row's sequence so an Owner can repair it with an authoritative replacement.
+      }
+    if (document) this.acceptKidTitleApprovals({ seq: approval!.seq }, document);
+    return { directory, document, base: approval?.seq ?? 0, generation: snapshot.generation };
+  }
+
   /** Create an empty activity library and prove its only initial row decrypts exactly under the journal key. */
   async createAndVerifyKidProfileLibrary(journal: ProfileCreateJournal): Promise<void> {
     await this.createAndVerifyProfileLibrary(await this.kidProfileKeys(journal));
@@ -2148,6 +2193,70 @@ export class LibraryLog {
     } catch {
       // A successful response whose evidence was lost or malformed is ambiguous and must be reconciled by reread.
       return 'unknown';
+    }
+  }
+
+  async casKidTitleApprovals(
+    authority: { base: number; generation: string },
+    document: KidTitleApprovalsDocument,
+    directory: ProfileDirectoryDocument,
+  ): Promise<'committed' | 'conflict' | 'unknown'> {
+    const validated = validateKidTitleApprovals(document, directory);
+    const materialized = profileMigrationMaterialize({
+      name: kidApprovalName(validated.kid),
+      row: validated,
+    });
+    const write = await sealPlaintext(
+      this.keys,
+      kidApprovalName(validated.kid),
+      fromBase64url(materialized.plaintext),
+    );
+    let response: Response;
+    try {
+      response = await this.send(`/lib/${this.keys.id}/batch`, {
+        method: 'POST',
+        headers: {
+          ...this.headers(),
+          'x-den-wire': '5',
+          'x-den-generation': authority.generation,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ writes: [{ ...write, base: authority.base }] }),
+      });
+    } catch {
+      return 'unknown';
+    }
+    if (!response.ok) {
+      if (response.status === 409 && (await errorCode(response)) === 'generation_changed')
+        return 'conflict';
+      throw new Error('Kid approval CAS was refused');
+    }
+    try {
+      const value = (await response.json()) as unknown;
+      if (!migrationBatch(value)) return 'unknown';
+      const applied = value.applied.find(({ k }) => k === write.k);
+      if (applied) {
+        this.acceptKidTitleApprovals({ seq: applied.seq }, validated);
+        return 'committed';
+      }
+      if (value.conflicts.some(({ k }) => k === write.k)) return 'conflict';
+      return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /** Valid approvals projected only through the current live directory; malformed/stale documents approve none. */
+  approvedTitleKeys(kid: string): string[] {
+    const directory = this.profileDirectoryEntry?.document;
+    const document = this.kidApprovalEntries.get(kid)?.document;
+    if (!directory || !document) return [];
+    try {
+      return Object.entries(validateKidTitleApprovals(document, directory).approvals)
+        .filter(([, approval]) => approval.value === 'allow')
+        .map(([key]) => key);
+    } catch {
+      return [];
     }
   }
 
@@ -2354,6 +2463,8 @@ export class LibraryLog {
     }
     for (const { k, v, opened } of entries) {
       if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened) continue;
+      // A compound household reset deliberately drops title exceptions; they never acquire successor authority.
+      if ('kidTitleApprovals' in opened) continue;
       if ('unknown' in opened || 'newerFraming' in opened) {
         console.warn(`den: the library row ${k} can't be moved by this build`);
         return { refused: 'update_required' };
@@ -2602,7 +2713,12 @@ export class LibraryLog {
           }
           // Another version is here: the next round merges onto it.
           const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
-          if (!theirs || this.isProfileDirectory(theirs) || this.isInvalidProfileDirectory(theirs))
+          if (
+            !theirs ||
+            this.isProfileDirectory(theirs) ||
+            this.isKidTitleApprovals(theirs) ||
+            this.isInvalidProfileDirectory(theirs)
+          )
             return false;
           this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
         }
@@ -2772,6 +2888,7 @@ export class LibraryLog {
       // goes out in the v2/v3 form: `set:tracker-event:*` and `ep`/`rec` rows a v4 library must never hold (§8).
       if ((savedV4 || documents) && log.wireMin < WIRE) log.wireMin = WIRE;
       log.restoreProfileDirectory(saved);
+      log.restoreKidTitleApprovals(saved);
       // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
       // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
       // follows at once, sends the work kept here.
@@ -2800,6 +2917,7 @@ export class LibraryLog {
         log.entries.set(name, { seq, row });
       });
       log.restoreProfileDirectory(partial);
+      log.restoreKidTitleApprovals(partial);
     }
     let firstPage = true;
     for (;;) {
@@ -2852,6 +2970,7 @@ export class LibraryLog {
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
         log.resetProfileDirectory();
+        log.kidApprovalEntries.clear();
         if (log.wireMin >= WIRE)
           for (const [name, { row }] of log.entries) if (legacy(row)) log.entries.delete(name);
         log.acknowledged.clear();
@@ -2875,6 +2994,10 @@ export class LibraryLog {
         }
         if (log.isProfileDirectory(row)) {
           log.acceptProfileDirectory(entry, row);
+          continue;
+        }
+        if (log.isKidTitleApprovals(row)) {
+          log.acceptKidTitleApprovals(entry, row);
           continue;
         }
         const previous = log.entries.get(rowName(row));
@@ -3000,7 +3123,9 @@ export class LibraryLog {
   private async readEntry(entry: {
     k: string;
     v: string;
-  }): Promise<Row | ProfileDirectoryDocument | InvalidProfileDirectory | null> {
+  }): Promise<
+    Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory | null
+  > {
     const opened = await openEntry(this.keys, entry.k, entry.v);
     this.unreadable.delete(entry.k);
     this.newerFraming.delete(entry.k);
@@ -3017,20 +3142,38 @@ export class LibraryLog {
     if ('unknown' in opened) return null;
     if ('invalidProfileDirectory' in opened) return opened;
     if ('profileDirectory' in opened) return opened.profileDirectory;
+    if ('kidTitleApprovals' in opened) return opened.kidTitleApprovals;
     this.noteFormat(opened.row);
     return believe(opened.row);
   }
 
   private isProfileDirectory(
-    value: Row | ProfileDirectoryDocument | InvalidProfileDirectory,
+    value: Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory,
   ): value is ProfileDirectoryDocument {
     return 'kind' in value && value.kind === 'profiles';
   }
 
+  private isKidTitleApprovals(
+    value: Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory,
+  ): value is KidTitleApprovalsDocument {
+    return 'kind' in value && value.kind === 'kid-title-approvals';
+  }
+
   private isInvalidProfileDirectory(
-    value: Row | ProfileDirectoryDocument | InvalidProfileDirectory,
+    value: Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory,
   ): value is InvalidProfileDirectory {
     return 'invalidProfileDirectory' in value;
+  }
+
+  private acceptKidTitleApprovals(
+    entry: { seq: number },
+    document: KidTitleApprovalsDocument,
+  ): boolean {
+    const previous = this.kidApprovalEntries.get(document.kid);
+    if (entry.seq <= (previous?.seq ?? 0)) return false;
+    this.kidApprovalEntries.set(document.kid, { seq: entry.seq, document });
+    this.entriesVersion++;
+    return true;
   }
 
   private acceptProfileDirectory(
@@ -3133,6 +3276,7 @@ export class LibraryLog {
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             this.resetProfileDirectory();
+            this.kidApprovalEntries.clear();
             // Switched to v4 meanwhile: what was read of the v3 log is not drawn beside its documents.
             if (this.wireMin >= WIRE)
               for (const [name, { row }] of this.entries)
@@ -3156,6 +3300,10 @@ export class LibraryLog {
             }
             if (this.isProfileDirectory(row)) {
               if (this.acceptProfileDirectory(entry, row)) this.unreported = true;
+              continue;
+            }
+            if (this.isKidTitleApprovals(row)) {
+              if (this.acceptKidTitleApprovals(entry, row)) this.unreported = true;
               continue;
             }
             const previous = this.entries.get(rowName(row));
@@ -3347,6 +3495,15 @@ export class LibraryLog {
             ] as [number, ProfileDirectoryDocument | null],
           }
         : {}),
+      ...(this.kidApprovalEntries.size
+        ? {
+            kidTitleApprovals: [...this.kidApprovalEntries].map(([kid, { seq, document }]) => [
+              kid,
+              seq,
+              document,
+            ]),
+          }
+        : {}),
       ...(this.offline && this.wireMin > 2 ? { wireMin: this.wireMin } : {}),
     };
   }
@@ -3364,6 +3521,21 @@ export class LibraryLog {
       // A damaged local cache is not a directory. The encrypted household row remains authoritative.
       this.profileDirectorySeq = 0;
       this.profileDirectoryEntry = undefined;
+    }
+  }
+
+  private restoreKidTitleApprovals(snapshot: Snapshot | undefined): void {
+    const directory = this.profileDirectoryEntry?.document;
+    if (!directory) return;
+    for (const candidate of snapshot?.kidTitleApprovals ?? []) {
+      try {
+        const [kid, seq, stored] = candidate;
+        if (!Number.isSafeInteger(seq) || seq < 0 || stored.kid !== kid) continue;
+        const document = validateKidTitleApprovals(stored, directory);
+        this.kidApprovalEntries.set(kid, { seq, document });
+      } catch {
+        // Damaged or stale cached control state approves nothing; den-edge remains authoritative.
+      }
     }
   }
 
@@ -3815,7 +3987,12 @@ export class LibraryLog {
           continue;
         }
         const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
-        if (!theirs || this.isProfileDirectory(theirs) || this.isInvalidProfileDirectory(theirs))
+        if (
+          !theirs ||
+          this.isProfileDirectory(theirs) ||
+          this.isKidTitleApprovals(theirs) ||
+          this.isInvalidProfileDirectory(theirs)
+        )
           return false;
         this.entries.set(write.name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
@@ -3890,6 +4067,7 @@ export class LibraryLog {
         conflict &&
         theirs &&
         !this.isProfileDirectory(theirs) &&
+        !this.isKidTitleApprovals(theirs) &&
         !this.isInvalidProfileDirectory(theirs)
       ) {
         this.entries.set(name, { seq: conflict.seq, row: theirs });

@@ -328,6 +328,24 @@ describe('library service client protocol', () => {
       expect(
         decodeTask({ kind: 'profile.policy.set', profile: kid, maximumAge, unknownRatings, pin }),
       ).toMatchObject({ ok });
+    expect(
+      decodeTask({
+        kind: 'kid-title-approval.set',
+        profile: kid,
+        title: { type: 'movie', id: 550 },
+        allow: true,
+        pin: '1234',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'kid-title-approval.set',
+        profile: kid,
+        title: { type: 'movie', id: 0 },
+        allow: true,
+        pin: '1234',
+      }),
+    ).toMatchObject({ ok: false });
     expect(decodeTask({ kind: 'profile.create.ack', receipt: 'create-sam' })).toMatchObject({
       ok: true,
     });

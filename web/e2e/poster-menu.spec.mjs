@@ -136,6 +136,9 @@ test('hovering shows ⋯, clicking opens the menu, and a right-click opens the s
     await expect(menu).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: 'More like this' })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: 'Share' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Allow for Kids' })).toBeVisible();
+    await menu.getByRole('menuitem', { name: 'Allow for Kids' }).click();
+    expect(await page.evaluate(() => window.fixture.calls().changeKidAccess)).toBe(1);
   } finally {
     await browser.close();
   }

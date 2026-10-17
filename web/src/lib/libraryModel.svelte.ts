@@ -530,6 +530,23 @@ export class LibraryModel {
     return result.outcome;
   }
 
+  async setKidTitleApproval(
+    profile: string,
+    title: TitleRef,
+    allow: boolean,
+    pin: string,
+  ): Promise<'changed' | 'unchanged'> {
+    const { result } = await this.task({
+      kind: 'kid-title-approval.set',
+      profile,
+      title,
+      allow,
+      pin,
+    });
+    if (result.kind !== 'kid-title-approval.set') throw wrongQueryResult('Kid title approval');
+    return result.outcome;
+  }
+
   /**
    * The household's Kid when its directory has none yet; `present` when one already exists. Asked fresh each time
    * (the Kid journal makes it once): the answer also brings in a directory this page had not read yet.

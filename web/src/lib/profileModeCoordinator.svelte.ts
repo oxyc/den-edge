@@ -1,5 +1,5 @@
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
-import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProtocol';
+import type { ConnectionsView, ProfileDirectoryView, TitleRef } from './libraryServiceProtocol';
 import {
   legacyProfileIdentity,
   persistentProfileIdentity,
@@ -40,6 +40,7 @@ export interface ProfileChoice {
   readonly name: string;
   readonly avatar: string;
   readonly policy?: ProfileContentPolicy;
+  readonly approvals?: readonly { type: 'movie' | 'tv'; id: number }[];
   /** Present only for a den-core-validated real directory; never returned by `choices`. */
   readonly libraryKey?: string;
   readonly keyVersion?: number;
@@ -83,6 +84,7 @@ export function profileDirectoryChoices(
       name: profile.name,
       avatar: profile.avatar ?? profile.role,
       policy: profile.policy,
+      approvals: profile.approvals,
       libraryKey: profile.libraryKey,
       keyVersion: profile.keyVersion,
     });
@@ -379,6 +381,25 @@ export class ProfileModeCoordinator {
       return await this.#household.setKidPolicy(unlock.profile, policy, unlock.pin);
     } catch (error) {
       console.warn('den: the Kid’s content policy could not be changed', error);
+      return false;
+    }
+  }
+
+  /** Owner-only, freshly PIN-authorized change to one Kid's title exception. */
+  async setKidTitleApproval(
+    profile: string,
+    title: TitleRef,
+    allow: boolean,
+    pin: string,
+  ): Promise<boolean> {
+    this.#assertOpen();
+    if (this.mode !== 'owner') return false;
+    const kid = this.#choice(profile);
+    if (!kid || kid.role !== 'kid' || !kid.id) return false;
+    try {
+      return await this.#household.setKidTitleApproval(kid.id, title, allow, pin);
+    } catch (error) {
+      console.warn('den: Kid title access could not be changed', error);
       return false;
     }
   }
@@ -785,8 +806,15 @@ export class ProfileModeCoordinator {
 
   #publicChoice(choice: ProfileChoice | undefined): ProfileChoice | null {
     if (!choice) return null;
-    const { id, role, name, avatar, policy } = choice;
-    return { id, role, name, avatar, ...(policy ? { policy } : {}) };
+    const { id, role, name, avatar, policy, approvals } = choice;
+    return {
+      id,
+      role,
+      name,
+      avatar,
+      ...(policy ? { policy } : {}),
+      ...(approvals ? { approvals } : {}),
+    };
   }
 
   /**
@@ -833,6 +861,7 @@ export class ProfileModeCoordinator {
       current.policy ?? null,
       current.role === 'owner',
       current.role === 'kid',
+      current.approvals ?? [],
     );
   }
 
@@ -874,8 +903,18 @@ export class ProfileModeCoordinator {
       a.id === b.id &&
       a.libraryKey === b.libraryKey &&
       a.keyVersion === b.keyVersion &&
-      this.#sameContentPolicy(a.policy, b.policy)
+      this.#sameContentPolicy(a.policy, b.policy) &&
+      this.#sameApprovals(a.approvals, b.approvals)
     );
+  }
+
+  #sameApprovals(a: ProfileChoice['approvals'], b: ProfileChoice['approvals']): boolean {
+    const keys = (values: ProfileChoice['approvals']) =>
+      (values ?? [])
+        .map(({ type, id }) => `${type}:${id}`)
+        .sort()
+        .join(',');
+    return keys(a) === keys(b);
   }
 
   #sameContentPolicy(
@@ -936,6 +975,7 @@ export class ProfileModeCoordinator {
       null,
       false,
       true,
+      choice.approvals ?? [],
     );
   }
 
