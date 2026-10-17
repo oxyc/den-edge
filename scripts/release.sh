@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish a release without rebuilding or retesting it. Main CI has already built, behavior-probed, and scanned
-# immutable edge/cast candidates for its exact SHA; the vX.Y.Z workflow only verifies and promotes those digests.
+# an immutable candidate image for its exact SHA; the vX.Y.Z workflow only verifies and promotes that digest.
 set -euo pipefail
 
 version="${1:-}"

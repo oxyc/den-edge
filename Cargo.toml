@@ -24,6 +24,8 @@ sha2 = "0.11"
 # `sys_rng`: the OS random source as a rand_core CryptoRng, which den-assistant's `*_with_rng` draw from.
 getrandom = { version = "0.4", features = ["sys_rng"] }
 url = "2"
+# The Cast page's paths are decoded as axum's `Path` decodes them (`cast.rs`); url and axum already depend on it.
+percent-encoding = "2"
 # The addon relay's client (`relay.rs`), and the server with a timer (`main.rs`); both already come with axum.
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio", "server-auto", "server-graceful", "service"] }
 http-body-util = "0.1"

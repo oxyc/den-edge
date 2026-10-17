@@ -1,5 +1,5 @@
-# den-edge and den-cast are one source release but remain separate minimal runtime images. BuildKit evaluates
-# both targets as one graph, so npm dependencies, sources, and the Rust release build are paid for once.
+# One image: den-edge, the web app it serves, and the Cast page it serves on CAST_ORIGIN's host. Both pages share
+# one npm install.
 ARG PREVIOUS_IMAGE=scratch
 FROM ${PREVIOUS_IMAGE} AS previous
 
@@ -26,10 +26,9 @@ RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-# The default package targets include den-edge and den-cast. Compiling them together avoids a second LTO build.
 RUN cargo build --release --locked && mkdir -p /out/data
 
-# Both runtime targets copy this marker, so missing release metadata fails before an image can be pushed. The
+# The runtime image copies this marker, so missing release metadata fails before an image can be pushed. The
 # version only reaches the final image configuration and does not invalidate the expensive Rust build.
 FROM node:26-alpine AS release-metadata
 ARG DEN_VERSION
@@ -42,6 +41,7 @@ ARG DEN_VERSION
 ARG GIT_REVISION
 ENV DATA_DIR=/data \
     WEB_DIR=/web \
+    CAST_DIR=/cast \
     PORT=8080 \
     DEN_VERSION=$DEN_VERSION
 LABEL org.opencontainers.image.version=$DEN_VERSION \
@@ -49,24 +49,10 @@ LABEL org.opencontainers.image.version=$DEN_VERSION \
 COPY --from=release-metadata /den-version /den-version
 COPY --from=rust-build /app/target/release/den-edge /den-edge
 COPY --from=edge-web /web/dist /web
+COPY --from=cast-web /web/dist-cast /cast
 # The state directory. The box mounts /var/lib/den/edge-data over it; this empty one, owned by the service
 # uid, is what a container without the mount (den-update's probe) writes to and then throws away.
 COPY --from=rust-build --chown=65532:65532 /out/data /data
 EXPOSE 8080
 USER 65532:65532
 ENTRYPOINT ["/den-edge"]
-
-FROM scratch AS cast
-ARG DEN_VERSION
-ARG GIT_REVISION
-ENV WEB_DIR=/web \
-    PORT=8080 \
-    DEN_VERSION=$DEN_VERSION
-LABEL org.opencontainers.image.version=$DEN_VERSION \
-      org.opencontainers.image.revision=$GIT_REVISION
-COPY --from=release-metadata /den-version /den-version
-COPY --from=rust-build /app/target/release/den-cast /den-cast
-COPY --from=cast-web /web/dist-cast /web
-EXPOSE 8080
-USER 65532:65532
-ENTRYPOINT ["/den-cast"]
