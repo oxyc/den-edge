@@ -134,6 +134,14 @@ describe('startPlayback', () => {
     ).toEqual({ failure: 'none', code: 'no_release', httpStatus: 404 });
   });
 
+  it('names the containers Remux left out when nothing else was ready', async () => {
+    expect(
+      await startPlayback('/den/config/playback', want, async () =>
+        json({ error: 'no_release', formats: ['.ts', '.avi', '../x', 7] }, 404),
+      ),
+    ).toEqual({ failure: 'none', code: 'no_release', formats: ['.ts', '.avi'], httpStatus: 404 });
+  });
+
   it('keeps Hearth source detail when its fallback also found no release', async () => {
     expect(
       await startPlayback('/den/config/playback', want, async () =>

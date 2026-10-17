@@ -346,6 +346,8 @@
   >(null);
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
+  /** On `none`: the containers of the releases that were ready but that the browser player can't open (`.ts`, …). */
+  let skippedFormats = $state<string[]>([]);
   /**
    * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
    * which is waited out rather than acted on. One per hls.js instance.
@@ -775,6 +777,7 @@
         return result.failure;
       }
       managedCause = cause;
+      skippedFormats = 'formats' in result ? ((result.formats as string[] | undefined) ?? []) : [];
       // Everything left earlier in the visit leaves nothing to start on: those are only kept off an automatic
       // pick while there is another to make, so the start is asked for again with none left out.
       if ((result.failure === 'none' || result.failure === 'noCopy') && excluded.length) {
@@ -2547,6 +2550,13 @@
       {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
         <Button variant="primary" label="Try again" onclick={() => void begin()} />
       {/if}
+    {:else if failure === 'none' && skippedFormats.length}
+      <p class="error" role="alert">
+        The releases of this that are ready are {skippedFormats
+          .map((ext) => ext.slice(1).toUpperCase())
+          .join(' and ')} files, which Den can’t play in a browser yet. Try again once another release
+        is out, or play it on your TV.
+      </p>
     {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode' || failure === 'timedOut' || failure === 'temporarilyUnavailable'}
       <p class="note" role="status">{waits[failure]}</p>
     {:else if failure === 'lost'}
