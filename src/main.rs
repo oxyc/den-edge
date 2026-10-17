@@ -451,6 +451,20 @@ impl AppState {
     pub fn now(&self) -> u64 {
         (self.clock)()
     }
+
+    /// Answer every held `?wait=` request now and hold no more: the process is stopping.
+    fn release_holds(&self) {
+        self.library_holds.release_all();
+        self.inbox_holds.release_all();
+        self.assistant_holds.release_all();
+    }
+}
+
+/// `signal`, then the held requests released, so they are answered (and the client asks again, of whatever serves
+/// next) instead of keeping the drain open until its deadline cuts them off unanswered.
+async fn stopping(state: Arc<AppState>, signal: impl std::future::Future<Output = ()>) {
+    signal.await;
+    state.release_holds();
 }
 
 fn now_ms() -> u64 {
@@ -608,26 +622,21 @@ async fn main() {
     let port: u16 = env_number("PORT").unwrap_or(8080);
     // `PORT` is always served: it is the address other containers reach this one on. A socket handed over by the
     // supervisor is served as well, and is the one that survives this process being replaced.
-    let mut listeners = Vec::new();
-    match inherited_listener() {
-        Some(Ok(l)) => {
-            eprintln!(
-                "serving on an inherited socket, {}",
-                l.local_addr().map_or("?".to_owned(), |a| a.to_string())
-            );
-            listeners.push(l);
-        }
-        Some(Err(e)) => {
-            eprintln!("inherited listening socket unusable: {e}");
-            std::process::exit(1);
-        }
-        None => {}
+    let mut listeners = inherited_listeners().unwrap_or_else(|e| {
+        eprintln!("inherited listening socket unusable: {e}");
+        std::process::exit(1);
+    });
+    for l in &listeners {
+        eprintln!(
+            "serving on an inherited socket, {}",
+            l.local_addr().map_or("?".to_owned(), |a| a.to_string())
+        );
     }
     listeners.push(tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
         eprintln!("bind :{port} failed: {e}");
         std::process::exit(1);
     }));
-    let shutdown = shutdown_signal();
+    let shutdown = stopping(Arc::clone(&state), shutdown_signal());
     let port = listeners.last().and_then(|l| l.local_addr().ok()).map_or(port, |a| a.port());
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
@@ -689,27 +698,34 @@ async fn main() {
     eprintln!("{}", outcome.describe());
 }
 
-/// The listening socket the supervisor handed over (systemd socket activation: `LISTEN_PID` is this process,
-/// `LISTEN_FDS` counts sockets starting at fd 3). The supervisor keeps the socket open across restarts, so
-/// connections queue in the kernel while a new process starts instead of being refused. `None` when nothing was
-/// handed over; the caller then binds `PORT` itself.
+/// The listening sockets the supervisor handed over (systemd socket activation: `LISTEN_PID` is this process,
+/// `LISTEN_FDS` counts sockets starting at fd 3) — one per port it holds, e.g. the API port and the Cast port. The
+/// supervisor keeps them open across restarts, so connections queue in the kernel while a new process starts
+/// instead of being refused. Empty when nothing was handed over.
 #[cfg(unix)]
-fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
+fn inherited_listeners() -> std::io::Result<Vec<tokio::net::TcpListener>> {
+    let fds = activation_fds(
+        std::env::var("LISTEN_PID").ok().as_deref(),
+        std::env::var("LISTEN_FDS").ok().as_deref(),
+        std::process::id(),
+    );
+    // SAFETY: the activation protocol hands this process sole ownership of these fds.
+    fds.map(|fd| unsafe { adopt_listener(fd) }).collect()
+}
+
+/// The fds handed to process `me`: 3 onwards, `LISTEN_FDS` of them, when `LISTEN_PID` names it.
+fn activation_fds(listen_pid: Option<&str>, listen_fds: Option<&str>, me: u32) -> std::ops::Range<i32> {
     const FIRST_FD: i32 = 3;
-    let pid = std::env::var("LISTEN_PID").ok()?.parse::<u32>().ok()?;
-    let count = std::env::var("LISTEN_FDS").ok()?.parse::<i32>().ok()?;
-    if pid != std::process::id() {
-        eprintln!("LISTEN_FDS is set for process {pid}, not this one ({}); ignoring it", std::process::id());
-        return None;
+    let (Some(pid), Some(count)) =
+        (listen_pid.and_then(|p| p.parse::<u32>().ok()), listen_fds.and_then(|c| c.parse::<i32>().ok()))
+    else {
+        return FIRST_FD..FIRST_FD;
+    };
+    if pid != me {
+        eprintln!("LISTEN_FDS is set for process {pid}, not this one ({me}); ignoring it");
+        return FIRST_FD..FIRST_FD;
     }
-    if count < 1 {
-        return None;
-    }
-    if count > 1 {
-        return Some(Err(std::io::Error::other(format!("expected one socket, got {count}"))));
-    }
-    // SAFETY: the activation protocol hands this process sole ownership of fd 3.
-    Some(unsafe { adopt_listener(FIRST_FD) })
+    FIRST_FD..FIRST_FD + count.max(0)
 }
 
 /// # Safety
@@ -723,8 +739,8 @@ unsafe fn adopt_listener(fd: i32) -> std::io::Result<tokio::net::TcpListener> {
 }
 
 #[cfg(not(unix))]
-fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
-    None
+fn inherited_listeners() -> std::io::Result<Vec<tokio::net::TcpListener>> {
+    Ok(Vec::new())
 }
 
 /// `TRUSTED_PROXIES`: comma-separated IP addresses, the trusted ones and, second, those written `cf:<ip>` — the
@@ -1260,6 +1276,119 @@ mod tests {
         let mut reply = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut early, &mut reply).await.unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let _ = tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    }
+
+    /// A held drain (the TV's 25 s `POST /inbox/drain?wait=`) is answered when the stop arrives, and the drain then
+    /// finishes cleanly at once. Before, it kept every restart open until the 8 s deadline, which then closed it with
+    /// no answer at all; while that ran the port refused everyone else.
+    #[tokio::test]
+    async fn a_stop_answers_held_requests_and_drains_at_once() {
+        use tokio::io::AsyncReadExt;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let state = Arc::new(AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        ));
+        let metrics = Arc::clone(&state.metrics);
+        let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let grace = Duration::from_secs(3);
+        let limits = Limits { grace, header_read: HEADER_READ_TIMEOUT };
+        let shutdown = stopping(Arc::clone(&state), async { rx.await.unwrap_or(()) });
+        let server = tokio::spawn(serve_until(vec![l], app, metrics, shutdown, limits));
+
+        let body = r#"{"keys":["deadbeefcafe1234deadbeef"]}"#;
+        let mut held = tokio::net::TcpStream::connect(addr).await.unwrap();
+        held.write_all(
+            format!(
+                "POST /inbox/drain?wait=25 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut first = [0u8; 1];
+        let early = tokio::time::timeout(Duration::from_millis(300), held.read(&mut first)).await;
+        assert!(early.is_err(), "the drain is held while nothing is stopping");
+
+        let started = std::time::Instant::now();
+        let _ = tx.send(());
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(1), held.read_to_string(&mut reply))
+            .await
+            .expect("the held drain was not answered at the stop")
+            .unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with(r#"{"queues":[[]]}"#), "{reply}");
+        let outcome = tokio::time::timeout(grace * 2, server).await.unwrap().unwrap();
+        assert!(matches!(outcome, Outcome::Drained), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(1), "the drain took {:?}", started.elapsed());
+    }
+
+    /// Every route's holds are released, not only the inbox's.
+    #[tokio::test]
+    async fn release_holds_answers_every_held_route() {
+        let state = AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        );
+        let held = [
+            state.library_holds.hold("o", &["k"]).unwrap(),
+            state.inbox_holds.hold("o", &["k"]).unwrap(),
+            state.assistant_holds.hold("o", &["k"]).unwrap(),
+        ];
+        state.release_holds();
+        for (i, hold) in held.iter().enumerate() {
+            let waited =
+                tokio::time::timeout(Duration::from_secs(1), hold.wait(Duration::from_secs(25))).await;
+            assert!(waited.is_ok(), "hold set {i} was not released");
+        }
+    }
+
+    /// The API port and the Cast port arrive as two sockets: both are adopted, not refused as "expected one".
+    #[test]
+    fn every_handed_over_socket_is_taken_and_only_for_this_process() {
+        assert_eq!(activation_fds(Some("7"), Some("2"), 7), 3..5);
+        assert_eq!(activation_fds(Some("7"), Some("1"), 7), 3..4);
+        assert!(activation_fds(Some("8"), Some("2"), 7).is_empty(), "another process's");
+        assert!(activation_fds(None, None, 7).is_empty(), "nothing handed over");
+        assert!(activation_fds(Some("7"), Some("0"), 7).is_empty());
+    }
+
+    /// Two inherited sockets, one accept loop: a request on either is answered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serves_on_every_inherited_socket() {
+        use std::os::fd::IntoRawFd;
+        let owners = [
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+        ];
+        let addrs: Vec<_> = owners.iter().map(|o| o.local_addr().unwrap()).collect();
+        let listeners: Vec<_> =
+            owners.into_iter().map(|o| unsafe { adopt_listener(o.into_raw_fd()) }.unwrap()).collect();
+        let state = Arc::new(AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        ));
+        let metrics = Arc::clone(&state.metrics);
+        let app = axum::Router::new().fallback(handler::handle).with_state(state);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let limits = Limits { grace: Duration::from_millis(300), header_read: HEADER_READ_TIMEOUT };
+        let server =
+            tokio::spawn(serve_until(listeners, app, metrics, async { rx.await.unwrap_or(()) }, limits));
+        for addr in addrs {
+            let reply = exchange(addr, "GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+            assert!(reply.starts_with("HTTP/1.1 200"), "{addr}: {reply}");
+        }
         let _ = tx.send(());
         tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
     }
