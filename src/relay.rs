@@ -2968,9 +2968,7 @@ mod tests {
         // A newly installed TV may validate its manifest before route discovery has selected Hearth's LAN
         // listener. The configured manifest is safe to relay without membership; it cannot mint an install or
         // exercise an indexer, and Hearth still authenticates the sealed config.
-        let manifest = h
-            .send("GET", "/den/compatible/manifest.json", None, &[("host", "d.oxy.fi")])
-            .await;
+        let manifest = h.send("GET", "/den/compatible/manifest.json", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(manifest.status(), StatusCode::NO_CONTENT);
         let (method, path, headers) = received.recv().await.unwrap();
         assert_eq!((method, path.as_str()), (Method::GET, "/den/compatible/manifest.json"));
