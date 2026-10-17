@@ -2476,14 +2476,6 @@
        moment playback resumes. -->
   <div class="notices">
     {#if session}
-      {#if castOffer === 'looking'}
-        {@render banner('Looking for a Chromecast…')}
-      {:else if castOffer === 'none'}
-        {@render banner(
-          'No Chromecast found. Check that it is awake and on the same network as this device.',
-          () => (castOffer = 'idle'),
-        )}
-      {/if}
       {#if swapped}
         {@render banner(swapped, () => (swapped = null))}
       {/if}
@@ -2511,6 +2503,20 @@
     {/if}
   </div>
   <div class="stage">
+    {#if session && (castOffer === 'looking' || castOffer === 'none')}
+      <!-- Discovery belongs to the Cast control, not the playback layout. Keeping its one stable surface over the
+           picture means neither its arrival nor its longer empty-state copy moves or resizes what is playing. -->
+      <div class="cast-status">
+        {#if castOffer === 'looking'}
+          {@render banner('Looking for a Chromecast…')}
+        {:else}
+          {@render banner(
+            'No Chromecast found. Check that it is awake and on the same network as this device.',
+            () => (castOffer = 'idle'),
+          )}
+        {/if}
+      </div>
+    {/if}
     {#if failure === 'login'}
       <form onsubmit={letIn}>
         <p>
@@ -2886,6 +2892,18 @@
     place-items: center;
   }
 
+  /* Cast discovery floats with the player control instead of becoming a new grid row. Its two-line footprint is
+     stable while the wording changes; only the card itself accepts a tap, so playback controls remain usable. */
+  .cast-status {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    z-index: 2;
+    width: min(36rem, calc(100% - 24px));
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+
   video,
   iframe {
     position: absolute;
@@ -3010,6 +3028,17 @@
 
   .notice:last-of-type {
     margin-bottom: 10px;
+  }
+
+  .cast-status .notice {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 76px;
+    pointer-events: auto;
+  }
+
+  .cast-status .notice:last-of-type {
+    margin-bottom: 0;
   }
 
   /* A notice with nothing to dismiss still sits the same height as one with. */
