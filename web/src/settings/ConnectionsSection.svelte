@@ -1120,7 +1120,7 @@
             >
             <div class="device-action">
               {#if row.device?.id === selfId}
-                <Button variant="secondary" size="compact" label="This device" disabled />
+                <span class="device-self">This device</span>
               {:else}
                 <Confirm
                   label="Remove"
@@ -1339,6 +1339,20 @@
 
   .device-action {
     grid-column: 3;
+  }
+
+  /* The self row's action column is a status, not an unavailable action. Anchor it to the rename field instead of
+     centering it against the field plus the smaller "seen" line below. */
+  .device-self {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .device-action:has(.device-self) {
+    align-self: start;
   }
 
   .field.name {

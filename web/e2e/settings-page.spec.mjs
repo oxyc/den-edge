@@ -77,6 +77,7 @@ for (const width of [320, 390, 820, 1280]) {
       const page = await context.newPage();
       await guardNetwork(page);
       await markPageFetch(page);
+      await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
       const pageOwnedProviders = [];
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('**/version', (r) => r.fulfill({ json: { version: '0.67.0' } }));
@@ -220,10 +221,23 @@ for (const width of [320, 390, 820, 1280]) {
       // it's matched with its case.
       const self = listed.filter({ hasText: /This browser · seen/ });
       await expect(self).toHaveCount(1);
-      await expect(self.getByRole('button', { name: 'This device' })).toBeDisabled();
+      await expect(self.getByText('This device', { exact: true })).toBeVisible();
+      await expect(self.getByRole('button')).toHaveCount(0);
       // This device's name is edited in its own row, and other rows have no field.
       const nameField = self.getByRole('textbox', { name: 'Name of this device' });
       await expect(nameField).toHaveValue('Test Browser');
+      const selfRowGeometry = await self.evaluate((row) => {
+        const field = row.querySelector('input')?.getBoundingClientRect();
+        const status = row.querySelector('.device-self')?.getBoundingClientRect();
+        return field && status
+          ? {
+              fieldCenter: field.top + field.height / 2,
+              statusCenter: status.top + status.height / 2,
+            }
+          : null;
+      });
+      expect(selfRowGeometry).not.toBeNull();
+      expect(Math.abs(selfRowGeometry.fieldCenter - selfRowGeometry.statusCenter)).toBeLessThan(2);
       await expect(listed.getByRole('textbox')).toHaveCount(1);
       await nameField.fill('Study Browser');
       expect(await page.evaluate(() => localStorage.getItem('den.deviceName'))).toBe(
@@ -322,6 +336,7 @@ test('saving a provider key validates it in the content Worker before storing it
 }) => {
   await guardNetwork(page);
   await markPageFetch(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));

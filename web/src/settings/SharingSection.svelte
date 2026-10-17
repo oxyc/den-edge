@@ -7,7 +7,6 @@
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
   import DetailIcon from '../components/DetailIcon.svelte';
-  import CheckGrid from './CheckGrid.svelte';
   import Confirm from './Confirm.svelte';
   import PhoneLink from './PhoneLink.svelte';
   import Select from './Select.svelte';
@@ -41,7 +40,7 @@
   import type { LibraryModel } from '../lib/libraryModel.svelte';
   import { hostGrantsFetch } from '../lib/relayFetch';
   import type { Routes } from '../lib/routes';
-  import { hostedInstalls, installsOf } from '../lib/scout';
+  import { hostedInstalls } from '../lib/scout';
 
   let {
     link,
@@ -90,7 +89,6 @@
   let problem = $state<string | null>(null);
   let working = $state(false);
   let name = $state('');
-  let picked = $state<Set<GrantAddon>>(new Set(GRANT_ADDONS));
   let trial = $state<'none' | '7' | '30' | 'custom'>('none');
   let customDays = $state(14);
   let redeemBy = $state(DEFAULT_REDEEM_DAYS);
@@ -115,11 +113,10 @@
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
   let codes = $state<Record<string, string>>({});
 
-  const offered = $derived(GRANT_ADDONS.filter((addon) => installs[addon]));
-  // Installed but not lendable: an install with no settings of its own (a bare Den Atlas) gives a guest nothing to hold.
-  const installed = (addon: GrantAddon) =>
-    installsOf(plugins, routes, addon === 'subtitles' ? 'subs' : addon).length > 0;
-  const chosen = $derived(offered.filter((addon) => picked.has(addon)));
+  // A new invite always carries every install that can actually be escrowed. The grant protocol keeps the legacy
+  // service names because Edge derives the stable guest Hearth overlay from them; bare or foreign plugins never
+  // enter `hostedInstalls`, so "all" cannot accidentally widen beyond this household's shareable sealed configs.
+  const shareable = $derived(GRANT_ADDONS.filter((addon) => installs[addon]));
   const clamp = (n: number, low: number, high: number) =>
     Math.min(high, Math.max(low, Math.round(Number.isFinite(n) ? n : low)));
 
@@ -167,17 +164,17 @@
 
   async function invite() {
     const household = await host();
-    if (!household || !name.trim() || !chosen.length) return;
+    if (!household || !name.trim() || !shareable.length) return;
     working = true;
     problem = null;
-    const picks = Object.fromEntries(chosen.map((addon) => [addon, installs[addon]]));
+    const picks = Object.fromEntries(shareable.map((addon) => [addon, installs[addon]]));
     const reply = await createGrant(
       household.id,
       {
         name: name.trim(),
-        addons: chosen,
+        addons: shareable,
         installs: picks,
-        // Left out at the default, so den-edge's own clock sets it; a chosen one stays under its 90-day limit even
+        // Left out at the default, so den-edge's own clock sets it; a custom date stays under its 90-day limit even
         // when this browser's clock runs ahead.
         ...(redeemBy === DEFAULT_REDEEM_DAYS
           ? {}
@@ -194,7 +191,7 @@
       problem = said(reply);
       return;
     }
-    await keepUploaded(reply.value.grant.gid, installs, chosen);
+    await keepUploaded(reply.value.grant.gid, installs, shareable);
     keepCode(reply.value.grant.gid, reply.value.code);
     codes = { ...codes, [reply.value.grant.gid]: reply.value.code };
     created = {
@@ -490,26 +487,6 @@
           aria-label="Guest’s name"
           bind:value={name}
         />
-        <div class="wide">
-          <CheckGrid
-            legend="Addons to share"
-            options={GRANT_ADDONS.map((addon) => ({
-              value: addon,
-              label: NAMES[addon].label,
-              note: installs[addon]
-                ? NAMES[addon].role
-                : `${NAMES[addon].role} · ${installed(addon) ? 'no settings to lend' : 'not installed'}`,
-              disabled: !installs[addon],
-            }))}
-            checked={(addon) => picked.has(addon) && !!installs[addon]}
-            onchange={(addon, on) => {
-              const next = new Set(picked);
-              if (on) next.add(addon);
-              else next.delete(addon);
-              picked = next;
-            }}
-          />
-        </div>
         <label class="labelled"
           >Access lasts
           <Select
@@ -543,10 +520,10 @@
           type="submit"
           variant="primary"
           label="Create invite"
-          disabled={!ready || working || !name.trim() || !chosen.length}
+          disabled={!ready || working || !name.trim() || !shareable.length}
         />
       </form>
-      {#if !offered.length}
+      {#if !shareable.length}
         <p class="status">
           None of your plugins is a Den addon this page can share. Add Den Scout under Plugins
           first.
