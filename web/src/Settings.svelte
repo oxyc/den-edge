@@ -375,7 +375,15 @@
           disable={async () => run(() => model.disableRecovery())}
         />
       {/snippet}
-      <SharingSection {link} plugins={pluginUrls} {routes} {ready} {sealHandover} {selfId} />
+      <SharingSection
+        {link}
+        {model}
+        plugins={pluginUrls}
+        {routes}
+        {ready}
+        {sealHandover}
+        {selfId}
+      />
       <AssistantsSection
         revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
         listGrants={link && !local ? () => model.assistantGrants() : undefined}

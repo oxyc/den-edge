@@ -39,6 +39,7 @@ import type {
   TitleRef,
   TitleView,
 } from './libraryServiceProtocol';
+import type { LibraryRelayMembership } from './relayFetch';
 import type {
   LibrarySelectionConnection,
   LibrarySelectionSnapshot,
@@ -405,6 +406,14 @@ export class LibraryModel {
     const { result } = await this.service.query({ kind: 'preferences.raw' });
     if (result.kind !== 'preferences.raw') throw wrongQueryResult('raw preferences');
     return result.values;
+  }
+
+  /** The relay-only proof of this exact model's library, independent of whichever profile is globally active. */
+  async relayMembership(): Promise<LibraryRelayMembership | null> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'relay.membership' });
+    if (result.kind !== 'relay.membership') throw wrongQueryResult('relay membership');
+    return result.capability;
   }
 
   /** Give this profile library the preferences `household` holds that it has not decided (profiles-v1 §6.3). */
