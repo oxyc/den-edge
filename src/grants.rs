@@ -3139,6 +3139,20 @@ mod tests {
             assert_eq!(seen.last().unwrap().0, "/den/configure");
             assert!(!seen.last().unwrap().1.contains_key("cookie"));
         }
+        // What the page itself then asks with the same cookie: its seal key, and "Test token".
+        let key = h.send("GET", "/den/config-key", None, &[("cookie", cookie), ("host", "d.oxy.fi")]).await;
+        assert_eq!(key.status(), StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().last().unwrap().0, "/den/config-key");
+        let validate = h
+            .send(
+                "POST",
+                "/den/validate",
+                Some(r#"{"service":"torbox","token":"x"}"#.to_owned()),
+                &[("cookie", cookie), ("host", "d.oxy.fi"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(validate.status(), StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().last().unwrap().0, "/den/validate");
 
         let form =
             url::form_urlencoded::Serializer::new(String::new()).append_pair("member", &claim).finish();
