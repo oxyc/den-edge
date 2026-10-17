@@ -479,14 +479,16 @@
           void invite();
         }}
       >
-        <input
-          class="field"
-          autocomplete="off"
-          maxlength="60"
-          placeholder="Who is it for?"
-          aria-label="Guest’s name"
-          bind:value={name}
-        />
+        <label class="labelled"
+          >Guest’s name
+          <input
+            class="field"
+            autocomplete="off"
+            maxlength="60"
+            placeholder="Who is it for?"
+            bind:value={name}
+          />
+        </label>
         <label class="labelled"
           >Access lasts
           <Select
