@@ -17,6 +17,7 @@
   import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
+  import { migrateGuestProfiles } from './lib/guestProfileMigration';
   import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import {
@@ -514,6 +515,38 @@
       const coordinator = profileCoordinator;
       untrack(() => coordinator.updateDirectory(directory));
     }
+  });
+
+  // Guests redeemed by older clients already own one ordinary wire-4 household. Upgrade that same authenticated
+  // household in place: every device keeps its key, while the inviter's household and profiles remain unreachable.
+  const GUEST_PROFILE_RETRY_MS = 30_000;
+  const GUEST_PROFILE_RETRIES = 5;
+  let guestProfileTries = $state(0);
+  let guestProfileMigrating = false;
+  $effect(() => {
+    void guestProfileTries;
+    const model = session.model;
+    if (
+      !link?.guest ||
+      session.local ||
+      profileCapability !== 'enabled' ||
+      !profileDirectoryAbsent ||
+      !model ||
+      guestProfileMigrating
+    )
+      return;
+    guestProfileMigrating = true;
+    void migrateGuestProfiles(model)
+      .then((outcome) => {
+        if (outcome === 'pending' && alive && guestProfileTries < GUEST_PROFILE_RETRIES)
+          setTimeout(() => alive && guestProfileTries++, GUEST_PROFILE_RETRY_MS);
+      })
+      .catch((error: unknown) => {
+        console.warn('den: the guest profile upgrade could not continue', error);
+        if (alive && guestProfileTries < GUEST_PROFILE_RETRIES)
+          setTimeout(() => alive && guestProfileTries++, GUEST_PROFILE_RETRY_MS);
+      })
+      .finally(() => (guestProfileMigrating = false));
   });
 
   $effect(() => {

@@ -547,7 +547,11 @@ pub(crate) async fn profile_migration_available(state: &AppState, path: &str) ->
         return false;
     }
     match protocol_for(state, id).await {
-        Ok(Some(protocol)) => protocol.wire_min >= 5 || state.profile_prepare_households.contains(id),
+        Ok(Some(protocol)) => {
+            protocol.wire_min >= 5
+                || state.profile_prepare_households.contains(id)
+                || crate::grants::is_guest_library(state, id).await.unwrap_or(true)
+        }
         Ok(None) => false,
         Err(_) => true,
     }
@@ -634,12 +638,24 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         && query_param(&req, "since").as_deref() == Some("0")
         && query_param(&req, "limit").as_deref() == Some("1");
     let minimum = protocol.as_ref().map_or(2, |value| value.wire_min);
+    let migration_prepare = if (migration_action || capability_action) && minimum < 5 {
+        if state.profile_prepare_households.contains(id) {
+            true
+        } else {
+            match crate::grants::is_guest_library(state, id).await {
+                Ok(guest) => guest,
+                Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
+            }
+        }
+    } else {
+        false
+    };
     if (migration_action || capability_action) && minimum > 5 {
         let response =
             json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }));
         return with_wire_headers(state, response, protocol.as_ref());
     }
-    if migration_action && minimum < 5 && !state.profile_prepare_households.contains(id) {
+    if migration_action && minimum < 5 && !migration_prepare {
         return with_wire_headers(
             state,
             json_reply(StatusCode::NOT_FOUND, &error("not_found")),
@@ -825,8 +841,11 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Some(protocol) => json_reply(
                 StatusCode::OK,
                 &json!({
-                    "enrollment": if state.profile_migration_enabled
-                        && state.profile_prepare_households.contains(id) { "prepare" } else { "off" },
+                    "enrollment": if state.profile_migration_enabled && migration_prepare {
+                        "prepare"
+                    } else {
+                        "off"
+                    },
                     "wireMin": protocol.wire_min,
                     "migrationWire": 5,
                     "runtimeHouseholdWire": 5,
@@ -836,7 +855,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             None => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
         },
         (action, _) if action == "profile-migration" || action.starts_with("profile-migration/") => {
-            profile_migration::handle(state, id, token_hash, action, req).await
+            profile_migration::handle(state, id, token_hash, action, req, migration_prepare).await
         }
         (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
         ("batch", Method::POST) => match write_budget(state, id) {
@@ -1741,6 +1760,14 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         Ok(protocol) => protocol.head == 0,
         Err(error) => return internal("library protocol", v3_io(error)),
     };
+    // Guest provenance must become durable before the first activity commit. If this fails, the empty store remains
+    // empty and the retry comes through here again; a committed guest library can therefore never lose enrollment
+    // merely because its invite record is reaped later.
+    if was_empty {
+        if let Err(error) = crate::grants::remember_started_library(state, id).await {
+            return internal("guest library provenance", error);
+        }
+    }
     let writes: Vec<_> = writes
         .into_iter()
         .map(|write| v3::Write { key: write.k, base: write.base, value: write.v })

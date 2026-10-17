@@ -1824,6 +1824,7 @@ pub(crate) async fn handle(
     token_hash: [u8; 32],
     action: &str,
     request: Request,
+    prepare: bool,
 ) -> Response {
     let storage = ProfileMigrationStorage::new(state);
     if action == "profile-migration/source" {
@@ -1853,8 +1854,7 @@ pub(crate) async fn handle(
                 &input.expected_source,
                 household_id,
                 token_hash,
-                input.purpose == AttemptPurpose::Restore
-                    || state.profile_prepare_households.contains(household_id),
+                input.purpose == AttemptPurpose::Restore || prepare,
             )
             .await
         {

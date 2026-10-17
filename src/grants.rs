@@ -1283,6 +1283,10 @@ fn library_key(id: &str) -> String {
     format!("lib:{id}")
 }
 
+fn started_library_key(id: &str) -> String {
+    format!("started-lib:{id}")
+}
+
 /// The grant whose record claims library `id`: the pointer is only a way to find it, the record decides.
 async fn claimant(state: &AppState, id: &str) -> io::Result<Option<Record>> {
     let Some(bytes) = state.store.get(NS, &library_key(id)).await? else { return Ok(None) };
@@ -1291,6 +1295,28 @@ async fn claimant(state: &AppState, id: &str) -> io::Result<Option<Record>> {
         return Ok(None);
     }
     Ok(load(state, gid).await?.filter(|r| r.library.as_ref().is_some_and(|l| l.id == id)))
+}
+
+/// Whether `id` is a household a guest grant created. The durable marker is written after its authenticated store is
+/// created but before its first commit; the still-present reservation recognizes libraries created before it existed.
+pub async fn is_guest_library(state: &AppState, id: &str) -> io::Result<bool> {
+    if !crate::library::valid_hex_id(id) {
+        return Ok(false);
+    }
+    if state.store.get(NS, &started_library_key(id)).await?.is_some() {
+        return Ok(true);
+    }
+    Ok(claimant(state, id).await?.is_some())
+}
+
+/// Remember guest provenance independently of the expiring invite record. Called only after the authenticated store
+/// exists, so an abandoned reservation never turns an unrelated future library with the same id into one.
+pub async fn remember_started_library(state: &AppState, id: &str) -> io::Result<()> {
+    if claimant(state, id).await?.is_none() {
+        return Ok(());
+    }
+    state.store.put(NS, &started_library_key(id), b"1").await?;
+    state.store.sync_dir(NS).await
 }
 
 /// May the first write of library `id`, written with a token hashing to `token_hash`, start it? Only when a grant
@@ -4137,7 +4163,11 @@ mod tests {
 
     /// A first write to library `id` with `token`: what starts it, when it is let.
     async fn first_write(h: &Harness, id: &str, token: &str) -> (StatusCode, Value) {
-        let body = json!({ "writes": [{ "k": "bbbbbbbbbbbbbbbb", "base": 0, "v": "c1" }] }).to_string();
+        first_write_at(h, id, token, 0).await
+    }
+
+    async fn first_write_at(h: &Harness, id: &str, token: &str, base: u64) -> (StatusCode, Value) {
+        let body = json!({ "writes": [{ "k": "bbbbbbbbbbbbbbbb", "base": base, "v": "c1" }] }).to_string();
         let resp =
             h.send("POST", &format!("/lib/{id}/batch"), Some(body), &[("x-den-library-token", token)]).await;
         let status = resp.status();
@@ -4150,7 +4180,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_guest_starts_one_library_and_a_stranger_cannot() {
-        let h = harness().await;
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
         let (_, header) = redeemed(&h, json!({})).await;
         let closed = (StatusCode::FORBIDDEN, json!({ "error": "new_libraries_closed" }));
 
@@ -4162,8 +4193,30 @@ mod tests {
             "the same pair again, so a lost answer can be retried"
         );
         assert_eq!(first_write(&h, GLIB, "someone-elses-token").await, closed, "bound to the reserved key");
+        let (status, conflicted) = first_write_at(&h, GLIB, GTOKEN, 1).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(conflicted["applied"].as_array().unwrap().is_empty());
+        assert!(
+            is_guest_library(&h.state, GLIB).await.unwrap(),
+            "provenance precedes the first activity commit"
+        );
         assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
+        assert!(is_guest_library(&h.state, GLIB).await.unwrap());
         assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK);
+        assert_eq!(
+            body_json(
+                h.send(
+                    "GET",
+                    &format!("/lib/{GLIB}/profile-capability"),
+                    None,
+                    &[("x-den-wire", "5"), ("x-den-library-token", GTOKEN)],
+                )
+                .await,
+            )
+            .await["enrollment"],
+            "prepare",
+            "a legacy guest household may perform its own in-place Owner split"
+        );
 
         assert_eq!(reserve(&h, &header, GLIB2, GTOKEN).await, closed, "one library per grant");
         assert_eq!(first_write(&h, GLIB2, GTOKEN).await, closed);
@@ -4251,6 +4304,10 @@ mod tests {
         h.advance(REAP_MS + DAY_MS);
         sweep(&h.state).await;
         assert!(h.state.store.get(NS, &key(&gid)).await.unwrap().is_none());
+        assert!(
+            is_guest_library(&h.state, GLIB).await.unwrap(),
+            "guest provenance outlives the invite record"
+        );
         assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK);
     }
 
