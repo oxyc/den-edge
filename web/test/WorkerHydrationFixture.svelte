@@ -9,6 +9,7 @@
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
+  import { LIVE_MS } from '../src/lib/livePosition';
   import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Link } from '../src/lib/links.svelte';
   import type { Route } from '../src/lib/route';
@@ -57,6 +58,9 @@
     void model.ready
       .then(async () => {
         const now = Date.now();
+        // Live-position browser tests need the saved resume points, but not a fresh position that spends the
+        // first 45 seconds looking like active playback. Other fixture consumers retain the production-like stamp.
+        const resumeAt = params.has('stale-live') ? now - LIVE_MS - 1_000 : now;
         await model.setApiKey('tmdb', 'worker-hydration-key', 'seed-key');
         await model.installPlugin(
           `${location.origin}/scout/fixture-install/manifest.json`,
@@ -70,7 +74,7 @@
             title: { type: 'movie', id: 1001 },
             fraction: 0.5,
             seconds: 1_800,
-            observedAt: now,
+            observedAt: resumeAt,
           },
           'seed-continue',
         );
@@ -80,7 +84,7 @@
             episode: { type: 'tv', id: 1003, season: 1, episode: 2 },
             fraction: 0.5,
             seconds: 1_200,
-            observedAt: now - 1,
+            observedAt: resumeAt - 1,
           },
           'seed-tv-continue',
         );
