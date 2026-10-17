@@ -256,6 +256,17 @@ test('a Hearth session on the public address plays in the real cast page on its 
     expect(managed[0]).not.toHaveProperty('exclude');
     expect(managed[0]).not.toHaveProperty('replaces');
     expect(heard.reports.filter((r) => !r.stats)).toEqual([]);
+    // den-edge's outcome line says where it really played: the cast page, from Remux, with a home address offered —
+    // not `native`, as it did for every session in that frame.
+    const outcome = page.waitForRequest((r) => r.url() === `${ORIGIN}/playback/outcome`);
+    await page.route(`${ORIGIN}/playback/outcome`, (r) => r.fulfill({ status: 204 }));
+    await page.getByRole('button', { name: 'Close' }).click();
+    expect((await outcome).postDataJSON()).toMatchObject({
+      engine: 'cast_page',
+      delivery: 'remux',
+      lanOffered: true,
+      endReason: 'user_exit',
+    });
   } finally {
     await browser.close();
   }
