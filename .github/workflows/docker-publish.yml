@@ -1,4 +1,4 @@
-# Main CI builds and scans immutable candidate images. A vX.Y.Z tag promotes the exact digests recorded by that
+# Main CI builds and scans an immutable candidate image. A vX.Y.Z tag promotes the exact digest recorded by that
 # successful main run; it does not compile or test the same commit again. Monday/manual runs retain the old security
 # patch behavior: rebuild the newest release without cache, scan it, sign it, and move :latest.
 name: docker-publish
@@ -12,7 +12,6 @@ on:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/den-edge
-  CAST_IMAGE: ghcr.io/${{ github.repository_owner }}/den-cast
 
 concurrency:
   group: docker-publish
@@ -54,7 +53,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   # A release consumes the digest record emitted only after the exact main workflow built, behavior-probed, and
-  # scanned both images. Resolving by the artifact rather than a moving tag binds promotion to that CI run.
+  # scanned the image. Resolving by the artifact rather than a moving tag binds promotion to that CI run.
   candidate:
     if: github.event_name == 'push'
     needs: source
@@ -65,7 +64,6 @@ jobs:
       packages: read
     outputs:
       edge: ${{ steps.images.outputs.edge }}
-      cast: ${{ steps.images.outputs.cast }}
       sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,14 +122,11 @@ jobs:
         run: |
           set -euo pipefail
           edge=$(jq -r .edge candidate-digests.json)
-          cast=$(jq -r .cast candidate-digests.json)
-          [[ "$edge" =~ ^sha256:[0-9a-f]{64}$ ]] && [[ "$cast" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$edge" =~ ^sha256:[0-9a-f]{64}$ ]]
           live_edge=$(docker buildx imagetools inspect "$IMAGE:candidate-$SHA" --format '{{json .Manifest}}' | jq -r .digest)
-          live_cast=$(docker buildx imagetools inspect "$CAST_IMAGE:candidate-$SHA" --format '{{json .Manifest}}' | jq -r .digest)
-          test "$live_edge" = "$edge" && test "$live_cast" = "$cast" || {
-            echo "::error::candidate tag no longer matches the digests recorded by main CI"; exit 1; }
+          test "$live_edge" = "$edge" || {
+            echo "::error::candidate tag no longer matches the digest recorded by main CI"; exit 1; }
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
-          echo "cast=$cast" >> "$GITHUB_OUTPUT"
       - name: Prove /version matches the release tag
         env:
           DIGEST: ${{ steps.images.outputs.edge }}
@@ -161,7 +156,6 @@ jobs:
       security-events: write
     outputs:
       edge: ${{ steps.images.outputs.edge }}
-      cast: ${{ steps.images.outputs.cast }}
       sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -199,7 +193,7 @@ jobs:
           else
             echo "image=scratch" >> "$GITHUB_OUTPUT"
           fi
-      - name: Rebuild both images without cache
+      - name: Rebuild the image without cache
         id: bake
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
@@ -212,18 +206,15 @@ jobs:
             *.args.PREVIOUS_IMAGE=${{ steps.previous.outputs.image }}
             *.no-cache=true
             edge.tags=${{ env.IMAGE }}:${{ needs.source.outputs.version }}-patch.${{ needs.source.outputs.stamp }}
-            cast.tags=${{ env.CAST_IMAGE }}:${{ needs.source.outputs.version }}-patch.${{ needs.source.outputs.stamp }}
             edge.cache-to=type=gha,mode=max,scope=release-images
-      - name: Record rebuilt digests
+      - name: Record rebuilt digest
         id: images
         env:
           METADATA: ${{ steps.bake.outputs.metadata }}
         run: |
           edge=$(jq -r '.edge["containerimage.digest"] // empty' <<<"$METADATA")
-          cast=$(jq -r '.cast["containerimage.digest"] // empty' <<<"$METADATA")
-          test -n "$edge" && test -n "$cast"
+          test -n "$edge"
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
-          echo "cast=$cast" >> "$GITHUB_OUTPUT"
       - name: Prove the rebuilt image
         env:
           DIGEST: ${{ steps.images.outputs.edge }}
@@ -249,22 +240,10 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
-      - name: Scan Cast image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.CAST_IMAGE }}@${{ steps.images.outputs.cast }}
-          version: v0.74.0
-          format: json
-          output: trivy-cast.json
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
       - name: Gate on fixable critical OS findings
         run: |
           jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy.json > gate.json
-          jq '.Results = ((.Results // []) | map(select(.Class == "os-pkgs")))' trivy-cast.json > gate-cast.json
           trivy convert --severity CRITICAL --exit-code 1 --format table gate.json
-          trivy convert --severity CRITICAL --exit-code 1 --format table gate-cast.json
       - name: Report edge scan
         continue-on-error: true
         run: trivy convert --format sarif --output trivy.sarif trivy.json
@@ -274,15 +253,6 @@ jobs:
         with:
           sarif_file: trivy.sarif
           category: trivy-image
-      - name: Report Cast scan
-        continue-on-error: true
-        run: trivy convert --format sarif --output trivy-cast.sarif trivy-cast.json
-      - name: Upload Cast scan
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        continue-on-error: true
-        with:
-          sarif_file: trivy-cast.sarif
-          category: trivy-cast-image
 
   # Only this workflow signs and advances :latest, preserving den-update's existing signature identity, throwaway
   # probe, digest pin, live probe, and rollback path.
@@ -302,17 +272,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      - name: Sign exact digests
+      - name: Sign the exact digest
         env:
           EDGE_DIGEST: ${{ needs.candidate.outputs.edge || needs.patch-build.outputs.edge }}
-          CAST_DIGEST: ${{ needs.candidate.outputs.cast || needs.patch-build.outputs.cast }}
-        run: |
-          cosign sign --yes "$IMAGE@$EDGE_DIGEST"
-          cosign sign --yes "$CAST_IMAGE@$CAST_DIGEST"
+        run: cosign sign --yes "$IMAGE@$EDGE_DIGEST"
       - name: Publish release tags and move latest last
         env:
           EDGE_DIGEST: ${{ needs.candidate.outputs.edge || needs.patch-build.outputs.edge }}
-          CAST_DIGEST: ${{ needs.candidate.outputs.cast || needs.patch-build.outputs.cast }}
           SHA: ${{ needs.candidate.outputs.sha || needs.patch-build.outputs.sha }}
           VERSION: ${{ needs.source.outputs.version }}
           PATCH: ${{ needs.source.outputs.patch }}
@@ -321,17 +287,11 @@ jobs:
           set -euo pipefail
           if [ "$PATCH" = true ]; then
             edge_tags=(--tag "$IMAGE:$VERSION-patch.$STAMP")
-            cast_tags=(--tag "$CAST_IMAGE:$VERSION-patch.$STAMP")
           else
             minor=${VERSION%.*}; major=${VERSION%%.*}; short=${SHA:0:7}
             edge_tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:$minor" --tag "$IMAGE:$major" --tag "$IMAGE:sha-$short")
-            cast_tags=(--tag "$CAST_IMAGE:$VERSION" --tag "$CAST_IMAGE:$minor" --tag "$CAST_IMAGE:$major" --tag "$CAST_IMAGE:sha-$short")
           fi
           docker buildx imagetools create "${edge_tags[@]}" "$IMAGE@$EDGE_DIGEST"
-          docker buildx imagetools create "${cast_tags[@]}" "$CAST_IMAGE@$CAST_DIGEST"
           docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$EDGE_DIGEST"
-          docker buildx imagetools create --tag "$CAST_IMAGE:latest" "$CAST_IMAGE@$CAST_DIGEST"
           moved=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
           test "$moved" = "$EDGE_DIGEST" || { echo "::error::latest resolved to $moved, not $EDGE_DIGEST"; exit 1; }
-          moved=$(docker buildx imagetools inspect "$CAST_IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
-          test "$moved" = "$CAST_DIGEST" || { echo "::error::Cast latest resolved to $moved, not $CAST_DIGEST"; exit 1; }

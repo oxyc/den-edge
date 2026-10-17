@@ -7,6 +7,7 @@
 mod assistant;
 mod billboard;
 mod cache;
+mod cast;
 mod diagnostics;
 mod grants;
 mod handler;
@@ -198,8 +199,11 @@ pub struct AppState {
     /// answers again. Set from real requests only: a probe would start the helper, and its refusal of an empty
     /// request makes it exit, which counts against the socket unit's start limit.
     pub public_listener_unanswered: std::sync::atomic::AtomicBool,
-    /// The static Cast sender/player origin allowed to frame the web app's playback handoff.
+    /// The static Cast sender/player origin allowed to frame the web app's playback handoff. Its host is served
+    /// the Cast page alone (`cast.rs`).
     pub cast_origin: Option<String>,
+    /// The Cast page's built files (env `CAST_DIR`), served on `cast_origin`'s host.
+    pub cast_dir: Option<std::path::PathBuf>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
     pub new_libraries: library::NewLibraries,
     /// The household's TMDB key (env `TMDB_KEY`), lent to devices that have none of their own (`tmdb.rs`).
@@ -401,6 +405,7 @@ impl AppState {
             public_media_socket: None,
             public_listener_unanswered: std::sync::atomic::AtomicBool::new(false),
             cast_origin: None,
+            cast_dir: None,
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,
             tmdb_client: None,
@@ -552,6 +557,7 @@ async fn main() {
             None
         })
     });
+    state.cast_dir = env_opt("CAST_DIR").map(std::path::PathBuf::from);
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
             eprintln!("NEW_LIBRARIES is {v:?}: expected open, members or visitors");
@@ -625,11 +631,16 @@ async fn main() {
     let port = listeners.last().and_then(|l| l.local_addr().ok()).map_or(port, |a| a.port());
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
-        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
+        "den-edge {} listening on :{port} — data={dir} web={} cast={} metrics={} log_requests={} log_identity={} web_origins={} \
          web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
          den_playback={} oauth={} assistant_writes={}",
         release_version(),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
+        match (&state.cast_origin, &state.cast_dir) {
+            (Some(origin), Some(dir)) => format!("{origin}({})", dir.display()),
+            (Some(origin), None) => format!("{origin}(no files)"),
+            (None, _) => "none".to_owned(),
+        },
         on(state.metrics_token.is_some()),
         on(state.log_requests),
         on(state.log_identity),

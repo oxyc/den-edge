@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["edge", "cast"]
+  targets = ["edge"]
 }
 
 target "common" {
@@ -17,9 +17,4 @@ target "common" {
 target "edge" {
   inherits = ["common"]
   target   = "edge"
-}
-
-target "cast" {
-  inherits = ["common"]
-  target   = "cast"
 }

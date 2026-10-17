@@ -1,6 +1,6 @@
 name: ci
 
-# Every exact main commit produces scanned, immutable candidate images while its checks run. A release tag only
+# Every exact main commit produces a scanned, immutable candidate image while its checks run. A release tag only
 # promotes those already-tested digests; it never recompiles or reruns this workflow.
 on:
   push:
@@ -21,7 +21,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   IMAGE: ghcr.io/${{ github.repository_owner }}/den-edge
-  CAST_IMAGE: ghcr.io/${{ github.repository_owner }}/den-cast
 
 jobs:
   test:
@@ -144,7 +143,7 @@ jobs:
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
-      - name: Build both runtime targets
+      - name: Build the runtime image
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
           source: .
@@ -195,7 +194,7 @@ jobs:
           else
             echo "image=scratch" >> "$GITHUB_OUTPUT"
           fi
-      - name: Build and push both candidates
+      - name: Build and push the candidate
         id: bake
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
@@ -207,27 +206,24 @@ jobs:
             *.args.GIT_REVISION=${{ github.sha }}
             *.args.PREVIOUS_IMAGE=${{ steps.previous.outputs.image }}
             edge.tags=${{ env.IMAGE }}:candidate-${{ github.sha }}
-            cast.tags=${{ env.CAST_IMAGE }}:candidate-${{ github.sha }}
             edge.cache-to=type=gha,mode=max,scope=release-images
-      - name: Record candidate digests
+      - name: Record candidate digest
         id: images
         env:
           METADATA: ${{ steps.bake.outputs.metadata }}
         run: |
           set -euo pipefail
           edge=$(jq -r '.edge["containerimage.digest"] // empty' <<<"$METADATA")
-          cast=$(jq -r '.cast["containerimage.digest"] // empty' <<<"$METADATA")
-          test -n "$edge" && test -n "$cast"
+          test -n "$edge"
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
-          echo "cast=$cast" >> "$GITHUB_OUTPUT"
-      - name: Prove the image reports its release version
+      - name: Prove the image reports its release version and serves the Cast page
         env:
           DIGEST: ${{ steps.images.outputs.edge }}
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           set -euo pipefail
           docker pull "$IMAGE@$DIGEST" >/dev/null
-          id=$(docker run --rm -d -p 127.0.0.1:18080:8080 "$IMAGE@$DIGEST")
+          id=$(docker run --rm -d -e CAST_ORIGIN=https://cast.invalid -p 127.0.0.1:18080:8080 "$IMAGE@$DIGEST")
           trap 'docker rm -f "$id" >/dev/null 2>&1 || true' EXIT
           body=""
           for _ in $(seq 1 20); do
@@ -236,6 +232,8 @@ jobs:
           done
           got=$(jq -r .version <<<"$body")
           test "$got" = "$VERSION" || { echo "::error::image /version is $got, expected $VERSION"; exit 1; }
+          cast=$(curl -fsS -H 'Host: cast.invalid' http://127.0.0.1:18080/)
+          grep -q '<title>Den Cast</title>' <<<"$cast" || { echo "::error::the Cast host did not serve the Cast page"; exit 1; }
       - name: Scan edge image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -246,27 +244,12 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
-      - name: Scan Cast image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.CAST_IMAGE }}@${{ steps.images.outputs.cast }}
-          version: v0.74.0
-          format: json
-          output: trivy-cast.json
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
       - name: Gate on fixable critical findings
-        run: |
-          trivy convert --severity CRITICAL --exit-code 1 --format table trivy.json
-          trivy convert --severity CRITICAL --exit-code 1 --format table trivy-cast.json
-      - name: Bind this CI run to its candidate digests
+        run: trivy convert --severity CRITICAL --exit-code 1 --format table trivy.json
+      - name: Bind this CI run to its candidate digest
         env:
           EDGE_DIGEST: ${{ steps.images.outputs.edge }}
-          CAST_DIGEST: ${{ steps.images.outputs.cast }}
-        run: |
-          jq -n --arg edge "$EDGE_DIGEST" --arg cast "$CAST_DIGEST" \
-            '{edge: $edge, cast: $cast}' > candidate-digests.json
+        run: jq -n --arg edge "$EDGE_DIGEST" '{edge: $edge}' > candidate-digests.json
       - name: Save candidate identity for release promotion
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -283,12 +266,3 @@ jobs:
         with:
           sarif_file: trivy.sarif
           category: trivy-image
-      - name: Report Cast scan
-        continue-on-error: true
-        run: trivy convert --format sarif --output trivy-cast.sarif trivy-cast.json
-      - name: Upload Cast scan
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        continue-on-error: true
-        with:
-          sarif_file: trivy-cast.sarif
-          category: trivy-cast-image

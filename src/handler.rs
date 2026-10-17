@@ -99,6 +99,11 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let started = Instant::now();
     // In the answer and in the log line, so a device's report can be matched to this request.
     let rid = crate::hex(&crate::random_bytes::<8>());
+    if request_host(&req)
+        .is_ok_and(|host| host.is_some_and(|host| crate::cast::is_host(state.cast_origin.as_deref(), &host)))
+    {
+        return cast(&state, req, started, &rid).await;
+    }
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
@@ -207,6 +212,32 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     if let Ok(slot) = admission {
         let admission = crate::lock(&slot.admission).take();
         resp = resp.map(|body| Body::new(Admitted { body, admission }));
+    }
+    resp
+}
+
+/// A request for the Cast page's own name (`cast.rs`), before any route sees it. Admitted and counted like any
+/// other, and logged as `/cast` whatever its path, but answered with the page's own headers alone: none of
+/// `harden`'s, no CORS, no request id.
+async fn cast(state: &AppState, req: Request, started: Instant, rid: &str) -> Response {
+    let method = req.method().clone();
+    let resp = match admit(state, true).await {
+        Err(()) => {
+            state.metrics.request_refused(true);
+            busy()
+        }
+        Ok(admission) => {
+            let mut resp = crate::cast::serve(state.cast_dir.as_deref(), &method, req.uri().path()).await;
+            if method == Method::HEAD {
+                *resp.body_mut() = Body::empty();
+            }
+            resp.map(|body| Body::new(Admitted { body, admission: Some(admission) }))
+        }
+    };
+    let status = resp.status().as_u16();
+    state.metrics.record("/cast", status);
+    if state.log_requests {
+        eprintln!("{}", log_line(&method, "/cast", status, started.elapsed().as_millis(), rid, &[]));
     }
     resp
 }

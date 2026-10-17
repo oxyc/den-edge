@@ -239,8 +239,9 @@ Each reopen starts from the committed data (den-edge restarted on a copy, same p
 
 ## Deploy
 
-Main CI builds `ghcr.io/oxyc/den-edge` and `ghcr.io/oxyc/den-cast` together as immutable candidates for
-the exact commit. It tests, probes, and scans them before recording their digests. Run
+Main CI builds `ghcr.io/oxyc/den-edge` as an immutable candidate for the exact commit. It tests, probes, and
+scans it before recording its digest. The one image also carries the Cast page (`web/cast`, at `/cast`), which
+den-edge serves on `CAST_ORIGIN`'s host and only there (`src/cast.rs`). Run
 `scripts/release.sh X.Y.Z` to update the release metadata and create `vX.Y.Z` after that exact main CI
 passes. The tag workflow verifies and promotes those same digests; it does not rebuild or rerun the suite.
 
