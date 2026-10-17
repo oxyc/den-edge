@@ -12,9 +12,16 @@ const card = (id, title, type = 'movie') => ({
   originalLanguage: 'en',
 });
 
-test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
-  page,
-}) => {
+const NAMES = { 82728: 'Bluey', 101: 'Moomin Magic', 103: 'Moominvalley' };
+const SERIES = new Set([82728, 103]);
+const named = (id) => NAMES[id] ?? 'Dinosaur Day';
+
+/**
+ * Atlas's Kid Home catalogue and the sources its rows read, and TMDB's records for the titles in them. The Moomins
+ * world leads with a series (Moominvalley) ahead of a film (Moomin Magic). Returns the atlas requests and the
+ * recommendation requests seen, which a Kid must never make.
+ */
+async function kidsAtlas(page) {
   await guardNetwork(page);
   const atlasRequests = [];
   const recommendations = [];
@@ -60,21 +67,14 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
         },
       });
     if (url.pathname.endsWith('/index/query.json')) {
-      const bluey = url.searchParams.get('q') === 'Bluey';
-      return route.fulfill({
-        json: {
-          hits: [
-            {
-              ...card(
-                bluey ? 82728 : 101,
-                bluey ? 'Bluey' : 'Moomin Magic',
-                bluey ? 'series' : 'movie',
-              ),
-              score: bluey ? 2.11 : 0.91,
-            },
-          ],
-        },
-      });
+      const hits =
+        url.searchParams.get('q') === 'Bluey'
+          ? [{ ...card(82728, 'Bluey', 'series'), score: 2.11 }]
+          : [
+              { ...card(103, 'Moominvalley', 'series'), score: 0.95 },
+              { ...card(101, 'Moomin Magic'), score: 0.91 },
+            ];
+      return route.fulfill({ json: { hits } });
     }
     if (url.pathname.endsWith('/index/filter/all/titles.json'))
       return route.fulfill({
@@ -84,11 +84,7 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
       const id = Number(url.pathname.match(/(\d+)\.json$/)[1]);
       return route.fulfill({
         json: {
-          ...card(
-            id,
-            id === 82728 ? 'Bluey' : id === 101 ? 'Moomin Magic' : 'Dinosaur Day',
-            id === 82728 ? 'series' : 'movie',
-          ),
+          ...card(id, named(id), SERIES.has(id) ? 'series' : 'movie'),
           indexed: true,
           eligible: true,
           minimumAge: 0,
@@ -110,8 +106,8 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
       json: {
         id,
         ...(match[1] === 'tv'
-          ? { name: id === 82728 ? 'Bluey' : 'Dinosaur Day', first_air_date: '2018-10-01' }
-          : { title: id === 101 ? 'Moomin Magic' : 'Dinosaur Day', release_date: '2020-01-01' }),
+          ? { name: named(id), first_air_date: '2018-10-01' }
+          : { title: named(id), release_date: '2020-01-01' }),
         poster_path: '/poster.jpg',
         backdrop_path: '/backdrop.jpg',
         genres: [{ id: 16, name: 'Animation' }],
@@ -128,7 +124,13 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"/>',
     }),
   );
+  return { atlasRequests, recommendations };
+}
 
+test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
+  page,
+}) => {
+  const { atlasRequests, recommendations } = await kidsAtlas(page);
   await page.goto(`${E2E_ORIGIN}/test/library.html?kid&populated&bluey`);
 
   await expect
@@ -155,4 +157,19 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
     expect(url.searchParams.get('unknownRatings'), url.href).toBe('block');
     expect(url.searchParams.get('kidAudience'), url.href).toBe('child-or-teen');
   }
+});
+
+test('a Kid’s Movies billboard leads with films, not the series that lead Home', async ({
+  page,
+}) => {
+  await kidsAtlas(page);
+  await page.goto(`${E2E_ORIGIN}/test/library.html?kid&populated`);
+  // On Home the Moomins world's series leads, so the Movies check below cannot pass by its absence alone.
+  await expect(page.locator('.billboard')).toContainText('Moominvalley');
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movies' } })),
+  );
+  await expect(page.locator('.billboard')).toContainText('Moomin Magic');
+  await expect(page.locator('.billboard')).not.toContainText('Moominvalley');
 });
