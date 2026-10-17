@@ -43,11 +43,11 @@ test('a new invite automatically shares every lendable addon and no others', asy
 
   expect(posted).toMatchObject({
     name: 'Alex',
-    addons: ['scout', 'atlas'],
-    installs: { scout: 'testcfg123', atlas: 'atlascfg456' },
+    addons: ['den', 'atlas'],
+    installs: { den: 'hearthcfg789', atlas: 'atlascfg456' },
   });
+  expect(posted.addons).not.toContain('scout');
   expect(posted.addons).not.toContain('reel');
-  expect(posted.addons).not.toContain('den');
   await expect(page.getByLabel('Invite link')).toBeVisible();
-  await expect(page.getByText(/testcfg123|atlascfg456/)).toHaveCount(0);
+  await expect(page.getByText(/testcfg123|atlascfg456|hearthcfg789/)).toHaveCount(0);
 });

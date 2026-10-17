@@ -9,10 +9,10 @@
 import { hex } from './crypto';
 import { relayFetch } from './relayFetch';
 
-export const GRANT_ADDONS = ['scout', 'atlas', 'reel', 'subtitles'] as const;
+export const GRANT_ADDONS = ['den', 'scout', 'atlas', 'reel', 'subtitles'] as const;
 export type GrantAddon = (typeof GRANT_ADDONS)[number];
-/** A guest may additionally use the stable combined-Den facade over shared and personal settings. */
-export const GUEST_ADDONS = [...GRANT_ADDONS, 'den'] as const;
+/** Guest addons include the stable combined-Den facade over shared and personal settings. */
+export const GUEST_ADDONS = GRANT_ADDONS;
 export type GuestAddon = (typeof GUEST_ADDONS)[number];
 export type GrantStatus = 'invited' | 'active' | 'expired' | 'revoked';
 
@@ -70,6 +70,10 @@ export function cappedCodeExpiry(now: number, ahead: number): number {
 
 /** A config segment as den-edge accepts it: base64url, and never a `~` (a virtual install can't be re-shared). */
 export const SEGMENT = /^[A-Za-z0-9_-]{1,2048}$/;
+/** Combined Hearth carries three member configs and therefore has the larger den-edge bound. */
+export const DEN_SEGMENT = /^[A-Za-z0-9_-]{1,21848}$/;
+export const validInstallSegment = (addon: GrantAddon, segment: string): boolean =>
+  (addon === 'den' ? DEN_SEGMENT : SEGMENT).test(segment);
 const CODE = /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/;
 const SHARED_INSTALL =
   /^\/(scout|den|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/manifest\.json)?\/?$/;
@@ -182,6 +186,13 @@ export async function hashInstalls(
   return hex(
     new Uint8Array(await crypto.subtle.digest('SHA-256', utf8.encode(JSON.stringify(picked)))),
   );
+}
+
+/** The host capabilities a grant needs: combined Hearth plus Discovery, or the available legacy addons. */
+export function shareableAddons(installs: Partial<Record<GrantAddon, string>>): GrantAddon[] {
+  return installs.den
+    ? (['den', ...(installs.atlas ? ['atlas'] : [])] as GrantAddon[])
+    : GRANT_ADDONS.filter((addon) => installs[addon]);
 }
 
 /** How long a grant request may take; one den-edge never answered left its screen waiting until a reload. */
@@ -370,8 +381,9 @@ export async function keepUploaded(
 }
 
 /**
- * Re-upload the installs of every live grant whose addons changed in the library's plugins, and return those grants.
- * A grant is left as it is when an addon it shares has no install any more, and when its own addons are unchanged.
+ * Re-upload every live grant whose shared installs changed, and return those grants. A migrated combined Hearth
+ * replaces legacy Scout, Reel and Subtitles while retaining separate Atlas discovery, so guests created before that
+ * migration heal on the host's next refresh. Without one, a grant is left alone if a shared install disappeared.
  */
 export async function reuploadInstalls(
   id: string,
@@ -382,13 +394,14 @@ export async function reuploadInstalls(
   const updated: string[] = [];
   for (const grant of grants) {
     if (grant.status !== 'invited' && grant.status !== 'active') continue;
-    if (!grant.addons.every((addon) => installs[addon])) continue;
-    const hash = await hashInstalls(installs, grant.addons);
+    const addons: GrantAddon[] = installs.den ? shareableAddons(installs) : [...grant.addons];
+    if (!addons.every((addon) => installs[addon])) continue;
+    const hash = await hashInstalls(installs, addons);
     if (keptHashes()[grant.gid] === hash) continue;
-    const picked = Object.fromEntries(grant.addons.map((addon) => [addon, installs[addon]]));
-    const reply = await updateGrant(id, grant.gid, { installs: picked }, fetchImpl);
+    const picked = Object.fromEntries(addons.map((addon) => [addon, installs[addon]]));
+    const reply = await updateGrant(id, grant.gid, { addons, installs: picked }, fetchImpl);
     if (!reply.ok) continue;
-    await keepUploaded(grant.gid, installs, grant.addons);
+    await keepUploaded(grant.gid, installs, addons);
     updated.push(grant.gid);
   }
   return updated;

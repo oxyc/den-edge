@@ -33,7 +33,7 @@
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
-  import type { Link } from './lib/links.svelte';
+  import { linkedTv, type Link } from './lib/links.svelte';
   import {
     clock as timecode,
     livePosition,
@@ -754,15 +754,16 @@
   /**
    * Start the title on the linked TV, as the TV's own Play would — it picks the source.
    *
-   * Undefined for a guest, and that is the enforcement: `sendToTV` needs the link's own keys, so with no
-   * link there is nothing to pass and this cannot be constructed at all. A missing callback, which the
-   * type checker insists on, rather than a callback that declines at runtime.
+   * Undefined without a real TV receiver. Guest and recovery libraries use synthetic `Link`s to open their synced
+   * library, but no device owns those random inbox keys; treating that shape as a receiver offered a dead
+   * "Play on TV" action.
    *
    * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
+  const tv = $derived(linkedTv(link));
   const play = $derived(
-    link
+    tv
       ? async (title: Title, season?: number, episode?: number) => {
           busy = true;
           failure = null;
@@ -778,7 +779,7 @@
             session.notify(blocked);
             return;
           }
-          const sealed = await sendToTV(link, {
+          const sealed = await sendToTV(tv, {
             type: 'play',
             tmdbId: title.id,
             mediaType: title.type,
@@ -788,7 +789,7 @@
           });
           busy = false;
           if (sealed)
-            playOnTv.start(link, sealed, link.name ?? 'your TV', {
+            playOnTv.start(tv, sealed, tv.name ?? 'your TV', {
               type: title.type,
               id: title.id,
             });

@@ -31,6 +31,16 @@ export interface Link {
 }
 
 /**
+ * A real paired TV receiver, rather than a synthetic link that only opens a library.
+ *
+ * Recovery and guest-library links deliberately carry random inbox/link keys so the rest of the app can open their
+ * synced library through the same shape. No device owns those keys, though, so sending to them can never reach a TV.
+ */
+export function linkedTv(link: Link | null | undefined): Link | undefined {
+  return link && !link.recovered && !link.guest ? link : undefined;
+}
+
+/**
  * A device this browser handed its library to. It keeps the library's key from then on, so this is a record of
  * what was given, not a grant that can be taken back: only a new library key cuts a device off.
  */

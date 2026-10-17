@@ -39,6 +39,7 @@ const ROUTES: Routes = {
   ],
 };
 const SCOUT_LAN = 'http://192.168.86.193:8080/sealed-cfg/manifest.json';
+const DEN_LAN = 'http://192.168.86.193:8090/den/hearth-cfg/manifest.json';
 const SCOUT_PUBLIC = 'https://d-scout.oxy.fi/sealed-cfg/manifest.json';
 const SUBS_LAN = 'http://192.168.86.193:8093/subs-cfg/manifest.json';
 const SUBS_PUBLIC = 'https://d-subs.oxy.fi/subs-cfg/manifest.json';
@@ -430,10 +431,21 @@ describe('hostedInstalls', () => {
   it('is the config segment of each Den addon the library has, and nothing for one it lacks', () => {
     expect(
       hostedInstalls(
-        [THEIRS, SCOUT_LAN, SUBS_PUBLIC, 'http://192.168.86.193:8081/atlas-cfg/manifest.json'],
+        [
+          THEIRS,
+          DEN_LAN,
+          SCOUT_LAN,
+          SUBS_PUBLIC,
+          'http://192.168.86.193:8081/atlas-cfg/manifest.json',
+        ],
         ROUTES,
       ),
-    ).toEqual({ scout: 'sealed-cfg', subtitles: 'subs-cfg', atlas: 'atlas-cfg' });
+    ).toEqual({
+      den: 'hearth-cfg',
+      scout: 'sealed-cfg',
+      subtitles: 'subs-cfg',
+      atlas: 'atlas-cfg',
+    });
   });
 
   it('skips an install that is not a plain base64url segment', () => {
@@ -442,5 +454,17 @@ describe('hostedInstalls', () => {
     );
     expect(hostedInstalls(['http://192.168.86.193:8080/~x/manifest.json'], ROUTES)).toEqual({});
     expect(hostedInstalls([], ROUTES)).toEqual({});
+  });
+
+  it('accepts a combined Hearth segment larger than the legacy addon bound', () => {
+    const large = 'h'.repeat(3_000);
+    expect(
+      hostedInstalls([`http://192.168.86.193:8090/den/${large}/manifest.json`], ROUTES),
+    ).toEqual({
+      den: large,
+    });
+    expect(hostedInstalls([`http://192.168.86.193:8080/${large}/manifest.json`], ROUTES)).toEqual(
+      {},
+    );
   });
 });

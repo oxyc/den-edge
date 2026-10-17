@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { Links, readLinks, readPendingReset, readShared, writePendingReset } from './links.svelte';
+import {
+  linkedTv,
+  Links,
+  readLinks,
+  readPendingReset,
+  readShared,
+  writePendingReset,
+} from './links.svelte';
 
 const KEYS = { libraryKey: 'bGli', linkKey: 'bGluaw==' };
 
@@ -18,6 +25,15 @@ beforeEach(() => {
 });
 
 afterEach(() => vi.unstubAllGlobals());
+
+it('offers Play on TV only for a real paired receiver', () => {
+  const paired = { inboxKey: 'a'.repeat(16), ...KEYS, name: 'Living room' };
+  expect(linkedTv(paired)).toBe(paired);
+  expect(linkedTv({ ...paired, recovered: true })).toBeUndefined();
+  expect(linkedTv({ ...paired, recovered: true, guest: true })).toBeUndefined();
+  expect(linkedTv({ ...paired, guest: true })).toBeUndefined();
+  expect(linkedTv(null)).toBeUndefined();
+});
 
 /** Another tab's change: written to the storage both share, and announced to this one as a browser does. */
 function elsewhere(change: (other: Links) => void) {

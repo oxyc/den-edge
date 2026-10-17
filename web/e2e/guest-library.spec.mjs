@@ -81,6 +81,19 @@ test('accepting an invite starts the guest’s library with the watchlist alread
     await expect(laptop.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible({
       timeout: 30_000,
     });
+
+    // The guest's synthetic library link is not a TV receiver. Browser playback is offered through the host's
+    // stable Hearth facade, whose Remux fallback stays behind the grant-authenticated Edge relay.
+    await laptop.goto(`${E2E_ORIGIN}/movie/1002`);
+    await expect(laptop.getByRole('button', { name: 'Play', exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(laptop.getByRole('button', { name: 'Play on TV', exact: true })).toHaveCount(0);
+    await expect.poll(() => edge.playbackProbes.length).toBeGreaterThan(0);
+    const probe = edge.playbackProbes.at(-1);
+    expect(probe.url).not.toContain('secret');
+    expect(probe.headers['x-den-grant']).toMatch(new RegExp(`^${GID}:`));
+    expect(probe.headers['x-den-library-member']).toBeUndefined();
   });
 });
 

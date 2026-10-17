@@ -694,7 +694,7 @@ pub async fn guest(
     } else {
         req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
     };
-    let live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
+    let mut live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
         Ok(live) => live,
         Err(crate::grants::Denied::NotFound) => return Ok(not_found()),
         Err(crate::grants::Denied::Expired(at)) => {
@@ -704,6 +704,9 @@ pub async fn guest(
             ))
         }
     };
+    // `validate` maintains this invariant on every normal write. Enforce it again at the capability boundary so a
+    // stale or malformed stored key can enter neither a Remux rewrite nor the private Edge -> Hearth envelope.
+    live.installs.retain(|addon, _| live.addons.iter().any(|shared| shared == addon));
     if let Some(wait) =
         crate::link::throttled_per_minute(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
     {
@@ -743,9 +746,9 @@ pub async fn guest(
                 live.installs.get(p.addon).filter(|_| shared).cloned()
             };
             let overlay = personal_den && !bare_den;
-            let host_scout =
-                live.addons.iter().any(|addon| addon == "scout") && live.installs.contains_key("scout");
-            if segment.is_none() && !bare_den && !(overlay && host_scout) {
+            let host_scout = crate::grants::shares_install(&live.addons, &live.installs, "scout");
+            let host_hearth = crate::grants::shares_install(&live.addons, &live.installs, "den");
+            if segment.is_none() && !bare_den && !(overlay && (host_scout || host_hearth)) {
                 return Ok(not_found());
             }
             // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
@@ -846,7 +849,7 @@ fn guest_overlay_body(
     }
 
     let mut host = serde_json::Map::new();
-    for (stored, wire) in [("scout", "scout"), ("subtitles", "subs"), ("reel", "reel")] {
+    for (stored, wire) in [("den", "den"), ("scout", "scout"), ("subtitles", "subs"), ("reel", "reel")] {
         if let Some(segment) = guest.installs.get(stored) {
             host.insert(wire.into(), serde_json::Value::String(segment.clone()));
         }

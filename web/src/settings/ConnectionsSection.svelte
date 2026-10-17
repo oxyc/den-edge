@@ -216,6 +216,7 @@
 
   // Addons another library shares with this browser (`grants.svelte.ts`): listed, never editable, and not the library's.
   const sharedLabels: Record<GrantAddon, string> = {
+    den: 'Den Hearth',
     scout: 'Den Scout',
     atlas: 'Den Atlas',
     reel: 'Den Reel',

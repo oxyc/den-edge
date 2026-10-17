@@ -4,7 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
-import { SEGMENT, sharedInstallOf, type GrantAddon } from './grants';
+import { SEGMENT, sharedInstallOf, validInstallSegment, type GrantAddon } from './grants';
 import { isLanURL } from './prefs';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
@@ -339,7 +339,7 @@ export function denConfigureURL(url: string, routes: Routes): string | null {
 }
 
 /**
- * The single config segment of each of the library's own scout, atlas, reel and subtitles installs — what a grant
+ * The single config segment of each of the library's own Hearth, scout, atlas, reel and subtitles installs — what a grant
  * escrows, so den-edge builds the address itself. An addon with no install, or one whose segment isn't plain base64url,
  * is left out.
  */
@@ -349,6 +349,7 @@ export function hostedInstalls(
 ): Partial<Record<GrantAddon, string>> {
   const installs: Partial<Record<GrantAddon, string>> = {};
   const wants: [GrantAddon, { name: string; path: string }][] = [
+    ['den', DEN],
     ['scout', SCOUT],
     ['atlas', ATLAS],
     ['reel', REEL],
@@ -357,7 +358,7 @@ export function hostedInstalls(
   for (const [addon, want] of wants) {
     for (const url of plugins) {
       const segment = place(url, routes, want)?.base.slice(want.path.length + 1);
-      if (segment && SEGMENT.test(segment)) {
+      if (segment && validInstallSegment(addon, segment)) {
         installs[addon] = segment;
         break;
       }
