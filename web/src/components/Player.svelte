@@ -1683,6 +1683,14 @@
       endCastSession();
       castFailed = true;
       castFailReason = castFailReasonOf(message.message ?? '');
+      // The cast page refused the load this page handed it before fetching anything: a fault in that hand-off, not
+      // in the release, so no release is left out for it and no other is tried.
+      if (message.message === 'Invalid media URL') {
+        console.warn('The cast page refused the media URLs it was handed.');
+        reportFailure(current, 0, message.message);
+        failure = 'protocol';
+        return;
+      }
       // A receiver failure of a managed direct URL is one explicit Hearth fallback. It keeps Cast intent and sends
       // directFailed=true, so Hearth alone chooses the Remux session that replaces it.
       if (current.external) {
