@@ -110,6 +110,47 @@ test('the library Worker asks the guest’s shared Atlas with the grant, and Hom
   }
 });
 
+test('a shared Atlas that refuses the filter is unavailable, not TMDB discover in its place', async ({
+  page,
+}) => {
+  const warnings = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') warnings.push(message.text());
+  });
+  // den-edge refuses a ~<gid> call with the same 404 a missing route gets.
+  const asked = await guestWithSharedAtlas(page, (route, call) =>
+    call.rest.startsWith('/index/filter/')
+      ? route.fulfill({ status: 404, json: { error: 'not_found' } })
+      : atlasHome(route, call),
+  );
+  // TMDB discover asked for the picked decade is the fallback standing in for the guest's Atlas.
+  const decadeDiscover = [];
+  await page.route('**/tmdb/**/discover/**', (route) => {
+    if (/_date\.gte=1990-01-01/.test(route.request().url()))
+      decadeDiscover.push(route.request().url());
+    return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
+  });
+  await openHome(page);
+  await expect(page.locator('.billboard')).toContainText(`Movie ${PICK}`, { timeout: 30_000 });
+  await page.evaluate(() => {
+    history.pushState(null, '', '/search?c=decade-1990');
+    dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await expect
+    .poll(() => asked.some((call) => call.worker && call.rest.startsWith('/index/filter/')), {
+      timeout: 30_000,
+    })
+    .toBe(true);
+  await expect
+    .poll(() => warnings.some((text) => text.includes(GID) && text.includes('/index/filter/')), {
+      message: 'the refused filter call is warned about, with its grant',
+      timeout: 30_000,
+    })
+    .toBe(true);
+  expect(decadeDiscover).toEqual([]);
+});
+
 test('a grant den-edge says expired, met by the Worker, ends the grant on the page', async ({
   page,
 }) => {

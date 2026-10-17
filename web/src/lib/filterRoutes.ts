@@ -460,13 +460,23 @@ export interface FilterCounts {
 const strings = (value: unknown) =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 
+/** `/atlas/~<gid>/…`: an Atlas shared through a guest's grant. */
+export const SHARED_ATLAS = /\/atlas\/~([0-9a-f]{8})(?:[/?]|$)/;
+
+/**
+ * Whether `res` says atlas at `url` has no such route. den-edge refuses a shared Atlas call (no grant, an unknown or
+ * revoked one) with the same 404 as a missing path, so under a `~<gid>` base a 404 is a refusal, not the routes absent.
+ */
+const notDeployed = (url: string, res: Response) => res.status === 404 && !SHARED_ATLAS.test(url);
+
 /**
  * Says why atlas's filter gave nothing, where that is news: a failed request, a body that isn't what atlas sends, a
- * status other than 404. A 404 is the routes not deployed, and a cancelled request is one the next question replaced:
- * both expected, and quiet.
+ * status other than a 404 for routes not deployed. That 404, and a cancelled request (one the next question replaced),
+ * are expected, and quiet.
  */
 function unanswered(url: string, why: unknown) {
-  if (why instanceof Response ? why.status === 404 : (why as Error)?.name === 'AbortError') return;
+  if (why instanceof Response ? notDeployed(url, why) : (why as Error)?.name === 'AbortError')
+    return;
   console.warn('atlas filter:', why instanceof Response ? `answered ${why.status}` : why, url);
 }
 
@@ -521,7 +531,7 @@ export function filterCountSplit(answers: FilterCounts[]): string {
 /**
  * Thrown by a titles page atlas can't give: the caller goes back to what it did without atlas's filter. `deployed`
  * is false for a 404 — the routes not there, expected and quiet — and true where atlas answered but couldn't apply
- * the selection, which is worth saying.
+ * the selection, which is worth saying. A shared Atlas's 404 is a refusal and throws a plain error instead.
  */
 export class FilterUnavailable extends Error {
   constructor(
@@ -554,7 +564,8 @@ export function filterTitles(
     const url = filterUrl(base, type, 'titles', { items, skip });
     if (!url) throw new FilterUnavailable('atlas refuses this selection');
     const res = await fetchImpl(url, { signal });
-    if (res.status === 404) throw new FilterUnavailable('atlas has no filter routes', false);
+    if (notDeployed(url, res)) throw new FilterUnavailable('atlas has no filter routes', false);
+    if (res.status === 404) unanswered(url, res); // a shared Atlas refused the grant
     if (!res.ok) throw new Error(`atlas answered ${res.status}`);
     const body = (await res.json()) as Record<string, unknown>;
     const missing = [...strings(body.ignored), ...strings(body.kindsUnavailable)].filter((kind) =>
@@ -774,7 +785,8 @@ export function filterPeople(
     });
     if (!url) throw new FilterUnavailable('atlas refuses this selection');
     const res = await fetchImpl(url);
-    if (res.status === 404) throw new FilterUnavailable('atlas has no people route', false);
+    if (notDeployed(url, res)) throw new FilterUnavailable('atlas has no people route', false);
+    if (res.status === 404) unanswered(url, res); // a shared Atlas refused the grant
     if (!res.ok) throw new Error(`atlas answered ${res.status}`);
     const body = (await res.json()) as Record<string, unknown>;
     const missing = [

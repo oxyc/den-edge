@@ -308,6 +308,26 @@ describe('fetching', () => {
     await expect(unknown(1)).rejects.toBeInstanceOf(FilterUnavailable);
   });
 
+  it('reads a shared Atlas’s 404 as a refusal: unavailable and warned, never the routes missing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refused = async () => answer({ error: 'not_found' }, 404);
+    const shared = '/atlas/~a1b2c3d4';
+    const titles = filterTitles(shared, 'movie', [], { fetchImpl: refused });
+    const titlesError = await titles(1).catch((error: unknown) => error);
+    expect(titlesError).toBeInstanceOf(Error);
+    expect(titlesError).not.toBeInstanceOf(FilterUnavailable);
+    const people = filterPeople(shared, 'movie', [], [], undefined, { fetchImpl: refused });
+    expect(await people(1).catch((error: unknown) => error)).not.toBeInstanceOf(FilterUnavailable);
+    await fetchFilterCounts(shared, 'movie', [], { fetchImpl: refused });
+    expect(warn.mock.calls.map((call) => call[2])).toEqual([
+      `${shared}/index/filter/movie/titles.json`,
+      `${shared}/index/filter/movie/people.json`,
+      `${shared}/index/filter/movie/counts.json`,
+    ]);
+    expect(warn).toHaveBeenCalledWith('atlas filter:', 'answered 404', expect.any(String));
+    warn.mockRestore();
+  });
+
   it('starts a page asked out of turn at its own skip, as a rebuilt row asks it', async () => {
     const asked: string[] = [];
     const load = filterTitles('/atlas', 'movie', [{ kind: 'decade', id: '1990' }], {
