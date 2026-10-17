@@ -48,6 +48,10 @@ try:
                 {200},
                 allowed_refusals={"503:media_busy", "503:server_busy"},
             )
+        elif label == "library-writes":
+            # Four first writes concurrently replay legacy logs. Aggregate cache pressure is retryable; a
+            # permanent `413 library_full` here is the regression this gate was built to catch.
+            gate.validate_result(part, {200, 503}, {200}, allowed_refusals={"503:library_busy"})
         else:
             gate.validate_result(part, {200}, {200}, label.startswith("tmdb-"))
     before, after, recovered = (
