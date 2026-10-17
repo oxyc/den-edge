@@ -122,7 +122,7 @@ export class DownloadCoordinatorDriver {
     if (download.release.hedge) await this.queue.pollHedge(download);
     if (!current() || answer.state !== 'expired' || answer.message === GONE) return;
     const url = await this.queue.renew(download);
-    if (!current() || typeof url !== 'string') return;
+    if (!current() || url === null || url === 'gone') return;
     if (answer.message !== FOREIGN) this.queue.lapsed.add(download.name);
     await this.queue.poll(download);
   }
@@ -276,6 +276,12 @@ export class DownloadCoordinatorDriver {
       }
       if (this.queue.lapsed.has(download.name)) {
         wrote = (await this.#writeTicket(download, now)) || wrote;
+        continue;
+      }
+      // A release the addon stopped listing won't arrive: move on, as for a stall. Before `renew`, which the lapsed
+      // ticket that found it gone still carries.
+      if (status.state === 'release_gone' && !download.release.hedge) {
+        wrote = (await this.#fallBack(download, status, now)) || wrote;
         continue;
       }
       if (status.renew) continue;
