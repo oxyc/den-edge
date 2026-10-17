@@ -106,7 +106,12 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let den_disabled = (den_playback_path(&path)
         || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
         && !state.den_playback_enabled;
-    let globally_disabled = migration_path && !state.profile_migration_enabled || den_disabled;
+    let gate_on = if exclusive_operation_path(&path) {
+        state.profile_reset_enabled
+    } else {
+        state.profile_migration_enabled
+    };
+    let globally_disabled = migration_path && !gate_on || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
     let route = if globally_disabled { "other" } else { route_label(&path) };
@@ -724,6 +729,13 @@ fn profile_migration_path(path: &str) -> bool {
         || action.starts_with("profile-migration/")
         || action == "exclusive-operation"
         || action.starts_with("exclusive-operation/")
+}
+
+/// A key reset's exclusive-operation route: behind `profile_reset_enabled`, not the migration's switch.
+fn exclusive_operation_path(path: &str) -> bool {
+    path.strip_prefix("/lib/").and_then(|rest| rest.split_once('/')).is_some_and(|(_, action)| {
+        action == "exclusive-operation" || action.starts_with("exclusive-operation/")
+    })
 }
 
 /// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind

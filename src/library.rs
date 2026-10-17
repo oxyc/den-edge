@@ -51,6 +51,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 mod profile_migration;
 pub const PROFILE_MIGRATION_BODY_BYTES: usize = profile_migration::BODY_BYTES;
 pub(crate) mod reset_lock;
+mod snapshot;
 pub(crate) mod v3;
 #[cfg(test)]
 mod v3_model;
@@ -533,15 +534,15 @@ async fn protocol_for(state: &AppState, id: &str) -> Result<Option<v3::Protocol>
 /// global switch remains an emergency transport kill. A storage error is left visible so the real handler can
 /// return 500 rather than disguising an unhealthy enrolled household as an absent route.
 pub(crate) async fn profile_migration_available(state: &AppState, path: &str) -> bool {
-    if !state.profile_migration_enabled {
-        return false;
-    }
     let Some(rest) = path.strip_prefix("/lib/") else { return false };
     let Some((id, action)) = rest.split_once('/') else { return false };
     if valid_hex_id(id) && (action == "exclusive-operation" || action.starts_with("exclusive-operation/")) {
         // A key reset's lock surface is addressed per library: the handler decides by the library's own minimum
-        // (and a retired library still answers its lock's lookup), so only the global switch applies here.
-        return true;
+        // (and a retired library still answers its lock's lookup), so only the reset's own switch applies here.
+        return state.profile_reset_enabled;
+    }
+    if !state.profile_migration_enabled {
+        return false;
     }
     if !valid_hex_id(id) || !(action == "profile-migration" || action.starts_with("profile-migration/")) {
         return false;
@@ -621,7 +622,9 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     let migration_action = action == "profile-migration" || action.starts_with("profile-migration/");
     let capability_action = action == "profile-capability";
     let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
-    if (migration_action || exclusive_action) && !state.profile_migration_enabled {
+    if migration_action && !state.profile_migration_enabled
+        || exclusive_action && !state.profile_reset_enabled
+    {
         return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
     }
     // Households that owe a sweep of declared successors (an aborted key reset) are swept on their next access.
@@ -755,7 +758,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     // A `DELETE` naming an owning attempt is a key reset retiring a library it locked: it is the one write a lock
     // lets through, and `reset_lock::retire` decides whether this attempt may.
     let exclusive_retire =
-        if state.profile_migration_enabled && action.is_empty() && req.method() == Method::DELETE {
+        if state.profile_reset_enabled && action.is_empty() && req.method() == Method::DELETE {
             match reset_lock::retire_headers(req.headers()) {
                 Ok(headers) => headers,
                 Err(()) => {
