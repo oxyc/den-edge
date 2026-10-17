@@ -189,6 +189,11 @@ pub struct AppState {
     /// Host helper socket mounted into the container. The helper owns nftables; den-edge can only request
     /// the fixed, short-lived public-listener action.
     pub public_media_socket: Option<std::path::PathBuf>,
+    /// The last request to that helper got no answer at all: the socket refused the connection or the helper
+    /// stayed silent past its timeout. `/health` reports it as `public_listener_unavailable` until the helper
+    /// answers again. Set from real requests only: a probe would start the helper, and its refusal of an empty
+    /// request makes it exit, which counts against the socket unit's start limit.
+    pub public_listener_unanswered: std::sync::atomic::AtomicBool,
     /// The static Cast sender/player origin allowed to frame the web app's playback handoff.
     pub cast_origin: Option<String>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
@@ -389,6 +394,7 @@ impl AppState {
             lan_media_base: None,
             home_address: home::HomeAddress::default(),
             public_media_socket: None,
+            public_listener_unanswered: std::sync::atomic::AtomicBool::new(false),
             cast_origin: None,
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,

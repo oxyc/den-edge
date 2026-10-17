@@ -14,7 +14,7 @@ See [Architecture](ARCHITECTURE.md) for the current request and storage flows an
 
 | Route | What it does |
 |---|---|
-| `GET /health` | `{"status":"ok"}` |
+| `GET /health` | `{"status":"ok"}`; always 200. `{"status":"degraded","reason":"public_listener_unavailable"}` with `X-Den-Degraded: public_listener_unavailable` while `PUBLIC_MEDIA_SOCKET` is set and the helper did not answer the last request made of it |
 | `GET /version` | `{"version"}` |
 | `GET /config` | the TV's kill-switch and update gate. Addresses live in `/routes` alone (den #16) |
 | `GET /capabilities/profiles` | `{"enabled":true,"preview":true}` on a web host named in `PROFILES_PREVIEW_HOSTS`, `{"enabled":true}` on one named only in `PROFILES_HOSTS`, otherwise `404`. Always `no-store`; preview wins if a host is accidentally in both lists |
