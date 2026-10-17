@@ -116,7 +116,7 @@ test.beforeEach(() => {
   dropping = () => false;
 });
 
-async function open({ grants = [] } = {}) {
+async function open({ grants = [], managed } = {}) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: [
@@ -151,12 +151,39 @@ async function open({ grants = [] } = {}) {
       },
     }),
   );
+  // Den Hearth's playback answer, in the shape it really sends: the playlist already on the public listener, the
+  // session's own `playlist` left out, and every control a path relative to wherever the playlist is.
+  await page.route(`${ORIGIN}/den/config/playback`, (r) => {
+    managed?.push(r.request().postDataJSON());
+    return r.fulfill({
+      json: {
+        url: `${MEDIA}${PATH}/master.m3u8`,
+        release: { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 },
+        publicBase: MEDIA,
+        lanBase: 'https://lan.test:8449',
+        castOrigin: CAST,
+        session: {
+          id: SID,
+          duration: 60,
+          video: { codec: 'h264', transcoded: false },
+          audioTrack: 0,
+          audioTracks: [],
+          speedUrl: `${PATH}/speed`,
+          endUrl: PATH,
+          heartbeatUrl: `${PATH}/heartbeat`,
+          reportUrl: `${PATH}/report`,
+        },
+      },
+    });
+  });
   await page.route(`${ORIGIN}/remux/releases`, (r) => r.fulfill({ json: { releases: [] } }));
   await page.route(`${ORIGIN}/remux/grant`, (r) => {
     grants.push(r.request().postDataJSON());
     return r.fulfill({ status: 204 });
   });
   await context.route(`${MEDIA}/**`, (r) => r.continue());
+  // Away from home: the home-network address the session names does not answer.
+  await context.route('https://lan.test:8449/**', (r) => r.abort('addressunreachable'));
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
     const file = path === '/' ? 'index.html' : path.slice(1);
@@ -171,7 +198,9 @@ async function open({ grants = [] } = {}) {
   await context.route('https://www.gstatic.com/**', (r) =>
     r.fulfill({ contentType: 'text/javascript', body: '' }),
   );
-  await page.goto(`${ORIGIN}/test/player.html?remux=/remux`);
+  await page.goto(
+    `${ORIGIN}/test/player.html?remux=/remux${managed ? '&playback=/den/config/playback' : ''}`,
+  );
   return { browser, page };
 }
 
@@ -209,6 +238,24 @@ test('a session the cast page plays reports its stats and is ended when the play
     await page.waitForTimeout(1_000);
     expect(heard.ended).toHaveLength(1);
     expect(ending()).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+// Den Hearth's answer reaches the cast page as one load whose every URL it accepts: the speed URL on the playlist's
+// own origin, not this page's. Before, it was resolved against this page, the cast page refused the load as an
+// invalid media URL without fetching anything, and the player took that for the decoder refusing the release:
+// it left the release out and asked for the next, which met the same refusal, until none was left.
+test('a Hearth session on the public address plays in the real cast page on its first answer', async () => {
+  const managed = [];
+  const { browser, page } = await open({ managed });
+  try {
+    await playingPast(page, 3);
+    expect(managed).toHaveLength(1);
+    expect(managed[0]).not.toHaveProperty('exclude');
+    expect(managed[0]).not.toHaveProperty('replaces');
+    expect(heard.reports.filter((r) => !r.stats)).toEqual([]);
   } finally {
     await browser.close();
   }

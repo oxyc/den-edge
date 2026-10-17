@@ -70,11 +70,11 @@ function number(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function href(value: unknown): string | undefined {
+function href(value: unknown, base?: string): string | undefined {
   const raw = text(value);
   if (!raw) return undefined;
   try {
-    return new URL(raw, globalThis.location?.href ?? 'https://den.invalid/').href;
+    return new URL(raw, base ?? globalThis.location?.href ?? 'https://den.invalid/').href;
   } catch {
     return undefined;
   }
@@ -132,12 +132,15 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   // resolving the already-public outer URL back to itself.
   const publicBase = href(answer.publicBase) ?? href(nested.publicBase);
   const lanBase = href(answer.lanBase) ?? href(nested.lanBase);
-  const relativePlaylist = text(nested.playlist);
+  // Hearth leaves `playlist` out of `session`; the outer URL's path is the same signed path on every base.
+  const relativePlaylist = text(nested.playlist) ?? new URL(playlist).pathname;
   return {
     ...(nested as unknown as Session),
     sid: text(nested.id) ?? text(nested.sid),
     playlist,
-    speed: href(nested.speedUrl) ?? href(nested.speed),
+    // Relative to the playlist, not this page: the cast page refuses a speed URL on another origin than the
+    // playlist's ("Invalid media URL"), and Hearth's `speedUrl` is a path.
+    speed: href(nested.speedUrl, playlist) ?? href(nested.speed, playlist),
     publicBase,
     lanBase,
     lanPlaylist: lanBase && relativePlaylist ? new URL(relativePlaylist, lanBase).href : undefined,
