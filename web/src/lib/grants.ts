@@ -37,6 +37,8 @@ export interface Grant {
   hoursTotal: number;
   playsThisMonth: number;
   hoursThisMonth: number;
+  /** `hashInstalls` of what den-edge escrows for it (its addons and their installs); absent from an older den-edge. */
+  escrow?: string;
 }
 
 /** What creating or changing a grant sends. `installs` are single base64url config segments, never URLs. */
@@ -254,6 +256,7 @@ function readGrant(raw: unknown): Grant | null {
     hoursTotal: number(g.hoursTotal) ?? 0,
     playsThisMonth: number(g.playsThisMonth) ?? 0,
     hoursThisMonth: number(g.hoursThisMonth) ?? 0,
+    ...(typeof g.escrow === 'string' ? { escrow: g.escrow } : {}),
   };
 }
 
@@ -384,6 +387,9 @@ export async function keepUploaded(
  * Re-upload every live grant whose shared installs changed, and return those grants. A migrated combined Hearth
  * replaces legacy Scout, Reel and Subtitles while retaining separate Atlas discovery, so guests created before that
  * migration heal on the host's next refresh. Without one, a grant is left alone if a shared install disappeared.
+ *
+ * What den-edge holds is what it says (`escrow`, the same hash of its addons and installs), so a grant already
+ * current is left alone on every browser; only a den-edge too old to say leaves it to what this browser last sent.
  */
 export async function reuploadInstalls(
   id: string,
@@ -397,7 +403,7 @@ export async function reuploadInstalls(
     const addons: GrantAddon[] = installs.den ? shareableAddons(installs) : [...grant.addons];
     if (!addons.every((addon) => installs[addon])) continue;
     const hash = await hashInstalls(installs, addons);
-    if (keptHashes()[grant.gid] === hash) continue;
+    if ((grant.escrow ?? keptHashes()[grant.gid]) === hash) continue;
     const picked = Object.fromEntries(addons.map((addon) => [addon, installs[addon]]));
     const reply = await updateGrant(id, grant.gid, { addons, installs: picked }, fetchImpl);
     if (!reply.ok) continue;

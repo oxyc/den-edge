@@ -502,6 +502,21 @@ test('a migrated combined Hearth keeps and adds installed Atlas discovery', asyn
   });
 });
 
+test('a grant den-edge says already escrows these installs is not written, on any browser', async () => {
+  const installs = { den: 'aGVhcnRoLWNvbmZpZy1zZWdtZW50', atlas: 'YXRsYXMtY29uZmln' };
+  // grants.rs pins the same value (`the_host_is_told_what_each_grant_escrows_as_its_page_hashes_it`).
+  const escrow = '860a0214443eac87094d5bdfe9f2450122c20bbe6be87422790a0d5b83ebe083';
+  expect(await hashInstalls(installs, ['atlas', 'den'])).toBe(escrow);
+  const spy = answering(200, { grant: GRANT });
+  const current: Grant = { ...GRANT, addons: ['den', 'atlas'], escrow };
+  expect(await reuploadInstalls('abc123', [current], installs, spy)).toEqual([]);
+  expect(spy).not.toHaveBeenCalled();
+  // What den-edge holds outranks what this browser last sent.
+  expect(
+    await reuploadInstalls('abc123', [{ ...current, escrow: 'f'.repeat(64) }], installs, spy),
+  ).toEqual(['a1b2c3d4']);
+});
+
 test('a failed upload is tried again next time', async () => {
   const installs = { scout: 'one', atlas: 'two' };
   const failing = answering(500, { error: 'boom' });

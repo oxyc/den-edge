@@ -66,6 +66,14 @@
           `${location.origin}/scout/fixture-install/manifest.json`,
           'seed-plugin',
         );
+        // A migrated household: combined Hearth and Atlas are what Settings › Sharing lends. Atlas was installed on
+        // another of the deployment's names, which only den-edge's /routes says is this household's.
+        if (params.has('sharing'))
+          for (const manifest of [
+            `${location.origin}/den/hearthcfg789/manifest.json`,
+            'https://edge.example/atlas/atlascfg456/manifest.json',
+          ])
+            await model.installPlugin(manifest, `seed-plugin-${manifest}`);
         await model.heartbeatDevice('Paired browser', 'seed-device');
         for (const id of [1002, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012])
           await model.addToWatchlist({ type: 'movie', id }, `seed-watchlist-${id}`);

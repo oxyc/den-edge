@@ -359,7 +359,20 @@ fn grant_json(state: &AppState, r: &Record, now: u64) -> Value {
         "hoursTotal": r.usage.seconds / 3600,
         "playsThisMonth": plays_this_month,
         "hoursThisMonth": seconds_this_month / 3600,
+        "escrow": escrow(r),
     })
+}
+
+/// What the host's page hashes for a grant (`hashInstalls`): hex SHA-256 of `[[addon, install], …]`, in `ADDONS`
+/// order, for the addons it lends. The host compares it with what it would send and rewrites only a grant whose
+/// escrow differs. Only the host lists it, and it already holds every install the hash is made from.
+fn escrow(r: &Record) -> String {
+    let picked: Vec<[&str; 2]> = ADDONS
+        .iter()
+        .filter(|addon| r.addons.iter().any(|lent| lent == *addon))
+        .map(|addon| [*addon, r.installs.get(*addon).map_or("", String::as_str)])
+        .collect();
+    sha(serde_json::to_string(&picked).expect("strings always serialise").as_bytes())
 }
 
 fn key(gid: &str) -> String {
@@ -2603,6 +2616,24 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_host_is_told_what_each_grant_escrows_as_its_page_hashes_it() {
+        let h = harness().await;
+        // In whatever order the page sent them, the hash is over `ADDONS` order: `hashInstalls` in grants.ts gives
+        // these values for the same installs (grants.test.ts pins them too).
+        const HEARTH: &str = "aGVhcnRoLWNvbmZpZy1zZWdtZW50";
+        const BOTH: &str = "860a0214443eac87094d5bdfe9f2450122c20bbe6be87422790a0d5b83ebe083";
+        const HEARTH_ONLY: &str = "488e31d1ec1627a26ddef8a143f07455c5a67475efec7117f462ee72c9359a16";
+        let lent = json!({ "addons": ["atlas", "den"], "installs": { "atlas": ATLAS, "den": HEARTH } });
+        let (gid, _) = invited(&h, lent).await;
+        let listed = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        assert_eq!(listed["escrow"], BOTH);
+
+        // A rewrite moves it with the escrow, and an addon no longer lent drops out of it.
+        let (_, got) = host_call(&h, "PUT", &format!("/{gid}"), Some(json!({ "addons": ["den"] }))).await;
+        assert_eq!(got["grant"]["escrow"], HEARTH_ONLY);
     }
 
     #[tokio::test]
