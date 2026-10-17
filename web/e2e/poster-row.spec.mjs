@@ -129,6 +129,69 @@ test('availability waits for its narrower lookahead after poster art starts', as
   await page.close();
 });
 
+// A profile page opens more than one session, and each new one's first configure has no scout yet. Its arrival must
+// not throw away what scout already answered (or the answer on its way): scrolling back over the shelf afterwards
+// asks scout about nothing it has answered.
+test('scrolling back over a shelf asks scout nothing it answered, though another session opened', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosterArt(page);
+  await page.route('**/tmdb/3/movie/*/external_ids', (route) => {
+    const id = /\/movie\/(\d+)\//.exec(route.request().url())?.[1];
+    return route.fulfill({ json: { id: Number(id), imdb_id: `tt${id.padStart(7, '0')}` } });
+  });
+  const asked = [];
+  let releaseFirst;
+  const firstHeld = new Promise((resolve) => (releaseFirst = resolve));
+  let firstAsked;
+  const firstArrived = new Promise((resolve) => (firstAsked = resolve));
+  await page.route('**/scout/availability', async (route) => {
+    const ids = route.request().postDataJSON().ids;
+    const first = asked.length === 0;
+    asked.push(...ids);
+    if (first) {
+      firstAsked();
+      await firstHeld;
+    }
+    return route.fulfill({
+      json: {
+        availability: Object.fromEntries(
+          ids.map((id) => [id, id === 'tt0000100' ? 'unavailable' : 'available']),
+        ),
+      },
+    });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html?availability`);
+  const far = page.getByRole('region', { name: 'Far below' });
+  await far.scrollIntoViewIfNeeded();
+  await firstArrived;
+
+  // Another session opens while scout's first answer is still on its way.
+  await page.evaluate(() => window.fixtureOpenSession());
+  releaseFirst();
+  await expect(far.locator('.card.faded')).toHaveCount(1);
+
+  // Along the shelf and back, then away down the page and back.
+  const track = far.locator('.track');
+  for (const left of ['end', 0, 'end', 0])
+    await track.evaluate((node, to) => {
+      node.scrollLeft = to === 'end' ? node.scrollWidth : to;
+      node.dispatchEvent(new Event('scroll'));
+    }, left);
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.waitForTimeout(300);
+  await far.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(1_500);
+
+  const twice = asked.filter((id, index) => asked.indexOf(id) !== index);
+  expect(twice, 'no movie scout answered is asked again').toEqual([]);
+  expect(asked.length).toBeGreaterThan(0);
+  await expect(far.locator('.card.faded')).toHaveCount(1);
+  await page.close();
+});
+
 test('a landscape TMDB still selects its smaller responsive candidate', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
   await guardNetwork(page);

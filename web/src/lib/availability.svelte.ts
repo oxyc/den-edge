@@ -26,6 +26,12 @@ export const RETRY_MS = 10_000;
 const RETRIES = 3;
 /** How long a verdict from an earlier visit fades a poster before scout has been asked again. */
 export const KEPT_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long this visit trusts "nothing to play" before asking again: scout keeps that verdict for ten minutes, since a
+ * just-released title gains streams within hours (`UNAVAILABLE_TTL`, den-hearth's scout/availability.rs). It keeps
+ * "available" for 30 days, which outlasts any visit.
+ */
+export const UNAVAILABLE_MS = 10 * 60 * 1000;
 const STORAGE_KEY = 'den.availability';
 /** How long scout may take to answer a page of posters. */
 const ANSWER_MS = 15_000;
@@ -65,6 +71,8 @@ export class Availability {
   private pausedUntil = 0;
   private scout: { base: string; content: ContentServiceClientPort; fetch: typeof fetch } | null =
     null;
+  /** The scout the verdicts are from: only a different one starts them over, not a session that has none yet. */
+  private answeredBy: string | undefined;
 
   /** The last day's verdicts from `storage` fade their posters at once, and scout is still asked. */
   constructor(
@@ -95,15 +103,21 @@ export class Availability {
    * Without it a paired
    * household is a visitor to the relay, and on the public name the `/scout/` gate answers 404 — which
    * is what it did, silently, to every availability request a browser made there.
+   *
+   * `null` only pauses asking. Every new session's first configure says it (before its discovery has found scout
+   * again), and a profile page opens several: wiping the verdicts and the answer in flight there sent the same
+   * movies again as soon as the next session reconnected the same scout.
    */
   connect(
     scout: Addon | null,
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
   ): void {
-    const previous = this.scout?.base;
     this.scout = scout ? { base: scout.base, content, fetch: fetchImpl } : null;
-    if (previous !== undefined && this.scout?.base !== previous) {
+    if (!scout) return;
+    const previous = this.answeredBy;
+    this.answeredBy = scout.base;
+    if (previous !== undefined && scout.base !== previous) {
       this.generation++;
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -124,7 +138,7 @@ export class Availability {
   want(title: Pick<Title, 'type' | 'id' | 'imdbId'>): void {
     if (
       title.type !== 'movie' ||
-      this.settled.has(title.id) ||
+      this.answered(title.id) ||
       this.wanted.has(title.id) ||
       this.pending.has(title.id)
     )
@@ -133,6 +147,13 @@ export class Availability {
     if (title.imdbId) this.imdbIds.set(title.id, title.imdbId);
     this.wanted.add(title.id);
     this.gather();
+  }
+
+  /** Scout answered this visit, and the answer still stands (`UNAVAILABLE_MS`). */
+  private answered(id: number): boolean {
+    if (!this.settled.has(id)) return false;
+    if (this.verdicts.get(id) !== 'unavailable') return true;
+    return this.now() - (this.givenAt.get(id) ?? 0) < UNAVAILABLE_MS;
   }
 
   /** Whether scout said this movie has nothing to play. */
