@@ -15,7 +15,12 @@ import {
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
-import { holdLibraryRelayMembership, useLibraryRelayMembership } from './relayFetch';
+import {
+  grantEndedElsewhere,
+  holdLibraryRelayMembership,
+  onHeldGrants,
+  useLibraryRelayMembership,
+} from './relayFetch';
 import { startupWorkerCreated, startupWorkerName } from './startupTiming';
 
 export interface LibraryServiceFactoryOptions {
@@ -93,6 +98,23 @@ export function createWorkerServiceConnection(
 ): WorkerServiceConnection {
   const transport = new WorkerLibraryServiceTransport(createWorker());
   const content = new ContentServiceClient(transport.contentTransport(), undefined, false);
+  // The Worker makes the content calls with its own relayFetch, whose grants start empty: it is handed the page's
+  // before anything else is asked of it, and again on every change. Worker messages keep their order, so no query
+  // sent after a change can go out without it. A `grant_expired` it meets ends the grant here, as the page's own does.
+  let closed = false;
+  let sharedGrants = false;
+  const stopGrants = onHeldGrants((grants) => {
+    // A browser that never held a grant has nothing to say, and says nothing.
+    if (!grants.length && !sharedGrants) return;
+    sharedGrants = true;
+    content.query({ kind: 'grants.configure', grants }).catch((error: unknown) => {
+      if (!closed)
+        console.warn('den: the library Worker could not be given the held grants', error);
+    });
+  });
+  const stopGrantEnded = content.onStatus((status) => {
+    if (status.kind === 'grant-ended') grantEndedElsewhere(status.gid);
+  });
   let releaseOpening = () => {};
   const library = new LibraryServiceClient(
     transport,
@@ -105,13 +127,14 @@ export function createWorkerServiceConnection(
       releaseOpening = onLibraryOpening?.(opening) ?? (() => {});
     },
   );
-  let closed = false;
   return {
     content,
     library,
     close() {
       if (closed) return;
       closed = true;
+      stopGrants();
+      stopGrantEnded();
       releaseOpening();
       // The connection owns the physical Worker. Closing either logical channel must not tear down its sibling.
       content.close();

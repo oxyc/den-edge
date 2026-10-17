@@ -6,6 +6,7 @@
   import Player from '../src/components/Player.svelte';
   import type { Title } from '../src/lib/library';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { rememberGrant } from '../src/lib/relayFetch';
   import { tabName } from '../src/lib/tabName.svelte';
 
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
@@ -19,6 +20,9 @@
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   // A guest's page names its host's install as its own (`/den/~<gid>`), as the app does for a grant.
   const scoutInstall = query.get('scout') ?? 'http://scout.test/config';
+  // That guest holds the grant (`<gid>:<secret>`), as the app's GuestGrants hands it to the relay.
+  const grant = query.get('grant')?.split(':');
+  if (grant?.length === 2) rememberGrant(grant[0]!, grant[1]!);
   const services = createWorkerServiceSession();
   const content = services.content;
   let open = $state(true);

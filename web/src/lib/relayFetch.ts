@@ -70,9 +70,30 @@ let version = 0;
  * its component mounted before the encrypted library finished opening.
  */
 let membershipOpening: { ready: Promise<void>; token: symbol } | null = null;
-/** The secrets of the grants this browser holds, by grant id. Never leaves this module except in the header. */
+/**
+ * The secrets of the grants this browser holds, by grant id. Leaves this module only in the header, and from the page
+ * to the library Worker (`onHeldGrants`), whose own copy of this module makes the content calls.
+ */
 const grantSecrets = new Map<string, string>();
 let grantEnded: ((gid: string) => void) | null = null;
+const heldGrantListeners = new Set<(grants: HeldGrant[]) => void>();
+/** The grants a `~<gid>` call was refused for want of a secret, so each is warned about once. */
+const unheldWarned = new Set<string>();
+
+/** A grant's id and secret, as the page hands them to the library Worker. */
+export interface HeldGrant {
+  gid: string;
+  secret: string;
+}
+
+function heldGrants(): HeldGrant[] {
+  return [...grantSecrets].map(([gid, secret]) => ({ gid, secret }));
+}
+
+function grantsChanged(): void {
+  const grants = heldGrants();
+  for (const listener of heldGrantListeners) listener(grants);
+}
 
 /** The open library's id, which its host routes carry in the path; null for a visitor. */
 export function libraryCredentialId(): string | null {
@@ -107,17 +128,42 @@ export function hostGrantsFetch(membership: LibraryRelayMembership): typeof fetc
 
 /** Remember a grant's secret, so calls to its `~<gid>` addons can carry it. */
 export function rememberGrant(gid: string, secret: string): void {
+  if (grantSecrets.get(gid) === secret) return;
   grantSecrets.set(gid, secret);
+  unheldWarned.delete(gid);
+  grantsChanged();
 }
 
 /** Forget a grant's secret: it ended, or this browser left it. */
 export function forgetGrant(gid: string): void {
-  grantSecrets.delete(gid);
+  if (grantSecrets.delete(gid)) grantsChanged();
+}
+
+/** Hold exactly `grants`: what the library Worker does with each set the page sends it. */
+export function useHeldGrants(grants: readonly HeldGrant[]): void {
+  for (const gid of [...grantSecrets.keys()])
+    if (!grants.some((grant) => grant.gid === gid)) forgetGrant(gid);
+  for (const { gid, secret } of grants) rememberGrant(gid, secret);
+}
+
+/**
+ * Told the held grants now and after every change, so the library Worker, which makes the content calls with a module
+ * of its own, can hold the same ones (`useHeldGrants`).
+ */
+export function onHeldGrants(listener: (grants: HeldGrant[]) => void): () => void {
+  heldGrantListeners.add(listener);
+  listener(heldGrants());
+  return () => heldGrantListeners.delete(listener);
 }
 
 /** Told when den-edge answers a grant's call with `grant_expired`, so the page can say the access ended. */
 export function onGrantEnded(listener: ((gid: string) => void) | null): void {
   grantEnded = listener;
+}
+
+/** The library Worker saw `grant_expired` for a grant: tell this page's listener, as a call of its own would. */
+export function grantEndedElsewhere(gid: string): void {
+  grantEnded?.(gid);
 }
 
 /** Whether this browser can authenticate a shared-cache write, without exposing the credential itself. */
@@ -277,7 +323,16 @@ async function guestFetch(
   );
   headers.delete(MEMBER_HEADER);
   const secret = grantSecrets.get(gid);
-  if (secret) headers.set(GRANT_HEADER, `${gid}:${secret}`);
+  // Sent bare, den-edge answers the same 404 as for a missing path, which read as "nothing here" and quietly put
+  // TMDB in Atlas's place: a call this browser cannot prove is refused here, out loud.
+  if (!secret) {
+    if (!unheldWarned.has(gid)) {
+      unheldWarned.add(gid);
+      console.warn(`den: no secret held for grant ${gid}; its shared addons are not asked`);
+    }
+    throw new TypeError(`no secret held for grant ${gid}`);
+  }
+  headers.set(GRANT_HEADER, `${gid}:${secret}`);
   const res = await fetch(input, { ...init, headers });
   if (res.status === 410) {
     const expired = await res

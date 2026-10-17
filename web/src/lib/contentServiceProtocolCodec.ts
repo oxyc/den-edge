@@ -111,6 +111,20 @@ function serviceBase(value: unknown): value is string | null {
   }
 }
 
+const grantId = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{8}$/.test(value);
+
+/** A grant as den-edge reads its `x-den-grant` header (`grants.rs` `parse_header`). */
+function heldGrant(value: unknown): boolean {
+  return (
+    record(value) &&
+    exact(value, ['gid', 'secret']) &&
+    grantId(value.gid) &&
+    typeof value.secret === 'string' &&
+    /^[\x21-\x7e]{1,128}$/.test(value.secret)
+  );
+}
+
 function providerKey(value: unknown): value is ContentProviderKey {
   return value === 'tmdb' || value === 'omdb' || value === 'content-warnings';
 }
@@ -381,6 +395,13 @@ function request(value: unknown): value is ContentRequest {
   switch (value.kind) {
     case 'sources.configure':
       return exact(value, ['kind', 'atlas']) && serviceBase(value.atlas);
+    case 'grants.configure':
+      return (
+        exact(value, ['kind', 'grants']) &&
+        Array.isArray(value.grants) &&
+        value.grants.length <= 64 &&
+        value.grants.every(heldGrant)
+      );
     case 'titles':
       return (
         exact(value, ['kind', 'titles']) &&
@@ -511,6 +532,7 @@ function result(value: unknown): value is ContentResult {
   };
   switch (value.kind) {
     case 'sources.configure':
+    case 'grants.configure':
       return exact(value, ['kind']);
     case 'titles':
       return (
@@ -629,6 +651,7 @@ function status(value: unknown): value is ContentServiceStatusValue {
       provider(value.provider) &&
       integer(value.retryAfterMs)
     );
+  if (value.kind === 'grant-ended') return exact(value, ['kind', 'gid']) && grantId(value.gid);
   return (
     value.kind === 'unavailable' &&
     exact(value, ['kind', 'provider', 'error']) &&

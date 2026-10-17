@@ -668,7 +668,9 @@ pub async fn guest(
     if parsed.is_none() && !remux {
         return Err(Box::new(req));
     }
-    let not_found = || json(StatusCode::NOT_FOUND, "not_found");
+    // Every refusal is the same 404 to the caller, so a prober learns nothing; the request log alone names the
+    // check (`why=`).
+    let not_found = |why| with_why(json(StatusCode::NOT_FOUND, "not_found"), why);
     let ip = crate::handler::client_ip(state, &req);
     if let Some(wait) =
         crate::link::throttled_per_minute(state, &format!("relay-guest-gate:{ip}"), MEMBER_PER_WINDOW)
@@ -677,7 +679,7 @@ pub async fn guest(
     }
     let path_gid = match &parsed {
         Some(Ok(p)) => Some(p.gid.as_str()),
-        Some(Err(())) => return Ok(not_found()),
+        Some(Err(())) => return Ok(not_found("bad_path")),
         None => None,
     };
     let configure_route = parsed.as_ref().is_some_and(|parsed| {
@@ -696,7 +698,9 @@ pub async fn guest(
     };
     let mut live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
         Ok(live) => live,
-        Err(crate::grants::Denied::NotFound) => return Ok(not_found()),
+        Err(crate::grants::Denied::NotFound) => {
+            return Ok(not_found(if claim.is_none() { "no_claim" } else { "bad_claim" }))
+        }
         Err(crate::grants::Denied::Expired(at)) => {
             return Ok(crate::handler::json_reply(
                 StatusCode::GONE,
@@ -728,10 +732,10 @@ pub async fn guest(
             // Migration consumes the owner's legacy bearer configs. A grant guest may configure and use only their
             // own personal Hearth install; it can never exchange the host's escrowed installs.
             if personal_den && p.rest == "/migrate" {
-                return Ok(not_found());
+                return Ok(not_found("not_allowed"));
             }
             if personal_den && !state.den_playback_enabled {
-                return Ok(not_found());
+                return Ok(not_found("den_off"));
             }
             let bare_den = personal_den
                 && matches!(p.rest.as_str(), "/configure" | "/configure/" | "/config-key" | "/validate");
@@ -749,7 +753,7 @@ pub async fn guest(
             let host_scout = crate::grants::shares_install(&live.addons, &live.installs, "scout");
             let host_hearth = crate::grants::shares_install(&live.addons, &live.installs, "den");
             if segment.is_none() && !bare_den && !(overlay && (host_scout || host_hearth)) {
-                return Ok(not_found());
+                return Ok(not_found("not_shared"));
             }
             // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
             // leave through `stream`, only through the session remux opens for it.
@@ -757,7 +761,7 @@ pub async fn guest(
                 || media(&path)
                 || crate::grants::query_names(query.as_deref(), &["debug"])
             {
-                return Ok(not_found());
+                return Ok(not_found("not_allowed"));
             }
             let real = if overlay {
                 "/den/_guest".to_owned()
@@ -769,7 +773,7 @@ pub async fn guest(
             };
             let real =
                 if overlay { real } else { query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}")) };
-            let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
+            let Some(target) = target(&state.relays, &real) else { return Ok(not_found("no_relay")) };
             let configure = personal_den && matches!(p.rest.as_str(), "/configure" | "/configure/");
             let guest = Guest {
                 gid: live.gid,
@@ -791,14 +795,14 @@ pub async fn guest(
                 || !control
                 || !crate::grants::libraries_are_members_only(state)
             {
-                return Ok(not_found());
+                return Ok(not_found("remux_closed"));
             }
             // An install of the guest's own in the query would bypass the body rewrite below.
             if crate::grants::query_names(query.as_deref(), &["scout", "subtitles"]) {
                 return Ok(bad_request("guest_install_in_query"));
             }
             let pq = req.uri().path_and_query().map_or(path.clone(), |pq| pq.as_str().to_owned());
-            let Some(target) = target(&state.relays, &pq) else { return Ok(not_found()) };
+            let Some(target) = target(&state.relays, &pq) else { return Ok(not_found("no_relay")) };
             let guest = Guest {
                 gid: live.gid,
                 segment: None,

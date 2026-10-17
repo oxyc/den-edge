@@ -277,12 +277,10 @@ test('a grant den-edge says has expired is kept, said so, and no longer asked wi
   expect(grants.pluginUrls()).toEqual([]);
   const spy = vi.fn(async () => new Response('{}'));
   vi.stubGlobal('fetch', spy);
-  await relayFetch('/scout/~a1b2c3d4/manifest.json');
-  expect(
-    new Headers((spy.mock.calls[0] as unknown as [string, RequestInit?])[1]?.headers).get(
-      'x-den-grant',
-    ),
-  ).toBeNull();
+  await expect(relayFetch('/scout/~a1b2c3d4/manifest.json')).rejects.toThrow(
+    'no secret held for grant a1b2c3d4',
+  );
+  expect(spy).not.toHaveBeenCalled();
 });
 
 test('an expired grant is asked again, and comes back once the host extends it', async () => {
@@ -372,12 +370,10 @@ test('leaving tells den-edge, forgets the grant and its secret; an unreachable d
   expect(JSON.parse(kept.get(KEY)!)).toEqual([]);
   const spy = vi.fn(async () => new Response('{}'));
   vi.stubGlobal('fetch', spy);
-  await relayFetch('/scout/~a1b2c3d4/manifest.json');
-  expect(
-    new Headers((spy.mock.calls[0] as unknown as [string, RequestInit?])[1]?.headers).get(
-      'x-den-grant',
-    ),
-  ).toBeNull();
+  await expect(relayFetch('/scout/~a1b2c3d4/manifest.json')).rejects.toThrow(
+    'no secret held for grant a1b2c3d4',
+  );
+  expect(spy).not.toHaveBeenCalled();
 });
 
 test('works for the visit where browser storage is refused', async () => {
