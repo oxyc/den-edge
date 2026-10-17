@@ -169,10 +169,15 @@ function prepareUrl(
   return `${base}/prepare/${type === 'tv' ? 'series' : 'movie'}/${id}.json?${query}`;
 }
 
-function planUrl(raw: unknown, base: string, origin: string): string | null {
+/**
+ * A candidate's plan URL, as this page fetches it. Reel names it relative to the prepare URL that was
+ * asked (`asked`), so an answer relayed here never carries the origin Reel itself listens on. Older
+ * releases answered an absolute URL at that origin; only its path and query are kept.
+ */
+function planUrl(raw: unknown, base: string, origin: string, asked: string): string | null {
   if (typeof raw !== 'string') return null;
   try {
-    const url = new URL(raw);
+    const url = new URL(raw, new URL(asked, 'https://relative.invalid'));
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
     if (!/\/sources\/[^/]+$/.test(url.pathname)) return null;
     if (!base.startsWith('/')) {
@@ -186,6 +191,7 @@ function planUrl(raw: unknown, base: string, origin: string): string | null {
     let path: string;
     if (url.pathname.startsWith(`${install}/sources/`)) path = url.pathname;
     else if (url.pathname.startsWith(`${mount}/sources/`)) path = url.pathname;
+    // An older absolute answer, at Reel's own root.
     else if (url.pathname.startsWith('/sources/')) path = `${mount}${url.pathname}`;
     else return null;
     return `${path}${url.search}`;
@@ -275,7 +281,12 @@ export function parseSourcePlan(value: unknown): SourcePlan | null {
   };
 }
 
-function candidatesFrom(value: unknown, base: string, origin: string): TrailerCandidate[] {
+function candidatesFrom(
+  value: unknown,
+  base: string,
+  origin: string,
+  asked: string,
+): TrailerCandidate[] {
   if (!value || typeof value !== 'object') return [];
   const answer = value as {
     v?: unknown;
@@ -285,12 +296,12 @@ function candidatesFrom(value: unknown, base: string, origin: string): TrailerCa
     degraded?: { reason?: unknown };
   };
   if (answer.v !== 2 || !Array.isArray(answer.meta?.links)) return [];
-  const primaryUrl = planUrl(answer.primary?.planUrl, base, origin);
+  const primaryUrl = planUrl(answer.primary?.planUrl, base, origin, asked);
   const primaryPlan = parseSourcePlan(answer.primaryPlan);
   const primaryUnavailable = answer.degraded?.reason === 'primary_unavailable';
   const candidates: TrailerCandidate[] = [];
   for (const link of answer.meta.links) {
-    const url = planUrl((link as { planUrl?: unknown })?.planUrl, base, origin);
+    const url = planUrl((link as { planUrl?: unknown })?.planUrl, base, origin, asked);
     if (!url || candidates.some((candidate) => candidate.planUrl === url)) continue;
     candidates.push({
       planUrl: url,
@@ -347,7 +358,7 @@ export async function prepareTrailers(
   try {
     const response = await fetchImpl(url, { signal });
     if (!response.ok) return [];
-    const candidates = candidatesFrom(await response.json(), base, origin);
+    const candidates = candidatesFrom(await response.json(), base, origin, url);
     const noStore = response.headers
       .get('cache-control')
       ?.split(',')
