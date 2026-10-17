@@ -56,6 +56,12 @@ describe('Den addon settings routes', () => {
     ).toBeNull();
     expect(denConfigureURL('http://192.168.86.193:8090/den/sealed-cfg', ROUTES)).toBeNull();
   });
+
+  it('never offers the owner setup page for a shared access', () => {
+    expect(
+      denConfigureURL('http://192.168.86.193:8090/den/~a1b2c3d4/manifest.json', ROUTES),
+    ).toBeNull();
+  });
 });
 
 /** Manifests by URL; anything else is this origin's app shell, which is not JSON. */

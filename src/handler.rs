@@ -191,6 +191,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
             ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
             ("src", resp.extensions().get::<SrcTag>().map(|s| s.0)),
+            ("at", (route == "/den").then(|| den_route(&path))),
         ]
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
@@ -421,6 +422,33 @@ pub struct CastTag(pub String);
 /// followed asking den-remux), for the request log as `src=`.
 #[derive(Clone)]
 pub struct SrcTag(pub &'static str);
+
+/// Which Hearth route a `/den` request was for, for the request log as `at=`: the metric label stays one `/den`, and
+/// a fixed label never carries the install segment or a guest id.
+fn den_route(path: &str) -> &'static str {
+    let rest = path.strip_prefix("/den/").unwrap_or("");
+    let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    // The owner's setup routes sit straight under `/den`; everything else is under an install or `~<gid>`.
+    match first {
+        "configure" => return "configure",
+        "config-key" => return "config-key",
+        "validate" => return "validate",
+        _ => {}
+    }
+    match tail.split('/').next().unwrap_or("") {
+        "configure" => "install/configure",
+        "config-key" => "install/config-key",
+        "validate" => "install/validate",
+        "config" => "install/config",
+        "availability" => "install/availability",
+        "manifest.json" => "install/manifest",
+        "stream" => "install/stream",
+        "subtitles" | "subtitle" => "install/subtitles",
+        "meta" => "install/meta",
+        "migrate" => "install/migrate",
+        _ => "other",
+    }
+}
 
 /// The one line each request is logged as. Tags go on the end as `name=value`: an error answer's code, so a
 /// refusal can be told from another with the same status; a public session's listener scope; whether a TMDB
@@ -1438,6 +1466,18 @@ pub mod tests {
         assert_eq!(body_cap("/den/:config/playback"), 16 * 1024);
         assert!(!is_control("/den/:config/playback"));
         assert_eq!(route_label("/den/migrate"), "/den/migrate");
+        for (path, at) in [
+            ("/den/configure", "configure"),
+            ("/den/validate", "validate"),
+            ("/den/~deadbeef/configure", "install/configure"),
+            ("/den/~deadbeef/validate", "install/validate"),
+            ("/den/sealed-config/availability", "install/availability"),
+            ("/den/~deadbeef/stream/movie/tt1.json", "install/stream"),
+            ("/den/~deadbeef/whatever", "other"),
+        ] {
+            assert_eq!(route_label(path), "/den", "{path}");
+            assert_eq!(den_route(path), at, "{path}");
+        }
         assert_eq!(allowed_methods("/den/migrate"), Some(&[Method::POST][..]));
         assert_eq!(body_cap("/den/migrate"), 32 * 1024);
         assert_eq!(route_label("/grant/den-install"), "/grant/den-install");

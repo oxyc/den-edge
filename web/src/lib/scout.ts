@@ -334,7 +334,12 @@ export function denAddonOf(
 export function denConfigureURL(url: string, routes: Routes): string | null {
   if (!url.endsWith(MANIFEST)) return null;
   const install = url.slice(0, -MANIFEST.length);
-  const entry = routes.den?.find((candidate) => within(install, [candidate]) !== null);
+  // A shared access's `/den/~<gid>` is a guest's view of someone else's Hearth: its settings open from "Shared with
+  // you", never the owner's setup page.
+  const entry = routes.den?.find((candidate) => {
+    const rest = within(install, [candidate]);
+    return rest !== null && !rest.startsWith('/~');
+  });
   return entry ? `${entry.url.replace(/\/+$/, '')}/configure` : null;
 }
 
