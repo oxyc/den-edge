@@ -86,7 +86,12 @@
   let saving = $state(false);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
   let routes = $state<Routes>({});
-  void fetchRoutes().then((fetched) => (routes = fetched));
+  /** Whether /routes has answered (or failed): until then an install on another of the deployment's names is unplaced. */
+  let routesLoaded = $state(false);
+  void fetchRoutes().then((fetched) => {
+    routes = fetched;
+    routesLoaded = true;
+  });
   let edgeVersion = $state<string | null>(null);
   void fetch('/version')
     .then((res) => (res.ok ? (res.json() as Promise<{ version?: unknown }>) : null))
@@ -380,7 +385,7 @@
         {model}
         plugins={pluginUrls}
         {routes}
-        {ready}
+        ready={ready && routesLoaded}
         {sealHandover}
         {selfId}
       />

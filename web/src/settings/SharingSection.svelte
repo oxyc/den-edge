@@ -154,12 +154,35 @@
     await reuploadInstalls(household.id, listed.value, installs, household.fetch);
   }
 
+  /**
+   * One refresh at a time. Its inputs settle in bursts as Settings opens (the plugin view, /routes, a retired legacy
+   * addon): two refreshes running at once each found the other's invites not yet rewritten, and wrote them again.
+   * A change during a refresh asks for one more after it, with what is current then.
+   */
+  let refreshing = false;
+  let refreshAgain = false;
+  async function refreshOnce() {
+    if (refreshing) {
+      refreshAgain = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        refreshAgain = false;
+        await refresh();
+      } while (refreshAgain);
+    } finally {
+      refreshing = false;
+    }
+  }
+
   // Listed once the library is open, and again whenever what would be escrowed changes: its content, as a string,
   // since a list re-read from the log is a new array with the same installs every time the library refreshes.
   const installsKey = $derived(JSON.stringify(installs));
   $effect(() => {
     void installsKey;
-    if (ready && link) untrack(() => void refresh());
+    if (ready && link) untrack(() => void refreshOnce());
   });
 
   async function invite() {
