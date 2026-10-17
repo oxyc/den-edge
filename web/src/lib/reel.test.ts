@@ -250,6 +250,39 @@ describe('prepareTrailers', () => {
     );
     expect(found[0]?.planUrl).toBe('https://lan.example/reel/cfg/sources/a.json?v=2');
   });
+
+  it('resolves a relative plan URL against the prepare URL it asked', async () => {
+    const answer = (planUrl: string) => async () =>
+      new Response(
+        JSON.stringify({
+          v: 2,
+          meta: { links: [{ planUrl }] },
+          primary: { id: 'a', planUrl },
+          primaryPlan: null,
+        }),
+      );
+    const ask = { surface: 'audible', player: 'native' } as const;
+    const relayed = await prepareTrailers('/reel', 'movie', { tmdb: 42 }, ROUTES, ask, {
+      fetchImpl: answer('../../sources/a.json?s=x&v=2'),
+    });
+    expect(relayed).toEqual([{ planUrl: '/reel/sources/a.json?s=x&v=2' }]);
+
+    forgetWarmedTrailers();
+    const installed = await prepareTrailers('/reel/cfg', 'movie', { tmdb: 42 }, ROUTES, ask, {
+      fetchImpl: answer('../../../sources/a.json?s=x&v=2'),
+    });
+    expect(installed).toEqual([{ planUrl: '/reel/sources/a.json?s=x&v=2' }]);
+
+    const direct = await prepareTrailers(
+      'https://lan.example/reel/cfg',
+      'movie',
+      { tmdb: 42 },
+      { reel: [{ url: 'https://lan.example/reel' }] },
+      ask,
+      { fetchImpl: answer('../../../sources/a.json?s=x&v=2') },
+    );
+    expect(direct).toEqual([{ planUrl: 'https://lan.example/reel/sources/a.json?s=x&v=2' }]);
+  });
 });
 
 describe('PlaybackCursor', () => {

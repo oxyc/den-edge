@@ -27,7 +27,8 @@ const capabilityFor = (media) => {
 };
 
 const relayUrl = (media) => `/reel/${capabilityFor(media)}`;
-const planUrl = (id) => `http://internal/sources/${id}.json?v=2`;
+// Relative to the prepare URL (`/reel/fixture/prepare/movie/<id>.json`), as Reel names it.
+const planUrl = (id) => `../../../sources/${id}.json?v=2`;
 const carried = (media) => ({
   kind: 'mp4',
   audio: true,
