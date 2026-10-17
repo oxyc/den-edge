@@ -45,6 +45,31 @@ async function open(page) {
 }
 
 const NEW_CODE = 'a1b2c3d4.BBBBBBBBBBBBBBBBBBBBBB';
+const HOUSEHOLD = 'f'.repeat(32);
+
+test('host actions use the household model while Owner is the active profile', async ({ page }) => {
+  const calls = [];
+  await page.route('**/lib/*/grants', (route) => {
+    calls.push({
+      url: route.request().url(),
+      member: route.request().headers()['x-den-library-member'],
+    });
+    return route.fulfill({ json: { grants: [] } });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html`);
+  await expect.poll(() => calls.length).toBeGreaterThan(0);
+  expect(calls[0]).toEqual({
+    url: `${E2E_ORIGIN}/lib/${HOUSEHOLD}/grants`,
+    member: `${HOUSEHOLD}:proof`,
+  });
+});
+
+test('a missing household membership is shown instead of an empty guest list', async ({ page }) => {
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html?membership-fails`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  await expect(page.getByRole('alert')).toHaveText('Couldn’t open household sharing. Try again.');
+});
 
 /** Opens the guest list with `POST …/code` answered by `reply`, and returns the code calls it saw. */
 async function openWithNewLink(page, current, reply) {
