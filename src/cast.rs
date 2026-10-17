@@ -69,8 +69,12 @@ async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
         Some("png") => "image/png",
         _ => "application/octet-stream",
     };
+    // Inline styles are allowed because the Cast SDK reveals `<google-cast-launcher>` by setting its `style`; under
+    // `style-src 'self'` the button stays `display: none` and nothing can be cast. Google serves the SDK unversioned,
+    // so a hash of today's style would break on its next update. Scripts stay strict, and the page draws no user
+    // content.
     let csp = format!(
-        "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
+        "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
          img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
          base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
     );
@@ -106,7 +110,7 @@ mod tests {
     use axum::http::{header, StatusCode};
     use std::sync::Arc;
 
-    const CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
+    const CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
                        img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
                        base-uri 'none'; form-action 'none'; frame-ancestors https://d.oxy.fi";
 
@@ -204,6 +208,20 @@ mod tests {
             headers(&post),
             vec![("content-length".to_owned(), "0".to_owned()), ("allow".to_owned(), "GET,HEAD".to_owned())]
         );
+    }
+
+    /// The Cast SDK reveals its launcher with an inline style, which the page's policy must admit; its scripts stay
+    /// limited to the page's own and the SDK's.
+    #[tokio::test]
+    async fn the_cast_page_admits_inline_styles_and_no_inline_script() {
+        let h = harness();
+        let resp = h.send("GET", "/", None, &[("host", "cast.example")]).await;
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
+        let directive = |name: &str| {
+            csp.split(';').map(str::trim).find(|d| d.starts_with(&format!("{name} "))).unwrap().to_owned()
+        };
+        assert_eq!(directive("style-src"), "style-src 'self' 'unsafe-inline'");
+        assert_eq!(directive("script-src"), "script-src 'self' https://www.gstatic.com");
     }
 
     /// The Cast page's name is public and outside Access: it must not become another way into den-edge. Every route
