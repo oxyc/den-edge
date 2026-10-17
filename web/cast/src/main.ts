@@ -583,6 +583,24 @@ function initializeCast(): boolean {
   return true;
 }
 
+/** How long the framework may take to arrive after the SDK says it is available. */
+const FRAMEWORK_WAIT_MS = 10_000;
+
+/**
+ * Whether the Cast framework and the chrome.cast API are both loaded, waiting up to FRAMEWORK_WAIT_MS for them.
+ * Desktop Chrome can call `__onGCastApiAvailable(true)` before the framework script `loadCastFramework=1` loads has
+ * run, so `cast.framework` is not there yet when the callback is: taken as final, that left Cast unstarted on every
+ * page load and no receiver was ever found.
+ */
+async function castFrameworkLoaded(): Promise<boolean> {
+  const deadline = performance.now() + FRAMEWORK_WAIT_MS;
+  while (!window.cast?.framework || !window.chrome?.cast) {
+    if (performance.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
 window.__onGCastApiAvailable = (available) => {
   if (!available) {
     castDevices = false;
@@ -592,15 +610,18 @@ window.__onGCastApiAvailable = (available) => {
   // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
   // controls) the launcher would draw as an empty circle over the video. Google's launcher also hides itself
   // while no receiver is on the network, so revealing it is not the same as showing it.
-  try {
-    if (!initializeCast()) throw new Error('the Cast SDK loaded without its framework');
-    castLauncher.hidden = false;
-  } catch (error) {
-    // A button that was never initialised does nothing, so it stays hidden; the console says why.
-    console.error('Cast could not start:', error);
-    castDevices = false;
+  void castFrameworkLoaded().then((loaded) => {
+    try {
+      if (!loaded || !initializeCast())
+        throw new Error('the Cast SDK loaded without its framework');
+      castLauncher.hidden = false;
+    } catch (error) {
+      // A button that was never initialised does nothing, so it stays hidden; the console says why.
+      console.error('Cast could not start:', error);
+      castDevices = false;
+    }
     announceDevices();
-  }
+  });
 };
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
