@@ -460,6 +460,83 @@ async function responsiveness(page, windowMs) {
   return { slowest: Math.max(0, ...trips), trips: trips.length, unanswered, continueWatchingAt };
 }
 
+/**
+ * Names for the synthetic titles. The rehearsal has no TMDB key, so without this a Continue Watching card has no name
+ * and its shelf is never drawn.
+ */
+async function nameSyntheticTitles(ctx) {
+  await ctx.route('**/tmdb/3/**', (route) => {
+    const url = new URL(route.request().url());
+    const [, , , kind, id] = url.pathname.split('/');
+    const headers = { 'cache-control': 'max-age=3600' };
+    if (kind === 'movie')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          title: `Film ${id}`,
+          release_date: '2001-01-01',
+          poster_path: null,
+        },
+      });
+    if (kind === 'tv')
+      return route.fulfill({
+        headers,
+        json: {
+          id: Number(id),
+          name: `Series ${id}`,
+          first_air_date: '2001-01-01',
+          poster_path: null,
+          number_of_seasons: 2,
+          seasons: [1, 2].map((n) => ({ season_number: n, episode_count: 8 })),
+        },
+      });
+    return route.fulfill({ status: 404, json: { status_code: 34 } });
+  });
+}
+
+// A page that answers: every round trip into its main thread within a second, from navigation start through the
+// first seconds the library is drawn and synced. The frozen tab did not answer one in 45 seconds.
+const RESPONSIVE_WINDOW_MS = 20_000;
+const MAX_ROUND_TRIP_MS = 1_000;
+
+/**
+ * Round trips into the page every 200 ms for `windowMs`, each also noting whether Continue Watching is drawn yet.
+ * One not answered within ten seconds is a frozen renderer: probing stops there, as every later call would queue
+ * behind it.
+ */
+async function responsiveness(page, windowMs) {
+  const trips = [];
+  let unanswered = false;
+  let continueWatchingAt = null;
+  const start = Date.now();
+  while (Date.now() - start < windowMs) {
+    const started = Date.now();
+    const answered = await Promise.race([
+      page
+        .evaluate(() =>
+          (document.querySelector('main')?.innerText ?? '').includes('Continue Watching'),
+        )
+        .then(
+          (drawn) => {
+            if (drawn && continueWatchingAt === null) continueWatchingAt = Date.now() - start;
+            return true;
+          },
+          // A navigation in progress destroys the context; that is not the page failing to answer.
+          () => true,
+        ),
+      sleep(10_000).then(() => false),
+    ]);
+    if (!answered) {
+      unanswered = true;
+      break;
+    }
+    trips.push(Date.now() - started);
+    await sleep(200);
+  }
+  return { slowest: Math.max(0, ...trips), trips: trips.length, unanswered, continueWatchingAt };
+}
+
 /** Wait for no request to den-edge's library routes for `quietMs`, or give up after `limitMs`. */
 async function quiet(edge, quietMs, limitMs = 60_000) {
   const started = Date.now();
@@ -1219,6 +1296,55 @@ async function main() {
           JSON.stringify(ownerPrefs['den.myServicePicks']?.value?.strings) === '["8@FI"]',
         `region ${JSON.stringify(ownerPrefs['den.watchRegion']?.value)}, services ${JSON.stringify(ownerPrefs['den.myServicePicks']?.value)}`,
       );
+    }
+
+    // 4a'. A returning Owner's browser, as one upgraded from 0.271.5 is: a persistent Owner and an Owner hint with no
+    // library key. With a long-lived library a release once froze such a tab on its second load (the renderer stopped
+    // answering), so two loads in a row must keep answering throughout and still draw Continue Watching.
+    step('reopen twice as an Owner whose hint has no library key (an upgraded browser)');
+    {
+      ctx = await launch(join(work, 'profile-upgraded'));
+      await nameSyntheticTitles(ctx);
+      const upgraded = await seedLink(ctx, edge, keyText);
+      await upgraded.evaluate(
+        ([marker, hint]) => {
+          localStorage.setItem('den.profile.active.v1', marker);
+          localStorage.setItem('den.profile.hint.v1', hint);
+        },
+        [
+          JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+          JSON.stringify({
+            version: 1,
+            profileId: directory.owner,
+            name: 'Owner',
+            avatar: 'owner',
+          }),
+        ],
+      );
+      for (const load of ['first', 'second']) {
+        await upgraded.goto(`${edge.origin}/`, { waitUntil: 'commit' });
+        const probe = await responsiveness(upgraded, RESPONSIVE_WINDOW_MS);
+        const shelves = await upgraded
+          .locator('main')
+          .getByText('Continue Watching')
+          .first()
+          .isVisible({ timeout: 2000 })
+          .catch(() => false);
+        check(
+          `an upgraded Owner's ${load} load keeps answering (every round trip under ${MAX_ROUND_TRIP_MS} ms)`,
+          !probe.unanswered && probe.slowest < MAX_ROUND_TRIP_MS,
+          JSON.stringify({
+            slowestRoundTripMs: probe.slowest,
+            roundTrips: probe.trips,
+            unanswered: probe.unanswered,
+            continueWatchingAtMs: probe.continueWatchingAt,
+          }),
+        );
+        if (probe.unanswered) break;
+        check(`an upgraded Owner's ${load} load draws Continue Watching`, shelves);
+      }
+      // A frozen renderer can keep the browser from closing; it is abandoned rather than waited on.
+      await Promise.race([ctx.close().catch(() => {}), sleep(15_000)]);
     }
 
     // 4a'. A returning Owner's browser, as one upgraded from 0.271.5 is: a persistent Owner and an Owner hint with no
