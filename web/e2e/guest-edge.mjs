@@ -12,9 +12,10 @@ const sha = (text) => createHash('sha256').update(text).digest('base64url');
 const GENERATION = 'guest-library';
 const HEADERS = { 'x-den-generation': GENERATION, 'x-den-wire-min': '4' };
 
-export function newEdge({ devices = 2, host = 'Oskar' } = {}) {
+export function newEdge({ devices = 2, host = 'Oskar', profiles = false } = {}) {
   return {
     host,
+    profiles,
     /** The grant: device secret hashes, the slot limit, the one reserved library, and live or revoked. */
     grant: { devices: new Set(), limit: devices, reserved: null, live: true },
     tickets: new Set(),
@@ -148,15 +149,25 @@ async function routeLibraries(page, edge) {
       if (!library) {
         // `NEW_LIBRARIES=members`: only the library a grant reserved for exactly this key may start.
         const reserved = edge.grant.reserved;
-        if (!reserved || reserved.id !== id || reserved.tokenHash !== sha(token ?? '')) {
+        const member = request.headers()['x-den-library-member']?.split(':')[0];
+        const allowedByGrant =
+          reserved && reserved.id === id && reserved.tokenHash === sha(token ?? '');
+        const allowedByHousehold = edge.profiles && member && edge.libraries.has(member);
+        if (!allowedByGrant && !allowedByHousehold) {
           edge.refusedStarts++;
           return json(route, 403, { error: 'new_libraries_closed' }, HEADERS);
         }
-        library = { tokenHash: sha(token), rows: new Map(), head: 0 };
+        library = {
+          tokenHash: sha(token),
+          rows: new Map(),
+          head: 0,
+          wireMin: Number(request.headers()['x-den-wire-min'] ?? 4),
+        };
         edge.libraries.set(id, library);
       }
+      const headers = { ...HEADERS, 'x-den-wire-min': String(library.wireMin) };
       if (library.tokenHash !== sha(token ?? ''))
-        return json(route, 403, { error: 'forbidden' }, HEADERS);
+        return json(route, 403, { error: 'forbidden' }, headers);
       const applied = [];
       const conflicts = [];
       for (const write of request.postDataJSON().writes) {
@@ -169,7 +180,7 @@ async function routeLibraries(page, edge) {
         library.rows.set(write.k, entry);
         applied.push({ k: write.k, seq: entry.seq });
       }
-      return json(route, 200, { applied, conflicts }, HEADERS);
+      return json(route, 200, { applied, conflicts }, headers);
     }
     if (action === 'changes' && request.method() === 'GET') {
       if (!library || library.tokenHash !== sha(token ?? '')) return json(route, 404, {}, HEADERS);
@@ -179,7 +190,7 @@ async function routeLibraries(page, edge) {
         route,
         200,
         { generation: GENERATION, entries, head: library.head, more: false },
-        HEADERS,
+        { ...HEADERS, 'x-den-wire-min': String(library.wireMin) },
       );
     }
     return route.abort('blockedbyclient');
@@ -199,14 +210,20 @@ export async function routeGuestEdge(page, edge) {
       );
     return api ? route.fulfill({ status: 404, json: {} }) : route.continue();
   });
-  // This page-level catch-all bypasses guardNetwork's context route when it continues to the dev server. Preserve
-  // the shipped default-off capability response explicitly so guest specs exercise the legacy Owner contract.
+  // This page-level catch-all bypasses guardNetwork's context route when it continues to the dev server. Most guest
+  // specs preserve the shipped default-off capability response; the profile provisioning regression opts in.
   await page.route(`${E2E_ORIGIN}/capabilities/profiles`, (route) =>
-    route.fulfill({
-      status: 404,
-      headers: { 'cache-control': 'no-store' },
-      json: { error: 'not_found' },
-    }),
+    edge.profiles
+      ? route.fulfill({
+          status: 200,
+          headers: { 'cache-control': 'no-store' },
+          json: { enabled: true },
+        })
+      : route.fulfill({
+          status: 404,
+          headers: { 'cache-control': 'no-store' },
+          json: { error: 'not_found' },
+        }),
   );
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'guest-test' } }));

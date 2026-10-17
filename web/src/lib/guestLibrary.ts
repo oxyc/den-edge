@@ -82,9 +82,11 @@ export async function startGuestLibrary(
   grant: GuestGrant,
   move: (libraryKey: string) => Promise<boolean>,
   fetchImpl: typeof fetch = fetch,
+  /** A profile household already planned by the page. Its durable plan, rather than PENDING_KEY, keeps this stable. */
+  plannedLibraryKey?: string,
 ): Promise<StartOutcome> {
   if (links.current || refusedGrants().includes(grant.gid)) return 'held';
-  const libraryKey = pendingKey(grant.gid);
+  const libraryKey = plannedLibraryKey ?? pendingKey(grant.gid);
   const keys = await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0)));
   const reserved = await reserveLibrary(grant.gid, grant.secret, keys, fetchImpl);
   if (!reserved.ok) {

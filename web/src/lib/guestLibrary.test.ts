@@ -97,6 +97,25 @@ test('the reservation names the token of the key the library is then opened with
   });
 });
 
+test('a profile guest reserves and opens the household already kept in its durable plan', async () => {
+  const { startGuestLibrary, startingGrant, links } = await world();
+  const { deriveKeys } = await import('./wire');
+  const fetchImpl = edge(204);
+  const householdKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+  const move = vi.fn(async () => true);
+
+  expect(await startGuestLibrary(startingGrant()!, move, fetchImpl, householdKey)).toBe('started');
+
+  const keys = await deriveKeys(Uint8Array.from(atob(householdKey), (c) => c.charCodeAt(0)));
+  expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body))).toEqual({
+    id: keys.id,
+    tokenHash: await secretHash(keys.token),
+  });
+  expect(move).toHaveBeenCalledExactlyOnceWith(householdKey);
+  expect(links.current).toMatchObject({ libraryKey: householdKey, recovered: true, guest: true });
+  expect(kept.get('den.guestLibrary.pending')).toBeUndefined();
+});
+
 test('a device that already holds a synced library keeps it and asks for nothing', async () => {
   const { startGuestLibrary, startingGrant, links } = await world();
   links.addRecovered('a'.repeat(43) + '=');
