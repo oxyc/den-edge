@@ -66,6 +66,7 @@ import {
   FilterUnavailable,
   searchFilterValues,
   searchTraitValues,
+  SHARED_ATLAS,
 } from './filterRoutes';
 import {
   countriesFrom,
@@ -252,8 +253,6 @@ function optional<T>(result: ProviderResult<T>, provider: ContentProvider): Opti
   }
 }
 
-/** `/atlas/~<gid>/…`: an Atlas shared through a guest's grant. */
-const SHARED_ATLAS = /\/atlas\/~([0-9a-f]{8})(?:[/?]|$)/;
 const sharedAtlasWarned = new Set<string>();
 
 /**
