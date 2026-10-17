@@ -622,20 +622,15 @@ async fn main() {
     let port: u16 = env_number("PORT").unwrap_or(8080);
     // `PORT` is always served: it is the address other containers reach this one on. A socket handed over by the
     // supervisor is served as well, and is the one that survives this process being replaced.
-    let mut listeners = Vec::new();
-    match inherited_listener() {
-        Some(Ok(l)) => {
-            eprintln!(
-                "serving on an inherited socket, {}",
-                l.local_addr().map_or("?".to_owned(), |a| a.to_string())
-            );
-            listeners.push(l);
-        }
-        Some(Err(e)) => {
-            eprintln!("inherited listening socket unusable: {e}");
-            std::process::exit(1);
-        }
-        None => {}
+    let mut listeners = inherited_listeners().unwrap_or_else(|e| {
+        eprintln!("inherited listening socket unusable: {e}");
+        std::process::exit(1);
+    });
+    for l in &listeners {
+        eprintln!(
+            "serving on an inherited socket, {}",
+            l.local_addr().map_or("?".to_owned(), |a| a.to_string())
+        );
     }
     listeners.push(tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
         eprintln!("bind :{port} failed: {e}");
@@ -703,27 +698,34 @@ async fn main() {
     eprintln!("{}", outcome.describe());
 }
 
-/// The listening socket the supervisor handed over (systemd socket activation: `LISTEN_PID` is this process,
-/// `LISTEN_FDS` counts sockets starting at fd 3). The supervisor keeps the socket open across restarts, so
-/// connections queue in the kernel while a new process starts instead of being refused. `None` when nothing was
-/// handed over; the caller then binds `PORT` itself.
+/// The listening sockets the supervisor handed over (systemd socket activation: `LISTEN_PID` is this process,
+/// `LISTEN_FDS` counts sockets starting at fd 3) — one per port it holds, e.g. the API port and the Cast port. The
+/// supervisor keeps them open across restarts, so connections queue in the kernel while a new process starts
+/// instead of being refused. Empty when nothing was handed over.
 #[cfg(unix)]
-fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
+fn inherited_listeners() -> std::io::Result<Vec<tokio::net::TcpListener>> {
+    let fds = activation_fds(
+        std::env::var("LISTEN_PID").ok().as_deref(),
+        std::env::var("LISTEN_FDS").ok().as_deref(),
+        std::process::id(),
+    );
+    // SAFETY: the activation protocol hands this process sole ownership of these fds.
+    fds.map(|fd| unsafe { adopt_listener(fd) }).collect()
+}
+
+/// The fds handed to process `me`: 3 onwards, `LISTEN_FDS` of them, when `LISTEN_PID` names it.
+fn activation_fds(listen_pid: Option<&str>, listen_fds: Option<&str>, me: u32) -> std::ops::Range<i32> {
     const FIRST_FD: i32 = 3;
-    let pid = std::env::var("LISTEN_PID").ok()?.parse::<u32>().ok()?;
-    let count = std::env::var("LISTEN_FDS").ok()?.parse::<i32>().ok()?;
-    if pid != std::process::id() {
-        eprintln!("LISTEN_FDS is set for process {pid}, not this one ({}); ignoring it", std::process::id());
-        return None;
+    let (Some(pid), Some(count)) =
+        (listen_pid.and_then(|p| p.parse::<u32>().ok()), listen_fds.and_then(|c| c.parse::<i32>().ok()))
+    else {
+        return FIRST_FD..FIRST_FD;
+    };
+    if pid != me {
+        eprintln!("LISTEN_FDS is set for process {pid}, not this one ({me}); ignoring it");
+        return FIRST_FD..FIRST_FD;
     }
-    if count < 1 {
-        return None;
-    }
-    if count > 1 {
-        return Some(Err(std::io::Error::other(format!("expected one socket, got {count}"))));
-    }
-    // SAFETY: the activation protocol hands this process sole ownership of fd 3.
-    Some(unsafe { adopt_listener(FIRST_FD) })
+    FIRST_FD..FIRST_FD + count.max(0)
 }
 
 /// # Safety
@@ -737,8 +739,8 @@ unsafe fn adopt_listener(fd: i32) -> std::io::Result<tokio::net::TcpListener> {
 }
 
 #[cfg(not(unix))]
-fn inherited_listener() -> Option<std::io::Result<tokio::net::TcpListener>> {
-    None
+fn inherited_listeners() -> std::io::Result<Vec<tokio::net::TcpListener>> {
+    Ok(Vec::new())
 }
 
 /// `TRUSTED_PROXIES`: comma-separated IP addresses, the trusted ones and, second, those written `cf:<ip>` — the
@@ -1348,6 +1350,47 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(1), hold.wait(Duration::from_secs(25))).await;
             assert!(waited.is_ok(), "hold set {i} was not released");
         }
+    }
+
+    /// The API port and the Cast port arrive as two sockets: both are adopted, not refused as "expected one".
+    #[test]
+    fn every_handed_over_socket_is_taken_and_only_for_this_process() {
+        assert_eq!(activation_fds(Some("7"), Some("2"), 7), 3..5);
+        assert_eq!(activation_fds(Some("7"), Some("1"), 7), 3..4);
+        assert!(activation_fds(Some("8"), Some("2"), 7).is_empty(), "another process's");
+        assert!(activation_fds(None, None, 7).is_empty(), "nothing handed over");
+        assert!(activation_fds(Some("7"), Some("0"), 7).is_empty());
+    }
+
+    /// Two inherited sockets, one accept loop: a request on either is answered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serves_on_every_inherited_socket() {
+        use std::os::fd::IntoRawFd;
+        let owners = [
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+        ];
+        let addrs: Vec<_> = owners.iter().map(|o| o.local_addr().unwrap()).collect();
+        let listeners: Vec<_> =
+            owners.into_iter().map(|o| unsafe { adopt_listener(o.into_raw_fd()) }.unwrap()).collect();
+        let state = Arc::new(AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        ));
+        let metrics = Arc::clone(&state.metrics);
+        let app = axum::Router::new().fallback(handler::handle).with_state(state);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let limits = Limits { grace: Duration::from_millis(300), header_read: HEADER_READ_TIMEOUT };
+        let server =
+            tokio::spawn(serve_until(listeners, app, metrics, async { rx.await.unwrap_or(()) }, limits));
+        for addr in addrs {
+            let reply = exchange(addr, "GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+            assert!(reply.starts_with("HTTP/1.1 200"), "{addr}: {reply}");
+        }
+        let _ = tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
     }
 
     /// A client that sends half a request head must not hold shutdown open past the grace.
