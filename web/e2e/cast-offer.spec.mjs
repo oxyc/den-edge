@@ -24,12 +24,12 @@ const TEST_CAST_PLAY_MS = 1_000;
  * The cast page, as far as the player can tell: `none` sees no receiver, `receiver` sees one but cannot play what is
  * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either).
  */
-const castPage = (mode) => `<!doctype html><script>
+const castPage = (mode, discoveryDelay = 0) => `<!doctype html><script>
   window.loads = [];
   addEventListener('message', (event) => {
     const message = event.data || {};
     if (message.type === 'den-discover')
-      parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin);
+      setTimeout(() => parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin), ${discoveryDelay});
     if (message.type !== 'den-load') return;
     window.loads.push(message.media);
     if (${mode === 'none'})
@@ -81,7 +81,14 @@ const lanSession = (n) => ({
 
 async function open(
   mode,
-  { releases = [], managed = false, subtitleLanguage, lanHttp = false } = {},
+  {
+    releases = [],
+    managed = false,
+    subtitleLanguage,
+    lanHttp = false,
+    viewport = { width: 1280, height: 800 },
+    castDiscoveryDelay = 0,
+  } = {},
 ) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -89,7 +96,7 @@ async function open(
   });
   const context = await browser.newContext({
     userAgent: CHROME_MAC,
-    viewport: { width: 1280, height: 800 },
+    viewport,
   });
   const page = await context.newPage();
   await guardNetwork(page);
@@ -197,7 +204,7 @@ async function open(
   await page.route(`${ORIGIN}/remux/releases`, (r) => r.fulfill({ json: { releases: [] } }));
   await page.route(`${MEDIA}/**`, (r) => r.fulfill({ status: 204 }));
   await page.route(`${CAST}/**`, (r) =>
-    r.fulfill({ contentType: 'text/html', body: castPage(mode) }),
+    r.fulfill({ contentType: 'text/html', body: castPage(mode, castDiscoveryDelay) }),
   );
   const query = new URLSearchParams({
     castDiscoveryMs: String(TEST_CAST_DISCOVERY_MS),
@@ -313,6 +320,43 @@ async function playingPast(page, seconds) {
     const video = document.querySelector('.player video');
     video.dataset.before = 'cast';
     return video.currentTime;
+  });
+}
+
+async function playerGeometry(page) {
+  return page.locator('.player').evaluate((player) => {
+    const box = (selector) => {
+      const rect = player.querySelector(selector).getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    return { stage: box('.stage'), video: box('video') };
+  });
+}
+
+for (const viewport of [
+  { name: 'desktop', width: 1280, height: 800 },
+  { name: 'narrow', width: 390, height: 844 },
+]) {
+  test(`Cast discovery keeps the ${viewport.name} video fixed through searching and no devices`, async () => {
+    const { browser, page } = await open('none', {
+      viewport,
+      castDiscoveryDelay: 250,
+    });
+    try {
+      await playingPast(page, 1);
+      const idle = await playerGeometry(page);
+
+      await page.getByRole('button', { name: 'Cast to a TV' }).click();
+      await expect(page.getByText('Looking for a Chromecast…')).toBeVisible();
+      expect(await playerGeometry(page)).toEqual(idle);
+      const searchingStatus = await page.locator('.cast-status .notice').boundingBox();
+
+      await expect(page.getByText('No Chromecast found.')).toBeVisible();
+      expect(await playerGeometry(page)).toEqual(idle);
+      expect(await page.locator('.cast-status .notice').boundingBox()).toEqual(searchingStatus);
+    } finally {
+      await browser.close();
+    }
   });
 }
 
