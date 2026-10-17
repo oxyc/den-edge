@@ -2479,6 +2479,13 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
+    {#if session}
+      <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
+           Remux session. -->
+      <span class="source-stamp" data-testid="playback-source"
+        >{session.external ? 'TorBox' : 'Den Remux'}</span
+      >
+    {/if}
     {#if castable && session && !session.castOrigin && route !== RELAY}
       <Button
         variant="player"
@@ -2899,6 +2906,20 @@
   header b {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Beside the title, quiet: it says what is playing, it is not something to press. */
+  .source-stamp {
+    flex: none;
+    margin-right: auto;
+    margin-left: -8px;
+    padding: 2px 8px;
+    border: 1px solid rgb(255 255 255 / 0.25);
+    border-radius: 999px;
+    color: rgb(255 255 255 / 0.75);
+    font-size: 12px;
+    line-height: 1.4;
     white-space: nowrap;
   }
 
