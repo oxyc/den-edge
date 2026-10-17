@@ -268,7 +268,11 @@ export function identityOf(
 
 // ---- A playback session's outcome (`POST /playback/outcome`) ----
 
-export type Engine = 'native' | 'hls.js' | 'progressive';
+/** `cast_page`: played inside the hidden cast-page frame (a public-address session), not this page's own video. */
+export type Engine = 'native' | 'hls.js' | 'progressive' | 'cast_page';
+/** What noticed the failure a visit ended on: the video element, hls.js, the stuck watch, or the cast page. */
+export type FailSource =
+  'media_element' | 'hls_fatal' | 'stuck' | 'cast_page_error' | 'cast_page_silent';
 export type NetworkRoute = 'lan' | 'public' | 'tailnet';
 export type EndReason = 'finished' | 'user_exit' | 'error';
 export type HlsFatalType = 'networkError' | 'mediaError' | 'muxError' | 'otherError';
@@ -381,6 +385,14 @@ export interface PlaybackOutcomeReport extends IdentityFields {
   switchCount?: number;
   /** The last switch's own reason; absent alongside `switchCount` when there was none. */
   lastSwitchReason?: SwitchReason;
+  /** What noticed the failure, when the visit ended on one. */
+  failSource?: FailSource;
+  /** The cast page's own failure class, when it reported one. */
+  castFailReason?: CastFailReason;
+  /** Whether the session came from Remux or as a provider's own HLS (TorBox), when one was open. */
+  delivery?: 'remux' | 'direct';
+  /** The session named a home-network playlist to try first. */
+  lanOffered?: boolean;
 }
 
 /** `sendBeacon` first (`beacon`): a session's outcome is as likely to be sent from a page hiding or unloading as
@@ -397,7 +409,12 @@ export function sendPlaybackOutcome(
 export type CastKind = 'chromecast' | 'airplay';
 export type CastStage = 'offered' | 'attempted' | 'started';
 export type CastFailReason =
-  'receiver_not_loaded' | 'media_error' | 'lan_unreachable' | 'session_error' | 'other';
+  | 'receiver_not_loaded'
+  | 'media_error'
+  | 'lan_unreachable'
+  | 'session_error'
+  | 'invalid_media'
+  | 'other';
 
 export interface CastReport extends IdentityFields {
   kind: CastKind;

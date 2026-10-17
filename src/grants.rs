@@ -3461,6 +3461,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A host on Den Hearth shares its one combined install, and the guest's page names it the way it names its own
+    /// Hearth (`/den/~<gid>`). The release list leaves with the host's real Hearth install, as the host's own does;
+    /// before, every guest's release list was a 400.
+    #[tokio::test]
+    async fn a_guest_of_a_hearth_host_lists_releases_through_the_hosts_hearth() {
+        let (h, seen) = relaying(remux_reply, Some("edge-secret")).await;
+        let hearth = "H".repeat(64);
+        let (gid, header) = redeemed(&h, json!({ "addons": ["den"], "installs": { "den": hearth } })).await;
+        let base = h.state.relays.iter().find(|(p, _)| p == "/den").unwrap().1.clone();
+        let asked = json!({ "imdb": "tt27369017", "scout": format!("https://d.example/den/~{gid}") });
+        let resp = remux_call(&h, "POST", "/remux/releases", &header, Some(asked)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (path, _, body) = seen.lock().unwrap().pop().unwrap();
+        assert_eq!(path, "/remux/releases");
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["scout"], format!("{base}/den/{hearth}"));
+
+        // Only that guest's own name for it, and only when the host shared Hearth.
+        let other = json!({ "scout": "https://d.example/den/~deadbeef" });
+        let resp = remux_call(&h, "POST", "/remux/releases", &header, Some(other)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // The request log names which check refused it (`why=`).
+        assert_eq!(resp.extensions().get::<crate::handler::Why>().map(|w| w.0), Some("guest_install_body"));
+        let (gid2, scout_only) = redeemed_second(&h).await;
+        let unshared = json!({ "scout": format!("https://d.example/den/~{gid2}") });
+        let resp = remux_call(&h, "POST", "/remux/releases", &scout_only, Some(unshared)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(seen.lock().unwrap().is_empty(), "a rejected body never reaches remux");
+    }
+
     /// A player away from home times its link before it starts a session. Through the relay that is `/remux/speed`,
     /// for a member and a guest alike: never more bytes than the web app's probe, never cached, and nothing for anyone
     /// else.

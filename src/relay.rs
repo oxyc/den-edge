@@ -795,7 +795,7 @@ pub async fn guest(
             }
             // An install of the guest's own in the query would bypass the body rewrite below.
             if crate::grants::query_names(query.as_deref(), &["scout", "subtitles"]) {
-                return Ok(json(StatusCode::BAD_REQUEST, "bad_request"));
+                return Ok(bad_request("guest_install_in_query"));
             }
             let pq = req.uri().path_and_query().map_or(path.clone(), |pq| pq.as_str().to_owned());
             let Some(target) = target(&state.relays, &pq) else { return Ok(not_found()) };
@@ -818,13 +818,18 @@ pub async fn guest(
 /// `/remux/session` and `/remux/releases` name the guest's installs as `<origin>/<addon>/~<gid>` — the same shape
 /// the web app sends for a real one, with the grant in the segment's place. Each is translated to the host's real
 /// install at the relay table's own origin, so the guest never sees it and never chooses where remux fetches from.
-/// Anything else in either field is refused.
+/// A host on Den Hearth shares one combined install, which the web app names in either field as `<origin>/den/~<gid>`
+/// (its own Hearth install's shape), and which leaves as the host's real `den` install. Anything else in either field
+/// is refused.
 fn remux_body(relays: &[(String, String)], guest: &Guest, body: &[u8]) -> Option<Bytes> {
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let fields = value.as_object_mut()?;
     for addon in ["scout", "subtitles"] {
         let Some(field) = fields.get_mut(addon).filter(|f| !f.is_null()) else { continue };
-        *field = serde_json::Value::String(real_install(relays, guest, addon, field.as_str()?)?);
+        let given = field.as_str()?;
+        let real = real_install(relays, guest, addon, given)
+            .or_else(|| real_install(relays, guest, "den", given))?;
+        *field = serde_json::Value::String(real);
     }
     serde_json::to_vec(&value).ok().map(Bytes::from)
 }
@@ -960,7 +965,7 @@ async fn relay_with(
     }
     let speed = req.uri().path() == "/remux/speed";
     let target = if speed { speed_target(&target) } else { Some(target) };
-    let Some(target) = target else { return json(StatusCode::BAD_REQUEST, "bad_request") };
+    let Some(target) = target else { return bad_request("speed_target") };
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
     // `/scout` and `/den` themselves (including a query) belong to those addons too.
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
@@ -1138,7 +1143,7 @@ async fn relay_with(
     let idempotency = if playback {
         match idempotency_key(&req) {
             Ok(key) => key,
-            Err(()) => return json(StatusCode::BAD_REQUEST, "bad_request"),
+            Err(()) => return bad_request("idempotency_key"),
         }
     } else {
         None
@@ -1235,7 +1240,7 @@ async fn relay_with(
         Some(g) if g.remux() && method == Method::POST && control != "/remux/health" => {
             match remux_body(&state.relays, g, &body) {
                 Some(rewritten) => rewritten,
-                None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+                None => return bad_request("guest_install_body"),
             }
         }
         _ => body,
@@ -1244,7 +1249,7 @@ async fn relay_with(
     let (body, hint, no_hint) = if public_session {
         match take_hint(body) {
             Some(taken) => taken,
-            None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+            None => return bad_request("ipv4_hint_body"),
         }
     } else {
         (body, None, false)
@@ -1327,13 +1332,13 @@ async fn relay_with(
             .as_ref()
             .and_then(|guest| guest_overlay_body(guest, &method, &control, original_query.as_deref(), &body))
         else {
-            return json(StatusCode::BAD_REQUEST, "bad_request");
+            return bad_request("guest_overlay_envelope");
         };
         (Method::POST, target, body)
     } else if regrant {
         match session_end_url(&target, &body) {
             Some(root) => (Method::HEAD, format!("{root}/master.m3u8"), Bytes::new()),
-            None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+            None => return bad_request("regrant_session"),
         }
     } else {
         (method, target, body)
@@ -1430,7 +1435,7 @@ async fn relay_with(
     for (name, value) in conditions {
         out = out.header(name, value);
     }
-    let Ok(out) = out.body(Full::new(body)) else { return json(StatusCode::BAD_REQUEST, "bad_request") };
+    let Ok(out) = out.body(Full::new(body)) else { return bad_request("upstream_request") };
     // One deadline for the head and the body: an addon that answered its head and then stalled held a relay slot
     // for as long as it stayed silent.
     let deadline = tokio::time::Instant::now() + if playback { PLAYBACK_TIMEOUT } else { TIMEOUT };
@@ -2167,7 +2172,7 @@ pub async fn transport_reel(
         Err(response) => return *response,
     };
     let Some((blob, query)) = reel_capability(&request.capability) else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+        return with_why(direct_json(StatusCode::BAD_REQUEST, &error("bad_request")), "reel_capability");
     };
     let (blob, query) = (blob.to_owned(), query.to_owned());
     match build_reel_transport(state, request, observed, &blob, &query, rid).await {
@@ -2193,11 +2198,11 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
         Err(response) => return *response,
     };
     let Some(capability) = legacy.media.strip_prefix("/reel/").map(str::to_owned) else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+        return with_why(direct_json(StatusCode::BAD_REQUEST, &error("bad_request")), "reel_media_path");
     };
     let request = ReelTransportRequest { capability, ipv4_hint: legacy.ipv4_hint, no_hint: legacy.no_hint };
     let Some((blob, query)) = reel_capability(&request.capability) else {
-        return direct_json(StatusCode::BAD_REQUEST, &error("bad_request"));
+        return with_why(direct_json(StatusCode::BAD_REQUEST, &error("bad_request")), "reel_capability");
     };
     let (blob, query) = (blob.to_owned(), query.to_owned());
     let transport = match build_reel_transport(state, request, observed, &blob, &query, rid).await {
@@ -2255,8 +2260,9 @@ async fn read_reel_json<T: for<'de> Deserialize<'de>>(req: Request) -> Result<T,
         }
         Err(_) => return Err(Box::new(direct_json(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")))),
     };
-    serde_json::from_slice(&body)
-        .map_err(|_| Box::new(direct_json(StatusCode::BAD_REQUEST, &error("bad_request"))))
+    serde_json::from_slice(&body).map_err(|_| {
+        Box::new(with_why(direct_json(StatusCode::BAD_REQUEST, &error("bad_request")), "reel_body"))
+    })
 }
 
 async fn build_reel_transport(
@@ -2718,7 +2724,7 @@ async fn stream(
         out = out.header(name, value);
     }
     let Ok(out) = out.body(Full::new(Bytes::new())) else {
-        return json(StatusCode::BAD_REQUEST, "bad_request");
+        return bad_request("upstream_request");
     };
     // The timeout covers reaching the addon and its answer's head, not the body: a trailer takes as long as
     // it takes to send, and cutting it off mid-stream would be a truncated file rather than an error.
@@ -2763,6 +2769,16 @@ async fn stream(
 
 fn json(status: StatusCode, code: &str) -> Response {
     json_reply(status, &error(code))
+}
+
+/// A `bad_request` that names, in the request log only, which check refused it.
+fn bad_request(why: &'static str) -> Response {
+    with_why(json(StatusCode::BAD_REQUEST, "bad_request"), why)
+}
+
+fn with_why(mut resp: Response, why: &'static str) -> Response {
+    resp.extensions_mut().insert(crate::handler::Why(why));
+    resp
 }
 
 /// The relayed service a path names, from its leading segment (`/scout/…` → `scout`): never the install segment

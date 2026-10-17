@@ -121,6 +121,8 @@
     subtitleSourceOf,
     type CastFailReason,
     type CastStage,
+    type Engine,
+    type FailSource,
     type SwitchReason,
   } from '../lib/diagnosticsReport';
   import Button from './Button.svelte';
@@ -463,6 +465,10 @@
   /** The last fatal error's code and, for an hls.js one, its type and detail — for den-edge's own outcome
    * report; parsed back from `broke()`'s own message rather than threaded through every path that calls it. */
   let lastFatal: { code?: number; hls?: ReturnType<typeof hlsFatalFromMessage> } | undefined;
+  /** What noticed the last failure (the video element, hls.js, the stuck watch, the cast page), for the same report. */
+  let lastFailSource: FailSource | undefined;
+  /** The engine the last session was actually mounted in, for the same report: hls.js is gone by the time it is sent. */
+  let playedEngine: Engine | undefined;
   /** Whether the viewer changed or turned off the subtitle after playback had already shown a frame: a signal
    * the file first chosen was wrong, for den-edge's own outcome report. */
   let subtitleSwitchedMidPlay = false;
@@ -1147,7 +1153,7 @@
         const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
         const why = `no picture after ${STUCK_MS / 1000} s with nothing arriving (readyState ${element.readyState}, networkState ${element.networkState})`;
         if (noSource) {
-          void broke(element.error?.code ?? 0, why, 'format');
+          void broke(element.error?.code ?? 0, why, 'format', 'stuck');
           return;
         }
         // No picture: no frame presented yet (`played`), whatever `readyState` claims — some WebViews lose the frame
@@ -1159,7 +1165,8 @@
         void segmentAnswer(current, stalledAt(), fetch, SEGMENT_ASK_MS).then((answer) => {
           if (session !== current || failure || played) return;
           const ready = answer && answer.status < 300 && answer.ms < SEGMENT_READY_MS;
-          if (ready || answer?.status === 502) void broke(element.error?.code ?? 0, why, 'format');
+          if (ready || answer?.status === 502)
+            void broke(element.error?.code ?? 0, why, 'format', 'stuck');
           else stuck.progress();
         });
       },
@@ -1399,6 +1406,7 @@
       if (link === connection) link = undefined;
       reconnecting = false;
     };
+    playedEngine = playsNatively ? 'native' : 'hls.js';
     if (playsNatively) {
       element.src = current.playlist;
       const mounted = element.src;
@@ -1487,6 +1495,7 @@
           0,
           `hls.js ${data.type} ${data.details}`,
           data.type === Hls.ErrorTypes.MEDIA_ERROR ? 'decode' : 'other',
+          'hls_fatal',
         );
       });
       // hls.js has its subtitle tracks once the master is parsed, and would otherwise show the DEFAULT one.
@@ -1545,6 +1554,7 @@
     const current = session;
     const frame = castFrame?.contentWindow;
     if (!current?.castOrigin || !frame) return;
+    playedEngine = 'cast_page';
     const poster = title.posterPath
       ? `https://image.tmdb.org/t/p/w500${title.posterPath}`
       : undefined;
@@ -1688,13 +1698,14 @@
       if (message.message === 'Invalid media URL') {
         console.warn('The cast page refused the media URLs it was handed.');
         reportFailure(current, 0, message.message);
+        lastFailSource = 'cast_page_error';
         failure = 'protocol';
         return;
       }
       // A receiver failure of a managed direct URL is one explicit Hearth fallback. It keeps Cast intent and sends
       // directFailed=true, so Hearth alone chooses the Remux session that replaces it.
       if (current.external) {
-        void broke(0, message.message ?? 'cast player failed', 'decode');
+        void broke(0, message.message ?? 'cast player failed', 'decode', 'cast_page_error');
         return;
       }
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
@@ -1707,7 +1718,7 @@
         return;
       }
       // A receiver that can't play what it was sent: a copy its conservative profile takes, as a decoder's refusal.
-      void broke(0, message.message ?? 'cast player failed', 'decode');
+      void broke(0, message.message ?? 'cast player failed', 'decode', 'cast_page_error');
     }
   }
 
@@ -1728,6 +1739,7 @@
 
   /** `message`, folded into one of den-edge's allowlisted cast-failure classes — never the message itself. */
   function castFailReasonOf(message: string): CastFailReason {
+    if (message === 'Invalid media URL') return 'invalid_media';
     if (message.includes('nothing played')) return 'lan_unreachable';
     if (message.includes('could not load') || message.includes('could not continue'))
       return 'media_error';
@@ -1830,7 +1842,7 @@
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
-      } else if (!castOffered && !castMode) void broke(0, why, 'other');
+      } else if (!castOffered && !castMode) void broke(0, why, 'other', 'cast_page_silent');
     }, castPlayMs);
     return () => clearTimeout(wait);
   });
@@ -1886,11 +1898,13 @@
     code = video?.error?.code ?? 0,
     message = video?.error?.message ?? '',
     kind: 'decode' | 'format' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
+    source: FailSource = 'media_element',
   ) {
     if (!session || failure) return;
     // den-edge's own outcome report (`finish()`) names the last fatal error this visit saw, whichever session it
     // belonged to: a switch away from a bad copy is still something that went wrong once.
     lastFatal = { code: code || undefined, hls: hlsFatalFromMessage(message) };
+    lastFailSource = source;
     if (breaking?.session === session) {
       if (kind === 'decode') breaking.decode = true;
       if (kind !== 'other') breaking.refused = true;
@@ -2345,7 +2359,7 @@
     );
     if (sessionRoute !== undefined) {
       sendPlaybackOutcome({
-        engine: hls ? 'hls.js' : 'native',
+        engine: playedEngine ?? (hls ? 'hls.js' : 'native'),
         route: routeKind(sessionRoute),
         stallCount: stats?.stallCount ?? 0,
         stalledMs: Math.round(stats?.stalledMs ?? 0),
@@ -2360,6 +2374,10 @@
         subtitleLoadFailed: subtitleLoadFailedFlag,
         switchCount: switchCount || undefined,
         lastSwitchReason,
+        failSource: failure ? lastFailSource : undefined,
+        castFailReason: castFailed ? castFailReason : undefined,
+        delivery: session ? (session.external ? 'direct' : 'remux') : undefined,
+        lanOffered: session?.lanPlaylist !== undefined || undefined,
       });
     }
     if (castFunnel) {

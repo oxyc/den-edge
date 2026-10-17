@@ -420,6 +420,9 @@ enum Engine {
     #[serde(rename = "hls.js")]
     HlsJs,
     Progressive,
+    /// Played inside the hidden cast-page frame (a public-address session), not the page's own video.
+    #[serde(rename = "cast_page")]
+    CastPage,
 }
 
 impl Engine {
@@ -428,6 +431,47 @@ impl Engine {
             Engine::Native => "native",
             Engine::HlsJs => "hls.js",
             Engine::Progressive => "progressive",
+            Engine::CastPage => "cast_page",
+        }
+    }
+}
+
+/// What noticed the failure a visit ended on (`web/src/lib/diagnosticsReport.ts`'s `FailSource`).
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailSource {
+    MediaElement,
+    HlsFatal,
+    Stuck,
+    CastPageError,
+    CastPageSilent,
+}
+
+impl FailSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FailSource::MediaElement => "media_element",
+            FailSource::HlsFatal => "hls_fatal",
+            FailSource::Stuck => "stuck",
+            FailSource::CastPageError => "cast_page_error",
+            FailSource::CastPageSilent => "cast_page_silent",
+        }
+    }
+}
+
+/// Whether the session came from Remux or as a provider's own HLS (TorBox).
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Delivery {
+    Remux,
+    Direct,
+}
+
+impl Delivery {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Delivery::Remux => "remux",
+            Delivery::Direct => "direct",
         }
     }
 }
@@ -595,6 +639,11 @@ struct PlaybackOutcomeReport {
     switch_count: Option<u32>,
     /// The last of those switches' own reason; absent alongside `switch_count` when there was none.
     last_switch_reason: Option<SwitchReason>,
+    fail_source: Option<FailSource>,
+    cast_fail_reason: Option<CastFailReason>,
+    delivery: Option<Delivery>,
+    #[serde(default)]
+    lan_offered: bool,
 }
 
 impl PlaybackOutcomeReport {
@@ -631,6 +680,18 @@ impl PlaybackOutcomeReport {
         }
         if let Some(reason) = &self.last_switch_reason {
             parts.push(format!("switchReason:{}", reason.as_str()));
+        }
+        if let Some(source) = &self.fail_source {
+            parts.push(format!("failSource:{}", source.as_str()));
+        }
+        if let Some(reason) = &self.cast_fail_reason {
+            parts.push(format!("castFail:{}", reason.as_str()));
+        }
+        if let Some(delivery) = &self.delivery {
+            parts.push(format!("delivery:{}", delivery.as_str()));
+        }
+        if self.lan_offered {
+            parts.push("lanOffered:1".to_owned());
         }
         parts.join(",")
     }
@@ -695,6 +756,8 @@ enum CastFailReason {
     MediaError,
     LanUnreachable,
     SessionError,
+    /// The cast page refused the media URLs it was handed, before fetching anything.
+    InvalidMedia,
     Other,
 }
 
@@ -705,6 +768,7 @@ impl CastFailReason {
             CastFailReason::MediaError => "media_error",
             CastFailReason::LanUnreachable => "lan_unreachable",
             CastFailReason::SessionError => "session_error",
+            CastFailReason::InvalidMedia => "invalid_media",
             CastFailReason::Other => "other",
         }
     }
@@ -847,6 +911,30 @@ mod tests {
             report.tag(true),
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:finished,secondsPlayed:1200"
         );
+    }
+
+    /// The 2026-10-17 failure, as it should have read: a Hearth session played in the cast page, which refused its
+    /// load. Before, the same visit logged only `engine:native,route:public,end:error`.
+    #[test]
+    fn playback_outcome_names_the_cast_page_and_what_noticed_the_failure() {
+        let mut body = outcome();
+        body["engine"] = serde_json::json!("cast_page");
+        body["route"] = serde_json::json!("public");
+        body["endReason"] = serde_json::json!("error");
+        body["failSource"] = serde_json::json!("cast_page_error");
+        body["castFailReason"] = serde_json::json!("invalid_media");
+        body["delivery"] = serde_json::json!("remux");
+        body["lanOffered"] = serde_json::json!(true);
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        let tag = report.tag(false);
+        assert!(tag.starts_with("engine:cast_page,route:public,"), "{tag}");
+        assert!(
+            tag.ends_with("failSource:cast_page_error,castFail:invalid_media,delivery:remux,lanOffered:1"),
+            "{tag}"
+        );
+        let mut bad = outcome();
+        bad["failSource"] = serde_json::json!("anything");
+        assert!(serde_json::from_value::<PlaybackOutcomeReport>(bad).is_err());
     }
 
     #[test]

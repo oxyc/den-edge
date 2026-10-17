@@ -182,6 +182,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     if state.log_requests {
         let tags: Vec<(&str, &str)> = [
             ("err", resp.extensions().get::<ErrorCode>().map(|c| c.0.as_str())),
+            ("why", resp.extensions().get::<Why>().map(|w| w.0)),
             ("scope", resp.extensions().get::<ListenerScope>().map(|s| s.0)),
             ("tmdb", resp.headers().get("x-den-tmdb").and_then(|v| v.to_str().ok())),
             ("file", resp.extensions().get::<crate::web::Served>().map(|s| s.0)),
@@ -385,6 +386,11 @@ impl Drop for Admitted {
 /// never leaves this server.
 #[derive(Clone)]
 pub struct ErrorCode(pub String);
+
+/// Which check produced an error answer whose code alone is shared by several (`bad_request`), for the request log
+/// as `why=`. A fixed label, never anything from the request.
+#[derive(Clone, Copy)]
+pub struct Why(pub &'static str);
 
 /// The media listener grant a public remux session asked for (`browser`, `hint`, `wide:cast`, `wide:ipv6`), carried on
 /// the response for the request log like `ErrorCode`.
