@@ -22,6 +22,7 @@ deadline = time.monotonic() + args.duration
 lock = threading.Lock()
 latencies = []
 statuses = collections.Counter()
+refusal_codes = collections.Counter()
 requests = payload_bytes = errors = 0
 
 
@@ -56,10 +57,17 @@ def writer(number):
                 if not isinstance(applied, list) or len(applied) != 1:
                     raise ValueError("write response has no single applied row")
                 base = int(applied[0]["seq"])
+            elif status >= 400:
+                decoded = json.loads(payload)
+                code = decoded.get("error")
+                if not isinstance(code, str):
+                    raise ValueError("write refusal has no error code")
             with lock:
                 requests += 1
                 payload_bytes += len(payload)
                 statuses[status] += 1
+                if status >= 400:
+                    refusal_codes[f"{status}:{code}"] += 1
                 latencies.append((time.monotonic() - started) * 1000)
         except (OSError, ValueError, json.JSONDecodeError):
             with lock:
@@ -97,7 +105,7 @@ print(
             "statuses": {str(status): count for status, count in statuses.items()},
             "errors": errors,
             "error_outcomes": {},
-            "refusal_codes": {},
+            "refusal_codes": dict(refusal_codes),
             "mode": "durable-writes",
             "concurrency": args.concurrency,
             "label": args.label,

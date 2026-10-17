@@ -28,6 +28,8 @@ pub struct Metrics {
     library_writes: Mutex<(u64, u64)>,
     /// Library batches answered `429 rate_limited` by the per-library write budget: a client looping on one library.
     library_write_throttled: AtomicU64,
+    /// Cold legacy replays answered `503 library_busy` because active replays held the bounded aggregate cache.
+    library_replay_busy: AtomicU64,
     /// Libraries started under `NEW_LIBRARIES=visitors`, by the tier they got (`visitor`, `member`) and what came
     /// of it (`created`, or the limit that refused it: `rate_limited`, `address_day`, `day_cap`).
     library_creations: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
@@ -588,6 +590,10 @@ impl Metrics {
         self.library_write_throttled.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_library_replay_busy(&self) {
+        self.library_replay_busy.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_library_creation(&self, tier: &'static str, outcome: &'static str) {
         *lock(&self.library_creations).entry((tier, outcome)).or_default() += 1;
     }
@@ -857,6 +863,12 @@ impl Metrics {
              den_edge_library_write_throttled_total {}\n",
             self.library_write_throttled.load(Ordering::Relaxed)
         ));
+        out.push_str(&format!(
+            "# HELP den_edge_library_replay_busy_total Cold legacy replays refused by bounded aggregate cache pressure.\n\
+             # TYPE den_edge_library_replay_busy_total counter\n\
+             den_edge_library_replay_busy_total {}\n",
+            self.library_replay_busy.load(Ordering::Relaxed)
+        ));
         out.push_str(
             "# HELP den_edge_library_creations_total Libraries started under NEW_LIBRARIES=visitors, by tier and outcome.\n\
              # TYPE den_edge_library_creations_total counter\n",
@@ -989,6 +1001,7 @@ mod tests {
             r#"den_edge_tmdb_prepared_total{result="transient_built"} 0"#,
             r#"den_edge_title_metadata_observation_admission_total{result="busy"} 0"#,
             r#"den_edge_title_metadata_observation_completion_total{result="stored"} 0"#,
+            "den_edge_library_replay_busy_total 0",
         ] {
             assert!(rendered.contains(row), "missing {row}");
         }

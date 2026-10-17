@@ -71,10 +71,11 @@ wedges. Throughput cases model many independent callers by rotating
 dedicated, trusted benchmark bridge. The slow-reader overload also rotates
 identities so it isolates shared concurrency admission rather than the separate
 per-address rate throttle. It and the two media components competing for the shared
-budget in the mixed soak are the only cases allowed stable overload statuses:
-HTTP 503 (`media_busy`/`server_busy`). They must
-still serve at least one HTTP 200. Control/cache/library/relay components in
-that same mixed saturation case remain strictly 200-only.
+budget in the mixed soak may return HTTP 503 (`media_busy`/`server_busy`). Concurrent first writes may also
+briefly return `503 library_busy` while cold legacy replays hold the bounded aggregate cache; the writer retries
+the same base. Every overloaded component must still serve at least one HTTP 200. Control, cache, library-read and
+relay components in that same mixed saturation case remain strictly 200-only, and `413 library_full` is never an
+accepted concurrency outcome.
 Cancellation cases require the driver's explicit status 0; every other case
 requires only its documented 200 or 304. Refusals cannot pass as throughput.
 

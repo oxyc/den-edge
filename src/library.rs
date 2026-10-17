@@ -87,6 +87,9 @@ pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 /// Libraries an address may start a minute. A household starts one per TV and another when it moves to a new key;
 /// every one is new storage, which anyone may ask for while `NEW_LIBRARIES=open`.
 const NEW_PER_WINDOW: u32 = 5;
+/// A cold legacy replay reserves its full per-library budget. If other active replays temporarily hold the
+/// aggregate cache budget, a client can try again after one second; the cache itself remains strictly bounded.
+const REPLAY_BUSY_RETRY_MS: u64 = 1_000;
 /// Batches one library may send in a burst. Clients send a bulk write as sequential 200-row batches with no pause
 /// (`chunks` in web/src/lib/log.ts): a split copies ~6k rows in ~30, a first upload or restore of a library at its
 /// 50,000-row ceiling in 250. The burst holds that whole ceiling, so no legitimate bulk write is ever refused.
@@ -168,8 +171,33 @@ fn full() -> io::Error {
     io::Error::new(io::ErrorKind::FileTooLarge, "library exceeds its memory budget")
 }
 
+#[derive(Debug)]
+struct ReplayBusy;
+
+impl std::fmt::Display for ReplayBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("library replay cache is temporarily busy")
+    }
+}
+
+impl std::error::Error for ReplayBusy {}
+
+fn replay_busy() -> io::Error {
+    io::Error::new(io::ErrorKind::WouldBlock, ReplayBusy)
+}
+
+fn is_replay_busy(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|source| source.downcast_ref::<ReplayBusy>().is_some())
+}
+
 fn read_error(e: io::Error) -> Response {
-    if e.kind() == io::ErrorKind::FileTooLarge {
+    if is_replay_busy(&e) {
+        crate::handler::retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &error("library_busy"),
+            REPLAY_BUSY_RETRY_MS,
+        )
+    } else if e.kind() == io::ErrorKind::FileTooLarge {
         json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"))
     } else {
         internal("library read", e)
@@ -373,9 +401,9 @@ impl Libraries {
                 .filter(|(key, candidate)| key.as_str() != id && Arc::strong_count(candidate) == 1)
                 .min_by_key(|(_, candidate)| candidate.last_used.load(Ordering::Relaxed))
                 .map(|(key, _)| key.clone())
-                .ok_or_else(full)?;
+                .ok_or_else(replay_busy)?;
             let candidate = registry.slots.remove(&candidate).expect("the eviction candidate is registered");
-            let mut library = candidate.library.try_lock().map_err(|_| full())?;
+            let mut library = candidate.library.try_lock().map_err(|_| replay_busy())?;
             if let Some(library) = library.take() {
                 registry.bytes = registry.bytes.saturating_sub(library.bytes);
                 registry.loaded -= 1;
@@ -2310,7 +2338,18 @@ async fn load(
     // Charge the worst-case library before replay starts. Distinct cold libraries may replay concurrently, but
     // their temporary row maps still fit the same aggregate cap; the reservation shrinks to the exact charge.
     let reserved = state.library_limits.library_bytes;
-    let mut reservation = state.libraries.reserve(id, slot, 0, reserved, state.library_limits)?;
+    let mut reservation = match state.libraries.reserve(id, slot, 0, reserved, state.library_limits) {
+        Ok(reservation) => reservation,
+        Err(reason) if is_replay_busy(&reason) => {
+            state.metrics.record_library_replay_busy();
+            eprintln!(
+                "library replay busy: library={} retry_after_ms={REPLAY_BUSY_RETRY_MS}",
+                &id[..id.len().min(8)]
+            );
+            return Err(reason);
+        }
+        Err(reason) => return Err(reason),
+    };
     let replayed = replay(state, id, file).await;
     match replayed {
         Ok(Some(library)) => {
@@ -2674,6 +2713,38 @@ mod tests {
         }
         assert_eq!(h.state.libraries.cached_bytes().await, before);
         assert_eq!(h.state.libraries.cached_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn aggregate_replay_pressure_is_retryable_without_raising_the_cache_cap() {
+        let root = Harness::new();
+        write_legacy(&root, &[(1, K1, "kept")]);
+        let h = bounded(&root, 1_024, 2_048);
+        let first = h.state.libraries.slot("1111111111111111", h.state.now());
+        let second = h.state.libraries.slot("2222222222222222", h.state.now());
+        let first_reservation =
+            h.state.libraries.reserve("1111111111111111", &first, 0, 1_024, h.state.library_limits).unwrap();
+        let _second_reservation =
+            h.state.libraries.reserve("2222222222222222", &second, 0, 1_024, h.state.library_limits).unwrap();
+
+        let refused =
+            h.send("GET", &format!("/lib/{LIB}/changes"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.headers()[axum::http::header::RETRY_AFTER], "1");
+        assert_eq!(refused.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+        assert_eq!(body_json(refused).await, json!({"error":"library_busy"}));
+        assert!(
+            h.state.metrics.render().contains("den_edge_library_replay_busy_total 1"),
+            "the transient refusal is observable"
+        );
+        assert_eq!(h.state.libraries.cached_bytes().await, 2_048, "the cache cap was not exceeded");
+
+        drop(first_reservation);
+        assert_eq!(
+            changes(&h, TOKEN, "").await.0,
+            StatusCode::OK,
+            "the same request succeeds after pressure clears"
+        );
     }
 
     /// The store's generation survives a restart; a store that comes back without it — restored from a backup,
