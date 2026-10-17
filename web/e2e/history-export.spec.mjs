@@ -1,7 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork, routeTmdb } from './network.mjs';
+import { guardNetwork, routeHostGrantList, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
+
+const HOUSEHOLD = '50724b489a92805f23be6bba897393c7';
+const MEMBER = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
 
 test('Settings downloads the watch history as CSV and JSON, built in the browser', async () => {
   const browser = await chromium.launch({
@@ -10,6 +13,10 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
   try {
     const page = await browser.newPage({ viewport: { width: 820, height: 900 } });
     await guardNetwork(page);
+    const grantReads = await routeHostGrantList(page, {
+      libraryId: HOUSEHOLD,
+      memberToken: MEMBER,
+    });
     const pageOwned = [];
     await page.addInitScript(() => {
       const pageFetch = window.fetch.bind(window);
@@ -77,6 +84,7 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
       expect.objectContaining({ type: 'movie', tmdbId: 603, status: 'watchlist', plays: [] }),
     ]);
     expect(pageOwned, 'provider requests must stay inside the content Worker').toEqual([]);
+    expect(grantReads).toEqual([`${E2E_ORIGIN}/lib/${HOUSEHOLD}/grants`]);
   } finally {
     await browser.close();
   }
