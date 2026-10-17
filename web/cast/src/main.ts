@@ -9,7 +9,7 @@ import {
   watchPlayback,
   type Watcher,
 } from '../../src/lib/playbackStats';
-import { lanReachable } from './lan';
+import { lanReachable } from '../../src/lib/localNetwork';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import {

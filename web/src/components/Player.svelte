@@ -109,7 +109,7 @@
   } from '../lib/skipdb';
   import { shouldWarmNext } from '../lib/binge';
   import { titleAllowed } from '../lib/playGuard';
-  import { privateLanRemuxPlaylist } from '../lib/localNetwork';
+  import { lanReachable, privateLanRemuxPlaylist } from '../lib/localNetwork';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import {
@@ -324,6 +324,8 @@
   let directCastOrigin: string | undefined;
   /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
   let castOffered = false;
+  /** Whether this page reaches den-remux's home-network address (`lanBase`): asked once per address (`homeHere`). */
+  let lanProbe: { base: string; reachable: Promise<boolean>; answer?: boolean } | undefined;
   let publicMaxBitrate: number | undefined;
   /** The `maxBitrate` the playing session was asked with. */
   let askedMaxBitrate: number | undefined;
@@ -753,6 +755,25 @@
     // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled.
     if ('failure' in result && result.failure === 'legacy')
       result = await startSession(request, undefined, on, undefined, attempt.signal);
+    const lanHere = !('failure' in result) && !castOffered && !castMode && (await homeHere(result));
+    if (lanHere && !('failure' in result)) {
+      // At home this page plays the home-network address itself rather than handing the session to the cast page:
+      // a browser may keep that cross-origin frame off the local network (Brave does), which then plays from the
+      // public address through the router. The session's controls are Remux's own there, as the cast page's are on
+      // the public address; the relay passes none of them. The cast page stays for casting, and for a page that
+      // can't reach the home network.
+      const {
+        castOrigin: _castOrigin,
+        publicBase: _publicBase,
+        speed: _speed,
+        control: _control,
+        ...here
+      } = result;
+      result = { ...here, playlist: result.lanPlaylist! };
+      // No home upload sits between this page and den-remux here: a limit remembered from away doesn't apply.
+      rememberLink(route, undefined);
+      publicMaxBitrate = undefined;
+    }
     if (startingSession === attempt) startingSession = undefined;
     // Another start (a retry and the key form, say) may have got there first.
     if (attempt.signal.aborted || ended || session !== (replacing ?? null)) {
@@ -850,6 +871,12 @@
     session = result;
     directAttempt = result.external ? (delivery === 'ordinary' ? 'initial' : 'refreshed') : null;
     sessionRoute = on;
+    // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
+    // page's `den-lan` has it.
+    if (lanHere && maxBitrate !== undefined && extra.maxBitrate === undefined) {
+      restart(releaseAfterMeasure(chosenRelease));
+      return true;
+    }
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
     // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand.
@@ -1555,6 +1582,12 @@
     const frame = castFrame?.contentWindow;
     if (!current?.castOrigin || !frame) return;
     playedEngine = 'cast_page';
+    // Played here only because this page could not reach the home network: the cast page, in the same browser,
+    // can't either, so it is not sent there to fail. A receiver is on that network, so a cast still offers it.
+    const lanUrl =
+      !castMode && !castOffered && lanProbe?.answer === false && lanProbe.base === current.lanBase
+        ? undefined
+        : current.lanPlaylist;
     const poster = title.posterPath
       ? `https://image.tmdb.org/t/p/w500${title.posterPath}`
       : undefined;
@@ -1567,7 +1600,7 @@
           ...(current.external
             ? {}
             : {
-                lanUrl: current.lanPlaylist,
+                lanUrl,
                 speed: current.speed,
                 measure: publicMaxBitrate === undefined,
               }),
@@ -1760,7 +1793,8 @@
   // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
   // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.castOrigin && route !== RELAY) reachCast('offered');
+    if (castable && session && !session.castOrigin && (route !== RELAY || playsHome(session)))
+      reachCast('offered');
   });
 
   /**
@@ -1819,6 +1853,26 @@
     castMode = false;
     if (session) restart({ filename: session.release.filename });
   }
+
+  /**
+   * Whether this page plays `current` from its home-network address itself (`begin`): a Remux session meant for the
+   * cast page, whose home-network address answers this page. Asked once per address, as the cast page asks once.
+   */
+  function homeHere(current: Session): Promise<boolean> {
+    const base = current.lanBase;
+    if (current.external || !current.castOrigin || !base || !current.lanPlaylist)
+      return Promise.resolve(false);
+    if (lanProbe?.base !== base) {
+      const probe: NonNullable<typeof lanProbe> = { base, reachable: lanReachable(base) };
+      void probe.reachable.then((answer) => (probe.answer = answer));
+      lanProbe = probe;
+    }
+    return lanProbe.reachable;
+  }
+
+  /** A session this page plays from the home-network address, though it came for the cast page (`begin`). */
+  const playsHome = (current: Session) =>
+    current.lanPlaylist !== undefined && current.playlist === current.lanPlaylist;
 
   // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
   $effect(() => {
@@ -2486,7 +2540,7 @@
         >{session.external ? 'TorBox' : 'Den Remux'}</span
       >
     {/if}
-    {#if castable && session && !session.castOrigin && route !== RELAY}
+    {#if castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
       <Button
         variant="player"
         size="icon"
