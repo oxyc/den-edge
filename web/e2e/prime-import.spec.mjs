@@ -24,6 +24,8 @@ test('Prime import requires both schemas, previews locally, and writes the playe
       };
     });
     await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+    // Settings' Sharing section lists the household's invites whenever it gets round to it; none here.
+    await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
     await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
     await page.route('**/config', (route) =>
       route.fulfill({ json: { simklClientId: 'client-1' } }),

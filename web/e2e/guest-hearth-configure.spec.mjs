@@ -32,6 +32,8 @@ test('guest Configure uses a native new-tab POST and follows the scoped redirect
   const order = [];
 
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  // Settings' Sharing section lists the household's invites whenever it gets round to it; none here.
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
   await page.route('**/version', (route) =>
     route.fulfill({ json: { version: 'guest-configure' } }),
   );
