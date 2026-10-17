@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { lanReachable } from '../../cast/src/lan';
+import { lanReachable } from './localNetwork';
 
 describe('the home-network probe', () => {
   it('is reachable when the home-network address answers at all, even opaquely', async () => {

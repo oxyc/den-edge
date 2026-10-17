@@ -82,8 +82,9 @@ const DIRECT_MEDIA_CONNECT: &str = "https://*.481920.xyz:8449";
 /// `media-src` also takes any `https:` source. At home a trailer plays from the home-network listener
 /// (`lanBase`, oxyc/den#197), whose name is the household's own: naming it would publish it to every visitor, and
 /// naming it only to a browser at home would miss one seen over IPv6 and one whose kept shell came from away. A
-/// media load cannot run script, so the widening is negligible. `connect-src` stays bounded: the page never
-/// fetches from the home-network listener (`reel.ts` offers it only to a bare `<video>`).
+/// media load cannot run script, so the widening is negligible. `connect-src` stays bounded: the page
+/// fetches from the home-network listener (its probe, and a Remux session it plays there) only through
+/// the direct-media zone and port (`DIRECT_MEDIA_CONNECT`); a trailer from it goes to a bare `<video>`.
 fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     let cast = cast_origin.map_or(String::new(), |origin| format!(" {origin}"));

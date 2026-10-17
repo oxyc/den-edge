@@ -28,6 +28,9 @@ const GUEST = 'dceafce0';
 const hls = new URL('./media/hls/', import.meta.url);
 const web = fileURLToPath(new URL('..', import.meta.url));
 const cors = { 'access-control-allow-origin': '*' };
+/** A desktop Chrome, where the player offers Cast. */
+const CHROME_MAC =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 
 /** Every media request the server answered, by the host it was asked as. */
 const served = [];
@@ -128,9 +131,20 @@ const torboxAnswer = {
 
 /**
  * The player with `answer` from Hearth's playback route at `playback`. `home`: whether the home-network listener
- * answers, as on home Wi-Fi; away, it is a name nothing answers.
+ * answers, as on home Wi-Fi; away, it is a name nothing answers. `silentLan`: at home, but the home-network listener
+ * never answers this browser, as when it may not reach the local network. `lanAsked` is the origin of every frame
+ * that asked the home-network listener for anything. `linkLimit`: the `maxBitrate` this browser remembers for the
+ * relay's link, as from an earlier play away.
  */
-async function open({ answer, home, playback = '/den/config/playback', scout }) {
+async function open({
+  answer,
+  home,
+  silentLan,
+  playback = '/den/config/playback',
+  scout,
+  userAgent,
+  linkLimit,
+}) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: [
@@ -143,11 +157,20 @@ async function open({ answer, home, playback = '/den/config/playback', scout }) 
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     ignoreHTTPSErrors: true,
+    ...(userAgent ? { userAgent } : {}),
   });
   const page = await context.newPage();
+  if (linkLimit)
+    await page.addInitScript((maxBitrate) => {
+      if (window === window.top)
+        localStorage.setItem(
+          `den.remux.link:${location.origin}/remux`,
+          JSON.stringify({ at: Date.now(), maxBitrate }),
+        );
+    }, linkLimit);
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
-  const asked = { playback: [], releases: [] };
+  const asked = { playback: [], releases: [], lanAsked: [] };
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
   await page.route(`${ORIGIN}${playback}`, (r) => {
@@ -164,9 +187,12 @@ async function open({ answer, home, playback = '/den/config/playback', scout }) 
     r.fulfill({ status: 404, json: { error: 'not_found' } }),
   );
   await page.route(`${ORIGIN}/playback/**`, (r) => r.fulfill({ status: 204 }));
-  for (const host of [PUBLIC, CDN, ...(home ? [LAN] : [])])
-    await context.route(`${host}/**`, (r) => r.continue());
-  if (!home) await context.route(`${LAN}/**`, (r) => r.abort('addressunreachable'));
+  for (const host of [PUBLIC, CDN]) await context.route(`${host}/**`, (r) => r.continue());
+  await context.route(`${LAN}/**`, (r) => {
+    asked.lanAsked.push(new URL(r.request().frame().url()).origin);
+    if (silentLan) return;
+    return home ? r.continue() : r.abort('addressunreachable');
+  });
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
     const file = path === '/' ? 'index.html' : path.slice(1);
@@ -200,12 +226,54 @@ const segmentHosts = () =>
 /** The player's stamp says which path is playing. */
 const stamped = (page, source) => expect(page.getByTestId('playback-source')).toHaveText(source);
 
-test('owner at home plays from the home-network listener', async () => {
-  const { browser, page, asked } = await open({ answer: remuxAnswer, home: true });
+const castFrame = (page) => page.locator('iframe[title="Den Cast player"]');
+
+test('owner at home plays from the home-network listener in the page itself', async () => {
+  const { browser, page, asked } = await open({
+    answer: remuxAnswer,
+    home: true,
+    userAgent: CHROME_MAC,
+  });
+  try {
+    await playingPast(pageVideo(page), 3);
+    await expect(castFrame(page)).toHaveCount(0);
+    expect(asked.playback).toHaveLength(1);
+    expect(segmentHosts()).toEqual(new Set(['lan.test']));
+    expect(new Set(asked.lanAsked)).toEqual(new Set([ORIGIN]));
+    await stamped(page, 'Den Remux');
+    // Casting is still offered: the page's own button, as for any session it plays.
+    await expect(page.getByRole('button', { name: 'Cast to a TV' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('owner at home asks again without a link limit remembered from away', async () => {
+  const { browser, page, asked } = await open({
+    answer: remuxAnswer,
+    home: true,
+    linkLimit: 4_000_000,
+  });
+  try {
+    await playingPast(pageVideo(page), 3);
+    expect(asked.playback.map(({ maxBitrate }) => maxBitrate ?? 'none')).toEqual([
+      4_000_000,
+      'none',
+    ]);
+    expect(segmentHosts()).toEqual(new Set(['lan.test']));
+  } finally {
+    await browser.close();
+  }
+});
+
+test('owner at home whose page can’t reach the home network plays from the public listener', async () => {
+  const { browser, page, asked } = await open({ answer: remuxAnswer, home: true, silentLan: true });
   try {
     await playingPast(castVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
-    expect(segmentHosts()).toEqual(new Set(['lan.test']));
+    expect(segmentHosts()).toEqual(new Set(['media.test']));
+    // The page asked once; the cast page, which can't reach it either, is not sent there to fail.
+    expect(asked.lanAsked).toEqual([ORIGIN]);
     await stamped(page, 'Den Remux');
   } finally {
     await browser.close();
@@ -230,6 +298,7 @@ test('owner away plays from the public listener', async () => {
     await playingPast(castVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['media.test']));
+    expect(asked.lanAsked).toEqual([ORIGIN]);
     await stamped(page, 'Den Remux');
   } finally {
     await browser.close();
