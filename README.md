@@ -221,7 +221,8 @@ npm run rehearse -- --small                               # the same with a ~30-
 REHEARSE_DATA=/path/to/edge-data REHEARSE_KEY_FILE=/path/to/key npm run rehearse   # a copy of real data
 ```
 
-`REHEARSE_DATA` is a copied `DATA_DIR` (`lib/` and `library-v3-index.json`); `REHEARSE_KEY_FILE` holds the household's
+`REHEARSE_DATA` is a copied `DATA_DIR` (`lib/` and `library-v3-index.redb`; an older
+`library-v3-index.json` is imported automatically); `REHEARSE_KEY_FILE` holds the household's
 base64 library key. Both are read only; the data is copied before anything runs, and neither is ever committed, so keep
 real copies outside the repo. Options (env, or `--flag value`): `REHEARSE_PIN` (default `1234`; the Owner PIN if the
 household has one), `REHEARSE_SETTLE_SECONDS` (how long each reopen is watched, default 25), `REHEARSE_MAX_BATCHES`
