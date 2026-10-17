@@ -74,6 +74,13 @@
             'https://edge.example/atlas/atlascfg456/manifest.json',
           ])
             await model.installPlugin(manifest, `seed-plugin-${manifest}`);
+        // A migrated household still listing its old Reel install, whose plaintext config Reel now refuses.
+        if (params.has('legacy-reel'))
+          for (const manifest of [
+            `${location.origin}/den/hearthcfg789/manifest.json`,
+            `${location.origin}/reel/plaintextcfg/manifest.json`,
+          ])
+            await model.installPlugin(manifest, `seed-plugin-${manifest}`);
         await model.heartbeatDevice('Paired browser', 'seed-device');
         for (const id of [1002, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012])
           await model.addToWatchlist({ type: 'movie', id }, `seed-watchlist-${id}`);
