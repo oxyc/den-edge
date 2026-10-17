@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Availability, KEPT_MS, RETRY_MS } from './availability.svelte';
+import { Availability, KEPT_MS, RETRY_MS, UNAVAILABLE_MS } from './availability.svelte';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
@@ -111,6 +111,43 @@ describe('Availability', () => {
       1: ['available', now],
       2: ['available', now],
     });
+  });
+
+  it('asks again about "nothing to play" once scout itself would have checked again, and never about "available"', async () => {
+    let now = 1_000_000;
+    const { calls, fetchImpl } = fake(() => ({
+      tt0000001: 'unavailable',
+      tt0000002: 'available',
+    }));
+    const availability = new Availability(undefined, () => now);
+    availability.connect(SCOUT, content, fetchImpl);
+    const ask = async () => {
+      for (const id of [1, 2]) availability.want({ type: 'movie', id });
+      await vi.advanceTimersByTimeAsync(100);
+    };
+    const asked = () =>
+      calls.filter((c) => c.url.endsWith('/availability')).map((c) => JSON.parse(c.body!).ids);
+    await ask();
+    now += UNAVAILABLE_MS - 1;
+    await ask();
+    expect(asked(), 'both answers still stand').toEqual([['tt0000001', 'tt0000002']]);
+    now += 1;
+    await ask();
+    expect(asked()).toEqual([['tt0000001', 'tt0000002'], ['tt0000001']]);
+  });
+
+  it('keeps what scout answered while a new session has no scout yet', async () => {
+    const { calls, fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
+    availability.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+    availability.connect(null, content);
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
+    availability.connect(SCOUT, content, fetchImpl);
+    availability.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls.filter((c) => c.url.endsWith('/availability'))).toHaveLength(1);
   });
 
   it('asks the content service nothing about a movie that already knows its IMDb id', async () => {

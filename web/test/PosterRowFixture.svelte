@@ -6,6 +6,7 @@
   import { setContentServiceContext } from '../src/lib/contentContext';
   import type { Title } from '../src/lib/library';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { SessionServices } from '../src/lib/sessionServices.svelte';
   import '../src/app.css';
 
   const titles: Title[] = Array.from({ length: 10 }, (_, index) => ({
@@ -32,8 +33,21 @@
 
   onMount(() => {
     if (!new URLSearchParams(location.search).has('availability')) return;
-    availability.connect({ install: '/scout', base: '/scout' }, content, fetch);
-    return () => availability.connect(null, content);
+    const scout = { install: '/scout', base: '/scout' };
+    // Bound: Availability calls it as `scout.fetch(…)`, and the browser's own fetch refuses any `this` but window.
+    const fetchImpl: typeof fetch = (input, init) => fetch(input, init);
+    availability.connect(scout, content, fetchImpl);
+    // Another session opening, as a profile page does: its first configure runs before its discovery has found the
+    // household's scout again, which then reconnects the same one.
+    const fixtureWindow = window as typeof window & { fixtureOpenSession?: () => void };
+    fixtureWindow.fixtureOpenSession = () => {
+      new SessionServices(null, content, async () => ({})).configure(undefined);
+      availability.connect(scout, content, fetchImpl);
+    };
+    return () => {
+      delete fixtureWindow.fixtureOpenSession;
+      availability.connect(null, content);
+    };
   });
 </script>
 
