@@ -103,10 +103,13 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
     let migration_path = profile_migration_path(&path);
+    let reset_path = profile_reset_path(&path);
     let den_disabled = (den_playback_path(&path)
         || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
         && !state.den_playback_enabled;
-    let globally_disabled = migration_path && !state.profile_migration_enabled || den_disabled;
+    let globally_disabled = migration_path && !state.profile_migration_enabled
+        || reset_path && !state.profile_reset_enabled
+        || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
     let route = if globally_disabled { "other" } else { route_label(&path) };
@@ -121,24 +124,24 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     // Per-household `off` is as absent as the global emergency kill. Resolve it inside admission, because reading
     // opaque protocol metadata may open a library database; an unauthenticated request must not bypass resource
     // bounds. This still precedes method, body, preflight, wire and authentication distinctions.
-    let migration_disabled = globally_disabled
-        || migration_path
+    let profile_operation_disabled = globally_disabled
+        || (migration_path || reset_path)
             && admission.is_ok()
-            && !crate::library::profile_migration_available(&state, &path).await;
-    let route = if migration_disabled { "other" } else { route };
+            && !crate::library::profile_operation_available(&state, &path).await;
+    let route = if profile_operation_disabled { "other" } else { route };
     let mut resp = match admission.as_ref() {
         Err(()) => busy(),
         Ok(slot) => match &origin {
             Some(_)
                 if method == Method::OPTIONS
-                    && !migration_disabled
+                    && !profile_operation_disabled
                     && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
             {
                 preflight()
             }
             _ => {
                 req.extensions_mut().insert(slot.clone());
-                dispatch(&state, req, route, &rid, migration_disabled).await
+                dispatch(&state, req, route, &rid, profile_operation_disabled).await
             }
         },
     };
@@ -502,11 +505,11 @@ async fn dispatch(
     req: Request,
     route: &'static str,
     rid: &str,
-    migration_disabled: bool,
+    profile_operation_disabled: bool,
 ) -> Response {
     // This precedes method validation and declared/body length checks so every shape of the dormant surface is
     // uniformly absent. `handle` also labels it as `other` and suppresses preflight before reaching here.
-    if migration_disabled {
+    if profile_operation_disabled {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
     if let Some(allowed) = allowed_methods(route) {
@@ -686,10 +689,17 @@ fn profile_migration_path(path: &str) -> bool {
     let Some((_, action)) = rest.split_once('/') else {
         return false;
     };
-    action == "profile-migration"
-        || action.starts_with("profile-migration/")
-        || action == "exclusive-operation"
-        || action.starts_with("exclusive-operation/")
+    action == "profile-migration" || action.starts_with("profile-migration/")
+}
+
+fn profile_reset_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/lib/") else {
+        return false;
+    };
+    let Some((_, action)) = rest.split_once('/') else {
+        return false;
+    };
+    action == "exclusive-operation" || action.starts_with("exclusive-operation/")
 }
 
 /// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind

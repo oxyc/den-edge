@@ -175,7 +175,7 @@ fn members_json() -> Value {
 }
 
 fn enabled(dir: std::path::PathBuf) -> Harness {
-    Harness::in_dir_with(dir, |state| state.profile_migration_enabled = true)
+    Harness::in_dir_with(dir, |state| state.profile_reset_enabled = true)
 }
 
 fn new_harness() -> Harness {
@@ -417,7 +417,7 @@ async fn assert_all_refuse_writes(h: &Harness) {
 // Dormancy, gates and the generic primitive
 
 #[tokio::test]
-async fn the_surface_does_not_exist_while_profile_migration_is_off() {
+async fn the_surface_does_not_exist_while_profile_reset_is_off() {
     let h = Harness::new();
     build_old_set(&h).await;
     let (status, body) =
@@ -429,6 +429,18 @@ async fn the_surface_does_not_exist_while_profile_migration_is_off() {
     assert_eq!((status, body), (StatusCode::OK, json!({ "deleted": true })));
     let (status, body) = changes(&h, OWNER).await;
     assert_eq!((status, &body["error"]), (StatusCode::GONE, &json!("library_moved")));
+}
+
+#[tokio::test]
+async fn the_reset_surface_exists_while_profile_migration_is_off() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    assert!(!h.state.profile_migration_enabled);
+    let (status, body) =
+        call(&h, "GET", &format!("/lib/{HOUSEHOLD}/exclusive-operation/source"), HOUSEHOLD, "5", None, &[])
+            .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["source"].is_object(), "{body}");
 }
 
 #[tokio::test]
@@ -1397,6 +1409,29 @@ async fn crash_after_the_abort_before_any_member_or_successor_effect_converges_a
 }
 
 #[tokio::test]
+async fn a_pre_separation_sweep_hint_is_read_and_removed_from_the_migration_namespace() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    build_successors(&h).await;
+    assert_eq!(abort(&h, ATTEMPT).await.0, StatusCode::OK);
+
+    // Simulate the durable layout written before reset got its own namespace.
+    let key = hint_key(HOUSEHOLD);
+    h.state.store.delete_file(HINT_NS, &key, HINT_EXT).await.unwrap();
+    h.state.store.replace_file(LEGACY_HINT_NS, &key, HINT_EXT, HOUSEHOLD.as_bytes()).await.unwrap();
+    assert_eq!(std::fs::read_dir(h.state.store.namespace_dir(LEGACY_HINT_NS)).unwrap().count(), 1);
+
+    let restarted = restart(&h);
+    sweep_startup(Arc::clone(&restarted.state)).await;
+    assert_eq!(store_of(&restarted, HOUSEHOLD).exclusive_record(SWEEP).unwrap(), None);
+    assert_eq!(std::fs::read_dir(restarted.state.store.namespace_dir(LEGACY_HINT_NS)).unwrap().count(), 0);
+    for id in [NEW_HOUSEHOLD, NEW_OWNER, NEW_KID1, NEW_KID2] {
+        assert_moved(&changes(&restarted, id).await);
+    }
+}
+
+#[tokio::test]
 async fn crash_between_successor_deletions_finishes_the_rest_and_never_touches_a_live_successor() {
     let h = new_harness();
     build_old_set(&h).await;
@@ -1517,7 +1552,8 @@ async fn crash_after_the_proofless_rollback_keeps_it_final() {
 
 #[tokio::test]
 async fn a_key_reset_and_a_migration_lock_exclude_each_other_with_the_same_metadata_free_answer() {
-    let h = new_harness();
+    let mut h = new_harness();
+    Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
     build_old_set(&h).await;
     // A migration-style lock on the household blocks a key-reset acquisition, whatever the source.
     let protocol = store_of(&h, HOUSEHOLD).protocol().unwrap();
@@ -1822,7 +1858,7 @@ async fn under_members_only_a_holder_of_the_household_starts_its_successors() {
     build_old_set(&h).await;
     acquire_all(&h, ATTEMPT).await;
     let m = Harness::in_dir_with(h.dir.clone(), |state| {
-        state.profile_migration_enabled = true;
+        state.profile_reset_enabled = true;
         state.new_libraries = crate::library::NewLibraries::Members;
     });
     assert_eq!(start_library(&m, NEW_HOUSEHOLD, None).await, StatusCode::FORBIDDEN);

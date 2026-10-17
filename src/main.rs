@@ -125,6 +125,10 @@ pub struct AppState {
     /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
     /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
     pub profile_migration_enabled: bool,
+    /// Enables the authenticated compound profile key-reset routes and their write lock. During the rollout an
+    /// unset `PROFILE_RESET_ENABLED` inherits `PROFILE_MIGRATION_ENABLED`, so an older deployment configuration
+    /// cannot silently disable reset before it starts rendering the independent switch.
+    pub profile_reset_enabled: bool,
     /// Batches one library may send in a burst, and how many a minute it earns back (env `LIBRARY_WRITE_BURST`,
     /// `LIBRARY_WRITE_PER_MINUTE`). A per-minute of 0 turns the budget off.
     pub library_write_burst: u32,
@@ -364,6 +368,7 @@ impl AppState {
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
+            profile_reset_enabled: false,
             library_write_burst: library::WRITE_BURST,
             library_write_per_minute: library::WRITE_PER_MINUTE,
             visitor_libraries_per_address_daily: library::VISITOR_LIBRARIES_PER_ADDRESS_DAILY_MAX,
@@ -492,6 +497,7 @@ async fn main() {
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
     state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
+    state.profile_reset_enabled = env_flag("PROFILE_RESET_ENABLED", state.profile_migration_enabled);
     state.library_write_burst = env_number("LIBRARY_WRITE_BURST").unwrap_or(library::WRITE_BURST);
     state.library_write_per_minute =
         env_number("LIBRARY_WRITE_PER_MINUTE").unwrap_or(library::WRITE_PER_MINUTE);
