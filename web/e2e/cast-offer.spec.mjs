@@ -22,7 +22,8 @@ const TEST_CAST_PLAY_MS = 1_000;
 
 /**
  * The cast page, as far as the player can tell: `none` sees no receiver, `receiver` sees one but cannot play what is
- * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either).
+ * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either). Offered the choice
+ * (`den-choose`), the viewer here picks the receiver at once: a Cast session starts with nothing loaded.
  */
 const castPage = (mode, discoveryDelay = 0) => `<!doctype html><script>
   window.loads = [];
@@ -30,6 +31,8 @@ const castPage = (mode, discoveryDelay = 0) => `<!doctype html><script>
     const message = event.data || {};
     if (message.type === 'den-discover')
       setTimeout(() => parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin), ${discoveryDelay});
+    if (message.type === 'den-choose')
+      parent.postMessage({ type: 'den-cast-session', state: 'started', profile: 'google-tv-4k' }, event.origin);
     if (message.type !== 'den-load') return;
     window.loads.push(message.media);
     if (${mode === 'none'})

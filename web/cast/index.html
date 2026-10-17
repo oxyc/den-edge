@@ -6,6 +6,16 @@
     <title>Den Cast</title>
   </head>
   <body>
+    <!-- Shown only while the player outside offers casting (`den-choose`): the press that opens Chrome's device list
+         has to happen in this page, since a press in the player does not reach into this cross-origin frame. -->
+    <button id="choose" class="choose" type="button" hidden>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor">
+        <path
+          d="M1 18v3h3a3 3 0 0 0-3-3Zm0-4v2a5 5 0 0 1 5 5h2a7 7 0 0 0-7-7Zm0-4v2a9 9 0 0 1 9 9h2A11 11 0 0 0 1 10Zm20-7H3a2 2 0 0 0-2 2v3h2V5h18v14h-7v2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"
+        />
+      </svg>
+      <span>Choose your Chromecast</span>
+    </button>
     <main>
       <video controls playsinline x-webkit-airplay="allow"></video>
       <div class="overlay">
@@ -21,7 +31,7 @@
               <option value="gen3">Chromecast 3</option>
               <option value="ultra">Chromecast Ultra</option>
               <option value="google-tv-hd">Chromecast with Google TV (HD)</option>
-              <option value="google-tv-4k">Chromecast with Google TV (4K)</option>
+              <option value="google-tv-4k" selected>Chromecast with Google TV (4K)</option>
               <option value="streamer">Google TV Streamer</option>
             </select>
           </label>

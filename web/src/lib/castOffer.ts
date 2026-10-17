@@ -21,10 +21,11 @@ export const CAST_DISCOVERY_MS = 6_000;
 export const CAST_PLAY_MS = 45_000;
 
 /**
- * Where a press of Cast stands: `idle` before one and once a receiver was found, `looking` while the cast page looks
- * for a receiver (the video in the page plays on meanwhile), `none` when it found none in time.
+ * Where a press of Cast stands: `idle` before one and once a receiver is casting, `looking` while the cast page looks
+ * for a receiver, `choose` once it found one and shows its own "Choose your Chromecast" button, `none` when it found
+ * none in time. The video in the page plays on through all of them.
  */
-export type CastOffer = 'idle' | 'looking' | 'none';
+export type CastOffer = 'idle' | 'looking' | 'choose' | 'none';
 
 export type CastLook =
   /** The cast page's answer: whether the Cast SDK sees a receiver right now. */
@@ -32,18 +33,30 @@ export type CastLook =
   /** CAST_DISCOVERY_MS passed with no receiver seen. */
   | { kind: 'deadline' }
   /** There is no cast page to ask: casting is off on this box, or `/config` could not be read. */
-  | { kind: 'no-cast-page' };
+  | { kind: 'no-cast-page' }
+  /** The viewer picked a receiver in Chrome's device list, and a Cast session started in the cast page. */
+  | { kind: 'chosen' }
+  /** The viewer dismissed the offer without choosing. */
+  | { kind: 'dismissed' };
 
 /**
  * What a step of the look for a receiver comes to, and whether playback moves to the cast page now.
  *
- * Only a receiver seen moves anything. "No devices" is not final while looking: the Cast SDK starts out saying so
- * and changes its mind once discovery has run, so a no is only taken at the deadline.
+ * A receiver seen only offers the choice: Chrome's device list opens only from a press inside the cross-origin cast
+ * page (user activation does not pass from this page into it), so the cast page shows its own button for that. Only
+ * a Cast session actually started moves playback. "No devices" is not final while looking: the Cast SDK starts out
+ * saying so and changes its mind once discovery has run, so a no is only taken at the deadline.
  */
 export function castLook(offer: CastOffer, event: CastLook): { offer: CastOffer; move: boolean } {
+  if (offer === 'choose') {
+    if (event.kind === 'chosen') return { offer: 'idle', move: true };
+    if (event.kind === 'dismissed') return { offer: 'idle', move: false };
+    return { offer, move: false };
+  }
   if (offer !== 'looking') return { offer, move: false };
+  if (event.kind === 'chosen' || event.kind === 'dismissed') return { offer, move: false };
   if (event.kind === 'availability')
-    return event.available ? { offer: 'idle', move: true } : { offer, move: false };
+    return event.available ? { offer: 'choose', move: false } : { offer, move: false };
   return { offer: 'none', move: false };
 }
 

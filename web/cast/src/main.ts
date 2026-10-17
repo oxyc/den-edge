@@ -37,6 +37,11 @@ interface Media {
   terminal?: boolean;
   /** Externally managed media has no Den lifecycle endpoint; this URL is the only capability handed to Cast. */
   external?: boolean;
+  /**
+   * The player outside reached `lanUrl` itself. A receiver on that network fetches it as that page did; this frame's
+   * own check may be refused by the browser's Local Network Access for a cross-origin frame, so it is not asked.
+   */
+  lanProven?: boolean;
 }
 
 interface LoadMessage {
@@ -61,6 +66,7 @@ interface CastMedia {
 
 interface CastContext {
   setOptions(options: Record<string, unknown>): void;
+  requestSession(): Promise<unknown>;
   addEventListener(type: string, listener: (event: unknown) => void): void;
   getCurrentSession(): CastSession | null;
   getCastState(): string;
@@ -93,8 +99,8 @@ interface CastGlobals {
       AutoJoinPolicy: { PAGE_SCOPED: unknown };
       media: {
         DEFAULT_MEDIA_RECEIVER_APP_ID: string;
-        HlsSegmentFormat: { FMP4: unknown };
-        HlsVideoSegmentFormat: { FMP4: unknown };
+        HlsSegmentFormat: { FMP4: unknown; TS: unknown };
+        HlsVideoSegmentFormat: { FMP4: unknown; MPEG2_TS: unknown };
         MetadataType: { GENERIC: unknown };
         StreamType: { BUFFERED: unknown };
         GenericMediaMetadata: new () => {
@@ -131,6 +137,7 @@ const video = document.querySelector('video')!;
 const statusPill = document.querySelector<HTMLElement>('#status')!;
 const profile = document.querySelector<HTMLSelectElement>('#profile')!;
 const castOptions = document.querySelector<HTMLElement>('.cast-options')!;
+const choose = document.querySelector<HTMLButtonElement>('#choose')!;
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
 function setStatus(text: string): void {
@@ -432,8 +439,14 @@ async function loadCast(): Promise<void> {
   };
   const info = new chrome.media.MediaInfo(url, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
-  info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
-  info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.FMP4;
+  // den-remux serves fMP4 segments; TorBox's managed HLS serves MPEG-TS, which a receiver told FMP4 cannot parse.
+  if (media.external) {
+    info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.TS;
+    info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.MPEG2_TS;
+  } else {
+    info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
+    info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.FMP4;
+  }
   const metadata = new chrome.media.GenericMediaMetadata();
   metadata.title = media.title;
   metadata.subtitle = media.subtitle;
@@ -493,7 +506,11 @@ function continued(id: string): Promise<void> {
 async function open(message: LoadMessage): Promise<void> {
   // Google permits a secure Web Sender to hand an HTTP media URL to its receiver. Do not fetch that URL from this
   // HTTPS iframe: the parent already proved the local route and holds Chrome's Local Network Access permission.
-  if (lanHttpMedia(message.media.url) || lanHttpMedia(message.media.lanUrl ?? '')) {
+  if (
+    lanHttpMedia(message.media.url) ||
+    lanHttpMedia(message.media.lanUrl ?? '') ||
+    (message.media.mode === 'cast' && message.media.lanProven === true && message.media.lanUrl)
+  ) {
     onLan.add(message.id);
     if (current?.id === message.id) tell('den-lan');
   }
@@ -509,7 +526,9 @@ async function open(message: LoadMessage): Promise<void> {
   const measured = onLan.has(message.id) ? false : await measure(message.media, message.id);
   if (measured) await continued(message.id);
   if (current?.id !== message.id) return;
-  if (message.media.mode === 'cast') await loadCast();
+  // A receiver already chosen (the player's offer, `den-choose`) takes the load; asked for in browser mode, `loadCast`
+  // has the player ask again for what this receiver plays.
+  if (message.media.mode === 'cast' || castContext?.getCurrentSession()) await loadCast();
   else await loadLocal(message.media, playUrl(message.id, message.media));
   if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
 }
@@ -571,7 +590,16 @@ function initializeCast(): boolean {
     const state = (event as { sessionState?: string }).sessionState;
     // The receiver menu is for choosing what the connected Chromecast is, so it is there only while one is.
     castOptions.hidden = !(state === 'SESSION_STARTED' || state === 'SESSION_RESUMED');
-    if (state === 'SESSION_STARTED') {
+    if (state === 'SESSION_STARTED' && !current) {
+      // Chosen from the player's offer, with nothing loaded yet: the player asks for what this receiver plays and
+      // hands it here. Until then its own video plays on.
+      document.documentElement.classList.remove('choosing');
+      if (parentOrigin)
+        window.parent.postMessage(
+          { type: 'den-cast-session', state: 'started', profile: profile.value },
+          parentOrigin,
+        );
+    } else if (state === 'SESSION_STARTED') {
       void loadCast();
     } else if (state === 'SESSION_ENDED' && castStarted) {
       castStarted = false;
@@ -690,6 +718,23 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if ((event.data as { type?: string }).type !== 'den-discover') return;
   parentOrigin = event.origin;
   announceDevices();
+});
+
+/** The player offers casting: this page shows the one button that can open Chrome's device list. */
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if ((event.data as { type?: string }).type !== 'den-choose' || !castContext) return;
+  parentOrigin = event.origin;
+  document.documentElement.classList.add('choosing');
+  choose.hidden = false;
+  choose.focus();
+});
+
+choose.addEventListener('click', () => {
+  // Rejected when the viewer closes the list without choosing: the offer stays, for another press.
+  castContext?.requestSession().catch((error: unknown) => {
+    console.info('No Chromecast chosen:', error);
+  });
 });
 
 /** The player kept the measured session: play it. */

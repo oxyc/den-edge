@@ -108,6 +108,36 @@ google-cast-launcher,
   font-size: 0.75rem;
 }
 
+/* Choosing a receiver: the button is the whole page, sized by the player's frame. */
+.choose {
+  display: none;
+}
+
+html.choosing main {
+  display: none;
+}
+
+html.choosing .choose {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #f5b942;
+  border-radius: 999px;
+  background: #171717;
+  color: #f6f3ec;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+html.choosing .choose:focus-visible {
+  outline: 2px solid #f5b942;
+  outline-offset: -4px;
+}
+
 select {
   max-width: 12rem;
   border: 1px solid #57534c;
