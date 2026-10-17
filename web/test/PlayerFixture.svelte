@@ -17,6 +17,8 @@
   const subtitleLanguage = query.get('subtitleLanguage') ?? undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
+  // A guest's page names its host's install as its own (`/den/~<gid>`), as the app does for a grant.
+  const scoutInstall = query.get('scout') ?? 'http://scout.test/config';
   const services = createWorkerServiceSession();
   const content = services.content;
   let open = $state(true);
@@ -31,7 +33,7 @@
   <Player
     {title}
     {content}
-    scout={{ install: 'http://scout.test/config', base: '/scout/config' }}
+    scout={{ install: scoutInstall, base: '/scout/config' }}
     {remux}
     {playback}
     {subtitleLanguage}
