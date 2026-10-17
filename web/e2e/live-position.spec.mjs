@@ -177,6 +177,8 @@ async function openWithDevice(browser, page, options) {
 
   let timer;
   let pausedAt;
+  // The write in flight, which `close` waits for: closing the device's context under it would reject it.
+  let writing = Promise.resolve();
   /**
    * Writes `title`'s position every three seconds, counting on from `from`, until `stop()`. After `pause()` the
    * writes go on at the position it paused at, as the TV's do while its player is paused.
@@ -184,10 +186,10 @@ async function openWithDevice(browser, page, options) {
   const play = (title, from, episode) => {
     const started = Date.now();
     const write = () =>
-      device.evaluate(
+      (writing = device.evaluate(
         ([title, seconds, episode]) => window.fixturePlay(title, seconds, episode),
         [title, pausedAt ?? from + Math.floor((Date.now() - started) / 1000), episode],
-      );
+      ));
     void write();
     timer = setInterval(() => void write(), WRITE_EVERY_MS);
     return {
@@ -197,6 +199,7 @@ async function openWithDevice(browser, page, options) {
   const stop = () => clearInterval(timer);
   const close = async () => {
     stop();
+    await writing;
     edge.close();
     await context.close();
   };

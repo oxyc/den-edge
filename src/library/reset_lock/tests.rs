@@ -174,8 +174,16 @@ fn members_json() -> Value {
         .collect::<Vec<_>>())
 }
 
+/// The key reset on and the profile migration off: nothing a reset does may lean on the migration's switch.
 fn enabled(dir: std::path::PathBuf) -> Harness {
-    Harness::in_dir_with(dir, |state| state.profile_migration_enabled = true)
+    Harness::in_dir_with(dir, |state| state.profile_reset_enabled = true)
+}
+
+fn both_enabled(dir: std::path::PathBuf) -> Harness {
+    Harness::in_dir_with(dir, |state| {
+        state.profile_reset_enabled = true;
+        state.profile_migration_enabled = true;
+    })
 }
 
 fn new_harness() -> Harness {
@@ -1397,6 +1405,32 @@ async fn crash_after_the_abort_before_any_member_or_successor_effect_converges_a
 }
 
 #[tokio::test]
+async fn a_hint_an_older_release_left_in_the_migration_namespace_is_still_swept_after_a_restart() {
+    let h = new_harness();
+    build_old_set(&h).await;
+    acquire_all(&h, ATTEMPT).await;
+    build_successors(&h).await;
+    assert_eq!(abort(&h, ATTEMPT).await.0, StatusCode::OK);
+    let hints = |ns: &str| std::fs::read_dir(h.state.store.namespace_dir(ns)).unwrap().count();
+    assert_eq!(
+        (hints(HINT_NS), hints(LEGACY_HINT_NS)),
+        (1, 0),
+        "a hint is written to the reset's own namespace"
+    );
+    // The same hint as a release that kept it beside the migration's files wrote it.
+    let hint = std::fs::read_dir(h.state.store.namespace_dir(HINT_NS)).unwrap().next().unwrap().unwrap();
+    std::fs::rename(hint.path(), h.state.store.namespace_dir(LEGACY_HINT_NS).join(hint.file_name())).unwrap();
+
+    let restarted = restart(&h);
+    sweep_startup(Arc::clone(&restarted.state)).await;
+    for id in [NEW_HOUSEHOLD, NEW_OWNER, NEW_KID1, NEW_KID2] {
+        assert_moved(&changes(&restarted, id).await);
+    }
+    assert_eq!(store_of(&restarted, HOUSEHOLD).exclusive_record(SWEEP).unwrap(), None, "marked swept");
+    assert_eq!((hints(HINT_NS), hints(LEGACY_HINT_NS)), (0, 0), "the old hint is cleared too");
+}
+
+#[tokio::test]
 async fn crash_between_successor_deletions_finishes_the_rest_and_never_touches_a_live_successor() {
     let h = new_harness();
     build_old_set(&h).await;
@@ -1517,7 +1551,7 @@ async fn crash_after_the_proofless_rollback_keeps_it_final() {
 
 #[tokio::test]
 async fn a_key_reset_and_a_migration_lock_exclude_each_other_with_the_same_metadata_free_answer() {
-    let h = new_harness();
+    let h = both_enabled(crate::handler::tests::temp_dir());
     build_old_set(&h).await;
     // A migration-style lock on the household blocks a key-reset acquisition, whatever the source.
     let protocol = store_of(&h, HOUSEHOLD).protocol().unwrap();
@@ -1672,6 +1706,39 @@ fn the_routes_have_stable_labels_and_methods() {
     }
 }
 
+#[tokio::test]
+async fn the_key_reset_and_the_migration_each_answer_only_to_their_own_switch() {
+    // Reset on, migration off: the reset's routes work and the migration's are absent.
+    let h = new_harness();
+    build_old_set(&h).await;
+    let migration_source = format!("/lib/{HOUSEHOLD}/profile-migration/source");
+    let absent = (StatusCode::NOT_FOUND, json!({ "error": "not_found" }));
+    assert_eq!(call(&h, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await, absent);
+    acquire_all(&h, ATTEMPT).await;
+
+    // Migration on, reset off: the migration's routes are back and the reset's are absent, including the
+    // retirement a `DELETE` with the exclusive headers would otherwise be.
+    let m = Harness::in_dir_with(h.dir.clone(), |state| state.profile_migration_enabled = true);
+    assert_eq!(call(&m, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await.0, StatusCode::OK);
+    let reset_source = format!("/lib/{HOUSEHOLD}/exclusive-operation/source");
+    assert_eq!(call(&m, "GET", &reset_source, HOUSEHOLD, "5", None, &[]).await, absent);
+    assert_eq!(lookup(&m, HOUSEHOLD, ATTEMPT).await, absent);
+    // Switching the routes off never unlocks a library: the lock is in the store, not in the switch.
+    assert_in_progress(&write(&m, KID1, "during").await);
+    assert_in_progress(&retire(&m, KID1, ATTEMPT, NEW_KID1).await);
+
+    // Both off: neither family exists.
+    let off = Harness::in_dir_with(h.dir.clone(), |_| {});
+    assert_eq!(call(&off, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await, absent);
+    assert_eq!(call(&off, "GET", &reset_source, HOUSEHOLD, "5", None, &[]).await, absent);
+
+    // And the reset resumes once its switch is back.
+    let back = restart(&h);
+    assert_eq!(lookup(&back, HOUSEHOLD, ATTEMPT).await.1["state"], "open");
+    assert_eq!(abort(&back, ATTEMPT).await.0, StatusCode::OK);
+    assert_all_writable(&back).await;
+}
+
 #[test]
 fn markers_round_trip_and_a_legacy_marker_still_names_its_tag() {
     let marker = Marker {
@@ -1822,7 +1889,7 @@ async fn under_members_only_a_holder_of_the_household_starts_its_successors() {
     build_old_set(&h).await;
     acquire_all(&h, ATTEMPT).await;
     let m = Harness::in_dir_with(h.dir.clone(), |state| {
-        state.profile_migration_enabled = true;
+        state.profile_reset_enabled = true;
         state.new_libraries = crate::library::NewLibraries::Members;
     });
     assert_eq!(start_library(&m, NEW_HOUSEHOLD, None).await, StatusCode::FORBIDDEN);

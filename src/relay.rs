@@ -1552,7 +1552,7 @@ async fn relay_with(
         {
             let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, address) };
             scope = Some(ListenerScope(asked));
-            if open_public_listener(socket, hinted.unwrap_or(address), cast).await {
+            if heard(state, open_public_listener(socket, hinted.unwrap_or(address), cast).await) {
                 if playback_session {
                     let committed = match playback_finalizer.clone() {
                         Some((target, request, owner, key)) => {
@@ -2334,7 +2334,7 @@ async fn build_reel_transport(
         state.metrics.record_public_media_hint_rejected("limit");
         return Ok(transport);
     }
-    if !lease_reel_listener(socket, source).await {
+    if !heard(state, lease_reel_listener(socket, source).await) {
         return Ok(transport);
     }
     if hinted {
@@ -2462,7 +2462,12 @@ fn direct_json(status: StatusCode, value: &serde_json::Value) -> Response {
 
 /// Ask the root-owned helper for its one operation. It validates the address again and owns every nftables
 /// argument; this process never runs a privileged command or supplies a table, chain, port, or timeout.
-async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr, cast: bool) -> bool {
+/// `Some(granted)` when the helper answered, `None` when it could not be reached or did not answer in time.
+async fn open_public_listener(
+    socket: &std::path::Path,
+    source: std::net::IpAddr,
+    cast: bool,
+) -> Option<bool> {
     let wide = listener_scope(cast, source) != "browser";
     let operation = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
@@ -2476,16 +2481,16 @@ async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr
         stream.shutdown().await.ok()?;
         let mut answer = [0u8; 3];
         stream.read_exact(&mut answer).await.ok()?;
-        (answer == *b"ok\n").then_some(())
+        Some(answer == *b"ok\n")
     };
     // The helper may have to start the TLS proxy container before it answers, and a timeout here makes it tear
     // that proxy down again, so every retry would start cold.
-    tokio::time::timeout(Duration::from_secs(10), operation).await.ok().flatten().is_some()
+    tokio::time::timeout(Duration::from_secs(10), operation).await.ok().flatten()
 }
 
 /// Ask the root-owned helper for the one fixed Reel lease. There is intentionally no caller-chosen
-/// scope, port, or TTL in this protocol.
-async fn lease_reel_listener(socket: &std::path::Path, source: std::net::IpAddr) -> bool {
+/// scope, port, or TTL in this protocol. Answers as `open_public_listener` does.
+async fn lease_reel_listener(socket: &std::path::Path, source: std::net::IpAddr) -> Option<bool> {
     let operation = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
         let request = serde_json::json!({ "lease": "reel", "source": source.to_string() });
@@ -2494,9 +2499,16 @@ async fn lease_reel_listener(socket: &std::path::Path, source: std::net::IpAddr)
         stream.shutdown().await.ok()?;
         let mut answer = [0u8; 3];
         stream.read_exact(&mut answer).await.ok()?;
-        (answer == *b"ok\n").then_some(())
+        Some(answer == *b"ok\n")
     };
-    tokio::time::timeout(REEL_LEASE_TIMEOUT, operation).await.ok().flatten().is_some()
+    tokio::time::timeout(REEL_LEASE_TIMEOUT, operation).await.ok().flatten()
+}
+
+/// Whether the helper granted the request, noting for `/health` whether it answered at all. A refusal is an
+/// answer: the helper is up, and a caller's bad address must not mark it down.
+fn heard(state: &AppState, answer: Option<bool>) -> bool {
+    state.public_listener_unanswered.store(answer.is_none(), std::sync::atomic::Ordering::Relaxed);
+    answer == Some(true)
 }
 
 /// A `Cache-Control` with `public` turned into `private`, everything else as it was. One that cannot be read is
@@ -3288,6 +3300,76 @@ mod tests {
         assert_eq!(lease, json!({ "lease": "reel", "source": "8.8.8.8" }));
     }
 
+    /// A trailer quietly falls back to the relay when the listener helper does not answer, so `/health` is the only
+    /// place that says so; it recovers once the helper answers again, and a refusal is an answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_is_degraded_while_the_public_listener_helper_does_not_answer() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            axum::http::Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header("x-den-media-form", "progressive")
+                .header("x-den-media-expires", "4000000000")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let mut h = Harness::in_dir(dir);
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel=http://{upstream_addr}"));
+        state.public_media_base = Some("https://media.example".into());
+        state.public_media_socket = Some(socket.clone());
+        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let capability = format!("m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
+        let transport = || {
+            h.send(
+                "POST",
+                super::REEL_TRANSPORT,
+                Some(json!({ "capability": capability }).to_string()),
+                &[("x-forwarded-for", "8.8.8.8"), ("content-type", "application/json")],
+            )
+        };
+
+        // Configured, and nothing asked yet: there is nothing to report.
+        assert_eq!(h.call("GET", "/health", None).await, (StatusCode::OK, json!({ "status": "ok" })));
+
+        // The socket is configured but nothing listens on it, as when its systemd unit has failed.
+        let body = crate::handler::tests::body_json(transport().await).await;
+        assert_eq!(body["attempts"], json!([{ "type": "relay", "url": format!("/reel/{capability}") }]));
+        let health = h.send("GET", "/health", None, &[]).await;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()["x-den-degraded"], "public_listener_unavailable");
+        assert_eq!(
+            crate::handler::tests::body_json(health).await,
+            json!({ "status": "degraded", "reason": "public_listener_unavailable" })
+        );
+
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            for answer in [b"no\n", b"ok\n"] {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                stream.read_line(&mut String::new()).await.unwrap();
+                stream.into_inner().write_all(answer).await.unwrap();
+            }
+        });
+        for attempts in [1, 2] {
+            let body = crate::handler::tests::body_json(transport().await).await;
+            assert_eq!(body["attempts"].as_array().unwrap().len(), attempts);
+            let health = h.send("GET", "/health", None, &[]).await;
+            assert!(health.headers().get("x-den-degraded").is_none());
+            assert_eq!(crate::handler::tests::body_json(health).await, json!({ "status": "ok" }));
+        }
+    }
+
     #[tokio::test]
     async fn a_valid_ipv6_transport_keeps_relay_while_asking_for_a_hint() {
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3496,7 +3578,10 @@ mod tests {
         });
 
         for source in ["2001:db8::7", "203.0.113.7"] {
-            assert!(super::open_public_listener(&socket, source.parse().unwrap(), false).await);
+            assert_eq!(
+                super::open_public_listener(&socket, source.parse().unwrap(), false).await,
+                Some(true)
+            );
         }
         let scope =
             |line: String| serde_json::from_str::<serde_json::Value>(line.trim()).unwrap()["scope"].clone();

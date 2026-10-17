@@ -217,6 +217,48 @@ it.each([
   expect(first.opened).toHaveLength(1);
 });
 
+it('reports a completed bootstrap, and opens a known household on wire 5 only with host approval', async () => {
+  const first = new FakeClient();
+  first.openFailure = updateRequired(5);
+  const second = new FakeClient();
+  const onProfileHouseholdBootstrapped = vi.fn();
+  const options = {
+    libraryKey: 'library-1',
+    mode: 'online',
+    wire: 4,
+    bootstrapProfileHousehold: true,
+  } as const;
+  const queue = [first, second];
+  const bootstrapped = new LibraryServiceSupervisor(() => queue.shift()!, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled: async () => true,
+    onProfileHouseholdBootstrapped,
+  });
+  await bootstrapped.open(options);
+  expect(onProfileHouseholdBootstrapped).toHaveBeenCalledExactlyOnceWith('library-1');
+  bootstrapped.close();
+
+  const wire5 = { ...options, wire: 5, bootstrapProfileHousehold: false };
+  for (const enabled of [true, false]) {
+    const [hinted, fallback] = [new FakeClient(), new FakeClient()];
+    const clients = [hinted, fallback];
+    const supervisor = new LibraryServiceSupervisor(() => clients.shift()!, {
+      maxAutomaticRestarts: 0,
+      profileHouseholdEnabled: async () => enabled,
+      knownProfileHousehold: (key) => key === 'library-1',
+      onProfileHouseholdBootstrapped,
+    });
+    const opening = supervisor.open(options);
+    // The hello is not held back for the host's answer: it carries wire 5 at once.
+    expect(hinted.opened).toEqual([wire5]);
+    await opening;
+    // Without the host's approval the wire-5 connection is dropped before it is ready, and wire 4 opens instead.
+    expect(fallback.opened).toEqual(enabled ? [] : [options]);
+    supervisor.close();
+  }
+  expect(onProfileHouseholdBootstrapped).toHaveBeenCalledOnce();
+});
+
 it('keeps the authenticated 426 when real-profile host discovery fails closed', async () => {
   const first = new FakeClient();
   first.openFailure = updateRequired(5);

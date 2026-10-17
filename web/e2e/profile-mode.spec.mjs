@@ -122,6 +122,49 @@ test('RoutedLibrary runs the legacy path when profiles are enabled but no direct
   await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toHaveCount(0);
 });
 
+// The wire-5 household here has no directory, so it ends on "Profiles couldn’t be opened" either way; a real split
+// household reloading is `guest-library.spec.mjs`. This one checks that the hint belongs to one household only.
+test('only a household seen bootstrapped to wire 5 skips the wire-4 open', async ({ page }) => {
+  const edge = { upgradeRequired: 5 };
+  await routeLibraryEdge(page, edge);
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } }),
+  );
+  const changes = () => edge.libraryRequests.filter(({ path }) => path.endsWith('/changes'));
+  const reset = () => {
+    edge.libraryRequests.length = 0;
+    edge.wires.length = 0;
+    edge.refused = 0;
+  };
+  const hint = () => page.evaluate(() => localStorage.getItem('den.household.wire5.v1'));
+
+  // First visit: den-edge refuses wire 4 and the supervisor reopens the household on wire 5.
+  await page.goto(ROUTED_FIXTURE);
+  await expect.poll(() => changes().some(({ wire }) => wire === '5')).toBe(true);
+  expect(changes()[0].wire).toBe('4');
+  expect(edge.refused).toBeGreaterThan(0);
+  await expect.poll(hint).not.toBeNull();
+  // The household's key is never what is kept.
+  expect(await hint()).not.toContain(btoa(String.fromCharCode(...new Uint8Array(32).fill(29))));
+
+  // Another household, with no profiles and never seen bootstrapped here, still opens on wire 4.
+  edge.upgradeRequired = undefined;
+  reset();
+  await page.goto(`${ROUTED_FIXTURE}?household=31`);
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  await expect.poll(() => changes().length).toBeGreaterThan(0);
+  expect(new Set(edge.wires)).toEqual(new Set(['4']));
+
+  // The remembered household opens on wire 5 straight away.
+  edge.upgradeRequired = 5;
+  reset();
+  await page.goto(ROUTED_FIXTURE);
+  await expect.poll(() => changes().length).toBeGreaterThan(0);
+  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible();
+  expect(new Set(edge.wires)).toEqual(new Set(['5']));
+  expect(edge.refused).toBe(0);
+});
+
 test('an unpaired browser-local library never waits on the profile directory', async ({ page }) => {
   await routeLibraryEdge(page, {});
   await page.route('**/capabilities/profiles', (route) =>

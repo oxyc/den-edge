@@ -106,7 +106,12 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let den_disabled = (den_playback_path(&path)
         || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
         && !state.den_playback_enabled;
-    let globally_disabled = migration_path && !state.profile_migration_enabled || den_disabled;
+    let gate_on = if exclusive_operation_path(&path) {
+        state.profile_reset_enabled
+    } else {
+        state.profile_migration_enabled
+    };
+    let globally_disabled = migration_path && !gate_on || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
     let route = if globally_disabled { "other" } else { route_label(&path) };
@@ -647,7 +652,7 @@ async fn dispatch(
         return crate::library::handle(state, req).await;
     }
     match path.as_str() {
-        "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
+        "/health" => health(state),
         // `/manifest.json` is where the host's `den-update` reads a service's `Cache-Tag` after a deploy, to purge
         // Cloudflare's copies (`cache::CACHE_TAG`). den-edge has no manifest of its own; before this it answered 404,
         // which `den-update`'s `curl -f` reads as no tags, so nothing of den-edge's was ever purged.
@@ -724,6 +729,13 @@ fn profile_migration_path(path: &str) -> bool {
         || action.starts_with("profile-migration/")
         || action == "exclusive-operation"
         || action.starts_with("exclusive-operation/")
+}
+
+/// A key reset's exclusive-operation route: behind `profile_reset_enabled`, not the migration's switch.
+fn exclusive_operation_path(path: &str) -> bool {
+    path.strip_prefix("/lib/").and_then(|rest| rest.split_once('/')).is_some_and(|(_, action)| {
+        action == "exclusive-operation" || action.starts_with("exclusive-operation/")
+    })
 }
 
 /// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind
@@ -1197,6 +1209,21 @@ fn revalidated_prepared(prepared: &PreparedJson, request: &HeaderMap) -> Respons
     if resp.status() == StatusCode::OK {
         *resp.body_mut() = Body::from(prepared.body.clone());
     }
+    resp
+}
+
+/// Always 200 while this process answers. Degraded, with the reason in the body and in `X-Den-Degraded`, while the
+/// public media listener's helper is configured and its last request went unanswered. Read from state the relay
+/// already keeps, so a poll costs nothing and never wakes the helper.
+fn health(state: &AppState) -> Response {
+    let unanswered = state.public_media_socket.is_some()
+        && state.public_listener_unanswered.load(std::sync::atomic::Ordering::Relaxed);
+    if !unanswered {
+        return bare_json(StatusCode::OK, &json!({ "status": "ok" }));
+    }
+    let reason = "public_listener_unavailable";
+    let mut resp = bare_json(StatusCode::OK, &json!({ "status": "degraded", "reason": reason }));
+    resp.headers_mut().insert("x-den-degraded", HeaderValue::from_static(reason));
     resp
 }
 

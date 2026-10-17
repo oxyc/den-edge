@@ -11,15 +11,16 @@ export const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
  * - `edge.refuse`: batch writes are refused for good (a 400 `invalid_batch`).
  * - `edge.drop`: batch writes never get through, as with no connection.
  * - `edge.batches`: how many batch writes arrived, answered or not.
+ * - `edge.upgradeRequired`: the library's minimum wire; a request on an older one gets a 426 (`edge.refused` counts).
  */
 export async function routeLibraryEdge(page, edge = {}) {
   edge.batches = 0;
   edge.wires = [];
   edge.libraryRequests = [];
+  edge.refused = 0;
   const generation = 'optimistic-actions';
   const rows = new Map();
   let head = 0;
-  const headers = { 'x-den-generation': generation, 'x-den-wire-min': '4' };
 
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
@@ -38,19 +39,23 @@ export async function routeLibraryEdge(page, edge = {}) {
   await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    edge.wires.push(request.headers()['x-den-wire']);
+    const wire = request.headers()['x-den-wire'];
+    edge.wires.push(wire);
     edge.libraryRequests.push({
       method: request.method(),
       path: url.pathname,
       body: request.postData() ?? null,
+      wire,
     });
     edge.trace?.push(`${Date.now() % 100000} ${request.method()} ${url.pathname.split('/').pop()}`);
-    if (edge.upgradeRequired)
-      return route.fulfill({
-        status: 426,
-        headers: { ...headers, 'x-den-wire-min': String(edge.upgradeRequired) },
-        json: { error: 'upgrade_required' },
-      });
+    const headers = {
+      'x-den-generation': generation,
+      'x-den-wire-min': String(edge.upgradeRequired ?? 4),
+    };
+    if (edge.upgradeRequired && Number(wire) < edge.upgradeRequired) {
+      edge.refused++;
+      return route.fulfill({ status: 426, headers, json: { error: 'upgrade_required' } });
+    }
     if (url.pathname.endsWith('/member') && request.method() === 'PUT')
       return route.fulfill({ status: 200, headers });
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
