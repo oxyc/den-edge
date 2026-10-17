@@ -217,6 +217,45 @@ it.each([
   expect(first.opened).toHaveLength(1);
 });
 
+it('reports a completed bootstrap, and opens a known household on wire 5 only with host approval', async () => {
+  const first = new FakeClient();
+  first.openFailure = updateRequired(5);
+  const second = new FakeClient();
+  const onProfileHouseholdBootstrapped = vi.fn();
+  const options = {
+    libraryKey: 'library-1',
+    mode: 'online',
+    wire: 4,
+    bootstrapProfileHousehold: true,
+  } as const;
+  const queue = [first, second];
+  const bootstrapped = new LibraryServiceSupervisor(() => queue.shift()!, {
+    maxAutomaticRestarts: 0,
+    profileHouseholdEnabled: async () => true,
+    onProfileHouseholdBootstrapped,
+  });
+  await bootstrapped.open(options);
+  expect(onProfileHouseholdBootstrapped).toHaveBeenCalledExactlyOnceWith('library-1');
+  bootstrapped.close();
+
+  for (const [enabled, wire] of [
+    [true, 5],
+    [false, 4],
+  ] as const) {
+    const client = new FakeClient();
+    const supervisor = new LibraryServiceSupervisor(() => client, {
+      maxAutomaticRestarts: 0,
+      profileHouseholdEnabled: async () => enabled,
+      knownProfileHousehold: async (key) => key === 'library-1',
+      onProfileHouseholdBootstrapped,
+    });
+    await supervisor.open(options);
+    expect(client.opened).toEqual([{ ...options, wire, bootstrapProfileHousehold: wire === 4 }]);
+    supervisor.close();
+  }
+  expect(onProfileHouseholdBootstrapped).toHaveBeenCalledOnce();
+});
+
 it('keeps the authenticated 426 when real-profile host discovery fails closed', async () => {
   const first = new FakeClient();
   first.openFailure = updateRequired(5);

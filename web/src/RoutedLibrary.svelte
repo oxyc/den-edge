@@ -45,6 +45,7 @@
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
+  import { knownProfileHousehold, rememberProfileHousehold } from './lib/profileHouseholdHint';
   import {
     allowsImplicitAssistant,
     carryActiveProfile,
@@ -145,12 +146,17 @@
     );
   };
 
-  // `wire` 5 opens a library known to be a profile household (one this browser made) without the 426 round trip.
+  // `wire` 5 opens a library known to be a profile household (one this browser made) without the 426 round trip. One
+  // this browser saw bootstrapped before skips it too, from the supervisor's remembered hint.
   const open = (key: string | null, local: boolean, wire: 4 | 5 = 4) => {
     // Public browsing uses ContentService without inventing encrypted library state. A local or paired library
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
     const services = createWorkerServiceSession({
-      supervisor: { profileHouseholdEnabled: realProfilesHost },
+      supervisor: {
+        profileHouseholdEnabled: realProfilesHost,
+        knownProfileHousehold,
+        onProfileHouseholdBootstrapped: (libraryKey) => void rememberProfileHousehold(libraryKey),
+      },
     });
     if (!key)
       return legacyProfileSession(null, false, null, services.content, () => services.close());

@@ -77,6 +77,10 @@ export interface LibraryServiceSupervisorOptions {
   maxAutomaticRestarts?: number;
   /** Host-scoped, fail-closed authorization for the one legacy-wire-4 to household-wire-5 bootstrap. */
   profileHouseholdEnabled?: () => Promise<boolean>;
+  /** A household this browser saw bootstrapped before: it opens on wire 5 once the host enables profiles. */
+  knownProfileHousehold?: (libraryKey: string) => Promise<boolean>;
+  /** Called once a household refused on wire 4 has opened on wire 5. */
+  onProfileHouseholdBootstrapped?: (libraryKey: string) => void;
 }
 
 /**
@@ -89,7 +93,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   readonly #maxAutomaticRestarts: number;
   readonly #profileHouseholdEnabled: () => Promise<boolean>;
+  readonly #knownProfileHousehold: (libraryKey: string) => Promise<boolean>;
+  readonly #onProfileHouseholdBootstrapped: (libraryKey: string) => void;
   #automaticRestartsLeft: number;
+  #bootstrapped = false;
   #nextSubscription = 0;
   #nextToken = 0;
   #openOptions?: LibraryServiceOpenOptions;
@@ -110,6 +117,8 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     this.#maxAutomaticRestarts = maxAutomaticRestarts;
     this.#automaticRestartsLeft = maxAutomaticRestarts;
     this.#profileHouseholdEnabled = options.profileHouseholdEnabled ?? (async () => false);
+    this.#knownProfileHousehold = options.knownProfileHousehold ?? (async () => false);
+    this.#onProfileHouseholdBootstrapped = options.onProfileHouseholdBootstrapped ?? (() => {});
   }
 
   static forTransport(
@@ -305,9 +314,15 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   }
 
   async #connectWithRetry(): Promise<LibraryVersion> {
+    await this.#openKnownProfileHousehold();
     while (true) {
       try {
-        return await this.#connectOnce();
+        const version = await this.#connectOnce();
+        if (this.#bootstrapped) {
+          this.#bootstrapped = false;
+          this.#onProfileHouseholdBootstrapped(this.#openOptions!.libraryKey);
+        }
+        return version;
       } catch (error) {
         const failure = failureFrom(error);
         this.#disposeActive();
@@ -504,6 +519,37 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     );
   }
 
+  /**
+   * A household this browser has seen bootstrapped skips the wire-4 refusal: the Owner split is one-way, so it still
+   * needs wire 5. The host's capability stays the authority, as for the bootstrap itself.
+   */
+  async #openKnownProfileHousehold(): Promise<void> {
+    const options = this.#openOptions;
+    if (
+      options?.mode !== 'online' ||
+      (options.wire ?? 4) !== 4 ||
+      options.bootstrapProfileHousehold !== true
+    )
+      return;
+    let enabled = false;
+    try {
+      enabled =
+        (await this.#knownProfileHousehold(options.libraryKey)) &&
+        (await this.#profileHouseholdEnabled());
+    } catch {
+      // Fail closed: the household opens on wire 4 and bootstraps from den-edge's answer.
+    }
+    if (this.#phase === 'closed')
+      throw new LibraryServiceError({
+        code: 'cancelled',
+        message: 'library service supervisor was closed',
+        retryable: false,
+      });
+    if (!enabled || this.#openOptions !== options) return;
+    startupMark('supervisor household bootstrap', 'opening a known household on wire 5');
+    this.#openOptions = { ...options, wire: 5, bootstrapProfileHousehold: false };
+  }
+
   async #bootstrapProfileHousehold(failure: LibraryServiceFailure): Promise<boolean> {
     if (!this.#canBootstrapProfileHousehold(failure)) return false;
     let enabled = false;
@@ -519,6 +565,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       wire: 5,
       bootstrapProfileHousehold: false,
     };
+    this.#bootstrapped = true;
     this.#automaticRestartsLeft = this.#maxAutomaticRestarts;
     return true;
   }
