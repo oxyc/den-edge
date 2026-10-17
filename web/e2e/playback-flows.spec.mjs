@@ -197,6 +197,8 @@ const castVideo = (page) => page.frameLocator('iframe[title="Den Cast player"]')
 const pageVideo = (page) => page.locator('.player video');
 const segmentHosts = () =>
   new Set(served.filter((s) => s.file.endsWith('.m4s')).map((s) => s.host));
+/** The player's stamp says which path is playing. */
+const stamped = (page, source) => expect(page.getByTestId('playback-source')).toHaveText(source);
 
 test('owner at home plays from the home-network listener', async () => {
   const { browser, page, asked } = await open({ answer: remuxAnswer, home: true });
@@ -204,6 +206,7 @@ test('owner at home plays from the home-network listener', async () => {
     await playingPast(castVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['lan.test']));
+    await stamped(page, 'Den Remux');
   } finally {
     await browser.close();
   }
@@ -215,6 +218,7 @@ test('owner with TorBox plays the provider’s own stream in the page', async ()
     await playingPast(pageVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+    await stamped(page, 'TorBox');
   } finally {
     await browser.close();
   }
@@ -226,6 +230,7 @@ test('owner away plays from the public listener', async () => {
     await playingPast(castVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['media.test']));
+    await stamped(page, 'Den Remux');
   } finally {
     await browser.close();
   }
@@ -244,6 +249,7 @@ test('a guest on the host’s Hearth plays, and lists releases under its own nam
     expect(segmentHosts()).toEqual(new Set(['media.test']));
     await expect.poll(() => asked.releases.length).toBeGreaterThan(0);
     expect(asked.releases[0].scout).toBe(`${ORIGIN}/den/~${GUEST}`);
+    await stamped(page, 'Den Remux');
   } finally {
     await browser.close();
   }
@@ -260,6 +266,7 @@ test('a guest with their own TorBox plays the provider’s stream in the page', 
     await playingPast(pageVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+    await stamped(page, 'TorBox');
   } finally {
     await browser.close();
   }
