@@ -9,7 +9,8 @@
 //!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
-//!   POST   /grant/den-configure      (grant or member proof) → 204 + a short-lived, HttpOnly setup cookie
+//!   POST   /grant/den-configure      (grant or member proof) → a short-lived, HttpOnly setup cookie; native
+//!                                    browser forms are redirected to the corresponding setup page
 //!   DELETE /grant/{gid}              (x-den-grant) the guest leaves → 204
 //!   POST   /grant/library            (x-den-grant) { id, tokenHash } reserves the one library this grant may start → 204
 //!   POST   /grant/device-ticket      (x-den-grant) → { ticket, expiresAt }: one more device may join, once, soon
@@ -1037,39 +1038,90 @@ pub(crate) fn member_configure_claim(req: &Request) -> Option<String> {
     })
 }
 
-/// Establish a narrowly used browser setup session. Navigations cannot attach `x-den-grant`, so the Web UI first
-/// proves the grant with fetch and then opens Hearth's ordinary, real document. This avoids putting the credential
-/// in a URL and avoids executing fetched addon HTML from a CSP-incompatible blob document.
+enum ConfigureProof {
+    Guest(String),
+    Member(String),
+}
+
+async fn configure_form(req: Request) -> Option<ConfigureProof> {
+    let content_type = req.headers().get(header::CONTENT_TYPE)?.to_str().ok()?;
+    if !content_type.split(';').next()?.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        return None;
+    }
+    let bytes = axum::body::to_bytes(req.into_body(), 4096).await.ok()?;
+    let fields: Vec<_> = url::form_urlencoded::parse(&bytes).into_owned().collect();
+    match fields.as_slice() {
+        [(name, claim)] if name == "grant" && !claim.is_empty() => Some(ConfigureProof::Guest(claim.clone())),
+        [(name, claim)] if name == "member" && !claim.is_empty() => {
+            Some(ConfigureProof::Member(claim.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Establish a narrowly used browser setup session. Header-authenticated fetch remains available to clients that
+/// need it. The Web UI uses a native form POST instead: mobile browsers treat it as the user's new-tab navigation,
+/// while the credential remains in the HTTPS body and the redirect URL contains no secret.
 async fn den_configure(state: &AppState, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, &ip, "grant-den-configure", ADDONS_PER_WINDOW) {
         return limited;
     }
-    let cookie = if let Some(claim) = header_of(&req) {
-        let live = match authenticate(state, Some(&claim), None).await {
-            Ok(live) => live,
-            Err(Denied::Expired(at)) => return expired_reply(at),
-            Err(Denied::NotFound) => return not_found(),
-        };
-        let Some((_, secret)) = parse_header(&claim) else { return not_found() };
-        format!(
-            "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
-            live.gid, secret, live.gid
-        )
-    } else {
-        let claim = req.headers().get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
-        if !state.new_libraries.gates_households() || !crate::library::is_household_member(state, claim).await
-        {
-            return not_found();
+    let guest_header = header_of(&req);
+    let member_header = req
+        .headers()
+        .get(crate::library::MEMBER_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let form =
+        if guest_header.is_none() && member_header.is_none() { configure_form(req).await } else { None };
+    let navigation = form.is_some();
+    let proof = guest_header
+        .map(ConfigureProof::Guest)
+        .or_else(|| member_header.map(ConfigureProof::Member))
+        .or(form);
+    let (cookie, destination) = match proof {
+        Some(ConfigureProof::Guest(claim)) => {
+            let live = match authenticate(state, Some(&claim), None).await {
+                Ok(live) => live,
+                Err(Denied::Expired(at)) => return expired_reply(at),
+                Err(Denied::NotFound) => return not_found(),
+            };
+            let Some((_, secret)) = parse_header(&claim) else { return not_found() };
+            (
+                format!(
+                    "{CONFIGURE_COOKIE}={}.{}; Path=/den/~{}; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict",
+                    live.gid, secret, live.gid
+                ),
+                format!("/den/~{}/configure", live.gid),
+            )
         }
-        let Some(claim) = claim else { return not_found() };
-        format!(
-            "{MEMBER_CONFIGURE_COOKIE}={claim}; Path=/den; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"
-        )
+        Some(ConfigureProof::Member(claim)) => {
+            if !state.new_libraries.gates_households()
+                || !crate::library::is_household_member(state, Some(&claim)).await
+            {
+                return not_found();
+            }
+            (
+                format!(
+                    "{MEMBER_CONFIGURE_COOKIE}={claim}; Path=/den; Max-Age={CONFIGURE_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"
+                ),
+                "/den/configure".to_owned(),
+            )
+        }
+        None => return not_found(),
     };
     let Ok(cookie) = HeaderValue::from_str(&cookie) else { return not_found() };
-    let mut response = no_content();
+    let mut response = if navigation {
+        Response::builder().status(StatusCode::SEE_OTHER).body(Body::empty()).unwrap()
+    } else {
+        no_content()
+    };
     response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if navigation {
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&destination).unwrap());
+    }
     response
 }
 
@@ -2841,6 +2893,20 @@ mod tests {
         );
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["overrides"], json!(["den"]));
+
+        let form =
+            url::form_urlencoded::Serializer::new(String::new()).append_pair("grant", &credential).finish();
+        let native = h
+            .send(
+                "POST",
+                "/grant/den-configure",
+                Some(form),
+                &[("content-type", "application/x-www-form-urlencoded")],
+            )
+            .await;
+        assert_eq!(native.status(), StatusCode::SEE_OTHER);
+        assert_eq!(native.headers()[header::LOCATION], format!("/den/~{gid}/configure"));
+        assert!(native.headers()[header::SET_COOKIE].to_str().unwrap().contains("HttpOnly"));
     }
 
     #[tokio::test]
@@ -2877,6 +2943,19 @@ mod tests {
             assert_eq!(seen.last().unwrap().0, "/den/configure");
             assert!(!seen.last().unwrap().1.contains_key("cookie"));
         }
+
+        let form =
+            url::form_urlencoded::Serializer::new(String::new()).append_pair("member", &claim).finish();
+        let native = h
+            .send(
+                "POST",
+                "/grant/den-configure",
+                Some(form),
+                &[("content-type", "application/x-www-form-urlencoded"), ("host", "d.oxy.fi")],
+            )
+            .await;
+        assert_eq!(native.status(), StatusCode::SEE_OTHER);
+        assert_eq!(native.headers()[header::LOCATION], "/den/configure");
 
         let before = seen.lock().unwrap().len();
         let installed = h

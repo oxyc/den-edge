@@ -99,6 +99,11 @@ export function hasLibraryCredential(): boolean {
   return credential !== null;
 }
 
+/** The member proof for a same-origin native setup POST. Never put this value in a URL. */
+export function libraryConfigureClaim(): string | null {
+  return credential;
+}
+
 /** Which credential this browser holds, as a number that changes whenever it is set or forgotten. */
 export function credentialVersion(): number {
   return version;

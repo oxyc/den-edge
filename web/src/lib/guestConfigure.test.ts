@@ -12,99 +12,49 @@ afterEach(() => {
 });
 
 describe('openGuestConfigure', () => {
-  it('establishes setup before navigating the reserved tab to the real Hearth page', async () => {
-    const order: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async () => {
-      order.push('fetch');
-      return new Response(null, { status: 204 });
+  it('submits the grant in a native new-tab POST', () => {
+    const submitImpl = vi.fn();
+    expect(openGuestConfigure('a1b2c3d4', 'secret', { submitImpl })).toBe(true);
+    expect(submitImpl).toHaveBeenCalledWith({
+      action: '/grant/den-configure',
+      target: '_blank',
+      fields: { grant: 'a1b2c3d4:secret' },
     });
-    const replace = vi.fn();
-    const opened = { opener: {}, location: { replace }, close: vi.fn() } as unknown as Window;
-    const openImpl = vi.fn(() => {
-      order.push('open');
-      return opened;
-    });
-    await expect(
-      openGuestConfigure('a1b2c3d4', 'secret', {
-        fetchImpl,
-        openImpl,
-      }),
-    ).resolves.toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith('/grant/den-configure', {
-      method: 'POST',
-      headers: { 'x-den-grant': 'a1b2c3d4:secret' },
-      cache: 'no-store',
-    });
-    expect(openImpl).toHaveBeenCalledWith('', '_blank');
-    expect(order).toEqual(['open', 'fetch']);
-    expect(opened.opener).toBeNull();
-    expect(replace).toHaveBeenCalledWith('/den/~a1b2c3d4/configure');
   });
 
-  it('does not establish setup when the browser refuses the new tab', async () => {
-    const fetchImpl = vi.fn<typeof fetch>();
-    await expect(
-      openGuestConfigure('a1b2c3d4', 'secret', {
-        fetchImpl,
-        openImpl: () => null,
-      }),
-    ).resolves.toBe(false);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it('closes the reserved tab when authenticated setup is unavailable', async () => {
-    const close = vi.fn();
-    const opened = { opener: {}, location: { replace: vi.fn() }, close } as unknown as Window;
-    await expect(
-      openGuestConfigure('a1b2c3d4', 'secret', {
-        fetchImpl: async () => new Response('not found', { status: 404 }),
-        openImpl: () => opened,
-      }),
-    ).resolves.toBe(false);
-    expect(opened.opener).toBeNull();
-    expect(close).toHaveBeenCalledOnce();
+  it('does not submit malformed credentials and reports a submission failure', () => {
+    const submitImpl = vi.fn(() => {
+      throw new Error('document unavailable');
+    });
+    expect(openGuestConfigure('bad', 'secret', { submitImpl })).toBe(false);
+    expect(submitImpl).not.toHaveBeenCalled();
+    expect(openGuestConfigure('a1b2c3d4', 'secret', { submitImpl })).toBe(false);
   });
 });
 
 describe('openOwnerConfigure', () => {
-  it('establishes the member setup session before navigating the reserved tab', async () => {
-    const order: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async () => {
-      order.push('fetch');
-      return new Response(null, { status: 204 });
+  it('submits the member proof in a native new-tab POST', () => {
+    const submitImpl = vi.fn();
+    expect(
+      openOwnerConfigure('/den/configure', {
+        claimImpl: () => 'library:member',
+        submitImpl,
+      }),
+    ).toBe(true);
+    expect(submitImpl).toHaveBeenCalledWith({
+      action: '/grant/den-configure',
+      target: '_blank',
+      fields: { member: 'library:member' },
     });
-    const replace = vi.fn();
-    const opened = { opener: {}, location: { replace }, close: vi.fn() } as unknown as Window;
-    const openImpl = vi.fn(() => {
-      order.push('open');
-      return opened;
-    });
-    await expect(openOwnerConfigure('/den/configure', { fetchImpl, openImpl })).resolves.toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith('/grant/den-configure', {
-      method: 'POST',
-      cache: 'no-store',
-    });
-    expect(order).toEqual(['open', 'fetch']);
-    expect(opened.opener).toBeNull();
-    expect(replace).toHaveBeenCalledWith('/den/configure');
   });
 
-  it('refuses a route that is not Hearth setup and closes on failed bootstrap', async () => {
-    const fetchImpl = vi.fn<typeof fetch>();
-    await expect(
-      openOwnerConfigure('/atlas/configure', { fetchImpl, openImpl: () => null }),
-    ).resolves.toBe(false);
-    expect(fetchImpl).not.toHaveBeenCalled();
-
-    const close = vi.fn();
-    const opened = { opener: {}, location: { replace: vi.fn() }, close } as unknown as Window;
-    await expect(
-      openOwnerConfigure('/den/configure', {
-        fetchImpl: async () => new Response(null, { status: 404 }),
-        openImpl: () => opened,
-      }),
-    ).resolves.toBe(false);
-    expect(close).toHaveBeenCalledOnce();
+  it('refuses another route or a missing member proof', () => {
+    const submitImpl = vi.fn();
+    expect(
+      openOwnerConfigure('/atlas/configure', { claimImpl: () => 'library:member', submitImpl }),
+    ).toBe(false);
+    expect(openOwnerConfigure('/den/configure', { claimImpl: () => null, submitImpl })).toBe(false);
+    expect(submitImpl).not.toHaveBeenCalled();
   });
 });
 

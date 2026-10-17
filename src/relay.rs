@@ -905,6 +905,18 @@ fn scout_cancel(path: &str, query: Option<&str>) -> bool {
         && matches!(query, None | Some("op=reannounce"))
 }
 
+/// A configured Hearth manifest is inert: it describes capabilities but cannot mint an install, query an
+/// indexer, or start playback. Let a TV validate the install URL before route discovery has found the LAN
+/// listener. Hearth still validates the sealed config itself. Everything else under `/den` keeps the household
+/// membership gate below.
+fn den_install_manifest(method: &Method, path: &str) -> bool {
+    matches!(*method, Method::GET | Method::HEAD)
+        && path
+            .strip_prefix("/den/")
+            .and_then(|rest| rest.strip_suffix("/manifest.json"))
+            .is_some_and(|config| !config.is_empty() && !config.contains('/'))
+}
+
 async fn relay_with(
     state: &Arc<AppState>,
     req: Request,
@@ -950,7 +962,10 @@ async fn relay_with(
     // `/scout` and `/den` themselves (including a query) belong to those addons too.
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
     let den = req.uri().path() == "/den" || req.uri().path().starts_with("/den/");
-    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || den || remux);
+    let member_only = grant.is_none()
+        && face == crate::handler::Face::Web
+        && (scout || den || remux)
+        && !den_install_manifest(&method, req.uri().path());
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -2897,6 +2912,20 @@ mod tests {
         assert!(super::idempotency_key(&request("combined,keys")).is_err());
     }
 
+    #[test]
+    fn only_a_single_configured_hearth_manifest_bypasses_the_member_gate() {
+        assert!(super::den_install_manifest(&Method::GET, "/den/sealed/manifest.json"));
+        assert!(super::den_install_manifest(&Method::HEAD, "/den/sealed/manifest.json"));
+        for (method, path) in [
+            (Method::POST, "/den/sealed/manifest.json"),
+            (Method::GET, "/den/manifest.json"),
+            (Method::GET, "/den/a/b/manifest.json"),
+            (Method::GET, "/den/sealed/stream/movie/tt1.json"),
+        ] {
+            assert!(!super::den_install_manifest(&method, path), "{method} {path}");
+        }
+    }
+
     #[tokio::test]
     async fn playback_probe_is_authenticated_live_and_headerless() {
         use axum::http::{header, HeaderValue};
@@ -2935,6 +2964,15 @@ mod tests {
         let visitor = h.send("OPTIONS", "/den/compatible/playback", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
         assert!(received.try_recv().is_err(), "an untrusted probe reached Hearth");
+
+        // A newly installed TV may validate its manifest before route discovery has selected Hearth's LAN
+        // listener. The configured manifest is safe to relay without membership; it cannot mint an install or
+        // exercise an indexer, and Hearth still authenticates the sealed config.
+        let manifest = h.send("GET", "/den/compatible/manifest.json", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(manifest.status(), StatusCode::NO_CONTENT);
+        let (method, path, headers) = received.recv().await.unwrap();
+        assert_eq!((method, path.as_str()), (Method::GET, "/den/compatible/manifest.json"));
+        assert!(!headers.contains_key("x-den-library-member"));
 
         // The gate covers the whole combined addon, not only playback. Otherwise a stranger could fetch the
         // public config key, seal their own debrid account, and exercise Scout through this household's address.

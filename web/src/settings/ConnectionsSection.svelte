@@ -243,22 +243,19 @@
   let pluginConfirm = $state<{ kind: 'remove' | 'unverify'; url: string } | null>(null);
   let pluginConfirmNext: { kind: 'remove' | 'unverify'; url: string } | null = null;
 
-  async function configureGuest(gid: string, secret: string) {
+  function configureGuest(gid: string, secret: string) {
     configuringGuest = gid;
     configureGuestProblem = null;
-    const opened = await openGuestConfigure(gid, secret);
-    if (!opened)
-      configureGuestProblem =
-        'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
+    if (!openGuestConfigure(gid, secret))
+      configureGuestProblem = 'Couldn’t open settings. Reload Den, then try again.';
     if (configuringGuest === gid) configuringGuest = null;
   }
 
-  async function configureOwner(url: string) {
+  function configureOwner(url: string) {
     configuringOwner = true;
     addonProblem = null;
-    if (!(await openOwnerConfigure(url)))
-      addonProblem =
-        'Setup isn’t available right now. Check that pop-ups are allowed, then try again.';
+    if (!openOwnerConfigure(url))
+      addonProblem = 'Couldn’t open settings. Reload Den, then try again.';
     configuringOwner = false;
   }
 
@@ -279,9 +276,9 @@
     if (configureURL)
       items.push({
         kind: 'item',
-        label: configuringOwner ? 'Opening settings…' : 'Edit Hearth settings',
+        label: configuringOwner ? 'Opening setup…' : 'Build new Hearth link',
         disabled: disabled || configuringOwner,
-        onselect: () => void configureOwner(configureURL),
+        onselect: () => configureOwner(configureURL),
       });
     if (pinned)
       items.push({
@@ -316,7 +313,7 @@
         kind: 'item',
         label: configuringGuest === gid ? 'Opening settings…' : 'Edit my Hearth settings',
         disabled: configuringGuest !== null || resettingGuest !== null,
-        onselect: () => void configureGuest(gid, secret),
+        onselect: () => configureGuest(gid, secret),
       },
     ];
     if (hasOverride)
@@ -948,9 +945,6 @@
                   there under Settings › Plugins</small
                 >{:else if added === url}<small
                   >Approve it on your Apple TV under Settings › Plugins</small
-                >{/if}{#if configureURL}<small
-                  >Edit settings to update this installed add-on on your linked devices. You don’t
-                  need to remove or add it again.</small
                 >{/if}</span
             >
             <span class="addon-menu">
@@ -1041,10 +1035,8 @@
           )}
           <li class="line addon-line">
             <span class="label"
-              >Den Hearth<small>Your personal provider settings for this shared access</small><small
-                >Editing updates this connection; it does not add another add-on. {hasOverride
-                  ? 'Use shared settings to remove your overrides and inherit its defaults.'
-                  : 'You currently inherit its shared settings.'}</small
+              >Den Hearth<small
+                >{hasOverride ? 'Using your settings' : 'Using shared settings'}</small
               ></span
             >
             <span class="addon-menu">
@@ -1070,11 +1062,8 @@
       {#if configureGuestProblem}<p class="status bad" role="alert">{configureGuestProblem}</p>{/if}
     {/if}
     <p class="foot">
-      A plugin sees what you browse and supplies what you play, so each Apple TV normally asks for
-      approval before installing one. A first-party Hearth migration is approved automatically only
-      when that TV proves it exactly replaces Den plugins already installed there. Removing one
-      declines it. A dataset plugin can sign what it publishes: pin its key and Den will only accept
-      an index that plugin signed.
+      Add-ons can see what you browse and choose what plays. An Apple TV may ask you to approve a
+      new one.
     </p>
     <h3>Add manually</h3>
     <form
