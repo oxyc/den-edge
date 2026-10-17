@@ -25,7 +25,12 @@ for (const [name, standalone] of [
     await page.evaluate(() =>
       document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/1' } })),
     );
-    await page.waitForTimeout(300);
+    // The swipe goes back only from a page that has one behind it: wait for the router to show the title, not a clock.
+    await page.waitForFunction(
+      () =>
+        location.pathname === '/movie/1' &&
+        document.querySelector('[data-active="true"] h1')?.textContent === 'title',
+    );
     const result = await page.evaluate(() => {
       const target = document.querySelector('[data-active="true"] section');
       const send = (type, x) => {
