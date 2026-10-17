@@ -1073,11 +1073,8 @@ async fn den_configure(state: &AppState, req: Request) -> Response {
         .get(crate::library::MEMBER_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let form = if guest_header.is_none() && member_header.is_none() {
-        configure_form(req).await
-    } else {
-        None
-    };
+    let form =
+        if guest_header.is_none() && member_header.is_none() { configure_form(req).await } else { None };
     let navigation = form.is_some();
     let proof = guest_header
         .map(ConfigureProof::Guest)
@@ -1121,9 +1118,7 @@ async fn den_configure(state: &AppState, req: Request) -> Response {
         no_content()
     };
     response.headers_mut().insert(header::SET_COOKIE, cookie);
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if navigation {
         response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&destination).unwrap());
     }
@@ -2899,9 +2894,8 @@ mod tests {
         let listed = body_json(h.send("GET", "/grant/addons", None, &grant_headers(&credential)).await).await;
         assert_eq!(listed["overrides"], json!(["den"]));
 
-        let form = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant", &credential)
-            .finish();
+        let form =
+            url::form_urlencoded::Serializer::new(String::new()).append_pair("grant", &credential).finish();
         let native = h
             .send(
                 "POST",
@@ -2950,9 +2944,8 @@ mod tests {
             assert!(!seen.last().unwrap().1.contains_key("cookie"));
         }
 
-        let form = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("member", &claim)
-            .finish();
+        let form =
+            url::form_urlencoded::Serializer::new(String::new()).append_pair("member", &claim).finish();
         let native = h
             .send(
                 "POST",
