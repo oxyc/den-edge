@@ -1218,6 +1218,14 @@
       : undefined;
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
+      // A Kid's tabs are Kid Home's catalogue narrowed to the tab's type, not the adult browse rows behind a
+      // policy; a row with nothing of that type hides itself.
+      if (session.kid)
+        return rankedKidHome.map((row) => ({
+          ...row,
+          id: `${row.id}-${type}`,
+          filter: (title: Title) => title.type === type && (row.filter?.(title) ?? true),
+        }));
       const browse = browseRows(type, pages, {
         minYear,
         hiddenGenres: prefs.excludedGenres,

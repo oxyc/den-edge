@@ -1,4 +1,4 @@
-import type { RowDef } from './catalog';
+import { drawn, type RowDef } from './catalog';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { ContentKidsHomeRow, ContentKidsHomeSource } from './contentServiceProtocol';
 import type { HomeRowAffinity } from './homeRowRanking';
@@ -96,8 +96,30 @@ export function parseKidsHomeCatalogue(value: unknown): ContentKidsHomeRow[] {
 export async function kidsHomeRows(content: ContentServiceClientPort): Promise<RowDef[]> {
   const answer = await content.query({ kind: 'atlas.query', query: { operation: 'kids-home' } });
   if (answer.answer.state !== 'ready' || answer.answer.value.operation !== 'kids-home') return [];
+  const lookup = async (ref: { type: 'movie' | 'tv'; id: number }) =>
+    (await content.query({ kind: 'titles', titles: [ref] })).titles[0] ?? null;
   return answer.answer.value.rows.map(({ id, title, group, source }) => {
     const cursor = crypto.randomUUID();
+    // Atlas cards carry a poster only once some browser has told den-edge one, and a card with no poster is
+    // hidden, so the rest are looked up (`drawn`) — without it a 12-title row showed the 2 already known.
+    const fetched = drawn(
+      {
+        id,
+        title,
+        load: (page) =>
+          content
+            .query({
+              kind: 'atlas.query',
+              query: { operation: 'kids-row', cursor, source, page },
+            })
+            .then((result) =>
+              result.answer.state === 'ready' && result.answer.value.operation === 'kids-row'
+                ? result.answer.value.titles
+                : [],
+            ),
+      },
+      lookup,
+    );
     // The billboard and the visible shelf can ask for page one in the same frame. One promise keeps the cursor's
     // paging state single-threaded and gives both consumers the identical policy-bound page.
     const pages = new Map<number, Promise<import('./library').Title[]>>();
@@ -125,16 +147,7 @@ export async function kidsHomeRows(content: ContentServiceClientPort): Promise<R
       load: (page) => {
         let loading = pages.get(page);
         if (!loading) {
-          loading = content
-            .query({
-              kind: 'atlas.query',
-              query: { operation: 'kids-row', cursor, source, page },
-            })
-            .then((result) =>
-              result.answer.state === 'ready' && result.answer.value.operation === 'kids-row'
-                ? result.answer.value.titles
-                : [],
-            );
+          loading = fetched.load(page);
           pages.set(page, loading);
         }
         return loading;
