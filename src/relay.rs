@@ -2153,8 +2153,14 @@ enum ReelTransportError {
 
 /// Choose transports for one signed capability. Reel remains the authority for signature and expiry, but an
 /// unavailable validator, listener or direct quota can only remove the direct optimization: the same-origin relay
-/// remains a complete playback path and is always the final attempt.
-pub async fn transport_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
+/// remains a complete playback path and is always the final attempt — except on the public web name, where
+/// `relay_with` never carries a trailer's bytes, so offering it would only cost the browser a 404.
+pub async fn transport_reel(
+    state: &Arc<AppState>,
+    req: Request,
+    rid: &str,
+    face: crate::handler::Face,
+) -> Response {
     let observed = crate::handler::client_addr(state, &req);
     let request = match read_reel_json::<ReelTransportRequest>(req).await {
         Ok(request) => request,
@@ -2165,7 +2171,12 @@ pub async fn transport_reel(state: &Arc<AppState>, req: Request, rid: &str) -> R
     };
     let (blob, query) = (blob.to_owned(), query.to_owned());
     match build_reel_transport(state, request, observed, &blob, &query, rid).await {
-        Ok(transport) => transport_json(&transport),
+        Ok(mut transport) => {
+            if face == crate::handler::Face::Web {
+                transport.attempts.retain(|(kind, _)| *kind != "relay");
+            }
+            transport_json(&transport)
+        }
         Err(ReelTransportError::Capability(status)) => capability_rejected(status),
         Err(ReelTransportError::InvalidIpv4Hint) => {
             direct_json(StatusCode::BAD_REQUEST, &error("invalid_ipv4_hint"))
@@ -3129,6 +3140,29 @@ mod tests {
             h.send("GET", super::REEL_TRANSPORT, None, &[]).await.status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
+    }
+
+    /// On the public web name `relay_with` refuses a trailer's bytes, so transport never offers the relay there.
+    #[tokio::test]
+    async fn the_public_web_name_is_never_offered_the_relay_it_refuses() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let capability = format!("m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
+        for (host, want) in [
+            ("d.oxy.fi", json!([])),
+            ("192.168.86.193:8094", json!([{ "type": "relay", "url": format!("/reel/{capability}") }])),
+        ] {
+            let answer = h
+                .send(
+                    "POST",
+                    super::REEL_TRANSPORT,
+                    Some(json!({ "capability": capability }).to_string()),
+                    &[("content-type", "application/json"), ("host", host)],
+                )
+                .await;
+            let body = crate::handler::tests::body_json(answer).await;
+            assert_eq!(body["attempts"], want, "{host}");
+        }
     }
 
     #[tokio::test]
