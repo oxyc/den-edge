@@ -37,7 +37,7 @@ export interface Link {
  * synced library through the same shape. No device owns those keys, though, so sending to them can never reach a TV.
  */
 export function linkedTv(link: Link | null | undefined): Link | undefined {
-  return link && !link.recovered ? link : undefined;
+  return link && !link.recovered && !link.guest ? link : undefined;
 }
 
 /**

@@ -70,6 +70,10 @@ export function cappedCodeExpiry(now: number, ahead: number): number {
 
 /** A config segment as den-edge accepts it: base64url, and never a `~` (a virtual install can't be re-shared). */
 export const SEGMENT = /^[A-Za-z0-9_-]{1,2048}$/;
+/** Combined Hearth carries three member configs and therefore has the larger den-edge bound. */
+export const DEN_SEGMENT = /^[A-Za-z0-9_-]{1,21848}$/;
+export const validInstallSegment = (addon: GrantAddon, segment: string): boolean =>
+  (addon === 'den' ? DEN_SEGMENT : SEGMENT).test(segment);
 const CODE = /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/;
 const SHARED_INSTALL =
   /^\/(scout|den|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/manifest\.json)?\/?$/;

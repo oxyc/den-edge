@@ -646,8 +646,11 @@ fn apply(r: &mut Record, body: &Map<String, Value>, now: u64, creating: bool) ->
     }
     if let Some(v) = body.get("installs") {
         for (addon, segment) in v.as_object()? {
-            let segment = segment.as_str().filter(|s| valid_segment(s))?;
             if !ADDONS.contains(&addon.as_str()) {
+                return None;
+            }
+            let segment = segment.as_str()?;
+            if !(if addon == "den" { valid_den_segment(segment) } else { valid_segment(segment) }) {
                 return None;
             }
             r.installs.insert(addon.clone(), segment.to_owned());
@@ -2024,6 +2027,46 @@ mod tests {
             assert!(!valid_segment(bad), "{bad:?}");
         }
         assert!(valid_segment(&"a".repeat(16)) && valid_segment(&"a".repeat(2048)));
+        assert!(valid_den_segment(&"a".repeat(3_000)) && valid_den_segment(&"a".repeat(DEN_SEGMENT_MAX)));
+        assert!(!valid_den_segment(&"a".repeat(DEN_SEGMENT_MAX + 1)));
+    }
+
+    #[tokio::test]
+    async fn a_large_combined_hearth_escrow_can_be_created_and_updated_but_legacy_ones_stay_bounded() {
+        let h = harness().await;
+        let first = "H".repeat(3_000);
+        let (status, made) = host_call(
+            &h,
+            "POST",
+            "",
+            Some(invite(json!({ "addons": ["den"], "installs": { "den": first } }))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+        let gid = made["gid"].as_str().unwrap();
+
+        let next = "N".repeat(4_000);
+        let (status, updated) = host_call(
+            &h,
+            "PUT",
+            &format!("/{gid}"),
+            Some(json!({ "addons": ["den"], "installs": { "den": next } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(load(&h.state, gid).await.unwrap().unwrap().installs["den"], "N".repeat(4_000));
+
+        let (status, _) = host_call(
+            &h,
+            "POST",
+            "",
+            Some(invite(json!({
+                "addons": ["scout"],
+                "installs": { "scout": "S".repeat(3_000) }
+            }))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

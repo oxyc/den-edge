@@ -455,4 +455,16 @@ describe('hostedInstalls', () => {
     expect(hostedInstalls(['http://192.168.86.193:8080/~x/manifest.json'], ROUTES)).toEqual({});
     expect(hostedInstalls([], ROUTES)).toEqual({});
   });
+
+  it('accepts a combined Hearth segment larger than the legacy addon bound', () => {
+    const large = 'h'.repeat(3_000);
+    expect(
+      hostedInstalls([`http://192.168.86.193:8090/den/${large}/manifest.json`], ROUTES),
+    ).toEqual({
+      den: large,
+    });
+    expect(hostedInstalls([`http://192.168.86.193:8080/${large}/manifest.json`], ROUTES)).toEqual(
+      {},
+    );
+  });
 });

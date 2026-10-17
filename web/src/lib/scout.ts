@@ -4,7 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
-import { SEGMENT, sharedInstallOf, type GrantAddon } from './grants';
+import { SEGMENT, sharedInstallOf, validInstallSegment, type GrantAddon } from './grants';
 import { isLanURL } from './prefs';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
@@ -358,7 +358,7 @@ export function hostedInstalls(
   for (const [addon, want] of wants) {
     for (const url of plugins) {
       const segment = place(url, routes, want)?.base.slice(want.path.length + 1);
-      if (segment && SEGMENT.test(segment)) {
+      if (segment && validInstallSegment(addon, segment)) {
         installs[addon] = segment;
         break;
       }

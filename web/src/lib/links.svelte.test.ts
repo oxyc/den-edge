@@ -31,6 +31,7 @@ it('offers Play on TV only for a real paired receiver', () => {
   expect(linkedTv(paired)).toBe(paired);
   expect(linkedTv({ ...paired, recovered: true })).toBeUndefined();
   expect(linkedTv({ ...paired, recovered: true, guest: true })).toBeUndefined();
+  expect(linkedTv({ ...paired, guest: true })).toBeUndefined();
   expect(linkedTv(null)).toBeUndefined();
 });
 
