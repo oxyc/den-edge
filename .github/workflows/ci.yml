@@ -249,7 +249,8 @@ jobs:
       - name: Bind this CI run to its candidate digest
         env:
           EDGE_DIGEST: ${{ steps.images.outputs.edge }}
-        run: jq -n --arg edge "$EDGE_DIGEST" '{edge: $edge}' > candidate-digests.json
+        run: |
+          jq -n --arg edge "$EDGE_DIGEST" '{edge: $edge}' > candidate-digests.json
       - name: Save candidate identity for release promotion
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
