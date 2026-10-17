@@ -1092,7 +1092,20 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
   };
 };
 
-export async function profilesCapability(
+/** The page's question in flight. A profile household's two library sessions both ask as the page opens. */
+let askingCapability: Promise<ProfilesCapability> | undefined;
+
+export function profilesCapability(
+  fetchImpl?: typeof fetch,
+  visitorLock?: VisitorActivityLock,
+): Promise<ProfilesCapability> {
+  // Only the page's own question is shared; an injected fetch or lock asks its own.
+  if (fetchImpl || visitorLock) return askProfilesCapability(fetchImpl, visitorLock);
+  askingCapability ??= askProfilesCapability().finally(() => (askingCapability = undefined));
+  return askingCapability;
+}
+
+async function askProfilesCapability(
   fetchImpl: typeof fetch = fetch,
   visitorLock: VisitorActivityLock = crossTabVisitorActivityLock,
 ): Promise<ProfilesCapability> {

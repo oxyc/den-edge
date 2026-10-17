@@ -17,6 +17,8 @@ import {
   decodeContentServiceClientMessage,
   decodeContentServiceServerMessage,
 } from './contentServiceProtocolCodec';
+import { acceptSyncPolicy } from './syncLoader';
+import { SYNC_POLICY_OFFER } from './syncPolicyModule';
 
 interface LibraryServiceDispatcher {
   dispatch(input: unknown): Promise<LibraryServiceServerMessage[]>;
@@ -36,6 +38,16 @@ export interface WorkerHostScope {
   addEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   removeEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   postMessage(message: WorkerServerMessage[]): void;
+}
+
+function isSyncPolicyOffer(input: unknown): input is { port: MessagePort } {
+  return (
+    typeof input === 'object' &&
+    input !== null &&
+    (input as { type?: unknown }).type === SYNC_POLICY_OFFER &&
+    typeof MessagePort !== 'undefined' &&
+    (input as { port?: unknown }).port instanceof MessagePort
+  );
 }
 
 function requestIdOf(input: unknown): string | undefined {
@@ -80,6 +92,11 @@ export class LibraryServiceWorkerHost {
   readonly #receive = (event: MessageEvent<unknown>): void => {
     if (this.#closed) return;
     const input = event.data;
+    // The page's compiled den-core, offered before any request (`offerSyncPolicy`): no library or content message.
+    if (isSyncPolicyOffer(input)) {
+      acceptSyncPolicy(input.port);
+      return;
+    }
     // The dispatcher owns authority ordering. Admit every message to it in event order, but do not hold later
     // messages behind a remote provider promise: Core deliberately lets commands run while metadata is in flight.
     const work = this.#dispatch(input);

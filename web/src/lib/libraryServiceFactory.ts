@@ -22,6 +22,7 @@ import {
   useLibraryRelayMembership,
 } from './relayFetch';
 import { startupWorkerCreated, startupWorkerName } from './startupTiming';
+import { offerSyncPolicy } from './syncPolicyModule';
 
 export interface LibraryServiceFactoryOptions {
   supervisor?: LibraryServiceSupervisorOptions;
@@ -31,11 +32,14 @@ export interface LibraryServiceFactoryOptions {
   startupTimeoutMs?: number;
 }
 
-const productionWorker = () =>
-  new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
+const productionWorker = () => {
+  const worker = new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
     type: 'module',
     name: startupWorkerName(),
   });
+  offerSyncPolicy(worker);
+  return worker;
+};
 
 // The production trace contained four dead generations before the fifth stayed up. Follow that bounded burst,
 // with a short pause between later generations, but never let one request manufacture Workers for 15 seconds.

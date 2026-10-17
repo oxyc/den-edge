@@ -3,6 +3,18 @@ import { initialize } from '../vendor/den-core/index.js';
 let ready = false;
 let pending: Promise<void> | undefined;
 let startPending: (() => void) | undefined;
+/** The page's compiled den-core, when it offered one (`offerSyncPolicy`); null once it said it has none. */
+let offered: Promise<WebAssembly.Module | null> | undefined;
+
+/** A library Worker takes the module the page compiled instead of downloading and compiling its own. */
+export function acceptSyncPolicy(port: MessagePort): void {
+  offered = new Promise((resolve) => {
+    port.onmessage = (event: MessageEvent<unknown>) => {
+      port.close();
+      resolve(event.data instanceof WebAssembly.Module ? event.data : null);
+    };
+  });
+}
 
 /** One idle warm-up, promoted immediately when an action needs it. Rejections permit a fresh retry. */
 export function ensureSyncPolicy(idle = false): Promise<void> {
@@ -17,7 +29,7 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
       cancel?.();
       startPending = undefined;
       void Promise.resolve()
-        .then(() => initialize())
+        .then(async () => initialize((await offered) ?? undefined))
         .then(
           () => {
             ready = true;

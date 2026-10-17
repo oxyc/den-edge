@@ -472,7 +472,8 @@ test('SVT billboard navigation keeps its warmed detail trailer on the paired Wor
 
   const worker = await page.evaluate(() => ({
     count: window.fixtureWorkerCount,
-    messages: window.fixtureWorkerMessages,
+    // The page's compiled den-core goes to every Worker ahead of the library protocol (`offerSyncPolicy`).
+    messages: window.fixtureWorkerMessages.filter(({ type }) => type !== 'den-core-module'),
   }));
   expect(worker.count).toBe(2);
   expect(worker.messages.filter(({ worker }) => worker === 2)[0]).toMatchObject({
@@ -610,7 +611,8 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   await expect(active.getByText('Couldn’t load this title from TMDB.')).toHaveCount(0);
   const worker = await page.evaluate(() => ({
     count: window.fixtureWorkerCount,
-    messages: window.fixtureWorkerMessages,
+    // The page's compiled den-core goes to every Worker ahead of the library protocol (`offerSyncPolicy`).
+    messages: window.fixtureWorkerMessages.filter(({ type }) => type !== 'den-core-module'),
     terminations: window.fixtureWorkerTerminations,
   }));
   expect(worker.count).toBe(5);
