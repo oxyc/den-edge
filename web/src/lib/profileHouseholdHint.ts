@@ -2,17 +2,17 @@ const HINT_KEY = 'den.household.wire5.v1';
 const MAX_HINTS = 16;
 
 /**
- * A short, one-way name for a household in this browser's storage: the key itself is never written there. Prefixed so
- * it cannot be matched against a hash of the same key kept for any other purpose.
+ * A short, one-way name for a household in this browser's storage: the key itself is never written there. FNV-1a
+ * over 64 bits, synchronous so the library's first open is not held back for it; a household key is 32 random bytes,
+ * so the 64 bits kept say nothing usable about it. Prefixed so it matches no other use of the same key.
  */
-async function householdTag(libraryKey: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(`den.household.wire5:${libraryKey}`),
-  );
-  return Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
-    byte.toString(16).padStart(2, '0'),
-  ).join('');
+function householdTag(libraryKey: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(`den.household.wire5:${libraryKey}`)) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0');
 }
 
 function readTags(storage: Storage): string[] {
@@ -25,24 +25,24 @@ function readTags(storage: Storage): string[] {
  * household once seen needing wire 5 always will. Blocked or damaged storage answers false, which opens on wire 4 and
  * bootstraps as before.
  */
-export async function knownProfileHousehold(
+export function knownProfileHousehold(
   libraryKey: string,
   storage: Storage = localStorage,
-): Promise<boolean> {
+): boolean {
   try {
-    return readTags(storage).includes(await householdTag(libraryKey));
+    return readTags(storage).includes(householdTag(libraryKey));
   } catch {
     return false;
   }
 }
 
 /** Remember that `libraryKey` opened on wire 5 after den-edge refused it on wire 4. */
-export async function rememberProfileHousehold(
+export function rememberProfileHousehold(
   libraryKey: string,
   storage: Storage = localStorage,
-): Promise<void> {
+): void {
   try {
-    const tag = await householdTag(libraryKey);
+    const tag = householdTag(libraryKey);
     const tags = readTags(storage).filter((kept) => kept !== tag);
     storage.setItem(HINT_KEY, JSON.stringify([tag, ...tags].slice(0, MAX_HINTS)));
   } catch {

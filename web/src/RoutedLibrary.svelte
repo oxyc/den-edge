@@ -155,7 +155,7 @@
       supervisor: {
         profileHouseholdEnabled: realProfilesHost,
         knownProfileHousehold,
-        onProfileHouseholdBootstrapped: (libraryKey) => void rememberProfileHousehold(libraryKey),
+        onProfileHouseholdBootstrapped: (libraryKey) => rememberProfileHousehold(libraryKey),
       },
     });
     if (!key)
