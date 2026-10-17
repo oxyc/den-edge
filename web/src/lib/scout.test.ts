@@ -186,6 +186,59 @@ describe('legacyMediaSuperseded', () => {
     }
   });
 
+  /** Hearth carrying trailers, and the legacy Reel install answering `status` with `error`, or failing. */
+  function refusing(status: number | Error, error = 'bad_config') {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      if (String(input) === '/den/hearth-cfg/manifest.json')
+        return new Response(JSON.stringify({ id: 'com.den.hearth', resources: ['meta'] }));
+      if (status instanceof Error) throw status;
+      return new Response(JSON.stringify({ error }), { status });
+    };
+    return { asked, fetchImpl };
+  }
+
+  it('retires a first-party legacy install whose config its service refuses, once Hearth carries its resource', async () => {
+    // A plaintext config refused since sealing went on, or a revoked install: it never answers again.
+    const { asked, fetchImpl } = refusing(400);
+    expect(await legacyMediaSuperseded([hearth, reel], ROUTES, fetchImpl)).toEqual([reel]);
+    expect(asked).toEqual(['/den/hearth-cfg/manifest.json', '/reel/reel-cfg/manifest.json']);
+  });
+
+  it('keeps a legacy install that is only missing, failing, out of reach or refused for another reason', async () => {
+    for (const [status, error] of [
+      [400, 'bad_path'],
+      [403, 'bad_config'],
+      [404, 'not_found'],
+      [500, 'bad_config'],
+      [503, 'unavailable'],
+      [new TypeError('offline'), ''],
+    ] as const) {
+      const { fetchImpl } = refusing(status, error);
+      expect(await legacyMediaSuperseded([hearth, reel], ROUTES, fetchImpl), `${status}`).toEqual(
+        [],
+      );
+    }
+  });
+
+  it('keeps a refused install while Hearth does not carry its resource', async () => {
+    const { fetchImpl } = refusing(400);
+    const without: typeof fetch = async (input, init) =>
+      String(input) === '/den/hearth-cfg/manifest.json'
+        ? new Response(JSON.stringify({ id: 'com.den.hearth', resources: ['stream'] }))
+        : fetchImpl(input, init);
+    expect(await legacyMediaSuperseded([hearth, reel], ROUTES, without)).toEqual([]);
+  });
+
+  it('keeps a refused install the routes table does not name as Den’s', async () => {
+    // Placed by its URL alone (the table lists no Reel), so nothing proves the refusal is Den's Reel's.
+    const { fetchImpl } = refusing(400);
+    expect(await legacyMediaSuperseded([hearth, reel], { ...ROUTES, reel: [] }, fetchImpl)).toEqual(
+      [],
+    );
+  });
+
   it('accepts the transition id during a rolling Hearth upgrade', async () => {
     const { fetchImpl } = addons({
       '/den/hearth-cfg/manifest.json': { id: 'com.den.addon', resources: ['meta'] },

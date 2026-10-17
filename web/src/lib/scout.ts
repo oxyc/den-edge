@@ -105,20 +105,44 @@ function configOf(install: string, mount: string): string | null {
   return path === '' || /^\/[\w.~%-]+$/.test(path) ? path : null;
 }
 
+/**
+ * A manifest's answer: its body where it is the service `id` names, and whether the service refused the install's
+ * config. Den's services answer a config they will never take — undecodable, plaintext while sealing is on, a
+ * revoked install, a stale epoch — with 400 `bad_config`; a 404, a 5xx or no answer at all may pass.
+ */
+async function askManifest(
+  manifest: string,
+  id: string | readonly string[],
+  fetchImpl: typeof fetch,
+): Promise<{ body: Record<string, unknown> | null; badConfig: boolean }> {
+  try {
+    const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
+    const body = (await res.json()) as Record<string, unknown> | null;
+    if (!res.ok)
+      return { body: null, badConfig: res.status === 400 && body?.error === 'bad_config' };
+    const ids = typeof id === 'string' ? [id] : id;
+    return {
+      body: typeof body?.id === 'string' && ids.includes(body.id) ? body : null,
+      badConfig: false,
+    };
+  } catch {
+    return { body: null, badConfig: false }; // out of reach, or not an addon at all
+  }
+}
+
 async function readManifest(
   manifest: string,
   id: string | readonly string[],
   fetchImpl: typeof fetch,
 ): Promise<Record<string, unknown> | null> {
-  try {
-    const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return null;
-    const body = (await res.json()) as Record<string, unknown> | null;
-    const ids = typeof id === 'string' ? [id] : id;
-    return typeof body?.id === 'string' && ids.includes(body.id) ? body : null;
-  } catch {
-    return null; // out of reach, or not an addon at all
-  }
+  return (await askManifest(manifest, id, fetchImpl)).body;
+}
+
+/** Whether the routes table itself names `url` as the service `want`'s, rather than `place` guessing it. */
+function listedAs(url: string, routes: Routes, want: { name: string }): boolean {
+  if (sharedInstallOf(url)) return false;
+  const rest = within(url.slice(0, -MANIFEST.length), routes[want.name]);
+  return rest !== null && !rest.startsWith('/~');
 }
 
 /** A live, deliberately uncached probe of Hearth's runtime/default-off playback route. */
@@ -259,7 +283,9 @@ export async function legacyMediaSuperseded(
     for (const url of plugins) {
       const addon = place(url, routes, legacy.want);
       if (!addon) continue;
-      if (await readManifest(`${addon.base}${MANIFEST}`, legacy.want.id, fetchImpl)) old.push(url);
+      const answer = await askManifest(`${addon.base}${MANIFEST}`, legacy.want.id, fetchImpl);
+      // One whose config Den's own service refuses is superseded too: kept, it is asked and refused on every load.
+      if (answer.body || (answer.badConfig && listedAs(url, routes, legacy.want))) old.push(url);
     }
   }
   return old;
