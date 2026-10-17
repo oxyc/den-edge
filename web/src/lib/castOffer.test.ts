@@ -48,11 +48,18 @@ describe('canOfferCast', () => {
 });
 
 describe('castLook', () => {
-  it('moves playback only once a receiver is seen', () => {
+  it('offers the choice once a receiver is seen, and moves playback only once one is chosen', () => {
     expect(castLook('looking', { kind: 'availability', available: true })).toEqual({
-      offer: 'idle',
-      move: true,
+      offer: 'choose',
+      move: false,
     });
+    expect(castLook('choose', { kind: 'chosen' })).toEqual({ offer: 'idle', move: true });
+    expect(castLook('choose', { kind: 'availability', available: true })).toEqual({
+      offer: 'choose',
+      move: false,
+    });
+    expect(castLook('choose', { kind: 'dismissed' })).toEqual({ offer: 'idle', move: false });
+    expect(castLook('looking', { kind: 'chosen' })).toEqual({ offer: 'looking', move: false });
   });
 
   it('keeps looking on "no devices", which the Cast SDK says before it has looked', () => {

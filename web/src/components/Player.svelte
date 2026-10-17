@@ -306,7 +306,13 @@
   let remotePaused = true;
   let casting = $state(false);
   let castMode = false;
-  let castProfile = 'legacy';
+  /**
+   * The receiver model asked for, until the cast page names the one its viewer picked. The Cast SDK names no model
+   * or codec of a connected device, so this is a choice: Chromecast with Google TV (4K), the common receiver now, so
+   * an HEVC or HDR release casts as it is. An older Chromecast that can't take it fails the load, and the receiver's
+   * error path retries once with the conservative `legacy` profile.
+   */
+  let castProfile = 'google-tv-4k';
   /** The same-origin control relay: the only route whose sessions carry a public address and the cast page. */
   const RELAY = '/remux';
   /**
@@ -317,9 +323,13 @@
   let routeBeforeCast = untrack(() => remux);
   /** Where a press of Cast stands (`castLook`): playback moves to the relay only once a receiver was seen. */
   let castOffer = $state<CastOffer>('idle');
-  /** The cast page, loaded unseen beside the playing video to look for a receiver; unset while not looking. */
+  /** The cast page, loaded beside the playing video to look for a receiver and offer it; unset otherwise. */
   let lookOrigin = $state<string>();
-  let lookFrame = $state<HTMLIFrameElement>();
+  /**
+   * The cast page in which the viewer chose a receiver. Its frame is kept, the same document, for the session cast
+   * from it: the Cast session started there belongs to that page, and a new frame would have none.
+   */
+  let chooserOrigin = $state<string>();
   /** The trusted Cast-page origin that discovered the receiver now receiving an external managed stream. */
   let directCastOrigin: string | undefined;
   /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
@@ -340,6 +350,8 @@
    */
   let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
   let session = $state<Session | null>(null);
+  /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
+  const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin);
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -755,6 +767,11 @@
     // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled.
     if ('failure' in result && result.failure === 'legacy')
       result = await startSession(request, undefined, on, undefined, attempt.signal);
+    // Headed for a receiver: whether this page reaches the session's home-network address says whether the receiver,
+    // on that network, can be handed it (`sendToCastFrame`'s `lanProven`). The cast page can't be the judge: a
+    // cross-origin frame may be kept off the local network when this page is not.
+    if (!('failure' in result) && castMode && castOffered && !result.external && result.castOrigin)
+      await homeHere(result);
     const lanHere = !('failure' in result) && !castOffered && !castMode && (await homeHere(result));
     if (lanHere && !('failure' in result)) {
       // At home this page plays the home-network address itself rather than handing the session to the cast page:
@@ -828,10 +845,12 @@
     }
     // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
     // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
+    // A Remux session's own cast page is that same trusted page; naming the one the receiver was chosen in keeps its
+    // frame, and the Cast session in it.
     if (
       castOffered &&
       directCastOrigin &&
-      (result.external || privateLanRemuxPlaylist(result.playlist))
+      (result.external || privateLanRemuxPlaylist(result.playlist) || result.castOrigin)
     )
       result = { ...result, castOrigin: directCastOrigin };
     if (replacing) {
@@ -1603,6 +1622,8 @@
                 lanUrl,
                 speed: current.speed,
                 measure: publicMaxBitrate === undefined,
+                lanProven:
+                  castMode && lanProbe?.base === current.lanBase && lanProbe?.answer === true,
               }),
           mode: castMode ? 'cast' : 'browser',
           title: title.title,
@@ -1627,12 +1648,18 @@
   });
 
   function castMessage(event: MessageEvent<unknown>): void {
-    const looking = lookFrame?.contentWindow;
+    const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
-      const message = event.data as { type?: string; available?: unknown };
+      const message = event.data as { type?: string; available?: unknown; profile?: unknown };
       if (message.type === 'den-ready') looking.postMessage({ type: 'den-discover' }, lookOrigin);
       else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
+      else if (message.type === 'den-cast-session' && castOffer === 'choose') {
+        // The receiver model the viewer keeps in the cast page's menu, else its default.
+        if (typeof message.profile === 'string' && CAST_PROFILES.includes(message.profile))
+          castProfile = message.profile;
+        look({ kind: 'chosen' });
+      }
       return;
     }
     const current = session;
@@ -1799,8 +1826,9 @@
 
   /**
    * The Cast button for a plain in-page player. The cast page is loaded unseen beside the video, which plays on, to
-   * look for a receiver (`look`); only once it sees one does playback move to the relay, whose sessions carry the
-   * public address and the cast page, and Google's own button shows there.
+   * look for a receiver (`look`). Once it sees one it shows its own "Choose your Chromecast" button over the video —
+   * Chrome's device list opens only from a press inside that cross-origin page — and only once the viewer has chosen
+   * a receiver there does Hearth get asked for what it plays, and the video here stop.
    */
   async function offerCast() {
     if (!session || castOffer === 'looking') return;
@@ -1817,15 +1845,18 @@
     else look({ kind: 'no-cast-page' });
   }
 
-  /** A step of the look for a receiver; one seen moves playback to the relay at the second the video is at. */
+  /** A step of the look for a receiver; one chosen moves playback to it at the second the video is at. */
   function look(event: CastLook) {
     const discoveredOrigin = lookOrigin;
     const next = castLook(castOffer, event);
     castOffer = next.offer;
-    if (next.offer !== 'looking') lookOrigin = undefined;
+    if (next.offer === 'choose' && discoveredOrigin)
+      castFrame?.contentWindow?.postMessage({ type: 'den-choose' }, discoveredOrigin);
+    if (next.offer !== 'looking' && next.offer !== 'choose') lookOrigin = undefined;
     if (!next.move || !session) return;
     castOffered = true;
     directCastOrigin = discoveredOrigin;
+    chooserOrigin = discoveredOrigin;
     routeBeforeCast = route;
     // A receiver can fetch a signed Hearth playlist over private-LAN HTTP. Keep that already-proven route instead
     // of replacing it with Edge's public relay; the HTTPS Cast sender only hands the URL to the receiver.
@@ -1839,15 +1870,22 @@
     restart({ filename: session.release.filename }, () => {
       castOffered = false;
       directCastOrigin = undefined;
+      chooserOrigin = undefined;
       route = routeBeforeCast;
       castMode = false;
     });
   }
 
+  // The offer, once shown, has the keyboard: its frame is focused, and the cast page focuses its button.
+  $effect(() => {
+    if (castOffer === 'choose') castFrame?.focus();
+  });
+
   /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
   function leaveCast() {
     castOffered = false;
     directCastOrigin = undefined;
+    chooserOrigin = undefined;
     casting = false;
     route = routeBeforeCast;
     castMode = false;
@@ -1892,7 +1930,9 @@
       if (session !== current || played || casting) return;
       const why = `nothing played in the cast page after ${castPlayMs / 1000} s`;
       castFailed = true;
-      castFailReason = castFailReasonOf(why);
+      // Handed to a receiver, it is the receiver that fetches the media, not this browser or its frame: a receiver
+      // that never starts is a Cast session's failure, not a sign the home network was out of reach.
+      castFailReason = castMode ? 'session_error' : castFailReasonOf(why);
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
@@ -1901,8 +1941,11 @@
     return () => clearTimeout(wait);
   });
 
-  /** Receiver model profiles from Google's published codec matrix. The oldest profile is the default so a
-   * first-generation stick gets H.264 High@4.1 and stereo AAC; newer models opt into the formats they add. */
+  /** The receiver models the cast page's menu names (`castCapabilities`). */
+  const CAST_PROFILES = ['legacy', 'gen3', 'ultra', 'google-tv-hd', 'google-tv-4k', 'streamer'];
+
+  /** Receiver model profiles from Google's published codec matrix. `castProfile` says which one is asked for;
+   * `legacy` (H.264 High@4.1, stereo AAC) is the conservative retry after a receiver refused a load. */
   function castCapabilities(profile: string): Playable {
     const h264 =
       profile === 'legacy'
@@ -2548,7 +2591,7 @@
         icon="cast"
         ariaLabel="Cast to a TV"
         title="Cast to a TV"
-        disabled={castOffer === 'looking'}
+        disabled={castOffer === 'looking' || castOffer === 'choose'}
         onclick={offerCast}
       />
     {/if}
@@ -2593,12 +2636,17 @@
     {/if}
   </div>
   <div class="stage">
-    {#if session && (castOffer === 'looking' || castOffer === 'none')}
+    {#if session && castOffer !== 'idle'}
       <!-- Discovery belongs to the Cast control, not the playback layout. Keeping its one stable surface over the
            picture means neither its arrival nor its longer empty-state copy moves or resizes what is playing. -->
       <div class="cast-status">
         {#if castOffer === 'looking'}
           {@render banner('Looking for a Chromecast…')}
+        {:else if castOffer === 'choose'}
+          {@render banner(
+            'A Chromecast is on your network. Choose it below to cast this to it.',
+            () => look({ kind: 'dismissed' }),
+          )}
         {:else}
           {@render banner(
             'No Chromecast found. Check that it is awake and on the same network as this device.',
@@ -2684,18 +2732,7 @@
         </p>
       {/if}
     {:else}
-      {#if session.castOrigin}
-        <!-- `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
-             and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
-        <iframe
-          bind:this={castFrame}
-          title="Den Cast player"
-          src={session.castOrigin}
-          allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
-          sandbox="allow-scripts allow-same-origin allow-presentation"
-          onload={sendToCastFrame}
-        ></iframe>
-      {:else}
+      {#if !session.castOrigin}
         <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
         <video
           bind:this={video}
@@ -2742,16 +2779,27 @@
         {/if}
       {/if}
     {/if}
-    {#if lookOrigin}
-      <!-- The cast page, unseen, asked only whether a receiver is on the network: nothing is loaded into it. -->
+    {#if frameOrigin && (lookOrigin || chooserOrigin || (session?.castOrigin && !failure))}
+      {@const shown = !!session?.castOrigin && !failure}
+      {@const choosing = !shown && castOffer === 'choose'}
+      <!-- The cast page: unseen while it looks for a receiver, a "Choose your Chromecast" button while it offers one,
+           then the player or the receiver's remote. One frame throughout, so the Cast session chosen in it is kept.
+           `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
+           and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
       <iframe
-        class="cast-look"
-        bind:this={lookFrame}
-        title="Looking for a Chromecast"
-        aria-hidden="true"
-        tabindex="-1"
-        src={lookOrigin}
+        bind:this={castFrame}
+        class:cast-look={!shown && !choosing}
+        class:cast-choose={choosing}
+        title={shown
+          ? 'Den Cast player'
+          : choosing
+            ? 'Choose your Chromecast'
+            : 'Looking for a Chromecast'}
+        inert={!shown && !choosing}
+        src={frameOrigin}
+        allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
         sandbox="allow-scripts allow-same-origin allow-presentation"
+        onload={sendToCastFrame}
       ></iframe>
     {/if}
   </div>
@@ -3032,6 +3080,18 @@
     height: 1px;
     opacity: 0;
     pointer-events: none;
+  }
+
+  /* The cast page's own "Choose your Chromecast" button, under the offer's notice: only a press in that page can
+     open Chrome's device list. */
+  iframe.cast-choose {
+    z-index: 2;
+    top: calc(12px + 76px + 8px);
+    left: 50%;
+    width: min(18rem, calc(100% - 24px));
+    height: 48px;
+    border-radius: 999px;
+    transform: translateX(-50%);
   }
 
   form {
