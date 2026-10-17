@@ -38,7 +38,7 @@ import {
 import { parseRatings, type Ratings } from './detailPresentation';
 import { parseIconicStudios, type IconicStudio } from './iconicStudios';
 import type { MediaType } from './library';
-import { relayFetch } from './relayFetch';
+import { onGrantEnded, relayFetch, useHeldGrants } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
 import { seriesShape, toTitle, type Details } from './tmdb';
 import { parseTitleFacts, type TitleFacts } from './titleFacts';
@@ -252,6 +252,26 @@ function optional<T>(result: ProviderResult<T>, provider: ContentProvider): Opti
   }
 }
 
+/** `/atlas/~<gid>/…`: an Atlas shared through a guest's grant. */
+const SHARED_ATLAS = /\/atlas\/~([0-9a-f]{8})(?:[/?]|$)/;
+const sharedAtlasWarned = new Set<string>();
+
+/**
+ * Whether `response` says nothing is at `url`. den-edge refuses a shared Atlas call (no grant, an unknown or revoked
+ * one) with the same 404 as a missing path, so a prober learns nothing; there a 404 is not evidence of absence, and
+ * reading it as one silently put TMDB fallbacks in place of the guest's whole Atlas side.
+ */
+function absent(url: string, response: Response): boolean {
+  if (response.status !== 404) return false;
+  const gid = SHARED_ATLAS.exec(url)?.[1];
+  if (!gid) return true;
+  if (!sharedAtlasWarned.has(gid)) {
+    sharedAtlasWarned.add(gid);
+    console.warn(`den: the Atlas shared by grant ${gid} answered 404; treating it as unavailable`);
+  }
+  return false;
+}
+
 function tmdbUrl(path: string, key: string, params: Record<string, string> = {}): string {
   const url = new URL(TMDB + path);
   for (const [name, value] of Object.entries({ ...params, api_key: key }))
@@ -282,6 +302,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       for (const listener of this.#statusListeners)
         listener({ kind: 'throttled', provider: 'tmdb', retryAfterMs: retryMs });
     });
+    // The page holds the guest's grants and says when one ends; a `grant_expired` met here is told back to it.
+    onGrantEnded((gid) => {
+      for (const listener of this.#statusListeners) listener({ kind: 'grant-ended', gid });
+    });
   }
 
   listen(listener: (status: ContentServiceStatusValue) => void): () => void {
@@ -306,6 +330,11 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       this.#atlasTitleCursors.clear();
       this.credentials.configureAtlas?.(request.atlas);
       return { kind: 'sources.configure' };
+    }
+    // Likewise the grants: a query sent after them must find them held.
+    if (request.kind === 'grants.configure') {
+      useHeldGrants(request.grants);
+      return { kind: 'grants.configure' };
     }
     await this.#wait(this.credentials.ready?.() ?? Promise.resolve(), signal);
     switch (request.kind) {
@@ -605,7 +634,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         reuse(`content:eligible:${policyKey(policy)}:${url}`, async () => {
           const response = await this.#atlasFetch(atlas, policy)(url);
           // A title the store has never heard of has no age evidence: unknown, which the policy then decides.
-          if (response.status === 404) return { minimumAge: null };
+          if (absent(url, response)) return { minimumAge: null };
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const record = object(await response.json());
           const age = record?.minimumAge;
@@ -972,7 +1001,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return await this.#wait(
         reuse(`content:kids-home:${atlas}`, async () => {
           const response = await this.#atlasFetch(atlas, policy)(url);
-          if (response.status === 404) return { state: 'absent' } as const;
+          if (absent(url, response)) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           return {
             state: 'ready',
@@ -1042,7 +1071,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             : `${atlas}/index/franchise/${source.type === 'tv' ? 'series' : 'movie'}/${source.id}.json`;
         const body = await reuse(`content:${policyKey(policy)}:${url}`, async () => {
           const response = await policed(url, { signal });
-          if (response.status === 404) return null;
+          if (absent(url, response)) return null;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           return object(await response.json());
         });
@@ -1085,7 +1114,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const request = async (path: string, init?: RequestInit) => {
       try {
         const response = await policed(`${atlas}${path}`, { ...init, signal });
-        if (response.status === 404) return null;
+        if (absent(`${atlas}${path}`, response)) return null;
         if (!response.ok) throw new Error(`atlas answered ${response.status}`);
         return object(await response.json());
       } catch (error) {
@@ -1274,7 +1303,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return await this.#wait(
         reuse(`content:${policyKey(policy)}:${url}`, async () => {
           const response = await this.#atlasFetch(atlas, policy)(url);
-          if (response.status === 404) return { state: 'absent' } as const;
+          if (absent(url, response)) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const titles = titlesOf(await response.json());
           return {
@@ -1299,7 +1328,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return await this.#wait(
         reuse(`content:manifest:${atlas}`, async () => {
           const response = await this.#providerFetch(`${atlas}/manifest.json`);
-          if (response.status === 404) return { state: 'absent' } as const;
+          if (absent(`${atlas}/manifest.json`, response)) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const body = object(await response.json());
           const catalogs = Array.isArray(body?.catalogs) ? body.catalogs : [];
@@ -1366,7 +1395,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return await this.#wait(
         reuse(`content:chart:${policyKey(policy)}:${url}`, async () => {
           const response = await this.#atlasFetch(atlas, policy)(url);
-          if (response.status === 404) return { state: 'absent' } as const;
+          if (absent(url, response)) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const expectedPolicy = atlasPolicyIdentity(policy);
           if (expectedPolicy && response.headers.get('x-den-policy') !== expectedPolicy)
@@ -1412,7 +1441,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
               signal: requestSignal,
             },
       );
-      if (response.status === 404) return { state: 'absent' } as const;
+      if (absent(url, response)) return { state: 'absent' } as const;
       if (!response.ok) throw new Error(`atlas answered ${response.status}`);
       const body = object(await response.json());
       return body && Array.isArray(body.slides)
@@ -1543,7 +1572,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     } catch {
       return unavailable('network');
     }
-    if (response.status === 404) return { kind: 'missing' };
+    if (absent(path, response)) return { kind: 'missing' };
     if (!response.ok) return refused(response, this.#now);
     try {
       const body = object(await response.json());

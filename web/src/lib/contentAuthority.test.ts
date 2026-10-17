@@ -272,6 +272,53 @@ describe('ContentAuthority', () => {
     ).rejects.toMatchObject({ failure: { code: 'invalid-request', provider: 'atlas' } });
   });
 
+  it('reads a 404 from an Atlas shared by a grant as unavailable, never as nothing there', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const answers = async (atlas: string) => {
+      const credentials = new WorkerContentCredentials();
+      credentials.configureAtlas(atlas);
+      const authority = new ContentAuthority(credentials, {
+        tmdbFetch: async () => json({ imdb_id: null }),
+        providerFetch: async () => json({ error: 'not_found' }, { status: 404 }),
+      });
+      const signal = new AbortController().signal;
+      const home = await authority.query(
+        { kind: 'atlas.recommend.shared', scope: 'home', day: '2026-10-17', fresh: false },
+        signal,
+      );
+      const row = await authority.query(
+        { kind: 'atlas.row', type: 'movie', where: { genre: 'drama' }, page: 1 },
+        signal,
+      );
+      const extras = await authority.query(
+        { kind: 'title.extras', title: { type: 'movie', id: 42 }, warningCategories: [] },
+        signal,
+      );
+      return [
+        home.kind === 'atlas.recommend.shared' && home.slides.state,
+        row.kind === 'atlas.row' && row.titles.state,
+        extras.kind === 'title.extras' && extras.extras.facts.state,
+      ];
+    };
+
+    // den-edge's own Atlas: a 404 is a path with nothing at it.
+    expect(await answers(`/atlas-own-${crypto.randomUUID()}`)).toEqual([
+      'absent',
+      'absent',
+      'absent',
+    ]);
+    expect(warn).not.toHaveBeenCalled();
+    // A guest's shared one: the same 404 is what den-edge answers a refused grant with.
+    expect(await answers('/atlas/~a1b2c3d4')).toEqual([
+      'unavailable',
+      'unavailable',
+      'unavailable',
+    ]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain('a1b2c3d4');
+    warn.mockRestore();
+  });
+
   it('lets shared recommendation waiters cancel independently over one GET', async () => {
     const credentials = new WorkerContentCredentials();
     credentials.configureAtlas(`/atlas-shared-${crypto.randomUUID()}`);

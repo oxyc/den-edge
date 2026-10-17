@@ -206,6 +206,8 @@ export interface ContentImportSearchHit {
 
 export type ContentRequest =
   | { kind: 'sources.configure'; atlas: string | null }
+  /** The guest grants the page holds, whole, so the Worker's own `~<gid>` calls can carry them. */
+  | { kind: 'grants.configure'; grants: { gid: string; secret: string }[] }
   | { kind: 'titles'; titles: ContentTitleRef[] }
   | { kind: 'title.detail'; title: ContentTitleRef; region: string }
   | { kind: 'title.extras'; title: ContentTitleRef; warningCategories: string[] }
@@ -306,6 +308,7 @@ export interface ContentImportLookupResult {
 
 export type ContentResult =
   | { kind: 'sources.configure' }
+  | { kind: 'grants.configure' }
   | { kind: 'titles'; titles: Title[]; retryable: ContentTitleRef[] }
   | { kind: 'title.detail'; detail: OptionalContent<TitleDetail> }
   | { kind: 'title.extras'; extras: ContentTitleExtras }
@@ -369,7 +372,9 @@ export interface ContentServiceFailure {
 export type ContentServiceStatusValue =
   | { kind: 'ready' }
   | { kind: 'throttled'; provider: ContentProvider; retryAfterMs: number }
-  | { kind: 'unavailable'; provider?: ContentProvider; error: ContentServiceFailure };
+  | { kind: 'unavailable'; provider?: ContentProvider; error: ContentServiceFailure }
+  /** den-edge answered one of the Worker's calls for this grant with `grant_expired`. */
+  | { kind: 'grant-ended'; gid: string };
 
 interface ContentClientMessage {
   protocol: ContentServiceProtocol;

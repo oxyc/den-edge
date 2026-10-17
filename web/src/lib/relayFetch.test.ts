@@ -166,18 +166,32 @@ test('a shared addon’s ~gid base carries the grant and never the library’s c
   }
 });
 
-test('the grant is not attached to another origin, another path, or a grant it does not hold', async () => {
+test('the grant is not attached to another origin or another path', async () => {
   const spy = stub();
   rememberGrant(GID, 'sekrit');
   for (const url of [
     `https://elsewhere.example/scout/~${GID}/manifest.json`,
     `/remux/s/abc/~${GID}`,
-    '/scout/~ffffffff/manifest.json',
     `/tmdb/~${GID}/3/movie/1`,
   ]) {
     await relayFetch(url);
     expect(sent(spy)[GRANT], url).toBeUndefined();
   }
+});
+
+test('a ~gid call for a grant it holds no secret for is refused here, once out loud, and never sent', async () => {
+  const spy = stub();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  rememberGrant(GID, 'sekrit');
+  for (let i = 0; i < 2; i++)
+    await expect(relayFetch('/atlas/~ffffffff/recommend/home.json')).rejects.toThrow(
+      'no secret held for grant ffffffff',
+    );
+  expect(spy).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(String(warn.mock.calls[0]?.[0])).toContain('ffffffff');
+  expect(String(warn.mock.calls[0]?.[0])).not.toContain('sekrit');
+  warn.mockRestore();
 });
 
 test('a session naming a shared install goes to the relay under the grant, not the membership', async () => {

@@ -25,6 +25,7 @@ const SID = 'AbCdEfGhIjKlMnOpQrStUv';
 const SIG = 'sIgNaTuReSiGnAtUrE0123';
 const PATH = `/remux/s/${SID}/${SIG}`;
 const GUEST = 'dceafce0';
+const GUEST_SECRET = 'guest-flow-secret';
 const hls = new URL('./media/hls/', import.meta.url);
 const web = fileURLToPath(new URL('..', import.meta.url));
 const cors = { 'access-control-allow-origin': '*' };
@@ -142,6 +143,7 @@ async function open({
   silentLan,
   playback = '/den/config/playback',
   scout,
+  grant,
   userAgent,
   linkLimit,
 }) {
@@ -170,11 +172,12 @@ async function open({
     }, linkLimit);
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
-  const asked = { playback: [], releases: [], lanAsked: [] };
+  const asked = { playback: [], playbackGrants: [], releases: [], lanAsked: [] };
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
   await page.route(`${ORIGIN}${playback}`, (r) => {
     asked.playback.push(r.request().postDataJSON());
+    asked.playbackGrants.push(r.request().headers()['x-den-grant'] ?? null);
     return r.fulfill({ json: answer });
   });
   await page.route(`${ORIGIN}/remux/releases`, (r) => {
@@ -208,6 +211,7 @@ async function open({
   );
   const query = new URLSearchParams({ remux: '/remux', playback });
   if (scout) query.set('scout', scout);
+  if (grant) query.set('grant', grant);
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
@@ -311,10 +315,12 @@ test('a guest on the host’s Hearth plays, and lists releases under its own nam
     home: false,
     playback: `/den/~${GUEST}/playback`,
     scout: `${ORIGIN}/den/~${GUEST}`,
+    grant: `${GUEST}:${GUEST_SECRET}`,
   });
   try {
     await playingPast(castVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
+    expect(asked.playbackGrants).toEqual([`${GUEST}:${GUEST_SECRET}`]);
     expect(segmentHosts()).toEqual(new Set(['media.test']));
     await expect.poll(() => asked.releases.length).toBeGreaterThan(0);
     expect(asked.releases[0].scout).toBe(`${ORIGIN}/den/~${GUEST}`);
@@ -330,10 +336,12 @@ test('a guest with their own TorBox plays the provider’s stream in the page', 
     home: false,
     playback: `/den/~${GUEST}/playback`,
     scout: `${ORIGIN}/den/~${GUEST}`,
+    grant: `${GUEST}:${GUEST_SECRET}`,
   });
   try {
     await playingPast(pageVideo(page), 3);
     expect(asked.playback).toHaveLength(1);
+    expect(asked.playbackGrants).toEqual([`${GUEST}:${GUEST_SECRET}`]);
     expect(segmentHosts()).toEqual(new Set(['flux.wnam.tb-cdn.io']));
     await stamped(page, 'TorBox');
   } finally {

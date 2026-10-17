@@ -3255,6 +3255,30 @@ mod tests {
         assert_eq!(post.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Each refusal names its check in the request log (`why=`), and only there: the caller gets the one `not_found`
+    /// whichever check it was, so a prober still cannot tell a missing grant from a wrong secret or an unshared addon.
+    #[tokio::test]
+    async fn a_refused_guest_call_names_its_check_in_the_log_and_answers_the_same() {
+        let (h, seen) = relaying(ok_json, None).await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        let wrong = format!("{gid}:wrong");
+        for (path, claim, why) in [
+            (format!("/atlas/~{gid}/recommend/home.json"), None, "no_claim"),
+            (format!("/atlas/~{gid}/recommend/home.json"), Some(wrong.as_str()), "bad_claim"),
+            (format!("/atlas/~{}/recommend/home.json", "f".repeat(8)), Some(header.as_str()), "bad_claim"),
+            ("/atlas/~zz/recommend/home.json".to_owned(), Some(header.as_str()), "bad_path"),
+            (format!("/reel/~{gid}/meta/movie/x.json"), Some(header.as_str()), "not_shared"),
+            (format!("/scout/~{gid}/stream/movie/tt1.json"), Some(header.as_str()), "not_allowed"),
+        ] {
+            let headers: Vec<(&str, &str)> = claim.map(|c| (HEADER, c)).into_iter().collect();
+            let resp = h.send("GET", &path, None, &headers).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(resp.extensions().get::<crate::handler::Why>().map(|w| w.0), Some(why), "{path}");
+            assert_eq!(body_json(resp).await, json!({ "error": "not_found" }), "{path}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "nothing refused may reach an addon");
+    }
+
     #[tokio::test]
     async fn an_addon_outside_the_grant_is_not_reachable_and_expiry_is_told_to_the_guest() {
         let (h, _) = relaying(ok_json, None).await;
