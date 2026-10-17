@@ -550,7 +550,7 @@ async fn dispatch(
     // capability is checked by Reel over the LAN before the root-owned helper leases this exact visitor address.
     // Metadata and the fallback relay remain on this origin.
     if path == crate::relay::REEL_TRANSPORT {
-        return crate::relay::transport_reel(state, req, rid).await;
+        return crate::relay::transport_reel(state, req, rid, face).await;
     }
     if path == crate::relay::REEL_ACTIVATE {
         return crate::relay::activate_reel(state, req, rid).await;
