@@ -7,10 +7,16 @@
   import type { LibraryModel } from '../src/lib/libraryModel.svelte';
   import '../src/app.css';
 
-  useLibraryCredential({ id: 'fixturelib01', member: 'proof' });
+  const membership = { libraryId: 'f'.repeat(32), memberToken: 'proof' };
+  // Profile mode has a different global Owner credential. Sharing must deliberately use the household model below.
+  useLibraryCredential({ id: 'e'.repeat(32), member: 'owner-proof' });
   const model = {
-    relayMembership: async () => ({ libraryId: 'fixturelib01', memberToken: 'proof' }),
-  } as unknown as LibraryModel;
+    relayMembership: async () => {
+      if (new URLSearchParams(location.search).has('membership-fails'))
+        throw new Error('fixture membership failure');
+      return membership;
+    },
+  } as LibraryModel;
 
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
