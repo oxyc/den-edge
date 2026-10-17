@@ -49,6 +49,9 @@ const CHARGES: TableDefinition<&str, u64> = TableDefinition::new("charges-v3");
 const SEQUENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("sequence-v3");
 const META_U64: TableDefinition<&str, u64> = TableDefinition::new("metadata-u64-v3");
 const META_BYTES: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata-bytes-v3");
+/// The protocol last durably observed outside each library file. Keeping this in one separate transactional
+/// database lets a restored library be fenced without rewriting and syncing every other library's entry.
+const PROTOCOLS: TableDefinition<&str, &[u8]> = TableDefinition::new("library-protocols-v1");
 /// One opaque, attempt-scoped exclusive operation owner. The generic store primitive deliberately knows
 /// nothing about profiles or household rows so a future authenticated compound reset can reuse it.
 const EXCLUSIVE_OPERATION_LOCK: &str = "exclusive-operation-lock";
@@ -66,6 +69,14 @@ pub(super) fn stored_charge(key: &str, value: &str) -> u64 {
 fn compaction_turn() -> &'static Mutex<()> {
     static TURN: OnceLock<Mutex<()>> = OnceLock::new();
     TURN.get_or_init(|| Mutex::new(()))
+}
+
+/// Test restart paths may overlap two managers briefly while a held store outlives the first state. Production has
+/// one manager, but sharing the one process-local protocol index also avoids redb's correctly exclusive file lock
+/// turning that harmless overlap into a startup failure.
+fn protocol_indexes() -> &'static Mutex<HashMap<PathBuf, Weak<ProtocolIndex>>> {
+    static INDEXES: OnceLock<Mutex<HashMap<PathBuf, Weak<ProtocolIndex>>>> = OnceLock::new();
+    INDEXES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug)]
@@ -1754,45 +1765,72 @@ struct IndexedProtocol {
 }
 
 struct ProtocolIndex {
-    path: PathBuf,
-    entries: Mutex<HashMap<String, IndexedProtocol>>,
+    database: Database,
 }
 
 impl ProtocolIndex {
-    fn open(path: PathBuf) -> Result<Self, StoreError> {
-        let entries = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|error| StoreError::Invalid(format!("invalid library protocol index: {error}")))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => return Err(StoreError::io(error)),
+    fn open(path: PathBuf) -> Result<Arc<Self>, StoreError> {
+        let mut open = protocol_indexes().lock().unwrap();
+        open.retain(|_, index| index.strong_count() > 0);
+        if let Some(index) = open.get(&path).and_then(Weak::upgrade) {
+            return Ok(index);
+        }
+        let legacy_path = path.with_extension("json");
+        let legacy: HashMap<String, IndexedProtocol> = if path.exists() {
+            HashMap::new()
+        } else {
+            match std::fs::read(&legacy_path) {
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                    StoreError::Invalid(format!("invalid library protocol index: {error}"))
+                })?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
+                Err(error) => return Err(StoreError::io(error)),
+            }
         };
-        Ok(Self { path, entries: Mutex::new(entries) })
+        let mut builder = Database::builder();
+        builder.set_cache_size(DATABASE_CACHE_BYTES);
+        let database = builder.create(&path).map_err(StoreError::redb)?;
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        {
+            let mut protocols = transaction.open_table(PROTOCOLS).map_err(StoreError::redb)?;
+            for (id, protocol) in legacy {
+                let bytes =
+                    serde_json::to_vec(&protocol).map_err(|error| StoreError::Failed(error.to_string()))?;
+                protocols.insert(id.as_str(), bytes.as_slice()).map_err(StoreError::redb)?;
+            }
+        }
+        transaction.commit().map_err(StoreError::redb)?;
+        let index = Arc::new(Self { database });
+        open.insert(path, Arc::downgrade(&index));
+        Ok(index)
     }
 
-    fn get(&self, id: &str) -> Option<IndexedProtocol> {
-        self.entries.lock().unwrap().get(id).cloned()
+    fn get(&self, id: &str) -> Result<Option<IndexedProtocol>, StoreError> {
+        let transaction = self.database.begin_read().map_err(StoreError::redb)?;
+        let protocols = transaction.open_table(PROTOCOLS).map_err(StoreError::redb)?;
+        let Some(bytes) = protocols.get(id).map_err(StoreError::redb)? else { return Ok(None) };
+        serde_json::from_slice(bytes.value())
+            .map(Some)
+            .map_err(|error| StoreError::Invalid(format!("invalid library protocol index: {error}")))
     }
 
     fn record(&self, id: &str, protocol: &Protocol) -> Result<(), StoreError> {
-        let mut entries = self.entries.lock().unwrap();
-        entries.insert(
-            id.to_owned(),
-            IndexedProtocol {
-                generation: protocol.generation.clone(),
-                head: protocol.head,
-                wire_min: protocol.wire_min,
-                migration_generation: protocol.migration_generation,
-            },
-        );
-        let bytes = serde_json::to_vec(&*entries).map_err(|error| StoreError::Failed(error.to_string()))?;
-        let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, bytes).map_err(StoreError::io)?;
-        std::fs::File::open(&temporary).and_then(|file| file.sync_all()).map_err(StoreError::io)?;
-        std::fs::rename(&temporary, &self.path).map_err(StoreError::io)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(StoreError::io)?;
+        let bytes = serde_json::to_vec(&IndexedProtocol {
+            generation: protocol.generation.clone(),
+            head: protocol.head,
+            wire_min: protocol.wire_min,
+            migration_generation: protocol.migration_generation,
+        })
+        .map_err(|error| StoreError::Failed(error.to_string()))?;
+        let transaction = self.database.begin_write().map_err(StoreError::redb)?;
+        {
+            transaction
+                .open_table(PROTOCOLS)
+                .map_err(StoreError::redb)?
+                .insert(id, bytes.as_slice())
+                .map_err(StoreError::redb)?;
         }
-        Ok(())
+        transaction.commit().map_err(StoreError::redb)
     }
 }
 
@@ -2057,7 +2095,7 @@ impl StoreManager {
         if used > disk_cap || file_cap > disk_cap || memory_cap < OPEN_DATABASE_BYTES {
             return Err(StoreError::Full);
         }
-        let index = Arc::new(ProtocolIndex::open(root.join("library-v3-index.json"))?);
+        let index = ProtocolIndex::open(root.join("library-v3-index.redb"))?;
         Ok(Self {
             root: root.to_owned(),
             registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
@@ -2081,8 +2119,7 @@ impl StoreManager {
         if memory_cap < OPEN_DATABASE_BYTES {
             return Err(StoreError::Full);
         }
-        let index =
-            Arc::new(ProtocolIndex::open(root.parent().unwrap_or(root).join("library-v3-index.json"))?);
+        let index = ProtocolIndex::open(root.parent().unwrap_or(root).join("library-v3-index.redb"))?;
         Ok(Self {
             root: root.to_owned(),
             registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
@@ -2274,7 +2311,7 @@ impl StoreManager {
         let created = !path.exists();
         match shared_or_open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
             Ok(store) => {
-                let recorded = self.index.get(id);
+                let recorded = self.index.get(id)?;
                 let protocol = store.reconcile_protocol(recorded.as_ref(), created)?;
                 // A database that no longer matches what was recorded for it was restored or replaced on disk; one
                 // that was not shows here as lost data, so it is said.
@@ -2386,6 +2423,61 @@ mod tests {
 
     fn value(row: &StoredRow) -> serde_json::Value {
         serde_json::from_slice(&row.fragment).unwrap()
+    }
+
+    #[test]
+    fn protocol_index_imports_the_legacy_json_only_once() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library-v3-index.redb");
+        let legacy_path = dir.join("library-v3-index.json");
+        let original =
+            IndexedProtocol { generation: "before".into(), head: 7, wire_min: 3, migration_generation: 2 };
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_vec(&HashMap::from([("library".to_owned(), original)])).unwrap(),
+        )
+        .unwrap();
+
+        let index = ProtocolIndex::open(path.clone()).unwrap();
+        let concurrent = ProtocolIndex::open(path.clone()).unwrap();
+        assert!(Arc::ptr_eq(&index, &concurrent));
+        drop(concurrent);
+        let imported = index.get("library").unwrap().unwrap();
+        assert_eq!(imported.generation, "before");
+        assert_eq!((imported.head, imported.wire_min, imported.migration_generation), (7, 3, 2));
+        index
+            .record(
+                "library",
+                &Protocol { generation: "after".into(), head: 8, wire_min: 4, migration_generation: 3 },
+            )
+            .unwrap();
+        drop(index);
+
+        // The old file can remain beside the transactional index during rollout; it is never re-imported.
+        let reopened = ProtocolIndex::open(path).unwrap();
+        let current = reopened.get("library").unwrap().unwrap();
+        assert_eq!(current.generation, "after");
+        assert_eq!((current.head, current.wire_min, current.migration_generation), (8, 4, 3));
+    }
+
+    #[test]
+    fn a_library_commit_ahead_of_its_index_reopens_with_a_new_fence() {
+        let dir = temp_dir();
+        let first = manager(&dir, 4, 32 << 20, 8 << 20);
+        let store = first.library("1111111111111111", TOKEN).unwrap();
+        store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        let recorded = store.protocol().unwrap();
+        store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        first.index.record("1111111111111111", &recorded).unwrap();
+        drop(store);
+        drop(first);
+
+        let reopened = manager(&dir, 4, 32 << 20, 8 << 20);
+        let current = reopened.library("1111111111111111", TOKEN).unwrap().protocol().unwrap();
+        assert_eq!(current.head, 2);
+        assert_ne!(current.generation, recorded.generation);
+        assert!(current.migration_generation > recorded.migration_generation);
     }
 
     #[test]
