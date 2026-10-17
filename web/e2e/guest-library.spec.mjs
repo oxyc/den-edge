@@ -84,6 +84,25 @@ test('accepting an invite starts the guest’s library with the watchlist alread
   });
 });
 
+test('on a profile host an invite starts the guest’s own profile household', async () => {
+  const edge = newEdge({ profiles: true });
+  await browserOf(edge, async (_browser, open) => {
+    const laptop = await laptopAcceptingAnInvite(open, edge);
+
+    const switcher = laptop.getByRole('button', { name: 'Switch profile, current Owner' });
+    await expect(switcher).toBeVisible({ timeout: 30_000 });
+    await switcher.click();
+    const profiles = laptop.getByRole('dialog', { name: 'Who’s watching?' });
+    await expect(profiles.getByRole('button', { name: 'Use Owner' })).toBeVisible();
+    await expect(profiles.getByRole('button', { name: 'Use Kids' })).toBeVisible();
+    await expect(profiles.getByRole('button', { name: 'Use Visitor' })).toBeVisible();
+
+    expect(edge.libraries.size, 'household, Owner and default Kid belong to the guest').toBe(3);
+    expect(edge.refusedStarts, 'the grant reserved the household first write').toBe(0);
+    expect((await stored(laptop, 'den.links'))[0]).toMatchObject({ guest: true });
+  });
+});
+
 test('the phone link pairs the phone with the laptop, which allows it, and the grant ending leaves the library', async () => {
   const edge = newEdge({ devices: 2 });
   await browserOf(edge, async (_browser, open) => {

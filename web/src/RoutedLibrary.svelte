@@ -763,24 +763,26 @@
   let householdTries = 0;
   let householdStarting = false;
   let householdRefused = false;
-  async function startHousehold(ifKept = false): Promise<void> {
+  async function startHousehold(ifKept = false, reserved = false): Promise<boolean> {
     const plan = plannedHousehold;
     // The library kept here, even while the switcher has a Visitor open over it.
     const staging = stagingOwner ?? session;
     const stagingKey = libraryIdentity;
-    if (!plan || householdStarting || householdRefused || !alive) return;
-    if (!staging.local || !staging.model || !stagingKey) return;
+    if (!plan || householdStarting || householdRefused || !alive) return false;
+    if (!staging.local || !staging.model || !stagingKey) return false;
     householdStarting = true;
     let retryMs: number | null = null;
     try {
       // Only where den-edge says it starts a household for a browser like this one; otherwise nothing is sent.
-      if (!(await bornHouseholds())) return;
+      // A guest grant reserves exactly this planned household before it gets here. That reservation is the server's
+      // permission for the first write even where arbitrary browser households are closed (`NEW_LIBRARIES=members`).
+      if (!reserved && !(await bornHouseholds())) return false;
       // `ifKept` marks the plan started only once something was found to move: a reload of an empty library stays idle.
       const started =
         ifKept && !plan.started && plan.stagingKey === stagingKey
           ? plan
           : startHouseholdPlan(plan, stagingKey);
-      if (!started) return;
+      if (!started) return false;
       plannedHousehold = started;
       // A reload resumes this as the page opens, before the library kept here is ready to be asked.
       await staging.model.ready;
@@ -795,7 +797,8 @@
       if (outcome === 'created') {
         if (!started.started) plannedHousehold = startHouseholdPlan(started, stagingKey) ?? started;
         const adopted = await adoptHousehold(started);
-        if (adopted !== 'adopted') retryMs = adopted;
+        if (adopted === 'adopted') return true;
+        retryMs = adopted;
       } else if (outcome === 'refused') householdRefused = true;
       else if (outcome !== 'empty') retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
     } catch (error) {
@@ -806,6 +809,7 @@
     }
     if (retryMs !== null && alive && ++householdTries < HOUSEHOLD_TRIES)
       setTimeout(() => void startHousehold(), retryMs);
+    return false;
   }
 
   /**
@@ -1361,7 +1365,21 @@
     const grant = startingGrant();
     if (!grant || !session.local || phoneLanding.request || guestStarting) return;
     guestStarting = true;
-    void startGuestLibrary(grant, joinsAsBoolean)
+    // On a real-profile host the grant's one reservation is the planned household itself. Starting the older
+    // single-library shape here would leave a brand-new guest permanently on the legacy Owner path, with no profile
+    // directory to discover. Hosts with profiles off retain that exact legacy flow.
+    void realProfilesHost()
+      .then((profiles) => {
+        const plan = profiles ? plannedHousehold : null;
+        return startGuestLibrary(
+          grant,
+          plan
+            ? async (key) => key === plan.householdKey && startHousehold(false, true)
+            : joinsAsBoolean,
+          fetch,
+          plan?.householdKey,
+        );
+      })
       .then((outcome) => {
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
