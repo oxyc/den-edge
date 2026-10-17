@@ -23,8 +23,10 @@ function servedPolicy() {
 }
 
 /**
- * Google's sender, as far as the launcher goes: the element hides itself through the CSSOM (which no policy stops)
- * and, once the context reports a receiver, shows itself by rewriting its `style` attribute, as the real one does.
+ * Google's sender, as far as the launcher goes: the element notes the display it has when it is taken over, hides
+ * itself through the CSSOM (which no policy stops) and, once the context reports a receiver, shows itself by rewriting
+ * its `style` attribute with the display it noted, as the real one does. A launcher that was `hidden` when taken over
+ * is therefore "shown" as `display: none`.
  */
 const SDK = `
   window.chrome = window.chrome || {};
@@ -33,7 +35,7 @@ const SDK = `
     media: { DEFAULT_MEDIA_RECEIVER_APP_ID: 'CC1AD845' },
   };
   customElements.define('google-cast-launcher', class extends HTMLElement {
-    connectedCallback() { this.style.display = 'none'; }
+    connectedCallback() { this.shown = getComputedStyle(this).display; this.style.display = 'none'; }
   });
   const listeners = {};
   let state = 'NO_DEVICES_AVAILABLE';
@@ -41,7 +43,8 @@ const SDK = `
     setOptions() {
       setTimeout(() => {
         state = 'NOT_CONNECTED';
-        document.querySelector('google-cast-launcher').setAttribute('style', 'display: inline-block;');
+        const launcher = document.querySelector('google-cast-launcher');
+        launcher.setAttribute('style', 'display: ' + launcher.shown + ';');
         window.launcherRevealed = true;
         (listeners.caststatechanged || []).forEach((fn) => fn({ castState: state }));
       }, 50);
@@ -77,6 +80,7 @@ test.beforeAll(() => {
 test.afterAll(() => rmSync(built, { recursive: true, force: true }));
 
 test('under the policy den-edge serves, the Cast launcher shows once a receiver is found', async () => {
+  // The SDK above runs `setOptions` before the page adds the launcher, so its reveal must find one by then.
   const policy = servedPolicy();
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -115,7 +119,6 @@ test('under the policy den-edge serves, the Cast launcher shows once a receiver 
       const box = element.getBoundingClientRect();
       return { display: getComputedStyle(element).display, width: box.width, height: box.height };
     });
-    // The launcher is a flex item, so its `inline-block` computes as `block`.
     expect(launcher.display).not.toBe('none');
     expect(launcher.width).toBeGreaterThan(0);
     expect(launcher.height).toBeGreaterThan(0);

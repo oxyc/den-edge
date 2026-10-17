@@ -130,7 +130,6 @@ declare global {
 const video = document.querySelector('video')!;
 const statusPill = document.querySelector<HTMLElement>('#status')!;
 const profile = document.querySelector<HTMLSelectElement>('#profile')!;
-const castLauncher = document.querySelector<HTMLElement>('google-cast-launcher')!;
 const castOptions = document.querySelector<HTMLElement>('.cast-options')!;
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
@@ -601,6 +600,18 @@ async function castFrameworkLoaded(): Promise<boolean> {
   return true;
 }
 
+/**
+ * Google's launcher, created only once Cast has started. The SDK reads the element's display when it takes it over and
+ * shows it with that value later, so one that was `hidden` then (as a launcher written into the page was, until Cast
+ * started) is "shown" as `display: none` forever: with a receiver found there was still no button to press.
+ */
+function addCastLauncher(): void {
+  const launcher = document.createElement('google-cast-launcher');
+  launcher.setAttribute('aria-label', 'Cast to a TV');
+  launcher.title = 'Cast to a TV';
+  castOptions.before(launcher);
+}
+
 window.__onGCastApiAvailable = (available) => {
   if (!available) {
     castDevices = false;
@@ -609,12 +620,12 @@ window.__onGCastApiAvailable = (available) => {
   }
   // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
   // controls) the launcher would draw as an empty circle over the video. Google's launcher also hides itself
-  // while no receiver is on the network, so revealing it is not the same as showing it.
+  // while no receiver is on the network, so adding it is not the same as showing it.
   void castFrameworkLoaded().then((loaded) => {
     try {
       if (!loaded || !initializeCast())
         throw new Error('the Cast SDK loaded without its framework');
-      castLauncher.hidden = false;
+      addCastLauncher();
     } catch (error) {
       // A button that was never initialised does nothing, so it stays hidden; the console says why.
       console.error('Cast could not start:', error);
