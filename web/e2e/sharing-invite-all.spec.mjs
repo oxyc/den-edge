@@ -39,7 +39,14 @@ test('a new invite automatically shares every lendable addon and no others', asy
   await expect(page.getByText('Addons to share', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('checkbox')).toHaveCount(0);
   await page.getByLabel('Guest’s name').fill('Alex');
+  // The click only starts the invite; its POST leaves after the page has prepared it. Its answer comes from the
+  // route above, so once it arrives `posted` holds what was sent.
+  const create = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' && /\/lib\/[^/]+\/grants$/.test(response.url()),
+  );
   await page.getByRole('button', { name: 'Create invite' }).click();
+  await create;
 
   expect(posted).toMatchObject({
     name: 'Alex',
