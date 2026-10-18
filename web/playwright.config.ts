@@ -31,6 +31,8 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
     url: `${E2E_ORIGIN}/test/router.html`,
+    // The dev server proxies unrouted requests to a real den-edge unless told this is a test (scripts/upstream.ts).
+    env: { DEN_E2E: '1' },
     // A busy port means another worktree's server is already there — fail loudly (--strictPort
     // backs this up) instead of silently reusing it and running tests against the wrong code.
     reuseExistingServer: false,
