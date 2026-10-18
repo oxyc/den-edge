@@ -312,10 +312,31 @@ function release(filename, { cached = false, seeders = 10 } = {}) {
   };
 }
 
+/**
+ * den-hearth's `/den/<config>/wanted`, as far as these specs need it: every list the holder sent, and each item
+ * answered `searching` unless the spec has Hearth start it (`started`, by content key).
+ */
+async function routeHearth(page) {
+  const hearth = { lists: [], started: {} };
+  await page.route('**/fixture-hearth/wanted', (route) => {
+    const { items } = JSON.parse(route.request().postData());
+    hearth.lists.push(items);
+    return route.fulfill({
+      json: {
+        items: items.map((item) =>
+          hearth.started[item.key]
+            ? { key: item.key, state: 'started', ...hearth.started[item.key] }
+            : { key: item.key, state: 'searching', retries: item.retries },
+        ),
+      },
+    });
+  });
+  return hearth;
+}
+
 // The owner's Rebecka Martinsson season 2: a Nordic series whose episodes are sparsely seeded. One is cached, one has
-// a seeded release, one has nothing listed at all, one only an unseeded release, and one hasn't aired. Each ends as a
-// download that keeps trying, survives a reload, and starts by itself once a release turns up.
-test('a season download keeps every episode until it can be fetched', async ({ page }) => {
+// a seeded release, one has nothing listed at all, one only an unseeded release, and one hasn't aired.
+async function rebeckaSeason(page) {
   await page.clock.install({ time: new Date('2026-10-17T12:00:00Z') });
   await guardNetwork(page);
   const shared = store();
@@ -341,9 +362,19 @@ test('a season download keeps every episode until it can be fetched', async ({ p
       json: { progress: 0.25, bytesPerSecond: 1_000_000, state: 'downloading', seeds: 5, peers: 9 },
     });
   });
+  const hearth = await routeHearth(page);
   // The Downloads page recovers episode stills from the season listing.
   await routeTmdb(page, (route) => route.fulfill({ json: { episodes: [] } }));
   await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=season`);
+  return { shared, listed, probed, hearth };
+}
+
+const seasonPack = () =>
+  release('Rebecka.Martinsson.S02.1080p.AMZN.WEB-DL.DD+2.0.H.264-playWEB', { seeders: 4 });
+
+// Each episode ends as a download that keeps trying, survives a reload, and starts by itself once a release turns up.
+test('a season download keeps every episode until it can be fetched', async ({ page }) => {
+  const { shared, listed, probed } = await rebeckaSeason(page);
 
   await page.getByRole('button', { name: 'Download season 2' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'already ready' })).toHaveText(
@@ -365,9 +396,7 @@ test('a season download keeps every episode until it can be fetched', async ({ p
   await expect(card(3)).toContainText('Searching for a release');
 
   // The season pack gets seeded. The next search after the first wait (12–18 minutes) starts it, unasked.
-  listed[3] = [
-    release('Rebecka.Martinsson.S02.1080p.AMZN.WEB-DL.DD+2.0.H.264-playWEB', { seeders: 4 }),
-  ];
+  listed[3] = [seasonPack()];
   await page.clock.fastForward('20:00');
   // Twenty minutes without a pass lets the lease lapse: the first pass drops it, the next takes it again (§17).
   await page.evaluate(() => window.downloadsFixture.refresh());
@@ -377,4 +406,84 @@ test('a season download keeps every episode until it can be fetched', async ({ p
   // E4's release is still unseeded: still searching, with a longer wait, and nothing was added for it.
   await expect(card(4)).toContainText('Searching for a release');
   expect(probed.some((path) => path.includes('s02e04'))).toBe(false);
+});
+
+// The same season with no Den client open: an Apple TV in the background and a closed tab search for nothing. The
+// holder hands Hearth what it is still looking for; Hearth starts E3's pack meanwhile, and the next client open adopts
+// that start into the row as if it had picked it.
+test('Hearth starts a wanted episode while no client is open, and the next one adopts it', async ({
+  page,
+}) => {
+  const { shared, listed, probed, hearth } = await rebeckaSeason(page);
+  await page.getByRole('button', { name: 'Download season 2' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'already ready' })).toBeVisible();
+
+  // The holder's pass hands Hearth the wanted rows — what Scout lists each under and its schedule, nothing more.
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect.poll(() => hearth.lists.length).toBeGreaterThan(0);
+  const sent = hearth.lists.at(-1);
+  expect(sent.map((item) => item.key).sort()).toEqual([
+    'tv:70742:2:3',
+    'tv:70742:2:4',
+    'tv:70742:2:5',
+  ]);
+  const allowed = [
+    'airDate',
+    'episode',
+    'imdb',
+    'key',
+    'originalLanguage',
+    'preferredLanguage',
+    'queuedAt',
+    'retries',
+    'season',
+    'since',
+    'tried',
+  ];
+  for (const item of sent) {
+    expect(
+      Object.keys(item).every((key) => allowed.includes(key)),
+      JSON.stringify(item),
+    ).toBe(true);
+    expect(item).toMatchObject({ imdb: 'tt6623682', season: 2, retries: 0, tried: [] });
+  }
+  expect(sent.find((item) => item.episode === 5).airDate).toBeGreaterThan(Date.now());
+
+  // Every client closes. Meanwhile the pack is seeded, and Hearth's search starts it for E3.
+  await page.goto('about:blank');
+  const startedAt = Date.parse('2026-10-17T12:05:00Z');
+  const pack = seasonPack();
+  listed[3] = [pack];
+  hearth.started['tv:70742:2:3'] = { identity: pack.identity, startedAt, retries: 1 };
+  const addsBefore = probed.length;
+
+  // Reopened: once the old window's lease has lapsed (ten minutes observed), its first holder pass adopts the start.
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=season`);
+  const card = (episode) => page.locator(`[data-download="tv:70742:2:${episode}"]`);
+  await expect(card(3)).toContainText('Searching for a release');
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await page.clock.fastForward('11:00');
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect(card(3)).toContainText('Downloading 25%');
+  await expect(card(3)).toContainText('playWEB');
+
+  // The row names the release as the holder's pick would, queued when Hearth made the add rather than now.
+  const row = shared.rows.get('set:download:tv:70742:2:3');
+  expect(JSON.parse(row.values.release.value.string).identity).toBe(pack.identity);
+  expect(row.values.queuedAt.value.int).toBe(startedAt);
+  expect(row.values.retries.value.int).toBe(1);
+  expect(row.values.exhausted.value.bool).toBe(false);
+  // The add this client made is for its own ticket for that release (den-scout de-duplicates Hearth's).
+  expect(probed.slice(addsBefore).some((path) => path.includes('playweb'))).toBe(true);
+
+  // The next list it hands Hearth no longer has E3; E4 and E5 are still looked for.
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect
+    .poll(() =>
+      hearth.lists
+        .at(-1)
+        .map((item) => item.key)
+        .sort(),
+    )
+    .toEqual(['tv:70742:2:4', 'tv:70742:2:5']);
 });

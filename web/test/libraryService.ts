@@ -252,6 +252,7 @@ export function fixtureLibraryService({
       cancel: effects.cancel ?? ((url, reannounce) => cancelSource(url, reannounce, fetch)),
       resolve: effects.resolve ?? (async () => ({ sources: null, failure: 'not-configured' })),
       ticket: effects.ticket ?? ((url) => (url.startsWith('/scout/') ? url : null)),
+      ...(effects.wanted ? { wanted: effects.wanted } : {}),
     },
     { changed: () => void fixtureState.service?.publish([{ kind: 'downloads' }]) },
   );

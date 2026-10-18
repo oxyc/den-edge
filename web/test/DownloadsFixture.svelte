@@ -9,6 +9,7 @@
   import SeasonDownload from '../src/components/SeasonDownload.svelte';
   import '../src/app.css';
   import { downloadStill } from '../src/lib/downloadArtwork';
+  import { sendWanted, type WantedItem } from '../src/lib/hearthWanted';
   import type { LibraryLog } from '../src/lib/log';
   import { syncPolicy } from '../src/lib/syncCore';
   import { rowName, type Row, type SettingsRow, type Stamp } from '../src/lib/wire';
@@ -174,6 +175,10 @@
                 source('second.mkv', '/scout/p/second', 'Second release'),
               ],
             },
+      // The season's Hearth, answered by the test at `/fixture-hearth/wanted`.
+      ...(page === 'season'
+        ? { wanted: (items: WantedItem[]) => sendWanted('/fixture-hearth', items, fetch) }
+        : {}),
     },
     downloadArtwork: async (target) =>
       target.type === 'tv'
