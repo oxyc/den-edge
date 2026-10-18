@@ -16,6 +16,8 @@ export interface WantedItem {
   /** The row's `retries`, and the wall time its `exhausted` was last written: `download_retry`'s inputs. */
   retries: number;
   since: number;
+  /** When it was asked for (the row's `queuedAt`): what den-core's time-to-watchable pick counts from. */
+  queuedAt: number;
   originalLanguage?: string;
   preferredLanguage?: string;
 }
@@ -46,6 +48,7 @@ export function wantedItems(downloads: Download[]): WantedItem[] {
         tried: download.tried,
         retries: download.retries,
         since,
+        queuedAt: download.queuedAt,
         ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
         ...(title.preferredLanguage ? { preferredLanguage: title.preferredLanguage } : {}),
       },

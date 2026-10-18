@@ -434,6 +434,7 @@ test('Hearth starts a wanted episode while no client is open, and the next one a
     'key',
     'originalLanguage',
     'preferredLanguage',
+    'queuedAt',
     'retries',
     'season',
     'since',
