@@ -119,7 +119,8 @@
         return;
       }
     }
-    const result = await answer(id, allow, relayFetch, approval);
+    // Approved for the library the rows were written to: on a split household, as the household's member.
+    const result = await answer(id, allow, assistantLibrary.fetch ?? relayFetch, approval);
     if (result.ok) {
       location.assign(result.value);
       return;

@@ -1,5 +1,6 @@
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type {
+  AssistantConnection,
   ConnectionsView,
   ContinueView,
   DownloadReleaseDescriptor,
@@ -916,9 +917,15 @@ export class LibraryModel {
     };
   }
 
-  /** Publish every live read grant's projection that is due (§15). How many were sent. */
-  async publishAssistant(): Promise<number> {
-    const { result } = await this.task({ kind: 'assistant.publish' });
+  /**
+   * Publish every live read grant's projection that is due (§15). How many were sent. `connection`: a split
+   * household's (`assistantConnection`), which this, Owner's library, publishes its lists for.
+   */
+  async publishAssistant(connection?: AssistantConnection): Promise<number> {
+    const { result } = await this.task({
+      kind: 'assistant.publish',
+      ...(connection ? { connection } : {}),
+    });
     if (result.kind !== 'assistant.publish') throw wrongQueryResult('assistant publish');
     return result.published;
   }
@@ -938,6 +945,17 @@ export class LibraryModel {
     return { grants: result.grants, reads: result.reads, plays: result.plays };
   }
 
+  /**
+   * This household's assistant connection, to lend Owner's library on a household split into profiles; null while
+   * den-edge does not know this library as a member.
+   */
+  async assistantConnection(): Promise<AssistantConnection | null> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'assistant.connection' });
+    if (result.kind !== 'assistant.connection') throw wrongQueryResult('assistant connection');
+    return result.connection;
+  }
+
   /** Keep the grants whose connection den-edge still lists from expiring (at most daily). */
   async renewAssistant(grants: readonly string[]): Promise<number> {
     const { result } = await this.task({ kind: 'assistant.renew', grants: [...grants] });
@@ -945,11 +963,18 @@ export class LibraryModel {
     return result.renewed;
   }
 
-  /** Open, check and apply a drain of the assistant queue (`assistant.ts`). */
-  async applyAssistant(messages: ReadonlyArray<{ seq: number; sealed: string }>) {
+  /**
+   * Open, check and apply a drain of the assistant queue (`assistant.ts`). `connection`: a split household's, whose
+   * queue it is; this, Owner's library, applies it.
+   */
+  async applyAssistant(
+    messages: ReadonlyArray<{ seq: number; sealed: string }>,
+    connection?: AssistantConnection,
+  ) {
     const { result } = await this.task({
       kind: 'assistant.apply',
       messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
+      ...(connection ? { connection } : {}),
     });
     if (result.kind !== 'assistant.apply') throw wrongQueryResult('assistant apply');
     return result;
