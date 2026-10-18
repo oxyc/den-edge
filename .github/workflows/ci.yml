@@ -112,17 +112,43 @@ jobs:
       - name: Browser behavior
         run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/3
 
-  # Preserve the stable `web` check name while making it represent both the once-only checks and every shard.
+  # Time budgets on a household the size of a long-lived one (`e2e/big-library-budgets.spec.mjs`), against the
+  # production build a phone is served, one test at a time on a runner of their own: a budget is time, and beside the
+  # shards' dev server and four workers it measured the runner rather than the app.
+  e2e-budgets:
+    runs-on: ubuntu-latest
+    name: e2e budgets
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Time budgets on the production build
+        run: npm run test:e2e:budgets
+
+  # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
   web:
     if: always()
-    needs: [web-checks, e2e]
+    needs: [web-checks, e2e, e2e-budgets]
     runs-on: ubuntu-latest
     steps:
       - name: Require every web check
         env:
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
-        run: test "$CHECKS" = success && test "$E2E" = success
+          BUDGETS: ${{ needs.e2e-budgets.result }}
+        run: test "$CHECKS" = success && test "$E2E" = success && test "$BUDGETS" = success
 
   # A PR proves the same shared build graph that main will publish. It reads main's cache but deliberately does not
   # publish an image or overwrite the durable release cache with an unmerged revision.

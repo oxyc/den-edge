@@ -47,6 +47,7 @@
     content,
     onplay,
     onready,
+    ondetail,
     onretained,
     onadvance,
     reel,
@@ -79,6 +80,8 @@
     onplay?: (title: Title) => void;
     /** The current still is decoded and visible, so the rest of Home may begin speculative work. */
     onready?: () => void;
+    /** The first slide's details were asked for and have answered (or failed): its text is as drawn as it will be. */
+    ondetail?: () => void;
     /** Preserve bounded static copy for this retained lead's next parser-time paint. */
     onretained?: (title: RecommendedTitle, detail: TitleDetail) => void;
     /**
@@ -160,6 +163,8 @@
 
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight deduplication must not retrigger the effect that schedules lookups.
   const learning = new Set<string>();
+  /** Whether the first detail asked for has answered, for `ondetail`. */
+  let detailSettled = false;
 
   async function learn(title: Title | undefined): Promise<void> {
     if (!title || known.has(keyOf(title)) || learning.has(keyOf(title))) return;
@@ -181,6 +186,10 @@
       }
     } finally {
       learning.delete(key);
+      if (!detailSettled) {
+        detailSettled = true;
+        ondetail?.();
+      }
     }
   }
 

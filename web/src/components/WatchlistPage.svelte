@@ -2,7 +2,7 @@
      row builds it, the watchlist under the same three tabs Watched uses, everything watched as one long list, newest first,
      grouped by month and drawn a screenful at a time as you scroll, or one year of it. -->
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import {
     UNKNOWN_YEAR,
     airedEpisodes,
@@ -13,9 +13,10 @@
   } from '../lib/history';
   import type { ContinueEntry, MediaType, Shape, Title } from '../lib/library';
   import { titleHref } from '../lib/route';
+  import { yieldTask } from '../lib/taskYield';
   import Select from '../settings/Select.svelte';
   import PosterCard from './PosterCard.svelte';
-  import PosterRow from './PosterRow.svelte';
+  import WindowedPosterRow from './WindowedPosterRow.svelte';
   import TypeFilter from './TypeFilter.svelte';
 
   let {
@@ -79,6 +80,25 @@
   // offer to mark it watched.
   const listed = $derived(saved.filter((t) => !seen.get(key(t))?.length));
   const savedShown = $derived(savedKind ? listed.filter((t) => t.type === savedKind) : listed);
+  /**
+   * How much of the watchlist is drawn: `STEP` cards, then another `STEP` after each yield, until all of it. Drawn in
+   * one go, a long watchlist was one main-thread task of every card (1 s on a throttled phone profile, 170 cards).
+   * Watched waits for the whole of it, so nothing below moves while it grows.
+   */
+  let savedDrawn = $state(STEP);
+  $effect(() => {
+    const total = savedShown.length;
+    let live = true;
+    void (async () => {
+      while (live && untrack(() => savedDrawn) < total) {
+        await yieldTask();
+        if (live) savedDrawn = Math.min(total, untrack(() => savedDrawn) + STEP);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  });
   const view = $derived(watchedView(history, kind, year));
   const shown = $derived(view.shown);
   const yearOptions = $derived([
@@ -271,8 +291,15 @@
 {/if}
 
 {#if resume.length}
-  <PosterRow heading="Continue Watching">
-    {#each resume as entry (key(entry.title))}
+  <!-- Windowed as Home's is: thirty cards in progress were thirty cards mounted at once. -->
+  <WindowedPosterRow
+    heading="Continue Watching"
+    items={resume}
+    itemKey={(entry) => key(entry.title)}
+    itemHref={(entry) => titleHref(entry.title)}
+    itemLabel={(entry) => entry.title.title}
+  >
+    {#snippet children(entry, onscreen)}
       {#snippet card()}
         <PosterCard
           title={entry.title}
@@ -280,11 +307,12 @@
           progress={entry.fraction}
           href={titleHref(entry.title)}
           menu={false}
+          {onscreen}
         />
       {/snippet}
       {@render framed(entry.title, resumeControls, card)}
-    {/each}
-  </PosterRow>
+    {/snippet}
+  </WindowedPosterRow>
 {/if}
 
 {#if savedCounts.all}
@@ -299,14 +327,14 @@
         label="Show in Watchlist"
       />
     </div>
-    {@render grid(savedShown)}
+    {@render grid(savedShown.slice(0, savedDrawn))}
     {#if !savedShown.length}
       <p class="note">Nothing of these on your watchlist.</p>
     {/if}
   </section>
 {/if}
 
-{#if history.length}
+{#if history.length && savedDrawn >= savedShown.length}
   <section aria-label="Watched">
     <div class="heading">
       <h2>Watched <span class="count">{shown.length}</span></h2>

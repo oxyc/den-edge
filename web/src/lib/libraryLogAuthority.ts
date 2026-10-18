@@ -152,6 +152,12 @@ const RETAINED_SERVICES = 'services.v1';
 const RETAINED_HOME_SHELVES = 'home.shelves.v1';
 /** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
 const DEFAULT_KID_OPERATION = 'default-kid';
+/**
+ * Titles one naming batch looks up at once. Most are answered from this browser's TMDB cache, and asked together
+ * their reads share a few IndexedDB transactions (`tmdbCache.ts` `coalesced`); a miss goes to den-edge's shared cache
+ * over one multiplexed connection. Six at a time made Home's first shelves wait on a round trip per six series.
+ */
+const METADATA_LOOKUPS = 16;
 const retainedBillboardName = (
   scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
 ) =>
@@ -1367,7 +1373,7 @@ export class LibraryLogAuthority {
         } else if (result) found.push(result);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(6, titles.length) }, lookup));
+    await Promise.all(Array.from({ length: Math.min(METADATA_LOOKUPS, titles.length) }, lookup));
     found.sort(
       (left, right) =>
         titles.findIndex((ref) => sameTitle(ref, left.title)) -

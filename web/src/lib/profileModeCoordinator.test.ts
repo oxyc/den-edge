@@ -795,6 +795,32 @@ describe('ProfileModeCoordinator', () => {
     expect(models.handles[0]!.model.close).toHaveBeenCalledOnce();
   });
 
+  it('opens a remembered Kid once, however soon the page hands over the same directory again', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(
+      storage,
+      true,
+      null,
+      undefined,
+      profileDirectoryChoices(view)!,
+      models.factory,
+    );
+    // The page's directory effect runs as the coordinator appears, with its own copy of the same directory.
+    first.coordinator.updateDirectory(profileDirectoryChoices(view)!);
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.session?.identity.id).toBe(kid.id));
+    expect(models.handles.map(({ key }) => key)).toEqual([kid.libraryKey]);
+    expect(models.handles[0]!.close).not.toHaveBeenCalled();
+  });
+
   it('keeps Kid active until Owner is ready, then commits the marker and closes only Kid activity', async () => {
     const storage = memoryStorage();
     const view = realDirectoryView();

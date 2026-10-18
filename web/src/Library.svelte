@@ -440,15 +440,29 @@
   const admitContinueNames = () => (continueNames += SHELF_TRANCHE);
   const admitWatchlistNames = () => (watchlistNames += SHELF_TRANCHE);
 
-  // The Watchlist screen is the only owner of the potentially large history naming tail.
+  // The Watchlist screen is the only owner of the potentially large history naming tail. The watchlist is named first,
+  // and the history — every title ever watched, read and parsed in the library Worker title by title — only once
+  // the billboard's first details have answered, since that answer comes from the same Worker. Named together, a long
+  // history kept the billboard's description waiting behind it.
+  let watchlistNamed = $state(false);
+  let watchlistLead = $state(false);
+  $effect(() => {
+    const view = overview;
+    if (!active || route.page !== 'watchlist' || !view) return;
+    let current = true;
+    void nameLibraryTitles(session, view.watchlist as TitleRef[]).finally(() => {
+      if (current) watchlistNamed = true;
+    });
+    return () => {
+      current = false;
+    };
+  });
   $effect(() => {
     const history = historyLease?.snapshot.value;
     const view = overview;
-    if (!active || route.page !== 'watchlist' || !view || !history) return;
-    void nameLibraryTitles(session, [
-      ...view.watchlist,
-      ...history.items.map(({ title }) => title),
-    ] as TitleRef[]);
+    if (!active || route.page !== 'watchlist' || !view || !history || !watchlistNamed) return;
+    if (!watchlistLead && untrack(() => savedTitles.length)) return;
+    void nameLibraryTitles(session, history.items.map(({ title }) => title) as TitleRef[]);
   });
 
   const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
@@ -1901,6 +1915,7 @@
         {rowOf}
         onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
         onseen={(title, on) => fromSlide(setSeen(title, on))}
+        ondetail={() => (watchlistLead = true)}
         watchlistPage
       />
     {/if}

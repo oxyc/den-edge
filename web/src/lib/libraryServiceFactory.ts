@@ -21,7 +21,8 @@ import {
   onHeldGrants,
   useLibraryRelayMembership,
 } from './relayFetch';
-import { startupWorkerCreated, startupWorkerName } from './startupTiming';
+import { takeLibraryWorker } from './libraryWorkerStart';
+import { startupWorkerCreated } from './startupTiming';
 import { offerSyncPolicy } from './syncPolicyModule';
 
 export interface LibraryServiceFactoryOptions {
@@ -33,10 +34,7 @@ export interface LibraryServiceFactoryOptions {
 }
 
 const productionWorker = () => {
-  const worker = new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
-    type: 'module',
-    name: startupWorkerName(),
-  });
+  const worker = takeLibraryWorker();
   offerSyncPolicy(worker);
   return worker;
 };

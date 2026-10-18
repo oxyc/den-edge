@@ -3,7 +3,8 @@
 // /capabilities/profiles once, however many sessions want them.
 import { test, expect, chromium } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
-import { CODE, newEdge, routeGuestEdge } from './guest-edge.mjs';
+import { newEdge } from './guest-edge.mjs';
+import { bigHousehold, routeBigHousehold } from './big-library.mjs';
 
 // The Worker script itself is not counted: each library has a Worker of its own by design (one LibraryLog per
 // Worker), and the browser's HTTP cache gives the second the first's transfer of that immutable asset. Request
@@ -40,29 +41,18 @@ test('a profile household’s load downloads den-core once and asks each startup
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
   try {
+    test.setTimeout(240_000);
     const edge = newEdge({ profiles: true });
     const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+    // A profile household of the browser's own, the size of a long-lived one: a guest's, started by accepting an
+    // invite with a big library kept in this browser (`big-library.mjs`).
+    await bigHousehold(context, edge, { atlas: false });
     const page = await context.newPage();
-    await routeGuestEdge(page, edge);
+    await routeBigHousehold(page, edge, { atlas: false });
     // den-edge's table names its services; an empty one is den-edge not saying, which a page asks again.
     await page.route('**/routes', (route) =>
       route.fulfill({ json: { addons: { reel: [{ url: `${E2E_ORIGIN}/reel` }] } } }),
     );
-    // A profile household of the browser's own: a guest's, started by accepting an invite, with a title saved.
-    await page.goto(`${E2E_ORIGIN}/`);
-    await page.getByRole('button', { name: 'Look around instead' }).click();
-    await page.goto(`${E2E_ORIGIN}/movie/1002`);
-    const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
-    await watchlist.click();
-    await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
-    await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
-    await page
-      .getByRole('dialog', { name: 'Accept this invite?' })
-      .getByRole('button', { name: 'Accept' })
-      .click();
-    await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
-      timeout: 30_000,
-    });
 
     const home = await countedLoad(page, '/');
     expect(countsOf(home), JSON.stringify(home)).toEqual({ wasm: 1, routes: 1, profiles: 1 });
@@ -76,7 +66,7 @@ test('a profile household’s load downloads den-core once and asks each startup
 
     // Both Workers run den-core from the page's one compile: the Owner's library still reads and shows what it holds.
     await page.goto(`${E2E_ORIGIN}/watchlist`);
-    await expect(page.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible({
+    await expect(page.getByRole('link', { name: /Film 100000/ }).first()).toBeVisible({
       timeout: 30_000,
     });
   } finally {

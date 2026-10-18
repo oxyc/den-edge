@@ -16,6 +16,8 @@ if (
 
 export default defineConfig({
   testDir: './e2e',
+  // Time budgets measure the production build on a runner of their own (`playwright.budgets.config.ts`).
+  testIgnore: 'big-library-budgets.spec.mjs',
   timeout: 120_000,
   // Files are isolated by Playwright contexts and do not share mutable server state.
   // Keep local runs deterministic while allowing CI to execute independent files in parallel.

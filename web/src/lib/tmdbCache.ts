@@ -75,6 +75,8 @@ export const PRUNE_PAUSE_MS = 1_000;
 const PRUNE_IDLE_TIMEOUT_MS = 5_000;
 /** A tab kept open prunes again after this many answers kept, not only once per page load. */
 export const PRUNE_EVERY = 200;
+/** How long answers fetched one after another are gathered into one IndexedDB write. */
+const PUT_GATHER_MS = 250;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
 export const STALE_FOR = 7 * DAY;
 
@@ -482,6 +484,32 @@ export function cachingFetch(
   };
 }
 
+/**
+ * Every call made in the same task answered by one call of `many`, in order. A library naming pass asks for hundreds
+ * of kept answers at once; one IndexedDB transaction each is cheap on a desktop and slow on iOS, where every
+ * transaction is a round trip to the storage process — and a billboard's or a season's own read waited behind them.
+ */
+export function coalesced<A, R>(
+  many: (asks: A[]) => Promise<R[]>,
+  gatherMs = 0,
+): (ask: A) => Promise<R> {
+  let waiting: Array<{ ask: A; resolve: (result: R) => void; reject: (error: unknown) => void }> =
+    [];
+  const flush = () => {
+    const batch = waiting;
+    waiting = [];
+    many(batch.map(({ ask }) => ask)).then(
+      (results) => batch.forEach(({ resolve }, index) => resolve(results[index] as R)),
+      (error: unknown) => batch.forEach(({ reject }) => reject(error)),
+    );
+  };
+  return (ask) =>
+    new Promise<R>((resolve, reject) => {
+      if (!waiting.length) setTimeout(flush, gatherMs);
+      waiting.push({ ask, resolve, reject });
+    });
+}
+
 /** This browser's IndexedDB, or null where there is none or it is refused (a private window, blocked site data). */
 function indexedStore(): Store | null {
   let factory: IDBFactory;
@@ -498,11 +526,22 @@ function indexedStore(): Store | null {
     (database) => database.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt'),
     'answers',
   );
+  // Answers arrive one by one off the network; nothing reads them back from here before the handoff (`remember`)
+  // expires, so they are written a moment later, together.
+  const put = coalesced<[string, Entry], void>(async (puts) => {
+    await run('readwrite', (answers) => {
+      for (const [key, entry] of puts) answers.put(entry, key);
+    });
+    return puts.map(() => undefined);
+  }, PUT_GATHER_MS);
   return {
-    get: (key) => run('readonly', (answers) => answers.get(key) as IDBRequest<Entry | undefined>),
-    put: async (key, entry) => {
-      await run('readwrite', (answers) => answers.put(entry, key));
-    },
+    get: coalesced<string, Entry | undefined>((keys) =>
+      run('readonly', (answers) => {
+        const asked = keys.map((key) => answers.get(key) as IDBRequest<Entry | undefined>);
+        return () => asked.map((request) => request.result);
+      }).then((found) => found ?? keys.map(() => undefined)),
+    ),
+    put: (key, entry) => put([key, entry]),
     prune: async (cutoff, most, batch) => {
       let dropped = 0;
       await run('readwrite', (answers) => {
