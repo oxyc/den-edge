@@ -840,6 +840,9 @@
       // A remote press chooses one exact slide and need not wait for touch-scroll settling. Chromium before 114
       // lacks `scrollend`, so that path would otherwise leave focus behind for its 1s fallback.
       paging = true;
+      // Move the rail before changing the selected slide. A queued scroll notification from its previous
+      // position otherwise runs during the Svelte flush and changes `index` straight back before focus moves.
+      goTo(next, false);
       arrive(next);
       await tick();
       goTo(index, false);

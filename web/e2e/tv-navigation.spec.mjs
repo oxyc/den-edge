@@ -164,6 +164,7 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
     p95Ms: orderedLatencies[Math.ceil(orderedLatencies.length * 0.95) - 1],
     worstMs: orderedLatencies.at(-1),
   };
+  console.log('TV_SEARCH_FOCUS_LATENCY', JSON.stringify(focusTiming));
   await testInfo.attach('tv-search-focus-latency.json', {
     body: Buffer.from(JSON.stringify(focusTiming, null, 2)),
     contentType: 'application/json',
@@ -194,7 +195,9 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
 
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
-  await remoteTo(page, contentSection, ['ArrowDown', 'ArrowLeft'], 20);
+  // The CI trace showed the old Down/Left traversal cycling between Expand all and Movies.
+  // Start horizontally instead; every step still goes through the real remote focus controller.
+  await remoteTo(page, contentSection, ['ArrowLeft', 'ArrowDown'], 4);
   await page.keyboard.press('Enter');
   await page.waitForTimeout(500);
   const expandContent = page.getByRole('button', { name: 'Expand all in Content' });

@@ -258,6 +258,21 @@ TV builds omit touch-only page snapshots and limit Home's idle screen warm-up to
 Details. Search, People, Settings and Player load on intent; browser preload policy
 and touch behavior stay unchanged.
 
+TV billboard arrows select and focus the adjacent title immediately, independently
+of touch-scroll settling. In a controlled two-arrow comparison of production outputs,
+key dispatch through visible-title/focused-action assertions took 778–781 ms before
+the change and 10–15 ms after it. Suppressing `scrollend` listeners before startup
+exposed the old one-second fallback (1015–1035 ms); the new path took 19–35 ms.
+These are small workstation diagnostic samples, not TV latency guarantees. The
+older target engines predate [Chromium's `scrollend` support](https://developer.chrome.com/blog/scrollend-a-new-javascript-event).
+The browsing soak checks forty detail/Back cycles across three titles, both arrow
+directions, retained-page bounds and Worker counts, without retrying missed presses.
+The dense Search journey also records native keydown-to-focusin timing. Across 14
+transitions per run, workstation medians/p95 were 1.3/2.2 ms for the LG-targeted
+Chromium build, 1.1/4.8 ms for the Samsung-targeted Chromium build and 1.0/2.0 ms
+for WebKit. These measure focus handling, not painted-highlight latency on a TV;
+the test reports timings without imposing a CPU-sensitive CI timing threshold.
+
 `npm audit` currently reports eight high findings, all in the existing
 development-only Stylelint chain (`stylelint`/`stylelint-config-*` →
 `globby`/`fast-glob`/`micromatch`/`braces`). The TV change only adds `core-js`,

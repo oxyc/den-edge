@@ -66,14 +66,34 @@ test('real TV Home keeps its hero simple and survives forty detail/back cycles',
     await expect(hero.getByRole('link', { name: 'More', exact: true })).toBeFocused();
     heroPagingMs.push(performance.now() - started);
   };
+  const directions = new Set();
+  const navigateHero = async (title) => {
+    for (let step = 0; step < 3; step++) {
+      const slides = await hero.locator('.slide').evaluateAll((nodes) =>
+        nodes.map((node, index) => ({
+          index,
+          active: !node.hasAttribute('inert'),
+          title: node.getAttribute('aria-label'),
+        })),
+      );
+      const current = slides.findIndex((slide) => slide.active);
+      const target = slides.findIndex((slide) => slide.title === title);
+      expect(current).toBeGreaterThanOrEqual(0);
+      expect(target).toBeGreaterThanOrEqual(0);
+      if (current === target) return;
+      const key = target > current ? 'ArrowRight' : 'ArrowLeft';
+      const next = current + (key === 'ArrowRight' ? 1 : -1);
+      expect(next).toBeGreaterThanOrEqual(0);
+      expect(next).toBeLessThan(slides.length);
+      expect(slides[next].title).toBeTruthy();
+      directions.add(key);
+      await pageHero(key, slides[next].title);
+    }
+    throw new Error(`hero did not reach ${title} through its current slide order`);
+  };
   for (let cycle = 0; cycle < 40; cycle++) {
     const titleId = 1002 + (cycle % 3);
-    if (cycle > 0) {
-      if (cycle % 3 === 0) {
-        await pageHero('ArrowLeft', 'Movie 1003');
-        await pageHero('ArrowLeft', 'Movie 1002');
-      } else await pageHero('ArrowRight', `Movie ${titleId}`);
-    }
+    if (cycle > 0) await navigateHero(`Movie ${titleId}`);
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(new RegExp(`/movie/${titleId}(?:-|$)`));
     await expect(page.getByRole('heading', { name: `Movie ${titleId}`, level: 1 })).toBeVisible();
@@ -85,6 +105,7 @@ test('real TV Home keeps its hero simple and survives forty detail/back cycles',
     expect(await page.locator('[data-route-page]').count()).toBeLessThanOrEqual(3);
     expect(page.workers().length).toBeLessThanOrEqual(Math.max(1, baselineWorkers));
   }
+  expect([...directions]).toEqual(expect.arrayContaining(['ArrowLeft', 'ArrowRight']));
 
   await info.attach('tv-hero-paging-latency.json', {
     body: Buffer.from(JSON.stringify(heroPagingMs, null, 2)),
