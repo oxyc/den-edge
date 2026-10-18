@@ -181,6 +181,17 @@ export async function withSharedTitleMetadata(
   titles: Title[],
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<Title[]> {
+  return (await fillSharedTitleMetadata(titles, fetchImpl)).titles;
+}
+
+/**
+ * `withSharedTitleMetadata`, saying whether den-edge answered. A refused (`429`) or failed query leaves the titles as
+ * they were, which is usable now but must not be kept as the complete answer.
+ */
+export async function fillSharedTitleMetadata(
+  titles: Title[],
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<{ titles: Title[]; answered: boolean }> {
   const wanted = titles
     .filter(
       (title) =>
@@ -189,14 +200,14 @@ export async function withSharedTitleMetadata(
         !title.posterPath,
     )
     .slice(0, 100);
-  if (!wanted.length) return titles;
+  if (!wanted.length) return { titles, answered: true };
   try {
     const response = await fetchImpl('/metadata/title/query', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ titles: wanted.map(({ type, id }) => ({ type, id })) }),
     });
-    if (!response.ok) return titles;
+    if (!response.ok) return { titles, answered: false };
     const answer = (await response.json()) as { entries?: Stored[] };
     const entries = new Map<string, Stored[]>();
     for (const entry of Array.isArray(answer.entries) ? answer.entries : []) {
@@ -211,7 +222,7 @@ export async function withSharedTitleMetadata(
           entry,
         ]);
     }
-    return titles.map((title) => {
+    const filled = titles.map((title) => {
       const observed = entries.get(`${title.type}:${title.id}`) ?? [];
       if (!observed.length) return title;
       const newest = <T>(fields: (Observed<T> | undefined)[], valid: (value: T) => boolean) =>
@@ -250,7 +261,8 @@ export async function withSharedTitleMetadata(
         posterPath: title.posterPath ?? posterPath,
       };
     });
+    return { titles: filled, answered: true };
   } catch {
-    return titles;
+    return { titles, answered: false };
   }
 }
