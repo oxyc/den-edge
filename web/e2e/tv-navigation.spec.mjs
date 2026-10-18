@@ -179,6 +179,7 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/search/);
+  await expect(pageSearch).toHaveValue('Movie');
   await expect(result).toBeFocused({ timeout: 5_000 });
 });
 

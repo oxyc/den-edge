@@ -144,6 +144,11 @@
   line-height: 1.45;
 }
 
+/* Poster actions cannot rely on hover: opacity: 0 also removes them from the remote geometry scan. */
+.den-tv .holder .action {
+  opacity: 0.8;
+}
+
 /* CheckGrid's browser checkbox is visually hidden. On old TV engines it must still expose a real rectangle to the
    geometry navigator; the transparent native surface fills its label while the existing mark remains the visual. */
 .den-tv .check input[type='checkbox'] {

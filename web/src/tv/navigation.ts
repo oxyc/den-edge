@@ -312,6 +312,23 @@ export function installTVNavigation(): () => void {
       // Arrow keys inside a native editor belong to its caret/list selection. Up/down at a search field is
       // likewise left to that field's own results behavior.
       if (isEditable(target) && editing === target) return;
+      if (target instanceof HTMLElement) {
+        const holder = target.closest<HTMLElement>('.holder');
+        const posterAction = holder?.querySelector<HTMLElement>('.action');
+        const posterCard = holder?.querySelector<HTMLElement>('.card');
+        const withinCard = posterCard && (target === posterCard || posterCard.contains(target));
+        if (
+          (direction === 'up' && withinCard && posterAction && visible(posterAction)) ||
+          (direction === 'down' && target === posterAction && posterCard && visible(posterCard))
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const destination = direction === 'up' ? posterAction! : posterCard!;
+          destination.focus({ preventScroll: true });
+          destination.scrollIntoView({ block: 'nearest', inline: 'center' });
+          return;
+        }
+      }
       if (
         direction === 'right' &&
         target instanceof HTMLElement &&

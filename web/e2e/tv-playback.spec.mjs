@@ -58,6 +58,21 @@ async function remoteKey(page, key, keyCode) {
   );
 }
 
+async function remoteKeyBurst(page, key, keyCode, count) {
+  return page.evaluate(
+    ({ key, keyCode, count }) => {
+      const target = document.activeElement ?? document.body;
+      return Array.from({ length: count }, () => {
+        const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'keyCode', { value: keyCode });
+        target.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+    },
+    { key, keyCode, count },
+  );
+}
+
 test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Back', async ({
   page,
 }) => {
@@ -121,9 +136,15 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(footerSelects.last()).toBeFocused();
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
-  // Back cancels track-picker editing before a subsequent Back is allowed to close playback.
+  // Escape and hardware Back each cancel track-picker editing without closing playback.
+  expect(await remoteKey(page, 'Escape', 27)).toBe(true);
+  await expect(video).toHaveCount(1);
+  await expect(page.getByTestId('player-close-count')).toHaveText('0');
+  await expect(footerSelects.last()).toBeFocused();
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   expect(await remoteKey(page, 'Unidentified', 10009)).toBe(true);
   await expect(video).toHaveCount(1);
+  await expect(page.getByTestId('player-close-count')).toHaveText('0');
   await expect(footerSelects.last()).toBeFocused();
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
@@ -133,7 +154,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
   await expect(page.locator('.player')).toHaveClass(/tv-controls-hidden/, { timeout: 5_000 });
-  expect(await remoteKey(page, 'Back', 461)).toBe(true);
+  expect(await remoteKeyBurst(page, 'Back', 461, 2)).toEqual([true, true]);
   await expect(video).toHaveCount(0);
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
   await expect.poll(() => ended.length).toBe(1);

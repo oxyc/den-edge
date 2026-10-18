@@ -37,7 +37,7 @@
 
   const menuId = $props.id();
   let trigger: HTMLButtonElement;
-  let menu = $state<HTMLDivElement>();
+  let menu = $state<HTMLDivElement | HTMLDialogElement>();
   let prepared = $state(false);
   let open = $state(false);
   let mobile = $state(false);
@@ -141,17 +141,29 @@
     // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
     // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
     position();
-    if (!menu.matches(':popover-open')) {
+    if (__DEN_TV__) {
+      const dialog = menu as HTMLDialogElement;
+      if (!dialog.open) {
+        dialog.showModal();
+        opened();
+      }
+    } else if (!menu.matches(':popover-open')) {
       menu.showPopover();
       // Measured now that it is laid out, and placed again before it is painted.
       position();
     }
   }
 
+  function showing() {
+    return __DEN_TV__
+      ? (menu as HTMLDialogElement | undefined)?.open === true
+      : (menu?.matches(':popover-open') ?? false);
+  }
+
   function toggleFromTrigger(event: MouseEvent) {
     const closesPointerGesture = event.detail > 0 && triggerWasOpenOnPointerDown;
     triggerWasOpenOnPointerDown = false;
-    if (closesPointerGesture || menu?.matches(':popover-open')) {
+    if (closesPointerGesture || showing()) {
       close();
       open = false;
       trigger?.focus();
@@ -168,7 +180,10 @@
   }
 
   export function close() {
-    menu?.hidePopover();
+    if (__DEN_TV__) {
+      const dialog = menu as HTMLDialogElement | undefined;
+      if (dialog?.open) dialog.close();
+    } else menu?.hidePopover();
   }
 
   function finishClose() {
@@ -219,30 +234,35 @@
     positioned.style.top = `${y}px`;
   }
 
-  function toggled(event: ToggleEvent) {
-    open = event.newState === 'open';
-    if (open) {
-      // The popover is in the top layer by the time `toggle` fires, so the first item can take focus now.
-      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
-      focusFrame = requestAnimationFrame(() => {
-        focusFrame = undefined;
-        enabledItemEls()[0]?.focus();
-      });
-    } else {
-      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+  function opened() {
+    open = true;
+    if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+    focusFrame = requestAnimationFrame(() => {
       focusFrame = undefined;
-      sheetDragStart = null;
-      headDrag = null;
-      menu?.style.removeProperty('transform');
-      menu?.style.removeProperty('transition');
-      coords = null;
-      if (!suppressRefocus) trigger?.focus();
-      suppressRefocus = false;
-      onclose?.();
-      // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
-      // calls `finishClose`; every other close can release the menu body and listeners immediately.
-      if (!swallowNextClick) finishClose();
-    }
+      enabledItemEls()[0]?.focus();
+    });
+  }
+
+  function closed() {
+    open = false;
+    if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+    focusFrame = undefined;
+    sheetDragStart = null;
+    headDrag = null;
+    menu?.style.removeProperty('transform');
+    menu?.style.removeProperty('transition');
+    coords = null;
+    if (!suppressRefocus) trigger?.focus();
+    suppressRefocus = false;
+    onclose?.();
+    // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
+    // calls `finishClose`; every other close can release the menu body and listeners immediately.
+    if (!swallowNextClick) finishClose();
+  }
+
+  function toggled(event: ToggleEvent) {
+    if (event.newState === 'open') opened();
+    else closed();
   }
 
   /**
@@ -261,7 +281,7 @@
    * whether that event has fired yet.
    */
   function outsidePointerDown(event: PointerEvent) {
-    if (!menu?.matches(':popover-open')) {
+    if (!showing()) {
       // A drag can end without a click. A later pointerdown starts a different gesture and must not let that stale
       // swallow escape into its click; releasing `prepared` also tears down the listeners left for the old gesture.
       if (swallowNextClick) {
@@ -271,7 +291,7 @@
       return;
     }
     const target = event.target;
-    const inside = target instanceof Node && (menu.contains(target) || trigger?.contains(target));
+    const inside = target instanceof Node && (menu?.contains(target) || trigger?.contains(target));
     swallowNextClick = !inside;
     if (swallowNextClick) close();
   }
@@ -293,10 +313,10 @@
 
   /** A wheel, a touch drag, or a keyboard page-scroll key, landing outside the menu and its own trigger. */
   function outsideScrollGesture(event: WheelEvent | TouchEvent | KeyboardEvent) {
-    if (!menu?.matches(':popover-open')) return;
+    if (!showing()) return;
     if (event instanceof KeyboardEvent && !SCROLL_KEYS.has(event.key)) return;
     const target = event.target;
-    if (target instanceof Node && (menu.contains(target) || trigger?.contains(target))) return;
+    if (target instanceof Node && (menu?.contains(target) || trigger?.contains(target))) return;
     close();
   }
 
@@ -457,29 +477,14 @@
   aria-expanded={open}
   aria-controls={prepared ? menuId : undefined}
   aria-label={label}
-  onpointerdown={() => (triggerWasOpenOnPointerDown = menu?.matches(':popover-open') ?? false)}
+  onpointerdown={() => (triggerWasOpenOnPointerDown = showing())}
   onclick={toggleFromTrigger}
 >
   {@render glyph()}
 </button>
 
 {#if prepared}
-  <div
-    bind:this={menu}
-    id={menuId}
-    class="menu"
-    class:sheet={mobile}
-    popover="auto"
-    role="menu"
-    aria-label={label}
-    aria-describedby={note ? `${menuId}-note` : undefined}
-    tabindex="-1"
-    ontoggle={toggled}
-    onkeydown={onMenuKeydown}
-    onpointermove={sheetPointerMove}
-    onpointerup={sheetPointerUp}
-    onpointercancel={sheetPointerUp}
-  >
+  {#snippet contents()}
     {#if mobile}
       <!-- The sheet's head: dragged, the sheet follows the finger; tapped, it closes. -->
       <div
@@ -521,7 +526,45 @@
         </Button>
       {/each}
     </div>
-  </div>
+  {/snippet}
+  {#if __DEN_TV__}
+    <dialog
+      bind:this={menu}
+      id={menuId}
+      class="menu"
+      class:sheet={mobile}
+      role="menu"
+      aria-label={label}
+      aria-describedby={note ? `${menuId}-note` : undefined}
+      tabindex="-1"
+      onclose={closed}
+      onkeydown={onMenuKeydown}
+      onpointermove={sheetPointerMove}
+      onpointerup={sheetPointerUp}
+      onpointercancel={sheetPointerUp}
+    >
+      {@render contents()}
+    </dialog>
+  {:else}
+    <div
+      bind:this={menu}
+      id={menuId}
+      class="menu"
+      class:sheet={mobile}
+      popover="auto"
+      role="menu"
+      aria-label={label}
+      aria-describedby={note ? `${menuId}-note` : undefined}
+      tabindex="-1"
+      ontoggle={toggled}
+      onkeydown={onMenuKeydown}
+      onpointermove={sheetPointerMove}
+      onpointerup={sheetPointerUp}
+      onpointercancel={sheetPointerUp}
+    >
+      {@render contents()}
+    </div>
+  {/if}
 {/if}
 
 <style>

@@ -3,7 +3,8 @@
 // Reproducible browser-bundle comparison. This is deliberately not a TV benchmark: it uses Chromium on the
 // workstation, serves only the normal browser bundles, and answers app APIs with the existing guest fixtures.
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
 import { chromium } from '@playwright/test';
 
@@ -23,6 +24,16 @@ const types = {
   '.woff2': 'font/woff2',
   '.wasm': 'application/wasm',
 };
+
+async function fingerprint(directory) {
+  const files = [
+    'index.html',
+    ...(await readdir(resolve(directory, 'assets'))).sort().map((name) => `assets/${name}`),
+  ];
+  const hash = createHash('sha256');
+  for (const file of files) hash.update(file).update(await readFile(resolve(directory, file)));
+  return hash.digest('hex');
+}
 
 async function serve(directory) {
   const base = resolve(directory);
@@ -142,14 +153,28 @@ const bundles = [
   { label: 'baseline', directory: resolve(root, 'dist-browser-baseline') },
   { label: 'current', directory: resolve(root, 'dist') },
 ];
+const fingerprints = Object.fromEntries(
+  await Promise.all(
+    bundles.map(async ({ label, directory }) => [label, await fingerprint(directory)]),
+  ),
+);
 const servers = await Promise.all(bundles.map((bundle) => serve(bundle.directory)));
-const browser = await chromium.launch({ headless: true });
+let browser;
 const results = [];
 try {
+  browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
   for (let run = 0; run < runs; run++) {
-    for (const [index, bundle] of bundles.entries()) {
+    // Counterbalance execution order so the current build is not always measured after the control.
+    const order = run % 2 ? [1, 0] : [0, 1];
+    for (const index of order) {
+      const bundle = bundles[index];
       const context = await browser.newContext();
       const page = await context.newPage();
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(error.message));
       await page.addInitScript(() => {
         const lcp = { value: null };
         try {
@@ -182,20 +207,47 @@ try {
       });
       await fixture(page, servers[index].origin);
       results.push({ run: run + 1, ...(await measure(page, servers[index].origin, bundle.label)) });
+      if (errors.length) throw new Error(`${bundle.label} page errors: ${errors.join('; ')}`);
       await context.close();
     }
   }
 } finally {
-  await browser.close();
+  await browser?.close();
   await Promise.all(servers.map((server) => server.close()));
 }
+const summary = Object.fromEntries(
+  bundles.map(({ label }) => [
+    label,
+    Object.fromEntries(
+      ['home', 'search'].map((phase) => {
+        const values = results
+          .filter((result) => result.label === label)
+          .map((result) => result[phase].readyMs)
+          .sort((a, b) => a - b);
+        const middle = Math.floor(values.length / 2);
+        return [
+          phase,
+          {
+            medianMs:
+              values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2,
+            minMs: values[0],
+            maxMs: values.at(-1),
+          },
+        ];
+      }),
+    ),
+  ]),
+);
 const report = {
   generatedAt: new Date().toISOString(),
   runs,
   browser: 'chromium',
   scope: 'loopback production bundles with guest API fixtures; not TV/device performance',
+  order: 'alternating baseline/current and current/baseline pairs',
+  fingerprints,
+  summary,
   results,
 };
 const json = JSON.stringify(report, null, 2);
-if (output) await (await import('node:fs/promises')).writeFile(resolve(output), `${json}\n`);
+if (output) await writeFile(resolve(output), `${json}\n`);
 console.log(json);

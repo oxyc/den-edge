@@ -221,8 +221,12 @@ The browser build rejects any TV/core-js module in its output graph, including l
 chunks. A checked-in clean-main baseline also gates compressed initial/all JS+CSS
 growth and checks TV-only markers. Run `npm run check:tv-isolation` for exact current
 compressed deltas against `3fccf42`. `node scripts/tv-browser-performance.mjs`
-alternates five fresh Chromium contexts between `dist-browser-baseline` and `dist`,
+alternates fresh Chromium contexts between `dist-browser-baseline` and `dist`,
 with deterministic local fixtures, reporting paint timing and resource transfers.
+Successive pairs reverse execution order, and the report records bundle fingerprints,
+readiness medians/ranges and uncaught-page-error checks. Set `DEN_BROWSER_PERF_RUNS=6`
+for six balanced pairs. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` selects an installed
+Chrome when Playwright's bundled browser is unavailable.
 Workstation timings are not TV hardware measurements. TV builds target Chrome 85, have isolated
 output directories, and verify Worker compilation and compatibility imports. Only
 E2E builds include the Player harness; normal TV builds omit it.
@@ -232,7 +236,8 @@ request merely to preserve the browser's existing path behavior. CI retains brow
 failure traces and screenshots for seven days.
 
 After merging current main, the 2026-10-18 comparison against a clean `3fccf42`
-build measured **+56 bytes initial gzip and +149 bytes total gzip**, with no
+build, including the follow-up audit fixes, measured **+126 bytes initial gzip and
++217 bytes total gzip**, with no
 additional browser asset chunk or TV module (80 JS/CSS assets in each build).
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
@@ -277,8 +282,35 @@ Chromium build, 1.1/4.8 ms for the Samsung-targeted Chromium build and 1.0/2.0 m
 for WebKit. These measure focus handling, not painted-highlight latency on a TV;
 the test reports timings without imposing a CPU-sensitive CI timing threshold.
 
+## Follow-up audit
+
+Poster action buttons previously depended on hover and were excluded from the
+TV focus scan at zero opacity. They are visible in TV builds; Up from a poster
+reaches its own Actions button, and Down returns to that poster. Left/right grid
+navigation is unchanged. TV action menus use native dialogs instead of the
+[Popover API introduced in Chrome 114](https://developer.chrome.com/blog/new-in-chrome-114),
+which is newer than the target engines. Browser builds keep their native popovers.
+A production E2E journey removes popover methods and rejects the unsupported
+selector, then opens the real poster menu, closes it through hardware Back and
+runs a menu action once. This is an API-absence simulation, not a TV emulator.
+
+A repeated hardware Back event before player unmount previously called the parent
+close callback twice. Closing is now idempotent, and the real HLS journey checks
+the repeated-event case and track-picker cancellation. Search also no longer
+allocates a duplicate TV query state or an empty effect in the browser build;
+its route query is the single source of truth.
+
+The package suite includes a distinct third-origin media CDN: a grant-bearing
+playback request reaches Den's API, actual HLS playlist/init/media segments play
+from the CDN without Den or Authorization headers, and end/heartbeat/report
+controls stay on the API. It checks time advancement, CSP violations and page
+errors. Dynamic HTTPS media/addon access remains intentional; executable code
+is still restricted to the package.
+
 `npm audit` currently reports eight high findings, all in the existing
 development-only Stylelint chain (`stylelint`/`stylelint-config-*` →
 `globby`/`fast-glob`/`micromatch`/`braces`). The TV change only adds `core-js`,
-which introduces no audit finding. Resolving the audit requires a major
-Stylelint-config upgrade and is deliberately outside TV packaging scope.
+which introduces no audit finding. The [upstream advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+lists no patched version. npm's force-fix suggestion downgrades the Stylelint config
+to an incompatible major; it is not a safe dependency upgrade. The existing CI audit
+exception is development-only and expires on 2026-11-02; it was not broadened or renewed.

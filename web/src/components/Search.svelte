@@ -82,17 +82,12 @@
     ]),
   );
   const typing = $derived(query.trim().length >= 2);
-  let tvQuery = $state(untrack(() => query));
-  $effect(() => {
-    if (__DEN_TV__ && query !== untrack(() => tvQuery)) tvQuery = query;
-  });
   function changeTVQuery(value: string) {
-    tvQuery = value;
     navigate(searchHref(value, explore), true);
     window.scrollTo({ top: 0, behavior: 'instant' });
   }
-  async function leaveTVSearchField(event: KeyboardEvent) {
-    if (event.key === 'Escape' && tvQuery) {
+  async function leaveTVSearchField(event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+    if (event.key === 'Escape' && event.currentTarget.value) {
       event.preventDefault();
       changeTVQuery('');
       return;
@@ -600,8 +595,11 @@
       role="search"
       onsubmit={(event) => {
         event.preventDefault();
-        if (tvQuery.trim().length >= 2) rememberSearch(tvQuery);
-        (event.currentTarget.elements.namedItem('tv-search') as HTMLInputElement | null)?.blur();
+        const input = event.currentTarget.elements.namedItem(
+          'tv-search',
+        ) as HTMLInputElement | null;
+        if (input && input.value.trim().length >= 2) rememberSearch(input.value);
+        input?.blur();
       }}
     >
       <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
@@ -611,7 +609,7 @@
         class="tv-search-input"
         name="tv-search"
         type="search"
-        value={tvQuery}
+        value={query}
         aria-label="Search titles, people, moods, languages…"
         placeholder="Movies, series, people, moods, languages…"
         autocomplete="off"
