@@ -410,6 +410,45 @@ export async function routeBigHousehold(
 }
 
 /**
+ * What the first publish of a page opened now makes of the household's assistant projection, as its library Worker
+ * says (`LibraryAssistantAuthority.publish`): `built` (and recorded) or `current`.
+ */
+export async function firstPublish(page, path, options = {}) {
+  const outcome = new Promise((resolve) =>
+    page.on('console', (message) => {
+      const text = message.text();
+      if (text.startsWith('den: assistant projection built')) resolve('built');
+      else if (text === 'den: assistant projection up to date') resolve('current');
+    }),
+  );
+  await page.goto(`${E2E_ORIGIN}${path}`);
+  return Promise.race([
+    outcome,
+    new Promise((_, fail) =>
+      setTimeout(() => fail(new Error(`${path}: no assistant publish`)), options.timeout ?? 60_000),
+    ),
+  ]);
+}
+
+/** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
+async function settleProjection(context, edge, options) {
+  for (let round = 0; round < 4; round += 1) {
+    const outcomes = [];
+    for (const path of ['/', '/watchlist']) {
+      const page = await context.newPage();
+      try {
+        await routeBigHousehold(page, edge, options);
+        outcomes.push(await firstPublish(page, path));
+      } finally {
+        await page.close();
+      }
+    }
+    if (outcomes.every((outcome) => outcome === 'current')) return;
+  }
+  throw new Error('the assistant projection never settled');
+}
+
+/**
  * Make the big household in `context` through the real app — rows written to a library kept only in this browser,
  * then a guest invite accepted, which starts a profile household and moves them into its Owner library — and leave
  * that browser as one that has been here before: every page opened in `context` afterwards is a returning visit.
@@ -476,4 +515,9 @@ export async function bigHousehold(context, edge, options = {}) {
   } finally {
     await page.close();
   }
+  // And the assistant's projection published for the household as it now is: Home and the Watchlist are opened again,
+  // one at a time (one tab publishes at once), until each finds it up to date, having learnt nothing it was not built
+  // from.
+  await settleProjection(context, edge, options);
+  step('published');
 }
