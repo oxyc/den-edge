@@ -12,7 +12,7 @@ use crate::handler::{client_ip, error, json_reply, read_json, retry_after};
 use crate::AppState;
 use axum::body::Bytes;
 use axum::extract::Request;
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use redb::backends::FileBackend;
 use redb::{BackendError, Database, ReadableDatabase, ReadableTable, StorageBackend, TableDefinition};
@@ -27,7 +27,12 @@ use std::time::Duration;
 const MAX_PUBLISH_ENTRIES: usize = 100;
 const MAX_QUERY_TITLES: usize = 200;
 const MAX_BODY: usize = 32 * 1024;
+/// Questions and observations per address per minute. The web app asks once for each page of a row it shows, and a
+/// household's devices share one address: one phone scrolling a browse screen asked 63 times in 12 seconds. As for
+/// TMDB (`tmdb.rs`'s `over_allowance`), an anonymous visitor gets enough to browse and a paired household gets room
+/// beyond it.
 const PER_WINDOW: u32 = 60;
+const MEMBER_PER_WINDOW: u32 = 600;
 const RETENTION_MS: u64 = 180 * 86_400_000;
 const SOURCES: [&str; 2] = ["tmdb", "justwatch-imdb"];
 const STORE_FILE: &str = "title-metadata.redb";
@@ -505,15 +510,27 @@ async fn store(state: &AppState) -> Result<Arc<Store>, Unstored> {
 pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let ip = client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_per_minute(state, &format!("title-metadata:{ip}"), PER_WINDOW)
-    {
-        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    if let Some(refused) = over_allowance(state, &ip, req.headers()).await {
+        return refused;
     }
     match (req.method().clone(), path.as_str()) {
         (Method::POST, "/metadata/title/query") => query(state, req).await,
         (Method::PUT, "/metadata/title") => publish(state, req).await,
         _ => json_reply(StatusCode::METHOD_NOT_ALLOWED, &error("method_not_allowed")),
     }
+}
+
+/// The refusal once this address's allowance is spent; `None` to answer. Membership is checked only after the
+/// visitor allowance is spent, so a forged header buys nothing.
+async fn over_allowance(state: &AppState, ip: &str, asked: &HeaderMap) -> Option<Response> {
+    let visitor_wait = crate::link::throttled_per_minute(state, &format!("title-metadata:{ip}"), PER_WINDOW)?;
+    let member = asked.get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
+    if !crate::library::is_household_member(state, member).await {
+        return Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait));
+    }
+    let wait =
+        crate::link::throttled_per_minute(state, &format!("title-metadata-member:{ip}"), MEMBER_PER_WINDOW)?;
+    Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
 async fn query(state: &AppState, req: Request) -> Response {
@@ -1021,6 +1038,43 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry["source"] == "tmdb" && entry["fields"]["rating"]["value"] == 8.1));
+    }
+
+    /// The web app asks once per page of a row, so a household browsing Den spends the visitor allowance its devices
+    /// share in seconds. A paired member goes on to the member allowance; a visitor, or a forged member header, stops.
+    #[tokio::test]
+    async fn a_member_browses_past_the_visitor_allowance_and_a_visitor_does_not() {
+        async fn ask(h: &Harness, member: Option<&str>) -> StatusCode {
+            let headers: Vec<(&str, &str)> =
+                member.map(|member| (crate::library::MEMBER_HEADER, member)).into_iter().collect();
+            let body = json!({"titles":[{"type":"movie","id":550}]}).to_string();
+            h.send("POST", "/metadata/title/query", Some(body), &headers).await.status()
+        }
+        let h = harness().await;
+        for _ in 0..PER_WINDOW {
+            assert_eq!(ask(&h, None).await, StatusCode::OK);
+        }
+        assert_eq!(ask(&h, None).await, StatusCode::TOO_MANY_REQUESTS, "a visitor stops at its allowance");
+        let forged = format!("{LIB}:not-the-token");
+        assert_eq!(
+            ask(&h, Some(&forged)).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "a forged member buys nothing"
+        );
+
+        let member = format!("{LIB}:{TOKEN}");
+        for asked in 0..MEMBER_PER_WINDOW {
+            assert_eq!(
+                ask(&h, Some(&member)).await,
+                StatusCode::OK,
+                "member question {asked} past the visitor's"
+            );
+        }
+        assert_eq!(
+            ask(&h, Some(&member)).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "a member's allowance is bounded"
+        );
     }
 
     #[tokio::test]
