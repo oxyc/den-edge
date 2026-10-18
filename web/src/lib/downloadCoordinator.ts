@@ -14,6 +14,7 @@ import {
   type DownloadTitle,
   type StallClock,
 } from './downloadRows';
+import type { WantedItem, WantedStatus } from './hearthWanted';
 import type { LibraryLog } from './log';
 import { readSyncedPrefs } from '../settings/values';
 import { syncPolicy } from './syncCore';
@@ -76,6 +77,8 @@ export interface DownloadCoordinatorEffects {
   resolve: DownloadResolve;
   /** Maps a persisted ticket to one this service instance can reach. */
   ticket(url: string): string | null;
+  /** Hand Hearth the wanted list and read back what it started (`hearthWanted`); absent with no Hearth. */
+  wanted?(items: WantedItem[]): Promise<WantedStatus[] | null>;
 }
 
 export interface DownloadCoordinatorOptions {

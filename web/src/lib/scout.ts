@@ -163,7 +163,7 @@ async function hasPlayback(base: string, fetchImpl: typeof fetch): Promise<boole
 export async function findAddon(
   plugins: string[],
   routes: Routes,
-  want: { name: string; id: string; path: string },
+  want: { name: string; id: string | readonly string[]; path: string },
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<Addon | null> {
   for (const url of plugins) {

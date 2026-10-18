@@ -14,15 +14,18 @@ import {
   type Download,
   type DownloadHedge,
 } from './downloadRows';
+import { wantedItems, type WantedStatus } from './hearthWanted';
 import { applyLog, contentWatched, emptyLibrary } from './library';
 import { syncPolicy } from './syncCore';
-import { rankable, type SourceAnswer } from './titleSources';
+import { rankable, type SourceAnswer, type TitleSource } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped, Stamp } from './wire';
 
 const CONCURRENCY = 4;
 const NO_HEDGE_MS = 10 * 60_000;
 /** A due search whose answer couldn't settle anything (a source unreachable or partial) is asked again after this. */
 const UNANSWERED_WAIT = 5 * 60_000;
+/** An unchanged wanted list is handed to Hearth again, and what it started read back, this often. */
+const HEARTH_EVERY = 5 * 60_000;
 const ANOTHER_WINDOW = 'another-window';
 const FOREIGN = 'Another device’s ticket.';
 const GONE = 'This release is no longer listed.';
@@ -54,6 +57,8 @@ export class DownloadCoordinatorDriver {
   #running?: Promise<boolean>;
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
+  /** The wanted list last handed to Hearth, and when. */
+  #hearthSent?: { digest: string; at: number };
 
   constructor(readonly queue: DownloadCoordinator) {}
 
@@ -214,7 +219,7 @@ export class DownloadCoordinatorDriver {
   }
 
   async #holderPass(now: number, current: () => boolean): Promise<boolean> {
-    let wrote = false;
+    let wrote = await this.#syncHearth(now, current);
     const states: Record<string, string> = {};
     const decided = this.queue.list();
     for (const download of decided) {
@@ -356,6 +361,61 @@ export class DownloadCoordinatorDriver {
   }
 
   /**
+   * The wanted list handed to Hearth, which searches on while no client is open, and what it started adopted. Sent when
+   * it changed and otherwise every few minutes (an empty one once, to clear what Hearth holds).
+   */
+  async #syncHearth(now: number, current: () => boolean): Promise<boolean> {
+    const send = this.queue.effects.wanted;
+    if (!send) return false;
+    const items = wantedItems(this.queue.list());
+    const digest = JSON.stringify(items);
+    const last = this.#hearthSent;
+    if (last?.digest === digest && (!items.length || now - last.at < HEARTH_EVERY)) return false;
+    this.#hearthSent = { digest, at: now };
+    const statuses = await send(items);
+    if (!statuses || !current()) return false;
+    let wrote = false;
+    for (const status of statuses) {
+      if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
+      const download = this.queue
+        .list()
+        .find((candidate) => candidate.content === status.key && candidate.exhausted);
+      if (!download || download.tried.includes(status.identity)) continue;
+      wrote = (await this.#adopt(download, status, now)) || wrote;
+    }
+    return wrote;
+  }
+
+  /**
+   * A release Hearth started for a wanted download, written into its row as the holder's own pick (§17): found again in
+   * this client's own list by its identity, so the row names a ticket this client can use.
+   */
+  async #adopt(download: Download, status: WantedStatus, now: number): Promise<boolean> {
+    const { sources } = await this.queue.sourcesForTitle(download.title, true);
+    if (!this.#stillHeld(now) || !sources) return false;
+    const chosen = sources.find((source) => source.identity === status.identity);
+    if (!chosen) {
+      console.info(
+        `den: download ${download.content}: Hearth's start isn't listed here; searching on`,
+      );
+      return false;
+    }
+    console.info(`den: download ${download.content}: Hearth started ${chosen.label} meanwhile`);
+    return this.#start(
+      download,
+      chosen,
+      {
+        retries: Math.max(download.retries, status.retries ?? 0),
+        tried: download.tried,
+        candidates: sources.filter((source) => !(source.cached === false && source.seeders === 0))
+          .length,
+        queuedAt: status.startedAt ?? now,
+      },
+      now,
+    );
+  }
+
+  /**
    * A due fresh search for an exhausted (or wanted) download (§17 *Searching again*): the next untried release, or
    * with every one tried, the best of them all again. Nothing to pick writes a fresh `exhausted`, so the next search
    * waits longer; an answer that can't settle it writes nothing and asks again shortly.
@@ -397,8 +457,32 @@ export class DownloadCoordinatorDriver {
         chosen.cached ? ' (cached)' : ''
       }`,
     );
+    return this.#start(
+      download,
+      chosen,
+      {
+        retries: attempt + 1,
+        tried: fresh.length ? [...tried] : [],
+        candidates: viable.length,
+        queuedAt: now,
+      },
+      now,
+    );
+  }
+
+  /**
+   * A wanted download's release, started: the row then names it with its search count, what was tried, the candidates
+   * and when the add was made, and the add is made (again, for one Hearth made: den-scout de-duplicates it).
+   */
+  async #start(
+    download: Download,
+    chosen: TitleSource,
+    picked: { retries: number; tried: string[]; candidates: number; queuedAt: number },
+    now: number,
+  ): Promise<boolean> {
+    const at = await this.#stamp(now);
     const values: Record<string, Stamped<ConfigValue | null>> = {
-      retries,
+      retries: { value: { int: picked.retries }, at },
       release: {
         value: releaseValue({
           identity: chosen.identity,
@@ -409,9 +493,9 @@ export class DownloadCoordinatorDriver {
         }),
         at,
       },
-      queuedAt: { value: { int: now }, at },
-      tried: { value: { strings: fresh.length ? [...tried] : [] }, at },
-      candidates: { value: { int: viable.length }, at },
+      queuedAt: { value: { int: picked.queuedAt }, at },
+      tried: { value: { strings: picked.tried }, at },
+      candidates: { value: { int: picked.candidates }, at },
       exhausted: { value: { bool: false }, at },
       progress: { value: clockValue({ lastProgress: 0, progressAt: now }), at },
       reported: { value: { bool: false }, at },

@@ -9,7 +9,8 @@ import { downloadStill, type SeasonLoader } from './downloadArtwork';
 import { readPlugins } from './prefs';
 import { relayFetch } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
-import { findAddon, SCOUT, type Addon } from './scout';
+import { sendWanted } from './hearthWanted';
+import { DEN, DEN_IDS, findAddon, SCOUT, type Addon } from './scout';
 import {
   cancelSource,
   fetchSourceList,
@@ -19,6 +20,13 @@ import {
 } from './titleSources';
 
 export type DownloadContent = Pick<ContentReader, 'identifiers' | 'season'>;
+
+interface Providers {
+  scout: Addon | null;
+  den: Addon | null;
+  routes: Routes;
+  input: string;
+}
 
 export interface DownloadBackgroundWork {
   /** Runs only after foreground readiness while visible and online. */
@@ -31,8 +39,8 @@ export interface DownloadBackgroundWork {
 export class DownloadServiceRuntime implements DownloadBackgroundWork {
   readonly coordinator: DownloadCoordinator;
   readonly driver: DownloadCoordinatorDriver;
-  #providers?: Promise<{ scout: Addon | null; routes: Routes; input: string }>;
-  #resolved?: { scout: Addon | null; routes: Routes; input: string };
+  #providers?: Promise<Providers>;
+  #resolved?: Providers;
   #providerInput?: string;
   readonly #seasonLoader: SeasonLoader;
   readonly #listeners = new Set<() => void>();
@@ -91,6 +99,10 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             this.fetchImpl,
           );
           return found.sources === null ? { ...found, failure: 'unreachable' } : found;
+        },
+        wanted: async (items) => {
+          const { den } = await providers();
+          return den ? sendWanted(den.base, items, this.fetchImpl) : null;
         },
       },
       {
@@ -206,7 +218,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     );
   }
 
-  async #getProviders(): Promise<{ scout: Addon | null; routes: Routes; input: string }> {
+  async #getProviders(): Promise<Providers> {
     const plugins = readPlugins(this.log.settings('plugins'));
     const input = JSON.stringify(plugins);
     if (this.#providers && this.#providerInput === input) return this.#providers;
@@ -214,7 +226,11 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     const request = (async () => {
       const routes = await fetchRoutes(this.fetchImpl);
       const scout = await findAddon(plugins, routes, SCOUT, this.fetchImpl);
-      return { scout, routes, input };
+      // Hearth, which searches on for the wanted downloads while this page is closed.
+      const den = scout
+        ? await findAddon(plugins, routes, { ...DEN, id: DEN_IDS }, this.fetchImpl)
+        : null;
+      return { scout, den, routes, input };
     })();
     this.#providers = request;
     try {
