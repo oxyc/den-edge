@@ -27,6 +27,7 @@
   let activation = 0;
   let focusReplacement: MutationObserver | undefined;
   let clearPointerFocus: (() => void) | undefined;
+  let cancelFrameRestore: (() => void) | undefined;
   function rememberRouteFocus(event: PointerEvent): void {
     const holder = (event.target as Element | null)?.closest<HTMLElement>('[data-route-focus-key]');
     if (!holder || !root.contains(holder)) return;
@@ -60,6 +61,7 @@
     const stopInput = trackInputModality();
     root.addEventListener('pointerdown', rememberRouteFocus, { passive: true });
     return () => {
+      if (__DEN_TV__) cancelFrameRestore?.();
       focusReplacement?.disconnect();
       clearPointerFocus?.();
       root.removeEventListener('pointerdown', rememberRouteFocus);
@@ -71,6 +73,7 @@
     untrack(() => {
       if (!root) return;
       const ticket = ++activation;
+      if (__DEN_TV__) cancelFrameRestore?.();
       focusReplacement?.disconnect();
       focusReplacement = undefined;
       if (!visible) {
@@ -150,7 +153,26 @@
           };
           restore();
           // Browsers may restore persisted form state after popstate, independently of scrollRestoration.
-          requestAnimationFrame(restore);
+          if (__DEN_TV__) {
+            // Delaying this frame across Back + ArrowRight reproduced a jump back to the previous hero slide.
+            // Once the viewer acts on the restored page, its saved scroll/form state no longer owns that frame.
+            let cancelled = false;
+            const cancel = () => {
+              cancelled = true;
+              window.removeEventListener('den:tv-input', cancel);
+              window.removeEventListener('pointerdown', cancel, true);
+            };
+            cancelFrameRestore = cancel;
+            // TV navigation consumes arrow events in window capture; observe its explicit input signal.
+            window.addEventListener('den:tv-input', cancel, { once: true });
+            window.addEventListener('pointerdown', cancel, { capture: true, once: true });
+            requestAnimationFrame(() => {
+              const shouldRestore = !cancelled;
+              cancel();
+              if (cancelFrameRestore === cancel) cancelFrameRestore = undefined;
+              if (shouldRestore) restore();
+            });
+          } else requestAnimationFrame(restore);
         });
       }
     });

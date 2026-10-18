@@ -310,6 +310,11 @@ Missing-screen recovery is fault-injected against the compiled application: one 
 document can load a replacement asset graph, while a persistent failure exposes Retry
 without a reload loop. Opt-in diagnostics also work from the startup-failure surface.
 
+Linux WebKit CI exposed an arrow press lost immediately after Back. Holding and then
+releasing the browser's restoration frame reproduced the old rail position overwriting
+the newly selected slide. TV input now cancels that pending restoration; the regression
+journey exercises this exact ordering without retrying presses. Browser restoration is unchanged.
+
 Samsung AVPlay opens relative playback URLs at the configured API origin, waits for
 resume seeking before Play, and fences callbacks after teardown. SDK error details can
 contain signed URLs: only recognized platform error enums reach diagnostics/reports.

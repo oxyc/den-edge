@@ -285,6 +285,11 @@ export function installTVNavigation(): () => void {
     // A hardware Back on an editor is translated below into Escape for its owning component. Let that one
     // synthetic event reach the component instead of treating it as a second, route-level Back in capture.
     if (forwardingBackToEditor && event.key === 'Escape') return;
+    // A deliberate press supersedes Back's pending focus/scroll restoration, including its next-frame pass.
+    // Emit before consuming the hardware key so retained pages can cancel without competing capture listeners.
+    for (const stop of pendingRestores) stop();
+    pendingRestores.clear();
+    window.dispatchEvent(new Event('den:tv-input'));
     const target = event.target instanceof Element ? event.target : null;
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
