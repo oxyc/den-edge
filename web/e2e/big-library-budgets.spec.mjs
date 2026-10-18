@@ -220,9 +220,6 @@ for (const [label, type, device, options] of ENGINES) {
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
-      // A visit the household has settled after: the day's first page renews the assistant's grants, a change of what
-      // its projection is built from, which the next page builds once.
-      await visit(context, edge, SURFACES[0], options);
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {

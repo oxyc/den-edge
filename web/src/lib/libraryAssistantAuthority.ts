@@ -215,6 +215,23 @@ function readPublication(value: unknown): value is Publication {
   );
 }
 
+/** A grants or read row with each record's `expiresAt` left out: what a renewal changes, and nothing else. */
+function withoutExpiry(row: SettingsRow | null): unknown {
+  if (!row) return null;
+  return Object.fromEntries(
+    Object.entries(row.values).map(([grant, { value, at }]) => {
+      if (!value || !('string' in value) || typeof value.string !== 'string')
+        return [grant, { value, at }];
+      try {
+        const { expiresAt: _, ...record } = JSON.parse(value.string) as Record<string, unknown>;
+        return [grant, record];
+      } catch {
+        return [grant, { value, at }];
+      }
+    }),
+  );
+}
+
 /** SHA-256 of `value`'s JSON, as hex. */
 async function digestOf(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -558,6 +575,8 @@ export class LibraryAssistantAuthority {
   #dueAt = 0;
   /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
   #restored = false;
+  /** Whether this service has said the projection was up to date when it was opened. */
+  #saidCurrent = false;
 
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
@@ -596,15 +615,29 @@ export class LibraryAssistantAuthority {
     const prefs = this.#row(PREFS_ROW);
     const localRevoked = this.#revoked(records, lent);
     const documents = this.port.documents();
-    // Not the log's head, which every write moves, nor the clock: what the lists are made of.
-    const key = await digestOf([library, documents, layouts, read, grants, prefs, localRevoked]);
+    // Not the log's head, which every write moves, nor the clock: what the lists are made of. Nor a grant's expiry,
+    // which only its daily renewal moves: whether it is live is den-core's to decide when it is next built, and the
+    // heartbeat builds at least every 15 minutes.
+    const key = await digestOf([
+      library,
+      documents,
+      layouts,
+      withoutExpiry(read),
+      withoutExpiry(grants),
+      prefs,
+      localRevoked,
+    ]);
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;
+      // Said once a page: that a page opened on the library as it was published did not build it again.
+      if (!this.#saidCurrent) console.info('den: assistant projection up to date');
+      this.#saidCurrent = true;
       return [];
     }
     await ensureAssistantPolicy();
     const started = performance.now();
+    let buildMs: number;
     let built: ProjectionAnswer;
     try {
       built = assistantPolicy<ProjectionAnswer>({
@@ -620,9 +653,7 @@ export class LibraryAssistantAuthority {
         random: this.port.random(),
         now,
       });
-      console.info(
-        `den: assistant projection built in ${Math.round(performance.now() - started)}ms`,
-      );
+      buildMs = Math.round(performance.now() - started);
     } catch (error) {
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
@@ -671,6 +702,8 @@ export class LibraryAssistantAuthority {
         layouts,
       },
     });
+    // Once it is recorded: a page opened after this line neither builds nor sends it again.
+    console.info(`den: assistant projection built in ${buildMs}ms, sent ${sent.length}`);
     return sent;
   }
 

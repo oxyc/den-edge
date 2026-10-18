@@ -604,6 +604,25 @@ test('a page opened again on the library as it was published builds and sends no
   expect(await reopen().publish()).toEqual([grant]);
 });
 
+test('a grant’s daily renewal is no change of the projection: the page after builds nothing', async () => {
+  const shared = library();
+  let builds = 0;
+  const { authority, later, reopen } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+  });
+  const { grant } = await authority.consent('Reader', { write: true, read: true });
+  builds = 0;
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(1);
+  const before = JSON.stringify(shared.rows.get(READ_ROW));
+  later(60_000);
+  expect(await authority.renew([grant])).toBeGreaterThan(0);
+  expect(JSON.stringify(shared.rows.get(READ_ROW))).not.toBe(before);
+  later(60_000);
+  expect(await reopen().publish()).toEqual([]);
+  expect(builds).toBe(1);
+});
+
 test('a change to the household’s hide rules is a change of the projection, sent once it has settled', async () => {
   const shared = library();
   let builds = 0;
