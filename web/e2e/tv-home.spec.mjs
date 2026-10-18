@@ -42,8 +42,13 @@ test('real TV Home keeps its hero simple and survives forty detail/back cycles',
   const more = hero.getByRole('link', { name: 'More', exact: true });
   await expect(more).toHaveCount(1);
   // Reach the hero from the navbar exactly as a remote does; direct DOM focus masked geometry regressions.
-  await page.keyboard.press('ArrowDown');
+  const approach = ['ArrowUp', 'ArrowRight', 'ArrowLeft', 'ArrowDown'];
+  for (let press = 0; press < 32 && !(await more.evaluate((node) => node === document.activeElement)); press++) {
+    await page.keyboard.press(approach[press % approach.length]);
+    await page.waitForTimeout(80);
+  }
   await expect(more).toBeFocused();
+  await expect(more).toHaveAttribute('data-tv-carousel-action', 'hero');
   await page.screenshot({ path: info.outputPath('tv-home.png') });
   await page.keyboard.press('ArrowRight');
   await expect(hero.getByRole('heading', { name: 'Movie 1003' })).toBeVisible();
