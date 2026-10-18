@@ -529,10 +529,10 @@ describe('DownloadCoordinator', () => {
         { now: () => now, monotonicNow: () => 0 },
       );
       const driver = new DownloadCoordinatorDriver(queue);
-      /** Passes every 30 s up to `at`, as the service scheduler runs them. */
-      const run = async (at: number) => {
+      /** Passes every `step` up to `at`: every 30 s, as the service scheduler runs them, unless told otherwise. */
+      const run = async (at: number, step = 30_000) => {
         do {
-          now = Math.min(at, now + 30_000);
+          now = Math.min(at, now + step);
           await driver.run({ now, observedFor: 0 });
         } while (now < at);
       };
@@ -575,9 +575,13 @@ describe('DownloadCoordinator', () => {
     it('a day with nothing watchable takes the cached AVI rather than wait', async () => {
       const { shared, queue, run } = racing();
       await queue.enqueue(episode, a, 4);
-      await run(T0 + 23 * 60 * MINUTE);
-      expect(readDownload(shared.log.settings(EPISODE)!)!.release.identity).not.toBe(avi.identity);
-      await run(T0 + 24 * 60 * MINUTE + MINUTE);
+      await run(T0 + 21 * MINUTE);
+      // The race's stages are hours apart, so the rest of the day is passes an hour apart, not 2,800 at 30 s.
+      await run(T0 + 23 * 60 * MINUTE, 60 * MINUTE);
+      const before = readDownload(shared.log.settings(EPISODE)!)!;
+      expect(before.release.identity).not.toBe(avi.identity);
+      expect(before.race.stage).toBe(2);
+      await run(T0 + 24 * 60 * MINUTE + MINUTE, 60 * MINUTE);
       expect(readDownload(shared.log.settings(EPISODE)!)!.release.identity).toBe(avi.identity);
     });
 

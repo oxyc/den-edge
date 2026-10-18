@@ -110,13 +110,21 @@
     },
   };
 
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each read; the queue's `touch` redraws.
-  let held = new Map<string, SettingsRow>(
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- The queue's `touch` redraws after each read.
+  const held = new Map<string, SettingsRow>(
     page === 'artwork' ? [[rowName(artworkRow), artworkRow]] : [],
   );
+  // Merged in, as the library log merges a pull: a store answer can predate a write still in flight, and replacing the
+  // rows with it dropped the row just written until the next read.
   const read = async () => {
     const rows = (await (await fetch('/fixture-store/rows')).json()) as SettingsRow[];
-    held = new Map(rows.map((row) => [rowName(row), row]));
+    for (const row of rows) {
+      const seen = held.get(rowName(row));
+      held.set(
+        rowName(row),
+        seen ? syncPolicy<SettingsRow>({ op: 'merge', a: seen, b: row }) : row,
+      );
+    }
   };
   const newest = (): Stamp => {
     let latest: Stamp = [0, 0, ''];
