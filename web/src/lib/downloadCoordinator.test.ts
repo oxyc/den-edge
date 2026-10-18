@@ -281,6 +281,36 @@ describe('DownloadCoordinator', () => {
     expect(cancelled).toEqual([first.url]);
   });
 
+  it('moves a download whose release is no longer listed on to the next release', async () => {
+    const shared = testLog([stalledRow()]);
+    const asked: string[] = [];
+    // The row's ticket lapsed, and the fresh list no longer carries its release.
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(asked),
+        prepare: async (url: string, queue: boolean, prefetch: boolean) => {
+          asked.push(`${queue ? (prefetch ? 'prefetch' : 'add') : 'probe'} ${url}`);
+          return url === first.url
+            ? { state: 'expired' as const }
+            : { state: 'preparing' as const, progress: 0 };
+        },
+        resolve: async () => ({ sources: [second] }),
+      },
+      { now: () => T0 + MINUTE, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+
+    await expect(driver.run({ now: T0 + MINUTE, observedFor: 0 })).resolves.toBe(true);
+
+    const moved = readDownload(shared.log.settings(NAME)!)!;
+    expect(moved.release.identity).toBe(second.identity);
+    expect(moved.tried).toEqual([first.identity]);
+    expect(moved.exhausted).toBe(false);
+    expect(asked).toEqual([`probe ${first.url}`, `prefetch ${second.url}`]);
+  });
+
   it('uses durable stamps for the lease and every fallback write', async () => {
     const shared = testLog([stalledRow()]);
     const issued: Stamp[] = [];
