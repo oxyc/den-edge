@@ -525,6 +525,18 @@ test('a failed upload is tried again next time', async () => {
   expect(await reuploadInstalls('abc123', [GRANT], installs, working)).toEqual(['a1b2c3d4']);
 });
 
+test('a refused proof stops the re-upload at the first grant instead of asking for each', async () => {
+  const installs = { scout: 'one', atlas: 'two' };
+  const grants = ['a1b2c3d4', 'b1b2c3d4', 'c1b2c3d4', 'd1b2c3d4'].map((gid) => ({ ...GRANT, gid }));
+  const refused = answering(403, { error: 'forbidden' });
+  expect(await reuploadInstalls('abc123', grants, installs, refused)).toEqual([]);
+  expect(refused).toHaveBeenCalledTimes(1);
+  // Any other failure is that grant's alone: the rest are still tried.
+  const failing = answering(500, { error: 'boom' });
+  expect(await reuploadInstalls('abc123', grants, installs, failing)).toEqual([]);
+  expect(failing).toHaveBeenCalledTimes(4);
+});
+
 test('nothing breaks where browser storage is refused', async () => {
   vi.stubGlobal('localStorage', {
     getItem: () => {

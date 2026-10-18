@@ -63,6 +63,8 @@ export interface RecoveryContext {
   fetchImpl?: typeof fetch;
   now?: () => number;
   storage?: Storage;
+  /** den-edge refused `memberProof` itself (a 403): nothing asked with it will be answered. */
+  refused?: () => void;
 }
 
 /** The context for the library `libraryKey` (base64) opens. */
@@ -313,8 +315,8 @@ interface Listed {
   lastOpenedAt: number | null;
 }
 
-function call(ctx: RecoveryContext, method: string, body?: unknown): Promise<Response> {
-  return (ctx.fetchImpl ?? fetch)('/recovery', {
+async function call(ctx: RecoveryContext, method: string, body?: unknown): Promise<Response> {
+  const res = await (ctx.fetchImpl ?? fetch)('/recovery', {
     method,
     headers: {
       'x-den-library-member': ctx.memberProof,
@@ -322,6 +324,8 @@ function call(ctx: RecoveryContext, method: string, body?: unknown): Promise<Res
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 403) ctx.refused?.();
+  return res;
 }
 
 async function post(

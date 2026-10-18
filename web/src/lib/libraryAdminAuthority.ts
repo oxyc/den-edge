@@ -84,6 +84,8 @@ export class LibraryAdminAuthority {
     }
   >();
   readonly #recoveryStorage = new MemoryStorage();
+  /** The member proof den-edge's `/recovery` last refused outright, if any. */
+  #recoveryRefused: string | null = null;
   constructor(
     private readonly log: LibraryLog,
     private readonly clock: ClockStore,
@@ -185,7 +187,12 @@ export class LibraryAdminAuthority {
 
   async recoveryView() {
     await this.#restoreRecoveryMakes();
-    const status = await reconcile(this.#recoveryContext());
+    // Reselected on every library change while Settings is open: a proof den-edge already refused is not asked
+    // again until it changes, or each sync is one more 403.
+    const status =
+      this.#recoveryRefused === this.log.memberProof
+        ? null
+        : await reconcile(this.#recoveryContext());
     return {
       kind: 'recovery' as const,
       availability: makingWaits(this.log) ? ('waits' as const) : ('ready' as const),
@@ -242,6 +249,7 @@ export class LibraryAdminAuthority {
       },
       fetchImpl: this.options.fetchImpl,
       storage: this.#recoveryStorage,
+      refused: () => (this.#recoveryRefused = this.log.memberProof),
     };
   }
 
