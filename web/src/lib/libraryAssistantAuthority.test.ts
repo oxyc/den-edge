@@ -136,6 +136,8 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     put,
     records: () => records,
     later: (ms: number) => void (now += ms),
+    /** The same device opened again, as each page load opens a new library service: only its records carry over. */
+    reopen: () => new LibraryAssistantAuthority(port),
   };
 }
 
@@ -555,6 +557,51 @@ test('a quiet library’s publish tick builds nothing until its rows change or s
   later(60_000);
   expect(await authority.publish()).toEqual([grant]);
   expect(builds).toBe(4);
+});
+
+test('a page opened again on the library as it was published builds and sends nothing until its lists change or the heartbeat is due', async () => {
+  const shared = library();
+  let builds = 0;
+  let head = 7;
+  let layouts: ReturnType<AssistantPort['layouts']> = {
+    '1399': { seasons: [{ season: 1, episodes: 10 }], last_aired: { season: 1, episode: 10 } },
+  };
+  const { authority, later, reopen } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+    head: () => head,
+    layouts: () => layouts,
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  builds = 0;
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(1);
+  // The next page: a new library service, at a head another device's write moved on, which has not learnt the
+  // series' layout yet.
+  later(60_000);
+  head = 9;
+  layouts = {};
+  expect(await reopen().publish()).toEqual([]);
+  expect(builds).toBe(1);
+  // The watchlist changes: the page after builds at once, and sends once the change has stood for 30 s.
+  shared.documents = [
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 550 },
+      status: { value: 'watchlist', at: [fixed.now, 0, DEVICE] },
+      addedAt: fixed.now,
+    },
+  ];
+  const changed = reopen();
+  expect(await changed.publish()).toEqual([]);
+  expect(builds).toBe(2);
+  later(30_000);
+  expect(await changed.publish()).toEqual([grant]);
+  // Opened again before the heartbeat: nothing; after it: sent, with a fresh `at`.
+  later(10 * 60_000);
+  expect(await reopen().publish()).toEqual([]);
+  later(5 * 60_000);
+  expect(await reopen().publish()).toEqual([grant]);
 });
 
 test('a change to the household’s hide rules is a change of the projection, sent once it has settled', async () => {

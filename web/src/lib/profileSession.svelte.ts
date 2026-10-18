@@ -58,6 +58,8 @@ export class ProfileSession {
   live = $state(false);
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
+  /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */
+  foregrounded = $state(false);
   readonly #policed: ContentServiceClientPort | null;
   #region?: Promise<string | undefined>;
   readonly #displays = new SvelteMap<string, Title>();
@@ -247,6 +249,7 @@ export class ProfileSession {
   }
 
   foregroundReady(): void {
+    this.foregrounded = true;
     this.household.foreground();
     if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});
   }

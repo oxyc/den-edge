@@ -10,6 +10,11 @@
 // hundreds of them — one per title the library names — kept the phone's billboard text, rows and episode lists waiting
 // for seconds while a desktop drew them at once. That count is what a lab machine can measure of the phone's cost.
 //
+// A library surface's rows have a budget of their own (`shelves ready`): they are named by the same library Worker
+// that publishes the household's assistant projection, which costs a phone's Worker seconds. The visits give that
+// publish the phone's cost (`PHONE_PROJECTION_MS`), and a returning visit, with the household as the last one
+// published it, must build and upload none.
+//
 // A new surface: add an entry to SURFACES with the path and the `markReady` fields that mean it has drawn (adding
 // one to `markReady` if none fits).
 
@@ -17,7 +22,12 @@ import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
-import { bigHousehold, routeBigHousehold, WATCHED_SERIES } from './big-library.mjs';
+import {
+  bigHousehold,
+  PHONE_PROJECTION_MS,
+  routeBigHousehold,
+  WATCHED_SERIES,
+} from './big-library.mjs';
 
 /** Milliseconds from navigation start to a surface's content. Today's iPhone took 5–10 s for most of these. */
 const READY_MS = 4_000;
@@ -26,11 +36,17 @@ const WORKER_TRANSACTIONS = 200;
 /** The longest a single main-thread task may run on the throttled phone. */
 const LONGEST_TASK_MS = 600;
 
-/** `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. */
+/** Milliseconds from navigation start to a library surface's `shelves ready` milestone (`startupTiming.ts`). */
+const SHELVES_MS = 4_000;
+
+/**
+ * `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. `shelves`: the surface
+ * names its library rows, and has its `shelves ready` milestone budgeted too.
+ */
 const SURFACES = [
-  { name: 'Home', path: '/', content: ['billboardText', 'continuePoster'] },
-  { name: 'Series', path: '/series', content: ['rowPoster'] },
-  { name: 'Watchlist', path: '/watchlist', content: ['billboardText'] },
+  { name: 'Home', path: '/', content: ['billboardText', 'continuePoster'], shelves: true },
+  { name: 'Series', path: '/series', content: ['rowPoster'], shelves: true },
+  { name: 'Watchlist', path: '/watchlist', content: ['billboardText'], shelves: true },
   { name: 'Series detail', path: `/tv/${WATCHED_SERIES}`, content: ['episodes'] },
   { name: 'Settings', path: '/settings', content: ['settings'] },
   // After the switch below: the household's Kid, whose billboard is age-checked title by title.
@@ -127,7 +143,8 @@ function countTransactions(page) {
 /** One returning visit to `surface`: the ms its content took, the Worker transactions, the longest task. */
 async function visit(context, edge, surface, { cpu = 1 } = {}) {
   const page = await context.newPage();
-  await routeBigHousehold(page, edge);
+  // The household's assistant projection costs the library Worker what it costs a phone's (`PHONE_PROJECTION_MS`).
+  await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });
   if (cpu > 1) {
     const cdp = await context.newCDPSession(page);
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
@@ -135,30 +152,45 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
   const transactions = countTransactions(page);
   // Where a slow surface's time went, printed with its result: the page's startup milestones (`startupTiming.ts`).
   const marks = {};
+  // Assistant projections the library Worker built, from its own line; a browser may report a Worker's console on the
+  // page, on the Worker, or both.
+  const built = { page: 0, worker: 0 };
+  const isBuild = (message) => message.text().startsWith('den: assistant projection built');
+  page.on('worker', (worker) =>
+    worker.on?.('console', (message) => isBuild(message) && built.worker++),
+  );
   page.on('console', (message) => {
+    if (isBuild(message)) built.page++;
     const match =
       /^den: startup \+(\d+)ms (app module requested|worker ready|handover|shelves ready|billboard detail|first poster|episodes shown)/.exec(
         message.text(),
       );
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
   });
+  const projectionsBefore = edge.assistant?.projections.length ?? 0;
   await page.goto(`${E2E_ORIGIN}${surface.path}`);
-  const drawn = (ready) => surface.content.every((name) => ready?.[name] !== undefined);
+  const drawn = (ready) =>
+    surface.content.every((name) => ready?.[name] !== undefined) &&
+    (!surface.shelves || marks['shelves ready'] !== undefined);
   // Not an assertion: a surface that never draws is reported as Infinity against its budget below.
   await expect
     .poll(async () => drawn(await page.evaluate(() => window.__ready)), { timeout: 30_000 })
     .toBe(true)
     .catch(() => {});
   const ready = await page.evaluate(() => window.__ready);
-  const contentMs = drawn(ready)
+  const contentMs = surface.content.every((name) => ready?.[name] !== undefined)
     ? Math.max(...surface.content.map((name) => ready[name]))
     : Infinity;
+  const shelvesMs = marks['shelves ready'] ?? Infinity;
   // Let the Worker finish what the surface set off, then count.
   await page.waitForTimeout(2_000);
   const { longest, ...drawnAt } = ready;
   const result = {
     contentMs,
+    ...(surface.shelves ? { shelvesMs } : {}),
     transactions: await transactions(),
+    projections: (edge.assistant?.projections.length ?? 0) - projectionsBefore,
+    builds: Math.max(built.page, built.worker),
     longest,
     drawnAt,
     marks,
@@ -188,6 +220,9 @@ for (const [label, type, device, options] of ENGINES) {
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
+      // A visit the household has settled after: the day's first page renews the assistant's grants, a change of what
+      // its projection is built from, which the next page builds once.
+      await visit(context, edge, SURFACES[0], options);
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {
@@ -198,9 +233,16 @@ for (const [label, type, device, options] of ENGINES) {
         const result = await visit(context, edge, surface, options);
         measured.push({ surface: surface.name, ...result });
         expect.soft(result.contentMs, `${surface.name}: ms to content`).toBeLessThan(READY_MS);
+        if (surface.shelves)
+          expect
+            .soft(result.shelvesMs, `${surface.name}: ms to shelves ready`)
+            .toBeLessThan(SHELVES_MS);
         expect
           .soft(result.transactions, `${surface.name}: library Worker IndexedDB transactions`)
           .toBeLessThan(WORKER_TRANSACTIONS);
+        // The household's lists are as the last visit published them: nothing is built or sent again.
+        expect.soft(result.builds, `${surface.name}: assistant projections built`).toBe(0);
+        expect.soft(result.projections, `${surface.name}: assistant projections uploaded`).toBe(0);
         if (options.cpu)
           expect
             .soft(result.longest, `${surface.name}: longest task ms`)

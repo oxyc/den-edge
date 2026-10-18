@@ -64,6 +64,20 @@ export interface AssistantRecords {
   applied: Record<string, ConfigValue>;
   renewedAt: number;
   dropped: string[];
+  /** What this device last published (§15), so a page opened later neither builds nor sends it again. */
+  publication?: Publication;
+}
+
+/**
+ * The last projection build: `key`, a digest of everything it was built from; `dueAt`, when it must be built again
+ * with those inputs unchanged; `sent`, each grant's digest and when it was sent; `layouts`, the series layouts known,
+ * which a page that has not seen those series yet builds with too.
+ */
+export interface Publication {
+  key: string;
+  dueAt: number;
+  sent: Record<string, { digest: string; at: number }>;
+  layouts: Record<string, SeriesLayout>;
 }
 
 const EMPTY: AssistantRecords = { revoked: [], applied: {}, renewedAt: 0, dropped: [] };
@@ -181,7 +195,30 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
     dropped: Array.isArray(value.dropped)
       ? value.dropped.filter((id) => typeof id === 'string')
       : [],
+    ...(readPublication(value.publication) ? { publication: value.publication } : {}),
   };
+}
+
+function readPublication(value: unknown): value is Publication {
+  if (!value || typeof value !== 'object') return false;
+  const { key, dueAt, sent, layouts } = value as Partial<Publication>;
+  return (
+    typeof key === 'string' &&
+    typeof dueAt === 'number' &&
+    !!sent &&
+    typeof sent === 'object' &&
+    Object.values(sent).every(
+      (entry) => typeof entry?.digest === 'string' && typeof entry.at === 'number',
+    ) &&
+    !!layouts &&
+    typeof layouts === 'object'
+  );
+}
+
+/** SHA-256 of `value`'s JSON, as hex. */
+async function digestOf(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 }
 
 /**
@@ -285,11 +322,14 @@ export class LibraryAssistantAuthority {
       const revoked = [...new Set([...held.revoked, ...(update.revoked ?? [])])].sort();
       const applied = { ...held.applied, ...(update.applied ?? {}) };
       for (const id of update.prune ?? []) delete applied[id];
-      const next = {
+      // The last publication is replaced whole: it is what was last built and sent, not a set that grows.
+      const publication = update.publication ?? held.publication;
+      const next: AssistantRecords = {
         revoked,
         applied,
         renewedAt: Math.max(held.renewedAt, update.renewedAt ?? 0),
         dropped: [...new Set([...held.dropped, ...(update.dropped ?? [])])].sort(),
+        ...(publication ? { publication } : {}),
       };
       // Losing a record weakens this device against an older row; it is said, never silent.
       await this.port.saveRecords(next).catch((error: unknown) => {
@@ -516,12 +556,18 @@ export class LibraryAssistantAuthority {
   /** The projection's inputs at the last build, and when a build is next due with the inputs unchanged. */
   #builtFrom: string | null = null;
   #dueAt = 0;
+  /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
+  #restored = false;
 
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
    * have stood for 30 s) or 15 minutes have passed; ask den-edge once to drop every dead grant's. A projection is
    * rebuilt only when its inputs changed or something is due, so a quiet library's tick builds nothing; and nothing is
    * built at all for a library with no read records. Which grants were sent.
+   *
+   * What was last built and sent is kept on this device (`Publication`), so a page opened again with the library as it
+   * was builds nothing until the heartbeat is due: a build reads the whole library, and on a phone it holds the library
+   * Worker for seconds.
    *
    * `lent`: a split household's connection (§15): its library id, read and grants rows and revoked set, and its member
    * proof to send with, around this library's lists, prefs and head.
@@ -535,24 +581,48 @@ export class LibraryAssistantAuthority {
       ? `${this.port.inputs()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
       : this.port.inputs();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
-    await ensureAssistantPolicy();
     const records = await this.#load();
+    const kept = records.publication;
+    if (!this.#restored) {
+      this.#restored = true;
+      for (const [grant, sent] of Object.entries(kept?.sent ?? {}))
+        if (!this.#published.has(grant)) this.#published.set(grant, sent);
+    }
+    // The layouts known when it was last built, under the ones this page has learnt since.
+    const layouts = { ...kept?.layouts, ...this.port.layouts() };
+    const library = lent?.member.libraryId ?? this.port.libraryId;
+    const grants = this.#row(GRANTS_ROW, lent);
+    // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
+    const prefs = this.#row(PREFS_ROW);
+    const localRevoked = this.#revoked(records, lent);
+    const documents = this.port.documents();
+    // Not the log's head, which every write moves, nor the clock: what the lists are made of.
+    const key = await digestOf([library, documents, layouts, read, grants, prefs, localRevoked]);
+    if (kept?.key === key && now < kept.dueAt) {
+      this.#builtFrom = inputs;
+      this.#dueAt = kept.dueAt;
+      return [];
+    }
+    await ensureAssistantPolicy();
+    const started = performance.now();
     let built: ProjectionAnswer;
     try {
       built = assistantPolicy<ProjectionAnswer>({
         op: 'assistant_projection',
-        library: lent?.member.libraryId ?? this.port.libraryId,
-        documents: this.port.documents(),
-        layouts: this.port.layouts(),
+        library,
+        documents,
+        layouts,
         head: this.port.head(),
         read,
-        grants: this.#row(GRANTS_ROW, lent),
-        // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
-        prefs: this.#row(PREFS_ROW),
-        localRevoked: this.#revoked(records, lent),
+        grants,
+        prefs,
+        localRevoked,
         random: this.port.random(),
         now,
       });
+      console.info(
+        `den: assistant projection built in ${Math.round(performance.now() - started)}ms`,
+      );
     } catch (error) {
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
@@ -592,6 +662,15 @@ export class LibraryAssistantAuthority {
       if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
     }
     this.#dueAt = dueAt;
+    await this.#remember({
+      publication: {
+        key,
+        // No live grant: nothing is due until the inputs change.
+        dueAt: Number.isFinite(dueAt) ? dueAt : Number.MAX_SAFE_INTEGER,
+        sent: Object.fromEntries(this.#published),
+        layouts,
+      },
+    });
     return sent;
   }
 
