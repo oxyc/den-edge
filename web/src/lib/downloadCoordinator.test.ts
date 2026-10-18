@@ -311,6 +311,135 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([`probe ${first.url}`, `prefetch ${second.url}`]);
   });
 
+  it('keeps searching for a wanted episode, backing off, until a release turns up', async () => {
+    const shared = testLog();
+    const asked: string[] = [];
+    let now = T0;
+    let listed: (typeof first)[] = [];
+    let resolves = 0;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(asked),
+        resolve: async () => {
+          resolves++;
+          return { sources: listed };
+        },
+      },
+      { now: () => now, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    // The service scheduler runs the driver every few seconds, renewing the lease; step time as it does.
+    const run = async (at: number) => {
+      do {
+        now = Math.min(at, now + 30_000);
+        await driver.run({ now, observedFor: 0 });
+      } while (now < at);
+    };
+
+    await expect(queue.want(title)).resolves.toBe(true);
+    const wanted = queue.get(NAME)!;
+    expect(wanted).toMatchObject({ wanted: true, exhausted: true, retries: 0 });
+    const firstSearch = queue.status(wanted, now).until!;
+    expect(queue.status(wanted, now).state).toBe('no_working_release');
+    expect(firstSearch - T0).toBeGreaterThanOrEqual(12 * MINUTE);
+    expect(firstSearch - T0).toBeLessThanOrEqual(18 * MINUTE);
+
+    // Before its time nothing is asked.
+    await run(T0 + MINUTE);
+    expect(resolves).toBe(0);
+
+    // Due, and still nothing listed: a fresh `exhausted`, one more search counted, and a longer wait.
+    await run(firstSearch);
+    expect(resolves).toBe(1);
+    const searched = queue.get(NAME)!;
+    expect(searched).toMatchObject({ wanted: true, exhausted: true, retries: 1 });
+    const secondSearch = queue.status(searched, now).until!;
+    expect(secondSearch - firstSearch).toBeGreaterThanOrEqual(24 * MINUTE);
+
+    // A release shows up (the pack got seeded): the next due search starts it.
+    listed = [second];
+    await run(secondSearch - MINUTE);
+    expect(resolves).toBe(1);
+    await run(secondSearch);
+    const started = queue.get(NAME)!;
+    expect(started).toMatchObject({ wanted: false, exhausted: false, retries: 2 });
+    expect(started.release.identity).toBe(second.identity);
+    expect(asked).toEqual([`prefetch ${second.url}`]);
+    expect(queue.status(started, now).state).toBe('fetching');
+  });
+
+  it('waits for a wanted episode to air before searching for it', async () => {
+    const shared = testLog();
+    let resolves = 0;
+    let now = T0;
+    const airs = T0 + 6 * 60 * MINUTE;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => {
+          resolves++;
+          return { sources: [first] };
+        },
+      },
+      { now: () => now, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    const run = async (at: number) => {
+      do {
+        now = Math.min(at, now + 30_000);
+        await driver.run({ now, observedFor: 0 });
+      } while (now < at);
+    };
+    await queue.want({ ...title, airDate: airs });
+    const waiting = queue.get(NAME)!;
+    expect(queue.status(waiting, T0)).toMatchObject({ state: 'awaiting_air', until: airs });
+
+    await run(airs - MINUTE);
+    expect(resolves).toBe(0);
+    await run(airs);
+    expect(resolves).toBe(1);
+    expect(queue.get(NAME)!.release.identity).toBe(first.identity);
+  });
+
+  it('asks again shortly when a due search gets no full answer', async () => {
+    const shared = testLog();
+    let resolves = 0;
+    let now = T0;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => {
+          resolves++;
+          return { sources: null, failure: 'unreachable' as const };
+        },
+      },
+      { now: () => now, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    const run = async (at: number) => {
+      do {
+        now = Math.min(at, now + 30_000);
+        await driver.run({ now, observedFor: 0 });
+      } while (now < at);
+    };
+    await queue.want(title);
+    const due = queue.status(queue.get(NAME)!, T0).until!;
+    await run(due);
+    expect(resolves).toBe(1);
+    // Nothing written: the row's schedule is untouched, and the next passes don't hammer the addon.
+    expect(queue.get(NAME)).toMatchObject({ retries: 0, exhausted: true });
+    await run(due + 4 * MINUTE);
+    expect(resolves).toBe(1);
+    await run(due + 5 * MINUTE);
+    expect(resolves).toBe(2);
+  });
+
   it('uses durable stamps for the lease and every fallback write', async () => {
     const shared = testLog([stalledRow()]);
     const issued: Stamp[] = [];

@@ -335,6 +335,7 @@ const internalDownloadTitle = (title: DownloadTitleDescriptor) => {
     ...(title.posterPath ? { posterPath: title.posterPath } : {}),
     ...(title.stillPath ? { stillPath: title.stillPath } : {}),
     ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+    ...(title.airDate !== undefined ? { airDate: title.airDate } : {}),
   };
 };
 
@@ -649,6 +650,8 @@ export class LibraryLogAuthority {
         );
       case 'download.enqueue':
         return this.#enqueueDownload(command);
+      case 'download.want':
+        return this.#wantDownload(command.title);
       case 'download.remove':
         return this.#removeDownload(command.target);
       case 'download.release.try':
@@ -1718,14 +1721,13 @@ export class LibraryLogAuthority {
         const service =
           providerText(live?.fetch?.service, 256) ?? providerText(durable.service, 256);
         const state = durable.state ?? 'starting';
-        const fraction = Math.max(
-          0,
-          Math.min(1, download.progress?.lastProgress ?? durable.clock.lastProgress),
-        );
+        // `download_status`'s clock is the later of the row's coarse one and the live answer's, so it is the figure
+        // to show: the row's own, written at most every 5 minutes and reset by every fallback, lags it.
+        const fraction = Math.max(0, Math.min(1, durable.clock.lastProgress));
         return {
           content: download.content,
           title: { type: download.title.mediaType, id: download.title.mediaId },
-          name: download.title.title || download.release.label,
+          name: download.title.title || download.release.label || download.content,
           ...(download.title.imdbId ? { imdbId: download.title.imdbId } : {}),
           ...(download.title.season !== undefined ? { season: download.title.season } : {}),
           ...(download.title.episode !== undefined ? { episode: download.title.episode } : {}),
@@ -1739,7 +1741,7 @@ export class LibraryLogAuthority {
               ? { name: deviceName(this.#log.settings('devices'), download.queuedBy) }
               : {}),
           },
-          release: publicRelease(download.release),
+          ...(download.wanted ? {} : { release: publicRelease(download.release) }),
           ...(download.release.hedge
             ? { alternate: publicRelease(download.release.hedge, download.release.label) }
             : {}),
@@ -1767,7 +1769,10 @@ export class LibraryLogAuthority {
             ...(durable.until !== undefined ? { until: durable.until } : {}),
             stalled: durable.stalled || live?.fetch?.state === 'stalled',
           },
-          tried: new Set([...download.tried, download.release.identity]).size,
+          tried: new Set([
+            ...download.tried,
+            ...(download.wanted ? [] : [download.release.identity]),
+          ]).size,
           ...(download.candidates !== undefined ? { candidates: download.candidates } : {}),
           announced: download.announced,
         };
@@ -2539,6 +2544,16 @@ export class LibraryLogAuthority {
     };
   }
 
+  async #wantDownload(title: DownloadTitleDescriptor): Promise<LibraryAuthorityCommandResult> {
+    const pending = this.#log.pendingActions;
+    if (!(await this.#downloadsCoordinator.want(internalDownloadTitle(title)))) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#delivery(pending),
+      affected: this.#withPendingStatus(pending, [{ kind: 'downloads' }]),
+    };
+  }
+
   async #removeDownload(target: DownloadTarget): Promise<LibraryAuthorityCommandResult> {
     const download = this.#download(target);
     if (!download) return this.#unchanged();
@@ -2564,7 +2579,10 @@ export class LibraryLogAuthority {
     if (download.release.hedge)
       throw authorityError('conflict', 'download is already trying an alternate release', true);
     const pending = this.#log.pendingActions;
-    const saved = await this.#downloadsCoordinator.tryReleaseIdentity(download, identity);
+    // A wanted download has no partial to keep beside the choice: the choice simply starts.
+    const saved = download.wanted
+      ? await this.#downloadsCoordinator.enqueueIdentity(download.title, identity)
+      : await this.#downloadsCoordinator.tryReleaseIdentity(download, identity);
     if (!saved) this.#writeFailed();
     return {
       outcome: 'applied',

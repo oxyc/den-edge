@@ -19,7 +19,7 @@
   const choices = $derived(
     (sources ?? []).filter(
       (source) =>
-        source.identity !== download.release.identity &&
+        source.identity !== download.release?.identity &&
         source.identity !== download.alternate?.identity,
     ),
   );

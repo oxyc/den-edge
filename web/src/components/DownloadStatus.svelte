@@ -29,7 +29,7 @@
     {viewHeadline(download)}
   </p>
   {#if lines.length}<p>{lines.join(' · ')}</p>{/if}
-  {#if release}<p class="release">{download.release.label}</p>{/if}
+  {#if release && download.release}<p class="release">{download.release.label}</p>{/if}
   {#if download.alternate}
     <p class="alternate">Also trying {download.alternate.label}</p>
   {/if}

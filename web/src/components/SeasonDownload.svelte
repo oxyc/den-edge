@@ -70,9 +70,11 @@
     <DetailIcon name="download" />{#if job?.running}{running}{:else if !compact}Download season {season}{/if}
   </button>
   {#if job && !job.running}<p role="status">
-      {job.queued} queued · {job.ready} already ready{job.unavailable
-        ? ` · ${job.unavailable} unavailable`
-        : ''}{job.uncertain ? ` · ${job.uncertain} unconfirmed` : ''}
+      {job.queued} queued · {job.ready} already ready{job.searching
+        ? ` · ${job.searching} searching for a release`
+        : ''}{job.waiting ? ` · ${job.waiting} waiting to air` : ''}{job.uncertain
+        ? ` · ${job.uncertain} unconfirmed`
+        : ''}
     </p>{/if}
 </div>
 
