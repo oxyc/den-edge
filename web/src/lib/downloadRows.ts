@@ -5,15 +5,26 @@
 import { syncPolicy } from './syncCore';
 import type { ConfigValue, Row, SettingsRow, Stamp, Stamped } from './wire';
 
-export interface DownloadHedge {
+/** An alternate fetched beside the row's `release` (§17 `race`). */
+export interface DownloadRaceEntry {
   identity: string;
   label?: string;
   url: string;
   sizeBytes?: number;
   cached?: boolean;
   queuedAt: number;
-  lastProgress?: number;
-  progressAt: number;
+}
+
+/**
+ * The row's race (§17 *Racing*): the alternates in flight beside `release`, the escalation stage and when it began,
+ * when the download was first asked for, and when the debrid last refused an add (its active-download limit).
+ */
+export interface DownloadRace {
+  stage: number;
+  stageAt: number;
+  startedAt: number;
+  cappedAt?: number;
+  entries: DownloadRaceEntry[];
 }
 
 /** The release a download is fetching. `url` is the writer's play ticket, which another device may not reach. */
@@ -23,8 +34,6 @@ export interface DownloadRelease {
   url: string;
   sizeBytes?: number;
   cached?: boolean;
-  /** One alternate tried beside a partial primary. Persisted so whichever device holds the lease can finish it. */
-  hedge?: DownloadHedge;
 }
 
 /** What a download is of, and what to show for it. */
@@ -69,6 +78,7 @@ export interface Download {
   reannounced: boolean;
   resumeAt?: number;
   progress?: StallClock;
+  race: DownloadRace;
   row: SettingsRow;
   /** The seq den-edge gave the row as read: a holder's write is compare-and-set on it. 0 where unknown. */
   seq: number;
@@ -144,12 +154,13 @@ export function readDownload(row: Row): Download | null {
     return null;
   const progress = json(values.progress);
   const tried = values.tried?.value;
+  const { hedge, ...current } = (release ?? {}) as unknown as DownloadRelease & {
+    hedge?: DownloadRaceEntry;
+  };
   return {
     name: row.name,
     content: row.name.slice(PREFIX.length),
-    release: release
-      ? (release as unknown as DownloadRelease)
-      : { identity: '', label: '', url: '' },
+    release: release ? (current as DownloadRelease) : { identity: '', label: '', url: '' },
     wanted,
     title: {
       ...(title as unknown as DownloadTitle),
@@ -171,9 +182,42 @@ export function readDownload(row: Row): Download | null {
       typeof progress.progressAt === 'number'
         ? { lastProgress: progress.lastProgress, progressAt: progress.progressAt }
         : undefined,
+    race: readRace(json(values.race), queuedAt, hedge),
     row,
     seq: 0,
   };
+}
+
+const isEntry = (entry: unknown): entry is DownloadRaceEntry =>
+  !!entry &&
+  typeof (entry as DownloadRaceEntry).identity === 'string' &&
+  typeof (entry as DownloadRaceEntry).url === 'string' &&
+  typeof (entry as DownloadRaceEntry).queuedAt === 'number';
+
+/**
+ * A row's `race`, or stage 0 from `queuedAt` with no entries. An older Den Web wrote one alternate as `release.hedge`,
+ * which reads as a race of that one entry.
+ */
+function readRace(
+  race: Record<string, unknown> | null,
+  queuedAt: number,
+  hedge: DownloadRaceEntry | undefined,
+): DownloadRace {
+  const number = (value: unknown, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  if (race) {
+    const entries = Array.isArray(race.entries) ? race.entries.filter(isEntry) : [];
+    return {
+      stage: number(race.stage, 0),
+      stageAt: number(race.stageAt, queuedAt),
+      startedAt: number(race.startedAt, queuedAt),
+      ...(typeof race.cappedAt === 'number' ? { cappedAt: race.cappedAt } : {}),
+      entries,
+    };
+  }
+  if (isEntry(hedge))
+    return { stage: 1, stageAt: hedge.queuedAt, startedAt: queuedAt, entries: [hedge] };
+  return { stage: 0, stageAt: queuedAt, startedAt: queuedAt, entries: [] };
 }
 
 /** Every live download the rows hold, newest first. */
@@ -197,6 +241,21 @@ export const titleValue = (title: DownloadTitle): ConfigValue => ({
 });
 export const clockValue = (clock: StallClock): ConfigValue => ({
   string: canonical({ ...clock }),
+});
+/** The `race` value: JCS-ordered keys, each entry's too, as the TV writes it. */
+export const raceValue = (race: DownloadRace): ConfigValue => ({
+  string: canonical({
+    ...race,
+    entries: race.entries.map((entry) => JSON.parse(canonical({ ...entry })) as unknown),
+  }),
+});
+
+/** A finished race: nothing beside the `release`, stage 0 from `now`, still counted from when it was asked for. */
+export const clearedRace = (race: DownloadRace, now: number): DownloadRace => ({
+  stage: 0,
+  stageAt: now,
+  startedAt: race.startedAt,
+  entries: [],
 });
 
 export const emptyRow = (name: string): SettingsRow => ({

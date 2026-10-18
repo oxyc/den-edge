@@ -4,12 +4,13 @@ import {
   downloadName,
   readDownload,
   readDownloads,
+  raceValue,
   releaseValue,
   removedRow,
   titleValue,
   withValues,
   type Download,
-  type DownloadHedge,
+  type DownloadRaceEntry,
   type DownloadRelease,
   type DownloadTitle,
   type StallClock,
@@ -90,22 +91,24 @@ export interface DownloadCoordinatorOptions {
 const GONE = 'This release is no longer listed.';
 const FOREIGN = 'Another device’s ticket.';
 
+/** A race entry's key in the per-entry maps: its row and its identity. */
+export const raceKey = (name: string, identity: string) => `${name}\n${identity}`;
+
 /**
  * Worker-safe state for the download domain. Durable rows are authoritative; answers and tickets are deliberately
  * instance-local capabilities. This class contains no Svelte state and owns no timers.
  */
 export class DownloadCoordinator {
   readonly answers = new Map<string, Preparation>();
-  readonly hedgeAnswers = new Map<string, Preparation>();
+  /** By `raceKey`: den-scout's latest word on each race entry, and the ticket this instance reaches it by. */
+  readonly entryAnswers = new Map<string, Preparation>();
+  readonly entryUrls = new Map<string, string>();
   readonly clocks = new Map<string, StallClock>();
   readonly urls = new Map<string, string>();
-  readonly hedgeUrls = new Map<string, string>();
   readonly lapsed = new Set<string>();
   readonly asked = new Map<string, { at: number; quiet: number; said: string }>();
 
-  readonly #hedgeIdentities = new Map<string, string>();
-  readonly #hedgeTokens = new Map<string, number>();
-  readonly #noHedgeUntil = new Map<string, { key: string; until: number }>();
+  readonly #entryPolls = new Map<string, Promise<Preparation | undefined>>();
   readonly #pending = new Map<string, Promise<Preparation>>();
   readonly #enqueuePending = new Map<string, Promise<boolean>>();
   readonly #sourceCache = new Map<
@@ -113,14 +116,6 @@ export class DownloadCoordinator {
     { expiresAt: number; snapshot: DownloadSourceSnapshot }
   >();
   readonly #sourcePending = new Map<string, Promise<DownloadSourceSnapshot>>();
-  readonly #hedgePending = new Map<
-    string,
-    { identity: string; url: string; run: Promise<Preparation> }
-  >();
-  readonly #hedgePolls = new Map<
-    string,
-    { identity: string; run: Promise<Preparation | undefined> }
-  >();
   readonly now: () => number;
   readonly monotonicNow: () => number;
   readonly startedAt: number;
@@ -325,7 +320,8 @@ export class DownloadCoordinator {
   async remove(download: Download, cancel: boolean): Promise<boolean> {
     if (cancel) {
       await this.cancelIfSafe(download);
-      await this.cancelHedgeIfSafe(download);
+      for (const entry of download.race.entries)
+        await this.cancelEntryIfSafe(download, entry.identity, this.entryUrl(download, entry));
     }
     const current = this.log.settings(download.name);
     if (!current) return true;
@@ -334,37 +330,36 @@ export class DownloadCoordinator {
     this.answers.delete(download.name);
     this.clocks.delete(download.name);
     this.urls.delete(download.name);
-    this.clearHedge(download.name);
+    this.clearEntries(download.name);
     this.changed();
     return true;
   }
 
+  /** "Try another": the chosen release joins the race beside what is already fetching (§17 *Racing*). */
   async tryRelease(download: Download, source: TitleSource): Promise<boolean> {
     const current = this.get(download.name);
-    if (!current || source.identity === current.release.identity || current.release.hedge)
+    if (
+      !current ||
+      source.identity === current.release.identity ||
+      current.race.entries.some((entry) => entry.identity === source.identity)
+    )
       return false;
     const now = this.now();
-    const hedge: DownloadHedge = {
+    const entry: DownloadRaceEntry = {
       identity: source.identity,
       label: source.label,
       url: source.url,
       sizeBytes: source.size,
       cached: source.cached,
       queuedAt: now,
-      lastProgress: 0,
-      progressAt: now,
     };
+    const race = { ...current.race, entries: [...current.race.entries, entry] };
     const saved = await this.log.write(
-      withValues(current.row, {
-        release: {
-          value: releaseValue({ ...current.release, hedge }),
-          at: await this.stamp(now),
-        },
-      }),
+      withValues(current.row, { race: { value: raceValue(race), at: await this.stamp(now) } }),
     );
     if (!saved) return false;
     this.changed();
-    void this.addHedge(download.name, source.url, source.identity).catch((error: unknown) =>
+    void this.addEntry(download.name, source.identity, source.url).catch((error: unknown) =>
       console.warn('den: alternate download activation failed', error),
     );
     return true;
@@ -467,154 +462,109 @@ export class DownloadCoordinator {
     return 'gone';
   }
 
-  async addHedge(name: string, url: string, identity = url): Promise<Preparation> {
-    const pending = this.#hedgePending.get(name);
-    if (pending?.identity === identity && pending.url === url) return pending.run;
-    if (this.#hedgeIdentities.get(name) !== identity) this.clearHedge(name);
-    this.#hedgeIdentities.set(name, identity);
-    this.hedgeUrls.set(name, url);
-    const run = this.effects.prepare(url, true, true);
-    this.#hedgePending.set(name, { identity, url, run });
+  /** Add a race entry at the debrid, as a prefetch. A refusal (`refused`) is its active-download limit. */
+  async addEntry(name: string, identity: string, url: string): Promise<Preparation> {
+    const key = raceKey(name, identity);
+    this.entryUrls.set(key, url);
+    const answer = await this.effects.prepare(url, true, true);
+    if (this.entryUrls.get(key) === url) this.entryAnswers.set(key, answer);
+    this.changed();
+    return answer;
+  }
+
+  /** The ticket this instance reaches a race entry by, without asking anyone. */
+  entryUrl(download: Download, entry: DownloadRaceEntry): string | null {
+    return (
+      this.entryUrls.get(raceKey(download.name, entry.identity)) ?? this.effects.ticket(entry.url)
+    );
+  }
+
+  /**
+   * The ticket for a race entry, renewed from a fresh resolve when this instance can't reach the written one; `gone`
+   * when a full answer no longer lists it, undefined when no answer settles it.
+   */
+  async renewEntryUrl(
+    download: Download,
+    entry: DownloadRaceEntry,
+  ): Promise<string | 'gone' | undefined> {
+    const known = this.entryUrl(download, entry);
+    if (known) return known;
+    const { sources, answer } = await this.sourcesForTitle(download.title, true);
+    if (!sources) return undefined;
+    const same = sources.find((source) => source.identity === entry.identity);
+    if (same) {
+      this.entryUrls.set(raceKey(download.name, entry.identity), same.url);
+      return same.url;
+    }
+    return answer?.kind === 'partial' || answer?.kind === 'unknown' || answer?.outage
+      ? undefined
+      : 'gone';
+  }
+
+  /** Ask den-scout about one race entry (`?probe=1`). A release no longer listed reads as failed. */
+  async pollEntry(download: Download, entry: DownloadRaceEntry): Promise<Preparation | undefined> {
+    const key = raceKey(download.name, entry.identity);
+    const pending = this.#entryPolls.get(key);
+    if (pending) return pending;
+    const run = (async () => {
+      const url = await this.renewEntryUrl(download, entry);
+      if (url === 'gone') return { state: 'failed', message: GONE } satisfies Preparation;
+      return url ? this.effects.prepare(url, false, false) : undefined;
+    })();
+    this.#entryPolls.set(key, run);
     try {
       const answer = await run;
-      if (this.#hedgePending.get(name)?.run === run && this.hedgeUrls.get(name) === url)
-        this.hedgeAnswers.set(name, answer);
+      if (answer && this.#entryPolls.get(key) === run) this.entryAnswers.set(key, answer);
       return answer;
     } finally {
-      if (this.#hedgePending.get(name)?.run === run) this.#hedgePending.delete(name);
+      if (this.#entryPolls.get(key) === run) this.#entryPolls.delete(key);
     }
   }
 
-  async pollHedge(download: Download): Promise<Preparation | undefined> {
-    const hedge = download.release.hedge;
-    if (!hedge) return undefined;
-    if (
-      this.#hedgeIdentities.has(download.name) &&
-      this.#hedgeIdentities.get(download.name) !== hedge.identity
-    )
-      this.clearHedge(download.name);
-    const adding = this.#hedgePending.get(download.name);
-    if (adding?.identity === hedge.identity) return adding.run;
-    const pending = this.#hedgePolls.get(download.name);
-    if (pending?.identity === hedge.identity) return pending.run;
-    const token = this.#hedgeTokens.get(download.name) ?? 0;
-    const run = this.#pollHedge(download, token);
-    this.#hedgePolls.set(download.name, { identity: hedge.identity, run });
-    try {
-      const answer = await run;
-      if (answer && this.#hedgePolls.get(download.name)?.run === run)
-        this.hedgeAnswers.set(download.name, answer);
-      return answer;
-    } finally {
-      if (this.#hedgePolls.get(download.name)?.run === run) this.#hedgePolls.delete(download.name);
-    }
-  }
-
-  async #pollHedge(download: Download, token: number): Promise<Preparation | undefined> {
-    const url = await this.hedgeUrl(download, token);
-    return url ? this.effects.prepare(url, false, false) : undefined;
-  }
-
-  async hedgeUrl(download: Download, token = this.#hedgeTokens.get(download.name) ?? 0) {
-    const hedge = download.release.hedge;
-    if (!hedge) return undefined;
-    let url =
-      (this.#hedgeIdentities.get(download.name) === hedge.identity
-        ? this.hedgeUrls.get(download.name)
-        : undefined) ??
-      this.effects.ticket(hedge.url) ??
-      undefined;
-    if (!url) {
-      const { sources } = await this.sourcesForTitle(download.title, true);
-      if ((this.#hedgeTokens.get(download.name) ?? 0) !== token) return undefined;
-      const same = sources?.find((source) => source.identity === hedge.identity);
-      if (same) {
-        url = same.url;
-        this.#hedgeIdentities.set(download.name, hedge.identity);
-        this.hedgeUrls.set(download.name, url);
-      }
-    }
-    return (this.#hedgeTokens.get(download.name) ?? 0) === token ? url : undefined;
-  }
-
-  async resumeHedge(download: Download, current: () => boolean): Promise<Preparation | undefined> {
-    const token = this.#hedgeTokens.get(download.name) ?? 0;
-    const url = await this.hedgeUrl(download, token);
-    return url && current()
-      ? this.addHedge(download.name, url, download.release.hedge?.identity)
-      : undefined;
-  }
-
-  hedgeResolveDue(download: Download, now: number): boolean {
-    const key = JSON.stringify([
-      download.content,
-      download.release.identity,
-      download.queuedAt,
-      [...download.tried].sort(),
-    ]);
-    const remembered = this.#noHedgeUntil.get(download.name);
-    if (!remembered || remembered.key !== key) {
-      if (remembered) this.#noHedgeUntil.delete(download.name);
-      return true;
-    }
-    return now >= remembered.until;
-  }
-
-  rememberNoHedge(download: Download, until: number): void {
-    this.#noHedgeUntil.set(download.name, {
-      key: JSON.stringify([
-        download.content,
-        download.release.identity,
-        download.queuedAt,
-        [...download.tried].sort(),
-      ]),
-      until,
-    });
-  }
-
-  promoteHedge(download: Download): void {
-    const answer = this.hedgeAnswers.get(download.name);
-    const url = this.hedgeUrls.get(download.name) ?? download.release.hedge?.url;
+  /** A race entry that won becomes the row's release: its answer and ticket move with it. */
+  promoteEntry(download: Download, entry: DownloadRaceEntry): void {
+    const key = raceKey(download.name, entry.identity);
+    const answer = this.entryAnswers.get(key);
+    const url = this.entryUrls.get(key) ?? this.effects.ticket(entry.url);
     if (answer) this.answers.set(download.name, answer);
     if (url) this.urls.set(download.name, url);
-    this.clearHedge(download.name);
+    this.forgetEntry(download.name, entry.identity);
   }
 
-  clearHedge(name: string): void {
-    this.#hedgeTokens.set(name, (this.#hedgeTokens.get(name) ?? 0) + 1);
-    this.#hedgePending.delete(name);
-    this.#hedgePolls.delete(name);
-    this.hedgeAnswers.delete(name);
-    this.#hedgeIdentities.delete(name);
-    this.hedgeUrls.delete(name);
+  forgetEntry(name: string, identity: string): void {
+    const key = raceKey(name, identity);
+    this.entryAnswers.delete(key);
+    this.entryUrls.delete(key);
+    this.#entryPolls.delete(key);
   }
 
-  async cancelIfSafe(download: Download): Promise<void> {
-    let safe = false;
+  clearEntries(name: string): void {
+    for (const map of [this.entryAnswers, this.entryUrls, this.#entryPolls])
+      for (const key of [...map.keys()]) if (key.startsWith(`${name}\n`)) map.delete(key);
+  }
+
+  #cancelSafe(download: Download, identity?: string): boolean {
     try {
-      safe = syncPolicy<boolean>({
+      return syncPolicy<boolean>({
         op: 'download_cancel_safe',
         row: download.row,
         rows: this.list().map((item) => item.row),
+        ...(identity ? { identity } : {}),
       });
     } catch (error) {
       console.warn(`den: download ${download.content}: cancel check refused`, error);
+      return false;
     }
-    const url = this.urlFor(download);
-    if (safe && url) await this.effects.cancel(url, false);
   }
 
-  async cancelHedgeIfSafe(download: Download): Promise<void> {
-    const hedge = download.release.hedge;
-    if (!hedge) return;
-    const shared = this.list().some(
-      (other) =>
-        other.name !== download.name &&
-        (other.release.identity === hedge.identity ||
-          other.release.hedge?.identity === hedge.identity),
-    );
-    const url = this.hedgeUrls.get(download.name) ?? this.effects.ticket(hedge.url);
-    if (!shared && url) await this.effects.cancel(url, false);
+  async cancelIfSafe(download: Download): Promise<void> {
+    const url = this.urlFor(download);
+    if (this.#cancelSafe(download) && url) await this.effects.cancel(url, false);
+  }
+
+  /** Cancel one release the row races, unless another row still names or races it (`download_cancel_safe`). */
+  async cancelEntryIfSafe(download: Download, identity: string, url: string | null): Promise<void> {
+    if (this.#cancelSafe(download, identity) && url) await this.effects.cancel(url, false);
   }
 }
 

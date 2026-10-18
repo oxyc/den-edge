@@ -25,9 +25,14 @@ export interface TitleSource {
   attributes: Record<string, unknown>;
 }
 
-/** The releases as `rank_releases` takes them: scout's attributes, with each one's identity. */
+/** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
+ *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map((source) => ({ ...source.attributes, identity: source.identity }));
+  sources.map((source) => ({
+    ...source.attributes,
+    identity: source.identity,
+    filename: source.filename,
+  }));
 
 /** Playback tickets stay on our Scout relay. Never follow the media redirect while queuing a download. */
 export function scoutTicket(url: string, addon: Addon, routes: Routes): string | null {

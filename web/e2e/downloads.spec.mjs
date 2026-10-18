@@ -216,11 +216,10 @@ test('Try another can resume a previous release beside the current partial', asy
       card.getByRole('status').filter({ hasText: 'Also trying First release' }),
     ).toBeVisible();
 
-    const saved = JSON.parse(
-      shared.rows.get('set:download:tv:1399:2:4').values.release.value.string,
-    );
-    expect(saved.identity).toBe('second.mkv');
-    expect(saved.hedge.identity).toBe('first.mkv');
+    const values = shared.rows.get('set:download:tv:1399:2:4').values;
+    expect(JSON.parse(values.release.value.string).identity).toBe('second.mkv');
+    // The chosen release races beside the partial one (§17 `race`).
+    expect(JSON.parse(values.race.value.string).entries[0].identity).toBe('first.mkv');
   } finally {
     await browser.close();
   }
@@ -295,8 +294,8 @@ test('a legacy episode recovers its still only once its retained page becomes vi
   expect(seasonRequests).toBe(3);
 });
 
-/** A release as den-scout lists it, by file name: uncached and seeded unless told otherwise. */
-function release(filename, { cached = false, seeders = 10 } = {}) {
+/** A release as den-scout lists it, by file name: an uncached, seeded 1080p unless told otherwise. */
+function release(filename, { cached = false, seeders = 10, resolution = '1080p', codec } = {}) {
   const url = `/scout/p/${encodeURIComponent(filename.toLowerCase())}`;
   return {
     filename,
@@ -308,7 +307,7 @@ function release(filename, { cached = false, seeders = 10 } = {}) {
     languages: [],
     probed: true,
     identity: filename.toLowerCase(),
-    attributes: { resolution: '1080p', cached, seeders },
+    attributes: { resolution, cached, seeders, ...(codec ? { codec } : {}) },
   };
 }
 
@@ -333,6 +332,126 @@ async function routeHearth(page) {
   });
   return hearth;
 }
+
+// Rebecka Martinsson S02E01 as the owner met it: the debrid held only a ~400p AVI, and two 1080p releases were listed
+// uncached. A download is kept, so it takes a 1080p (den-spec library-v4 §17); the cached AVI is only what Play takes.
+test('a season download takes an uncached 1080p over a cached SD AVI', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-17T12:00:00Z') });
+  await guardNetwork(page);
+  const shared = store();
+  await page.route('**/fixture-store/rows', shared.route);
+  await routeHearth(page);
+  const listed = {
+    1: [
+      release('Rebecka.Martinsson.S02E01.400p.WEB-DLRip.ViruseProject.avi', {
+        cached: true,
+        resolution: null,
+      }),
+      release('Rebecka.Martinsson.S02E01.1080p.WEB.H264-GRP.mkv', { seeders: 12, codec: 'h264' }),
+      release('Rebecka.Martinsson.S02E01.1080p.WEB.H265-GRP.mkv', { seeders: 9, codec: 'hevc' }),
+    ],
+  };
+  await page.route('**/fixture-sources/*', (route) =>
+    route.fulfill({
+      json: {
+        sources: listed[Number(new URL(route.request().url()).pathname.split('/').at(-1))] ?? [],
+      },
+    }),
+  );
+  await page.route('**/scout/p/**', (route) =>
+    route.fulfill({
+      status: 202,
+      json: { progress: 0.25, bytesPerSecond: 1_000_000, state: 'downloading', seeds: 5, peers: 9 },
+    }),
+  );
+  await routeTmdb(page, (route) => route.fulfill({ json: { episodes: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=season`);
+
+  await page.getByRole('button', { name: 'Download season 2' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'queued' })).toHaveText(
+    '1 queued · 0 already ready · 3 searching for a release · 1 waiting to air',
+  );
+  const saved = JSON.parse(
+    shared.rows.get('set:download:tv:70742:2:1').values.release.value.string,
+  );
+  expect(saved.identity).toBe('rebecka.martinsson.s02e01.1080p.web.h264-grp.mkv');
+  await expect(page.locator('[data-download="tv:70742:2:1"]')).toContainText('Downloading 25%');
+});
+
+// Rebecka Martinsson S2 sat a week with nothing playable: the 1080p it started on never moved, and the only cached
+// release was an SD AVI. The download races alternates once its release stalls, and takes the AVI only after a day
+// with nothing watchable (den-spec library-v4 §17 *Racing*).
+test('Rebecka S2: a stalled 1080p races the next two, and the cached AVI is taken only after a day', async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date('2026-10-17T12:00:00Z') });
+  await guardNetwork(page);
+  const shared = store();
+  await page.route('**/fixture-store/rows', shared.route);
+  await routeHearth(page);
+  const avi = 'Rebecka.Martinsson.S02E01.400p.WEB-DLRip.ViruseProject.avi';
+  const h264 = 'Rebecka.Martinsson.S02E01.1080p.WEB.H264-GRP.mkv';
+  const hevc = 'Rebecka.Martinsson.S02E01.1080p.WEB.H265-GRP.mkv';
+  const hd = 'Rebecka.Martinsson.S02E01.720p.HDTV.H264-GRP.mkv';
+  const listed = {
+    1: [
+      release(avi, { cached: true, resolution: null }),
+      release(h264, { seeders: 12, codec: 'h264' }),
+      release(hevc, { seeders: 9, codec: 'hevc' }),
+      release(hd, { seeders: 4, codec: 'h264', resolution: '720p' }),
+    ],
+  };
+  await page.route('**/fixture-sources/*', (route) =>
+    route.fulfill({
+      json: {
+        sources: listed[Number(new URL(route.request().url()).pathname.split('/').at(-1))] ?? [],
+      },
+    }),
+  );
+  const asked = [];
+  await page.route('**/scout/p/**', (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    asked.push(`${request.method()} ${decodeURIComponent(url.pathname)}`);
+    if (request.method() === 'DELETE') return route.fulfill({ json: { ok: true } });
+    // The 1080p it starts on never moves; the alternates crawl, the debrid projecting days.
+    const stuck = url.pathname.includes(encodeURIComponent(h264.toLowerCase()));
+    return route.fulfill({
+      status: 202,
+      json: stuck
+        ? { progress: 0, bytesPerSecond: 0, state: 'downloading', seeds: 1, peers: 2 }
+        : { progress: 0.01, bytesPerSecond: 20_000, etaSeconds: 200_000, state: 'downloading' },
+    });
+  });
+  await routeTmdb(page, (route) => route.fulfill({ json: { episodes: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=season`);
+
+  await page.getByRole('button', { name: 'Download season 2' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'queued' })).toHaveText(
+    '1 queued · 0 already ready · 3 searching for a release · 1 waiting to air',
+  );
+  const values = () => shared.rows.get('set:download:tv:70742:2:1').values;
+  const releaseNow = () => JSON.parse(values().release.value.string).identity;
+  const racing = () =>
+    values().race ? JSON.parse(values().race.value.string).entries.map((e) => e.identity) : [];
+  expect(releaseNow()).toBe(h264.toLowerCase());
+
+  // Twenty minutes without moving: the 1080p stalls. It keeps going, and the next two race beside it.
+  await page.clock.fastForward('21:00');
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect.poll(racing).toEqual([hevc.toLowerCase(), hd.toLowerCase()]);
+  expect(releaseNow()).toBe(h264.toLowerCase());
+  expect(asked.some((ask) => ask.startsWith('DELETE'))).toBe(false);
+
+  // A day on, nothing has finished: the cached AVI is taken rather than wait, and the race is cancelled.
+  await page.clock.fastForward('24:00:00');
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect.poll(releaseNow).toBe(avi.toLowerCase());
+  expect(racing()).toEqual([]);
+  expect(asked.filter((ask) => ask.startsWith('DELETE')).length).toBeGreaterThan(0);
+});
 
 // The owner's Rebecka Martinsson season 2: a Nordic series whose episodes are sparsely seeded. One is cached, one has
 // a seeded release, one has nothing listed at all, one only an unseeded release, and one hasn't aired.
