@@ -35,9 +35,22 @@ export interface Link {
  *
  * Recovery and guest-library links deliberately carry random inbox/link keys so the rest of the app can open their
  * synced library through the same shape. No device owns those keys, though, so sending to them can never reach a TV.
+ *
+ * A link is also made by joining another browser (Settings › "Use Den on your phone"): its inbox is that browser's,
+ * which never plays what is sent to it, so a "Play on TV" through it reached no TV. The handover names its host by
+ * stamp device id, and the library's device list says whether that device is a TV; a host the list does not show as
+ * one (or a list not read yet) is not a receiver. A link with no host id predates the id in the handover: those
+ * came from TVs, the only hosts until browsers could host, a week before the id was added.
  */
-export function linkedTv(link: Link | null | undefined): Link | undefined {
-  return link && !link.recovered && !link.guest ? link : undefined;
+export function linkedTv(
+  link: Link | null | undefined,
+  devices: readonly { id: string; kind: 'tv' | 'browser' }[] | undefined,
+): Link | undefined {
+  if (!link || link.recovered || link.guest) return undefined;
+  if (!link.deviceId) return link;
+  return devices?.some((device) => device.id === link.deviceId && device.kind === 'tv')
+    ? link
+    : undefined;
 }
 
 /**

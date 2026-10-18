@@ -87,6 +87,7 @@
   import { rankHomeRows, type HomeTasteTitle } from './lib/homeRowRanking';
   import type { LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
+    ConnectionsView,
     ContinueItem,
     HistoryView,
     RetainedBillboardScope,
@@ -321,6 +322,19 @@
     return () => {
       lease.release();
       if (connectionsLease === lease) connectionsLease = undefined;
+    };
+  });
+  // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
+  // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
+  const householdModel = untrack(() => session.household.ownerSettingsModel());
+  let householdConnections = $state.raw<LibraryModelLease<ConnectionsView>>();
+  $effect(() => {
+    if (!householdModel) return;
+    const lease = householdModel.connections();
+    householdConnections = lease;
+    return () => {
+      lease.release();
+      if (householdConnections === lease) householdConnections = undefined;
     };
   });
   $effect(() => {
@@ -763,7 +777,7 @@
    * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
-  const tv = $derived(linkedTv(link));
+  const tv = $derived(linkedTv(link, householdConnections?.snapshot.value?.devices));
   const play = $derived(
     tv
       ? async (title: Title, season?: number, episode?: number) => {
