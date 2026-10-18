@@ -32,7 +32,11 @@ test('an invite link asks to accept where it lands, and a guest who accepts hold
     await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
 
     const dialog = page.getByRole('dialog', { name: 'Accept this invite?' });
-    await expect(dialog).toBeVisible();
+    // The first thing in this test that waits on the app booting, which on a cold dev server (unbundled module graph,
+    // every module relayed through `context.route` above) takes seconds on a busy runner: measured 10 s to the dialog
+    // with four cold pages at 6× CPU slowdown. Specs that wait on a boot give it 30 s; the second test below never
+    // flaked because a click waits up to the test timeout.
+    await expect(dialog).toBeVisible({ timeout: 30_000 });
     await expect(page.getByLabel('Link code, twelve characters')).toHaveCount(0);
     expect(new URL(page.url()).hash, 'the code leaves the address').toBe('');
     expect(new URL(page.url()).pathname).toBe('/');
