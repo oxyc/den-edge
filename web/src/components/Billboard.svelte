@@ -837,9 +837,12 @@
         shown.length - 1,
       );
       if (next === index) return;
-      show(next);
-      await settled(rail);
+      // A remote press chooses one exact slide and need not wait for touch-scroll settling. Chromium before 114
+      // lacks `scrollend`, so that path would otherwise leave focus behind for its 1s fallback.
+      paging = true;
+      arrive(next);
       await tick();
+      goTo(index, false);
       frame
         ?.querySelector<HTMLElement>('.slide:not([inert]) [data-tv-carousel-action]')
         ?.focus({ preventScroll: true });

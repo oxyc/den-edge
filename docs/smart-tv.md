@@ -143,6 +143,12 @@ Worker loading or Web Crypto classification. HLS servers also need appropriate
 CORS for playlists, segments, subtitles and preflights. Credentials still use the
 shared exact-origin/path allowlists; external media hosts do not receive library keys.
 
+The package suite also opens the built entry through `file://` and checks bootstrap,
+Settings and remote Back. Only that test enables Chromium's local-file access flag;
+the HTTP-package CORS/security journeys keep normal browser security. Chromium on
+the test workstation reports `file://` as its origin. This test does not establish
+Samsung's origin value or local-file permissions.
+
 ## Diagnostics and scope
 
 On each TV record model, firmware, browser engine, URL, TLS certificate chain,
@@ -222,7 +228,7 @@ output directories, and verify Worker compilation and compatibility imports. Onl
 E2E builds include the Player harness; normal TV builds omit it.
 Packaged URL helper calls in shared code must stay behind `__DEN_TV_PACKAGED__`;
 the browser module gate rejects that helper too, preventing an extra browser
-request merely to preserve the browser's existing path behavior. CI retains TV
+request merely to preserve the browser's existing path behavior. CI retains browser and TV
 failure traces and screenshots for seven days.
 
 The 2026-10-18 comparison against `a045b842` measured **+56 bytes initial gzip and

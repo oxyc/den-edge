@@ -93,6 +93,27 @@ async function numericBack(page, keyCode) {
 test('remote can pass onboarding, enter search, open a title, and restore its result on Back', async ({
   page,
 }, testInfo) => {
+  await page.addInitScript(() => {
+    window.__tvFocusLatencies = [];
+    let pressedAt = 0;
+    window.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key.startsWith('Arrow')) pressedAt = performance.now();
+      },
+      true,
+    );
+    document.addEventListener(
+      'focusin',
+      () => {
+        if (pressedAt) {
+          window.__tvFocusLatencies.push(performance.now() - pressedAt);
+          pressedAt = 0;
+        }
+      },
+      true,
+    );
+  });
   await setup(page);
   await browse(page);
   await expect(page.getByText('Services unavailable')).toBeVisible({ timeout: 30_000 });
@@ -119,6 +140,7 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   expect((await editor.boundingBox())?.width).toBeGreaterThan(1_600);
   await expect(editor.getByRole('searchbox')).toHaveCSS('font-size', '28px');
   await page.screenshot({ path: testInfo.outputPath('tv-search-1920.png'), fullPage: false });
+  await page.evaluate(() => (window.__tvFocusLatencies = []));
   await page.keyboard.press('ArrowDown');
   await remoteTo(page, result, ['ArrowDown'], 20);
   await page.keyboard.press('ArrowLeft');
@@ -134,6 +156,19 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   await page.keyboard.press('ArrowUp');
   for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
   await expect(result).toBeFocused();
+  const focusLatencies = await page.evaluate(() => window.__tvFocusLatencies);
+  const orderedLatencies = [...focusLatencies].sort((a, b) => a - b);
+  const focusTiming = {
+    samples: focusLatencies.length,
+    medianMs: orderedLatencies[Math.floor(orderedLatencies.length / 2)],
+    p95Ms: orderedLatencies[Math.ceil(orderedLatencies.length * 0.95) - 1],
+    worstMs: orderedLatencies.at(-1),
+  };
+  await testInfo.attach('tv-search-focus-latency.json', {
+    body: Buffer.from(JSON.stringify(focusTiming, null, 2)),
+    contentType: 'application/json',
+  });
+  expect(focusTiming.samples).toBeGreaterThanOrEqual(10);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/movie\/1002(?:-|$)/);
   await expect(page.getByRole('heading', { name: 'Movie 1002', level: 1 })).toBeVisible({

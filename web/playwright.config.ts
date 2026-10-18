@@ -33,8 +33,11 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',
+  outputDir: './test-results',
   use: {
     baseURL: E2E_ORIGIN,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,

@@ -126,6 +126,14 @@ jobs:
         run: node test/sync-policy-browser.mjs
       - name: Browser behavior
         run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/3
+      - name: Retain browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: browser-failures-${{ matrix.shard }}-of-3
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
       - name: TV native HLS behavior
         if: matrix.shard == 1
         run: DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv -- tv-playback.spec.mjs

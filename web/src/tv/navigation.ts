@@ -154,6 +154,7 @@ function restore(selector?: string): () => void {
     clearTimeout(timer);
   };
   const attempt = () => {
+    if (done) return;
     const root: ParentNode = activeModal() ?? document;
     // A title can expose the same href through an inert full-slide link, its hidden title link and the visible
     // TV action. Restore the first *visible* match, not merely the first node in DOM order.
@@ -164,6 +165,23 @@ function restore(selector?: string): () => void {
     // immediately would focus Home's brand while the detail page is still the active DOM.
     const target = remembered ?? (selector ? undefined : focusables()[0]);
     if (target) {
+      // Initial focus is complete once the first control exists. Keeping this observer alive made every async
+      // shelf mutation pull focus back to Home while a viewer was already moving through Search or Settings.
+      if (!selector) finish();
+      else {
+        const active = document.activeElement;
+        // A viewer's deliberate move wins over restoration. Continue only while the remembered control still
+        // owns focus (it may be blurred by a retained-route swap) or while focus is nowhere useful.
+        if (
+          restored &&
+          active instanceof HTMLElement &&
+          active !== document.body &&
+          active !== target
+        ) {
+          finish();
+          return;
+        }
+      }
       restored = true;
       target.focus({ preventScroll: true });
       target.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -191,7 +209,9 @@ function atAppRoot(): boolean {
 }
 
 function routeKey(path = currentAppPath()): string {
-  const url = new URL(path, location.origin + currentAppPath());
+  // location.href is a valid base for hosted and packaged file:// widgets; opaque origins can stringify to
+  // "null", which is not a URL base.
+  const url = new URL(path, location.href);
   return url.pathname + url.search;
 }
 

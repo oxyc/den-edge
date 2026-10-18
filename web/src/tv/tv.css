@@ -118,7 +118,7 @@
 .den-tv section.search .chip,
 .den-tv section.search .toggle,
 .den-tv section.search .facet,
-.den-tv section.search .pick {
+.den-tv section.search .picks .pick {
   min-height: 50px;
   padding-inline: 18px;
   font-size: 18px;
