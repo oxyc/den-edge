@@ -16,7 +16,7 @@
   import { onDestroy } from 'svelte';
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
-  import { relayFetch } from './lib/relayFetch';
+  import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
   import {
     findAddon,
     findAtlas,
@@ -254,6 +254,18 @@
     return !!approvalId && run(() => model.approveSimklRemovals(approvalId));
   }
 
+  // den-edge's assistant connections are asked about as `model`'s member. On a household split into profiles that is
+  // the household, whose connections they are (profiles-v1 §6.1), while the page's own credential may be Owner's.
+  const assistantConnectionFetch = untrack(() =>
+    model.ready.then(() => model.relayMembership()),
+  ).then(
+    (membership) => (membership ? householdAssistantFetch(membership) : undefined),
+    (error: unknown) => {
+      console.error('den: the library’s assistant membership could not be read', error);
+      return undefined;
+    },
+  );
+
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
 
@@ -390,6 +402,7 @@
         {selfId}
       />
       <AssistantsSection
+        connectionFetch={assistantConnectionFetch}
         revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
         listGrants={link && !local ? () => model.assistantGrants() : undefined}
       />
