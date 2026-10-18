@@ -241,10 +241,10 @@ build, including the follow-up audit fixes, measured **+126 bytes initial gzip a
 additional browser asset chunk or TV module (80 JS/CSS assets in each build).
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
-A five-pair loopback Chromium comparison against the same `3fccf42` baseline,
+A six-pair, counterbalanced loopback Chromium comparison against the same `3fccf42` baseline,
 after the other local test suites finished, measured Home readiness medians of
-126.2 ms baseline / 112.9 ms current (ranges 97.5–139.4 / 96.4–128.6 ms), and Search
-result medians of 34.8 / 36.1 ms (ranges 33.6–37.8 / 34.8–37.1 ms). These overlapping,
+112.3 ms baseline / 104.8 ms current (ranges 95.4–176.8 / 96.5–112.9 ms), and Search
+result medians of 36.6 / 35.4 ms (ranges 35.5–38.9 / 33.8–36.9 ms). These overlapping,
 variable samples do not establish a hardware speedup or a stable timing regression.
 The script labels initial-navigation paint metrics separately from interaction
 readiness; resource snapshots are taken at those milestones, not after all idle
@@ -276,9 +276,9 @@ These are small workstation diagnostic samples, not TV latency guarantees. The
 older target engines predate [Chromium's `scrollend` support](https://developer.chrome.com/blog/scrollend-a-new-javascript-event).
 The browsing soak checks forty detail/Back cycles across three titles, both arrow
 directions, retained-page bounds and Worker counts, without retrying missed presses.
-The dense Search journey also records native keydown-to-focusin timing. Across 14
-transitions per run, workstation medians/p95 were 1.3/2.2 ms for the LG-targeted
-Chromium build, 1.1/4.8 ms for the Samsung-targeted Chromium build and 1.0/2.0 ms
+The dense Search journey also records native keydown-to-focusin timing. Across 17
+transitions per run, workstation medians/p95 were 1.1/3.5 ms for the LG-targeted
+Chromium build, 1.0/2.3 ms for the Samsung-targeted Chromium build and 1.0/1.0 ms
 for WebKit. These measure focus handling, not painted-highlight latency on a TV;
 the test reports timings without imposing a CPU-sensitive CI timing threshold.
 
@@ -286,8 +286,9 @@ the test reports timings without imposing a CPU-sensitive CI timing threshold.
 
 Poster action buttons previously depended on hover and were excluded from the
 TV focus scan at zero opacity. They are visible in TV builds; Up from a poster
-reaches its own Actions button, and Down returns to that poster. Left/right grid
-navigation is unchanged. TV action menus use native dialogs instead of the
+reaches its own Actions button, and Down returns to that poster. A second Up
+continues to the preceding row's poster; it does not strand focus in a parallel
+lane of action buttons. Left/right grid navigation is unchanged. TV action menus use native dialogs instead of the
 [Popover API introduced in Chrome 114](https://developer.chrome.com/blog/new-in-chrome-114),
 which is newer than the target engines. Browser builds keep their native popovers.
 A production E2E journey removes popover methods and rejects the unsupported

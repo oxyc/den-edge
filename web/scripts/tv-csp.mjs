@@ -1,4 +1,4 @@
-// Tizen 8's Chromium 108 understands `wasm-unsafe-eval`, which permits Den's signed WebAssembly
+// Tizen 8's Chromium 108 understands `wasm-unsafe-eval`, which permits Den's packaged WebAssembly
 // without permitting JavaScript eval. Older Samsung Chromium engines conflate the two permissions.
 export const TV_CSP = [
   "default-src 'self'",

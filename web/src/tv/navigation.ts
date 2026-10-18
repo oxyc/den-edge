@@ -94,7 +94,10 @@ function score(from: DOMRect, to: DOMRect, direction: Direction): number | null 
   return primary + secondary * (overlap > 0 ? 2.2 : 4.5);
 }
 
-function move(direction: Direction): boolean {
+function move(
+  direction: Direction,
+  accepts: (candidate: HTMLElement) => boolean = () => true,
+): boolean {
   const current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const candidates = focusables();
   if (!candidates.length) return false;
@@ -110,7 +113,12 @@ function move(direction: Direction): boolean {
   for (const candidate of candidates) {
     // Some controls expose both a native focusable child and a tabindex-bearing wrapper (details/summary,
     // composite widgets). Moving to an ancestor/descendant is not a spatial move and focus() may be refused.
-    if (candidate === current || candidate.contains(current) || current.contains(candidate))
+    if (
+      !accepts(candidate) ||
+      candidate === current ||
+      candidate.contains(current) ||
+      current.contains(candidate)
+    )
       continue;
     const value = score(from, candidate.getBoundingClientRect(), direction);
     if (value !== null && value < best) {
@@ -326,6 +334,18 @@ export function installTVNavigation(): () => void {
           const destination = direction === 'up' ? posterAction! : posterCard!;
           destination.focus({ preventScroll: true });
           destination.scrollIntoView({ block: 'nearest', inline: 'center' });
+          return;
+        }
+        // The action is an intentional stop above its poster. A second Up continues through the poster grid,
+        // rather than creating a parallel lane of action buttons. On the first row there is no card above, so
+        // normal geometry below can still leave the grid for Search's controls and navigation.
+        if (
+          direction === 'up' &&
+          target === posterAction &&
+          move(direction, (candidate) => candidate.matches('.holder .card'))
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
           return;
         }
       }

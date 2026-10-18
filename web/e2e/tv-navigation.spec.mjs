@@ -152,8 +152,17 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('link', { name: /Movie 1006/ }).first()).toBeFocused();
   await page.keyboard.press('ArrowDown');
-  await expect(page.getByRole('link', { name: /Movie 1011/ }).first()).toBeFocused();
+  const secondRowResult = page.getByRole('link', { name: /Movie 1011/ }).first();
+  const secondRowAction = page.getByRole('button', { name: 'Actions for Movie 1011' });
+  await expect(secondRowResult).toBeFocused();
   await page.keyboard.press('ArrowUp');
+  await expect(secondRowAction).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(secondRowResult).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(secondRowAction).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(page.getByRole('link', { name: /Movie 1006/ }).first()).toBeFocused();
   for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
   await expect(result).toBeFocused();
   const focusLatencies = await page.evaluate(() => window.__tvFocusLatencies);
