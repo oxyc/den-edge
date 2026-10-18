@@ -207,6 +207,48 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
+    let release!: () => void;
+    const building = new Promise<void>((resolve) => (release = resolve));
+    const held = {
+      ...authority(),
+      async task(task: { kind: string }) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        await building;
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+
+    const publish = core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'publish-1',
+      operationId: 'publish-operation-1',
+      task: { kind: 'assistant.publish' },
+    });
+    await Promise.resolve();
+    const command = core.dispatch({
+      type: 'command',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'command-during-publish',
+      operationId: 'operation-during-publish',
+      command: { kind: 'watchlist.add', title },
+    });
+
+    await expect(command).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+    release();
+    await expect(publish).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.publish', published: 1 },
+      }),
+    ]);
+  });
+
   it('drains detached metadata work before closing its authority', async () => {
     let release!: () => void;
     const provider = new Promise<void>((resolve) => (release = resolve));

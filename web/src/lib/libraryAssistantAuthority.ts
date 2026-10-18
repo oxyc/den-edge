@@ -15,6 +15,8 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import { assistantPolicy, ensureAssistantPolicy } from './assistantCore';
+import { buildProjection } from './assistantProjection';
+import { policyAnswer } from './syncCore';
 import type { ConfigValue, Row, SettingsRow, Stamp } from './wire';
 
 export const DROPBOX_ROW = 'assistant';
@@ -232,9 +234,9 @@ function withoutExpiry(row: SettingsRow | null): unknown {
   );
 }
 
-/** SHA-256 of `value`'s JSON, as hex. */
-async function digestOf(value: unknown): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
+/** SHA-256 of `text`, as hex. */
+async function digestText(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
   return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 }
 
@@ -590,8 +592,24 @@ export class LibraryAssistantAuthority {
    *
    * `lent`: a split household's connection (§15): its library id, read and grants rows and revoked set, and its member
    * proof to send with, around this library's lists, prefs and head.
+   *
+   * The library service runs it beside its other requests, not before them (`LibraryServiceCore`), and the build is
+   * done in a Worker of its own (`buildProjection`). One publish at a time: a tick that finds one under way sends
+   * nothing.
    */
   async publish(lent: AssistantConnection | null = null): Promise<string[]> {
+    if (this.#publishing) return [];
+    this.#publishing = true;
+    try {
+      return await this.#publish(lent);
+    } finally {
+      this.#publishing = false;
+    }
+  }
+
+  #publishing = false;
+
+  async #publish(lent: AssistantConnection | null): Promise<string[]> {
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
@@ -614,19 +632,20 @@ export class LibraryAssistantAuthority {
     // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
     const prefs = this.#row(PREFS_ROW);
     const localRevoked = this.#revoked(records, lent);
-    const documents = this.port.documents();
+    // The library as it stands now, written once: the inputs' digest and the build's request share it, and later
+    // changes to the rows cannot reach a build already on its way.
+    const documents = JSON.stringify(this.port.documents());
+    const known = JSON.stringify(layouts);
     // Not the log's head, which every write moves, nor the clock: what the lists are made of. Nor a grant's expiry,
     // which only its daily renewal moves: whether it is live is den-core's to decide when it is next built, and the
     // heartbeat builds at least every 15 minutes.
-    const key = await digestOf([
-      library,
-      documents,
-      layouts,
+    const rows = JSON.stringify([
       withoutExpiry(read),
       withoutExpiry(grants),
       prefs,
       localRevoked,
-    ]);
+    ]).slice(1, -1);
+    const key = await digestText(`[${JSON.stringify(library)},${documents},${known},${rows}]`);
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;
@@ -635,24 +654,26 @@ export class LibraryAssistantAuthority {
       this.#saidCurrent = true;
       return [];
     }
-    await ensureAssistantPolicy();
+    const request = JSON.stringify({
+      op: 'assistant_projection',
+      library,
+      head: this.port.head(),
+      read,
+      grants,
+      prefs,
+      localRevoked,
+      random: this.port.random(),
+      now,
+    });
     const started = performance.now();
     let buildMs: number;
     let built: ProjectionAnswer;
     try {
-      built = assistantPolicy<ProjectionAnswer>({
-        op: 'assistant_projection',
-        library,
-        documents,
-        layouts,
-        head: this.port.head(),
-        read,
-        grants,
-        prefs,
-        localRevoked,
-        random: this.port.random(),
-        now,
-      });
+      built = policyAnswer<ProjectionAnswer>(
+        await buildProjection(
+          `${request.slice(0, -1)},"documents":${documents},"layouts":${known}}`,
+        ),
+      );
       buildMs = Math.round(performance.now() - started);
     } catch (error) {
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.

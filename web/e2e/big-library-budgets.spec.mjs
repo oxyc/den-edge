@@ -24,6 +24,8 @@ import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
   bigHousehold,
+  holdProjectionBuilds,
+  settleProjection,
   PHONE_PROJECTION_MS,
   routeBigHousehold,
   WATCHED_SERIES,
@@ -38,6 +40,8 @@ const LONGEST_TASK_MS = 600;
 
 /** Milliseconds from navigation start to a library surface's `shelves ready` milestone (`startupTiming.ts`). */
 const SHELVES_MS = 4_000;
+/** Milliseconds a library Worker may take to answer, and a series' episodes to draw, while the projection is rebuilt. */
+const DURING_REBUILD_MS = 1_000;
 
 /**
  * `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. `shelves`: the surface
@@ -199,6 +203,78 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
   return result;
 }
 
+/**
+ * A rebuild of the assistant projection that is due, as after a change, the heartbeat or the day's renewal: this
+ * device forgets what it last published, so the next page builds and uploads it, at the phone's cost. While it runs,
+ * the library Workers are asked for names, and a series is opened from Continue Watching. How long each
+ * took, how long the build took, and whether the publish was still under way when they had all answered.
+ */
+async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
+  const forget = await context.newPage();
+  await routeBigHousehold(forget, edge);
+  await forget.goto(`${E2E_ORIGIN}/test/seed-library.html`);
+  await forget.evaluate(
+    () =>
+      new Promise((done, fail) => {
+        const open = indexedDB.open('den-library');
+        open.onerror = () => fail(open.error);
+        open.onsuccess = () => {
+          const kept = open.result.transaction('kept', 'readwrite').objectStore('kept');
+          const keys = kept.getAllKeys();
+          keys.onsuccess = () => {
+            for (const key of keys.result)
+              if (String(key).endsWith(':assistant.records.v1')) kept.delete(key);
+            kept.transaction.oncomplete = () => (open.result.close(), done());
+          };
+        };
+      }),
+  );
+  await forget.close();
+
+  const page = await context.newPage();
+  await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });
+  if (cpu > 1)
+    await (await context.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: cpu });
+  edge.assistant.publishing = 0;
+  const library = holdProjectionBuilds(page);
+  let buildMs;
+  page.on('console', (message) => {
+    const built = /^den: assistant projection built in (\d+)ms/.exec(message.text());
+    if (built) buildMs ??= Number(built[1]);
+  });
+  const uploads = edge.assistant.projections.length;
+  await page.goto(`${E2E_ORIGIN}/`);
+  const series = page
+    .locator('main section[aria-label="Continue Watching"] a[href^="/tv/"]')
+    .first();
+  await expect(series).toBeVisible({ timeout: 30_000 });
+  // The publish is under way: its build started (in its own Worker), or — where the build has no Worker of its own —
+  // its upload reached den-edge.
+  await expect
+    .poll(async () => edge.assistant.publishing > 0 || (await library.started()), {
+      timeout: 30_000,
+    })
+    .toBe(true);
+  // What a page asks its library Worker meanwhile: the names its rows need, which `shelves ready` waits on and which
+  // are answered after every request the Worker took before them.
+  const namesMs = await library.ask({
+    kind: 'library.metadata',
+    titles: [{ type: 'tv', id: WATCHED_SERIES }],
+  });
+  const opened = Date.now();
+  await series.click();
+  await expect(page.locator('.episodes .episode').first()).toBeVisible({ timeout: 30_000 });
+  const episodesMs = Date.now() - opened;
+  const buildingThroughout = edge.assistant.projections.length === uploads;
+  // Let the upload land and the publication be recorded (the Worker says it built only then).
+  await expect.poll(() => buildMs, { timeout: 30_000 }).toBeDefined();
+  await page.close();
+  // The records forgotten held the layouts the device knew too: the surfaces after this are returning visits again
+  // once Home and the Watchlist find the projection up to date.
+  await settleProjection(context, edge);
+  return { namesMs, episodesMs, buildingThroughout, buildMs };
+}
+
 const ENGINES = [
   ['WebKit iPhone', webkit, devices['iPhone 13'], {}],
   ['Chromium phone, 4× CPU', chromium, devices['Pixel 7'], { cpu: 4 }],
@@ -220,6 +296,18 @@ for (const [label, type, device, options] of ENGINES) {
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
+      const rebuild = await openDuringRebuild(context, edge, options);
+      console.log(`${label}: during a rebuild ${JSON.stringify(rebuild)}`);
+      for (const [name, ms] of [
+        ['names for rows', rebuild.namesMs],
+        ['a series’ episodes', rebuild.episodesMs],
+      ])
+        expect
+          .soft(ms, `ms to ${name} while the projection is rebuilt`)
+          .toBeLessThan(DURING_REBUILD_MS);
+      expect
+        .soft(rebuild.buildingThroughout, 'answered while the publish was still under way')
+        .toBe(true);
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {

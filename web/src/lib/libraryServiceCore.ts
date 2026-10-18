@@ -172,7 +172,9 @@ export class LibraryServiceCore {
   dispatch(input: unknown): Promise<LibraryServiceServerMessage[]> {
     // Metadata is remote provider work, not authority coordination. Start it after everything already admitted to
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
-    if (isLibraryMetadataRequest(input)) {
+    // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
+    // and on den-edge, and changes nothing the lane orders.
+    if (isLibraryMetadataRequest(input) || isAssistantPublish(input)) {
       const admitted = this.#requests;
       const work = admitted.then(() => this.#dispatch(input));
       this.#providerWork.add(work);
@@ -576,6 +578,12 @@ function isLibraryMetadataRequest(
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
   const request = input as { type?: unknown; query?: { kind?: unknown } };
   return request.type === 'query' && request.query?.kind === 'library.metadata';
+}
+
+function isAssistantPublish(input: unknown): boolean {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const request = input as { type?: unknown; task?: { kind?: unknown } };
+  return request.type === 'task' && request.task?.kind === 'assistant.publish';
 }
 
 function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {
