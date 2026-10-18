@@ -44,6 +44,7 @@ export interface DownloadStatus {
     | 'unreachable'
     | 'ready'
     | 'no_working_release'
+    | 'awaiting_air'
     | 'release_gone'
     | null;
   service?: string;
@@ -263,6 +264,35 @@ export class DownloadCoordinator {
     this.answers.set(name, { state: 'unknown', message: 'Starting download…' });
     this.changed();
     void this.#activate(name, source.url);
+    return true;
+  }
+
+  /**
+   * Ask for content that has nothing to fetch yet (§17 wanted row: `exhausted`, no `release`): an episode a season
+   * download found no release for, or one not yet aired (`title.airDate`). The holder searches for it again on
+   * den-core's `download_retry` schedule. A live row for the content is left as it is.
+   */
+  async want(title: DownloadTitle): Promise<boolean> {
+    const name = downloadName(contentKeyOf(title));
+    const existing = this.log.settings(name);
+    if (existing && readDownload(existing)) return true;
+    const now = this.now();
+    const base: SettingsRow = existing ?? { kind: 'set', schema: 2, name, values: {} };
+    const values: Record<string, Stamped<ConfigValue | null>> = {};
+    if (existing) values.removed = { value: { bool: true }, at: await this.stamp(now) };
+    const at = await this.stamp(now);
+    const preferredLanguage = readSyncedPrefs(this.log.settings('prefs')).audioLanguage;
+    values.title = {
+      value: titleValue({
+        ...title,
+        preferredLanguage: title.preferredLanguage ?? preferredLanguage,
+      }),
+      at,
+    };
+    values.queuedAt = { value: { int: now }, at };
+    values.exhausted = { value: { bool: true }, at };
+    if (!(await this.log.write(withValues(base, values)))) return false;
+    this.changed();
     return true;
   }
 

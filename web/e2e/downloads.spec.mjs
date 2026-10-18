@@ -294,3 +294,87 @@ test('a legacy episode recovers its still only once its retained page becomes vi
   await page.waitForTimeout(200);
   expect(seasonRequests).toBe(3);
 });
+
+/** A release as den-scout lists it, by file name: uncached and seeded unless told otherwise. */
+function release(filename, { cached = false, seeders = 10 } = {}) {
+  const url = `/scout/p/${encodeURIComponent(filename.toLowerCase())}`;
+  return {
+    filename,
+    url,
+    label: filename,
+    cached,
+    seeders,
+    badges: ['1080p'],
+    languages: [],
+    probed: true,
+    identity: filename.toLowerCase(),
+    attributes: { resolution: '1080p', cached, seeders },
+  };
+}
+
+// The owner's Rebecka Martinsson season 2: a Nordic series whose episodes are sparsely seeded. One is cached, one has
+// a seeded release, one has nothing listed at all, one only an unseeded release, and one hasn't aired. Each ends as a
+// download that keeps trying, survives a reload, and starts by itself once a release turns up.
+test('a season download keeps every episode until it can be fetched', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-17T12:00:00Z') });
+  await guardNetwork(page);
+  const shared = store();
+  await page.route('**/fixture-store/rows', shared.route);
+  const listed = {
+    1: [release('Rebecka.Martinsson.S02E01.400p.WEB-DLRip.ViruseProject.avi', { cached: true })],
+    2: [release('Rebecka.Martinsson.S02E02.1080p.WEB-DLRip.ViruseProject.mkv', { seeders: 3 })],
+    3: [],
+    4: [release('Rebecka.Martinsson.S02E04.1080p.WEB-DLRip.ViruseProject.mkv', { seeders: 0 })],
+  };
+  await page.route('**/fixture-sources/*', (route) =>
+    route.fulfill({
+      json: {
+        sources: listed[Number(new URL(route.request().url()).pathname.split('/').at(-1))] ?? [],
+      },
+    }),
+  );
+  const probed = [];
+  await page.route('**/scout/p/**', (route) => {
+    probed.push(new URL(route.request().url()).pathname);
+    return route.fulfill({
+      status: 202,
+      json: { progress: 0.25, bytesPerSecond: 1_000_000, state: 'downloading', seeds: 5, peers: 9 },
+    });
+  });
+  // The Downloads page recovers episode stills from the season listing.
+  await routeTmdb(page, (route) => route.fulfill({ json: { episodes: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=season`);
+
+  await page.getByRole('button', { name: 'Download season 2' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'already ready' })).toHaveText(
+    '1 queued · 1 already ready · 2 searching for a release · 1 waiting to air',
+  );
+  const card = (episode) => page.locator(`[data-download="tv:70742:2:${episode}"]`);
+  await expect(card(2)).toContainText('Downloading 25%');
+  for (const episode of [3, 4]) {
+    await expect(card(episode)).toContainText('Searching for a release');
+    await expect(card(episode)).toContainText('Searching again');
+  }
+  await expect(card(5)).toContainText('Waiting for it to air');
+  await expect(card(5)).toContainText('Airs');
+  // Every episode not already there is a library row, so every device sees it and it outlives this page.
+  for (const episode of [2, 3, 4, 5])
+    expect(shared.rows.has(`set:download:tv:70742:2:${episode}`), `E${episode}`).toBe(true);
+
+  await page.reload();
+  await expect(card(3)).toContainText('Searching for a release');
+
+  // The season pack gets seeded. The next search after the first wait (12–18 minutes) starts it, unasked.
+  listed[3] = [
+    release('Rebecka.Martinsson.S02.1080p.AMZN.WEB-DL.DD+2.0.H.264-playWEB', { seeders: 4 }),
+  ];
+  await page.clock.fastForward('20:00');
+  // Twenty minutes without a pass lets the lease lapse: the first pass drops it, the next takes it again (§17).
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await page.evaluate(() => window.downloadsFixture.refresh());
+  await expect(card(3)).toContainText('Downloading 25%');
+  await expect(card(3)).toContainText('playWEB');
+  // E4's release is still unseeded: still searching, with a longer wait, and nothing was added for it.
+  await expect(card(4)).toContainText('Searching for a release');
+  expect(probed.some((path) => path.includes('s02e04'))).toBe(false);
+});

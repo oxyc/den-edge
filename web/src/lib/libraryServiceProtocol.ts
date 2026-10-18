@@ -169,6 +169,8 @@ export interface DownloadTitleDescriptor {
   posterPath?: string;
   stillPath?: string;
   originalLanguage?: string;
+  /** When an episode airs (ms). A wanted download of one not yet out searches from then. */
+  airDate?: number;
 }
 
 /** One source release. Its URL is a play-ticket capability, not a durable-row or transport concern. */
@@ -262,6 +264,11 @@ export type LibraryCommand =
       /** Number of viable releases in the source list this release was selected from. */
       candidates?: number;
     }
+  /**
+   * Content asked for with nothing to fetch yet (an episode a season download found no release for, or not aired):
+   * kept as a download that is searched for again until a release turns up.
+   */
+  | { kind: 'download.want'; title: DownloadTitleDescriptor }
   | { kind: 'download.remove'; target: DownloadTarget }
   | {
       /** Preserve the current partial release and try this release beside it. */
@@ -504,7 +511,8 @@ export interface DownloadViewItem {
   stillPath?: string;
   queuedAt: number;
   queuedBy: { device: string; name?: string; isSelf: boolean };
-  release: Omit<DownloadReleaseDescriptor, 'url'>;
+  /** Absent while nothing was found to fetch yet (a wanted episode, searched for again at `status.until`). */
+  release?: Omit<DownloadReleaseDescriptor, 'url'>;
   alternate?: Omit<DownloadReleaseDescriptor, 'url'>;
   status: {
     state:
@@ -516,6 +524,7 @@ export interface DownloadViewItem {
       | 'unreachable'
       | 'ready'
       | 'no-working-release'
+      | 'awaiting-air'
       | 'release-gone';
     phase: 'queued' | 'downloading' | 'trouble' | 'ready';
     fraction?: number;

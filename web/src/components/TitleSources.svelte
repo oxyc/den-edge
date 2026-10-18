@@ -91,7 +91,7 @@
   );
   /** The download of `source`, when the one in the library is of this release. */
   const jobOf = (source: DownloadSourceOption) =>
-    current && current.release.identity === source.identity ? current : undefined;
+    current && current.release?.identity === source.identity ? current : undefined;
   const stateOf = (source: DownloadSourceOption) => {
     const job = jobOf(source);
     return job?.status.state;

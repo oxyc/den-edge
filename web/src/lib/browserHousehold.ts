@@ -258,6 +258,7 @@ const KEPT: ReadonlySet<LibraryCommand['kind']> = new Set<LibraryCommand['kind']
   'server.patch',
   'simkl.connect',
   'download.enqueue',
+  'download.want',
 ]);
 
 type ObservedService = Pick<

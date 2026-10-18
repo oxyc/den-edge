@@ -382,13 +382,25 @@ export function isRetainedServices(value: unknown): value is RetainedServices {
 function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
   return (
     record(value) &&
-    exact(value, ['target', 'name', 'imdbId', 'posterPath', 'stillPath', 'originalLanguage']) &&
+    exact(value, [
+      'target',
+      'name',
+      'imdbId',
+      'posterPath',
+      'stillPath',
+      'originalLanguage',
+      'airDate',
+    ]) &&
     downloadTarget(value.target) &&
     boundedText(value.name, 1_024) &&
     optional(value.imdbId, (candidate): candidate is string => boundedText(candidate, 128)) &&
     optional(value.posterPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
     optional(value.stillPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
-    optional(value.originalLanguage, languageCode)
+    optional(value.originalLanguage, languageCode) &&
+    optional(
+      value.airDate,
+      (candidate): candidate is number => integer(candidate) && candidate >= 0,
+    )
   );
 }
 
@@ -705,6 +717,8 @@ function command(value: unknown): value is LibraryCommand {
           (candidate): candidate is number => integer(candidate) && candidate > 0,
         )
       );
+    case 'download.want':
+      return exact(value, ['kind', 'title']) && downloadTitle(value.title);
     case 'download.remove':
       return exact(value, ['kind', 'target']) && downloadTarget(value.target);
     case 'download.release.try':
@@ -1281,7 +1295,7 @@ function download(value: unknown): value is DownloadViewItem {
     optional(value.queuedBy.name, (candidate): candidate is string =>
       boundedText(candidate, 256),
     ) &&
-    release(value.release) &&
+    optional(value.release, release) &&
     optional(value.alternate, release) &&
     record(status) &&
     exact(status, [
@@ -1304,6 +1318,7 @@ function download(value: unknown): value is DownloadViewItem {
       status.state === 'unreachable' ||
       status.state === 'ready' ||
       status.state === 'no-working-release' ||
+      status.state === 'awaiting-air' ||
       status.state === 'release-gone') &&
     (status.phase === 'queued' ||
       status.phase === 'downloading' ||

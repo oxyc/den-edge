@@ -707,6 +707,14 @@ export class LibraryModel {
     );
   }
 
+  /** Keep asking for content with nothing to fetch yet; the download is searched for again until one turns up. */
+  wantDownload(
+    title: DownloadTitleDescriptor,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'download.want', title: wireDownloadTitle(title) }, operationId);
+  }
+
   removeDownload(
     target: DownloadTarget,
     operationId?: string,
@@ -1233,5 +1241,6 @@ function wireDownloadTitle(title: DownloadTitleDescriptor): DownloadTitleDescrip
     ...(title.posterPath !== undefined ? { posterPath: title.posterPath } : {}),
     ...(title.stillPath !== undefined ? { stillPath: title.stillPath } : {}),
     ...(title.originalLanguage !== undefined ? { originalLanguage: title.originalLanguage } : {}),
+    ...(title.airDate !== undefined ? { airDate: title.airDate } : {}),
   };
 }
