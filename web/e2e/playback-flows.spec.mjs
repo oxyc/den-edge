@@ -131,7 +131,38 @@ const torboxAnswer = {
 };
 
 /**
- * The player with `answer` from Hearth's playback route at `playback`. `home`: whether the home-network listener
+ * Den Hearth deciding as it does for an install with a TorBox key and Remux (den-hearth `managed_request`): Remux
+ * where the request rules TorBox out (`directFailed`, `audioTrack`, `replaces`, a non-empty `exclude`), else TorBox
+ * first. `torbox: false` is a TorBox that fails for now: Hearth falls back to Remux and says so (`degraded`), and a
+ * request for TorBox alone (`directOnly`) is refused rather than given Remux.
+ */
+const hearthWithTorbox =
+  ({ torbox = true } = {}) =>
+  (body) => {
+    const remuxOnly =
+      body.directFailed === true ||
+      body.audioTrack !== undefined ||
+      body.replaces !== undefined ||
+      body.exclude?.length > 0;
+    if (!remuxOnly && torbox) return { json: torboxAnswer };
+    if (body.directOnly)
+      return {
+        status: 409,
+        json: {
+          error: 'direct_unavailable',
+          ...(remuxOnly ? {} : { cause: 'torbox_unavailable' }),
+        },
+      };
+    return {
+      json: remuxOnly
+        ? remuxAnswer
+        : { ...remuxAnswer, degraded: true, directFailure: 'torbox_unavailable' },
+    };
+  };
+
+/**
+ * The player with `answer` from Hearth's playback route at `playback` — or, as a function, what it answers for each
+ * request body. `home`: whether the home-network listener
  * answers, as on home Wi-Fi; away, it is a name nothing answers. `silentLan`: at home, but the home-network listener
  * never answers this browser, as when it may not reach the local network. `lanAsked` is the origin of every frame
  * that asked the home-network listener for anything. `linkLimit`: the `maxBitrate` this browser remembers for the
@@ -176,9 +207,10 @@ async function open({
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
   await page.route(`${ORIGIN}${playback}`, (r) => {
-    asked.playback.push(r.request().postDataJSON());
+    const body = r.request().postDataJSON();
+    asked.playback.push(body);
     asked.playbackGrants.push(r.request().headers()['x-den-grant'] ?? null);
-    return r.fulfill({ json: answer });
+    return r.fulfill(typeof answer === 'function' ? answer(body) : { json: answer });
   });
   await page.route(`${ORIGIN}/remux/releases`, (r) => {
     asked.releases.push(r.request().postDataJSON());
@@ -291,6 +323,110 @@ test('owner with TorBox plays the provider’s own stream in the page', async ()
     expect(asked.playback).toHaveLength(1);
     expect(segmentHosts()).toEqual(new Set(['flux.wnam.tb-cdn.io']));
     await stamped(page, 'TorBox');
+  } finally {
+    await browser.close();
+  }
+});
+
+/** The hosts media segments came from since `from` (an index into `served`). */
+const segmentHostsSince = (from) =>
+  new Set(
+    served
+      .slice(from)
+      .filter((s) => s.file.endsWith('.m4s'))
+      .map((s) => s.host),
+  );
+const position = (video) => video.evaluate((v) => v.currentTime);
+/** Where the video plays once media from `host` has arrived since `from`: the new session's own position. */
+async function playsFrom(video, host, from) {
+  await expect.poll(() => segmentHostsSince(from).has(host), { timeout: 30_000 }).toBe(true);
+  await expect
+    .poll(() => video.evaluate((v) => (v.paused || v.readyState < 3 ? -1 : v.currentTime)), {
+      timeout: 30_000,
+    })
+    .toBeGreaterThan(0);
+  return position(video);
+}
+
+test('owner with TorBox switches to Den Remux and back from the stamp, at the same second', async () => {
+  const { browser, page, asked } = await open({ answer: hearthWithTorbox(), home: true });
+  try {
+    const video = pageVideo(page);
+    await playingPast(video, 7);
+    await stamped(page, 'TorBox');
+    expect(segmentHosts()).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+
+    // TorBox → Den Remux: Hearth is told the direct path is not wanted, for the same release, from where it is.
+    let from = served.length;
+    const at = await position(video);
+    await page.getByRole('button', { name: 'Playing from TorBox — switch to Den Remux' }).click();
+    await stamped(page, 'Den Remux');
+    expect(asked.playback).toHaveLength(2);
+    expect(asked.playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
+    expect(asked.playback[1].startAt).toBeGreaterThan(at - 1);
+    const onRemux = await playsFrom(video, 'lan.test', from);
+    expect(onRemux).toBeGreaterThan(at - 1);
+    expect(onRemux).toBeLessThan(at + 15);
+    expect(segmentHostsSince(from)).toEqual(new Set(['lan.test']));
+    await playingPast(video, onRemux + 1);
+
+    // Den Remux → TorBox: TorBox alone, so Hearth can't answer with a Remux session in the playing one's slot.
+    from = served.length;
+    const back = await position(video);
+    await page.getByRole('button', { name: 'Playing from Den Remux — switch to TorBox' }).click();
+    await stamped(page, 'TorBox');
+    expect(asked.playback).toHaveLength(3);
+    expect(asked.playback[2]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
+    expect(asked.playback[2]).not.toHaveProperty('replaces');
+    expect(asked.playback[2]).not.toHaveProperty('directFailed');
+    expect(asked.playback[2].startAt).toBeGreaterThan(back - 1);
+    const onTorbox = await playsFrom(video, 'flux.wnam.tb-cdn.io', from);
+    expect(onTorbox).toBeGreaterThan(back - 1);
+    expect(onTorbox).toBeLessThan(back + 15);
+    expect(segmentHostsSince(from)).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+    await playingPast(video, onTorbox + 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a viewer whose Hearth has only Remux gets a plain stamp, not a switch', async () => {
+  const { browser, page, asked } = await open({ answer: remuxAnswer, home: true });
+  try {
+    await playingPast(pageVideo(page), 3);
+    await stamped(page, 'Den Remux');
+    await expect(page.getByTestId('playback-source')).not.toHaveRole('button');
+    await expect(page.getByRole('button', { name: /switch to/ })).toHaveCount(0);
+    expect(asked.playback).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a switch to TorBox that Hearth refuses keeps Den Remux playing and says so', async () => {
+  const { browser, page, asked } = await open({
+    answer: hearthWithTorbox({ torbox: false }),
+    home: true,
+  });
+  try {
+    const video = pageVideo(page);
+    await playingPast(video, 7);
+    // Hearth tried TorBox first and fell back: TorBox is this viewer's to try again.
+    await stamped(page, 'Den Remux');
+    const from = served.length;
+    const at = await position(video);
+    await page.getByRole('button', { name: 'Playing from Den Remux — switch to TorBox' }).click();
+    await expect(
+      page.getByRole('status').filter({ hasText: 'TorBox couldn’t play this release just now' }),
+    ).toBeVisible();
+    expect(asked.playback).toHaveLength(2);
+    expect(asked.playback[1]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
+    await stamped(page, 'Den Remux');
+    // The same session plays on from where it was: no restart, and nothing from TorBox's host.
+    expect(await position(video)).toBeGreaterThanOrEqual(at);
+    await playingPast(video, at + 2);
+    expect(segmentHostsSince(from).has('flux.wnam.tb-cdn.io')).toBe(false);
+    expect(segmentHosts()).toEqual(new Set(['lan.test']));
   } finally {
     await browser.close();
   }

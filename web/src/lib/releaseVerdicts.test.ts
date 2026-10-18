@@ -3,6 +3,7 @@ import type { Release, Session } from './remux';
 import {
   autoSwitchedNotice,
   autoSwitchNotice,
+  deliveryUnchangedNotice,
   nothingFits,
   optionLabel,
   releaseAfterMeasure,
@@ -170,6 +171,23 @@ describe('unchangedNotice', () => {
     expect(unchangedNotice('temporarilyUnavailable')).toContain('temporarily unavailable');
     expect(unchangedNotice('protocol')).toContain('answer this page couldn’t use');
     expect(unchangedNotice('ended', 'Your access to Kim’s library ended')).toBe(
+      'Your access to Kim’s library ended, so this carries on as it was.',
+    );
+  });
+});
+
+describe('deliveryUnchangedNotice', () => {
+  it('names the path that refused and the one that carries on', () => {
+    expect(deliveryUnchangedNotice('TorBox', 'request')).toBe(
+      'TorBox couldn’t play this release just now, so it carries on from Den Remux.',
+    );
+    expect(deliveryUnchangedNotice('Den Remux', 'transcode')).toBe(
+      'Den Remux couldn’t play this release just now, so it carries on from TorBox.',
+    );
+  });
+
+  it('says ended access as itself', () => {
+    expect(deliveryUnchangedNotice('TorBox', 'ended', 'Your access to Kim’s library ended')).toBe(
       'Your access to Kim’s library ended, so this carries on as it was.',
     );
   });

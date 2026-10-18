@@ -145,3 +145,17 @@ export function unchangedNotice(failure: Failure, ended?: string | null): string
       return `That can’t be played here as it is, so ${carriesOn}`;
   }
 }
+
+/**
+ * What the player says when the viewer's switch to the other playback path (the source stamp) was refused and the
+ * path playing carries on. Access that ended or a key asked for again are said as themselves (`unchangedNotice`).
+ */
+export function deliveryUnchangedNotice(
+  to: 'TorBox' | 'Den Remux',
+  failure: Failure,
+  ended?: string | null,
+): string {
+  if (failure === 'login' || failure === 'ended') return unchangedNotice(failure, ended);
+  const from = to === 'TorBox' ? 'Den Remux' : 'TorBox';
+  return `${to} couldn’t play this release just now, so it carries on from ${from}.`;
+}
