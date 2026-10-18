@@ -535,17 +535,21 @@ test('Hearth starts a wanted episode while no client is open, and the next one a
 }) => {
   const { shared, listed, probed, hearth } = await rebeckaSeason(page);
   await page.getByRole('button', { name: 'Download season 2' }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'already ready' })).toBeVisible();
+  // The whole pass, not just its first episode: a holder pass sooner hands Hearth a list the pass is still adding to.
+  await expect(page.getByRole('status').filter({ hasText: 'already ready' })).toHaveText(
+    '1 queued · 1 already ready · 2 searching for a release · 1 waiting to air',
+  );
 
-  // The holder's pass hands Hearth the wanted rows — what Scout lists each under and its schedule, nothing more.
-  await page.evaluate(() => window.downloadsFixture.refresh());
-  await expect.poll(() => hearth.lists.length).toBeGreaterThan(0);
+  // The holder's pass hands Hearth the wanted rows — what Scout lists each under and its schedule, nothing more. A
+  // pass the scheduler started meanwhile may have sent an earlier list, so the one asserted on is the latest.
+  const keys = () => (hearth.lists.at(-1) ?? []).map((item) => item.key).sort();
+  await expect
+    .poll(async () => {
+      await page.evaluate(() => window.downloadsFixture.refresh());
+      return keys();
+    })
+    .toEqual(['tv:70742:2:3', 'tv:70742:2:4', 'tv:70742:2:5']);
   const sent = hearth.lists.at(-1);
-  expect(sent.map((item) => item.key).sort()).toEqual([
-    'tv:70742:2:3',
-    'tv:70742:2:4',
-    'tv:70742:2:5',
-  ]);
   const allowed = [
     'airDate',
     'episode',
