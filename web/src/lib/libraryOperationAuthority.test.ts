@@ -67,6 +67,28 @@ describe('DurableOperationAuthority', () => {
     ]);
   });
 
+  it('runs an assistant projection publish beside the operations, unjournalled, and holds no tap behind it', async () => {
+    const stored = storedLog();
+    let release!: () => void;
+    const building = new Promise<void>((resolve) => (release = resolve));
+    const inner = {
+      ...base(),
+      task: vi.fn(async () => {
+        await building;
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      }),
+    };
+    const authority = new DurableOperationAuthority(inner, stored.log);
+
+    const publish = authority.task({ kind: 'assistant.publish' }, 'publish-1');
+    await expect(
+      authority.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'tap-1'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+    release();
+    await expect(publish).resolves.toMatchObject({ result: { published: 1 } });
+    expect(JSON.stringify([...stored.kept.values()])).not.toContain('publish-1');
+  });
+
   it('returns the original command result after authority replacement without executing again', async () => {
     const stored = storedLog();
     const first = base();

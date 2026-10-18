@@ -167,7 +167,7 @@ const memberOf = (request) => request.headers()['x-den-library-member']?.split('
  * projection taken, `projectionMs` late, and its queue held empty. What was uploaded is kept on `edge.assistant`.
  */
 async function routeBigAssistant(page, edge, projectionMs) {
-  const seen = (edge.assistant ??= { grant: null, projections: [] });
+  const seen = (edge.assistant ??= { grant: null, projections: [], publishing: 0 });
   await page.route(`${E2E_ORIGIN}/oauth/connections`, (route) =>
     route.fulfill({
       json: {
@@ -195,6 +195,7 @@ async function routeBigAssistant(page, edge, projectionMs) {
     const path = new URL(request.url()).pathname;
     if (path === '/assistant/dropbox') return route.fulfill({ status: 204 });
     if (path.startsWith('/assistant/projection/') && request.method() === 'PUT') {
+      seen.publishing ||= Date.now();
       seen.projections.push({ member: memberOf(request), at: Date.now() });
       if (projectionMs) await new Promise((done) => setTimeout(done, projectionMs));
       return route.fulfill({ status: 204 });
@@ -388,9 +389,87 @@ async function routeBigAtlas(page, latencyMs) {
  * What publishing this household's assistant projection costs an iPhone's library Worker: from the page's first
  * assistant request to its projection upload, which is the time its shelves waited (den-edge's log, 0.271.69). A lab
  * Worker builds it in about 0.2 s, and Chromium can slow a page's CPU but not a Worker's, so `projectionMs` holds the
- * upload's answer this long instead: the library Worker is busy with the publish as long as the phone's was.
+ * upload's answer this long instead (and `holdProjectionBuilds` spends it in the build's own Worker).
  */
 export const PHONE_PROJECTION_MS = 6_000;
+
+/**
+ * Give each assistant projection `page` builds the phone's time, on the build's own thread: the library Worker starts
+ * its projection Worker (`assistantProjectionWorker.ts`) as a module that loads it and then spends `ms`, so the build
+ * it was sent starts that much later, in that Worker. Playwright's routes never see the script of a Worker another
+ * Worker starts, so it is done through the library Worker's handle, long before it builds.
+ *
+ * `started()`: whether a build has started. `ask(query)`: the milliseconds the slowest of the page's library Workers
+ * takes to answer `query`, sent to it as the page sends one (`LibraryServiceWorkerHost`), with its answer kept from
+ * the page.
+ */
+export function holdProjectionBuilds(page, ms = PHONE_PROJECTION_MS) {
+  const libraries = [];
+  page.on('worker', (worker) => {
+    if (!worker.url().includes('libraryServiceWorker')) return;
+    libraries.push(worker);
+    void worker
+      .evaluate((hold) => {
+        const Native = globalThis.Worker;
+        if (!Native) return;
+        globalThis.Worker = class extends Native {
+          constructor(url, options) {
+            const href = new URL(String(url), location.href).href;
+            if (!href.includes('assistantProjectionWorker')) {
+              super(url, options);
+              return;
+            }
+            globalThis.__projectionBuilds = (globalThis.__projectionBuilds ?? 0) + 1;
+            const source = `import ${JSON.stringify(href)};\nconst until = Date.now() + ${hold};\nwhile (Date.now() < until);\n`;
+            super(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })), {
+              ...options,
+              type: 'module',
+            });
+          }
+        };
+      }, ms)
+      .catch(() => {});
+  });
+  const started = async () => {
+    for (const worker of libraries)
+      if (await worker.evaluate(() => globalThis.__projectionBuilds ?? 0).catch(() => 0))
+        return true;
+    return false;
+  };
+  const ask = async (query) => {
+    const answered = await Promise.all(
+      libraries.map((worker) =>
+        worker
+          .evaluate(
+            (request) =>
+              new Promise((resolve) => {
+                const requestId = `budget-${Math.random().toString(36).slice(2)}`;
+                const post = self.postMessage.bind(self);
+                const began = performance.now();
+                self.postMessage = (messages, ...rest) => {
+                  const mine = Array.isArray(messages)
+                    ? messages.filter((message) => message?.requestId === requestId)
+                    : [];
+                  if (!mine.length) return post(messages, ...rest);
+                  self.postMessage = post;
+                  resolve(Math.round(performance.now() - began));
+                  const others = messages.filter((message) => message?.requestId !== requestId);
+                  if (others.length) post(others, ...rest);
+                };
+                self.dispatchEvent(
+                  new MessageEvent('message', { data: { ...request, requestId } }),
+                );
+              }),
+            // `LIBRARY_SERVICE_PROTOCOL` (libraryServiceProtocol.ts).
+            { type: 'query', protocol: 7, query },
+          )
+          .catch(() => 0),
+      ),
+    );
+    return Math.max(0, ...answered);
+  };
+  return { started, ask };
+}
 
 /**
  * One page of the big household: the in-memory den-edge with the household's assistant, TMDB and — unless `atlas` is
@@ -431,7 +510,7 @@ export async function firstPublish(page, path, options = {}) {
 }
 
 /** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
-async function settleProjection(context, edge, options) {
+export async function settleProjection(context, edge, options = {}) {
   for (let round = 0; round < 4; round += 1) {
     const outcomes = [];
     for (const path of ['/', '/watchlist']) {

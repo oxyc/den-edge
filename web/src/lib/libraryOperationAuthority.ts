@@ -186,6 +186,10 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
   }
 
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
+    // An assistant projection's publish changes no rows and is safe to repeat, so it has no intent to keep or replay;
+    // one tab publishes at a time under a lock of its own (`publishWhileOpen`). It runs beside the operations here,
+    // never ahead of them: a build and its upload take seconds on a phone, and a tap waiting behind them would too.
+    if (task.kind === 'assistant.publish') return this.authority.task(task, operationId);
     return this.#serialized(() =>
       this.runExclusive(`den.library.operations.${this.log.libraryId}`, () =>
         this.#perform('task', operationId, task, () => this.authority.task(task, operationId)),
