@@ -342,9 +342,9 @@ export function installTVNavigation(): () => void {
       ) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        target.closest<HTMLElement>('[data-tv-carousel-action]')!.dispatchEvent(
-          new CustomEvent('den:tv-page', { detail: { direction }, bubbles: false }),
-        );
+        target
+          .closest<HTMLElement>('[data-tv-carousel-action]')!
+          .dispatchEvent(new CustomEvent('den:tv-page', { detail: { direction }, bubbles: false }));
         return;
       }
       if (move(direction)) {

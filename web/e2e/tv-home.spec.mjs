@@ -43,7 +43,11 @@ test('real TV Home keeps its hero simple and survives forty detail/back cycles',
   await expect(more).toHaveCount(1);
   // Reach the hero from the navbar exactly as a remote does; direct DOM focus masked geometry regressions.
   const approach = ['ArrowUp', 'ArrowRight', 'ArrowLeft', 'ArrowDown'];
-  for (let press = 0; press < 32 && !(await more.evaluate((node) => node === document.activeElement)); press++) {
+  for (
+    let press = 0;
+    press < 32 && !(await more.evaluate((node) => node === document.activeElement));
+    press++
+  ) {
     await page.keyboard.press(approach[press % approach.length]);
     await page.waitForTimeout(80);
   }
