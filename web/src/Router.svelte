@@ -273,6 +273,11 @@
       if (!restoring) {
         navigation.save(window.scrollX, window.scrollY);
         unsaved = current.key;
+      } else if (unsaved === null) {
+        // The navigation before this one has already put its page on screen and is still restoring it (each `tick`
+        // waits a frame): that page is left now, and is copied for a swipe back like any other. Its saved position
+        // is the one it is being restored to, not wherever the window is mid-restore.
+        unsaved = current.key;
       }
       restoring = true;
       if (push && address() !== path) {

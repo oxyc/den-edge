@@ -456,16 +456,29 @@ test('navigation regressions', async () => {
         await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         // An entry from an earlier mount, or one the address bar made: a history position the router holds
-        // no ledger entry for, which must start a fresh segment rather than inherit Home's.
-        await page.evaluate(() => {
-          history.pushState(null, '', '/person/7');
-          dispatchEvent(new PopStateEvent('popstate'));
-        });
-        await page.waitForFunction(
-          () => document.querySelector('[data-active="true"] h1')?.textContent === 'person',
-        );
-        await page.evaluate(() =>
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/2' } })),
+        // no ledger entry for, which must start a fresh segment rather than inherit Home's. It is left the moment it
+        // draws, while the router is still restoring it (each tick waits a frame): it must be copied all the same.
+        await page.evaluate(
+          () =>
+            new Promise((done) => {
+              const observer = new MutationObserver(() => {
+                if (document.querySelector('[data-active="true"] h1')?.textContent !== 'person')
+                  return;
+                observer.disconnect();
+                document.dispatchEvent(
+                  new CustomEvent('den:navigate', { detail: { path: '/movie/2' } }),
+                );
+                done();
+              });
+              observer.observe(document.body, {
+                subtree: true,
+                childList: true,
+                characterData: true,
+                attributes: true,
+              });
+              history.pushState(null, '', '/person/7');
+              dispatchEvent(new PopStateEvent('popstate'));
+            }),
         );
         await page.waitForFunction(
           () => document.querySelector('[data-active="true"] h1')?.textContent === 'title',
