@@ -9,7 +9,11 @@ export interface SeasonJob {
   checked: number;
   queued: number;
   ready: number;
-  unavailable: number;
+  /** Nothing to fetch yet (no release, every one unseeded, or the sources didn't answer): searched for again. */
+  searching: number;
+  /** Not aired yet: searched for from its air date. */
+  waiting: number;
+  /** Couldn't even be written down. */
   uncertain: number;
   running: boolean;
 }
@@ -22,7 +26,7 @@ export interface SeasonTitle {
   originalLanguage?: string;
 }
 
-export type EpisodeDownloadResult = 'queued' | 'ready' | 'unavailable' | 'uncertain';
+export type EpisodeDownloadResult = 'queued' | 'ready' | 'searching' | 'waiting' | 'uncertain';
 
 interface SharedSeasonRun {
   latest: SeasonJob;
@@ -32,20 +36,34 @@ interface SharedSeasonRun {
 
 const seasonRuns = new WeakMap<LibraryModel, SvelteMap<string, SharedSeasonRun>>();
 
+/** An episode's air date (`YYYY-MM-DD`, its broadcast day) as ms, or nothing when unknown. */
+const airTime = (episode: Episode): number | undefined => {
+  const at = episode.airDate ? Date.parse(`${episode.airDate}T00:00:00Z`) : NaN;
+  return Number.isFinite(at) ? at : undefined;
+};
+
 const descriptor = (
   imdb: string,
   season: number,
   episode: Episode,
   title: SeasonTitle,
-): DownloadTitleDescriptor => ({
-  target: { type: 'tv', id: title.id, season, episode: episode.number },
-  name: title.title,
-  imdbId: imdb,
-  ...(title.posterPath ? { posterPath: title.posterPath } : {}),
-  ...(episode.stillPath ? { stillPath: episode.stillPath } : {}),
-  ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
-});
+): DownloadTitleDescriptor => {
+  const airDate = airTime(episode);
+  return {
+    target: { type: 'tv', id: title.id, season, episode: episode.number },
+    name: title.title,
+    imdbId: imdb,
+    ...(title.posterPath ? { posterPath: title.posterPath } : {}),
+    ...(episode.stillPath ? { stillPath: episode.stillPath } : {}),
+    ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
+    ...(airDate !== undefined ? { airDate } : {}),
+  };
+};
 
+/**
+ * One episode of a season download. Every episode not already there ends as a durable download: a release to fetch,
+ * or — with none to fetch yet, or not aired — a wanted one the queue keeps searching for (den-core `download_retry`).
+ */
 async function downloadEpisodeWithModel(
   model: LibraryModel,
   imdb: string,
@@ -62,13 +80,25 @@ async function downloadEpisodeWithModel(
       item.season === season &&
       item.episode === episode.number,
   );
-  if (queued) return queued.status.state === 'ready' ? 'ready' : 'queued';
+  if (queued) {
+    if (queued.status.state === 'ready') return 'ready';
+    if (queued.status.state === 'awaiting-air') return 'waiting';
+    return queued.release ? 'queued' : 'searching';
+  }
+  if (futureDate(episode.airDate)) {
+    await model.wantDownload(requested);
+    return 'waiting';
+  }
   const { result } = await model.downloadSources(requested);
-  if (result.kind !== 'download.sources' || result.sources === null) return 'uncertain';
-  const release = result.sources[0];
-  if (!release) return 'unavailable';
+  const sources = result.kind === 'download.sources' ? result.sources : null;
+  const release = sources?.[0];
+  // The service ranks a release nobody seeds last, so reaching one means none would arrive.
+  if (!sources || !release || (release.cached === false && release.seeders === 0)) {
+    await model.wantDownload(requested);
+    return 'searching';
+  }
   if (release.cached) return 'ready';
-  await model.enqueueDownload(requested, release, result.sources.length);
+  await model.enqueueDownload(requested, release, sources.length);
   return 'queued';
 }
 
@@ -104,8 +134,8 @@ export async function downloadSeason(
   changed: (job: SeasonJob) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const aired = episodes.filter((episode) => !futureDate(episode.airDate));
-  const key = seasonKey(imdb, season, aired, title);
+  // Unaired episodes too: each becomes a download that waits for its air date.
+  const key = seasonKey(imdb, season, episodes, title);
   let runs = seasonRuns.get(model);
   if (!runs) {
     runs = new SvelteMap();
@@ -115,11 +145,12 @@ export async function downloadSeason(
   if (!run) {
     const shared: SharedSeasonRun = {
       latest: {
-        total: aired.length,
+        total: episodes.length,
         checked: 0,
         queued: 0,
         ready: 0,
-        unavailable: 0,
+        searching: 0,
+        waiting: 0,
         uncertain: 0,
         running: true,
       },
@@ -136,7 +167,7 @@ export async function downloadSeason(
       let lease: ReturnType<LibraryModel['downloads']> | undefined;
       try {
         lease = model.downloads();
-        for (const episode of aired) {
+        for (const episode of episodes) {
           let result: EpisodeDownloadResult = 'uncertain';
           try {
             result = await downloadEpisodeWithModel(model, imdb, season, episode, title, lease);

@@ -1290,6 +1290,50 @@ describe('library service server protocol', () => {
     ).toMatchObject({ ok: true });
   });
 
+  it('carries a wanted download: asked for without a release, and its waiting states', () => {
+    const want = (title: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'want',
+        operationId: 'want',
+        command: { kind: 'download.want', title },
+      });
+    const title = {
+      target: { type: 'tv', id: 70742, season: 2, episode: 5 },
+      name: 'Rebecka Martinsson',
+      imdbId: 'tt6623682',
+      airDate: 1_900_000_000_000,
+    };
+    expect(want(title)).toMatchObject({ ok: true });
+    expect(want({ ...title, airDate: -1 })).toMatchObject({ ok: false });
+    expect(want({ ...title, url: '/scout/p/ticket' })).toMatchObject({ ok: false });
+
+    const item = (state: string) => ({
+      content: 'tv:70742:2:5',
+      title: { type: 'tv', id: 70742 },
+      name: 'Rebecka Martinsson',
+      season: 2,
+      episode: 5,
+      queuedAt: 1,
+      queuedBy: { device: 'self', isSelf: true },
+      status: { state, phase: 'queued', until: 1_900_000_000_000, stalled: false },
+      tried: 0,
+      announced: false,
+    });
+    for (const state of ['awaiting-air', 'no-working-release'])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'update',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          subscriptionId: 'downloads',
+          version,
+          value: { kind: 'downloads', items: [item(state)] },
+        }),
+        state,
+      ).toMatchObject({ ok: true });
+  });
+
   it('carries delivery, resolved playback intent, and session status without storage details', () => {
     expect(
       decodeLibraryServiceServerMessage({

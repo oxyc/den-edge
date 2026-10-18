@@ -23,7 +23,15 @@ export function viewHeadline(download: DownloadViewItem): string {
   if (status.state === 'refused') return 'Download refused';
   if (status.state === 'unreachable') return 'Service unavailable';
   if (status.state === 'release-gone') return 'Release unavailable';
-  return 'No working release';
+  if (status.state === 'awaiting-air') return 'Waiting for it to air';
+  return download.release ? 'No working release yet' : 'Searching for a release';
+}
+
+/** "14:05", or "Mon 14:05" beyond today: when a wait ends. */
+function clockTime(at: number, now: number): string {
+  const time = new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (new Date(at).toDateString() === new Date(now).toDateString()) return time;
+  return `${new Date(at).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
 }
 
 export function viewTrouble(download: DownloadViewItem): boolean {
@@ -55,6 +63,12 @@ export function viewFacts(download: DownloadViewItem, now = Date.now()): string[
     );
   if (status.state === 'paused' && status.until && status.until > now)
     values.push(`Retries in ${Math.max(1, Math.ceil((status.until - now) / 60_000))} min`);
+  if (status.state === 'awaiting-air' && status.until)
+    values.push(`Airs ${clockTime(status.until, now)}`);
+  if (status.state === 'no-working-release' && status.until)
+    values.push(
+      status.until > now ? `Searching again ${clockTime(status.until, now)}` : 'Searching now',
+    );
   if (download.candidates && download.tried > 1)
     values.push(`Tried ${Math.min(download.tried, download.candidates)} of ${download.candidates}`);
   return values;

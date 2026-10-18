@@ -21,7 +21,8 @@ import type { ConfigValue, SettingsRow, Stamped, Stamp } from './wire';
 
 const CONCURRENCY = 4;
 const NO_HEDGE_MS = 10 * 60_000;
-const EXHAUSTED_RETRY_EVERY = 6 * 60 * 60_000;
+/** A due search whose answer couldn't settle anything (a source unreachable or partial) is asked again after this. */
+const UNANSWERED_WAIT = 5 * 60_000;
 const ANOTHER_WINDOW = 'another-window';
 const FOREIGN = 'Another device’s ticket.';
 const GONE = 'This release is no longer listed.';
@@ -51,6 +52,8 @@ export class DownloadCoordinatorDriver {
   #held?: Held;
   #observed?: Observed;
   #running?: Promise<boolean>;
+  /** By row name: when a due search that got an incomplete answer may ask again. */
+  readonly #unanswered = new Map<string, number>();
 
   constructor(readonly queue: DownloadCoordinator) {}
 
@@ -87,6 +90,7 @@ export class DownloadCoordinatorDriver {
       if (
         (force && state === 'ready') ||
         state === 'no_working_release' ||
+        state === 'awaiting_air' ||
         state === 'release_gone' ||
         state === 'paused'
       )
@@ -219,8 +223,14 @@ export class DownloadCoordinatorDriver {
       if (status.state) states[download.name] = status.state;
       this.queue.clocks.set(download.name, status.clock);
       if (download.exhausted) {
-        if (now - (download.exhaustedAt ?? download.queuedAt) >= EXHAUSTED_RETRY_EVERY)
-          wrote = (await this.#retryExhausted(download, now)) || wrote;
+        // Never given up on: den-core says when it searches again (backing off to 6 h, never before its air date).
+        const retry = syncPolicy<{ due: boolean; at: number; attempt: number }>({
+          op: 'download_retry',
+          row: download.row,
+          now,
+        });
+        if (retry.due && now >= (this.#unanswered.get(download.name) ?? 0))
+          wrote = (await this.#retryExhausted(download, retry.attempt, now)) || wrote;
         continue;
       }
       if (download.release.hedge) {
@@ -345,16 +355,50 @@ export class DownloadCoordinatorDriver {
     return wrote;
   }
 
-  async #retryExhausted(download: Download, now: number): Promise<boolean> {
+  /**
+   * A due fresh search for an exhausted (or wanted) download (§17 *Searching again*): the next untried release, or
+   * with every one tried, the best of them all again. Nothing to pick writes a fresh `exhausted`, so the next search
+   * waits longer; an answer that can't settle it writes nothing and asks again shortly.
+   */
+  async #retryExhausted(download: Download, attempt: number, now: number): Promise<boolean> {
     const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
-    if (!this.#stillHeld(now) || sources === null || !completeAnswer(answer)) return false;
+    if (!this.#stillHeld(now)) return false;
+    if (sources === null || !completeAnswer(answer)) {
+      this.#unanswered.set(download.name, now + UNANSWERED_WAIT);
+      console.info(`den: download ${download.content}: search ${attempt + 1} got no full answer`);
+      return false;
+    }
+    this.#unanswered.delete(download.name);
     const viable = sources.filter((source) => !(source.cached === false && source.seeders === 0));
-    const tried = new Set([...download.tried, download.release.identity]);
+    const tried = new Set([
+      ...download.tried,
+      ...(download.wanted ? [] : [download.release.identity]),
+    ]);
     const fresh = viable.filter((source) => !tried.has(source.identity));
     const chosen = this.queue.pick(fresh.length ? fresh : viable, download.title.originalLanguage);
     const at = await this.#stamp(now);
-    if (!chosen) return this.#write(download, { exhausted: { value: { bool: true }, at } }, now);
+    const retries = { value: { int: attempt + 1 }, at };
+    if (!chosen) {
+      console.info(
+        `den: download ${download.content}: search ${attempt + 1} found nothing to fetch (${sources.length} listed)`,
+      );
+      return this.#write(
+        download,
+        {
+          exhausted: { value: { bool: true }, at },
+          retries,
+          candidates: { value: viable.length ? { int: viable.length } : null, at },
+        },
+        now,
+      );
+    }
+    console.info(
+      `den: download ${download.content}: search ${attempt + 1} found ${chosen.label}${
+        chosen.cached ? ' (cached)' : ''
+      }`,
+    );
     const values: Record<string, Stamped<ConfigValue | null>> = {
+      retries,
       release: {
         value: releaseValue({
           identity: chosen.identity,

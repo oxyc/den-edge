@@ -16,14 +16,17 @@ import {
 interface DigestCase {
   name: string;
   request: {
+    op: string;
     kind: 'source' | 'backup' | 'staged' | 'owner';
     input: Record<string, unknown>;
   };
   ok: string;
 }
 
-const cases = (fixture.cases as DigestCase[]).filter(({ request }) =>
-  ['source', 'backup', 'staged', 'owner'].includes(request.kind),
+const cases = (fixture.cases as DigestCase[]).filter(
+  ({ request }) =>
+    request.op === 'profiles_migration_digest' &&
+    ['source', 'backup', 'staged', 'owner'].includes(request.kind),
 );
 
 interface CoreCase {

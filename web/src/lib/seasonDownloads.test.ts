@@ -94,6 +94,52 @@ describe('semantic season downloads', () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
+  it('leaves every episode of a sparse season as a download that keeps trying', async () => {
+    const season = [
+      { number: 1, name: 'One', airDate: '2020-01-01' },
+      { number: 2, name: 'Two', airDate: '2020-01-08' },
+      { number: 3, name: 'Three', airDate: '2020-01-15' },
+      { number: 4, name: 'Four', airDate: '2020-01-22' },
+      { number: 5, name: 'Five', airDate: '2999-01-01' },
+    ];
+    const listed: Record<number, unknown[]> = {
+      1: [{ ...source, identity: 'e1', cached: true }],
+      2: [{ ...source, identity: 'e2', seeders: 3 }],
+      3: [],
+      4: [{ ...source, identity: 'e4', seeders: 0 }],
+    };
+    const { library } = model();
+    let asking = 0;
+    (library as unknown as { downloadSources: unknown }).downloadSources = vi.fn(
+      async (requested: { target: { episode: number } }) => {
+        asking = requested.target.episode;
+        return { result: { kind: 'download.sources', sources: listed[asking] }, version: {} };
+      },
+    );
+    const wanted: Array<{ target: { episode: number }; airDate?: number }> = [];
+    (library as unknown as { wantDownload: unknown }).wantDownload = vi.fn(async (requested) => {
+      wanted.push(requested);
+    });
+    const updates: Array<Record<string, number | boolean>> = [];
+    await downloadSeason(library, 'tt6623682', 2, season, title, (job) => updates.push({ ...job }));
+
+    expect(updates.at(-1)).toMatchObject({
+      total: 5,
+      checked: 5,
+      ready: 1,
+      queued: 1,
+      searching: 2,
+      waiting: 1,
+      uncertain: 0,
+      running: false,
+    });
+    expect(library.enqueueDownload).toHaveBeenCalledTimes(1);
+    expect(wanted.map(({ target }) => target.episode)).toEqual([3, 4, 5]);
+    expect(wanted[2]!.airDate).toBe(Date.parse('2999-01-01T00:00:00Z'));
+    // An unaired episode has nothing to search for yet.
+    expect(library.downloadSources).toHaveBeenCalledTimes(4);
+  });
+
   it('stops publishing to an observer that has been cancelled', async () => {
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => (finish = resolve));

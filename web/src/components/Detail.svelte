@@ -606,8 +606,9 @@
     }
     const result = await downloadEpisode(model, d.imdbId, picked, episode, d.title);
     if (result === 'ready') notify?.('This episode is already ready to play.');
-    else if (result === 'unavailable')
-      notify?.('No downloadable release was found for that episode.');
+    else if (result === 'searching')
+      notify?.('No release yet. Den keeps searching and starts it when one turns up.');
+    else if (result === 'waiting') notify?.('Den will start this episode once it airs.');
     else if (result === 'uncertain')
       notify?.('Couldn’t start that download. Try again in a moment.');
   }

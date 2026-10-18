@@ -6,6 +6,7 @@
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
   import DownloadsPage from '../src/components/DownloadsPage.svelte';
+  import SeasonDownload from '../src/components/SeasonDownload.svelte';
   import '../src/app.css';
   import { downloadStill } from '../src/lib/downloadArtwork';
   import type { LibraryLog } from '../src/lib/log';
@@ -16,8 +17,19 @@
 
   const params = new URLSearchParams(location.search);
   const requestedPage = params.get('page');
+  // `?page=season`: a season's Download button over the Downloads page, with each episode's releases answered by the
+  // test at `/fixture-sources/<episode>`, so availability can change while the queue keeps trying.
   const page =
-    requestedPage === 'downloads' || requestedPage === 'artwork' ? requestedPage : 'title';
+    requestedPage === 'downloads' || requestedPage === 'artwork' || requestedPage === 'season'
+      ? requestedPage
+      : 'title';
+  const seasonEpisodes = [
+    { number: 1, name: 'Part 1', airDate: '2020-01-06' },
+    { number: 2, name: 'Part 2', airDate: '2020-01-13' },
+    { number: 3, name: 'Part 3', airDate: '2020-01-20' },
+    { number: 4, name: 'Part 4', airDate: '2020-01-27' },
+    { number: 5, name: 'Part 5', airDate: '2999-01-04' },
+  ];
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
   const content = fixtureContentServiceContext();
@@ -76,9 +88,12 @@
         setMounted: (mounted: boolean) => void;
         refreshIdentity: () => void;
         changeEpisode: () => void;
+        refresh: () => Promise<unknown>;
       };
     }
   ).downloadsFixture = {
+    // One pass of the download queue, as the library service's scheduler runs it.
+    refresh: () => library.model.refreshDownloads(),
     setActive: (active) => (artworkActive = active),
     setMounted: (mounted) => (artworkMounted = mounted),
     refreshIdentity: () => {
@@ -148,12 +163,17 @@
     device,
     ...(page === 'artwork' ? { refreshDownloads: async () => false } : {}),
     effects: {
-      resolve: async () => ({
-        sources: [
-          source('first.mkv', '/scout/p/first', 'First release'),
-          source('second.mkv', '/scout/p/second', 'Second release'),
-        ],
-      }),
+      resolve: async (title) =>
+        page === 'season'
+          ? ((await (await fetch(`/fixture-sources/${title.episode}`)).json()) as {
+              sources: ReturnType<typeof source>[];
+            })
+          : {
+              sources: [
+                source('first.mkv', '/scout/p/first', 'First release'),
+                source('second.mkv', '/scout/p/second', 'Second release'),
+              ],
+            },
     },
     downloadArtwork: async (target) =>
       target.type === 'tv'
@@ -190,6 +210,15 @@
   {#if page === 'artwork'}
     {#if artworkActive && artworkMounted}<DownloadsPage model={library.model} />{/if}
   {:else if ready && page === 'downloads'}
+    <DownloadsPage model={library.model} />
+  {:else if ready && page === 'season'}
+    <SeasonDownload
+      title={{ type: 'tv', id: 70742, title: 'Rebecka Martinsson' }}
+      imdb="tt6623682"
+      season={2}
+      episodes={seasonEpisodes}
+      model={library.model}
+    />
     <DownloadsPage model={library.model} />
   {:else if ready}
     <Detail

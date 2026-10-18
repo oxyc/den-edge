@@ -39,6 +39,8 @@ export interface DownloadTitle {
   stillPath?: string;
   originalLanguage?: string;
   preferredLanguage?: string;
+  /** When the content airs, ms: an episode asked for before it is out searches from then. */
+  airDate?: number;
 }
 
 /** A live download row, read. */
@@ -46,7 +48,13 @@ export interface Download {
   /** The row's settings name, `download:<content>`. */
   name: string;
   content: string;
+  /** The release being fetched; a wanted row's is empty (`wanted`). */
   release: DownloadRelease;
+  /**
+   * Asked for with nothing to fetch yet (§17 wanted row: `exhausted`, no `release`) — an episode a season download
+   * found no release for, or that hasn't aired. It is searched for again like any exhausted row.
+   */
+  wanted: boolean;
   title: DownloadTitle;
   queuedAt: number;
   /** The device that queued it: the device of `queuedAt`'s stamp. */
@@ -54,8 +62,8 @@ export interface Download {
   tried: string[];
   candidates?: number;
   exhausted: boolean;
-  /** When the last complete source pass ran out. Used to schedule a fresh search without hammering addons. */
-  exhaustedAt?: number;
+  /** How many fresh searches ran since it started (den-core `download_retry` waits longer after each). */
+  retries: number;
   announced: boolean;
   reported: boolean;
   reannounced: boolean;
@@ -124,12 +132,12 @@ export function readDownload(row: Row): Download | null {
   const release = json(values.release);
   const title = json(values.title);
   const queuedAt = int(values.queuedAt);
+  const wanted = !release && flag(values.exhausted);
   if (
-    !release ||
+    (!release && !wanted) ||
     !title ||
     queuedAt === undefined ||
-    typeof release.identity !== 'string' ||
-    typeof release.url !== 'string' ||
+    (release && (typeof release.identity !== 'string' || typeof release.url !== 'string')) ||
     (title.mediaType !== 'movie' && title.mediaType !== 'tv') ||
     typeof title.mediaId !== 'number'
   )
@@ -139,7 +147,10 @@ export function readDownload(row: Row): Download | null {
   return {
     name: row.name,
     content: row.name.slice(PREFIX.length),
-    release: release as unknown as DownloadRelease,
+    release: release
+      ? (release as unknown as DownloadRelease)
+      : { identity: '', label: '', url: '' },
+    wanted,
     title: {
       ...(title as unknown as DownloadTitle),
       title: typeof title.title === 'string' ? title.title : '',
@@ -149,7 +160,7 @@ export function readDownload(row: Row): Download | null {
     tried: tried && 'strings' in tried ? tried.strings : [],
     candidates: int(values.candidates),
     exhausted: flag(values.exhausted),
-    exhaustedAt: flag(values.exhausted) ? values.exhausted?.at[0] : undefined,
+    retries: int(values.retries) ?? 0,
     announced: flag(values.announced),
     reported: flag(values.reported),
     reannounced: flag(values.reannounced),
