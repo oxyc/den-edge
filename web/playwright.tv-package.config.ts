@@ -14,6 +14,7 @@ export default defineConfig({
     viewport: { width: 1920, height: 1080 },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH },
   },
   webServer: {
     command: `DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den-tv-api.example.invalid DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:tizen && E2E_PORT=${E2E_PORT} DEN_TV_OUT_DIR=${output} node scripts/tv-static-preview.mjs`,

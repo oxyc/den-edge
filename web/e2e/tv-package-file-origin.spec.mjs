@@ -4,7 +4,12 @@ import { resolve } from 'node:path';
 import { E2E_PORT } from './base-url.mjs';
 
 // This is a browser URL/history regression only. It does not prove Samsung Web Workers, AVPlay, or hardware behavior.
-test.use({ launchOptions: { args: ['--allow-file-access-from-files'] } });
+test.use({
+  launchOptions: {
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--allow-file-access-from-files'],
+  },
+});
 const entry = pathToFileURL(
   resolve(import.meta.dirname, '..', `dist-tv-tizen-package-e2e-${E2E_PORT}`, 'index.html'),
 ).href;

@@ -236,9 +236,10 @@ build measured **+56 bytes initial gzip and +149 bytes total gzip**, with no
 additional browser asset chunk or TV module (80 JS/CSS assets in each build).
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
-An earlier five-pair loopback Chromium comparison against `a045b842` measured Home readiness medians of 174.9 ms
-baseline / 183.1 ms current (ranges 135.6–220.2 / 141.0–196.2 ms), and Search result
-medians of 96.3 / 61.8 ms (ranges 39.4–108.8 / 36.5–111.5 ms). These overlapping,
+A five-pair loopback Chromium comparison against the same `3fccf42` baseline,
+after the other local test suites finished, measured Home readiness medians of
+126.2 ms baseline / 112.9 ms current (ranges 97.5–139.4 / 96.4–128.6 ms), and Search
+result medians of 34.8 / 36.1 ms (ranges 33.6–37.8 / 34.8–37.1 ms). These overlapping,
 variable samples do not establish a hardware speedup or a stable timing regression.
 The script labels initial-navigation paint metrics separately from interaction
 readiness; resource snapshots are taken at those milestones, not after all idle
