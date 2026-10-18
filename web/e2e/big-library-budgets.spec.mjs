@@ -1,6 +1,8 @@
 // Time-to-content budgets on a household the size of a long-lived one (`big-library.mjs`), as a phone opens it again:
 // WebKit at an iPhone's size, and Chromium at a phone's size with its page CPU slowed four times. Each surface is a
-// returning visit, so what is measured is a household's every day rather than its first sync.
+// returning visit, so what is measured is a household's every day rather than its first sync. It runs against the
+// production build, alone (`playwright.budgets.config.ts`, `npm run test:e2e:budgets`, CI's `e2e budgets` job), never
+// in the dev-server shards: there the time was the dev server's five hundred modules and the shards beside it.
 //
 // Two budgets per surface. Time to its content (the billboard's description, a personal row's first poster, the
 // episode list, Settings' heading), generous enough for CI. And the IndexedDB transactions its library Worker makes:
@@ -8,8 +10,8 @@
 // hundreds of them — one per title the library names — kept the phone's billboard text, rows and episode lists waiting
 // for seconds while a desktop drew them at once. That count is what a lab machine can measure of the phone's cost.
 //
-// A new surface: add an entry to SURFACES with the path, what "ready" means there (a predicate over `window.__ready`,
-// which `markReady` fills from the page as it draws), and its budgets.
+// A new surface: add an entry to SURFACES with the path and the `markReady` fields that mean it has drawn (adding
+// one to `markReady` if none fits).
 
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { existsSync } from 'node:fs';

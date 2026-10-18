@@ -152,7 +152,15 @@ export default defineConfig({
   },
   // Keep route styles beside their already-split route chunks. Settings, Player and other uncommon screens are
   // intent-loaded, so Home should not transfer or parse their CSS either.
-  build: { target: 'es2022', cssCodeSplit: true },
+  build: {
+    target: 'es2022',
+    cssCodeSplit: true,
+    // The production build the time budgets run against (`playwright.budgets.config.ts`) also carries the page that
+    // seeds their household with the app's own code (`test/seed-library.html`). Never in a release build.
+    ...(process.env.DEN_E2E_SEED === '1'
+      ? { rolldownOptions: { input: { index: 'index.html', seed: 'test/seed-library.html' } } }
+      : {}),
+  },
   test: {
     include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     setupFiles: ['test/setup-sync.ts'],
