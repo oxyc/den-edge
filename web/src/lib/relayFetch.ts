@@ -126,6 +126,32 @@ export function hostGrantsFetch(membership: LibraryRelayMembership): typeof fetc
   };
 }
 
+/**
+ * A fetcher that proves one household's membership on the assistant routes (approving a connection, listing them,
+ * the drop-box key, draining and acknowledging the queue). On a household split into profiles the singleton
+ * credential may be Owner's, while an assistant connection is the household's: it is approved for, and queues to,
+ * the household's library. Every other call is plain `fetch`.
+ */
+export function householdAssistantFetch(membership: LibraryRelayMembership): typeof fetch {
+  const claim = `${membership.libraryId}:${membership.memberToken}`;
+  return async (input, init) => {
+    const href =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    const url = ours(href);
+    if (!url || !(OAUTH.test(url.pathname) || ASSISTANT.test(url.pathname)))
+      return fetch(input, init);
+    const inherited = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+    const headers = new Headers(inherited);
+    headers.delete(GRANT_HEADER);
+    headers.set(MEMBER_HEADER, claim);
+    return fetch(input, { ...init, headers });
+  };
+}
+
 /** Remember a grant's secret, so calls to its `~<gid>` addons can carry it. */
 export function rememberGrant(gid: string, secret: string): void {
   if (grantSecrets.get(gid) === secret) return;

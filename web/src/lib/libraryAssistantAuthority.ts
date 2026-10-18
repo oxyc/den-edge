@@ -8,6 +8,7 @@ import { hex } from './crypto';
 import type { LibraryAuthorityCommandResult, LibrarySelectionScope } from './libraryServiceCore';
 import type {
   AssistantApplied,
+  AssistantConnection,
   AssistantGrantView,
   AssistantNeeds,
   LibraryCommand,
@@ -25,6 +26,8 @@ export const READ_ROW = 'assistant-read';
 export const PLAY_ROW = 'assistant-play';
 /** The rows a grant's id keys, renewed and revoked together. */
 const GRANT_ROWS = [GRANTS_ROW, READ_ROW, PLAY_ROW] as const;
+/** The connection rows: whole household rows once a household is split into profiles (profiles-v1 §6.1). */
+export const CONNECTION_ROWS = [DROPBOX_ROW, ...GRANT_ROWS] as const;
 /** The household's preferences, whose hide rules a projection carries (§15). */
 const PREFS_ROW = 'prefs';
 
@@ -113,9 +116,16 @@ export interface AssistantPort {
   /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
   inputs(): string;
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
-   * proof. */
-  putProjection(grant: string, set: string, parts: string[]): Promise<boolean>;
-  deleteProjection(grant: string): Promise<boolean>;
+   * proof: this library's, or `member` (a lent household connection's). */
+  putProjection(
+    grant: string,
+    set: string,
+    parts: string[],
+    member?: AssistantConnection['member'],
+  ): Promise<boolean>;
+  deleteProjection(grant: string, member?: AssistantConnection['member']): Promise<boolean>;
+  /** This library's member proof, or null while den-edge does not know it as a member. */
+  membership(): Promise<AssistantConnection['member'] | null>;
   loadRecords(): Promise<AssistantRecords | null | undefined>;
   saveRecords(records: AssistantRecords): Promise<void>;
   now(): number;
@@ -224,8 +234,39 @@ export class LibraryAssistantAuthority {
 
   constructor(private readonly port: AssistantPort) {}
 
-  #row(name: string): SettingsRow | null {
+  /**
+   * A row of this library's, or, for a connection row, the lent household's when there is one: Owner's service then
+   * builds and applies with the household's connection, and with its own documents, prefs and applied row.
+   */
+  #row(name: string, lent: AssistantConnection | null = null): SettingsRow | null {
+    if (lent && (CONNECTION_ROWS as readonly string[]).includes(name))
+      return (lent.rows.find((row) => row.name === name) as SettingsRow | undefined) ?? null;
     return this.port.settings(name) ?? null;
+  }
+
+  /** The grants this device knows revoked: its own records', and a lent household's. */
+  #revoked(records: AssistantRecords, lent: AssistantConnection | null): string[] {
+    return lent ? [...new Set([...records.revoked, ...lent.revoked])].sort() : records.revoked;
+  }
+
+  /**
+   * This library's connection, to lend Owner's library service on a household split into profiles: read to the log's
+   * head, with every revocation its rows show joined to this device's records first. Null while den-edge does not
+   * know this library as a member.
+   */
+  async lend(): Promise<AssistantConnection | null> {
+    await this.port.refresh();
+    if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
+      await this.grants();
+    const member = await this.port.membership();
+    if (!member) return null;
+    const rows = CONNECTION_ROWS.flatMap((name) => {
+      const row = this.#row(name);
+      return row
+        ? [{ kind: row.kind, schema: row.schema, name: row.name, values: row.values }]
+        : [];
+    });
+    return { member, rows, revoked: (await this.#load()).revoked };
   }
 
   async #load(): Promise<AssistantRecords> {
@@ -261,32 +302,32 @@ export class LibraryAssistantAuthority {
   }
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
-  dropbox(): DropboxKey | null {
+  dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
     return assistantPolicy<DropboxKey | null>({
       op: 'assistant_dropbox',
-      assistant: this.#row(DROPBOX_ROW),
+      assistant: this.#row(DROPBOX_ROW, lent),
     });
   }
 
-  #list(records: AssistantRecords): AssistantGrantList {
+  #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {
     return assistantPolicy<AssistantGrantList>({
       op: 'assistant_grants',
-      grants: this.#row(GRANTS_ROW),
-      read: this.#row(READ_ROW),
-      play: this.#row(PLAY_ROW),
-      localRevoked: records.revoked,
+      grants: this.#row(GRANTS_ROW, lent),
+      read: this.#row(READ_ROW, lent),
+      play: this.#row(PLAY_ROW, lent),
+      localRevoked: this.#revoked(records, lent),
       now: this.port.now(),
     });
   }
 
   /**
-   * Every grant, read and play record the library's rows hold, for Settings; any shown revoked joins this device's
-   * revoked set.
+   * Every grant, read and play record the library's rows hold (or a lent household's), for Settings; any shown
+   * revoked joins this device's revoked set.
    */
-  async grants(): Promise<AssistantGrantList> {
+  async grants(lent: AssistantConnection | null = null): Promise<AssistantGrantList> {
     await ensureAssistantPolicy();
     const records = await this.#load();
-    const listed = this.#list(records);
+    const listed = this.#list(records, lent);
     const revoked = [...listed.grants, ...listed.reads, ...listed.plays]
       .filter((g) => g.state === 'revoked')
       .map((g) => g.grant);
@@ -456,11 +497,12 @@ export class LibraryAssistantAuthority {
   }
 
   /** Ask den-edge to drop a grant's projection; once it has, this device never asks again. */
-  async #drop(grant: string): Promise<void> {
+  async #drop(grant: string, lent: AssistantConnection | null = null): Promise<void> {
     if (this.#dropping.has(grant)) return;
     this.#dropping.add(grant);
     try {
-      if (await this.port.deleteProjection(grant)) await this.#remember({ dropped: [grant] });
+      if (await this.port.deleteProjection(grant, lent?.member))
+        await this.#remember({ dropped: [grant] });
     } finally {
       this.#dropping.delete(grant);
     }
@@ -480,12 +522,18 @@ export class LibraryAssistantAuthority {
    * have stood for 30 s) or 15 minutes have passed; ask den-edge once to drop every dead grant's. A projection is
    * rebuilt only when its inputs changed or something is due, so a quiet library's tick builds nothing; and nothing is
    * built at all for a library with no read records. Which grants were sent.
+   *
+   * `lent`: a split household's connection (§15): its library id, read and grants rows and revoked set, and its member
+   * proof to send with, around this library's lists, prefs and head.
    */
-  async publish(): Promise<string[]> {
-    const read = this.#row(READ_ROW);
+  async publish(lent: AssistantConnection | null = null): Promise<string[]> {
+    const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
-    const inputs = this.port.inputs();
+    // A change in either log is a change of the inputs.
+    const inputs = lent
+      ? `${this.port.inputs()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
+      : this.port.inputs();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     await ensureAssistantPolicy();
     const records = await this.#load();
@@ -493,15 +541,15 @@ export class LibraryAssistantAuthority {
     try {
       built = assistantPolicy<ProjectionAnswer>({
         op: 'assistant_projection',
-        library: this.port.libraryId,
+        library: lent?.member.libraryId ?? this.port.libraryId,
         documents: this.port.documents(),
         layouts: this.port.layouts(),
         head: this.port.head(),
         read,
-        grants: this.#row(GRANTS_ROW),
+        grants: this.#row(GRANTS_ROW, lent),
         // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
         prefs: this.#row(PREFS_ROW),
-        localRevoked: records.revoked,
+        localRevoked: this.#revoked(records, lent),
         random: this.port.random(),
         now,
       });
@@ -524,7 +572,10 @@ export class LibraryAssistantAuthority {
       const last = this.#published.get(entry.grant);
       const changed = last?.digest !== built.digest;
       const due = !last || (changed && now >= settleAt) || now - last.at >= HEARTBEAT_MS;
-      if (due && (await this.port.putProjection(entry.grant, entry.set, entry.parts))) {
+      if (
+        due &&
+        (await this.port.putProjection(entry.grant, entry.set, entry.parts, lent?.member))
+      ) {
         this.#published.set(entry.grant, { digest: built.digest, at: now });
         sent.push(entry.grant);
       }
@@ -538,25 +589,29 @@ export class LibraryAssistantAuthority {
     }
     for (const grant of built.delete) {
       this.#published.delete(grant);
-      if (!records.dropped.includes(grant)) await this.#drop(grant);
+      if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
     }
     this.#dueAt = dueAt;
     return sent;
   }
 
-  /** Den Web drains only the library's queue: a play found there is refused (`wrong_queue`), never applied here. */
-  #open(sealed: string, records: AssistantRecords): Opened {
+  /**
+   * Den Web drains only the library's queue: a play found there is refused (`wrong_queue`), never applied here. A
+   * lent household's connection opens it (its library id, drop-box key, grants and play rows); what was applied is
+   * always this library's own row.
+   */
+  #open(sealed: string, records: AssistantRecords, lent: AssistantConnection | null): Opened {
     return assistantPolicy<Opened>({
       op: 'assistant_open',
-      library: this.port.libraryId,
+      library: lent?.member.libraryId ?? this.port.libraryId,
       device: this.port.device,
       sealed,
       queue: 'library',
-      assistant: this.#row(DROPBOX_ROW),
-      grants: this.#row(GRANTS_ROW),
-      play: this.#row(PLAY_ROW),
+      assistant: this.#row(DROPBOX_ROW, lent),
+      grants: this.#row(GRANTS_ROW, lent),
+      play: this.#row(PLAY_ROW, lent),
       applied: this.#row(APPLIED_ROW),
-      localRevoked: records.revoked,
+      localRevoked: this.#revoked(records, lent),
       localApplied: records.applied,
       now: this.port.now(),
     });
@@ -568,8 +623,14 @@ export class LibraryAssistantAuthority {
    * accepted ones performed and recorded. Every request handled is acknowledged, except `from_future`, which stays
    * queued until the clocks agree; a request that could not be performed or recorded stops the drain there, to be
    * delivered again.
+   *
+   * `lent`: a split household's connection, whose queue this is; each accepted request is performed on this
+   * library, Owner's, which assistant activity targets (profiles-v1 §4), and recorded in its applied row.
    */
-  async apply(messages: ReadonlyArray<{ seq: number; sealed: string }>): Promise<{
+  async apply(
+    messages: ReadonlyArray<{ seq: number; sealed: string }>,
+    lent: AssistantConnection | null = null,
+  ): Promise<{
     results: AssistantApplied[];
     ack: number | null;
     dropbox: DropboxKey | null;
@@ -578,11 +639,11 @@ export class LibraryAssistantAuthority {
     await ensureAssistantPolicy();
     await this.port.refresh();
     // Revocations in the row as read join this device's set before anything is opened against it.
-    await this.grants();
+    await this.grants(lent);
     let records = await this.#load();
     const order = messages
       .map((message) => {
-        const opened = this.#open(message.sealed, records);
+        const opened = this.#open(message.sealed, records, lent);
         return { ...message, at: 'accept' in opened ? opened.accept.at : null };
       })
       // A refused request has no `at` to learn and changes nothing: those go first, by `seq`.
@@ -593,7 +654,7 @@ export class LibraryAssistantAuthority {
     let held = Infinity;
     for (const [index, { seq, sealed }] of order.entries()) {
       // Opened again: an earlier request in this drain may have changed what this one is checked against.
-      const opened = this.#open(sealed, records);
+      const opened = this.#open(sealed, records, lent);
       if ('reject' in opened) {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
@@ -635,7 +696,7 @@ export class LibraryAssistantAuthority {
     return {
       results,
       ack: handled.length ? Math.max(...handled) : null,
-      dropbox: this.dropbox(),
+      dropbox: this.dropbox(lent),
       affected,
     };
   }

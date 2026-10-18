@@ -2,6 +2,7 @@ import {
   LIBRARY_SERVICE_PROTOCOL,
   LIBRARY_SERVICE_WIRE_LIMITS,
   type AssistantApplied,
+  type AssistantConnection,
   type AssistantGrantView,
   type ContinueItem,
   type ConnectionsView,
@@ -771,6 +772,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
   if (value.kind === 'history.export') return exact(value, ['kind']);
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
+  if (value.kind === 'assistant.connection') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.status') return exact(value, ['kind']);
   if (value.kind === 'profile-create.status') return exact(value, ['kind']);
   if (value.kind === 'profile-migration.observe') return exact(value, ['kind']);
@@ -934,7 +936,9 @@ function task(value: unknown): value is LibraryTask {
     case 'assistant.revoke':
       return exact(value, ['kind', 'grant']) && hexId(value.grant);
     case 'assistant.publish':
-      return exact(value, ['kind']);
+      return (
+        exact(value, ['kind', 'connection']) && optional(value.connection, assistantConnection)
+      );
     case 'assistant.renew':
       return (
         exact(value, ['kind', 'grants']) &&
@@ -942,7 +946,8 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'assistant.apply':
       return (
-        exact(value, ['kind', 'messages']) &&
+        exact(value, ['kind', 'messages', 'connection']) &&
+        optional(value.connection, assistantConnection) &&
         list(
           value.messages,
           (message): message is { seq: number; sealed: string } =>
@@ -1850,6 +1855,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (value.kind === 'relay.membership') {
     return exact(value, ['kind', 'capability']) && relayMembership(value.capability);
   }
+  if (value.kind === 'assistant.connection')
+    return exact(value, ['kind', 'connection']) && nullable(value.connection, assistantConnection);
   if (value.kind === 'key-reset.prepare')
     return (
       exact(value, ['kind', 'destinationLibraryKey', 'device']) &&
@@ -2030,6 +2037,53 @@ function relayMembership(
       /^[0-9a-f]{32}$/.test(candidate.libraryId) &&
       typeof candidate.memberToken === 'string' &&
       /^[0-9a-f]{64}$/.test(candidate.memberToken),
+  );
+}
+
+/** The assistant connection rows a household lends (`AssistantConnection`), each at most once. */
+const ASSISTANT_CONNECTION_ROWS = [
+  'assistant',
+  'assistant-grants',
+  'assistant-read',
+  'assistant-play',
+];
+
+function assistantConnection(value: unknown): value is AssistantConnection {
+  return (
+    record(value) &&
+    exact(value, ['member', 'rows', 'revoked']) &&
+    value.member !== null &&
+    relayMembership(value.member) &&
+    list(
+      value.rows,
+      (row): row is AssistantConnection['rows'][number] =>
+        record(row) &&
+        exact(row, ['kind', 'schema', 'name', 'values']) &&
+        row.kind === 'set' &&
+        integer(row.schema) &&
+        typeof row.name === 'string' &&
+        ASSISTANT_CONNECTION_ROWS.includes(row.name) &&
+        assistantConnectionValues(row.values),
+      ASSISTANT_CONNECTION_ROWS.length,
+    ) &&
+    unique(value.rows, (row) => row.name) &&
+    list(value.revoked, hexId, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+  );
+}
+
+/** A connection row's `values`: each setting stamped, as den-core reads it; bounded, not interpreted here. */
+function assistantConnectionValues(value: unknown): value is StoredPreferenceValues {
+  return (
+    record(value) &&
+    Object.keys(value).length <= LIBRARY_SERVICE_WIRE_LIMITS.collectionItems &&
+    Object.entries(value).every(
+      ([key, stamped]) =>
+        boundedText(key, 256) &&
+        record(stamped) &&
+        'value' in stamped &&
+        Array.isArray(stamped.at) &&
+        JSON.stringify(stamped).length <= 16_384,
+    )
   );
 }
 

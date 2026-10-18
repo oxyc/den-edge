@@ -36,12 +36,16 @@
     rememberLocalLibraryMerge,
     settleLocalLibraryMerge,
   } from './lib/localLibrary';
-  import type { KeyResetOutcome, ProfileDirectoryView } from './lib/libraryServiceProtocol';
+  import type {
+    AssistantConnection,
+    KeyResetOutcome,
+    ProfileDirectoryView,
+  } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { libraryCredentialId } from './lib/relayFetch';
+  import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
@@ -1213,21 +1217,42 @@
       .catch(() => {});
   });
 
+  // On a household split into profiles an assistant connection is the household's (profiles-v1 §6.1): its rows are
+  // written to the household's library and approved as its member, so den-mcp queues to and reads from the household.
+  // Owner's library, which assistant activity targets (§4), publishes its lists and applies the requests with the
+  // connection the household lends it (assistant-v1 §15). Null for a household that was never split.
+  const assistantHousehold = $derived.by(() => {
+    const model = implicitAssistantModel;
+    const control = model ? session.household.ownerSettingsModel() : null;
+    return control && control !== model ? control : null;
+  });
+
   // Assistants (den-spec wire/assistant-v1.md): while a member's library is open here, the consent dialog may write
   // grants into it. A library kept only in this browser is no member's on den-edge, and has none.
   $effect(() => {
     const model = implicitAssistantModel;
     if (!model) return;
+    const household = assistantHousehold;
+    const consent = household ?? model;
     let open = true;
-    void model.ready.then(
-      () => {
-        if (open) assistantLibrary.model = model;
-      },
-      () => {},
-    );
+    void Promise.all([model.ready, consent.ready])
+      .then(() => household?.relayMembership() ?? null)
+      .then(
+        (membership) => {
+          if (!open) return;
+          // A household den-edge does not know as a member yet could not be approved for: no consent is offered.
+          if (household && !membership) return;
+          assistantLibrary.model = consent;
+          assistantLibrary.fetch = membership ? householdAssistantFetch(membership) : null;
+        },
+        () => {},
+      );
     return () => {
       open = false;
-      if (assistantLibrary.model === model) assistantLibrary.model = null;
+      if (assistantLibrary.model === consent) {
+        assistantLibrary.model = null;
+        assistantLibrary.fetch = null;
+      }
     };
   });
 
@@ -1235,27 +1260,63 @@
   // do, and pay nothing for it): with a live grant to write, requests an assistant queued are drained, applied through
   // the tap path and told in a quiet toast; with a live read record, the projection is published (§15); with either,
   // grants den-edge still lists are renewed. Each starts and stops as consent or revocation, here or on another
-  // device, changes the rows. The code itself is fetched only then.
+  // device, changes the rows. The code itself is fetched only then. On a split household the rows that say so are
+  // the household's, and so are the queue, the projection's library and the grants renewed.
   const memberModel = $derived(implicitAssistantModel);
-  const drainNeeded = $derived(memberModel?.settings.value?.assistant.write ?? false);
-  const publishNeeded = $derived(memberModel?.settings.value?.assistant.read ?? false);
+  const connectionModel = $derived(assistantHousehold ?? memberModel);
+  const drainNeeded = $derived(connectionModel?.settings.value?.assistant.write ?? false);
+  const publishNeeded = $derived(connectionModel?.settings.value?.assistant.read ?? false);
   const renewNeeded = $derived(drainNeeded || publishNeeded);
+
+  interface AssistantWork {
+    /** The library assistant activity targets: the household's own, or Owner's on a split household. */
+    model: LibraryModel;
+    /** The split household whose connection it is, or null. */
+    household: LibraryModel | null;
+    /** The library the connection is for, which names its Web Locks. */
+    libraryId: string;
+    /** Proves the household's membership on the assistant routes; undefined for the page's own credential. */
+    fetchImpl?: typeof fetch;
+    /** What `model` publishes and applies with: the household's connection, read again each time it is asked. */
+    lend(): Promise<AssistantConnection | undefined>;
+  }
 
   function whileNeeded(
     needed: boolean,
     run: (
       assistant: typeof import('./lib/assistant'),
-      model: LibraryModel,
+      work: AssistantWork,
       signal: AbortSignal,
     ) => void,
   ) {
     const current = session;
     const model = memberModel;
+    const household = assistantHousehold;
     if (!needed || !model) return;
     const stop = new AbortController();
-    void import('./lib/assistant').then(
-      (assistant) => {
-        if (!stop.signal.aborted && current === session) run(assistant, model, stop.signal);
+    void Promise.all([import('./lib/assistant'), household?.relayMembership() ?? null]).then(
+      ([assistant, membership]) => {
+        if (stop.signal.aborted || current !== session) return;
+        if (household && !membership) {
+          console.warn('den: the household is not a member on den-edge yet; its assistants wait');
+          return;
+        }
+        run(
+          assistant,
+          {
+            model,
+            household,
+            libraryId: membership?.libraryId ?? libraryCredentialId() ?? 'library',
+            ...(membership ? { fetchImpl: householdAssistantFetch(membership) } : {}),
+            lend: async () => {
+              if (!household) return undefined;
+              const connection = await household.assistantConnection();
+              if (!connection) throw new Error('the household is not a member on den-edge');
+              return connection;
+            },
+          },
+          stop.signal,
+        );
       },
       (error: unknown) => console.warn('den: the assistant connection could not be loaded', error),
     );
@@ -1263,9 +1324,12 @@
   }
 
   $effect(() =>
-    whileNeeded(renewNeeded, ({ renewListed }, model, signal) => {
+    whileNeeded(renewNeeded, ({ renewListed }, work, signal) => {
       const renew = () =>
-        void renewListed((grants) => model.renewAssistant(grants)).catch((error: unknown) =>
+        void renewListed(
+          (grants) => (work.household ?? work.model).renewAssistant(grants),
+          work.fetchImpl,
+        ).catch((error: unknown) =>
           console.warn('den: assistant grants could not be renewed', error),
         );
       renew();
@@ -1276,12 +1340,13 @@
 
   $effect(() => {
     const current = session;
-    return whileNeeded(drainNeeded, ({ drainWhileOpen }, model, signal) => {
+    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
       void drainWhileOpen(
         {
-          libraryId: libraryCredentialId() ?? 'library',
-          apply: (messages) => model.applyAssistant(messages),
+          libraryId: work.libraryId,
+          apply: async (messages) => work.model.applyAssistant(messages, await work.lend()),
           applied: (result) => void announceAssistant(current, result),
+          ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
         },
         signal,
       );
@@ -1289,11 +1354,11 @@
   });
 
   $effect(() =>
-    whileNeeded(publishNeeded, ({ publishWhileOpen }, model, signal) => {
+    whileNeeded(publishNeeded, ({ publishWhileOpen }, work, signal) => {
       void publishWhileOpen(
         {
-          libraryId: libraryCredentialId() ?? 'library',
-          publish: () => model.publishAssistant(),
+          libraryId: work.libraryId,
+          publish: async () => work.model.publishAssistant(await work.lend()),
         },
         signal,
       );

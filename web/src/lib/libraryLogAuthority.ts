@@ -497,17 +497,27 @@ export class LibraryLogAuthority {
         ),
       head: () => this.#log.logHead,
       inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
-      putProjection: (grant, set, parts) =>
-        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { set, parts }),
-      deleteProjection: (grant) => this.#memberSend(`/assistant/projection/${grant}`, 'DELETE'),
+      putProjection: (grant, set, parts, member) =>
+        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { set, parts }, member),
+      deleteProjection: (grant, member) =>
+        this.#memberSend(`/assistant/projection/${grant}`, 'DELETE', undefined, member),
+      membership: () => this.#log.relayMembership(),
       now: () => Date.now(),
       random: randomHex,
     });
   }
 
-  /** A member route of den-edge's (`/assistant/…`), with this library's proof: whether it answered success. */
-  async #memberSend(path: string, method: string, body?: unknown): Promise<boolean> {
-    const member = await this.#log.relayMembership();
+  /**
+   * A member route of den-edge's (`/assistant/…`), with this library's proof, or a lent household connection's:
+   * whether it answered success.
+   */
+  async #memberSend(
+    path: string,
+    method: string,
+    body?: unknown,
+    lent?: { libraryId: string; memberToken: string },
+  ): Promise<boolean> {
+    const member = lent ?? (await this.#log.relayMembership());
     if (!member) return false;
     try {
       const res = await this.#fetch(path, {
@@ -716,6 +726,11 @@ export class LibraryLogAuthority {
         return this.#libraryMetadata(query.titles);
       case 'assistant.grants':
         return { kind: 'assistant.grants', ...(await this.#assistant.grants()) };
+      case 'assistant.connection':
+        return {
+          kind: 'assistant.connection',
+          connection: this.#options.mode === 'local' ? null : await this.#assistant.lend(),
+        };
       case 'download.refresh':
         return {
           kind: 'download.refresh',
@@ -1276,7 +1291,7 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.publish',
-            published: (await this.#assistant.publish()).length,
+            published: (await this.#assistant.publish(task.connection ?? null)).length,
           },
           affected: [],
         };
@@ -1291,7 +1306,10 @@ export class LibraryLogAuthority {
           affected: [{ kind: 'settings' }],
         };
       case 'assistant.apply': {
-        const { results, ack, dropbox, affected } = await this.#assistant.apply(task.messages);
+        const { results, ack, dropbox, affected } = await this.#assistant.apply(
+          task.messages,
+          task.connection ?? null,
+        );
         return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
       }
       default:

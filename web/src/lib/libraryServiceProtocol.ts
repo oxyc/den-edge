@@ -639,12 +639,22 @@ export type LibraryTask =
    */
   | { kind: 'assistant.consent'; client: string; write: boolean; read: boolean }
   | { kind: 'assistant.revoke'; grant: string }
-  /** Build every live read grant's projection and send what is due (§15). */
-  | { kind: 'assistant.publish' }
+  /**
+   * Build every live read grant's projection and send what is due (§15). `connection`: a split household's, which
+   * Owner's library publishes its lists for.
+   */
+  | { kind: 'assistant.publish'; connection?: AssistantConnection }
   /** The grants whose connection den-edge still lists, kept from expiring (at most daily). */
   | { kind: 'assistant.renew'; grants: string[] }
-  /** A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. */
-  | { kind: 'assistant.apply'; messages: Array<{ seq: number; sealed: string }> }
+  /**
+   * A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. `connection`: a split
+   * household's, whose queue it is; Owner's library applies it.
+   */
+  | {
+      kind: 'assistant.apply';
+      messages: Array<{ seq: number; sealed: string }>;
+      connection?: AssistantConnection;
+    }
   | {
       kind: 'profile-migration.enable';
       attempt: string;
@@ -694,6 +704,18 @@ export type LibraryTask =
       recoveryAttempt: string;
       successorKey: string | null;
     };
+
+/**
+ * A household's assistant connection, lent by its library service to Owner's on a household split into profiles
+ * (assistant-v1 §15, profiles-v1 §4 and §6.1): the member proof of the library the connection was made for, its
+ * connection rows (`set:assistant`, `-grants`, `-read`, `-play`) as the household's service read them, and the grants
+ * the household's records hold revoked on this device. The page passes it on and reads none of it.
+ */
+export interface AssistantConnection {
+  member: { libraryId: string; memberToken: string };
+  rows: Array<{ kind: 'set'; schema: number; name: string; values: StoredPreferenceValues }>;
+  revoked: string[];
+}
 
 /** A grant as the library's grants row holds it (`assistant_grants`), for Settings. */
 export interface AssistantGrantView {
@@ -866,6 +888,8 @@ export type LibraryQuery =
   | { kind: 'library.metadata'; titles: TitleRef[] }
   /** The grants the library's row holds, whatever their state, for Settings › Assistants. */
   | { kind: 'assistant.grants' }
+  /** The household's assistant connection, to lend Owner's library on a household split into profiles. */
+  | { kind: 'assistant.connection' }
   | { kind: 'profile-migration.status' }
   | { kind: 'profile-migration.observe' }
   | { kind: 'profile-migration.observe-recovery'; attempt: string | null }
@@ -966,7 +990,8 @@ export type LibraryQueryResult =
       grants: AssistantGrantView[];
       reads: AssistantGrantView[];
       plays: AssistantGrantView[];
-    };
+    }
+  | { kind: 'assistant.connection'; connection: AssistantConnection | null };
 
 export type LibraryObservation =
   | {

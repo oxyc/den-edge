@@ -1,4 +1,6 @@
+import { createDecipheriv } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { inflateRawSync } from 'node:zlib';
 import policyCases from '../vendor/den-core/policy-v1.json';
 import { expect, test, vi } from 'vitest';
 import {
@@ -52,6 +54,8 @@ function library() {
     /** den-edge's projections by grant, and every PUT and DELETE it was sent, in order. */
     projections: new Map<string, { set: string; parts: string[] }>(),
     sent: [] as string[],
+    /** Whose member proof each PUT and DELETE went with: a lent connection's library id, or null for its own. */
+    members: [] as Array<string | null>,
     patch(name: string, changes: Record<string, ConfigValue | null>) {
       const base = rows.get(name) ?? { kind: 'set' as const, schema: 2, name, values: {} };
       const at: [number, number, string] = [fixed.now, ++tick, 'device'];
@@ -106,16 +110,19 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     layouts: () => ({}),
     head: () => 7,
     inputs: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
-    putProjection: async (grant, set, parts) => {
+    putProjection: async (grant, set, parts, member) => {
       shared.projections.set(grant, { set, parts });
       shared.sent.push(`put:${grant}`);
+      shared.members.push(member?.libraryId ?? null);
       return true;
     },
-    deleteProjection: async (grant) => {
+    deleteProjection: async (grant, member) => {
       shared.projections.delete(grant);
       shared.sent.push(`delete:${grant}`);
+      shared.members.push(member?.libraryId ?? null);
       return true;
     },
+    membership: async () => ({ libraryId: fixed.library, memberToken: 'a'.repeat(64) }),
     loadRecords: async () => records && structuredClone(records),
     saveRecords: async (next) => void (records = structuredClone(next)),
     now: () => now,
@@ -572,4 +579,127 @@ test('a library with no read records builds no projection at all', async () => {
   const { authority } = device(shared, []);
   expect(await authority.publish()).toEqual([]);
   expect(shared.sent).toEqual([]);
+});
+
+// ---- a household split into profiles (§15, profiles-v1 §4 and §6.1): the connection rows are the household's, the
+// lists and the applied row Owner's. The household is the vectors' library; Owner's library is another.
+
+const OWNER_LIBRARY = 'f'.repeat(32);
+
+/** Owner's library and a device of its, and the connection the household's service lends it. */
+async function owner(household: Library) {
+  const lend = () => device(household, []).authority.lend();
+  const shared = library();
+  return { shared, lend, ...device(shared, [], { libraryId: OWNER_LIBRARY }) };
+}
+
+/** A projection opened as den-mcp opens it (§15 *Sealing in parts*): the compact form's JSON. */
+function openProjection(
+  readKey: string,
+  library: string,
+  grant: string,
+  sealed: { set: string; parts: string[] },
+) {
+  const key = Buffer.from(readKey, 'base64url');
+  const chunks = sealed.parts.map((part, index) => {
+    const bytes = Buffer.from(part, 'base64url');
+    const aad = Buffer.from(
+      ['den/assistant/projection/v1', library, grant, sealed.set, index, sealed.parts.length].join(
+        '\0',
+      ),
+    );
+    const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+    decipher.setAAD(aad);
+    decipher.setAuthTag(bytes.subarray(-16));
+    return Buffer.concat([decipher.update(bytes.subarray(12, -16)), decipher.final()]);
+  });
+  return JSON.parse(inflateRawSync(Buffer.concat(chunks)).toString('utf8')) as {
+    library: string;
+    titles: Array<[string, number]>;
+    watchlist: Array<[number, number | null]>;
+  };
+}
+
+test('on a split household Owner applies the household’s queue, and records it in its own applied row', async () => {
+  const household = await consented();
+  const split = await owner(household);
+  const sealed = fixed.request.sealed;
+  // Owner's library holds no connection of its own: nothing opens there.
+  expect((await split.authority.apply([{ seq: 7, sealed }])).results[0]).toMatchObject({
+    outcome: 'rejected',
+  });
+  expect(split.commands).toEqual([]);
+
+  const lent = await split.lend();
+  expect(lent?.member.libraryId).toBe(fixed.library);
+  const outcome = await split.authority.apply([{ seq: 8, sealed }], lent);
+  expect(outcome.results).toEqual([
+    expect.objectContaining({ seq: 8, outcome: 'accepted', op: 'seen' }),
+  ]);
+  expect(outcome.ack).toBe(8);
+  // The household's drop-box key is the one den-edge keeps for its queue.
+  expect(outcome.dropbox).toEqual({
+    kid: fixed.keys.dropbox!.kid,
+    public: fixed.keys.dropbox!.public,
+  });
+  // Performed on Owner's library, with the applied entry in Owner's row and nothing written to the household.
+  expect(split.commands.map((c) => c.command.kind)).toEqual(['episode-watched.set']);
+  expect(Object.keys(split.shared.rows.get(APPLIED_ROW)!.values)).toEqual([
+    fixed.request.fields.id,
+  ]);
+  expect(household.rows.get(APPLIED_ROW)).toBeUndefined();
+  expect(household.batches).toEqual([]);
+  expect((await split.authority.apply([{ seq: 9, sealed }], lent)).results[0]).toMatchObject({
+    reason: 'replay',
+  });
+});
+
+test('on a split household a revocation the household’s device recorded holds on Owner, even against an older row', async () => {
+  const household = await consented();
+  const split = await owner(household);
+  const before = structuredClone(household.rows.get(GRANTS_ROW)!);
+  const householdDevice = device(household, []);
+  expect(await householdDevice.authority.revoke(GRANT)).toBe('revoked');
+  // den-edge serves the grants row from before the revocation: the household's records still carry it to Owner.
+  household.rows.set(GRANTS_ROW, before);
+  const lent = await householdDevice.authority.lend();
+  expect(lent?.revoked).toEqual([GRANT]);
+  const outcome = await split.authority.apply([{ seq: 1, sealed: fixed.request.sealed }], lent);
+  expect(outcome.results).toEqual([{ seq: 1, outcome: 'rejected', reason: 'revoked' }]);
+  expect(split.commands).toEqual([]);
+});
+
+test('on a split household Owner publishes its own lists for the household’s read grant, as the household’s member', async () => {
+  const household = library();
+  const { grant, readKey } = await device(household, [
+    seed('other'),
+    seed('limited'),
+  ]).authority.consent('Reader', READ_ONLY);
+  const split = await owner(household);
+  split.shared.documents = [
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 550 },
+      status: { value: 'watchlist', at: [fixed.now, 0, DEVICE] },
+      addedAt: fixed.now,
+    },
+  ];
+  // Owner's library alone has no read record, so it publishes nothing.
+  expect(await split.authority.publish()).toEqual([]);
+  expect(split.shared.sent).toEqual([]);
+
+  const lent = await split.lend();
+  expect(await split.authority.publish(lent)).toEqual([grant]);
+  expect(split.shared.members).toEqual([fixed.library]);
+  const view = openProjection(readKey!, fixed.library, grant, split.shared.projections.get(grant)!);
+  expect(view.library).toBe(fixed.library);
+  expect(view.watchlist.map(([index]) => view.titles[index])).toEqual([['movie', 550]]);
+
+  // A revocation in the household's log is a change of the inputs: the projection is dropped, as its member.
+  await device(household, []).authority.revoke(grant);
+  split.later(1_000);
+  expect(await split.authority.publish(await split.lend())).toEqual([]);
+  expect(split.shared.sent.at(-1)).toBe(`delete:${grant}`);
+  expect(split.shared.members.at(-1)).toBe(fixed.library);
 });
