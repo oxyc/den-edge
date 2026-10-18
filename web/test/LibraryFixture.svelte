@@ -161,14 +161,33 @@
   const holds = (row: Row, ref: { type: string; id: number }) =>
     row.kind !== 'set' && row.title.type === ref.type && row.title.id === ref.id;
 
+  /**
+   * `link-host=tv|browser`: the link names its host by device id, as every handover since den-edge#41 does, and the
+   * library's device list says what kind of device that is: a TV, or a browser this one joined.
+   */
+  const linkHost = params.get('link-host');
+  const hostDevice = 'cccc000000000003';
+  const at = [1, 0, 'test'];
+  const devices =
+    linkHost === 'tv' || linkHost === 'browser'
+      ? {
+          values: {
+            [`${hostDevice}.name`]: { value: { string: 'Living Room TV' }, at },
+            [`${hostDevice}.kind`]: { value: { string: linkHost }, at },
+            [`${hostDevice}.seen`]: { value: { int: 5000 }, at },
+          },
+        }
+      : undefined;
   const log = {
     readOnly: false,
     wireMinimum: 4,
     currentGeneration: undefined,
     settings: (group: string) =>
       group === 'keys'
-        ? { values: { tmdb: { value: { string: 'fixture-key' }, at: [1, 0, 'test'] } } }
-        : undefined,
+        ? { values: { tmdb: { value: { string: 'fixture-key' }, at } } }
+        : group === 'devices'
+          ? devices
+          : undefined,
     refresh: async () => false,
     rows: () => stored,
     seqOf: () => 0,
@@ -274,6 +293,7 @@
     name: 'Living Room TV',
     libraryKey: 'fixture',
     linkKey: 'fixture',
+    ...(devices ? { deviceId: hostDevice } : {}),
   };
   const shownLink = params.has('local') || visitor ? null : link;
 

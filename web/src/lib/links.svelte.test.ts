@@ -28,11 +28,22 @@ afterEach(() => vi.unstubAllGlobals());
 
 it('offers Play on TV only for a real paired receiver', () => {
   const paired = { inboxKey: 'a'.repeat(16), ...KEYS, name: 'Living room' };
-  expect(linkedTv(paired)).toBe(paired);
-  expect(linkedTv({ ...paired, recovered: true })).toBeUndefined();
-  expect(linkedTv({ ...paired, recovered: true, guest: true })).toBeUndefined();
-  expect(linkedTv({ ...paired, guest: true })).toBeUndefined();
-  expect(linkedTv(null)).toBeUndefined();
+  expect(linkedTv(paired, [])).toBe(paired);
+  expect(linkedTv({ ...paired, recovered: true }, [])).toBeUndefined();
+  expect(linkedTv({ ...paired, recovered: true, guest: true }, [])).toBeUndefined();
+  expect(linkedTv({ ...paired, guest: true }, [])).toBeUndefined();
+  expect(linkedTv(null, [])).toBeUndefined();
+});
+
+/** A browser that joined another browser sent "Play on TV" to that browser's inbox, which no TV drains. */
+it('is not a TV when the link was made by joining a browser', () => {
+  const host = '0123456789abcdef';
+  const viaBrowser = { inboxKey: 'a'.repeat(16), ...KEYS, name: 'Mac - Oskar', deviceId: host };
+  expect(linkedTv(viaBrowser, [{ id: host, kind: 'browser' }])).toBeUndefined();
+  expect(linkedTv(viaBrowser, [{ id: 'fedcba9876543210', kind: 'tv' }])).toBeUndefined();
+  expect(linkedTv(viaBrowser, undefined), 'device list not read yet').toBeUndefined();
+  const viaTv = { ...viaBrowser, name: 'Apple TV' };
+  expect(linkedTv(viaTv, [{ id: host, kind: 'tv' }])).toBe(viaTv);
 });
 
 /** Another tab's change: written to the storage both share, and announced to this one as a browser does. */
