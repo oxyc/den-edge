@@ -175,6 +175,39 @@ describe('a chunk failing to load', () => {
     expect(at.went).toEqual([expect.stringMatching(/^assign https:\/\/den\.test\/movie\/550\?/)]);
   });
 
+  it('does not reload a page that is already being navigated away from', () => {
+    // WebKit rejects the imports a navigation cancels; reloading would replace the address being opened.
+    release.pageLeaving();
+    const idle = hiddenPage();
+    expect(release.recoverChunkFailure(idle.page)).toBe(false);
+    expect(idle.at.went).toEqual([]);
+    expect(release.swapOnNavigation('/movie/550', place())).toBe(false);
+  });
+
+  it('recovers and swaps again once a navigation away turns out not to have unloaded the page', () => {
+    vi.useFakeTimers();
+    try {
+      // A custom-scheme link, a download or a stopped navigation: `beforeunload` fires and the page stays.
+      release.pageLeaving();
+      expect(release.recoverChunkFailure(hiddenPage().page)).toBe(false);
+      vi.advanceTimersByTime(5_000);
+      expect(release.isLeaving()).toBe(false);
+
+      const idle = hiddenPage();
+      expect(release.recoverChunkFailure(idle.page)).toBe(true);
+      expect(idle.at.went).toEqual([expect.stringMatching(AGAIN)]);
+      const at = place();
+      expect(release.swapOnNavigation('/movie/550', at)).toBe(true);
+
+      // A page restored from the back/forward cache ends it at once, without waiting.
+      release.pageLeaving();
+      release.pageStayed();
+      expect(release.isLeaving()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('defers the same way a hidden page does: playing media or typing hold it off too', () => {
     const playing = hiddenPage({ media: [{ paused: false, muted: false }] });
     expect(release.recoverChunkFailure(playing.page)).toBe(false);

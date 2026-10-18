@@ -8,6 +8,38 @@
 // page right after a deploy.
 
 let waiting = false;
+let leaving = false;
+
+/**
+ * The page is being navigated away from (`beforeunload`, which fires before the browser cancels its loads). WebKit
+ * rejects a dynamic import still in flight when that happens, and Vite reports the rejection as `vite:preloadError`
+ * exactly as it reports a chunk den-edge no longer has: reloading then replaced the address the person was opening
+ * with this page's own, under `den-retry`. A page on its way out has no chunk to recover.
+ *
+ * `beforeunload` also fires for navigations that never unload the page (a custom-scheme "open in" link, a download,
+ * a navigation the person stops), and nothing else announces that one was abandoned. So the mark ends by itself:
+ * after `LEAVING_MS`, a timer started here runs only if the page survived (a page that really unloads is gone before
+ * it fires), and `pageshow` ends it at once for a page restored from the back/forward cache. The imports a
+ * navigation cancels fail within moments of `beforeunload` (measured: under 200 ms), well inside the window.
+ */
+const LEAVING_MS = 5_000;
+let leavingTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function pageLeaving(): void {
+  leaving = true;
+  clearTimeout(leavingTimer);
+  leavingTimer = setTimeout(pageStayed, LEAVING_MS);
+}
+
+/** The page is still here: whatever it was leaving for did not happen. */
+export function pageStayed(): void {
+  clearTimeout(leavingTimer);
+  leaving = false;
+}
+
+export function isLeaving(): boolean {
+  return leaving;
+}
 
 interface ReleaseWatcher {
   /** True once this page has learned that den-edge serves another release. */
@@ -129,6 +161,7 @@ export function swapFailedScreen(): void {
  * something on screen.
  */
 export function recoverChunkFailure(page: Page = window): boolean {
+  if (leaving) return false;
   releaseWaiting();
   if (!nothingToLose(page)) return false;
   reloadOnce(page);
@@ -142,6 +175,7 @@ export function recoverChunkFailure(page: Page = window): boolean {
  * (`ScreenLoading`).
  */
 export function reloadOnce(page: Pick<Page, 'location'> = window): void {
+  if (leaving) return;
   try {
     const last = Number(sessionStorage.getItem('den.reloadedAt'));
     if (Date.now() - last < 10_000) return;
