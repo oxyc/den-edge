@@ -194,10 +194,21 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
 
+  const audioLanguage = page.getByRole('combobox', { name: 'Audio language', exact: true });
+  await expect(audioLanguage).toBeVisible({ timeout: 30_000 });
+  await expect(audioLanguage).toBeEnabled();
+  // Follow one intentional route through the rendered geometry, asserting every junction. A generic
+  // alternating search can validly cycle between the navbar and the page-level Expand all control.
+  await expect(settings).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.getByRole('link', { name: 'Watchlist', exact: true })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('button', { name: 'Expand all in Settings' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(audioLanguage).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
-  // The CI trace showed the old Down/Left traversal cycling between Expand all and Movies.
-  // Start horizontally instead; every step still goes through the real remote focus controller.
-  await remoteTo(page, contentSection, ['ArrowLeft', 'ArrowDown'], 4);
+  await expect(contentSection).toBeFocused();
   await page.keyboard.press('Enter');
   await page.waitForTimeout(500);
   const expandContent = page.getByRole('button', { name: 'Expand all in Content' });
