@@ -56,11 +56,14 @@ fn accepted(tag: String, insert: impl FnOnce(&mut Response, String)) -> Response
 #[serde(try_from = "String")]
 struct Release(String);
 
+/// The shell's digest is a SHA-256, 64 hex digits. At 32 every report that named its release was a 400.
+const MAX_RELEASE_LEN: usize = 64;
+
 impl TryFrom<String> for Release {
     type Error = &'static str;
     fn try_from(s: String) -> Result<Self, Self::Error> {
         let ok = !s.is_empty()
-            && s.len() <= 32
+            && s.len() <= MAX_RELEASE_LEN
             && s.bytes()
                 .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || matches!(b, b'.' | b'-' | b'+'));
         if ok {

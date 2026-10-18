@@ -1020,6 +1020,19 @@ mod tests {
         assert_ne!(identity.headers()[header::ETAG], gzip_etag);
     }
 
+    /// The page reads its release back from the shell (`diagnosticsReport.ts`'s `loadRelease`) and names it in
+    /// every page-error report, so the report must take the release exactly as the shell gives it.
+    #[tokio::test]
+    async fn a_page_error_naming_the_shell_s_release_is_taken() {
+        let h = with_app();
+        let root = h.send("GET", "/", None, &[]).await;
+        let release = root.headers()["x-den-release"].to_str().unwrap().to_owned();
+        let report =
+            serde_json::json!({ "kind": "uncaught", "module": "app", "release": release, "route": "home" });
+        let response = h.send("POST", "/playback/page-error", Some(report.to_string()), &[]).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
     /// A diagnostic, readable since Cloudflare strips the ETag from `/`: it names the shell's build the same
     /// way in every encoding, on a 304 and on an app route, and changes only when the shell does.
     #[tokio::test]
