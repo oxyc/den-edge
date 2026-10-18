@@ -8,6 +8,21 @@
 // page right after a deploy.
 
 let waiting = false;
+let leaving = false;
+
+/**
+ * The page is being navigated away from (`beforeunload`, which fires before the browser cancels its loads). WebKit
+ * rejects a dynamic import still in flight when that happens, and Vite reports the rejection as `vite:preloadError`
+ * exactly as it reports a chunk den-edge no longer has: reloading then replaced the address the person was opening
+ * with this page's own, under `den-retry`. A page on its way out has no chunk to recover.
+ */
+export function pageLeaving(): void {
+  leaving = true;
+}
+
+export function isLeaving(): boolean {
+  return leaving;
+}
 
 interface ReleaseWatcher {
   /** True once this page has learned that den-edge serves another release. */
@@ -129,6 +144,7 @@ export function swapFailedScreen(): void {
  * something on screen.
  */
 export function recoverChunkFailure(page: Page = window): boolean {
+  if (leaving) return false;
   releaseWaiting();
   if (!nothingToLose(page)) return false;
   reloadOnce(page);
@@ -142,6 +158,7 @@ export function recoverChunkFailure(page: Page = window): boolean {
  * (`ScreenLoading`).
  */
 export function reloadOnce(page: Pick<Page, 'location'> = window): void {
+  if (leaving) return;
   try {
     const last = Number(sessionStorage.getItem('den.reloadedAt'));
     if (Date.now() - last < 10_000) return;

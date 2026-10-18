@@ -175,6 +175,15 @@ describe('a chunk failing to load', () => {
     expect(at.went).toEqual([expect.stringMatching(/^assign https:\/\/den\.test\/movie\/550\?/)]);
   });
 
+  it('does not reload a page that is already being navigated away from', () => {
+    // WebKit rejects the imports a navigation cancels; reloading would replace the address being opened.
+    release.pageLeaving();
+    const idle = hiddenPage();
+    expect(release.recoverChunkFailure(idle.page)).toBe(false);
+    expect(idle.at.went).toEqual([]);
+    expect(release.swapOnNavigation('/movie/550', place())).toBe(false);
+  });
+
   it('defers the same way a hidden page does: playing media or typing hold it off too', () => {
     const playing = hiddenPage({ media: [{ paused: false, muted: false }] });
     expect(release.recoverChunkFailure(playing.page)).toBe(false);

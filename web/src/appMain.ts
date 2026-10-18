@@ -8,7 +8,13 @@ import { links } from './lib/links.svelte';
 import { watchLoadReport } from './lib/loadReport';
 import { parsePhoneLink } from './lib/phoneLink';
 import { phoneLanding } from './lib/phoneLanding.svelte';
-import { recoverChunkFailure, swapWhileHidden, watchRelease } from './lib/release';
+import {
+  isLeaving,
+  pageLeaving,
+  recoverChunkFailure,
+  swapWhileHidden,
+  watchRelease,
+} from './lib/release';
 import { legacyPath } from './lib/route';
 
 // Read once, now, rather than lazily when the first error report needs it: a page open across a deploy must
@@ -101,8 +107,10 @@ mount(App, { target });
 // the file is simply out of reach, and reloading would not bring it back. The event is left uncancelled:
 // cancelling it makes Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8),
 // and whatever asked for it then never learns it failed.
+window.addEventListener('beforeunload', pageLeaving);
 window.addEventListener('vite:preloadError', () => {
-  if (navigator.onLine) {
+  // Not for imports a navigation away cancelled (`pageLeaving`): nothing is missing, and no one should be told so.
+  if (navigator.onLine && !isLeaving()) {
     sendPageError(pageError('chunk_load', 'app'));
     recoverChunkFailure();
   }
