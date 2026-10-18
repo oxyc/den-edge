@@ -21,6 +21,8 @@ async function settings(browser, { config, connections = [] }) {
   const page = await context.newPage();
   await guardNetwork(page);
   await page.route('**/routes', (r) => r.fulfill({ json: {} }));
+  // Settings' Sharing section lists the household's invites whenever it gets round to it; none here.
+  await page.route('**/lib/*/grants', (r) => r.fulfill({ json: { grants: [] } }));
   await page.route('**/version', (r) => r.fulfill({ json: { version: '0.67.0' } }));
   await page.route('**/config', (r) => r.fulfill({ json: config }));
   await routeTmdb(page, (route) => route.fulfill({ json: { results: [], images: {} } }));

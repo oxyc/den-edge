@@ -1293,10 +1293,17 @@
   // grants den-edge still lists are renewed. Each starts and stops as consent or revocation, here or on another
   // device, changes the rows. The code itself is fetched only then. On a split household the rows that say so are
   // the household's, and so are the queue, the projection's library and the grants renewed.
+  // None of it starts before the page has drawn what it opened for (`foregroundReady`): each runs in the library
+  // Worker that answers the page's rows, and a projection build reads the whole library and holds that Worker for
+  // seconds on a phone.
   const memberModel = $derived(implicitAssistantModel);
   const connectionModel = $derived(assistantHousehold ?? memberModel);
-  const drainNeeded = $derived(connectionModel?.settings.value?.assistant.write ?? false);
-  const publishNeeded = $derived(connectionModel?.settings.value?.assistant.read ?? false);
+  const drainNeeded = $derived(
+    session.foregrounded && (connectionModel?.settings.value?.assistant.write ?? false),
+  );
+  const publishNeeded = $derived(
+    session.foregrounded && (connectionModel?.settings.value?.assistant.read ?? false),
+  );
   const renewNeeded = $derived(drainNeeded || publishNeeded);
 
   interface AssistantWork {

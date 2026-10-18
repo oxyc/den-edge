@@ -1,7 +1,8 @@
 // A household the size of a long-lived one, for any spec: a profile household (Owner and Kid) whose Owner library
 // holds about 1,890 titles (1,500 films, 380 series, ~170 on the watchlist, 30 being watched), 11,000-odd episode
-// marks, 3,000 tracker receipts and a few downloads — about 6,100 rows. Generated, never hand-written: the same rows
-// for the whole UTC day (their stamps are days before it), so a run is reproducible.
+// marks, 3,000 tracker receipts, a few film downloads and a season downloading — about 6,100 rows — and an assistant
+// allowed to change and read it. Generated, never hand-written: the same rows for the whole UTC day (their stamps are
+// days before it), so a run is reproducible.
 //
 // Bugs that only a big library shows (work per title, per row, per card) stay hidden on the three-title fixtures most
 // specs use. `bigHousehold` makes one through the real app, against the in-memory den-edge of `guest-edge.mjs`, and
@@ -14,7 +15,10 @@
 //   await routeBigHousehold(page, edge);                     // per page, before it loads
 
 import { expect } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { syntheticRows } from '../scripts/rehearse-synthetic.mjs';
+import { evaluateAssistant, initializeAssistant } from '../src/vendor/den-core/assistant.js';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { CODE, routeGuestEdge } from './guest-edge.mjs';
 import { routeTmdb } from './network.mjs';
@@ -24,11 +28,19 @@ const DAY = 86_400_000;
 /** Today at midnight UTC: every stamp in the fixture is some days before it. */
 export const fixtureNow = () => Math.floor(Date.now() / DAY) * DAY;
 
-/** What the fixture holds, for assertions and for budgets that scale with it. */
-export const BIG_LIBRARY = { films: 1_510, series: 380, watching: 30, downloads: 6 };
-
 /** A series being watched (`rehearse-synthetic.mjs`: every fifteenth long-history series), with four seasons. */
 export const WATCHED_SERIES = 200_000;
+
+/** Its last season, downloading: two episodes have a release, the rest are still searched for. */
+const SEASON_DOWNLOAD = { season: 4, episodes: 10, released: 2 };
+
+/** What the fixture holds, for assertions and for budgets that scale with it. */
+export const BIG_LIBRARY = {
+  films: 1_510,
+  series: 380,
+  watching: 30,
+  downloads: 6 + SEASON_DOWNLOAD.episodes,
+};
 
 const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
 const text = (value, at) => ({ value: { string: value }, at });
@@ -37,7 +49,7 @@ export function bigLibraryRows(now = fixtureNow()) {
   const rows = syntheticRows(now, { large: true });
   const at = [now - DAY, 0, 'aaaaaaaaaaaaaaaa'];
   // Five more downloads beside the synthetic household's one: films queued over the last days.
-  for (let i = 1; i <= BIG_LIBRARY.downloads - 1; i += 1) {
+  for (let i = 1; i <= 5; i += 1) {
     const id = 100_000 + i * 7;
     rows.push(
       setting(`download:movie:${id}:-1:-1`, {
@@ -54,7 +66,143 @@ export function bigLibraryRows(now = fixtureNow()) {
       }),
     );
   }
+  // A season download in progress: one row per episode, queued yesterday.
+  const { season, episodes, released } = SEASON_DOWNLOAD;
+  for (let episode = 1; episode <= episodes; episode += 1) {
+    const title = {
+      mediaType: 'tv',
+      mediaId: WATCHED_SERIES,
+      season,
+      episode,
+      title: `Series ${WATCHED_SERIES}`,
+    };
+    rows.push(
+      setting(`download:tv:${WATCHED_SERIES}:${season}:${episode}`, {
+        ...(episode <= released
+          ? {
+              release: text(
+                JSON.stringify({
+                  identity: `episode-${episode}.mkv`,
+                  label: `Series.S0${season}E${String(episode).padStart(2, '0')}.1080p.mkv`,
+                  url: 'https://example.invalid/p/ticket',
+                }),
+                at,
+              ),
+            }
+          : {}),
+        title: text(JSON.stringify(title), at),
+        queuedAt: { value: { int: now - DAY }, at },
+      }),
+    );
+  }
   return rows;
+}
+
+/** den-core's assistant op `request`, as the library Worker runs it. */
+let assistantLoaded;
+async function assistantOp(request) {
+  assistantLoaded ??= initializeAssistant(
+    readFileSync(
+      new URL('../src/vendor/den-core/generated/den_core_assistant_bg.wasm', import.meta.url),
+    ),
+  );
+  await assistantLoaded;
+  const answer = JSON.parse(evaluateAssistant(JSON.stringify(request)));
+  if (answer.version !== 1 || !('ok' in answer)) throw new Error(`den-core: ${answer.error}`);
+  return answer.ok;
+}
+
+/** 32 bytes, as hex, the same every run: what the fixture's keys are made from. */
+const fixedRandom = (name) => createHash('sha256').update(`den-e2e-${name}`).digest('hex');
+
+/**
+ * The household's connection to an assistant that may change and read its library, made a day ago as Settings'
+ * consent makes it (den-spec assistant-v1 §1, §15, §16): a drop-box key, a grant, a play record and a read record.
+ * They are household rows (profiles-v1 §6.1), so the split leaves them with the household. `grant`: its id.
+ */
+export async function assistantRows(now = fixtureNow()) {
+  const at = [now - DAY, 1, 'aaaaaaaaaaaaaaaa'];
+  const client = 'Claude';
+  const dropbox = await assistantOp({
+    op: 'assistant_keygen_dropbox',
+    random: fixedRandom('dropbox'),
+  });
+  const grant = await assistantOp({
+    op: 'assistant_keygen_grant',
+    random: fixedRandom('grant'),
+    client,
+    ops: ['rate', 'seen', 'watchlist_add', 'watchlist_remove'],
+    cap: 100,
+    now: now - DAY,
+  });
+  const play = await assistantOp({
+    op: 'assistant_keygen_play',
+    grant: grant.grant,
+    client,
+    now: now - DAY,
+  });
+  const read = await assistantOp({
+    op: 'assistant_keygen_read',
+    grant: grant.grant,
+    random: fixedRandom('read'),
+    client,
+    now: now - DAY,
+  });
+  const row = (name, made) => setting(name, { [made.setting]: { value: made.value, at } });
+  return {
+    grant: grant.grant,
+    rows: [
+      row('assistant', dropbox),
+      row('assistant-grants', grant),
+      row('assistant-play', play),
+      row('assistant-read', read),
+    ],
+  };
+}
+
+const memberOf = (request) => request.headers()['x-den-library-member']?.split(':')[0] ?? null;
+
+/**
+ * den-edge's assistant routes for the household's connection (`assistantRows`): it is listed to every member, its
+ * projection taken, `projectionMs` late, and its queue held empty. What was uploaded is kept on `edge.assistant`.
+ */
+async function routeBigAssistant(page, edge, projectionMs) {
+  const seen = (edge.assistant ??= { grant: null, projections: [] });
+  await page.route(`${E2E_ORIGIN}/oauth/connections`, (route) =>
+    route.fulfill({
+      json: {
+        connections: seen.grant
+          ? [
+              {
+                sid: 'fedcba9876543210fedcba9876543210',
+                client: 'Claude',
+                redirectHost: 'claude.ai',
+                kind: 'member',
+                guest: null,
+                createdAt: fixtureNow() - DAY,
+                usedAt: fixtureNow() - DAY,
+                grant: seen.grant,
+                write: true,
+                read: true,
+              },
+            ]
+          : [],
+      },
+    }),
+  );
+  await page.route(`${E2E_ORIGIN}/assistant/**`, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/assistant/dropbox') return route.fulfill({ status: 204 });
+    if (path.startsWith('/assistant/projection/') && request.method() === 'PUT') {
+      seen.projections.push({ member: memberOf(request), at: Date.now() });
+      if (projectionMs) await new Promise((done) => setTimeout(done, projectionMs));
+      return route.fulfill({ status: 204 });
+    }
+    if (path === '/assistant/drain') return route.fulfill({ json: { messages: [] } });
+    if (path === '/assistant/ack') return route.fulfill({ json: {} });
+    return route.fulfill({ status: 404, json: {} });
+  });
 }
 
 const people = (kind) => ({
@@ -237,11 +385,25 @@ async function routeBigAtlas(page, latencyMs) {
 }
 
 /**
- * One page of the big household: the in-memory den-edge, TMDB and — unless `atlas` is false, for a spec about a
- * household with none — atlas, each answering `latencyMs` late.
+ * What publishing this household's assistant projection costs an iPhone's library Worker: from the page's first
+ * assistant request to its projection upload, which is the time its shelves waited (den-edge's log, 0.271.69). A lab
+ * Worker builds it in about 0.2 s, and Chromium can slow a page's CPU but not a Worker's, so `projectionMs` holds the
+ * upload's answer this long instead: the library Worker is busy with the publish as long as the phone's was.
  */
-export async function routeBigHousehold(page, edge, { latencyMs = 0, atlas = true } = {}) {
+export const PHONE_PROJECTION_MS = 6_000;
+
+/**
+ * One page of the big household: the in-memory den-edge with the household's assistant, TMDB and — unless `atlas` is
+ * false, for a spec about a household with none — atlas, each answering `latencyMs` late; an assistant projection's
+ * upload answers `projectionMs` late.
+ */
+export async function routeBigHousehold(
+  page,
+  edge,
+  { latencyMs = 0, atlas = true, projectionMs = 0 } = {},
+) {
   await routeGuestEdge(page, edge);
+  await routeBigAssistant(page, edge, projectionMs);
   await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
   if (atlas) await routeBigAtlas(page, latencyMs);
   await routeBigTmdb(page, { latencyMs });
@@ -267,7 +429,9 @@ export async function bigHousehold(context, edge, options = {}) {
     await page.goto(`${E2E_ORIGIN}/test/seed-library.html`);
     await page.waitForFunction(() => typeof window.denSeed === 'function');
     step('seeding');
-    await page.evaluate((rows) => window.denSeed(rows), bigLibraryRows());
+    const assistant = await assistantRows();
+    edge.assistant.grant = assistant.grant;
+    await page.evaluate((rows) => window.denSeed(rows), [...bigLibraryRows(), ...assistant.rows]);
     step('seeded');
     await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
     await page
