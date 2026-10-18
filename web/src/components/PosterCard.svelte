@@ -23,6 +23,7 @@
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
+  import { startupMarkOnce } from '../lib/startupTiming';
   import ActionMenu from './ActionMenu.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import { titleActionsContext, titleMenuItems } from '../lib/titleActions';
@@ -247,6 +248,7 @@
           alt=""
           loading="lazy"
           decoding="async"
+          onload={() => startupMarkOnce('first poster')}
           onerror={() => (failed = art ?? '')}
         />
       {/if}

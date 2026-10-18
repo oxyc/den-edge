@@ -30,6 +30,7 @@
   import type { PlaybackStep } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
+  import { startupMarkOnce } from '../lib/startupTiming';
   import {
     BILLBOARD_IMAGE_SIZES,
     billboardBackdropSrcset,
@@ -173,8 +174,11 @@
         })
         .catch(() => null);
       const found = answer?.detail.state === 'ready' ? answer.detail.value : null;
-      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Publish one completed immutable map through the existing state assignment.
-      if (found) known = new Map(known).set(key, found);
+      if (found) {
+        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Publish one completed immutable map through the existing state assignment.
+        known = new Map(known).set(key, found);
+        startupMarkOnce('billboard detail');
+      }
     } finally {
       learning.delete(key);
     }

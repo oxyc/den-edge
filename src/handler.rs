@@ -197,7 +197,9 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("tmdb", resp.headers().get("x-den-tmdb").and_then(|v| v.to_str().ok())),
             ("file", resp.extensions().get::<crate::web::Served>().map(|s| s.0)),
             ("startup", resp.extensions().get::<StartupTag>().map(|s| s.0.as_str())),
+            ("field", resp.extensions().get::<ReportField>().map(|s| s.0.as_str())),
             ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
+            ("load", resp.extensions().get::<LoadTag>().map(|s| s.0.as_str())),
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
             ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
             ("src", resp.extensions().get::<SrcTag>().map(|s| s.0)),
@@ -445,6 +447,14 @@ pub struct StartupTag(pub String);
 #[derive(Clone)]
 pub struct PageErrorTag(pub String);
 
+/// A browser's page-load timing (`diagnostics.rs`), carried on the response for the request log like `StartupTag`.
+#[derive(Clone)]
+pub struct LoadTag(pub String);
+
+/// The field a refused report failed on (`diagnostics.rs`): a name of a few letters, never its value.
+#[derive(Clone)]
+pub struct ReportField(pub String);
+
 /// A browser's playback-session outcome (`diagnostics.rs`), carried on the response for the request log like
 /// `StartupTag`.
 #[derive(Clone)]
@@ -659,6 +669,9 @@ async fn dispatch(
     if path == "/playback/page-error" {
         return crate::diagnostics::handle_page_error(state, req).await;
     }
+    if path == "/playback/load" {
+        return crate::diagnostics::handle_load(state, req).await;
+    }
     if path == "/playback/outcome" {
         return crate::diagnostics::handle_playback_outcome(state, req).await;
     }
@@ -842,6 +855,7 @@ impl Face {
             // from (home, the tailnet, away), not just this half.
             || path == "/playback/startup"
             || path == "/playback/page-error"
+            || path == "/playback/load"
             || path == "/playback/outcome"
             || path == "/playback/cast"
             // An assistant's server asks for tokens and calls `/mcp` on whichever public name it was given, and its
@@ -1063,6 +1077,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/skipdb/") => "/skipdb",
         "/playback/startup" => "/playback/startup",
         "/playback/page-error" => "/playback/page-error",
+        "/playback/load" => "/playback/load",
         "/playback/outcome" => "/playback/outcome",
         "/playback/cast" => "/playback/cast",
         // One label each: what happens inside them is their own repo's log to keep.
@@ -1150,6 +1165,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/tmdb/warm"
         | "/playback/startup"
         | "/playback/page-error"
+        | "/playback/load"
         | "/playback/outcome"
         | "/playback/cast" => Some(POST),
         // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
@@ -1180,7 +1196,11 @@ fn body_cap(route: &str) -> usize {
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
         // A dozen durations and a few short labels: a few hundred bytes, generously.
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
-        "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
+        "/playback/startup"
+        | "/playback/page-error"
+        | "/playback/load"
+        | "/playback/outcome"
+        | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
         "/den/migrate" => crate::relay::MIGRATION_BODY_BYTES,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
@@ -1566,7 +1586,7 @@ pub mod tests {
 
     #[test]
     fn the_diagnostics_reports_are_small_post_only_routes_on_every_face() {
-        for route in ["/playback/page-error", "/playback/outcome", "/playback/cast"] {
+        for route in ["/playback/page-error", "/playback/load", "/playback/outcome", "/playback/cast"] {
             assert_eq!(route_label(route), route);
             assert_eq!(allowed_methods(route), Some(&[Method::POST][..]));
             assert_eq!(body_cap(route), 2048);

@@ -6,7 +6,8 @@
 //! rather than by scrubbing.
 
 use crate::handler::{
-    client_ip, error, json_reply, read_json, retry_after, CastTag, PageErrorTag, PlaybackOutcomeTag,
+    client_ip, error, json_reply, read_json, retry_after, CastTag, LoadTag, PageErrorTag, PlaybackOutcomeTag,
+    ReportField,
 };
 use crate::AppState;
 use axum::body::Body;
@@ -36,8 +37,26 @@ async fn intake<T: DeserializeOwned>(
         return Err(Box::new(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait)));
     }
     let value = read_json(req, MAX_BODY_BYTES).await?;
-    serde_json::from_value::<T>(value)
-        .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("invalid_report"))))
+    serde_json::from_value::<T>(value.clone()).map_err(|_| {
+        let mut resp = json_reply(StatusCode::BAD_REQUEST, &error("invalid_report"));
+        if let Some(field) = refused_field::<T>(&value) {
+            resp.extensions_mut().insert(ReportField(field));
+        }
+        Box::new(resp)
+    })
+}
+
+/// The one optional field whose value alone made `value` fail to parse as `T`: the report parses without it. Only a
+/// field name of a few letters is named, never its value; a missing required field, or several bad ones, name none.
+fn refused_field<T: DeserializeOwned>(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    object.keys().find_map(|key| {
+        let named = (1..=24).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphabetic());
+        let mut without = object.clone();
+        without.remove(key);
+        (named && serde_json::from_value::<T>(serde_json::Value::Object(without)).is_ok())
+            .then(|| key.clone())
+    })
 }
 
 /// A bare `204`, `no-store`, with `tag` for the request log — the shape every report in this file answers with.
@@ -406,6 +425,141 @@ pub async fn handle_page_error(state: &Arc<AppState>, req: Request) -> Response 
     };
     accepted(report.tag(), |resp, tag| {
         resp.extensions_mut().insert(PageErrorTag(tag));
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// A page load's timing (`POST /playback/load`, `web/src/lib/loadReport.ts`): how long one load took to reach each
+// of its milestones, on which kind of page, device and engine — sent once per load, so a page slow on one phone is
+// read from this log line rather than reproduced.
+
+const LOAD_BUCKET: &str = "load";
+/// A page starts a Worker per library session and one more on a restart; past this is a burst worth seeing as such.
+const MAX_WORKERS: u32 = 50;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LoadRoute {
+    Home,
+    Movies,
+    Series,
+    Watchlist,
+    Title,
+    Settings,
+    Other,
+}
+
+impl LoadRoute {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LoadRoute::Home => "home",
+            LoadRoute::Movies => "movies",
+            LoadRoute::Series => "series",
+            LoadRoute::Watchlist => "watchlist",
+            LoadRoute::Title => "title",
+            LoadRoute::Settings => "settings",
+            LoadRoute::Other => "other",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DeviceClass {
+    Phone,
+    Tablet,
+    Desktop,
+}
+
+impl DeviceClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DeviceClass::Phone => "phone",
+            DeviceClass::Tablet => "tablet",
+            DeviceClass::Desktop => "desktop",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BrowserEngine {
+    Webkit,
+    Blink,
+    Gecko,
+    Other,
+}
+
+impl BrowserEngine {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BrowserEngine::Webkit => "webkit",
+            BrowserEngine::Blink => "blink",
+            BrowserEngine::Gecko => "gecko",
+            BrowserEngine::Other => "other",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadReport {
+    route: LoadRoute,
+    device: DeviceClass,
+    engine: BrowserEngine,
+    /// Milliseconds since navigation start; each absent when this load never reached it.
+    app_module_ms: Option<u32>,
+    worker_ready_ms: Option<u32>,
+    handover_ms: Option<u32>,
+    billboard_detail_ms: Option<u32>,
+    shelves_ms: Option<u32>,
+    poster_ms: Option<u32>,
+    episodes_ms: Option<u32>,
+    workers: u32,
+    /// The page started hidden (a background tab), which delays everything that waits for a frame.
+    #[serde(default)]
+    hidden: bool,
+    release: Option<Release>,
+}
+
+impl LoadReport {
+    fn tag(&self) -> String {
+        let mut parts = vec![
+            format!("route:{}", self.route.as_str()),
+            format!("device:{}", self.device.as_str()),
+            format!("engine:{}", self.engine.as_str()),
+        ];
+        for (name, ms) in [
+            ("app", self.app_module_ms),
+            ("worker", self.worker_ready_ms),
+            ("handover", self.handover_ms),
+            ("billboard", self.billboard_detail_ms),
+            ("shelves", self.shelves_ms),
+            ("poster", self.poster_ms),
+            ("episodes", self.episodes_ms),
+        ] {
+            if let Some(ms) = ms {
+                parts.push(format!("{name}:{}", ms.min(MAX_MS)));
+            }
+        }
+        parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
+        if self.hidden {
+            parts.push("hidden:1".to_owned());
+        }
+        if let Some(release) = &self.release {
+            parts.push(format!("release:{}", release.0));
+        }
+        parts.join(",")
+    }
+}
+
+pub async fn handle_load(state: &Arc<AppState>, req: Request) -> Response {
+    let report: LoadReport = match intake(state, req, LOAD_BUCKET).await {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    accepted(report.tag(), |resp, tag| {
+        resp.extensions_mut().insert(LoadTag(tag));
     })
 }
 
@@ -894,6 +1048,50 @@ mod tests {
             "kind": "nonsense", "module": "app", "release": "deadbeef", "route": "home",
         });
         assert!(serde_json::from_value::<PageErrorReport>(bad).is_err());
+    }
+
+    #[test]
+    fn a_load_report_names_each_milestone_it_reached_and_nothing_else() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "series", "device": "phone", "engine": "webkit",
+            "appModuleMs": 40, "workerReadyMs": 300, "handoverMs": 420, "shelvesMs": 9800,
+            "workers": 3, "release": "deadbeef",
+            "title": "the-shawshank-redemption", "url": "https://example.invalid/?q=1",
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:series,device:phone,engine:webkit,app:40,worker:300,handover:420,shelves:9800,workers:3,\
+             release:deadbeef"
+        );
+    }
+
+    #[test]
+    fn a_load_report_caps_what_it_claims_and_says_it_started_hidden() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "desktop", "engine": "blink",
+            "appModuleMs": u32::MAX, "workers": 9999, "hidden": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            format!("route:home,device:desktop,engine:blink,app:{MAX_MS},workers:{MAX_WORKERS},hidden:1")
+        );
+        let unknown = serde_json::json!({
+            "route": "/movie/550", "device": "phone", "engine": "webkit", "workers": 1,
+        });
+        assert!(serde_json::from_value::<LoadReport>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_refused_report_names_the_one_optional_field_it_failed_on_but_never_its_value() {
+        let bad_chunk = serde_json::json!({
+            "kind": "uncaught", "module": "other", "chunk": "../evil", "route": "home",
+        });
+        assert_eq!(refused_field::<PageErrorReport>(&bad_chunk).as_deref(), Some("chunk"));
+        // A required field that fails cannot be left out to prove it, so nothing is named.
+        let bad_kind = serde_json::json!({ "kind": "nonsense", "module": "app", "route": "home" });
+        assert_eq!(refused_field::<PageErrorReport>(&bad_kind), None);
     }
 
     fn outcome() -> serde_json::Value {
