@@ -258,6 +258,7 @@
   bind:this={wrapper}
   class="row-window"
   class:placed
+  class:near={gatesPlacement && rowNear}
   class:gone={done && !pager.failed && visible.length === 0}
   class:mobile-two-line-heading={row.mobileHeadingLines === 2}
 >
@@ -318,16 +319,23 @@
      leaves the row skipped at the position it was first laid out when the router scrolls the retained page, so
      the row paints but a tap on it goes to the wrapper and nowhere. Until then the wrapper keeps the containment
      `auto` gives a row that is not skipped, so its height (the row's bottom margin included) does not change
-     when it is placed again and shift the page. */
+     when it is placed again and shift the page.
+
+     A near row is not skipped either, where placement is gated (WebKit). WebKit skips everything outside the
+     viewport itself, so a row inside the 800px near window had no laid-out track: its ResizeObserver never
+     delivered the width the card window needs, no card mounted, and no poster appeared until the row was scrolled
+     on screen (or a tap forced layout). Chromium delivers that size for a skipped row and keeps the property fixed
+     (`placementGate`). */
   .row-window {
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
   }
 
-  .row-window.placed {
+  .row-window.placed:not(.near) {
     content-visibility: auto;
   }
 
-  .row-window:not(.placed) {
+  .row-window:not(.placed),
+  .row-window.near {
     contain: layout style paint;
   }
 
