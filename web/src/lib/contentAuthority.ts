@@ -82,11 +82,6 @@ import {
 
 const TMDB = 'https://api.themoviedb.org/3';
 const MAX_ATLAS_TITLE_CURSORS = 64;
-/**
- * Titles a `titles` or `title.eligibility` query asks about at once. Each is a round trip (atlas's age answer, then
- * TMDB), and a Kid's billboard waited on twenty of them six at a time — four round trips before its first slide.
- */
-const LANES = 16;
 
 /**
  * Row and chart answers whose poster fill den-edge did not answer (a `429` or a failure). They are handed to whoever
@@ -374,7 +369,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
               retryable.push(ref);
           }
         };
-        await Promise.all(Array.from({ length: Math.min(LANES, request.titles.length) }, read));
+        await Promise.all(Array.from({ length: Math.min(6, request.titles.length) }, read));
         const order = new Map(request.titles.map((ref, index) => [`${ref.type}:${ref.id}`, index]));
         titles.sort(
           (left, right) =>
@@ -396,7 +391,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           for (let at = next++; at < request.titles.length; at = next++)
             answers[at] = await this.#allowed(request.titles[at]!, policy, signal);
         };
-        await Promise.all(Array.from({ length: Math.min(LANES, request.titles.length) }, ask));
+        await Promise.all(Array.from({ length: Math.min(6, request.titles.length) }, ask));
         return {
           kind: 'title.eligibility',
           allowed: request.titles.filter((_, index) => answers[index]),

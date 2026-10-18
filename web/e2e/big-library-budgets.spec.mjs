@@ -131,6 +131,15 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
   }
   const transactions = countTransactions(page);
+  // Where a slow surface's time went, printed with its result: the page's startup milestones (`startupTiming.ts`).
+  const marks = {};
+  page.on('console', (message) => {
+    const match =
+      /^den: startup \+(\d+)ms (app module requested|worker ready|handover|shelves ready|billboard detail|first poster|episodes shown)/.exec(
+        message.text(),
+      );
+    if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
+  });
   await page.goto(`${E2E_ORIGIN}${surface.path}`);
   const drawn = (ready) => surface.content.every((name) => ready?.[name] !== undefined);
   // Not an assertion: a surface that never draws is reported as Infinity against its budget below.
@@ -144,7 +153,14 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     : Infinity;
   // Let the Worker finish what the surface set off, then count.
   await page.waitForTimeout(2_000);
-  const result = { contentMs, transactions: await transactions(), longest: ready.longest };
+  const { longest, ...drawnAt } = ready;
+  const result = {
+    contentMs,
+    transactions: await transactions(),
+    longest,
+    drawnAt,
+    marks,
+  };
   await page.close();
   return result;
 }
