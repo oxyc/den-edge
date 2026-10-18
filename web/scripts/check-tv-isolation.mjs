@@ -21,7 +21,11 @@ async function measure(directory) {
     const size = gzipSync(bytes, { level: 9 }).length;
     totalGzip += size;
     if (initial.has(`assets/${name}`)) initialGzip += size;
-    if (/den:tv-back|den-tv-diagnostics|tv-remote-active|tv-transport/.test(bytes.toString()))
+    if (
+      /den:tv-back|den-tv-diagnostics|tv-remote-active|tv-transport|den-avplay|Samsung AVPlay/.test(
+        bytes.toString(),
+      )
+    )
       throw new Error(`TV-only implementation leaked into browser output: ${name}`);
   }
   return { initialGzip, totalGzip, files: files.length };

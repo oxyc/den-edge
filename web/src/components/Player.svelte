@@ -102,6 +102,7 @@
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { SamsungAvplayAdapter } from '../tv/player/avplay';
   import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import {
@@ -233,6 +234,11 @@
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
     __DEN_TV_PLATFORM__ === 'webos' && /(?:webOS|Web0S)/i.test(navigator.userAgent);
+  // The packaged Samsung shell supplies this bridge. Hosted previews and ordinary browsers do not, and retain the
+  // existing native-HLS/hls.js path even when they use the Tizen-targeted bundle.
+  const samsungAvplay =
+    __DEN_TV_PLATFORM__ === 'tizen' &&
+    !!(globalThis as typeof globalThis & { webapis?: { avplay?: unknown } }).webapis?.avplay;
   const messages: Record<
     | 'none'
     | 'unreachable'
@@ -404,6 +410,7 @@
   let upNext = $state<number | null>(null);
   let imdb: string | undefined;
   let hls: Hls | undefined;
+  let avplay: SamsungAvplayAdapter | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
@@ -798,7 +805,7 @@
       // For den-remux's log only, so a session can be told apart by the player that played it.
       player: castMode
         ? 'cast'
-        : webOsNative || nativeHls(document.createElement('video'))
+        : samsungAvplay || webOsNative || nativeHls(document.createElement('video'))
           ? 'native'
           : 'hls.js',
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
@@ -1283,7 +1290,7 @@
     if (!current || current.castOrigin || !element) return;
     // LG's webOS media pipeline accepts HLS even when its WebKit canPlayType answer is incomplete.
     // Keeping it on this element path preserves Den's existing progress, recovery and session ownership.
-    const playsNatively = webOsNative || nativeHls(element);
+    const playsNatively = samsungAvplay || webOsNative || nativeHls(element);
     // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
     // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that — a
     // while with nothing arriving, since a slow link shows no picture either but keeps delivering (`stuckWatch`).
@@ -1563,7 +1570,7 @@
     element.addEventListener('timeupdate', firstFrameFromProgress);
     // The type is unconditional (every modern lib.dom.d.ts has it); the browser isn't — an older Safari lacks
     // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`.
-    if (typeof element.requestVideoFrameCallback === 'function') {
+    if (!samsungAvplay && typeof element.requestVideoFrameCallback === 'function') {
       const id = element.requestVideoFrameCallback(firstFrame);
       cancelVideoFrame = () => element.cancelVideoFrameCallback(id);
     } else {
@@ -1598,6 +1605,34 @@
       reconnecting = false;
     };
     playedEngine = playsNatively ? 'native' : 'hls.js';
+    if (samsungAvplay) {
+      let gone = false;
+      let mounted: SamsungAvplayAdapter | undefined;
+      const starting = import('../tv/player/avplay').then(({ mountSamsungAvplay }) => {
+        if (gone || ended || session !== current) return;
+        mounted = mountSamsungAvplay({
+          element,
+          url: current.playlist,
+          audioTrack: current.audioTrack,
+          subtitleLanguage: subtitleChoice,
+        });
+        avplay = mounted;
+        watcher = watchPlayback({ video: element, reportUrl });
+        return mounted.start();
+      });
+      void starting.catch((error: unknown) => {
+        console.warn('Samsung AVPlay could not be started.', error);
+        if (gone || ended || session !== current || failure || breaking) return;
+        failure = 'engine';
+        letGo();
+      });
+      return () => {
+        gone = true;
+        stopWatching();
+        mounted?.destroy();
+        if (avplay === mounted) avplay = undefined;
+      };
+    }
     if (playsNatively) {
       element.src = current.playlist;
       const mounted = element.src;
@@ -1729,6 +1764,25 @@
   $effect(() => {
     const [current, element, held] = [session, video, hold];
     if (!current || current.castOrigin || !element || !held) return;
+    if (samsungAvplay) {
+      // AVPlay reports percent toward a platform-selected startup buffer, not seconds on the media timeline. Its
+      // buffering-complete/canplay signal is the only faithful readiness boundary available to this page.
+      const ready = () => {
+        if (hold !== held) return;
+        hold = null;
+        startsIn = null;
+        void element
+          .play()
+          .catch((error: unknown) =>
+            console.warn(
+              'The held Samsung start could not play on its own; its controls can.',
+              error,
+            ),
+          );
+      };
+      element.addEventListener('canplay', ready, { once: true });
+      return () => element.removeEventListener('canplay', ready);
+    }
     const tick = setInterval(() => {
       if (hold !== held) return clearInterval(tick);
       const { ready, seconds } = held.update(
@@ -2365,6 +2419,10 @@
    */
   function applySubtitles() {
     const choice = subtitleChoice;
+    if (__DEN_TV_PLATFORM__ === 'tizen' && avplay) {
+      avplay.selectSubtitleLanguage(choice);
+      return;
+    }
     const language = selectedSubtitleLanguage();
     const sidecars = session?.externalSubtitles ?? [];
     const sidecar = sidecars.some((track) => track.value === choice);
@@ -2832,6 +2890,10 @@
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
+    if (__DEN_TV_PLATFORM__ === 'tizen') {
+      avplay?.destroy();
+      avplay = undefined;
+    }
     endSession(current);
     session = null;
   }
@@ -3361,8 +3423,11 @@
           onerror={() => {
             // An `error` with no MediaError behind it — what iOS fired as a page came back from the background,
             // while its video went on loading — is no failure of the element.
-            if (video?.error) void broke();
-            else console.warn('The video fired an error with no MediaError; it plays on.');
+            if (video?.error) {
+              if (__DEN_TV_PLATFORM__ === 'tizen')
+                void broke(video.error.code, video.error.message, avplay?.failureKind());
+              else void broke();
+            } else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
         >
           {#each session?.externalSubtitles ?? [] as track (track.value)}

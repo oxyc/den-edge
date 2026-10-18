@@ -16,6 +16,8 @@ npm run test:e2e:tv
 For desktop preview open `http://127.0.0.1:4173`. Arrow keys navigate; Select is Enter,
 Back is Escape. In a text field, Select enters editing and Back leaves editing.
 Add `?tv-diagnostics=1` for a safe capability report (no library keys).
+Its **Run device checks** action performs disposable IndexedDB write/read, Web Crypto,
+and bundled Worker/Crypto/WASM probes. It is reachable by remote even if app startup fails.
 
 Set `DEN_EDGE` to your running Den Edge origin. The existing defaults are the
 homelab's LAN addresses; override `DEN_ATLAS`, `DEN_REEL`, and `DEN_REMUX` if those
@@ -188,7 +190,13 @@ codec/HDR behavior do not become available merely by reusing a screen. TV playba
 reuses the existing source/session, retry and progress logic, with remote
 play/pause/seek, a hideable controls overlay, and Back/visibility cleanup. LG's
 webOS user agent explicitly selects native HLS. Desktop preview uses native HLS
-where available and hls.js otherwise; Samsung has no AVPlay adapter yet.
+where available and hls.js otherwise. Installed Samsung builds load the platform
+Web API bridge before the app and lazily mount a TV-only AVPlay adapter. It reuses
+the shared session/recovery/progress UI, waits for resume seeking before playback,
+selects audio/native subtitle tracks and renders external WebVTT against AVPlay's
+clock. Stale callbacks cannot mutate a replacement session. Unknown buffered seconds
+and decoded-frame counts stay unknown rather than being fabricated from callbacks.
+The adapter and its CSS are absent from browser and LG builds.
 
 ## Verification and browser isolation
 
@@ -200,16 +208,19 @@ npm run test:e2e
 npm run test:e2e:tv
 DEN_TV_PLATFORM=tizen npm run test:e2e:tv
 npm run test:e2e:tv-package
-DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv -- tv-playback.spec.mjs
+DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv
 npm run build:tv:webos
 npm run build:tv:tizen
 node scripts/tv-package.integration.mjs
 node scripts/tizen-package.integration.mjs
+npm run test:tv-preflight
 ```
 
 Playwright needs its Chromium/WebKit browsers installed. TV E2E runs the production
-bundle, exercises real encrypted-library Workers and pairing, and plays checked-in
-HLS segments (not mocked `play()` or `currentTime`). Backend responses are fixtures;
+bundle, exercises real encrypted-library Workers and pairing, and the HLS tests play checked-in
+media segments (not mocked `play()` or `currentTime`). Separate AVPlay tests use an explicit
+workstation SDK fixture: they verify bridge state/transport, caption rendering, error redaction,
+cleanup, and the actual packaged script/CSP path, not Samsung decoding. Backend responses are fixtures;
 these tests do not use or modify the live library. They also cover remote navigation,
 focus restoration, forty detail/Back cycles, remote source/audio/subtitle selection,
 resume, Next, retry after a failed session, visibility cleanup and Back during loading.
@@ -221,12 +232,17 @@ The browser build rejects any TV/core-js module in its output graph, including l
 chunks. A checked-in clean-main baseline also gates compressed initial/all JS+CSS
 growth and checks TV-only markers. Run `npm run check:tv-isolation` for exact current
 compressed deltas against `3fccf42`. `node scripts/tv-browser-performance.mjs`
-alternates fresh Chromium contexts between `dist-browser-baseline` and `dist`,
+alternates fresh browser contexts between `dist-browser-baseline` and `dist`,
 with deterministic local fixtures, reporting paint timing and resource transfers.
 Successive pairs reverse execution order, and the report records bundle fingerprints,
 readiness medians/ranges and uncaught-page-error checks. Set `DEN_BROWSER_PERF_RUNS=6`
 for six balanced pairs. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` selects an installed
 Chrome when Playwright's bundled browser is unavailable.
+Set `DEN_BROWSER_PERF_ENGINE=webkit` for the same comparison in WebKit. It also measures
+detail, Back, Settings, a retained-library return and the idle preload window. These
+fresh contexts use HTTP no-store; the return is not a service-worker cache benchmark.
+Layout-shift sums and long-task observations are supplementary diagnostics, not a
+complete CLS/INP/Core Web Vitals assessment. Unsupported engine metrics are null.
 Workstation timings are not TV hardware measurements. TV builds target Chrome 85, have isolated
 output directories, and verify Worker compilation and compatibility imports. Only
 E2E builds include the Player harness; normal TV builds omit it.
@@ -236,16 +252,15 @@ request merely to preserve the browser's existing path behavior. CI retains brow
 failure traces and screenshots for seven days.
 
 After merging current main, the 2026-10-18 comparison against a clean `3fccf42`
-build, including the follow-up audit fixes, measured **+126 bytes initial gzip and
-+217 bytes total gzip**, with no
+build, including the follow-up audit fixes, measured **+119 bytes initial gzip and
++315 bytes total gzip**, with no
 additional browser asset chunk or TV module (80 JS/CSS assets in each build).
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
-A six-pair, counterbalanced loopback Chromium comparison against the same `3fccf42` baseline,
-after the other local test suites finished, measured Home readiness medians of
-112.3 ms baseline / 104.8 ms current (ranges 95.4–176.8 / 96.5–112.9 ms), and Search
-result medians of 36.6 / 35.4 ms (ranges 35.5–38.9 / 33.8–36.9 ms). These overlapping,
-variable samples do not establish a hardware speedup or a stable timing regression.
+Use six counterbalanced pairs against that baseline in each engine and run the comparison
+after local test suites finish. Record the generated report and its fingerprints with
+the PR's validation evidence; overlapping variable samples do not establish a hardware
+speedup or a stable timing regression.
 The script labels initial-navigation paint metrics separately from interaction
 readiness; resource snapshots are taken at those milestones, not after all idle
 preloads. It requires the clean-base output in `web/dist-browser-baseline` and the
@@ -257,7 +272,7 @@ Before claiming device support, record an actual C2/C4 firmware run: linking and
 relaunch, Magic Remote/D-pad and on-screen keyboard, Back/exit, a representative
 codec/audio/subtitle/source/resume matrix, suspend/reopen, and a longer browsing
 and playback soak. Samsung additionally needs installed-widget assets/API validation,
-real SDK key/exit behavior, AVPlay evaluation and a signed package. These are remaining
+real SDK key/exit behavior, AVPlay decoder/track evaluation and a signed package. These are remaining
 qualification tasks, not reasons to block the local preview.
 
 Focus restoration keys include the originating shelf, so duplicate titles in
@@ -283,6 +298,24 @@ for WebKit. These measure focus handling, not painted-highlight latency on a TV;
 the test reports timings without imposing a CPU-sensitive CI timing threshold.
 
 ## Follow-up audit
+
+Season tabs now retain their own left/right selection behavior. Watchlist actions are
+visible without hover, Sources has a direct Down/Up path between its disclosure and
+first source action, and pairing preserves focus as a code becomes an approval prompt.
+Source metadata is enlarged for viewing distance and season focus rings stay inside
+their scrollable strip instead of being clipped.
+Hardware Back leaves a Settings editor before closing its row. Production E2E exercises
+each of these flows, including encrypted two-device pairing and relaunch persistence.
+Missing-screen recovery is fault-injected against the compiled application: one fresh
+document can load a replacement asset graph, while a persistent failure exposes Retry
+without a reload loop. Opt-in diagnostics also work from the startup-failure surface.
+
+Samsung AVPlay opens relative playback URLs at the configured API origin, waits for
+resume seeking before Play, and fences callbacks after teardown. SDK error details can
+contain signed URLs: only recognized platform error enums reach diagnostics/reports.
+External WebVTT uses browser cue parsing and an overlay synchronized to the AVPlay clock.
+The five AVPlay journeys and the packaged bridge journey use an explicitly mocked SDK;
+the separate HLS journeys exercise actual media decoding.
 
 Poster action buttons previously depended on hover and were excluded from the
 TV focus scan at zero opacity. They are visible in TV builds; Up from a poster

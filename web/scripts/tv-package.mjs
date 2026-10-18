@@ -122,6 +122,12 @@ if (platform === 'tizen') {
     throw new Error(
       'Bundled Tizen index still contains root-absolute asset URLs; rebuild with packaged base ./',
     );
+  const samsungBridge =
+    '<script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>';
+  if (!builtIndex.includes(samsungBridge))
+    throw new Error(
+      'Bundled Tizen index is missing Samsung Web API bridge; rebuild the packaged bundle',
+    );
   prepareShell();
   cpSync(built, shell, { recursive: true });
   // The app icon is deliberately copied after the build so a public favicon cannot replace
@@ -185,7 +191,7 @@ if (platform === 'tizen') {
 <meta name="viewport" content="width=1920,height=1080,initial-scale=1,viewport-fit=cover"><title>Den</title></head>
 <body><p>Opening Den…</p><script>
 const target = ${JSON.stringify(remote.href)};
-window.addEventListener('keydown', (event) => { if (event.key === 'Escape' || event.key === 'Backspace') history.back(); });
+window.addEventListener('keydown', (event) => { if (event.key === 'Escape' || event.key === 'Backspace' || event.keyCode === 461) history.back(); });
 location.replace(target);
 </script></body></html>\n`;
   writeFileSync(join(shell, 'index.html'), redirect);
@@ -203,6 +209,8 @@ location.replace(target);
         largeIcon: 'largeicon.png',
         resolution: '1920x1080',
         disableBackHistoryAPI: true,
+        // Required by current webOS CLI guidance; this launcher uses no Luna service APIs.
+        requiredACG: [],
       },
       null,
       2,

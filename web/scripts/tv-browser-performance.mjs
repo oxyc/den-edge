@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 
-// Reproducible browser-bundle comparison. This is deliberately not a TV benchmark: it uses Chromium on the
+// Reproducible browser-bundle comparison. This is deliberately not a TV benchmark: it uses a workstation browser,
 // workstation, serves only the normal browser bundles, and answers app APIs with the existing guest fixtures.
 import { createServer } from 'node:http';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
-import { chromium } from '@playwright/test';
+import { chromium, webkit } from '@playwright/test';
 
 const root = resolve(import.meta.dirname, '..');
 const runs = Number(process.env.DEN_BROWSER_PERF_RUNS ?? 5);
 if (!Number.isInteger(runs) || runs < 1 || runs > 20)
   throw new Error('DEN_BROWSER_PERF_RUNS must be 1..20');
 const output = process.env.DEN_BROWSER_PERF_OUTPUT;
+const engine = process.env.DEN_BROWSER_PERF_ENGINE ?? 'chromium';
+if (!['chromium', 'webkit'].includes(engine))
+  throw new Error('DEN_BROWSER_PERF_ENGINE must be chromium or webkit');
 const types = {
   '.css': 'text/css',
   '.html': 'text/html',
@@ -112,13 +115,36 @@ async function fixture(page, origin) {
     }
     if (path.startsWith('/ratings/') || path.startsWith('/warnings/'))
       return route.fulfill({ status: 404, json: {} });
+    const movie = path.match(/^\/tmdb\/3\/movie\/(\d+)$/);
+    if (movie)
+      return route.fulfill({
+        json: {
+          id: Number(movie[1]),
+          title: `Movie ${movie[1]}`,
+          release_date: '2026-01-01',
+          overview: 'A deterministic detail page for browser performance comparisons.',
+          poster_path: '/poster.jpg',
+          backdrop_path: '/backdrop.jpg',
+          vote_average: 8,
+          vote_count: 1000,
+          genres: [{ id: 18, name: 'Drama' }],
+          credits: { cast: [], crew: [] },
+          recommendations: { results: [] },
+          external_ids: {},
+        },
+      });
+    if (path.startsWith('/tmdb/3/'))
+      return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
     if (!extname(path)) return route.continue();
     return route.abort('blockedbyclient');
   });
 }
 
 async function measure(page, origin, label) {
+  const entryStarted = performance.now();
   await page.goto(origin);
+  await page.getByRole('button', { name: 'Look around instead' }).waitFor();
+  const entry = { readyMs: performance.now() - entryStarted };
   const initialNavigation = await page.evaluate(() => globalThis.__denPerfSample?.());
   const homeStarted = performance.now();
   await page.getByRole('button', { name: 'Look around instead' }).click();
@@ -141,11 +167,57 @@ async function measure(page, origin, label) {
     .first()
     .waitFor();
   const result = await page.evaluate(() => globalThis.__denPerfSample?.());
+  const searchResult = { readyMs: performance.now() - searchStarted, resources: result };
+  const detailStarted = performance.now();
+  await page
+    .getByRole('link', { name: /Movie 1002/ })
+    .first()
+    .click();
+  await page.getByRole('heading', { name: 'Movie 1002', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Watchlist', exact: true }).waitFor();
+  const detail = {
+    readyMs: performance.now() - detailStarted,
+    resources: await page.evaluate(() => globalThis.__denPerfSample?.()),
+  };
+  const backStarted = performance.now();
+  await page.goBack();
+  await search.waitFor();
+  await page
+    .getByRole('link', { name: /Movie 1002/ })
+    .first()
+    .waitFor();
+  const back = { readyMs: performance.now() - backStarted };
+  const settingsStarted = performance.now();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  await page.waitForFunction(() => !globalThis.document.querySelector('.settings-load'));
+  const settings = {
+    readyMs: performance.now() - settingsStarted,
+    resources: await page.evaluate(() => globalThis.__denPerfSample?.()),
+  };
+  // Observe the real idle preload window as well as the initial download. This delay is a measurement phase,
+  // not a wait used to make an assertion pass; it catches optional assets fetched after navigation settles.
+  await page.waitForTimeout(2500);
+  const idle = await page.evaluate(() => globalThis.__denPerfSample?.());
+  const warmStarted = performance.now();
+  await page.goto(origin);
+  await page.getByRole('navigation', { name: 'Main navigation' }).waitFor();
+  await page.waitForFunction(() => {
+    const active = globalThis.document.querySelector('[data-route-page][data-active="true"]');
+    return active?.textContent?.trim() && !active.querySelector('[data-route-loading]');
+  });
+  const warmReturn = { readyMs: performance.now() - warmStarted };
   return {
     label,
+    entry,
     initialNavigation,
     home: { readyMs: home.readyMs, resources: home.resources },
-    search: { readyMs: performance.now() - searchStarted, resources: result },
+    search: searchResult,
+    detail,
+    back,
+    settings,
+    idle,
+    warmReturn,
   };
 }
 
@@ -162,9 +234,11 @@ const servers = await Promise.all(bundles.map((bundle) => serve(bundle.directory
 let browser;
 const results = [];
 try {
-  browser = await chromium.launch({
+  browser = await (engine === 'webkit' ? webkit : chromium).launch({
     headless: true,
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    ...(engine === 'chromium'
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+      : {}),
   });
   for (let run = 0; run < runs; run++) {
     // Counterbalance execution order so the current build is not always measured after the control.
@@ -177,6 +251,8 @@ try {
       page.on('pageerror', (error) => errors.push(error.message));
       await page.addInitScript(() => {
         const lcp = { value: null };
+        let layoutShiftScore = 0;
+        let longTaskMs = 0;
         try {
           new PerformanceObserver((list) => {
             const entries = list.getEntries();
@@ -184,6 +260,19 @@ try {
           }).observe({ type: 'largest-contentful-paint', buffered: true });
         } catch {
           /* Chromium version without LCP is reported as null. */
+        }
+        for (const type of ['layout-shift', 'longtask']) {
+          try {
+            new PerformanceObserver((list) => {
+              for (const entry of list.getEntries()) {
+                if (type === 'layout-shift' && !entry.hadRecentInput)
+                  layoutShiftScore += entry.value;
+                if (type === 'longtask') longTaskMs += entry.duration;
+              }
+            }).observe({ type, buffered: true });
+          } catch {
+            /* Unsupported observations are explicitly labelled below. */
+          }
         }
         globalThis.__denPerfSample = (phase) => {
           const navigation = performance.getEntriesByType('navigation')[0];
@@ -198,9 +287,19 @@ try {
             phase,
             fcp: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
             lcp: lcp.value,
+            // Whole-journey shift sum, not session-window CLS or an INP/Core Web Vitals score.
+            layoutShiftScore: PerformanceObserver.supportedEntryTypes.includes('layout-shift')
+              ? layoutShiftScore
+              : null,
+            longTaskMs: PerformanceObserver.supportedEntryTypes.includes('longtask')
+              ? longTaskMs
+              : null,
             domContentLoaded: navigation?.domContentLoadedEventEnd ?? null,
             load: navigation?.loadEventEnd ?? null,
             resources: resources.length,
+            assets: resources
+              .filter((entry) => /\/assets\//.test(entry.name))
+              .map((entry) => new URL(entry.name).pathname),
             transferBytes: resources.reduce((sum, entry) => sum + (entry.transferSize || 0), 0),
           };
         };
@@ -219,7 +318,7 @@ const summary = Object.fromEntries(
   bundles.map(({ label }) => [
     label,
     Object.fromEntries(
-      ['home', 'search'].map((phase) => {
+      ['entry', 'home', 'search', 'detail', 'back', 'settings', 'warmReturn'].map((phase) => {
         const values = results
           .filter((result) => result.label === label)
           .map((result) => result[phase].readyMs)
@@ -241,9 +340,12 @@ const summary = Object.fromEntries(
 const report = {
   generatedAt: new Date().toISOString(),
   runs,
-  browser: 'chromium',
+  browser: engine,
   scope: 'loopback production bundles with guest API fixtures; not TV/device performance',
   order: 'alternating baseline/current and current/baseline pairs',
+  cache:
+    'fresh context per sample; HTTP no-store and routed APIs; warm return retains local app data, not service-worker cache',
+  idleObservationMs: 2500,
   fingerprints,
   summary,
   results,

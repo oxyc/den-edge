@@ -236,6 +236,7 @@ export function installTVNavigation(): () => void {
   const pendingRestores = new Set<() => void>();
   let locationKey = routeKey();
   let editing: HTMLElement | null = null;
+  let forwardingBackToEditor = false;
 
   const restoreSoon = (selector?: string) => {
     for (const pending of pendingRestores) pending();
@@ -281,6 +282,9 @@ export function installTVNavigation(): () => void {
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    // A hardware Back on an editor is translated below into Escape for its owning component. Let that one
+    // synthetic event reach the component instead of treating it as a second, route-level Back in capture.
+    if (forwardingBackToEditor && event.key === 'Escape') return;
     const target = event.target instanceof Element ? event.target : null;
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
@@ -320,7 +324,59 @@ export function installTVNavigation(): () => void {
       // Arrow keys inside a native editor belong to its caret/list selection. Up/down at a search field is
       // likewise left to that field's own results behavior.
       if (isEditable(target) && editing === target) return;
+      // A tablist owns horizontal selection. Its inactive tabs use the required roving tabindex=-1, so the
+      // spatial scan cannot see them; let the component move focus and select the adjacent season itself.
+      if (
+        target instanceof HTMLElement &&
+        target.matches('[role="tab"]') &&
+        (direction === 'left' || direction === 'right')
+      )
+        return;
       if (target instanceof HTMLElement) {
+        // Source actions sit at the far right of their rows. Geometry alone skips them for the season tabs
+        // below the left-aligned disclosure, so make entering/leaving this panel an explicit vertical step.
+        const containingPanel = target.closest<HTMLElement>('.source-panel');
+        const disclosure = target.matches('.sources-disclosure[aria-expanded="true"]')
+          ? target
+          : containingPanel
+            ? document.querySelector<HTMLElement>(
+                `.sources-disclosure[aria-expanded="true"][aria-controls="${CSS.escape(containingPanel.id)}"]`,
+              )
+            : null;
+        const controlledId = disclosure?.getAttribute('aria-controls');
+        const sourceAction = (
+          controlledId ? document.getElementById(controlledId) : null
+        )?.querySelectorAll<HTMLElement>(FOCUSABLE);
+        const firstSourceAction =
+          sourceAction && Array.from(sourceAction).find((element) => visible(element));
+        const sourceDestination =
+          direction === 'down' && target === disclosure
+            ? firstSourceAction
+            : direction === 'up' && target === firstSourceAction
+              ? disclosure
+              : undefined;
+        if (sourceDestination && visible(sourceDestination)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          sourceDestination.focus({ preventScroll: true });
+          sourceDestination.scrollIntoView({ block: 'nearest', inline: 'center' });
+          return;
+        }
+        const framed = target.closest<HTMLElement>('.framed');
+        const listCard = framed?.querySelector<HTMLElement>('.card');
+        const listAction = framed?.querySelector<HTMLElement>('.controls button');
+        const withinListCard = listCard && (target === listCard || listCard.contains(target));
+        if (
+          (direction === 'up' && withinListCard && listAction && visible(listAction)) ||
+          (direction === 'down' && target.closest('.controls') && listCard && visible(listCard))
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const destination = direction === 'up' ? listAction! : listCard!;
+          destination.focus({ preventScroll: true });
+          destination.scrollIntoView({ block: 'nearest', inline: 'center' });
+          return;
+        }
         const holder = target.closest<HTMLElement>('.holder');
         const posterAction = holder?.querySelector<HTMLElement>('.action');
         const posterCard = holder?.querySelector<HTMLElement>('.card');
@@ -430,11 +486,20 @@ export function installTVNavigation(): () => void {
         editing = null;
         return;
       }
-      target.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
-      );
-      if (document.activeElement === target) target.blur();
-      restoreSoon(focusIdentity(target));
+      forwardingBackToEditor = true;
+      try {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+        );
+      } finally {
+        forwardingBackToEditor = false;
+      }
+      // An owner such as SettingRow may close itself and deliberately focus its trigger. Only provide the
+      // generic blur/restore fallback when the translated Escape left focus on the editor.
+      if (document.activeElement === target) {
+        target.blur();
+        restoreSoon(focusIdentity(target));
+      }
       return;
     }
     const tvBack = new CustomEvent('den:tv-back', { bubbles: true, cancelable: true });

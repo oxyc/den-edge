@@ -51,7 +51,7 @@ for (const required of [
   "style-src 'self'",
   "style-src-attr 'unsafe-inline'",
   "worker-src 'self' blob:",
-  "object-src 'none'",
+  "object-src 'self'",
   "connect-src 'self' https: wss:",
   "media-src 'self' blob: https:",
   'frame-src https://www.youtube-nocookie.com',
@@ -62,6 +62,11 @@ if (/script-src[^;]*'unsafe-(?:inline|eval)'/.test(config))
 const index = readFileSync(join(shell, 'index.html'), 'utf8');
 if (/\b(?:src|href)="\/(?:assets|manifest)/.test(index))
   throw new Error('Root-absolute asset URL remains in packaged index');
+const bridge = '<script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>';
+if (!index.includes(bridge))
+  throw new Error('Packaged Tizen index is missing the Samsung Web API bridge required by AVPlay');
+if (index.indexOf(bridge) > index.indexOf('<script type="module"'))
+  throw new Error('Samsung Web API bridge must load before the application module');
 const icon = readFileSync(join(shell, 'icon.png'));
 if (
   icon.length < 24 ||
@@ -72,7 +77,7 @@ if (
   throw new Error('Packaged Tizen icon must be a 117x117 PNG');
 if (!index.includes('http-equiv="Content-Security-Policy"'))
   throw new Error('Packaged index does not enforce its manifest CSP during browser/E2E execution');
-for (const source of ["script-src 'self' 'wasm-unsafe-eval'", "object-src 'none'"])
+for (const source of ["script-src 'self' 'wasm-unsafe-eval'", "object-src 'self'"])
   if (!index.includes(source)) throw new Error(`Packaged index CSP is missing: ${source}`);
 const xmllint = spawnSync('xmllint', ['--noout', join(shell, 'config.xml')], { encoding: 'utf8' });
 if (!xmllint.error && xmllint.status !== 0)

@@ -65,6 +65,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   });
   await packaged(host, edge);
   await host.goto(`${ENTRY}#/movie/1002`);
+  expect(await host.evaluate(() => globalThis.__tvSdkBridgeOrder)).toBe('before-app');
   await host.getByRole('button', { name: 'Look around instead' }).click();
   const saved = host.getByRole('button', { name: 'Watchlist', exact: true });
   await saved.click();

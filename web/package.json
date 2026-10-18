@@ -13,6 +13,8 @@
     "preview:tv:webos": "DEN_TV_PLATFORM=webos vite preview --config vite.tv.config.ts",
     "preview:tv:tizen": "DEN_TV_PLATFORM=tizen vite preview --config vite.tv.config.ts",
     "package:tv": "node scripts/tv-package.mjs",
+    "preflight:tv": "node scripts/tv-preflight.mjs",
+    "test:tv-preflight": "node scripts/tv-preflight.integration.mjs",
     "check:tv-isolation": "node scripts/check-tv-isolation.mjs",
     "test:e2e:tv": "playwright test --config playwright.tv.config.ts",
     "test:e2e:tv-package": "playwright test --config playwright.tv-package.config.ts",

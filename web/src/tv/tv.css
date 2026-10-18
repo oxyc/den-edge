@@ -45,6 +45,16 @@
   gap: 10px;
 }
 
+/* Source metadata is 12–14px in the browser. Keep the release and its availability legible at TV distance. */
+.den-tv .source-panel .note,
+.den-tv .source-panel .chip,
+.den-tv .source-panel strong,
+.den-tv .source-panel .languages,
+.den-tv .source-panel .status {
+  font-size: 20px;
+  line-height: 1.4;
+}
+
 /* Search is a ten-foot workspace: a substantial query field, a stable category rail, and a uniform poster grid.
    The shared Search component remains the data/paging engine; this TV-only sheet changes presentation only. */
 .den-tv .bar.searching .search {
@@ -147,6 +157,18 @@
 /* Poster actions cannot rely on hover: opacity: 0 also removes them from the remote geometry scan. */
 .den-tv .holder .action {
   opacity: 0.8;
+}
+
+/* Watchlist cards have their own direct Seen/Remove actions rather than PosterCard's menu. They are hover-only
+   in a browser; a remote has no hover state, so keep those compact actions visible and in the focus geometry. */
+.den-tv .framed .controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.den-tv .framed .control {
+  min-width: 48px;
+  height: 48px;
 }
 
 /* CheckGrid's browser checkbox is visually hidden. On old TV engines it must still expose a real rectangle to the
@@ -275,6 +297,12 @@
   --hero-drop: 0px;
 
   margin-bottom: 40px;
+}
+
+/* The season strip scrolls horizontally and clips an outer focus ring. Draw this ring inside the tab instead. */
+.den-tv.tv-remote-active [role='tab']:focus {
+  outline-offset: -4px;
+  box-shadow: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

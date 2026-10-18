@@ -10,6 +10,8 @@ const directory = resolve(
     (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
+if (platform === 'webos' && assets.some((file) => /^avplay-/.test(file)))
+  throw new Error('Samsung AVPlay leaked into the LG build');
 for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {
   const files = assets.filter((file) => file.startsWith(`${worker}-`) && file.endsWith('.js'));
   if (files.length !== 1) throw new Error(`Expected exactly one ${worker}, got ${files.length}`);

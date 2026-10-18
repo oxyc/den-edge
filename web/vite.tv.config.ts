@@ -99,6 +99,22 @@ const packagedMetadata: Plugin = {
   },
 };
 
+const samsungBridge: Plugin = {
+  name: 'den-tv-samsung-bridge',
+  transformIndexHtml: {
+    order: 'post',
+    handler(html) {
+      if (!packaged) return html;
+      // A platform-owned local script, not remote executable code. Keep it after the CSP meta and before
+      // the app module; ordinary browser and hosted preview builds do not request Samsung device files.
+      return html.replace(
+        /(?=<script type="module")/,
+        '<script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>\n',
+      );
+    },
+  },
+};
+
 const https =
   process.env.DEN_TLS_CERT && process.env.DEN_TLS_KEY
     ? { cert: readFileSync(process.env.DEN_TLS_CERT), key: readFileSync(process.env.DEN_TLS_KEY) }
@@ -138,7 +154,7 @@ export default mergeConfig(
       __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
     },
-    plugins: [tvEntry, workerCompatibility(), packagedMetadata],
+    plugins: [tvEntry, workerCompatibility(), packagedMetadata, samsungBridge],
     worker: { plugins: () => [workerCompatibility(), svelte()] },
     build: {
       target: 'chrome85',

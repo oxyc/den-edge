@@ -6,7 +6,9 @@ export const TV_CSP = [
   "style-src 'self'",
   "style-src-attr 'unsafe-inline'",
   "worker-src 'self' blob:",
-  "object-src 'none'",
+  // Samsung AVPlay creates a platform-owned <object> without a data URL; keep it
+  // local while continuing to reject remote object/plugin content.
+  "object-src 'self'",
   "base-uri 'self'",
   "connect-src 'self' https: wss:",
   "img-src 'self' data: blob: https:",

@@ -21,6 +21,18 @@ const types = {
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    if (
+      /-e2e-\d+$/.test(directory) &&
+      /^\/package\/(?:test\/)?\$WEBAPIS\/webapis\/webapis\.js$/.test(pathname)
+    ) {
+      // Samsung resolves this reserved alias to its installed SDK. A workstation has no SDK: make that
+      // boundary explicit, without adding a fake SDK to the signed package or masking missing app assets.
+      response.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
+      response.end(
+        "globalThis.__tvSdkBridgeOrder = document.documentElement.dataset.denTv || 'before-app';",
+      );
+      return;
+    }
     if (!pathname.startsWith('/package/')) throw new Error('Not an asset');
     const file = resolve(root, pathname.slice('/package/'.length));
     if (!file.startsWith(root + sep)) throw new Error('Outside package');

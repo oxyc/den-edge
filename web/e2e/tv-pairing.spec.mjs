@@ -14,6 +14,8 @@ test('TV joins another device through encrypted pairing and retains its saved li
   const saved = host.getByRole('button', { name: 'Watchlist', exact: true });
   await saved.click();
   await expect(saved).toHaveAttribute('aria-pressed', 'true');
+  // Pressed is optimistic; finish the actual local save before tearing down its Worker with navigation.
+  await expect(saved).not.toHaveAttribute('aria-busy', 'true');
   // Local-only libraries cannot be shared. Accept a real invite first so the
   // Worker uploads the saved title into the relay's encrypted library.
   await host.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
@@ -23,6 +25,9 @@ test('TV joins another device through encrypted pairing and retains its saved li
     .click();
   await expect.poll(() => edge.libraries.size, { timeout: 30_000 }).toBe(1);
   await expect.poll(() => [...edge.libraries.values()][0].rows.size).toBeGreaterThan(0);
+  await expect
+    .poll(() => host.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? '[]').length))
+    .toBe(1);
   await host.goto(`${E2E_ORIGIN}/settings`);
   await host.getByRole('button', { name: /Linked devices/ }).click();
   const devices = host.getByRole('region', { name: 'Linked devices' });
