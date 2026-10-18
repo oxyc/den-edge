@@ -394,10 +394,11 @@ async function routeBigAtlas(page, latencyMs) {
 export const PHONE_PROJECTION_MS = 6_000;
 
 /**
- * Give each assistant projection `page` builds the phone's time, on the build's own thread: the library Worker starts
- * its projection Worker (`assistantProjectionWorker.ts`) as a module that loads it and then spends `ms`, so the build
- * it was sent starts that much later, in that Worker. Playwright's routes never see the script of a Worker another
- * Worker starts, so it is done through the library Worker's handle, long before it builds.
+ * Give each assistant projection `page` builds the phone's time: the library Worker's projection Worker
+ * (`assistantProjectionWorker.ts`) is handed its build `ms` late, so as far as the library Worker can tell the build
+ * takes that long, elsewhere. Playwright's routes never see the script of a Worker another Worker starts, and that
+ * Worker finds its files from its own address, so it is started as it is and held through the library Worker's
+ * handle, long before it builds.
  *
  * `started()`: whether a build has started. `ask(query)`: the milliseconds the slowest of the page's library Workers
  * takes to answer `query`, sent to it as the page sends one (`LibraryServiceWorkerHost`), with its answer kept from
@@ -420,11 +421,9 @@ export function holdProjectionBuilds(page, ms = PHONE_PROJECTION_MS) {
               return;
             }
             globalThis.__projectionBuilds = (globalThis.__projectionBuilds ?? 0) + 1;
-            const source = `import ${JSON.stringify(href)};\nconst until = Date.now() + ${hold};\nwhile (Date.now() < until);\n`;
-            super(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })), {
-              ...options,
-              type: 'module',
-            });
+            super(url, options);
+            const post = this.postMessage.bind(this);
+            this.postMessage = (...args) => void setTimeout(() => post(...args), hold);
           }
         };
       }, ms)
