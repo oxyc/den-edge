@@ -14,7 +14,13 @@
   let {
     revokeGrant,
     listGrants,
+    connectionFetch,
   }: {
+    /**
+     * What lists and ends den-edge's connections: proof of the library they are for, which on a household split into
+     * profiles is the household's, not the page's own (Owner's) credential. Resolves undefined for the page's own.
+     */
+    connectionFetch?: Promise<typeof fetch | undefined>;
     /** Marks a grant revoked in the open library; absent where no member library is open here. */
     revokeGrant?: (grant: string) => Promise<unknown>;
     /**
@@ -74,7 +80,7 @@
       return;
     }
     for (const connection of (connections ?? []).filter((c) => c.grant === grant.grant)) {
-      const reply = await revokeConnection(connection.sid);
+      const reply = await revokeConnection(connection.sid, await connectionFetch);
       if (reply.ok) connections = (connections ?? []).filter((c) => c.sid !== connection.sid);
     }
     await loadGrants();
@@ -96,7 +102,7 @@
     mcpUrl = await fetchMcpUrl();
     asked = true;
     if (!mcpUrl) return;
-    const listed = await listConnections();
+    const listed = await listConnections(await connectionFetch);
     if (listed.ok) {
       connections = listed.value;
       problem = null;
@@ -132,7 +138,7 @@
         return;
       }
     }
-    const reply = await revokeConnection(connection.sid);
+    const reply = await revokeConnection(connection.sid, await connectionFetch);
     if (reply.ok) connections = (connections ?? []).filter((c) => c.sid !== connection.sid);
     else problem = 'Couldn’t disconnect it. Try again in a moment.';
     if (connection.grant) await loadGrants();
