@@ -11,6 +11,7 @@ import { phoneLanding } from './lib/phoneLanding.svelte';
 import {
   isLeaving,
   pageLeaving,
+  pageStayed,
   recoverChunkFailure,
   swapWhileHidden,
   watchRelease,
@@ -108,6 +109,7 @@ mount(App, { target });
 // cancelling it makes Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8),
 // and whatever asked for it then never learns it failed.
 window.addEventListener('beforeunload', pageLeaving);
+window.addEventListener('pageshow', pageStayed);
 window.addEventListener('vite:preloadError', () => {
   // Not for imports a navigation away cancelled (`pageLeaving`): nothing is missing, and no one should be told so.
   if (navigator.onLine && !isLeaving()) {
