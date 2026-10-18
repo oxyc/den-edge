@@ -50,7 +50,12 @@ import {
   tmdbJson,
   tmdbMissing,
 } from './tmdbCache';
-import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
+import {
+  fillSharedTitleMetadata,
+  keptByEdge,
+  rememberAtlasMetadata,
+  withSharedTitleMetadata,
+} from './titleMetadata';
 import { reuse } from './reuse';
 import { parseRecommendationSlides } from './recommend';
 import { discoverParams } from './catalog';
@@ -77,6 +82,19 @@ import {
 
 const TMDB = 'https://api.themoviedb.org/3';
 const MAX_ATLAS_TITLE_CURSORS = 64;
+
+/**
+ * Row and chart answers whose poster fill den-edge did not answer (a `429` or a failure). They are handed to whoever
+ * asked, but not kept for `reuse`'s five minutes: a row rebuilt in that window would otherwise stay posterless.
+ */
+const unfilled = new WeakSet<object>();
+const filled = (answer: object) => !unfilled.has(answer);
+async function readyFilled(titles: import('./library').Title[], fetchImpl: typeof fetch) {
+  const fill = await fillSharedTitleMetadata(titles, fetchImpl);
+  const answer = { state: 'ready', value: fill.titles } as const;
+  if (!fill.answered) unfilled.add(answer);
+  return answer;
+}
 
 export interface ContentRef {
   type: MediaType;
@@ -1300,16 +1318,16 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const url = `${atlas}/index/row/${type}.json?${query}`;
     try {
       return await this.#wait(
-        reuse(`content:${policyKey(policy)}:${url}`, async () => {
-          const response = await this.#atlasFetch(atlas, policy)(url);
-          if (absent(url, response)) return { state: 'absent' } as const;
-          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
-          const titles = titlesOf(await response.json());
-          return {
-            state: 'ready',
-            value: await withSharedTitleMetadata(titles, this.#providerFetch),
-          } as const;
-        }),
+        reuse(
+          `content:${policyKey(policy)}:${url}`,
+          async () => {
+            const response = await this.#atlasFetch(atlas, policy)(url);
+            if (absent(url, response)) return { state: 'absent' } as const;
+            if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+            return readyFilled(titlesOf(await response.json()), this.#providerFetch);
+          },
+          { keep: filled },
+        ),
         signal,
       );
     } catch (error) {
@@ -1392,20 +1410,21 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     const url = `${atlas}/catalog/${type}/${encodeURIComponent(request.catalog.id)}/country=${request.country}.json`;
     try {
       return await this.#wait(
-        reuse(`content:chart:${policyKey(policy)}:${url}`, async () => {
-          const response = await this.#atlasFetch(atlas, policy)(url);
-          if (absent(url, response)) return { state: 'absent' } as const;
-          if (!response.ok) throw new Error(`atlas answered ${response.status}`);
-          const expectedPolicy = atlasPolicyIdentity(policy);
-          if (expectedPolicy && response.headers.get('x-den-policy') !== expectedPolicy)
-            throw new Error('atlas answered a chart for another content policy');
-          const titles = this.#atlasChartTitles(await response.json());
-          if (!keptByEdge(response)) rememberAtlasMetadata(titles, this.#providerFetch);
-          return {
-            state: 'ready',
-            value: await withSharedTitleMetadata(titles, this.#providerFetch),
-          } as const;
-        }),
+        reuse(
+          `content:chart:${policyKey(policy)}:${url}`,
+          async () => {
+            const response = await this.#atlasFetch(atlas, policy)(url);
+            if (absent(url, response)) return { state: 'absent' } as const;
+            if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+            const expectedPolicy = atlasPolicyIdentity(policy);
+            if (expectedPolicy && response.headers.get('x-den-policy') !== expectedPolicy)
+              throw new Error('atlas answered a chart for another content policy');
+            const titles = this.#atlasChartTitles(await response.json());
+            if (!keptByEdge(response)) rememberAtlasMetadata(titles, this.#providerFetch);
+            return readyFilled(titles, this.#providerFetch);
+          },
+          { keep: filled },
+        ),
         signal,
       );
     } catch (error) {

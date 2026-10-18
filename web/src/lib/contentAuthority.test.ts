@@ -272,6 +272,59 @@ describe('ContentAuthority', () => {
     ).rejects.toMatchObject({ failure: { code: 'invalid-request', provider: 'atlas' } });
   });
 
+  it('keeps an Atlas row or chart only once den-edge answered its poster fill', async () => {
+    const credentials = new WorkerContentCredentials();
+    // `reuse` is shared by the module: a fresh base keeps this test's questions its own.
+    const atlas = `/atlas-fill-${crypto.randomUUID()}`;
+    credentials.configureAtlas(atlas);
+    const asked: string[] = [];
+    let metadata = 0;
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: async (input) => {
+        const url = String(input);
+        if (url === '/metadata/title/query')
+          return ++metadata === 1
+            ? json({}, { status: 429, headers: { 'retry-after': '1' } })
+            : json({
+                entries: [
+                  {
+                    type: 'movie',
+                    id: 7,
+                    source: 'tmdb',
+                    fields: { posterPath: { value: '/seven.jpg', observedAt: Date.now() - 1 } },
+                  },
+                ],
+              });
+        asked.push(url.includes('/catalog/') ? 'chart' : 'row');
+        return url.includes('/catalog/')
+          ? json({ metas: [{ type: 'movie', moviedb_id: 7, name: 'Seven' }] })
+          : json({ titles: [{ type: 'movie', id: 7, title: 'Seven' }] });
+      },
+    });
+    const signal = new AbortController().signal;
+    const posters = async (request: Parameters<ContentAuthority['query']>[0]) => {
+      const answer = await authority.query(request, signal);
+      const titles = 'titles' in answer && 'state' in answer.titles ? answer.titles : undefined;
+      return titles?.state === 'ready' ? titles.value.map((title) => title.posterPath) : null;
+    };
+
+    for (const request of [
+      { kind: 'atlas.row', type: 'movie', where: { mood: 'Tense' }, page: 1 },
+      { kind: 'atlas.service.chart', catalog: { id: 'nfx-new', type: 'movie' }, country: 'FI' },
+    ] as const) {
+      metadata = 0;
+      asked.length = 0;
+      // Refused: the titles are still handed over, without their poster.
+      expect(await posters(request)).toEqual([undefined]);
+      // Not kept: the next ask fills it.
+      expect(await posters(request)).toEqual(['/seven.jpg']);
+      // Kept: answered from the first complete answer.
+      expect(await posters(request)).toEqual(['/seven.jpg']);
+      expect(metadata).toBe(2);
+      expect(asked).toHaveLength(2);
+    }
+  });
+
   it('reads a 404 from an Atlas shared by a grant as unavailable, never as nothing there', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const answers = async (atlas: string) => {

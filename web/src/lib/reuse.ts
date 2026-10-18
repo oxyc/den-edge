@@ -11,20 +11,24 @@ const held = new Map<string, { at: number; value: Promise<unknown> }>();
 
 /**
  * `make()`'s promise, shared by every caller asking under `key` within `REUSE_MS`. A failure is not kept: the next
- * caller asks again rather than being handed the same refusal for five minutes.
+ * caller asks again rather than being handed the same refusal for five minutes. Nor is an answer `keep` turns down —
+ * one that is usable now but partial — though callers already waiting on it still share it.
  */
 export function reuse<T>(
   key: string,
   make: () => Promise<T>,
-  now: number = Date.now(),
+  { now = Date.now(), keep }: { now?: number; keep?: (value: T) => boolean } = {},
 ): Promise<T> {
   const kept = held.get(key);
   if (kept && now - kept.at < REUSE_MS) return kept.value as Promise<T>;
   const value = make();
   held.set(key, { at: now, value });
-  value.catch(() => {
+  const forget = () => {
     if (held.get(key)?.value === value) held.delete(key);
-  });
+  };
+  value.then((answer) => {
+    if (keep && !keep(answer)) forget();
+  }, forget);
   return value;
 }
 
