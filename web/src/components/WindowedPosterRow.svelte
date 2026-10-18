@@ -289,7 +289,13 @@
   }
 </script>
 
-<div bind:this={wrapper} class="windowed" class:landscape class:placed>
+<div
+  bind:this={wrapper}
+  class="windowed"
+  class:landscape
+  class:placed
+  class:near={gatesPlacement && rowNear}
+>
   <PosterRow {heading} {aside} active={rowNear} bind:track>
     {#each items as item, index (itemKey(item))}
       <span
@@ -323,8 +329,11 @@
      A reactivated page waits for its first observer delivery before skipping again. A retained page is shown before
      the router restores its scroll, and WebKit then keeps the row skipped at the position it was first laid out:
      the row paints but a tap on it is hit-tested against the wrapper, so its click goes nowhere. The first
-     delivery is computed after that restore, so enabling `auto` here lets the browser judge the restored position. */
-  .windowed.placed {
+     delivery is computed after that restore, so enabling `auto` here lets the browser judge the restored position.
+
+     A near row is not skipped either where placement is gated (WebKit), for the reason `BrowseRow` gives: WebKit
+     never lays out a skipped track, so a row inside the near window mounted no cards until it reached the screen. */
+  .windowed.placed:not(.near) {
     content-visibility: auto;
   }
 
@@ -338,7 +347,8 @@
 
   /* Until placed the wrapper keeps the containment `auto` gives a row that is not skipped, so its height (the row's
      bottom margin included) does not change when it is placed again and shift the page. */
-  .windowed:not(.placed) {
+  .windowed:not(.placed),
+  .windowed.near {
     contain: layout style paint;
   }
 

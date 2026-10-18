@@ -15,13 +15,15 @@
     title: `Continuing series ${index + 1}`,
     posterPath: `/continuing-${index + 1}.jpg`,
   }));
+  // The shelf starts below the screen, still inside its near window.
+  const below = new URLSearchParams(location.search).has('below');
 </script>
 
 <main>
   <Router onchange={() => {}}>
     {#snippet children(route)}
       {#if route.page === 'library'}
-        <div class="hero" aria-hidden="true"></div>
+        <div class="hero" class:below aria-hidden="true"></div>
         <WindowedPosterRow
           heading="Continue Watching"
           items={titles}
@@ -53,5 +55,9 @@
 
   .hero {
     height: 320px;
+  }
+
+  .hero.below {
+    height: 1100px;
   }
 </style>
