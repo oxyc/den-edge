@@ -406,6 +406,9 @@ export async function reuploadInstalls(
     if ((grant.escrow ?? keptHashes()[grant.gid]) === hash) continue;
     const picked = Object.fromEntries(addons.map((addon) => [addon, installs[addon]]));
     const reply = await updateGrant(id, grant.gid, { addons, installs: picked }, fetchImpl);
+    // A 403 refuses this browser's proof for the household, not this one grant: every other grant would be refused
+    // the same way, so asking again for each of them is only more refusals in den-edge's log.
+    if (!reply.ok && reply.status === 403) break;
     if (!reply.ok) continue;
     await keepUploaded(grant.gid, installs, addons);
     updated.push(grant.gid);

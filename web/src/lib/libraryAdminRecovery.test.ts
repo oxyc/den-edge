@@ -50,6 +50,33 @@ beforeEach(() => {
   recovery.confirm.mockResolvedValue({ ok: true });
 });
 
+it('stops reconciling recovery with a member proof den-edge refused', async () => {
+  const log = {
+    libraryId: 'library-id',
+    memberProof: 'member-proof',
+    newestStamp: () => [0, 0, ''] as [number, number, string],
+    kept: async () => undefined,
+    keep: async () => {},
+  } as unknown as LibraryLog & { memberProof: string };
+  // den-edge answering 403, as `recovery.ts`'s own call reports it.
+  recovery.reconcile.mockImplementation(async (...args: unknown[]) => {
+    (args[0] as { refused?: () => void }).refused?.();
+    return null;
+  });
+  const admin = new LibraryAdminAuthority(log, clock, {
+    mode: 'online',
+    libraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(1))),
+    vault,
+  });
+  // Settings reselects the view on every library change while it is open.
+  for (let change = 0; change < 5; change++) await admin.recoveryView();
+  expect(recovery.reconcile).toHaveBeenCalledOnce();
+  // A new proof (a key reset, a repaired membership) is asked again.
+  log.memberProof = 'another-proof';
+  await admin.recoveryView();
+  expect(recovery.reconcile).toHaveBeenCalledTimes(2);
+});
+
 it('restores a begun recovery transaction after authority replacement', async () => {
   const kept = new Map<string, unknown>();
   const log = {
