@@ -59,6 +59,7 @@
     previewProfileDirectory,
     profileDirectoryState,
     profilesCapability,
+    readActiveProfile,
     usesProfileDirectory,
     type ProfileActivityModelFactory,
     type ProfilesCapability,
@@ -479,12 +480,36 @@
       const activity = adopt
         ? { model: adopt.model!, close: () => adopt.close() }
         : openProfileActivity(owner.libraryKey);
+      // A remembered Kid's library opens beside the Owner's rather than after it: the coordinator below needs the Owner
+      // open, then restores the Kid, which took two library opens end to end. It takes this handle instead of opening
+      // the same library again, and a handle nothing took is closed.
+      const saved = readActiveProfile(localStorage);
+      const remembered =
+        saved?.mode === 'persistent' && saved.profileId !== owner.id
+          ? directory.profiles.find((choice) => choice.id === saved.profileId)
+          : undefined;
+      let early = remembered?.libraryKey
+        ? { key: remembered.libraryKey, handle: openProfileActivity(remembered.libraryKey) }
+        : null;
+      const profileModels: ProfileActivityModelFactory = (key) => {
+        if (early?.key !== key) return openProfileActivity(key);
+        const { handle } = early;
+        early = null;
+        return handle;
+      };
+      const closeEarly = () => {
+        early?.handle.close();
+        early = null;
+      };
       openingCommittedProfiles = true;
-      void activity.model.ready
+      // The coordinator closes the Owner session at once when it restores a remembered Kid, so that profile's load
+      // does not wait for the Owner library to open first.
+      void (early ? Promise.resolve() : activity.model.ready)
         .then(
           () => {
             if (opening !== committedProfilesOpen || profileCoordinator || session !== legacy) {
               activity.close();
+              closeEarly();
               return;
             }
             legacy.household.commitProfiles(libraryIdentity!);
@@ -507,11 +532,13 @@
               window,
               undefined,
               directory,
-              openProfileActivity,
+              profileModels,
             );
+            closeEarly();
           },
           () => {
             activity.close();
+            closeEarly();
             if (opening === committedProfilesOpen) profileCapability = 'indeterminate';
           },
         )

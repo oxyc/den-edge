@@ -652,6 +652,11 @@ export class ProfileModeCoordinator {
   /** Replace the validated control-plane projection. A changed/removed active entry is never kept alive. */
   updateDirectory(directory: PreviewProfileDirectory | null): void {
     this.#assertOpen();
+    // The page hands over the directory it constructed this coordinator with as soon as it holds it. While the profile
+    // it remembered is still opening, nothing has changed: cancelling then made a remembered Kid's library open twice,
+    // the first one thrown away.
+    if (this.#restoring > 0 && JSON.stringify(directory) === JSON.stringify(this.#directory))
+      return;
     const current = this.#session;
     const previousChoice =
       current?.identity.kind === 'profile' ? this.#choice(current.identity.id) : undefined;

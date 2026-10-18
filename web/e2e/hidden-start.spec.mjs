@@ -23,6 +23,24 @@ test('a returning Owner’s page opened hidden starts the app without waiting to
     const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
     const edge = newEdge({ profiles: true });
     await bigHousehold(context, edge);
+    // The kept billboard the document draws from: Home keeps it once its ranking's encrypted copy has landed
+    // (`recommend.ts` `keepPersonalBackdrop`), which a slow machine reaches after the household's own setup is done.
+    const keeping = await context.newPage();
+    await routeBigHousehold(keeping, edge);
+    await keeping.goto(`${E2E_ORIGIN}/`);
+    await expect
+      .poll(
+        () =>
+          keeping.evaluate(() =>
+            // `den.hero-lead.current.v1.<fresh.?><facet>` (`heroLeadPointer.ts`): Home's, whichever form it keeps.
+            Object.keys(localStorage).some((key) =>
+              /^den\.hero-lead\.current\.v1\.(?:fresh\.)?all$/.test(key),
+            ),
+          ),
+        { timeout: 60_000, message: 'Home kept its billboard lead' },
+      )
+      .toBe(true);
+    await keeping.close();
 
     const page = await context.newPage();
     await routeBigHousehold(page, edge);
