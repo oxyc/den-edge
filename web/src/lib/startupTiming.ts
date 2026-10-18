@@ -23,6 +23,8 @@ function sinceNavigation(): number {
 export const startupWorkerName = (): string => String(performance.timeOrigin);
 
 let last: { event: string; at: number } | undefined;
+/** Each milestone's first time on this page, for its one load report (`loadReport.ts`). */
+const firsts = new Map<string, number>();
 let workers = 0;
 let stall: ReturnType<typeof setTimeout> | undefined;
 let handedOver = false;
@@ -45,10 +47,24 @@ export function startupFailure(error: unknown): string {
 
 export function startupMark(event: string, detail?: string): void {
   const at = sinceNavigation();
-  if (!inWorker) last = { event, at };
+  if (!inWorker) {
+    last = { event, at };
+    if (!firsts.has(event)) firsts.set(event, at);
+  }
   console.info(
     `den: startup${inWorker ? ' [worker]' : ''} +${at}ms ${event}${detail ? ` (${detail})` : ''}`,
   );
+}
+
+/** When `event` first happened on this page, in milliseconds since navigation start; undefined if it has not. */
+export const startupMilestone = (event: string): number | undefined => firsts.get(event);
+
+/** How many Workers this page has started. */
+export const startupWorkers = (): number => workers;
+
+/** Mark `event` only the first time it happens on this page: a milestone, not a stream of them. */
+export function startupMarkOnce(event: string, detail?: string): void {
+  if (!firsts.has(event)) startupMark(event, detail);
 }
 
 /** One line per Worker the page starts, numbered across the whole page so a burst of them is visible. */

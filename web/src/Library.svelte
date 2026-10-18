@@ -46,6 +46,7 @@
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
+  import { startupMarkOnce } from './lib/startupTiming';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
@@ -411,6 +412,7 @@
     void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
       shelvesReady = true;
+      startupMarkOnce('shelves ready');
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
       void model.retainHomeContinue(plan.continue).catch(warnKeep);

@@ -37,6 +37,7 @@
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref } from '../lib/route';
+  import { startupMarkOnce } from '../lib/startupTiming';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
   import { toastContext } from '../lib/toast';
@@ -433,6 +434,7 @@
         seasonEpisodes = loaded.state === 'ready' ? loaded.value : null;
         displayedSeason = picked;
         seasonLoading = false;
+        if (seasonEpisodes?.length) startupMarkOnce('episodes shown');
       })
       .catch(() => {
         if (controller.signal.aborted) return;

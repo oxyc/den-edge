@@ -5,6 +5,7 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
+import { watchLoadReport } from './lib/loadReport';
 import { parsePhoneLink } from './lib/phoneLink';
 import { phoneLanding } from './lib/phoneLanding.svelte';
 import { recoverChunkFailure, swapWhileHidden, watchRelease } from './lib/release';
@@ -64,6 +65,9 @@ setTimeout(() => {
 // itself then only ever reads paths. `#pair=…` is not a route and is left alone for the pairing screen to read.
 const legacy = legacyPath(location.hash);
 if (legacy) history.replaceState(history.state, '', legacy + location.search);
+
+// How long this load took to reach its milestones, for den-edge's log: a page slow on one device is read there.
+watchLoadReport();
 
 // An invite link (`#invite=<code>`) asks, on the page it opens, whether to accept (`InviteDialog`). The code leaves the
 // address at once, so it isn't kept in history or shared onward by copying the URL.
