@@ -347,6 +347,40 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([`probe ${first.url}`, `prefetch ${second.url}`]);
   });
 
+  it('answers a refresh asked during a pass with a pass of its own, not the one in flight', async () => {
+    const shared = testLog([stalledRow()]);
+    const asked: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let polled!: () => void;
+    const polling = new Promise<void>((resolve) => (polled = resolve));
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        prepare: async (url: string) => {
+          asked.push(url);
+          polled();
+          await gate;
+          return { state: 'preparing' as const, progress: 0 };
+        },
+      },
+      { now: () => T0 + MINUTE, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+
+    const scheduled = driver.run({ observedFor: 0 });
+    await polling;
+    const refreshed = driver.run({ force: true, observedFor: 0 });
+    const again = driver.run({ force: true, observedFor: 0 });
+    release();
+    await scheduled;
+    await Promise.all([refreshed, again]);
+    // The refreshes polled again, in one pass after the one that was already polling when they were asked.
+    expect(asked).toEqual([first.url, first.url]);
+  });
+
   it('keeps searching for a wanted episode, backing off, until a release turns up', async () => {
     const shared = testLog();
     const asked: string[] = [];

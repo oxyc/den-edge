@@ -71,6 +71,8 @@ export class DownloadCoordinatorDriver {
   #held?: Held;
   #observed?: Observed;
   #running?: Promise<boolean>;
+  /** The forced pass that follows the one in flight. */
+  #again?: { options: DownloadDriveOptions; pass: Promise<boolean> };
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
   /** The wanted list last handed to Hearth, and when. */
@@ -81,6 +83,10 @@ export class DownloadCoordinatorDriver {
   constructor(readonly queue: DownloadCoordinator) {}
 
   run(options: DownloadDriveOptions = {}): Promise<boolean> {
+    // A forced pass (a refresh) is asked for figures from now: the pass in flight began before it, with an older
+    // `now`, the rows as they were, and possibly other names, so one more pass follows it, shared by every refresh
+    // asked meanwhile, rather than answering with it.
+    if (this.#running && options.force) return this.#after(options);
     if (this.#running) return this.#running;
     const running = this.#run(options);
     this.#running = running;
@@ -88,6 +94,26 @@ export class DownloadCoordinatorDriver {
       if (this.#running === running) this.#running = undefined;
     });
     return running;
+  }
+
+  #after(options: DownloadDriveOptions): Promise<boolean> {
+    const waiting = this.#again;
+    if (waiting) {
+      const names = waiting.options.names;
+      waiting.options = {
+        ...waiting.options,
+        names: names && options.names ? new Set([...names, ...options.names]) : undefined,
+      };
+      return waiting.pass;
+    }
+    const again = { options } as { options: DownloadDriveOptions; pass: Promise<boolean> };
+    const next = () => {
+      this.#again = undefined;
+      return this.run(again.options);
+    };
+    again.pass = this.#running!.then(next, next);
+    this.#again = again;
+    return again.pass;
   }
 
   async #run(options: DownloadDriveOptions): Promise<boolean> {
