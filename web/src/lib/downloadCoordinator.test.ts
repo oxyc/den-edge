@@ -173,14 +173,60 @@ describe('DownloadCoordinator', () => {
 
     const shown = await queue.sourcesForTitle(title);
     expect(shown.sources?.map(({ identity }) => identity)).toEqual([
-      first.identity,
       second.identity,
+      first.identity,
     ]);
     await expect(queue.enqueueIdentity(title, first.identity, 2)).resolves.toBe(true);
     expect(resolves).toBe(1);
 
     await queue.sourcesForTitle(title, true);
     expect(resolves).toBe(2);
+  });
+
+  it('downloads Rebecka Martinsson S02E01 as an uncached 1080p, not the cached SD AVI', async () => {
+    const avi = source('Rebecka.Martinsson.S02E01.SWEDiSH.PDTV.XviD-GRP.avi', {
+      resolution: '480p',
+      cached: true,
+      seeders: 3,
+    });
+    const h264 = source('Rebecka.Martinsson.S02E01.1080p.WEB.H264-GRP.mkv', {
+      resolution: '1080p',
+      codec: 'h264',
+      cached: false,
+      seeders: 12,
+    });
+    const hevc = source('Rebecka.Martinsson.S02E01.1080p.WEB.H265-GRP.mkv', {
+      resolution: '1080p',
+      codec: 'hevc',
+      cached: false,
+      seeders: 9,
+    });
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      { ...effects(), resolve: async () => ({ sources: [avi, h264, hevc] }) },
+      { now: () => T0 },
+    );
+
+    expect(queue.pick([avi, h264, hevc], 'sv')?.identity).toBe(h264.identity);
+    const shown = await queue.sourcesForTitle({ ...title, episode: 1, originalLanguage: 'sv' });
+    expect(shown.sources?.[0]?.identity).toBe(h264.identity);
+  });
+
+  it('sinks an AVI for a download by its file name when its identity is an info-hash', () => {
+    const avi = source(
+      'Rebecka.Martinsson.S02E03.1080p.HDTV.avi',
+      { resolution: '1080p', cached: true, seeders: 20 },
+      '5d41402abc4b2a76b9719d911017c592aa000001',
+    );
+    const mkv = source(
+      'Rebecka.Martinsson.S02E03.720p.HDTV.x264.mkv',
+      { resolution: '720p', codec: 'h264', cached: false, seeders: 20 },
+      '5d41402abc4b2a76b9719d911017c592aa000002',
+    );
+    const queue = new DownloadCoordinator(testLog().log, clock(), effects(), { now: () => T0 });
+    expect(avi.identity).toBe('5d41402abc4b2a76b9719d911017c592aa000001');
+    expect(queue.pick([avi, mkv])?.identity).toBe(mkv.identity);
   });
 
   it('coalesces concurrent fresh UI, renewal, hedge, and fallback source resolution', async () => {
@@ -238,7 +284,7 @@ describe('DownloadCoordinator', () => {
     const hedge = queue.hedgeUrl(hedged);
 
     releaseFresh();
-    await expect(shown).resolves.toMatchObject({ sources: [refreshedFirst, refreshedSecond] });
+    await expect(shown).resolves.toMatchObject({ sources: [refreshedSecond, refreshedFirst] });
     await expect(renewed).resolves.toBe(refreshedFirst.url);
     await expect(hedge).resolves.toBe(refreshedSecond.url);
     await expect(fallback).resolves.toBe(true);
