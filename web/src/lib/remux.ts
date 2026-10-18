@@ -47,6 +47,8 @@ export interface Session {
   castOrigin?: string;
   /** Set when den-edge opened the media listener for the `ipv4Hint` this page sent rather than the address it saw. */
   hinted?: boolean;
+  /** Hearth tried TorBox first and fell back to this Remux session: TorBox's closed reason (`PlaybackCause`). */
+  directFailure?: string;
   /** Seconds. */
   duration: number;
   release: {

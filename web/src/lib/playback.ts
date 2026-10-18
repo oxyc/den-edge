@@ -12,10 +12,13 @@ export const PLAYBACK_ANSWER_MS = 150_000;
 export type PlaybackWant = Omit<Want, 'scout' | 'subtitles' | 'ipv4Hint' | 'noHint'> & {
   /** An already-returned direct URL failed in the player; Hearth may skip direct delivery for this attempt. */
   directFailed?: boolean;
+  /** TorBox or nothing: Hearth refuses (`direct_unavailable`) rather than start a Remux session in its place. */
+  directOnly?: boolean;
 };
 
 export type PlaybackErrorCode =
   | 'bad_request'
+  | 'direct_unavailable'
   | 'idempotency_conflict'
   | 'no_release'
   | 'playback_busy'
@@ -146,6 +149,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
     lanPlaylist: lanBase && relativePlaylist ? new URL(relativePlaylist, lanBase).href : undefined,
     castOrigin: origin(answer.castOrigin) ?? origin(nested.castOrigin),
     hinted: answer.hinted === true || nested.hinted === true || undefined,
+    directFailure: answer.degraded === true ? knownCause(text(answer.directFailure)) : undefined,
     release,
     duration: number(nested.duration) ?? 0,
     audioTrack: number(nested.audioTrack) ?? 0,
@@ -205,6 +209,7 @@ function knownCause(cause: string | undefined): PlaybackCause | undefined {
 function knownCode(error: string | undefined): PlaybackErrorCode | undefined {
   switch (error) {
     case 'bad_request':
+    case 'direct_unavailable':
     case 'idempotency_conflict':
     case 'no_release':
     case 'playback_busy':

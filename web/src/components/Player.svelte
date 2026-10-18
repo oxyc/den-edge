@@ -61,6 +61,7 @@
   import {
     autoSwitchedNotice,
     autoSwitchNotice,
+    deliveryUnchangedNotice,
     nothingFits,
     optionLabel,
     releaseAfterMeasure,
@@ -442,6 +443,13 @@
   let excluded: string[] = recalled.left;
   // $state: a notice of a switch under way stays up until it lands, and only then starts to fade.
   let switching = $state(false);
+  /**
+   * Whether this viewer's Hearth delivers TorBox: a TorBox stream played here this visit, or Hearth tried TorBox first
+   * and fell back to Remux for a reason that may pass (`directFailure`). Only then does the stamp offer TorBox.
+   */
+  let torboxOffered = $state(false);
+  /** Set while the stamp's switch to the other path is under way (`switchDelivery`). */
+  let deliverySwitching = $state(false);
 
   /** Keep `chosenRelease` and `excluded` for a reload of this same visit. */
   function keepReleases() {
@@ -636,6 +644,8 @@
    * Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. `extra`
    * is what a switch adds to the request. With `replacing`, the session playing now is kept until the new one has
    * started, and kept for good when none does: true when one did, den-remux's refusal when it refused one, else false.
+   * `delivery` 'fallback' asks Hearth for Remux; 'direct' for TorBox or nothing, so a Remux session Hearth would
+   * otherwise start in its place never takes the playing one's slot.
    */
   async function begin(
     pick: { audioTrack?: number; filename: string } | undefined = chosenRelease
@@ -643,7 +653,7 @@
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
-    delivery: 'ordinary' | 'refresh' | 'fallback' = 'ordinary',
+    delivery: 'ordinary' | 'refresh' | 'fallback' | 'direct' = 'ordinary',
   ): Promise<boolean | Failure> {
     clearTimeout(retry);
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
@@ -730,13 +740,16 @@
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
-      ...(excluded.length ? { exclude: [...excluded] } : {}),
+      // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
+      ...(excluded.length && delivery !== 'direct' ? { exclude: [...excluded] } : {}),
       ...extra,
       ...pick,
       // den-remux keeps the session being replaced playing until this one serves media, rather than ending it as
       // soon as this is asked for. Only a session of the same route: another route's (a move to cast) may belong to
       // another owner there, and is not ended by this one anyway.
-      ...(replacing?.sid && sessionRoute === route ? { replaces: replacing.sid } : {}),
+      ...(replacing?.sid && sessionRoute === route && delivery !== 'direct'
+        ? { replaces: replacing.sid }
+        : {}),
     };
     const on = route;
     startingSession?.abort(new DOMException('superseded session start', 'AbortError'));
@@ -759,14 +772,24 @@
             ...(delivery === 'fallback' || (castMode && subtitleChoice)
               ? { directFailed: true }
               : {}),
+            ...(delivery === 'direct' ? { directOnly: true } : {}),
           },
           undefined,
           attempt.signal,
         )
       : await startSession(request, undefined, on, undefined, attempt.signal);
-    // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled.
+    // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled. Legacy
+    // playback is Remux, which a request for TorBox alone never takes.
     if ('failure' in result && result.failure === 'legacy')
-      result = await startSession(request, undefined, on, undefined, attempt.signal);
+      result =
+        delivery === 'direct'
+          ? { failure: 'sourceUnavailable' }
+          : await startSession(request, undefined, on, undefined, attempt.signal);
+    // TorBox was asked for and anything else is a refusal: a Remux answer is ended unplayed.
+    if (delivery === 'direct' && !('failure' in result) && !result.external) {
+      endSession(result);
+      result = { failure: 'sourceUnavailable' };
+    }
     // Headed for a receiver: whether this page reaches the session's home-network address says whether the receiver,
     // on that network, can be handed it (`sendToCastFrame`'s `lanProven`). The cast page can't be the judge: a
     // cross-origin frame may be kept off the local network when this page is not.
@@ -812,7 +835,9 @@
       if (replacing) {
         // A failed external session is kept only long enough for `broke` to judge recovery; unlike an ordinary
         // Remux track/release change, it does not carry on. Keep the two log messages truthful and URL-free.
-        if (replacing.external)
+        if (delivery === 'direct')
+          console.warn(`TorBox could not start (${result.failure}); Den Remux carries on.`);
+        else if (replacing.external)
           console.warn(`Managed direct media recovery failed (${result.failure}).`);
         else
           console.warn(
@@ -888,7 +913,18 @@
     // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     session = result;
-    directAttempt = result.external ? (delivery === 'ordinary' ? 'initial' : 'refreshed') : null;
+    directAttempt = result.external
+      ? delivery === 'ordinary' || delivery === 'direct'
+        ? 'initial'
+        : 'refreshed'
+      : null;
+    if (
+      result.external ||
+      (result.directFailure &&
+        result.directFailure !== 'torbox_authentication_failed' &&
+        result.directFailure !== 'torbox_managed_streaming_unavailable_for_plan')
+    )
+      torboxOffered = true;
     sessionRoute = on;
     // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
     // page's `den-lan` has it.
@@ -2379,6 +2415,42 @@
   }
 
   /**
+   * The stamp's switch: the same release from the second it is at, from the other path — TorBox to Den Remux, or Den
+   * Remux to TorBox. Always a replacement, so what plays now plays on until the other has started, and for good
+   * where the other path refuses, which the viewer is told.
+   */
+  function switchDelivery() {
+    const current = session;
+    if (!current || switching || deliverySwitching) return;
+    const to = current.external ? 'Den Remux' : 'TorBox';
+    report();
+    carryPosition();
+    deliverySwitching = true;
+    begin(
+      { filename: current.release.filename },
+      { transcode: 'never' },
+      current,
+      current.external ? 'fallback' : 'direct',
+    )
+      .catch((error: unknown): Failure => {
+        console.warn(`A switch to ${to} got no answer; this one carries on.`, error);
+        return 'unreachable';
+      })
+      .then((moved) => {
+        if (moved === true) {
+          switchCount += 1;
+          lastSwitchReason = 'user';
+          return;
+        }
+        if (session !== current) return;
+        startAt = null;
+        if (typeof moved === 'string')
+          unchanged = deliveryUnchangedNotice(to, moved, guestGrants.endedText());
+      })
+      .finally(() => (deliverySwitching = false));
+  }
+
+  /**
    * Where the next session starts: where this one is, or — once a failure took its video away — where it last was
    * (`lastPosition`), or was started at. Only a position worth carrying: a release refused before it drew a frame sits
    * at zero, and taking that forward would throw away where the library says this was left.
@@ -2578,10 +2650,22 @@
     <b>{heading}</b>
     {#if session}
       <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
-           Remux session. -->
-      <span class="source-stamp" data-testid="playback-source"
-        >{session.external ? 'TorBox' : 'Den Remux'}</span
-      >
+           Remux session. Where this viewer's Hearth offers both, it switches to the other. -->
+      {@const source = session.external ? 'TorBox' : 'Den Remux'}
+      {#if !casting && (session.external || torboxOffered)}
+        <Button
+          variant="player"
+          size="compact"
+          class="player-source-switch"
+          label={source}
+          ariaLabel={`Playing from ${source} — switch to ${session.external ? 'Den Remux' : 'TorBox'}`}
+          busy={deliverySwitching || switching}
+          data-testid="playback-source"
+          onclick={switchDelivery}
+        />
+      {:else}
+        <span class="source-stamp" data-testid="playback-source">{source}</span>
+      {/if}
     {/if}
     {#if castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
       <Button
@@ -3023,6 +3107,13 @@
     font-size: 12px;
     line-height: 1.4;
     white-space: nowrap;
+  }
+
+  /* The stamp as a switch sits where the plain stamp does. */
+  :global(.player-source-switch) {
+    flex: none;
+    margin-right: auto;
+    margin-left: -8px;
   }
 
   /* The title takes the width; closing is one glyph, as it is on the pickers. No ring around it: it sits beside
