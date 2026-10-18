@@ -3,10 +3,11 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin, ViteDevServer } from 'vite';
 import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
+import { upstream } from './scripts/upstream.ts';
 
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
-// den-edge — the homelab's by default, DEN_EDGE for another.
-const edge = process.env.DEN_EDGE ?? 'http://192.168.86.193:8094';
+// den-edge — the homelab's by default, DEN_EDGE for another. Under e2e (`DEN_E2E=1`) it is never a real one.
+const edge = upstream('DEN_EDGE', 'http://192.168.86.193:8094');
 // `/tmdb` is den-edge lending its TMDB key to a browser that has none, so it has to be proxied too — without
 // it this server answers the app's own index.html to a request for a title and nothing is ever named here.
 // `/metadata` names the titles atlas lists without a poster; without it every atlas row is empty here.
@@ -23,13 +24,13 @@ const api = [
   '/metadata',
 ];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
-const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
+const atlas = upstream('DEN_ATLAS', 'http://192.168.86.193:8081');
 // reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
-const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
+const reel = upstream('DEN_REEL', 'http://192.168.86.193:8092');
 // den-remux, for the player and for test/remux.html. Unlike atlas and reel this keeps the prefix: den-remux's own
 // routes are under /remux, which is why tailscale serve sends /remux to :8095/remux rather than stripping it. A
 // rewrite here would ask it for /session, which it does not serve.
-const remux = process.env.DEN_REMUX ?? 'http://192.168.86.193:8095';
+const remux = upstream('DEN_REMUX', 'http://192.168.86.193:8095');
 // The probe is an instrument, not part of the app: it injects a beacon into every page this server hands
 // out. Left on unconditionally it reaches the e2e suite too, where `POST /__probe` reads as an unmocked
 // request and fails every spec that guards the network. On for a session someone is watching from a
