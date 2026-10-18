@@ -1,7 +1,7 @@
 // One assistant projection build (den-spec wire/assistant-v1.md §15), in a Worker of its own: den-core reads the whole
 // library, deflates and seals it, which holds a phone's thread for seconds. The library Worker that starts it hands
-// it the compiled assistant module and the request, and keeps answering the page meanwhile.
-import { evaluateAssistant, initializeAssistant } from '../vendor/den-core/assistant.js';
+// it the request, and keeps answering the page meanwhile.
+import { assistantAnswer, ensureAssistantPolicy } from './assistantCore';
 import type { ProjectionBuild, ProjectionBuilt } from './assistantProjection';
 
 const scope = self as unknown as {
@@ -12,10 +12,8 @@ const scope = self as unknown as {
 scope.onmessage = (event) => {
   void (async () => {
     try {
-      await initializeAssistant(event.data.module);
-      scope.postMessage({
-        answer: evaluateAssistant(new TextDecoder().decode(event.data.request)),
-      });
+      await ensureAssistantPolicy();
+      scope.postMessage({ answer: assistantAnswer(new TextDecoder().decode(event.data.request)) });
     } catch (error) {
       // The failure's message only: the request carries the read keys.
       scope.postMessage({

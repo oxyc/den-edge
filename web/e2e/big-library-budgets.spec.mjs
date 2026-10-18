@@ -110,8 +110,12 @@ function markReady() {
   requestAnimationFrame(frame);
 }
 
-/** Count each Worker's IndexedDB transactions from the moment it is seen. */
-function countTransactions(page) {
+/**
+ * Count each Worker's IndexedDB transactions, and the wasm it compiles itself (`WebAssembly.compile` or
+ * `compileStreaming`), from the moment it is seen. A compile of its own is a fresh one on every load: a module streamed
+ * straight into instantiation is taken from WebKit's cache of its compiled code instead.
+ */
+function countWorkerWork(page) {
   const workers = [];
   page.on('worker', (worker) =>
     workers.push(
@@ -119,6 +123,7 @@ function countTransactions(page) {
         .evaluate(() => {
           globalThis.__transactions = 0;
           globalThis.__stores = {};
+          globalThis.__compiles = 0;
           const transaction = IDBDatabase.prototype.transaction;
           IDBDatabase.prototype.transaction = function (...args) {
             globalThis.__transactions++;
@@ -126,21 +131,31 @@ function countTransactions(page) {
             globalThis.__stores[key] = (globalThis.__stores[key] ?? 0) + 1;
             return transaction.apply(this, args);
           };
+          for (const name of ['compile', 'compileStreaming']) {
+            const compile = WebAssembly[name];
+            if (!compile) continue;
+            WebAssembly[name] = function (...args) {
+              globalThis.__compiles++;
+              return compile.apply(this, args);
+            };
+          }
         })
         .then(() => worker)
         .catch(() => null),
     ),
   );
   return async () => {
-    let total = 0;
+    let transactions = 0;
+    let compiles = 0;
     for (const worker of await Promise.all(workers)) {
-      total += (await worker?.evaluate(() => globalThis.__transactions).catch(() => 0)) ?? 0;
+      transactions += (await worker?.evaluate(() => globalThis.__transactions).catch(() => 0)) ?? 0;
+      compiles += (await worker?.evaluate(() => globalThis.__compiles).catch(() => 0)) ?? 0;
       if (process.env.BIG_LIBRARY_DEBUG)
         console.log(
           JSON.stringify(await worker?.evaluate(() => globalThis.__stores).catch(() => null)),
         );
     }
-    return total;
+    return { transactions, compiles };
   };
 }
 
@@ -153,7 +168,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     const cdp = await context.newCDPSession(page);
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
   }
-  const transactions = countTransactions(page);
+  const workerWork = countWorkerWork(page);
   // Where a slow surface's time went, printed with its result: the page's startup milestones (`startupTiming.ts`).
   const marks = {};
   // Assistant projections the library Worker built, from its own line; a browser may report a Worker's console on the
@@ -189,10 +204,12 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
   // Let the Worker finish what the surface set off, then count.
   await page.waitForTimeout(2_000);
   const { longest, ...drawnAt } = ready;
+  const { transactions, compiles } = await workerWork();
   const result = {
     contentMs,
     ...(surface.shelves ? { shelvesMs } : {}),
-    transactions: await transactions(),
+    transactions,
+    compiles,
     projections: (edge.assistant?.projections.length ?? 0) - projectionsBefore,
     builds: Math.max(built.page, built.worker),
     longest,
@@ -325,6 +342,9 @@ for (const [label, type, device, options] of ENGINES) {
         expect
           .soft(result.transactions, `${surface.name}: library Worker IndexedDB transactions`)
           .toBeLessThan(WORKER_TRANSACTIONS);
+        // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
+        // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
+        expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
         // The household's lists are as the last visit published them: nothing is built or sent again.
         expect.soft(result.builds, `${surface.name}: assistant projections built`).toBe(0);
         expect.soft(result.projections, `${surface.name}: assistant projections uploaded`).toBe(0);
