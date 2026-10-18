@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ANSWER_HANDOFF_MS,
   cachingFetch,
+  coalesced,
   freshFor,
   MOST_KEPT,
   MOST_HANDOFF_ANSWERS,
@@ -18,6 +19,31 @@ import {
 } from './tmdbCache';
 
 const HOUR = 3_600_000;
+
+describe('coalesced', () => {
+  it('answers every call of one task with one batch, each its own result, in order', async () => {
+    const many = vi.fn(async (keys: string[]) => keys.map((key) => key.toUpperCase()));
+    const get = coalesced(many);
+    const answers = await Promise.all(['a', 'b', 'c'].map((key) => get(key)));
+    expect(answers).toEqual(['A', 'B', 'C']);
+    expect(many).toHaveBeenCalledTimes(1);
+    // A later task is a batch of its own.
+    expect(await get('d')).toBe('D');
+    expect(many).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails every call of a batch that failed, and not the next batch', async () => {
+    let fail = true;
+    const get = coalesced(async (keys: string[]) => {
+      if (fail) throw new Error('storage closed');
+      return keys;
+    });
+    const failed = await Promise.allSettled([get('a'), get('b')]);
+    expect(failed.map(({ status }) => status)).toEqual(['rejected', 'rejected']);
+    fail = false;
+    expect(await get('c')).toBe('c');
+  });
+});
 
 function memory() {
   const entries = new Map<string, Entry>();

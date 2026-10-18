@@ -5,11 +5,13 @@
 import { LibraryLog } from '../src/lib/log';
 import type { Row } from '../src/lib/wire';
 
-async function seed(rows: Row[], { v3 = false } = {}): Promise<string> {
+async function seed(rows: Row[], { v3 = false, batch = rows.length } = {}): Promise<string> {
   const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
   const log = await LibraryLog.openLocal(key);
   if (!log) throw new Error('this browser keeps no library');
-  if (!(await log.writeRows(rows))) throw new Error('the rows were not kept');
+  for (let from = 0; from < rows.length; from += batch)
+    if (!(await log.writeRows(rows.slice(from, from + batch))))
+      throw new Error('the rows were not kept');
   if (v3 && !(await log.switchWebOnly())) throw new Error('the library was not switched to v3');
   log.close();
   localStorage.setItem('den.localLibrary', key);
