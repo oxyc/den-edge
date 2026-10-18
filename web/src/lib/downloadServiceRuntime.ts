@@ -1,6 +1,6 @@
 import type { ClockStore } from './clockStore';
 import type { ContentReader } from './contentAuthority';
-import { DownloadCoordinator, downloadPollDelay } from './downloadCoordinator';
+import { DownloadCoordinator, downloadPollDelay, raceKey } from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import type { LibraryLog } from './log';
 import type { DownloadTarget } from './libraryServiceProtocol';
@@ -213,7 +213,10 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         .map((download) => [
           download.name,
           this.coordinator.status(download),
-          this.coordinator.hedgeAnswers.get(download.name) ?? null,
+          download.race.entries.map(
+            (entry) =>
+              this.coordinator.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+          ),
         ]),
     );
   }

@@ -1,27 +1,43 @@
 import {
-  DOWNLOAD_POLL_MAX_MS,
   downloadPollDelay,
+  raceKey,
   type DownloadCoordinator,
   type DownloadStatus,
 } from './downloadCoordinator';
 import {
+  clearedRace,
   clockValue,
   emptyRow,
   LEASE_ROW,
+  raceValue,
   releaseValue,
   removedRow,
   withValues,
   type Download,
-  type DownloadHedge,
+  type DownloadRace,
+  type DownloadRaceEntry,
 } from './downloadRows';
 import { wantedItems, type WantedStatus } from './hearthWanted';
 import { applyLog, contentWatched, emptyLibrary } from './library';
 import { syncPolicy } from './syncCore';
-import { rankable, type SourceAnswer, type TitleSource } from './titleSources';
+import { answerOf, rankable, type SourceAnswer, type TitleSource } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped, Stamp } from './wire';
 
 const CONCURRENCY = 4;
-const NO_HEDGE_MS = 10 * 60_000;
+/** How long a race decides on one resolve of the title's releases: its stages are hours apart. */
+const RACE_LIST_MS = 10 * 60_000;
+
+/** den-core's `download_escalate` (den-spec library-v4 §17 *Racing*). */
+interface Escalation {
+  decision: 'take' | 'add' | 'wait' | 'exhausted';
+  take?: string;
+  reason?: 'finished' | 'cached' | 'fallback';
+  add: string[];
+  cancel: string[];
+  stage: number;
+  stage_at: number;
+  capped: boolean;
+}
 /** A due search whose answer couldn't settle anything (a source unreachable or partial) is asked again after this. */
 const UNANSWERED_WAIT = 5 * 60_000;
 /** An unchanged wanted list is handed to Hearth again, and what it started read back, this often. */
@@ -59,6 +75,8 @@ export class DownloadCoordinatorDriver {
   readonly #unanswered = new Map<string, number>();
   /** The wanted list last handed to Hearth, and when. */
   #hearthSent?: { digest: string; at: number };
+  /** By row name: the releases a race last decided on, and when they were resolved. */
+  readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
   constructor(readonly queue: DownloadCoordinator) {}
 
@@ -111,7 +129,10 @@ export class DownloadCoordinatorDriver {
           if (!current()) return;
           const said = JSON.stringify([
             this.queue.answers.get(download.name) ?? null,
-            this.queue.hedgeAnswers.get(download.name) ?? null,
+            ...download.race.entries.map(
+              (entry) =>
+                this.queue.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+            ),
           ]);
           const last = this.queue.asked.get(download.name);
           this.queue.asked.set(download.name, {
@@ -128,7 +149,10 @@ export class DownloadCoordinatorDriver {
   async #pollAndRenew(download: Download, current: () => boolean): Promise<void> {
     const answer = await this.queue.poll(download);
     if (!current()) return;
-    if (download.release.hedge) await this.queue.pollHedge(download);
+    for (const entry of download.race.entries) {
+      if (!current()) return;
+      await this.queue.pollEntry(download, entry);
+    }
     if (!current() || answer.state !== 'expired' || answer.message === GONE) return;
     const url = await this.queue.renew(download);
     if (!current() || url === null || url === 'gone') return;
@@ -238,44 +262,12 @@ export class DownloadCoordinatorDriver {
           wrote = (await this.#retryExhausted(download, retry.attempt, now)) || wrote;
         continue;
       }
-      if (download.release.hedge) {
-        if (status.state === 'ready') {
-          wrote = (await this.#primaryWon(download, now)) || wrote;
-          continue;
-        }
-        const alternate = this.queue.hedgeAnswers.get(download.name);
-        if (alternate?.state === 'ready') {
-          wrote = (await this.#hedgeWon(download, now)) || wrote;
-          continue;
-        }
-        if (alternate?.state === 'not-queued') {
-          await this.queue.resumeHedge(download, () => current() && this.#stillHeld(now));
-          continue;
-        }
-        if (
-          alternate?.state === 'preparing' &&
-          alternate.progress !== undefined &&
-          alternate.progress > (download.release.hedge.lastProgress ?? 0) &&
-          now - download.release.hedge.progressAt >= DOWNLOAD_POLL_MAX_MS
-        ) {
-          const hedge = {
-            ...download.release.hedge,
-            lastProgress: alternate.progress,
-            progressAt: now,
-          };
-          wrote =
-            (await this.#write(
-              download,
-              {
-                release: {
-                  value: releaseValue({ ...download.release, hedge }),
-                  at: await this.#stamp(now),
-                },
-              },
-              now,
-            )) || wrote;
-          continue;
-        }
+      for (const entry of download.race.entries) {
+        // An entry whose add never landed (a relaunch, another device's ticket) is asked for again.
+        const answer = this.queue.entryAnswers.get(raceKey(download.name, entry.identity));
+        const url = answer?.state === 'not-queued' ? this.queue.entryUrl(download, entry) : null;
+        if (url && current() && this.#stillHeld(now))
+          await this.queue.addEntry(download.name, entry.identity, url);
       }
       if (
         status.state === 'starting' &&
@@ -295,19 +287,15 @@ export class DownloadCoordinatorDriver {
       }
       // A release the addon stopped listing won't arrive: move on, as for a stall. Before `renew`, which the lapsed
       // ticket that found it gone still carries.
-      if (status.state === 'release_gone' && !download.release.hedge) {
+      if (status.state === 'release_gone' && !download.race.entries.length) {
         wrote = (await this.#fallBack(download, status, now)) || wrote;
         continue;
       }
       if (status.renew) continue;
-      if (status.stalled) {
-        const answer = this.queue.answers.get(download.name);
-        const progress =
-          answer?.progress ?? download.progress?.lastProgress ?? status.clock.lastProgress;
-        if (!download.release.hedge && answer?.fetch?.state !== 'failed' && progress > 0)
-          wrote = (await this.#startHedge(download, now)) || wrote;
-        else if (!download.release.hedge)
-          wrote = (await this.#fallBack(download, status, now)) || wrote;
+      // The race (§17 *Racing*): keep what finishes first, widen a race that isn't arriving, fall back after a day.
+      const raced = await this.#race(download, status, now);
+      if (raced !== 'unchanged') {
+        wrote = raced === 'written' || wrote;
         continue;
       }
       const values: Record<string, Stamped<ConfigValue | null>> = {};
@@ -509,91 +497,253 @@ export class DownloadCoordinatorDriver {
     return true;
   }
 
-  async #startHedge(download: Download, now: number): Promise<boolean> {
-    if (!this.queue.hedgeResolveDue(download, now)) return false;
+  /** The releases a race decides on: one resolve per `RACE_LIST_MS`; null while none could be had. */
+  async #raceList(download: Download, now: number): Promise<TitleSource[] | null> {
+    const kept = this.#raceLists.get(download.name);
+    if (kept && now - kept.at < RACE_LIST_MS) return kept.sources;
     const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
-    if (!this.#stillHeld(now) || !sources) return false;
-    const excluded = new Set([...download.tried, download.release.identity]);
-    const candidates = sources.filter(
-      (source) =>
-        !excluded.has(source.identity) && !(source.cached === false && source.seeders === 0),
-    );
-    const chosen = this.queue.pick(candidates, download.title.originalLanguage);
-    if (!chosen) {
-      if (completeAnswer(answer)) this.queue.rememberNoHedge(download, now + NO_HEDGE_MS);
-      return false;
-    }
-    const hedge: DownloadHedge = {
-      identity: chosen.identity,
-      label: chosen.label,
-      url: chosen.url,
-      sizeBytes: chosen.size,
-      cached: chosen.cached,
-      queuedAt: now,
-      lastProgress: 0,
-      progressAt: now,
-    };
-    const written = await this.#write(
-      download,
-      {
-        release: {
-          value: releaseValue({ ...download.release, hedge }),
-          at: await this.#stamp(now),
-        },
-      },
-      now,
-    );
-    if (written && this.#stillHeld(now))
-      await this.queue.addHedge(download.name, chosen.url, chosen.identity);
-    return written;
+    if (!sources || !completeAnswer(answer)) return kept?.sources ?? null;
+    this.#raceLists.set(download.name, { at: now, sources });
+    return sources;
   }
 
-  async #primaryWon(download: Download, now: number): Promise<boolean> {
-    const written = await this.#write(
-      download,
+  /**
+   * One pass of the row's race through den-core's `download_escalate`: what is in flight (the `release` and every
+   * `race` entry, with den-scout's latest word on each) against the releases listed now. `unchanged` when it decided
+   * nothing to write, `written` when the row changed, `failed` when a write lost its compare-and-set.
+   */
+  async #race(
+    download: Download,
+    status: DownloadStatus,
+    now: number,
+  ): Promise<'unchanged' | 'written' | 'failed'> {
+    const { race, name } = download;
+    const entries = race.entries;
+    if (status.state === 'paused' || (status.state === 'ready' && !entries.length))
+      return 'unchanged';
+    const primary = this.queue.answers.get(name);
+    const flights = [
       {
-        release: {
-          value: releaseValue(primaryRelease(download)),
-          at: await this.#stamp(now),
-        },
+        identity: download.release.identity,
+        since: download.queuedAt,
+        stalled: status.stalled,
+        ...(status.state === 'release_gone'
+          ? { answer: { kind: 'dead' } }
+          : primary
+            ? { answer: answerOf(primary) }
+            : {}),
       },
-      now,
-    );
-    if (!written) return false;
-    await this.queue.cancelHedgeIfSafe(download);
-    this.queue.clearHedge(download.name);
-    return true;
+      ...entries.map((entry) => {
+        const answer = this.queue.entryAnswers.get(raceKey(name, entry.identity));
+        return {
+          identity: entry.identity,
+          since: entry.queuedAt,
+          ...(answer ? { answer: answerOf(answer) } : {}),
+        };
+      }),
+    ];
+    const decide = (releases: TitleSource[]) =>
+      syncPolicy<Escalation>({
+        op: 'download_escalate',
+        releases: rankable(releases),
+        original: download.title.originalLanguage,
+        preferred: download.title.preferredLanguage,
+        tried: download.tried,
+        in_flight: flights,
+        stage: race.stage,
+        stage_at: race.stageAt,
+        started_at: race.startedAt,
+        ...(race.cappedAt !== undefined ? { capped_at: race.cappedAt } : {}),
+        now,
+      });
+    // Until a race is under way a healthy download costs den-scout no list: den-core is asked first with the
+    // releases last resolved (or none), and the title is resolved only when that answer escalates.
+    const first = decide(this.#raceLists.get(name)?.sources ?? []);
+    const finished = first.decision === 'take' && first.reason === 'finished';
+    const underWay = race.stage > 0 || entries.length > 0 || first.stage !== race.stage;
+    if (!underWay && (first.decision === 'wait' || finished)) return 'unchanged';
+    const listed = await this.#raceList(download, now);
+    if (!this.#stillHeld(now)) return 'unchanged';
+    const decided = listed ? decide(listed) : first;
+    // Without a list only a finished release may be decided: nothing else can be judged.
+    if (!listed && !(decided.decision === 'take' && decided.reason === 'finished'))
+      return 'unchanged';
+    if (decided.decision === 'take') return this.#take(download, decided, listed ?? [], now);
+    return this.#widen(download, decided, listed ?? [], now);
   }
 
-  async #hedgeWon(download: Download, now: number): Promise<boolean> {
-    const hedge = download.release.hedge;
-    if (!hedge) return false;
+  /** The race is won: `take` becomes the release, and everything else in flight is cancelled where safe. */
+  async #take(
+    download: Download,
+    decided: Escalation,
+    listed: TitleSource[],
+    now: number,
+  ): Promise<'unchanged' | 'written' | 'failed'> {
+    const identity = decided.take!;
+    const entries = download.race.entries;
+    const entry = entries.find((candidate) => candidate.identity === identity);
+    const source = listed.find((candidate) => candidate.identity === identity);
+    const isPrimary = identity === download.release.identity;
+    if (isPrimary && !entries.length) return 'unchanged';
+    if (!isPrimary && !entry && !source) return 'unchanged';
     const at = await this.#stamp(now);
-    const written = await this.#write(
-      download,
-      {
+    const values: Record<string, Stamped<ConfigValue | null>> = {
+      race: { value: raceValue(clearedRace(download.race, now)), at },
+    };
+    if (!isPrimary) {
+      const taken = entry ?? {
+        identity,
+        label: source!.label,
+        url: source!.url,
+        sizeBytes: source!.size,
+        cached: source!.cached,
+        queuedAt: now,
+      };
+      Object.assign(values, {
         release: {
           value: releaseValue({
-            identity: hedge.identity,
-            label: hedge.label ?? download.release.label,
-            url: hedge.url,
-            sizeBytes: hedge.sizeBytes,
-            cached: hedge.cached,
+            identity,
+            label: taken.label ?? identity,
+            url: taken.url,
+            sizeBytes: taken.sizeBytes,
+            cached: taken.cached,
           }),
           at,
         },
-        queuedAt: { value: { int: hedge.queuedAt }, at },
-        progress: { value: clockValue({ lastProgress: 1, progressAt: now }), at },
+        queuedAt: { value: { int: taken.queuedAt }, at },
+        progress: {
+          value: clockValue({ lastProgress: entry ? 1 : 0, progressAt: now }),
+          at,
+        },
         announced: { value: { bool: false }, at },
         reannounced: { value: { bool: false }, at },
-      },
-      now,
+        resumeAt: { value: null, at },
+      });
+    }
+    if (!(await this.#write(download, values, now))) return 'failed';
+    console.info(
+      `den: download ${download.content}: kept ${entry?.label ?? source?.label ?? download.release.label} (${decided.reason})`,
     );
-    if (!written) return false;
-    await this.queue.cancelIfSafe(download);
-    this.queue.promoteHedge(download);
+    for (const other of entries)
+      if (other.identity !== identity)
+        await this.queue.cancelEntryIfSafe(
+          download,
+          other.identity,
+          this.queue.entryUrl(download, other),
+        );
+    if (!isPrimary) await this.queue.cancelIfSafe(download);
+    if (entry) this.queue.promoteEntry(download, entry);
+    this.queue.clearEntries(download.name);
     this.queue.clocks.delete(download.name);
-    return true;
+    if (!isPrimary && !entry && source) await this.queue.add(download.name, source.url);
+    return 'written';
+  }
+
+  /**
+   * The race goes on: drop what failed (it counts as tried), add what den-core says up to the stage's width, and stop
+   * at the debrid's first refusal — its active-download limit, a cap and never a failure. A primary that failed hands
+   * over to the first live entry. Nothing in flight and nothing to add is an exhausted download, searched for again.
+   */
+  async #widen(
+    download: Download,
+    decided: Escalation,
+    listed: TitleSource[],
+    now: number,
+  ): Promise<'unchanged' | 'written' | 'failed'> {
+    const { race } = download;
+    const dropped = new Set(decided.cancel);
+    let entries: DownloadRaceEntry[] = race.entries.filter((entry) => !dropped.has(entry.identity));
+    let cappedAt = race.cappedAt;
+    const added: DownloadRaceEntry[] = [];
+    for (const identity of decided.add) {
+      const source = listed.find((candidate) => candidate.identity === identity);
+      if (!source || !this.#stillHeld(now)) continue;
+      const answer = await this.queue.addEntry(download.name, identity, source.url);
+      if (answer.state === 'refused') {
+        cappedAt = now;
+        this.queue.forgetEntry(download.name, identity);
+        break;
+      }
+      added.push({
+        identity,
+        label: source.label,
+        url: source.url,
+        sizeBytes: source.size,
+        cached: source.cached,
+        queuedAt: now,
+      });
+    }
+    entries = [...entries, ...added];
+    const primaryFailed = dropped.has(download.release.identity);
+    const promoted = primaryFailed ? entries[0] : undefined;
+    if (promoted) entries = entries.slice(1);
+    const next: DownloadRace = {
+      stage: decided.stage,
+      stageAt: decided.stage_at,
+      startedAt: race.startedAt,
+      ...(cappedAt !== undefined ? { cappedAt } : {}),
+      entries,
+    };
+    const tried = [...new Set([...download.tried, ...decided.cancel])];
+    const exhausted = decided.decision === 'exhausted';
+    if (
+      !exhausted &&
+      !promoted &&
+      JSON.stringify(raceValue(next)) === JSON.stringify(raceValue(race)) &&
+      tried.length === download.tried.length
+    )
+      return 'unchanged';
+    const at = await this.#stamp(now);
+    const values: Record<string, Stamped<ConfigValue | null>> = {
+      race: { value: raceValue(exhausted ? clearedRace(race, now) : next), at },
+      tried: { value: { strings: tried }, at },
+    };
+    if (exhausted) values.exhausted = { value: { bool: true }, at };
+    if (promoted)
+      Object.assign(values, {
+        release: {
+          value: releaseValue({
+            identity: promoted.identity,
+            label: promoted.label ?? promoted.identity,
+            url: promoted.url,
+            sizeBytes: promoted.sizeBytes,
+            cached: promoted.cached,
+          }),
+          at,
+        },
+        queuedAt: { value: { int: promoted.queuedAt }, at },
+        progress: { value: clockValue({ lastProgress: 0, progressAt: now }), at },
+        reported: { value: { bool: false }, at },
+        announced: { value: { bool: false }, at },
+        reannounced: { value: { bool: false }, at },
+      });
+    if (!(await this.#write(download, values, now))) {
+      for (const entry of added)
+        await this.queue.effects.cancel(this.queue.entryUrl(download, entry) ?? entry.url, false);
+      return 'failed';
+    }
+    if (added.length)
+      console.info(
+        `den: download ${download.content}: racing ${added.map((entry) => entry.label).join(', ')} (stage ${decided.stage})`,
+      );
+    for (const identity of decided.cancel) {
+      if (identity === download.release.identity) await this.queue.cancelIfSafe(download);
+      else {
+        const entry = race.entries.find((candidate) => candidate.identity === identity);
+        if (entry)
+          await this.queue.cancelEntryIfSafe(
+            download,
+            identity,
+            this.queue.entryUrl(download, entry),
+          );
+      }
+      this.queue.forgetEntry(download.name, identity);
+    }
+    if (promoted) {
+      this.queue.promoteEntry(download, promoted);
+      this.queue.clocks.delete(download.name);
+    }
+    return 'written';
   }
 
   async #resumed(now: number) {
@@ -686,11 +836,3 @@ const completeAnswer = (answer: SourceAnswer | undefined): boolean =>
     answer?.outage ||
     (answer?.missing ?? 0) > 0
   );
-
-const primaryRelease = (download: Download) => ({
-  identity: download.release.identity,
-  label: download.release.label,
-  url: download.release.url,
-  sizeBytes: download.release.sizeBytes,
-  cached: download.release.cached,
-});

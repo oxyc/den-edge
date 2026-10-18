@@ -29,6 +29,7 @@ import {
   readDownload,
   readDownloads,
   type Download,
+  type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
@@ -249,7 +250,7 @@ const effectiveStanding = (
 };
 
 const publicRelease = (
-  release: DownloadRelease | NonNullable<DownloadRelease['hedge']>,
+  release: DownloadRelease | DownloadRaceEntry,
   fallbackLabel?: string,
 ): DownloadReleaseDescriptor => ({
   identity: release.identity,
@@ -1742,8 +1743,8 @@ export class LibraryLogAuthority {
               : {}),
           },
           ...(download.wanted ? {} : { release: publicRelease(download.release) }),
-          ...(download.release.hedge
-            ? { alternate: publicRelease(download.release.hedge, download.release.label) }
+          ...(download.race.entries[0]
+            ? { alternate: publicRelease(download.race.entries[0], download.release.label) }
             : {}),
           status: {
             state: state.replaceAll('_', '-') as Extract<
@@ -2574,10 +2575,11 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const download = this.#download(target);
     if (!download) throw authorityError('not-found', 'download is no longer in the queue');
-    if (identity === download.release.identity || identity === download.release.hedge?.identity)
+    if (
+      identity === download.release.identity ||
+      download.race.entries.some((entry) => entry.identity === identity)
+    )
       return this.#unchanged();
-    if (download.release.hedge)
-      throw authorityError('conflict', 'download is already trying an alternate release', true);
     const pending = this.#log.pendingActions;
     // A wanted download has no partial to keep beside the choice: the choice simply starts.
     const saved = download.wanted

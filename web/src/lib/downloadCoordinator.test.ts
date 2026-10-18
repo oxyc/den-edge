@@ -4,6 +4,7 @@ import { DownloadCoordinator, downloadIsInFlight, downloadPollDelay } from './do
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import { clockValue, downloadName, readDownload, releaseValue, titleValue } from './downloadRows';
 import { source, testLog } from './downloadTestLog';
+import type { Preparation } from './titleSources';
 import type { SettingsRow, Stamp } from './wire';
 
 const DEVICE = 'bbbbbbbbbbbbbbbb';
@@ -173,8 +174,8 @@ describe('DownloadCoordinator', () => {
 
     const shown = await queue.sourcesForTitle(title);
     expect(shown.sources?.map(({ identity }) => identity)).toEqual([
-      second.identity,
       first.identity,
+      second.identity,
     ]);
     await expect(queue.enqueueIdentity(title, first.identity, 2)).resolves.toBe(true);
     expect(resolves).toBe(1);
@@ -260,19 +261,8 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(1);
     fresh = true;
     const download = queue.get(NAME)!;
-    const hedged = {
-      ...download,
-      release: {
-        ...download.release,
-        hedge: {
-          identity: second.identity,
-          url: '/foreign/expired-hedge-ticket',
-          queuedAt: T0,
-          lastProgress: 0,
-          progressAt: T0,
-        },
-      },
-    };
+    const entry = { identity: second.identity, url: '/foreign/expired-hedge-ticket', queuedAt: T0 };
+    const hedged = { ...download, race: { ...download.race, entries: [entry] } };
     const fallback = new DownloadCoordinatorDriver(queue).run({
       now: T0 + 21 * MINUTE,
       observedFor: 0,
@@ -281,10 +271,10 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
     const shown = queue.sourcesForTitle(title, true);
     const renewed = queue.renew(download);
-    const hedge = queue.hedgeUrl(hedged);
+    const hedge = queue.renewEntryUrl(hedged, entry);
 
     releaseFresh();
-    await expect(shown).resolves.toMatchObject({ sources: [refreshedSecond, refreshedFirst] });
+    await expect(shown).resolves.toMatchObject({ sources: [refreshedFirst, refreshedSecond] });
     await expect(renewed).resolves.toBe(refreshedFirst.url);
     await expect(hedge).resolves.toBe(refreshedSecond.url);
     await expect(fallback).resolves.toBe(true);
@@ -486,7 +476,126 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
   });
 
-  it('uses durable stamps for the lease and every fallback write', async () => {
+  describe('the race (§17 Racing), Rebecka Martinsson S02E01 with nothing good cached', () => {
+    const episode = { ...title, episode: 1, originalLanguage: 'sv' };
+    const EPISODE = downloadName('tv:1399:2:1');
+    const avi = source('Rebecka.Martinsson.S02E01.400p.WEB-DLRip.avi', {
+      resolution: '480p',
+      cached: true,
+      seeders: 3,
+      sizeBytes: 700_000_000,
+    });
+    const a = source('Rebecka.Martinsson.S02E01.1080p.WEB.H264-A.mkv', {
+      resolution: '1080p',
+      codec: 'h264',
+      cached: false,
+      seeders: 12,
+      sizeBytes: 3_000_000_000,
+    });
+    const b = source('Rebecka.Martinsson.S02E01.1080p.WEB.H265-B.mkv', {
+      resolution: '1080p',
+      codec: 'hevc',
+      cached: false,
+      seeders: 6,
+      sizeBytes: 2_000_000_000,
+    });
+    const c = source('Rebecka.Martinsson.S02E01.720p.HDTV.H264-C.mkv', {
+      resolution: '720p',
+      codec: 'h264',
+      cached: false,
+      seeders: 4,
+      sizeBytes: 1_200_000_000,
+    });
+
+    /** A queue whose den-scout answers each ticket as `answers` says (a stall by default), recording every ask. */
+    function racing(answers: Record<string, Preparation> = {}, asked: string[] = []) {
+      const shared = testLog();
+      let now = T0;
+      const queue = new DownloadCoordinator(
+        shared.log,
+        clock(),
+        {
+          prepare: async (url: string, queue: boolean, prefetch: boolean) => {
+            asked.push(`${queue ? (prefetch ? 'prefetch' : 'add') : 'probe'} ${url}`);
+            return answers[url] ?? { state: 'preparing', progress: 0, bytesPerSecond: 0 };
+          },
+          cancel: async (url: string) => {
+            asked.push(`cancel ${url}`);
+            return true;
+          },
+          resolve: async () => ({ sources: [avi, a, b, c] }),
+          ticket: (url: string) => (url.startsWith('/scout/') ? url : null),
+        },
+        { now: () => now, monotonicNow: () => 0 },
+      );
+      const driver = new DownloadCoordinatorDriver(queue);
+      /** Passes every 30 s up to `at`, as the service scheduler runs them. */
+      const run = async (at: number) => {
+        do {
+          now = Math.min(at, now + 30_000);
+          await driver.run({ now, observedFor: 0 });
+        } while (now < at);
+      };
+      return { shared, queue, run, asked };
+    }
+
+    it('a stalled 1080p races the next two, and the cached AVI is not taken', async () => {
+      const { shared, queue, run, asked } = racing();
+      await queue.enqueue(episode, queue.pick([avi, a, b, c], 'sv')!, 4);
+      expect(readDownload(shared.log.settings(EPISODE)!)!.release.identity).toBe(a.identity);
+
+      await run(T0 + 21 * MINUTE);
+
+      const row = readDownload(shared.log.settings(EPISODE)!)!;
+      expect(row.release.identity).toBe(a.identity);
+      expect(row.race.entries.map(({ identity }) => identity)).toEqual([b.identity, c.identity]);
+      expect(row.race.stage).toBe(1);
+      expect(asked).toContain(`prefetch ${b.url}`);
+      expect(asked).toContain(`prefetch ${c.url}`);
+      expect(asked).not.toContain(`prefetch ${avi.url}`);
+      expect(asked.filter((ask) => ask.startsWith('cancel'))).toEqual([]);
+    });
+
+    it('the first release to finish is kept and the others are cancelled', async () => {
+      const answers: Record<string, Preparation> = {};
+      const { shared, queue, run, asked } = racing(answers);
+      await queue.enqueue(episode, a, 4);
+      await run(T0 + 21 * MINUTE);
+      answers[c.url] = { state: 'ready' };
+      await run(T0 + 23 * MINUTE);
+
+      const row = readDownload(shared.log.settings(EPISODE)!)!;
+      expect(row.release.identity).toBe(c.identity);
+      expect(row.race.entries).toEqual([]);
+      expect(asked).toContain(`cancel ${a.url}`);
+      expect(asked).toContain(`cancel ${b.url}`);
+      expect(asked).not.toContain(`cancel ${c.url}`);
+    });
+
+    it('a day with nothing watchable takes the cached AVI rather than wait', async () => {
+      const { shared, queue, run } = racing();
+      await queue.enqueue(episode, a, 4);
+      await run(T0 + 23 * 60 * MINUTE);
+      expect(readDownload(shared.log.settings(EPISODE)!)!.release.identity).not.toBe(avi.identity);
+      await run(T0 + 24 * 60 * MINUTE + MINUTE);
+      expect(readDownload(shared.log.settings(EPISODE)!)!.release.identity).toBe(avi.identity);
+    });
+
+    it('a refused add is the debrid’s active limit: the race holds, and nothing is counted as failed', async () => {
+      const answers: Record<string, Preparation> = {
+        [c.url]: { state: 'refused', service: 'torbox' },
+      };
+      const { shared, queue, run } = racing(answers);
+      await queue.enqueue(episode, a, 4);
+      await run(T0 + 21 * MINUTE);
+      const row = readDownload(shared.log.settings(EPISODE)!)!;
+      expect(row.race.entries.map(({ identity }) => identity)).toEqual([b.identity]);
+      expect(row.race.cappedAt).toBeGreaterThanOrEqual(T0 + 20 * MINUTE);
+      expect(row.tried).toEqual([]);
+    });
+  });
+
+  it('uses durable stamps for the lease and every race write', async () => {
     const shared = testLog([stalledRow()]);
     const issued: Stamp[] = [];
     const asked: string[] = [];
@@ -498,9 +607,12 @@ describe('DownloadCoordinator', () => {
 
     await expect(driver.run({ now: T0 + 21 * MINUTE, observedFor: 0 })).resolves.toBe(true);
 
-    const moved = readDownload(shared.log.settings(NAME)!)!;
-    expect(moved.release.identity).toBe(second.identity);
-    expect(moved.tried).toEqual([first.identity]);
+    // A stalled download is not given up on: the next release races beside it (§17 *Racing*).
+    const raced = readDownload(shared.log.settings(NAME)!)!;
+    expect(raced.release.identity).toBe(first.identity);
+    expect(raced.race.entries.map(({ identity }) => identity)).toEqual([second.identity]);
+    expect(raced.race.stage).toBe(1);
+    expect(raced.tried).toEqual([]);
     expect(asked).toEqual([`probe ${first.url}`, `prefetch ${second.url}`]);
     expect(issued.length).toBeGreaterThanOrEqual(2);
     expect(issued.every((stamp) => stamp[2] === DEVICE)).toBe(true);
