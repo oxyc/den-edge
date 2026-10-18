@@ -135,9 +135,8 @@ test('the startup notice clears once the video is ready and only waits for a pre
     });
     await page.goto(`${ORIGIN}/test/player.html`);
 
-    await expect(page.getByText('Starting 4K • REMUX • 58 GB…', { exact: false })).toBeVisible({
-      timeout: 10_000,
-    });
+    // Not waited for: "Starting…" itself. The media here answers at once, so the notice can be gone again before a
+    // check for it runs — the first test above is the one that sees it.
     // Ready to play and still paused: nothing more is coming without a press.
     await page.waitForFunction(
       () => {
