@@ -340,6 +340,7 @@ test('a season download takes an uncached 1080p over a cached SD AVI', async ({ 
   await guardNetwork(page);
   const shared = store();
   await page.route('**/fixture-store/rows', shared.route);
+  await routeHearth(page);
   const listed = {
     1: [
       release('Rebecka.Martinsson.S02E01.400p.WEB-DLRip.ViruseProject.avi', {
@@ -387,6 +388,7 @@ test('Rebecka S2: a stalled 1080p races the next two, and the cached AVI is take
   await guardNetwork(page);
   const shared = store();
   await page.route('**/fixture-store/rows', shared.route);
+  await routeHearth(page);
   const avi = 'Rebecka.Martinsson.S02E01.400p.WEB-DLRip.ViruseProject.avi';
   const h264 = 'Rebecka.Martinsson.S02E01.1080p.WEB.H264-GRP.mkv';
   const hevc = 'Rebecka.Martinsson.S02E01.1080p.WEB.H265-GRP.mkv';
