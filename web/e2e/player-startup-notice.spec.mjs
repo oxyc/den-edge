@@ -86,6 +86,82 @@ test('the startup notice counts the wait, names a large release once open, and c
   }
 });
 
+// iOS Safari, after a long wait for a large release, can refuse to start the video by itself: it sits ready with its
+// own play button up. The startup notice is done then, and must not stay over that button until the press. Stripping
+// `autoplay` the moment the element exists is that refusal: the video loads, can play, and stays paused. And as on the
+// iPhone, no frame is presented before the press: Chromium presents a paused video's first frame, which would count as
+// played, so frame callbacks are held until the video is actually playing.
+test('the startup notice clears once the video is ready and only waits for a press', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const context = await browser.newContext({
+      userAgent: CHROME_MAC,
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const presented = HTMLVideoElement.prototype.requestVideoFrameCallback;
+      HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+        if (!this.paused) return presented.call(this, callback);
+        this.addEventListener('playing', () => presented.call(this, callback), { once: true });
+        return 0;
+      };
+      new MutationObserver(() => {
+        for (const video of document.querySelectorAll('video[autoplay]')) {
+          video.removeAttribute('autoplay');
+          video.autoplay = false;
+        }
+      }).observe(document, { childList: true, subtree: true });
+    });
+    await guardNetwork(page);
+    await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
+    await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
+    await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: {} }));
+    await page.route(`${ORIGIN}/direct/session`, (r) => r.fulfill({ status: 201, json: session }));
+    await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases: [] } }));
+    await page.route(`${ORIGIN}/direct/s/**`, async (r) => {
+      const request = r.request();
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'DELETE') return r.fulfill({ status: 204 });
+      if (request.method() === 'POST') return r.fulfill({ status: 204 });
+      const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
+      return r.fulfill({
+        contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+        body: await readFile(new URL(file, hls)),
+      });
+    });
+    await page.goto(`${ORIGIN}/test/player.html`);
+
+    await expect(page.getByText('Starting 4K • REMUX • 58 GB…', { exact: false })).toBeVisible({
+      timeout: 10_000,
+    });
+    // Ready to play and still paused: nothing more is coming without a press.
+    await page.waitForFunction(
+      () => {
+        const video = document.querySelector('.player video');
+        return !!video && video.readyState >= 3 && video.paused;
+      },
+      undefined,
+      { timeout: 30_000 },
+    );
+    await expect(page.locator('.startup')).toHaveCount(0, { timeout: 3_000 });
+
+    // The press plays it, with no notice coming back.
+    await page.evaluate(() => document.querySelector('.player video').play());
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 0,
+      undefined,
+      { timeout: 30_000 },
+    );
+    await expect(page.locator('.startup')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 // den-edge#234 (the owner's second note): a bare spinner during the wait is the actual complaint. Every media
 // file on this route answers slowly — a throttled link — so there is a real (if brief, for this tiny fixture)
 // window between hls.js's `FRAG_LOADED` for the first segment and the first frame actually rendering. A

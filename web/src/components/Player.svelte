@@ -436,6 +436,14 @@
   // arrives, which needs it reactive — every other read here is a plain check inside a function body.
   let played = $state(false);
   /**
+   * Whether the playing session is ready but waiting for a press: the browser refused to start it by itself (iOS
+   * Safari does, after a long wait for a large release), so its own play button is up. The startup notice is then
+   * done — it would otherwise sit over that button until the press.
+   */
+  let awaitingPress = $state(false);
+  /** How long after `canplay` a video the browser lets start by itself has started. */
+  const AUTOPLAY_GRACE_MS = 1_000;
+  /**
    * Releases of this title playback left — a switch moved away from it (`switchAway`), or a decoder refused it — which
    * no automatic pick lands on again this visit, a reload included. The viewer may still pick one from the list.
    */
@@ -573,7 +581,7 @@
   const notice = $derived(
     !session
       ? startupNotice(elapsedMs, 'session')
-      : !played && !startsIn && !reconnecting
+      : !played && !awaitingPress && !startsIn && !reconnecting
         ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
         : null,
   );
@@ -866,6 +874,7 @@
     started = at;
     askedMaxBitrate = maxBitrate;
     played = false;
+    awaitingPress = false;
     // A switch keeps the early window it was made in: the time already played counts, or every switch would open
     // another thirty seconds for the next. Folded in now, while `video` is still showing the session being
     // replaced — the session effect below is about to reassign `element.src` (or hls.js's `loadSource` /
@@ -2750,6 +2759,14 @@
             // `textTracks.onaddtrack` below is what actually catches a track that arrives late.
             applySubtitles();
             if (video) video.textTracks.onaddtrack = applySubtitles;
+          }}
+          oncanplay={() => {
+            // Autoplay starts a moment after `canplay`: still paused by then, the browser refused to start it
+            // itself and its play button is up.
+            const element = video;
+            setTimeout(() => {
+              if (element === video && element?.paused && !played) awaitingPress = true;
+            }, AUTOPLAY_GRACE_MS);
           }}
           onplay={playing}
           onpause={paused}
