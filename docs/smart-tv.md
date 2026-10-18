@@ -220,7 +220,7 @@ not LG decoder evidence.
 The browser build rejects any TV/core-js module in its output graph, including lazy
 chunks. A checked-in clean-main baseline also gates compressed initial/all JS+CSS
 growth and checks TV-only markers. Run `npm run check:tv-isolation` for exact current
-compressed deltas against `a045b842`. `node scripts/tv-browser-performance.mjs`
+compressed deltas against `3fccf42`. `node scripts/tv-browser-performance.mjs`
 alternates five fresh Chromium contexts between `dist-browser-baseline` and `dist`,
 with deterministic local fixtures, reporting paint timing and resource transfers.
 Workstation timings are not TV hardware measurements. TV builds target Chrome 85, have isolated
@@ -231,9 +231,12 @@ the browser module gate rejects that helper too, preventing an extra browser
 request merely to preserve the browser's existing path behavior. CI retains browser and TV
 failure traces and screenshots for seven days.
 
-The 2026-10-18 comparison against `a045b842` measured **+56 bytes initial gzip and
-+155 bytes total gzip**, with no additional browser asset chunk or TV module.
-A five-pair loopback Chromium run measured Home readiness medians of 174.9 ms
+After merging current main, the 2026-10-18 comparison against a clean `3fccf42`
+build measured **+56 bytes initial gzip and +149 bytes total gzip**, with no
+additional browser asset chunk or TV module (80 JS/CSS assets in each build).
+The baseline was rebuilt from that exact main commit using the same toolchain;
+the byte-budget ceilings were not increased.
+An earlier five-pair loopback Chromium comparison against `a045b842` measured Home readiness medians of 174.9 ms
 baseline / 183.1 ms current (ranges 135.6–220.2 / 141.0–196.2 ms), and Search result
 medians of 96.3 / 61.8 ms (ranges 39.4–108.8 / 36.5–111.5 ms). These overlapping,
 variable samples do not establish a hardware speedup or a stable timing regression.
