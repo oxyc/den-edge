@@ -32,6 +32,24 @@ describe('coalesced', () => {
     expect(many).toHaveBeenCalledTimes(2);
   });
 
+  it('drops calls still gathering on discard, and gathers the next ones normally', async () => {
+    vi.useFakeTimers();
+    try {
+      const many = vi.fn(async (keys: string[]) => keys.map((key) => key.toUpperCase()));
+      const get = coalesced(many, 250);
+      const dropped = get('a');
+      get.discard('none');
+      await expect(dropped).resolves.toBe('none');
+      const kept = get('b');
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(kept).resolves.toBe('B');
+      expect(many).toHaveBeenCalledTimes(1);
+      expect(many).toHaveBeenCalledWith(['b']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fails every call of a batch that failed, and not the next batch', async () => {
     let fail = true;
     const get = coalesced(async (keys: string[]) => {
