@@ -13,6 +13,7 @@
     type ProfileSession,
   } from './lib/profileSession.svelte';
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
+  import { releaseEarlyLibraryWorkers } from './lib/libraryWorkerStart';
   import { LibraryServiceError } from './lib/libraryServiceClient';
   import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
@@ -311,6 +312,9 @@
       );
     }),
   );
+  // Every Worker this page opens with is open by now: one the entry started for nothing (a hint the marker no longer
+  // matches) is ended.
+  releaseEarlyLibraryWorkers();
   const optimistic = $derived(
     profileHint !== null &&
       (profileCapability === 'checking' ||

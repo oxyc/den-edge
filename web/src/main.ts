@@ -1,9 +1,12 @@
 // Keep the entry tiny enough for a retained parser-time hero to paint before Svelte evaluates and mounts. The
 // application module is preloaded from index.html, so this changes CPU admission rather than adding a network chain.
 import './app.css';
+import { openingWorkers, startLibraryWorkers } from './lib/libraryWorkerStart';
 import { startupMark } from './lib/startupTiming';
 
 startupMark('page boot');
+// Booting while the app module loads, rather than after it has mounted.
+startLibraryWorkers(openingWorkers());
 
 const start = () => {
   startupMark('app module requested');
