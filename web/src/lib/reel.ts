@@ -5,6 +5,7 @@ import type { MediaType } from './library';
 import { ipv4Hint } from './ipv4';
 import { relayFetch } from './relayFetch';
 import type { Entry, Routes } from './routes';
+import { apiUrl } from './runtimeUrl';
 
 export interface TitleIds {
   tmdb?: number;
@@ -619,7 +620,9 @@ export class PlaybackCursor {
       source: this.#source,
       attempt: this.#attempt,
       attemptType: attempt.type,
-      url: attempt.url,
+      // A packaged app's relative relay attempt is a media-element URL, so the fetch adapter never sees it.
+      // Resolve only allowlisted Den paths to the configured API; external/LAN/public attempts stay untouched.
+      url: __DEN_TV_PACKAGED__ ? apiUrl(attempt.url) : attempt.url,
       kind: source.kind,
       audio: source.audio,
       width: source.width,

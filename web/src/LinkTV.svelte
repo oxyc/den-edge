@@ -5,6 +5,7 @@
   import { links } from './lib/links.svelte';
   import { formatCode, join, parseCode, type JoinError } from './lib/pair';
   import RecoveryRedeem from './components/RecoveryRedeem.svelte';
+  import { currentAppPath } from './lib/runtimeUrl';
 
   /** Inside another screen's dialog (the assistant consent page), which says where the code comes from itself. */
   let { embedded = false }: { embedded?: boolean } = $props();
@@ -12,7 +13,12 @@
   // The TV's QR carries its code in the URL fragment, which never reaches a server; it is read once and dropped
   // from the address bar, so it isn't left in history.
   const scanned = new URLSearchParams(location.hash.slice(1)).get('pair');
-  if (scanned) history.replaceState(null, '', location.pathname + location.search);
+  if (scanned)
+    history.replaceState(
+      null,
+      '',
+      __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+    );
   let code = $state(formatCode(scanned ?? '').text);
 
   /** The dashes behind the field, with a blank for each character still to type. */

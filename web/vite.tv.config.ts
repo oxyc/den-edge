@@ -3,13 +3,43 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
+import { TV_CSP } from './scripts/tv-csp.mjs';
 
 const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
 const compat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
+const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
-const outDir = process.env.DEN_TV_OUT_DIR ?? `dist-tv-${platform}`;
-if (!/^dist-tv-(?:webos|tizen)(?:-e2e-\d+)?$/.test(outDir))
+const packaged = process.env.DEN_TV_PACKAGED === '1';
+const apiOriginText = process.env.DEN_TV_API_ORIGIN;
+if (packaged && !apiOriginText)
+  throw new Error('DEN_TV_API_ORIGIN is required for packaged TV builds');
+let apiOrigin = '';
+if (apiOriginText) {
+  let parsed: URL;
+  try {
+    parsed = new URL(apiOriginText);
+  } catch {
+    throw new Error('DEN_TV_API_ORIGIN must be a valid URL');
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash ||
+    parsed.pathname !== '/' ||
+    parsed.search
+  )
+    throw new Error(
+      'DEN_TV_API_ORIGIN must be an exact HTTPS origin without credentials, path, query, or fragment',
+    );
+  apiOrigin = parsed.origin;
+}
+if (packaged && platform !== 'tizen')
+  throw new Error('DEN_TV_PACKAGED=1 is only supported for Tizen');
+const outDir =
+  process.env.DEN_TV_OUT_DIR ?? (packaged ? 'dist-tv-tizen-package' : `dist-tv-${platform}`);
+if (!/^dist-tv-(?:webos|tizen)(?:-package)?(?:-e2e-\d+)?$/.test(outDir))
   throw new Error('DEN_TV_OUT_DIR must name an isolated dist-tv platform directory');
 const hostname = process.env.DEN_TV_HOST;
 if (hostname && !/^(?:[a-z0-9-]+\.)*[a-z0-9-]+$/i.test(hostname))
@@ -24,7 +54,10 @@ function workerCompatibility(): Plugin {
     enforce: 'pre',
     transform(code, id) {
       if (/\/src\/lib\/(?:libraryServiceWorker|libraryWorker|recoveryWorker)\.ts$/.test(id))
-        return { code: `import ${JSON.stringify(compat)};\n${code}`, map: null };
+        return {
+          code: `import ${JSON.stringify(compat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
+          map: null,
+        };
     },
   };
 }
@@ -37,14 +70,32 @@ const tvEntry: Plugin = {
       // Dev history fallbacks keep the requested path (/movies, /settings), but resolve to index.html.
       if (context.filename !== fileURLToPath(new URL('./index.html', import.meta.url))) {
         if (e2e && context.filename.endsWith('/test/player.html'))
-          return html.replace('/test/player.ts', '/src/tv/test-entry.ts');
+          return html
+            .replace(
+              '<html>',
+              `<html>${packaged ? `<head><meta http-equiv="Content-Security-Policy" content="${TV_CSP}"></head>` : ''}`,
+            )
+            .replace('/test/player.ts', '/src/tv/test-entry.ts');
         return html;
       }
       return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+${packaged ? `<meta http-equiv="Content-Security-Policy" content="${TV_CSP}">` : ''}
 <meta name="viewport" content="width=1920, initial-scale=1"><meta name="theme-color" content="#0b0b0f">
 <title>Den TV</title></head><body><div id="app"><p>Starting Den…</p></div>
 <script type="module" src="/src/tv/main.ts"></script></body></html>`;
     },
+  },
+};
+
+const packagedMetadata: Plugin = {
+  name: 'den-tv-packaged-metadata',
+  generateBundle() {
+    if (packaged)
+      this.emitFile({
+        type: 'asset',
+        fileName: 'den-tv-package.json',
+        source: JSON.stringify({ packaged: true, platform, apiOrigin, e2e }, null, 2),
+      });
   },
 };
 
@@ -80,8 +131,14 @@ const tvProxy = {
 export default mergeConfig(
   browser,
   defineConfig({
-    define: { __DEN_TV__: 'true', __DEN_TV_PLATFORM__: JSON.stringify(platform) },
-    plugins: [tvEntry, workerCompatibility()],
+    base: packaged ? './' : '/',
+    define: {
+      __DEN_TV__: 'true',
+      __DEN_TV_PLATFORM__: JSON.stringify(platform),
+      __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
+      __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
+    },
+    plugins: [tvEntry, workerCompatibility(), packagedMetadata],
     worker: { plugins: () => [workerCompatibility(), svelte()] },
     build: {
       target: 'chrome85',

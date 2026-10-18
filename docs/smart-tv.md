@@ -95,9 +95,22 @@ diverge.
 
 ## Samsung Tizen
 
-The generator currently stops before producing a `.wgt` and exits nonzero. A
-bundled client still needs validation of Vite base-relative assets, path-based
-SPA routing, media APIs, and signing. It does not claim that arbitrary remote
+The packaged path is explicitly opt-in and requires an HTTPS
+`DEN_TV_API_ORIGIN` plus a named Tizen certificate profile:
+
+```sh
+DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den.example npm run build:tv:tizen
+DEN_TV_API_ORIGIN=https://den.example node scripts/tv-package.mjs tizen --url https://den.example --profile MyCertificateProfile
+```
+
+This copies the actual bundle into a Tizen shell and writes `config.xml`; it
+exits nonzero when the CLI/profile is unavailable. `--prepare` generates and
+validates the unsigned shell without invoking the SDK. Local assets and dedicated
+Workers remain in the package; app routes use `index.html#/…` and only allowlisted
+Den API paths move to the explicit API origin. The production-package E2E suite
+serves physical files without SPA rewrites or an API proxy and exercises encrypted
+pairing, Worker sync, reload, detail/Back and actual HLS playback across origins.
+It does not claim that arbitrary remote
 content is an approved Samsung hosted app: Samsung says hosted/cloud apps are
 normally not accepted without Content Manager approval, and Tizen APIs are not
 available in hosted apps. A signed `.wgt` also requires Tizen Studio and a
@@ -108,10 +121,27 @@ References: [Samsung hosted applications Q&A](https://developer.samsung.com/smar
 [Tizen CLI packaging](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html?device=htv),
 [testing on a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html).
 
-The working Samsung target should be recorded as an explicit model/firmware
-and browser baseline (the current project target uses Chrome 85 as a minimum
-planning assumption). Confirm actual feature support on hardware; a package
-build or browser E2E run is not hardware proof.
+The packaged Samsung target is Tizen 8.0 (2024 generation, Chromium 108) or newer.
+That permits WebAssembly with `wasm-unsafe-eval` while keeping JavaScript eval and
+remote scripts prohibited. Earlier Samsung engines require the broader
+`unsafe-eval` permission, which Samsung's submission guidance disallows. The
+manifest declares this minimum; older Samsung TVs are not qualified. LG's separate
+build still targets Chrome 85 for C2/C4 compatibility. Record the actual Samsung
+model/firmware when testing; a package build or browser E2E run is not hardware proof.
+
+The package allows dynamic network destinations for media/addons through WARP,
+but applies a separate CSP restricting executable code to local assets. Production
+HTML and the package test server enforce the same policy, including on Workers.
+Only HTTPS external media/API origins are permitted. See the packaging README for
+certificate/profile and publication artwork requirements.
+
+The configured API must allow the installed widget's actual request origin through
+`WEB_ORIGINS`. Determine that origin on the TV; do not globally allow `null` just
+because a local-file widget might use an opaque origin. Browser package tests use
+an explicit loopback origin and do not prove Tizen's file-origin security rules,
+Worker loading or Web Crypto classification. HLS servers also need appropriate
+CORS for playlists, segments, subtitles and preflights. Credentials still use the
+shared exact-origin/path allowlists; external media hosts do not receive library keys.
 
 ## Diagnostics and scope
 
@@ -140,6 +170,13 @@ pagination dots and the fullscreen shortcut are removed from the TV hero.
 Watchlist/Seen and the available playback/source/trailer actions remain on the
 shared detail screen. The normal browser presentation is unchanged.
 
+`Screens/SearchView.swift` also informs TV Search: a full-width, 28px query editor
+above a category rail and uniform 200×300 poster grid. The editor scrolls with the
+page; the first result column's Left returns to the active category, and Right from
+the rail enters results. Querying, debounce, filters, caching and paging remain
+shared with the browser. A dense-result E2E journey covers keyboard editing,
+row/column movement and detail/Back focus restoration.
+
 This is not full native-tvOS parity. Native downloads, platform player menus and
 codec/HDR behavior do not become available merely by reusing a screen. TV playback
 reuses the existing source/session, retry and progress logic, with remote
@@ -156,41 +193,64 @@ npm run check:tv-isolation
 npm run test:e2e
 npm run test:e2e:tv
 DEN_TV_PLATFORM=tizen npm run test:e2e:tv
+npm run test:e2e:tv-package
 DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv -- tv-playback.spec.mjs
 npm run build:tv:webos
 npm run build:tv:tizen
 node scripts/tv-package.integration.mjs
+node scripts/tizen-package.integration.mjs
 ```
 
 Playwright needs its Chromium/WebKit browsers installed. TV E2E runs the production
 bundle, exercises real encrypted-library Workers and pairing, and plays checked-in
 HLS segments (not mocked `play()` or `currentTime`). Backend responses are fixtures;
 these tests do not use or modify the live library. They also cover remote navigation,
-focus restoration, repeated detail/Back cycles and Back during session loading.
+focus restoration, forty detail/Back cycles, remote source/audio/subtitle selection,
+resume, Next, retry after a failed session, visibility cleanup and Back during loading.
 The compatibility journey removes newer APIs in both page and Worker globals;
 it is not an emulator of an older Chromium engine. Native WebKit HLS evidence is
 not LG decoder evidence.
 
 The browser build rejects any TV/core-js module in its output graph, including lazy
 chunks. A checked-in clean-main baseline also gates compressed initial/all JS+CSS
-growth and checks TV-only markers. The initial implementation measured +42 bytes
-initial and +77 bytes total gzip against `a045b842`; byte isolation is not a claim
-that hardware timings have been measured. TV builds target Chrome 85, have isolated
+growth and checks TV-only markers. Run `npm run check:tv-isolation` for exact current
+compressed deltas against `a045b842`. `node scripts/tv-browser-performance.mjs`
+alternates five fresh Chromium contexts between `dist-browser-baseline` and `dist`,
+with deterministic local fixtures, reporting paint timing and resource transfers.
+Workstation timings are not TV hardware measurements. TV builds target Chrome 85, have isolated
 output directories, and verify Worker compilation and compatibility imports. Only
 E2E builds include the Player harness; normal TV builds omit it.
+Packaged URL helper calls in shared code must stay behind `__DEN_TV_PACKAGED__`;
+the browser module gate rejects that helper too, preventing an extra browser
+request merely to preserve the browser's existing path behavior. CI retains TV
+failure traces and screenshots for seven days.
+
+The 2026-10-18 comparison against `a045b842` measured **+56 bytes initial gzip and
++155 bytes total gzip**, with no additional browser asset chunk or TV module.
+A five-pair loopback Chromium run measured Home readiness medians of 174.9 ms
+baseline / 183.1 ms current (ranges 135.6–220.2 / 141.0–196.2 ms), and Search result
+medians of 96.3 / 61.8 ms (ranges 39.4–108.8 / 36.5–111.5 ms). These overlapping,
+variable samples do not establish a hardware speedup or a stable timing regression.
+The script labels initial-navigation paint metrics separately from interaction
+readiness; resource snapshots are taken at those milestones, not after all idle
+preloads. It requires the clean-base output in `web/dist-browser-baseline` and the
+current browser output in `web/dist`. An attached DevTools-profile audit was not
+run because that existing browser profile was in use; the comparison used isolated
+Playwright contexts without interrupting it.
 
 Before claiming device support, record an actual C2/C4 firmware run: linking and
 relaunch, Magic Remote/D-pad and on-screen keyboard, Back/exit, a representative
 codec/audio/subtitle/source/resume matrix, suspend/reopen, and a longer browsing
-and playback soak. Samsung additionally needs bundled routing/assets/API validation,
-key registration, AVPlay evaluation and a signed package. These are remaining
+and playback soak. Samsung additionally needs installed-widget assets/API validation,
+real SDK key/exit behavior, AVPlay evaluation and a signed package. These are remaining
 qualification tasks, not reasons to block the local preview.
 
-One known focus limitation: a title repeated in multiple shelves currently shares
-its restoration key, so returning may focus the first visible occurrence of that
-title rather than its original shelf. Ordinary unique-title and hero restoration
-are covered. The existing bounded route cache is reused (two inactive details),
+Focus restoration keys include the originating shelf, so duplicate titles in
+different shelves remain distinct. The existing bounded route cache is reused (two inactive details),
 not replaced with a separate TV router.
+TV builds omit touch-only page snapshots and limit Home's idle screen warm-up to
+Details. Search, People, Settings and Player load on intent; browser preload policy
+and touch behavior stay unchanged.
 
 `npm audit` currently reports eight high findings, all in the existing
 development-only Stylelint chain (`stylelint`/`stylelint-config-*` →

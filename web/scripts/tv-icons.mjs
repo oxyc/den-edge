@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Rasterize the checked-in brand SVG at the exact sizes required by webOS.
+// Rasterize the checked-in brand SVG at the exact development/package icon sizes used by the TVs.
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
@@ -11,7 +11,7 @@ const target = join(webRoot, 'tv-packaging', 'assets');
 mkdirSync(target, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 try {
-  for (const size of [80, 130]) {
+  for (const size of [80, 117, 130]) {
     const page = await browser.newPage({
       viewport: { width: size, height: size },
       deviceScaleFactor: 1,

@@ -7,7 +7,7 @@ const film = (id, title = `Movie ${id}`) => ({
   title,
   media_type: 'movie',
   release_date: '2026-01-01',
-  poster_path: '/poster.jpg',
+  poster_path: `/poster-${id}.jpg`,
   backdrop_path: '/backdrop.jpg',
   genre_ids: [18],
   vote_average: 8,
@@ -18,9 +18,21 @@ async function setup(page, path = '') {
   await routeGuestEdge(page, newEdge());
   await page.route('**/tmdb/**', (route) => {
     if (new URL(route.request().url()).pathname.includes('/search/'))
-      return route.fulfill({ json: { page: 1, total_pages: 1, results: [film(1002)] } });
+      return route.fulfill({
+        json: {
+          page: 1,
+          total_pages: 1,
+          results: Array.from({ length: 18 }, (_, index) => film(1002 + index)),
+        },
+      });
     return route.fallback();
   });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="#2c4770"/><stop offset="1" stop-color="#161922"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="200" cy="220" r="86" fill="#d7def0" opacity=".16"/></svg>',
+    }),
+  );
   await page.goto(`${E2E_ORIGIN}${path}`);
 }
 
@@ -90,14 +102,38 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
     name: 'Search titles, people, moods, languages…',
   });
   await remoteTo(page, search, ['ArrowUp', 'ArrowRight', 'ArrowLeft']);
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/search/);
+  const pageSearch = page.locator('section.search').getByRole('searchbox');
+  await expect(pageSearch).toBeFocused();
   await page.keyboard.type('Movie');
   await expect(page).toHaveURL(/\/search/);
 
   // The search field owns Down and transfers focus into its real result grid.
   const result = page.getByRole('link', { name: /Movie 1002/ }).first();
   await expect(result).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('section.search .grid').getByRole('link')).toHaveCount(18);
+  const resultBox = await result.boundingBox();
+  expect(resultBox?.width).toBeGreaterThanOrEqual(190);
+  const editor = page.locator('section.search .tv-search-editor');
+  expect((await editor.boundingBox())?.width).toBeGreaterThan(1_600);
+  await expect(editor.getByRole('searchbox')).toHaveCSS('font-size', '28px');
+  await page.screenshot({ path: testInfo.outputPath('tv-search-1920.png'), fullPage: false });
   await page.keyboard.press('ArrowDown');
   await remoteTo(page, result, ['ArrowDown'], 20);
+  await page.keyboard.press('ArrowLeft');
+  expect(
+    await focusedInside(page.locator('section.search .rail')),
+    'Left from the first result returns to the category rail',
+  ).toBe(true);
+  await remoteTo(page, result, ['ArrowRight'], 10);
+  for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('link', { name: /Movie 1006/ }).first()).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('link', { name: /Movie 1011/ }).first()).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
+  await expect(result).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/movie\/1002(?:-|$)/);
   await expect(page.getByRole('heading', { name: 'Movie 1002', level: 1 })).toBeVisible({
@@ -112,7 +148,7 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
 
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
-}) => {
+}, testInfo) => {
   await setup(page);
   await browse(page);
 
@@ -121,6 +157,25 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+
+  const contentSection = page.getByRole('link', { name: 'Content', exact: true });
+  await remoteTo(page, contentSection, ['ArrowDown', 'ArrowLeft'], 20);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(500);
+  const expandContent = page.getByRole('button', { name: 'Expand all in Content' });
+  await remoteTo(page, expandContent, ['ArrowRight'], 4);
+  const hiddenGenres = page.getByRole('button', { name: 'Hidden genres', exact: true });
+  await remoteTo(page, hiddenGenres, ['ArrowLeft', 'ArrowDown'], 12);
+  await page.keyboard.press('Enter');
+  const hiddenGenre = page.locator('#hidden-genres input[type="checkbox"]').first();
+  await expect(hiddenGenre).toBeVisible();
+  await page.keyboard.press('ArrowDown');
+  await remoteTo(page, hiddenGenre, ['ArrowLeft'], 10);
+  await page.keyboard.press('Enter');
+  await expect(hiddenGenre).toBeChecked();
+  await expect(hiddenGenre.locator('xpath=..').locator('.mark')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('tv-settings-checkbox.png'), fullPage: false });
+  await page.waitForTimeout(500);
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/$/);

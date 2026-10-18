@@ -10,13 +10,15 @@ if (!['webos', 'tizen'].includes(platform)) throw new Error('Unknown DEN_TV_PLAT
 export default defineConfig({
   ...browser,
   testMatch: 'tv-*.spec.mjs',
-  testIgnore: [],
+  testIgnore: ['tv-package-*.spec.mjs'],
   workers: 2,
   outputDir: `./test-results-tv/${platform}-${E2E_PORT}`,
   use: {
     ...browser.use,
     browserName: engine,
     viewport: { width: 1920, height: 1080 },
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
     launchOptions:
       engine === 'chromium'
         ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }

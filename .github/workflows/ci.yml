@@ -70,12 +70,22 @@ jobs:
       - run: npm run check:tv-isolation
       - run: npm run test:e2e:tv
       - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv
+      - run: npm run test:e2e:tv-package
+      - run: node scripts/tizen-package.integration.mjs
       # Normal artifacts must not contain the test-only Player harness enabled by the E2E builds.
       - run: npm run build:tv:webos && npm run build:tv:tizen
       - name: Verify the runner browser used by the built-worker check
         run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
       - run: npm run test:worker-build
       - run: npm run build:cast
+      - name: Retain TV failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-failures
+          path: web/test-results-tv
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Playwright already uses all four CPUs on one hosted runner. File sharding supplies three runners without changing
   # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards
@@ -119,6 +129,14 @@ jobs:
       - name: TV native HLS behavior
         if: matrix.shard == 1
         run: DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv -- tv-playback.spec.mjs
+      - name: Retain native TV failure evidence
+        if: failure() && matrix.shard == 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-native-failures
+          path: web/test-results-tv
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Time budgets on a household the size of a long-lived one (`e2e/big-library-budgets.spec.mjs`), against the
   # production build a phone is served, one test at a time on a runner of their own: a budget is time, and beside the

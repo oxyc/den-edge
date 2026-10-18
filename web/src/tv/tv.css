@@ -45,6 +45,116 @@
   gap: 10px;
 }
 
+/* Search is a ten-foot workspace: a substantial query field, a stable category rail, and a uniform poster grid.
+   The shared Search component remains the data/paging engine; this TV-only sheet changes presentation only. */
+.den-tv .bar.searching .search {
+  display: none;
+}
+
+.den-tv section.search > h1 {
+  display: none;
+}
+
+.den-tv section.search .tv-search-editor {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-height: 70px;
+  margin: 14px 0 34px;
+  padding: 0 24px;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 16px;
+  background: rgb(255 255 255 / 0.09);
+  color: var(--muted);
+}
+
+.den-tv section.search .tv-search-editor:focus-within {
+  border-color: transparent;
+  color: var(--fg);
+}
+
+.den-tv section.search .tv-search-editor svg {
+  flex: none;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+}
+
+.den-tv section.search .tv-search-input {
+  width: 100%;
+  min-height: 66px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 28px;
+}
+
+.den-tv section.search .tv-search-input::placeholder {
+  color: var(--muted);
+}
+
+.den-tv section.search .explore {
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 48px;
+}
+
+.den-tv section.search .rail {
+  top: calc(var(--bar-space) + 12px);
+  gap: 20px;
+  max-height: calc(100vh - var(--bar-space) - 44px);
+  padding: 8px 18px 28px 8px;
+}
+
+.den-tv section.search .filter {
+  gap: 8px;
+  padding: 5px;
+}
+
+.den-tv section.search .filter [aria-pressed],
+.den-tv section.search .chip,
+.den-tv section.search .toggle,
+.den-tv section.search .facet,
+.den-tv section.search .pick {
+  min-height: 50px;
+  padding-inline: 18px;
+  font-size: 18px;
+}
+
+.den-tv section.search .heading {
+  margin-bottom: 10px;
+  font-size: 20px;
+}
+
+.den-tv section.search .grid {
+  --card-w: 200px;
+
+  grid-template-columns: repeat(auto-fill, minmax(200px, 200px));
+  gap: 40px;
+  align-items: start;
+}
+
+.den-tv section.search .status,
+.den-tv section.search .note,
+.den-tv section.search .try {
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+/* CheckGrid's browser checkbox is visually hidden. On old TV engines it must still expose a real rectangle to the
+   geometry navigator; the transparent native surface fills its label while the existing mark remains the visual. */
+.den-tv .check input[type='checkbox'] {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 1;
+  appearance: none;
+}
+
 /* LinkTV's summary gains a 44px remote target without affecting the details element's flow height in old
    Chromium. Reserve that height explicitly so "Look around" does not sit on top of it. */
 .den-tv .recovery {
@@ -152,6 +262,14 @@
 .den-tv .billboard .slide-link,
 .den-tv .billboard .title-link {
   display: none;
+}
+
+/* Shared desktop Detail deliberately peeks its action row below the fold. A D-pad cannot scroll by touch, so the
+   complete primary action row must start on-screen and provide an obvious first destination. */
+.den-tv header.hero {
+  --hero-drop: 0px;
+
+  margin-bottom: 40px;
 }
 
 @media (prefers-reduced-motion: reduce) {

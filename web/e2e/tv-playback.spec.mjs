@@ -10,10 +10,15 @@ const session = {
   release: { label: 'TV fixture 1080p', filename: 'tv-fixture.mkv', size: 1 },
   video: { codec: 'h264', transcoded: false },
   audioTrack: 0,
-  audioTracks: [],
+  audioTracks: [
+    { language: 'en', name: 'English', channels: 2 },
+    { language: 'es', name: 'Spanish', channels: 2 },
+  ],
+  subtitles: [{ language: 'en', name: 'English' }],
 };
+const alternate = { label: 'TV fixture 720p', filename: 'tv-fixture-720.mkv', size: 2 };
 
-async function routePlayback(page, { onSession } = {}) {
+async function routePlayback(page, { onSession, releases = [] } = {}) {
   const ended = [];
   await page.route('**/tmdb/3/**', (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -23,9 +28,7 @@ async function routePlayback(page, { onSession } = {}) {
     `${ORIGIN}/direct/session`,
     onSession ?? ((route) => route.fulfill({ status: 201, json: session })),
   );
-  await page.route(`${ORIGIN}/direct/releases`, (route) =>
-    route.fulfill({ json: { releases: [] } }),
-  );
+  await page.route(`${ORIGIN}/direct/releases`, (route) => route.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/direct/s/**`, async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -58,15 +61,18 @@ async function remoteKey(page, key, keyCode) {
 test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Back', async ({
   page,
 }) => {
-  const ended = await routePlayback(page);
-  await page.goto(`${ORIGIN}/test/player.html`);
+  const ended = await routePlayback(page, { releases: [session.release, alternate] });
+  await page.goto(`${ORIGIN}/test/player.html?resume=12&next=1`);
 
   const video = page.locator('.player video');
   await expect(video).toBeVisible();
   await expect(page.locator('.tv-transport')).toBeVisible();
   await expect
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
-    .toBeGreaterThan(1);
+    .toBeGreaterThan(12);
+
+  expect(await remoteKey(page, 'MediaTrackNext', 176)).toBe(true);
+  await expect(page.getByTestId('player-next-count')).toHaveText('1');
 
   // TV engines commonly expose only a numeric remote code and the key name "Unidentified".
   expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
@@ -104,6 +110,25 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(transport.first()).toBeFocused();
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(transport.nth(1)).toBeFocused();
+
+  // Down enters the metadata controls; horizontal presses can then reach every source/track picker.
+  expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.closest('footer') !== null))
+    .toBe(true);
+  const footerSelects = page.locator('footer select');
+  await expect(footerSelects).toHaveCount(3);
+  for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
+  await expect(footerSelects.last()).toBeFocused();
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  // Back cancels track-picker editing before a subsequent Back is allowed to close playback.
+  expect(await remoteKey(page, 'Unidentified', 10009)).toBe(true);
+  await expect(video).toHaveCount(1);
+  await expect(footerSelects.last()).toBeFocused();
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect(footerSelects.last()).toHaveValue('en');
 
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
@@ -143,4 +168,54 @@ test('TV Back closes cleanly while a playback session is still loading', async (
   answer();
   await page.waitForTimeout(100);
   await expect(page.locator('.player')).toHaveCount(0);
+});
+
+test('TV remote retries a refused session and reaches real HLS playback', async ({ page }) => {
+  let attempts = 0;
+  await routePlayback(page, {
+    onSession: (route) => {
+      attempts += 1;
+      return attempts === 1
+        ? route.fulfill({ status: 503, json: { error: 'fixture_unavailable' } })
+        : route.fulfill({ status: 201, json: session });
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+
+  // With no picture controls yet, Down enters at Close and continues spatially to the recovery action.
+  await remoteKey(page, 'ArrowDown', 40);
+  await remoteKey(page, 'ArrowDown', 40);
+  await expect(retry).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(() => page.locator('.player video').evaluate((video) => video.currentTime), {
+      timeout: 30_000,
+    })
+    .toBeGreaterThan(1);
+  expect(attempts).toBe(2);
+});
+
+test('TV visibility suspension flushes progress and releases its session', async ({ page }) => {
+  const ended = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(1);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(video).toHaveCount(0);
+  await expect(page.getByTestId('player-close-count')).toHaveText('1');
+  await expect.poll(() => ended.length).toBe(1);
+  await expect
+    .poll(
+      async () =>
+        JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}').seconds ?? 0,
+    )
+    .toBeGreaterThan(0);
 });

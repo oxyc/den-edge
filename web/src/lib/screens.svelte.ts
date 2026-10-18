@@ -100,5 +100,7 @@ export function preloadScreens(): void {
   };
   // Detail and Search are the common next taps. Person follows in its own idle slice. Large or uncommon routes
   // (Settings, Player, Service and Watchlist) stay intent-only: their route effects above load them when asked.
-  preloadInIdle(HOME_SCREEN_PRELOADS, idle);
+  // The hero's next action is Details. TV Search/Person stay intent-only rather than competing for
+  // CPU/bytes on lower-powered engines after Home paints; the browser keeps its existing batches.
+  preloadInIdle(__DEN_TV__ ? [[DetailScreen]] : HOME_SCREEN_PRELOADS, idle);
 }

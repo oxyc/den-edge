@@ -7,6 +7,7 @@
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
+  import { currentAppPath } from '../lib/runtimeUrl';
   import {
     exploreFromPeople,
     parseRoute,
@@ -133,7 +134,9 @@
     if (searching()) navigateOut();
   }
   const searching = () =>
-    route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
+    route.page === 'search' ||
+    parseRoute(__DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search)
+      .page === 'search';
   /** What Explore is browsing: a query is typed over it, and clearing the query returns to it. */
   const explore = (): Explore =>
     route.page === 'search' ? { type: route.type, chips: route.chips } : {};
@@ -161,7 +164,9 @@
     text = value;
     // Focus opens Search before Router's `route` prop necessarily catches up. Read the address it already changed
     // instead, so an immediate tap on a recent item cannot be reset to the empty Search route.
-    const here = parseRoute(location.pathname + location.search);
+    const here = parseRoute(
+      __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+    );
     const context: Explore = here.page === 'search' ? { type: here.type, chips: here.chips } : {};
     navigate(searchHref(value, context), true);
     window.scrollTo({ top: 0, behavior: 'instant' });

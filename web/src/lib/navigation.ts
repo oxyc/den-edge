@@ -97,6 +97,18 @@ export function appPath(href: string, base: string): string | null {
     return null;
   }
   if (url.origin !== here.origin) return null;
+  if (__DEN_TV_PACKAGED__) {
+    if (url.protocol !== here.protocol) return null;
+    if (href.startsWith('#') && !href.startsWith('#/')) return null;
+    const path =
+      url.pathname === here.pathname && url.hash.startsWith('#/')
+        ? url.hash.slice(1).split('#')[0]!
+        : url.pathname + url.search;
+    // The shared navbar's Home link uses the legacy /library alias. A widget has no server to
+    // answer that document URL: keep the alias inside the router just like canonical Home.
+    if (path === '/library') return '/';
+    return parseRoute(path).page !== 'library' || path === '/' ? path : null;
+  }
   if (url.hash && url.pathname === here.pathname && url.search === here.search) return null;
   const route = parseRoute(url.pathname + url.search);
   const home = url.pathname === '/' && url.search === '';

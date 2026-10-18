@@ -5,6 +5,7 @@ import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
 import type { Failure, Session, Want } from './remux';
 import { directSubtitles } from './directSubtitles';
+import { apiOrigin } from './runtimeUrl';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
 export const PLAYBACK_ANSWER_MS = 150_000;
@@ -77,7 +78,13 @@ function href(value: unknown, base?: string): string | undefined {
   const raw = text(value);
   if (!raw) return undefined;
   try {
-    return new URL(raw, base ?? globalThis.location?.href ?? 'https://den.invalid/').href;
+    return new URL(
+      raw,
+      base ??
+        (__DEN_TV_PACKAGED__
+          ? `${apiOrigin()}/`
+          : (globalThis.location?.href ?? 'https://den.invalid/')),
+    ).href;
   } catch {
     return undefined;
   }

@@ -106,19 +106,21 @@ const preloadApplication = () => ({
         }
       };
       visit(application);
+      const assetPrefix = process.env.DEN_TV_PACKAGED === '1' ? './' : '/';
       const absentFromHtml = (file: string) =>
-        !html.includes(`href="/${file}"`) && !html.includes(`src="/${file}"`);
+        !html.includes(`href="${assetPrefix}${file}"`) &&
+        !html.includes(`src="${assetPrefix}${file}"`);
       return {
         html,
         tags: [
           ...[...scripts].filter(absentFromHtml).map((file) => ({
             tag: 'link',
-            attrs: { rel: 'modulepreload', crossorigin: '', href: `/${file}` },
+            attrs: { rel: 'modulepreload', crossorigin: '', href: `${assetPrefix}${file}` },
             injectTo: 'head' as const,
           })),
           ...[...styles].filter(absentFromHtml).map((file) => ({
             tag: 'link',
-            attrs: { rel: 'stylesheet', crossorigin: '', href: `/${file}` },
+            attrs: { rel: 'stylesheet', crossorigin: '', href: `${assetPrefix}${file}` },
             injectTo: 'head' as const,
           })),
         ],
@@ -128,7 +130,12 @@ const preloadApplication = () => ({
 });
 
 export default defineConfig({
-  define: { __DEN_TV__: 'false', __DEN_TV_PLATFORM__: JSON.stringify('browser') },
+  define: {
+    __DEN_TV__: 'false',
+    __DEN_TV_PLATFORM__: JSON.stringify('browser'),
+    __DEN_TV_PACKAGED__: 'false',
+    __DEN_TV_API_ORIGIN__: JSON.stringify(''),
+  },
   plugins: [
     {
       name: 'den-browser-platform-isolation',
@@ -138,7 +145,7 @@ export default defineConfig({
         for (const output of Object.values(bundle)) {
           if (output.type !== 'chunk') continue;
           const leaked = output.moduleIds.find((id) =>
-            /\/src\/tv\/|\/node_modules\/core-js\//.test(id),
+            /\/src\/tv\/|\/src\/lib\/runtimeUrl\.ts$|\/node_modules\/core-js\//.test(id),
           );
           if (leaked) this.error(`TV-only module leaked into browser build: ${leaked}`);
         }

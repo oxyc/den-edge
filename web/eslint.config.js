@@ -38,7 +38,13 @@ export default defineConfig(
   {
     files: ['src/**', 'test/**', 'e2e/**'],
     languageOptions: {
-      globals: { ...globals.browser, __DEN_TV__: 'readonly', __DEN_TV_PLATFORM__: 'readonly' },
+      globals: {
+        ...globals.browser,
+        __DEN_TV__: 'readonly',
+        __DEN_TV_PLATFORM__: 'readonly',
+        __DEN_TV_PACKAGED__: 'readonly',
+        __DEN_TV_API_ORIGIN__: 'readonly',
+      },
     },
   },
   {

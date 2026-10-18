@@ -150,7 +150,10 @@ export function titleMenuItems(
     kind: 'item',
     label: 'Share',
     onselect: () =>
-      void shareOrCopy({ title: title.title, url: `${location.origin}${href}` }).then((result) => {
+      void shareOrCopy({
+        title: title.title,
+        url: `${__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin}${href}`,
+      }).then((result) => {
         if (result === 'copied') notify?.('Link copied');
       }),
   });

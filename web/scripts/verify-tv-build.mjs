@@ -6,7 +6,8 @@ if (!['webos', 'tizen'].includes(platform)) throw new Error('Expected webos or t
 const directory = resolve(
   import.meta.dirname,
   '..',
-  process.env.DEN_TV_OUT_DIR ?? `dist-tv-${platform}`,
+  process.env.DEN_TV_OUT_DIR ??
+    (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
 for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {

@@ -2,7 +2,7 @@
      default — one chip open — For You, a genre, a recipe or a mood — and the endless grid it fills. Typing searches
      instead, and clearing the query returns to the chip that was open, since the address still names it. -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
   import ExploreTabs from './ExploreTabs.svelte';
   import FacetSuggestions from './FacetSuggestions.svelte';
@@ -82,6 +82,30 @@
     ]),
   );
   const typing = $derived(query.trim().length >= 2);
+  let tvQuery = $state(untrack(() => query));
+  $effect(() => {
+    if (__DEN_TV__ && query !== untrack(() => tvQuery)) tvQuery = query;
+  });
+  function changeTVQuery(value: string) {
+    tvQuery = value;
+    navigate(searchHref(value, explore), true);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+  async function leaveTVSearchField(event: KeyboardEvent) {
+    if (event.key === 'Escape' && tvQuery) {
+      event.preventDefault();
+      changeTVQuery('');
+      return;
+    }
+    if (event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    await tick();
+    document
+      .querySelector<HTMLElement>(
+        '[data-route-page][data-active="true"] section.search .browse button, [data-route-page][data-active="true"] section.search .grid a, [data-route-page][data-active="true"] section.search .rail button',
+      )
+      ?.focus({ preventScroll: false });
+  }
   /** The year floor by value: `prefs` is a new object whenever it is re-read, and the feed must not restart for that. */
   const minYear = $derived(prefs.minReleaseYear);
 
@@ -570,6 +594,33 @@
   aria-label={typing ? 'Search results' : 'Explore'}
   aria-busy={typing ? pending : feed.pager.page === 0 && !feed.pager.done}
 >
+  {#if __DEN_TV__}
+    <form
+      class="tv-search-editor"
+      role="search"
+      onsubmit={(event) => {
+        event.preventDefault();
+        if (tvQuery.trim().length >= 2) rememberSearch(tvQuery);
+        (event.currentTarget.elements.namedItem('tv-search') as HTMLInputElement | null)?.blur();
+      }}
+    >
+      <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
+        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+      >
+      <input
+        class="tv-search-input"
+        name="tv-search"
+        type="search"
+        value={tvQuery}
+        aria-label="Search titles, people, moods, languages…"
+        placeholder="Movies, series, people, moods, languages…"
+        autocomplete="off"
+        enterkeyhint="search"
+        oninput={(event) => changeTVQuery(event.currentTarget.value)}
+        onkeydown={leaveTVSearchField}
+      />
+    </form>
+  {/if}
   {#if typing}
     <h1>Search</h1>
   {:else}

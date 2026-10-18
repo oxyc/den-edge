@@ -1,7 +1,9 @@
 import './compat';
+import './packaged';
 import '../app.css';
 import './tv.css';
 import { installTVNavigation } from './navigation';
+import { registerSamsungKeys } from './platform';
 
 document.documentElement.dataset.denTv = __DEN_TV_PLATFORM__;
 
@@ -16,8 +18,12 @@ async function start() {
   }
   await import('../appMain');
   const stop = installTVNavigation();
+  const stopKeys = __DEN_TV_PLATFORM__ === 'tizen' ? registerSamsungKeys() : () => {};
   window.addEventListener('pagehide', (event) => {
-    if (!event.persisted) stop();
+    if (!event.persisted) {
+      stop();
+      stopKeys();
+    }
   });
   if (new URLSearchParams(location.search).has('tv-diagnostics')) {
     const { installDiagnostics } = await import('./diagnostics');

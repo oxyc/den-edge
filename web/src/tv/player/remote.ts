@@ -20,6 +20,7 @@ const HIDE_MS = 4_000;
 export function installTvRemote(actions: TvRemoteActions): () => void {
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let hidden = false;
+  let editing: HTMLSelectElement | undefined;
   const root = document.querySelector<HTMLElement>('.player');
   const regions = () =>
     root ? [...root.querySelectorAll<HTMLElement>('header, footer, .tv-transport')] : [];
@@ -59,6 +60,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       target instanceof HTMLTextAreaElement ||
       target instanceof HTMLButtonElement ||
       target instanceof HTMLAnchorElement;
+    if (target !== editing && event.key !== 'Enter' && event.key !== 'Select') editing = undefined;
 
     let handled = true;
     const code = event.keyCode;
@@ -70,7 +72,11 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     }
     reveal();
     const moveControl = (direction: -1 | 1) => {
-      if (!(target instanceof HTMLButtonElement || target instanceof HTMLAnchorElement))
+      if (!(
+        target instanceof HTMLButtonElement ||
+        target instanceof HTMLAnchorElement ||
+        (target instanceof HTMLSelectElement && target !== editing)
+      ))
         return false;
       const group = target.closest<HTMLElement>('.tv-transport, .controls, header');
       if (!group) return false;
@@ -85,6 +91,68 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       next.focus({ preventScroll: true });
       return true;
     };
+    const moveSpatial = (direction: 'up' | 'down') => {
+      if (!root) return false;
+      const controls = [
+        ...root.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter((control) => {
+        if (control.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+        const style = getComputedStyle(control);
+        const rect = control.getBoundingClientRect();
+        return (
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          rect.width > 1 &&
+          rect.height > 1
+        );
+      });
+      const current =
+        target instanceof HTMLElement && controls.includes(target) ? target : undefined;
+      if (!current) {
+        const fallback = root.querySelector<HTMLElement>(
+          '.tv-transport button, header button, footer select, footer button',
+        );
+        fallback?.focus({ preventScroll: true });
+        return !!fallback;
+      }
+      const from = current.getBoundingClientRect();
+      const x = from.left + from.width / 2;
+      const y = from.top + from.height / 2;
+      let winner: HTMLElement | undefined;
+      let best = Infinity;
+      for (const control of controls) {
+        if (control === current) continue;
+        const rect = control.getBoundingClientRect();
+        const dx = Math.abs(rect.left + rect.width / 2 - x);
+        const dy = rect.top + rect.height / 2 - y;
+        const primary = direction === 'down' ? dy : -dy;
+        if (primary <= 2) continue;
+        const score = primary + dx * 3;
+        if (score < best) {
+          best = score;
+          winner = control;
+        }
+      }
+      winner?.focus({ preventScroll: true });
+      winner?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      return !!winner;
+    };
+    const stepSelect = (select: HTMLSelectElement, direction: -1 | 1) => {
+      for (
+        let index = select.selectedIndex + direction;
+        index >= 0 && index < select.options.length;
+        index += direction
+      ) {
+        if (select.options[index]?.disabled) continue;
+        select.selectedIndex = index;
+        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      return false;
+    };
     if (PLAY_KEYS.has(event.key) || code === 415 || code === 10252) {
       if (event.key === 'MediaPlayPause' || code === 10252) {
         if (actions.paused()) void actions.play();
@@ -97,12 +165,32 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     else if (code === 417) actions.seekBy(10);
     else if (event.key === 'ArrowLeft' && moveControl(-1)) void 0;
     else if (event.key === 'ArrowRight' && moveControl(1)) void 0;
+    else if (target instanceof HTMLSelectElement && editing && event.key === 'ArrowUp')
+      stepSelect(target, -1);
+    else if (target instanceof HTMLSelectElement && editing && event.key === 'ArrowDown')
+      stepSelect(target, 1);
+    else if (event.key === 'ArrowUp' && moveSpatial('up')) void 0;
+    else if (event.key === 'ArrowDown' && moveSpatial('down')) void 0;
     else if (!interactive && event.key === 'ArrowLeft') actions.seekBy(-10);
     else if (!interactive && event.key === 'ArrowRight') actions.seekBy(10);
     else if (event.key === 'MediaTrackNext' && actions.next) actions.next();
-    else if (event.key === 'Back' || event.key === 'BrowserBack' || code === 461 || code === 10009)
-      actions.close();
-    else handled = false;
+    else if (
+      (event.key === 'Enter' || event.key === 'Select' || code === 13) &&
+      target instanceof HTMLSelectElement
+    )
+      editing = editing === target ? undefined : target;
+    else if (
+      event.key === 'Escape' ||
+      event.key === 'Back' ||
+      event.key === 'BrowserBack' ||
+      code === 461 ||
+      code === 10009
+    ) {
+      // Back first leaves the select's remote edit mode. Closing the entire film while the viewer is
+      // choosing a track makes a native TV picker impossible to cancel safely.
+      if (editing) editing = undefined;
+      else actions.close();
+    } else handled = false;
 
     if (!handled) return;
     event.preventDefault();
@@ -111,7 +199,8 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
 
   const onBack = (event: Event) => {
     event.preventDefault();
-    actions.close();
+    if (editing) editing = undefined;
+    else actions.close();
   };
 
   const onPlay = () => scheduleHide();

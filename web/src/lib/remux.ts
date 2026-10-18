@@ -10,6 +10,7 @@ import type { Playable } from './playable';
 import type { PlaybackEvidence } from './playbackStats';
 import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
+import { apiOrigin } from './runtimeUrl';
 
 export { nativeHls } from './nativeHls';
 
@@ -917,7 +918,9 @@ export async function startSession(
       session.subtitleSource = candidate ? 'den_subtitles' : undefined;
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
-      const mediaBase = session.publicBase ?? (/^https?:/.test(base) ? base : undefined);
+      const mediaBase =
+        session.publicBase ??
+        (/^https?:/.test(base) ? base : __DEN_TV_PACKAGED__ ? apiOrigin() : undefined);
       return mediaBase
         ? {
             ...session,

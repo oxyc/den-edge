@@ -1,3 +1,6 @@
+import { currentAppPath } from '../lib/runtimeUrl';
+import { exitTvApp } from './platform';
+
 type Direction = 'left' | 'right' | 'up' | 'down';
 
 const FOCUSABLE = [
@@ -10,9 +13,24 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-const isEditable = (element: Element | null): element is HTMLElement =>
-  element instanceof HTMLElement &&
-  !!element.closest('input, textarea, select, [contenteditable="true"]');
+const isEditable = (element: Element | null): element is HTMLElement => {
+  if (!(element instanceof HTMLElement)) return false;
+  const control = element.closest('input, textarea, select, [contenteditable="true"]');
+  if (!control) return false;
+  if (!(control instanceof HTMLInputElement)) return true;
+  return ![
+    'checkbox',
+    'radio',
+    'button',
+    'submit',
+    'reset',
+    'range',
+    'color',
+    'file',
+    'image',
+    'hidden',
+  ].includes(control.type);
+};
 
 function visible(element: HTMLElement, ancestry = new WeakMap<HTMLElement, boolean>()): boolean {
   if (element.hidden || element.matches(':disabled, [aria-disabled="true"]')) return false;
@@ -109,7 +127,15 @@ function move(direction: Direction): boolean {
 function focusIdentity(element: HTMLElement): string | undefined {
   if (element.id) return `#${CSS.escape(element.id)}`;
   const key = element.dataset.tvFocusKey;
-  if (key) return `[data-tv-focus-key="${CSS.escape(key)}"]`;
+  if (key) {
+    // The same title can legitimately appear in several shelves. Include its originating named row so Back
+    // restores the card the viewer actually opened, while still waiting for that row's virtual card to remount.
+    const row = element.closest<HTMLElement>('.row[aria-label]');
+    const rowLabel = row?.getAttribute('aria-label');
+    if (rowLabel)
+      return `.row[aria-label="${CSS.escape(rowLabel)}"] [data-tv-focus-key="${CSS.escape(key)}"]`;
+    return `[data-tv-focus-key="${CSS.escape(key)}"]`;
+  }
   if (element instanceof HTMLAnchorElement && element.getAttribute('href'))
     return `a[href="${CSS.escape(element.getAttribute('href')!)}"]`;
   const label = element.getAttribute('aria-label');
@@ -120,6 +146,7 @@ function focusIdentity(element: HTMLElement): string | undefined {
 function restore(selector?: string): () => void {
   let done = false;
   let timer = 0;
+  let restored = false;
   const finish = () => {
     if (done) return;
     done = true;
@@ -137,15 +164,18 @@ function restore(selector?: string): () => void {
     // immediately would focus Home's brand while the detail page is still the active DOM.
     const target = remembered ?? (selector ? undefined : focusables()[0]);
     if (target) {
-      finish();
+      restored = true;
       target.focus({ preventScroll: true });
       target.scrollIntoView({ block: 'nearest', inline: 'center' });
-      return;
     }
   };
   const observer = new MutationObserver(attempt);
   timer = window.setTimeout(() => {
-    const fallback = focusables()[0];
+    // Route pages are retained and swap visibility asynchronously. Keep reasserting the remembered target
+    // through that transition; otherwise a later inert/active update can leave focus on body. Only use the
+    // first-page fallback when the remembered control never appeared.
+    attempt();
+    const fallback = restored ? undefined : focusables()[0];
     finish();
     fallback?.focus({ preventScroll: true });
     fallback?.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -156,30 +186,27 @@ function restore(selector?: string): () => void {
 }
 
 function atAppRoot(): boolean {
-  return location.pathname === '/' || location.pathname === '/library';
+  const path = currentAppPath().split(/[?#]/, 1)[0];
+  return path === '/' || path === '/library';
+}
+
+function routeKey(path = currentAppPath()): string {
+  const url = new URL(path, location.origin + currentAppPath());
+  return url.pathname + url.search;
 }
 
 function requestExit(): void {
   const request = new CustomEvent('den:tv-exit-request', { cancelable: true });
   if (!window.dispatchEvent(request)) return;
   if (!window.confirm('Exit Den?')) return;
-  if (__DEN_TV_PLATFORM__ === 'tizen') {
-    const api = (
-      window as typeof window & {
-        tizen?: { application?: { getCurrentApplication?: () => { exit: () => void } } };
-      }
-    ).tizen;
-    api?.application?.getCurrentApplication?.().exit();
-  } else {
-    window.close();
-  }
+  if (!exitTvApp()) window.close();
 }
 
 /** Installs remote-key spatial navigation. This module is loaded by TV entry points only. */
 export function installTVNavigation(): () => void {
   const memory = new Map<string, string>();
   const pendingRestores = new Set<() => void>();
-  let locationKey = location.pathname + location.search;
+  let locationKey = routeKey();
   let editing: HTMLElement | null = null;
 
   const restoreSoon = (selector?: string) => {
@@ -205,7 +232,7 @@ export function installTVNavigation(): () => void {
   const routeChanged = (event?: Event) => {
     remember();
     const requested = (event as CustomEvent<{ path?: string }> | undefined)?.detail?.path;
-    locationKey = requested ?? location.pathname + location.search;
+    locationKey = routeKey(requested);
     // Focusing Search itself opens /search. Carry that field into the destination instead of resetting to
     // the brand between the focus event and the route mount.
     const active = document.activeElement;
@@ -218,6 +245,10 @@ export function installTVNavigation(): () => void {
   const onFocus = () => {
     document.documentElement.classList.add('tv-remote-active');
     if (document.activeElement !== editing) editing = null;
+    // Anchor navigation is intercepted directly by Router and does not emit den:navigate. Its first page control
+    // can focus before popstate ever occurs, so associate it with the address now on screen instead of overwriting
+    // the source route's remembered control.
+    locationKey = routeKey();
     remember();
   };
   const onKey = (event: KeyboardEvent) => {
@@ -225,6 +256,15 @@ export function installTVNavigation(): () => void {
     const target = event.target instanceof Element ? event.target : null;
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
+    if (
+      event.key === 'Enter' &&
+      target instanceof HTMLInputElement &&
+      (target.type === 'checkbox' || target.type === 'radio')
+    ) {
+      event.preventDefault();
+      target.click();
+      return;
+    }
     if (isEditable(target)) {
       const wasEditing = editing === target;
       const startsEditing =
@@ -238,6 +278,10 @@ export function installTVNavigation(): () => void {
       // A second Select while editing retains the field's native Enter/search behavior.
       if (event.key === 'Enter' && !wasEditing) {
         event.preventDefault();
+        if (target.closest('#nav-search') && !currentAppPath().startsWith('/search')) {
+          editing = null;
+          target.closest('form')?.requestSubmit();
+        }
         return;
       }
     }
@@ -249,14 +293,62 @@ export function installTVNavigation(): () => void {
       // likewise left to that field's own results behavior.
       if (isEditable(target) && editing === target) return;
       if (
+        direction === 'right' &&
+        target instanceof HTMLElement &&
+        target.closest('section.search .rail')
+      ) {
+        const result = document.querySelector<HTMLElement>(
+          '[data-route-page][data-active="true"] section.search .grid a',
+        );
+        if (result && visible(result)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          result.focus({ preventScroll: true });
+          result.scrollIntoView({ block: 'center', inline: 'nearest' });
+          return;
+        }
+      }
+      if (direction === 'left' && target instanceof HTMLElement) {
+        const grid = target.closest<HTMLElement>('section.search .grid');
+        if (grid) {
+          const here = target.getBoundingClientRect();
+          const hasGridChoiceToLeft = focusables().some((candidate) => {
+            if (candidate === target || candidate.closest('section.search .grid') !== grid)
+              return false;
+            const other = candidate.getBoundingClientRect();
+            return (
+              center(other).x < center(here).x - 2 &&
+              Math.min(here.bottom, other.bottom) > Math.max(here.top, other.top)
+            );
+          });
+          if (!hasGridChoiceToLeft) {
+            const rail = document.querySelector<HTMLElement>(
+              '[data-route-page][data-active="true"] section.search .rail [aria-pressed="true"], [data-route-page][data-active="true"] section.search .rail .chip',
+            );
+            if (rail && visible(rail)) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              rail.focus({ preventScroll: true });
+              rail.scrollIntoView({ block: 'center', inline: 'nearest' });
+              return;
+            }
+          }
+        }
+      }
+      if (
         (direction === 'left' || direction === 'right') &&
         target instanceof HTMLElement &&
-        target.matches('[data-tv-carousel-action]')
+        target.closest('[data-tv-carousel-action]')
       ) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        target.dispatchEvent(
-          new CustomEvent('den:tv-page', { detail: { direction }, bubbles: false }),
+        window.dispatchEvent(
+          new CustomEvent('den:tv-page', {
+            detail: {
+              direction,
+              target: target.closest<HTMLElement>('[data-tv-carousel-action]'),
+            },
+          }),
         );
         return;
       }
@@ -330,6 +422,9 @@ export function installTVNavigation(): () => void {
       return;
     }
     event.preventDefault();
+    // Once Back leaves a route, do not let that same Escape continue into a retained component's local handler
+    // and steal focus back after the router restores the source control.
+    event.stopImmediatePropagation();
     if (atAppRoot()) {
       requestExit();
       return;

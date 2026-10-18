@@ -6,6 +6,7 @@
   import { Navigation, appPath, foreignProfileEntry, nearest, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
   import { swapOnNavigation } from './lib/release';
+  import { currentAppPath } from './lib/runtimeUrl';
 
   let {
     children,
@@ -18,7 +19,9 @@
     profile?: string;
   } = $props();
   // The parent keys this entire scope by the typed active profile, including all retained pages and data.
-  const navigation = new Navigation(location.pathname + location.search);
+  const navigation = new Navigation(
+    __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+  );
   let current = $state.raw(navigation.current);
   let pages = $state.raw([...navigation.pages.values()]);
   let revision = 0;
@@ -141,7 +144,7 @@
     // the capture was ~33 ms of every tap at 4x CPU on d.oxy.fi's Home; there the new page's own spinner shows.
     // Neither happens without touch, so there nothing for them loads. A page left before it has loaded waits for it
     // (`update`), so that page is still copied and can be swiped back to.
-    const copies = navigator.maxTouchPoints > 0;
+    const copies = !__DEN_TV__ && navigator.maxTouchPoints > 0;
     const touchReady: Promise<typeof TouchNavigation | null> = copies
       ? import('./lib/touchNavigation').then(
           (module) => {
@@ -181,7 +184,9 @@
         )
       : Promise.resolve(null);
     onchange(current.route);
-    const address = () => location.pathname + location.search;
+    const address = __DEN_TV_PACKAGED__
+      ? currentAppPath
+      : () => location.pathname + location.search;
     /**
      * An address the route has already moved to but the entry does not say yet: a query typed a letter at a time.
      * The route is the one truth every page reads, and it moves with each letter; the entry follows once typing
