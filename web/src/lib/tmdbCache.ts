@@ -492,9 +492,10 @@ export function cachingFetch(
 export function coalesced<A, R>(
   many: (asks: A[]) => Promise<R[]>,
   gatherMs = 0,
-): (ask: A) => Promise<R> {
+): ((ask: A) => Promise<R>) & { discard(result: R): void } {
   let waiting: Array<{ ask: A; resolve: (result: R) => void; reject: (error: unknown) => void }> =
     [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const flush = () => {
     const batch = waiting;
     waiting = [];
@@ -503,11 +504,19 @@ export function coalesced<A, R>(
       (error: unknown) => batch.forEach(({ reject }) => reject(error)),
     );
   };
-  return (ask) =>
+  const call = (ask: A) =>
     new Promise<R>((resolve, reject) => {
-      if (!waiting.length) setTimeout(flush, gatherMs);
+      if (!waiting.length) timer = setTimeout(flush, gatherMs);
       waiting.push({ ask, resolve, reject });
     });
+  /** Drop the calls still gathering, without running them; each is answered with `result`. */
+  call.discard = (result: R) => {
+    clearTimeout(timer);
+    const dropped = waiting;
+    waiting = [];
+    for (const { resolve } of dropped) resolve(result);
+  };
+  return call;
 }
 
 /** This browser's IndexedDB, or null where there is none or it is refused (a private window, blocked site data). */
@@ -570,6 +579,9 @@ function indexedStore(): Store | null {
       return dropped;
     },
     clear: async () => {
+      // An answer still gathering for its write (`PUT_GATHER_MS`) was fetched before this clear; written afterwards
+      // it would bring back what was just forgotten. A write already in a transaction runs ahead of this one.
+      put.discard(undefined);
       await run('readwrite', (answers) => answers.clear());
     },
   };
