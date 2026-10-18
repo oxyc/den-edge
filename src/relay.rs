@@ -5443,6 +5443,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
             let since = req.headers().get(header::IF_MODIFIED_SINCE).map(|v| v.to_str().unwrap().to_owned());
+            // Read the whole request, as atlas does. Answering a large POST with its body unread makes hyper close the
+            // connection with bytes still unread, which resets it under the relay's write: a 502 that depends only
+            // on scheduling.
+            axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
             let mut resp =
                 axum::response::Response::new(axum::body::Body::from(json!({ "since": since }).to_string()));
             resp.headers_mut().insert(
