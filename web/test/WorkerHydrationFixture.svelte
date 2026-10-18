@@ -103,6 +103,20 @@
           },
           'seed-tv-continue',
         );
+        // A film resumed after the series' mark, as one paused on the TV a moment ago. The seed's writes share one
+        // millisecond (the clock counts them apart), so this one waits for a later millisecond to be later at all.
+        if (params.has('film-after-series')) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          await model.recordProgress(
+            {
+              title: { type: 'movie', id: 1002 },
+              fraction: 0.67,
+              seconds: 4_626,
+              observedAt: Date.now(),
+            },
+            'seed-film-after-series',
+          );
+        }
         if (params.has('verano'))
           await model.recordProgress(
             {

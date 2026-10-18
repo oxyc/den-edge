@@ -707,6 +707,42 @@ async function reopenRetainedContinueCard(browser) {
   await page.close();
 }
 
+// The seed resumes Movie 1001, then Series 1003, then (`film-after-series`) Movie 1002. Films and series share one
+// newest-first order, so the row is 1002, 1003, 1001. With every series ahead of every film, a film paused on the
+// TV a minute ago sat at the far end of a row of month-old series and read as missing.
+test('Home Continue Watching puts a film watched after a series ahead of it', async ({ page }) => {
+  const metadata = {
+    requests: [],
+    attempts: new Map(),
+    members: new Set(),
+    held: () => {},
+    release: Promise.resolve(),
+    refuseOnce: new Set(),
+    missing: new Set(),
+    holdId: null,
+  };
+  await routes(page, metadata);
+  await page.goto(`${FIXTURE}?seed&film-after-series`);
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await page.goto(`${FIXTURE}?routed&online&shell`);
+  const row = page
+    .locator('[data-route-page][data-active="true"]')
+    .getByRole('region', { name: 'Continue Watching', exact: true });
+  for (const name of [/Movie 1002/, /Series 1003/, /Movie 1001/])
+    await expect(row.getByRole('link', { name })).toBeVisible({ timeout: 15_000 });
+  const order = await row
+    .getByRole('link')
+    .evaluateAll((links) => [...new Set(links.map((link) => link.getAttribute('href')))]);
+  expect(order).toEqual([
+    '/movie/1002-movie-1002',
+    '/tv/1003-series-1003',
+    '/movie/1001-movie-1001',
+  ]);
+});
+
 test('a retained Home Continue Watching card opens again after returning through the Den logo', async ({
   browser,
 }) => {

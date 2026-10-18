@@ -568,6 +568,8 @@ export class ContinueProjector {
   private seriesOrder: string[] = [];
   private seriesCandidates = new Map<string, ContinueCandidate>();
   private movies: ContinueCandidate[] = [];
+  /** Each entry's time in the row's newest-first order: a series' latest mark, a film's resume. */
+  private activity = new Map<string, number>();
   private candidates: ContinueCandidate[] = [];
 
   constructor(
@@ -631,10 +633,10 @@ export class ContinueProjector {
       else this.seriesCandidates.delete(key);
     }
     this.library = library;
-    this.candidates = [
-      ...this.seriesOrder.flatMap((key) => this.seriesCandidates.get(key) ?? []),
-      ...this.movies,
-    ];
+    this.candidates = newestFirst(
+      [...this.seriesOrder.flatMap((key) => this.seriesCandidates.get(key) ?? []), ...this.movies],
+      this.activity,
+    );
     return this.candidates;
   }
 
@@ -674,6 +676,16 @@ export class ContinueProjector {
       }),
     );
     this.movies = candidates.filter((candidate) => !seriesKeys.has(titleKey(candidate.ref)));
+    const progressAt = new Map(
+      library.records.map((record) => [titleKey(record.title), record.progressAt]),
+    );
+    this.activity = new Map([
+      ...this.movies.map((movie) => {
+        const key = titleKey(movie.ref);
+        return [key, progressAt.get(key) ?? -Infinity] as const;
+      }),
+      ...this.seriesOrder.map((key) => [key, latest.get(key) ?? -Infinity] as const),
+    ]);
     this.library = library;
     this.candidates = candidates;
   }
@@ -696,6 +708,7 @@ function continueCandidates(
   );
   const seen = new Set<string>();
   const entries: ContinueCandidate[] = [];
+  const activity = new Map<string, number>();
 
   // Three summaries per series, because the policy asks three different questions of them and conflating any
   // two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
@@ -762,6 +775,7 @@ function continueCandidates(
     });
     if (answer.action === 'none' || !answer.episode || seen.has(key)) continue;
     seen.add(key);
+    activity.set(key, mark?.updatedAt ?? -Infinity);
     // Continue Watching may already offer the next episode while the TV is still playing the opening or ending
     // of this one. Keep that policy answer in `episode`/`fraction`, but carry the latest physical position beside
     // it so the live clock never disappears merely because the resume policy crossed one of its thresholds.
@@ -790,6 +804,7 @@ function continueCandidates(
     const key = titleKey(record.title);
     if (dismissedSince(key, record.progressAt) || seen.has(key)) continue;
     seen.add(key);
+    activity.set(key, record.progressAt);
     entries.push({
       ref: record.title,
       display: 'record',
@@ -803,7 +818,20 @@ function continueCandidates(
         : {}),
     });
   }
-  return entries;
+  return newestFirst(entries, activity);
+}
+
+/**
+ * Series and films in one order, latest first (den-spec assistant-v1 §15 `continue`): a series at its latest mark, a
+ * film at its resume. A series known only by a flag has no time and comes last. The sort is stable, so a tie keeps the
+ * order the entries came in.
+ */
+function newestFirst(
+  entries: ContinueCandidate[],
+  activity: ReadonlyMap<string, number>,
+): ContinueCandidate[] {
+  const at = (entry: ContinueCandidate) => activity.get(titleKey(entry.ref)) ?? -Infinity;
+  return entries.sort((a, b) => (at(a) === at(b) ? 0 : at(a) > at(b) ? -1 : 1));
 }
 
 /** Lay late title names and artwork over policy decisions, dropping entries that are not named yet. */
