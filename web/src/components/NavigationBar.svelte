@@ -302,7 +302,9 @@
         aria-controls={showRecent ? 'recent-searches' : undefined}
         enterkeyhint="search"
         onfocus={() => {
-          if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
+          // On a TV, merely landing on Search with the D-pad is not an activation and must not add a history
+          // entry. Typing still reaches `searchChanged`, and Select enters the navigation layer's edit mode.
+          if (!__DEN_TV__ && route.page !== 'search' && !onPeople) navigate(searchHref(text));
         }}
         oninput={searchChanged}
         onkeydown={(event) => {

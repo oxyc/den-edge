@@ -4,8 +4,12 @@
 /web/dist
 /web/dist-cast
 /web/dist-shell
+/web/dist-tv-*
+/web/dist-browser-baseline
+/web/tv-packages
 .env
 *.log
 
 /web/test-results
+/web/test-results-tv
 /web/playwright-report

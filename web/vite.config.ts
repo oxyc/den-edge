@@ -73,7 +73,8 @@ const preloadApplication = () => ({
   enforce: 'post' as const,
   transformIndexHtml: {
     order: 'post' as const,
-    handler(html: string, context: { bundle?: Record<string, unknown> }) {
+    handler(html: string, context: { path?: string; bundle?: Record<string, unknown> }) {
+      if (context.path !== '/index.html') return html;
       const outputs = Object.values(context.bundle ?? {});
       const chunks = outputs.filter(
         (
@@ -127,7 +128,22 @@ const preloadApplication = () => ({
 });
 
 export default defineConfig({
+  define: { __DEN_TV__: 'false', __DEN_TV_PLATFORM__: JSON.stringify('browser') },
   plugins: [
+    {
+      name: 'den-browser-platform-isolation',
+      // Inspect every output chunk, not just the initial entry. An accidentally lazy TV import still leaks.
+      generateBundle(_options, bundle) {
+        if (process.env.DEN_TV_PLATFORM) return;
+        for (const output of Object.values(bundle)) {
+          if (output.type !== 'chunk') continue;
+          const leaked = output.moduleIds.find((id) =>
+            /\/src\/tv\/|\/node_modules\/core-js\//.test(id),
+          );
+          if (leaked) this.error(`TV-only module leaked into browser build: ${leaked}`);
+        }
+      },
+    },
     previewProfiles(),
     previewBuild(),
     ...(watching ? [probe()] : []),

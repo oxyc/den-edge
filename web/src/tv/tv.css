@@ -1,0 +1,162 @@
+/* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle. */
+:root.den-tv {
+  --gutter: clamp(54px, 5vw, 96px);
+  --bar-space: 100px;
+  --card-w: clamp(190px, 13vw, 260px);
+  --page-max: 1920px;
+  --tv-focus: #fff;
+
+  font-size: 19px;
+  overscroll-behavior: none;
+}
+
+.den-tv body {
+  overflow-x: hidden;
+}
+
+/* Chrome 85 ignores color-mix(), including the complete declaration containing it. */
+.den-tv .den-button-device {
+  --button-fg: #d2daf1;
+}
+
+.den-tv .den-button-destructive {
+  --button-bg: rgb(255 107 107 / 0.12);
+  --button-border: rgb(255 107 107 / 0.48);
+}
+
+.den-tv .bar {
+  top: 22px;
+  right: var(--gutter);
+  left: var(--gutter);
+  min-height: 70px;
+  padding: 8px 18px;
+  background: rgb(10 12 16 / 0.82);
+  backdrop-filter: blur(12px);
+}
+
+.den-tv .bar nav a,
+.den-tv .bar button,
+.den-tv .bar input {
+  min-height: 54px;
+  font-size: 22px;
+}
+
+.den-tv .bar nav {
+  gap: 10px;
+}
+
+/* LinkTV's summary gains a 44px remote target without affecting the details element's flow height in old
+   Chromium. Reserve that height explicitly so "Look around" does not sit on top of it. */
+.den-tv .recovery {
+  padding-bottom: 48px;
+}
+
+.den-tv.tv-remote-active a:focus,
+.den-tv.tv-remote-active button:focus,
+.den-tv.tv-remote-active input:focus,
+.den-tv.tv-remote-active select:focus,
+.den-tv.tv-remote-active textarea:focus,
+.den-tv.tv-remote-active [tabindex]:focus {
+  outline: 4px solid var(--tv-focus);
+  outline-offset: 4px;
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 7px rgb(0 0 0 / 0.45),
+    0 10px 34px rgb(0 0 0 / 0.5);
+}
+
+.den-tv .row {
+  margin-bottom: 54px;
+}
+
+.den-tv .row .head {
+  margin-bottom: 18px;
+}
+
+.den-tv .row h2 {
+  font-size: 28px;
+}
+
+.den-tv .row .track {
+  gap: 26px;
+  padding-top: 8px;
+  padding-bottom: 18px;
+  scroll-snap-type: x mandatory;
+}
+
+.den-tv .row .track > * {
+  scroll-snap-align: start;
+}
+
+.den-tv .card .art {
+  height: calc(var(--card-w) * 1.5);
+  border-radius: 10px;
+}
+
+.den-tv .card .art.landscape {
+  height: calc(var(--card-w) * 1.45 * 0.5625);
+}
+
+.den-tv .card .meta {
+  padding-top: 10px;
+  font-size: 18px;
+}
+
+.den-tv .card.pick:focus {
+  transform: scale(1.065);
+  transform-origin: center;
+  transition: transform 90ms ease-out;
+  z-index: 2;
+}
+
+.den-tv .card.pick:focus .art {
+  outline: 5px solid var(--tv-focus);
+  outline-offset: 3px;
+  box-shadow: 0 14px 38px rgb(0 0 0 / 0.7);
+}
+
+.den-tv .billboard {
+  min-height: min(78vh, 820px);
+  margin-bottom: 46px;
+}
+
+.den-tv .billboard .told {
+  max-width: none;
+  padding-right: 48%;
+}
+
+.den-tv .billboard .overview {
+  max-width: 66ch;
+  font-size: 20px;
+  line-height: 1.45;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.den-tv .billboard .actions {
+  gap: 16px;
+}
+
+.den-tv .billboard .actions a,
+.den-tv .billboard .actions button {
+  min-height: 54px;
+  padding-inline: 26px;
+  font-size: 20px;
+}
+
+.den-tv .billboard .pager,
+.den-tv .billboard .expand,
+.den-tv .billboard .slide-link,
+.den-tv .billboard .title-link {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .den-tv * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

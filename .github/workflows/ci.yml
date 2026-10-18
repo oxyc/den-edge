@@ -67,6 +67,11 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - run: npm run check:tv-isolation
+      - run: npm run test:e2e:tv
+      - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv
+      # Normal artifacts must not contain the test-only Player harness enabled by the E2E builds.
+      - run: npm run build:tv:webos && npm run build:tv:tizen
       - name: Verify the runner browser used by the built-worker check
         run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
       - run: npm run test:worker-build
@@ -111,6 +116,9 @@ jobs:
         run: node test/sync-policy-browser.mjs
       - name: Browser behavior
         run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/3
+      - name: TV native HLS behavior
+        if: matrix.shard == 1
+        run: DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv -- tv-playback.spec.mjs
 
   # Time budgets on a household the size of a long-lived one (`e2e/big-library-budgets.spec.mjs`), against the
   # production build a phone is served, one test at a time on a runner of their own: a budget is time, and beside the

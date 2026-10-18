@@ -1,0 +1,46 @@
+.tv-transport {
+  position: absolute;
+  right: 4vw;
+  bottom: 4vh;
+  left: 4vw;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  background: rgb(0 0 0 / 0.72);
+}
+
+.tv-transport button {
+  min-width: 8rem;
+  min-height: 3.5rem;
+  padding: 0.75rem 1.25rem;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  background: #292929;
+  border: 2px solid transparent;
+  border-radius: 0.65rem;
+}
+
+.tv-transport button:focus-visible {
+  color: #000;
+  background: #fff;
+  outline: 0;
+  transform: scale(1.06);
+}
+
+.player header,
+.player footer,
+.player .tv-transport {
+  transition: opacity 180ms ease;
+}
+
+.player.tv-controls-hidden header,
+.player.tv-controls-hidden footer,
+.player.tv-controls-hidden .tv-transport {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}

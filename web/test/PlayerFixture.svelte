@@ -33,6 +33,8 @@
   const services = createWorkerServiceSession();
   const content = services.content;
   let open = $state(true);
+  let progress = $state<{ fraction: number; seconds: number }>();
+  let closeCount = $state(0);
   onDestroy(() => services.close());
   // As App does: the name a page offers, else the address's.
   $effect(() => {
@@ -52,7 +54,15 @@
     resume={{ fraction: 0 }}
     {castDiscoveryMs}
     {castPlayMs}
-    onprogress={() => undefined}
-    onclose={() => (open = false)}
+    onprogress={(fraction, seconds) => (progress = { fraction, seconds })}
+    onclose={() => {
+      closeCount += 1;
+      open = false;
+    }}
   />
+{/if}
+<output data-testid="player-close-count" hidden>{closeCount}</output>
+
+{#if progress}
+  <output data-testid="player-progress" hidden>{JSON.stringify(progress)}</output>
 {/if}

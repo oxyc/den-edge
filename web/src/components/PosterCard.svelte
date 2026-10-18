@@ -349,6 +349,7 @@
       class:landscape
       class:faded
       {href}
+      data-tv-focus-key={__DEN_TV__ ? `${title.type}:${title.id}` : undefined}
       onclick={cardClick}
       onkeydown={cardKeydown}
       oncontextmenu={cardContextMenu}

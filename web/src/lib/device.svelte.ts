@@ -21,11 +21,12 @@ class ThisDevice {
 
   /** What to pair as: the chosen name, else what the browser looks like. */
   get name(): string {
-    return this.chosen || deviceLabel();
+    return this.chosen || this.guess;
   }
 
   /** The guess, whether or not a name has been chosen: the placeholder, and what clearing the field falls back to. */
   get guess(): string {
+    if (__DEN_TV__) return __DEN_TV_PLATFORM__ === 'webos' ? 'LG TV' : 'Samsung TV';
     return deviceLabel();
   }
 

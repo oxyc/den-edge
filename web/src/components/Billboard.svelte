@@ -390,7 +390,9 @@
   // Intent still wins immediately: changing `index` makes that slide current and the effect above loads it high.
   $effect(() => {
     const here = current;
-    if (!active || !here || readyKey !== keyOf(here)) return;
+    // A TV changes slides deliberately with the remote. Do not spend its smaller decoder/network budget on
+    // adjacent 4K-room artwork; the newly selected still already starts at high priority above.
+    if (__DEN_TV__ || !active || !here || readyKey !== keyOf(here)) return;
     return whenIdle(() => {
       if (!active) return;
       for (const step of [1, -1]) {
@@ -588,7 +590,7 @@
     const next = shown[index + 1];
     const base = reel;
     const table = routes;
-    if (!active || !playing || !next || !base || !onScreen || still() || saving()) {
+    if (__DEN_TV__ || !active || !playing || !next || !base || !onScreen || still() || saving()) {
       cancelNextWarm();
       return;
     }
@@ -825,6 +827,27 @@
     show(Math.min(Math.max(next, 0), shown.length - 1));
   }
 
+  function remotePaging(node: HTMLElement) {
+    if (!__DEN_TV__) return {};
+    const page = async (event: Event) => {
+      const direction = (event as CustomEvent<{ direction?: 'left' | 'right' }>).detail?.direction;
+      if (!direction || !rail) return;
+      const next = Math.min(
+        Math.max(index + (direction === 'right' ? 1 : -1), 0),
+        shown.length - 1,
+      );
+      if (next === index) return;
+      show(next);
+      await settled(rail);
+      await tick();
+      frame
+        ?.querySelector<HTMLElement>('.slide:not([inert]) [data-tv-carousel-action]')
+        ?.focus({ preventScroll: true });
+    };
+    node.addEventListener('den:tv-page', page);
+    return { destroy: () => node.removeEventListener('den:tv-page', page) };
+  }
+
   /**
    * The same paging from the page itself, with nothing focused. A carousel you are looking at is one the
    * arrow keys should move; before this they worked only once a dot had been tabbed to, which nobody does.
@@ -834,7 +857,7 @@
    * without that check every press would page twice.
    */
   $effect(() => {
-    if (!active || !onScreen) return;
+    if (__DEN_TV__ || !active || !onScreen) return;
     const fromPage = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
@@ -1013,9 +1036,13 @@
           <div class="told">
             <div class="text">
               <h2>
-                <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
-                  >{title.title}</a
-                ><span class="mobile-title">{title.title}</span>
+                {#if __DEN_TV__}
+                  <span class="tv-title">{title.title}</span>
+                {:else}
+                  <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
+                    >{title.title}</a
+                  ><span class="mobile-title">{title.title}</span>
+                {/if}
               </h2>
               {#if reason}
                 <p class="reason">{reason}</p>
@@ -1036,9 +1063,11 @@
                 <a
                   class="den-button den-button-secondary den-button-large more"
                   href={titleHref(title)}
+                  data-tv-carousel-action={__DEN_TV__ ? 'hero' : undefined}
+                  use:remotePaging
                   tabindex={n === index ? 0 : -1}>More</a
                 >
-                {#if rowOf && onwatchlist && onseen}
+                {#if !__DEN_TV__ && rowOf && onwatchlist && onseen}
                   <TitleActions
                     compact
                     row={rowOf(title)}
@@ -1060,7 +1089,7 @@
 
   <!-- Only once a trailer is actually running: a button offering full screen over a still photograph would
        have nothing to show. Desktop only, in CSS — a phone reaches the video's own controls with a tap. -->
-  {#if playing}
+  {#if !__DEN_TV__ && playing}
     <Button
       variant="player"
       size="icon"
@@ -1072,7 +1101,7 @@
   {/if}
 
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
-  {#if shown.length > 1}
+  {#if !__DEN_TV__ && shown.length > 1}
     <div class="pager">
       <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
         {#each window9.at as n (n)}

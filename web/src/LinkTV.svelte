@@ -80,7 +80,7 @@
 </script>
 
 <section class:embedded>
-  {#if !embedded}<h1>Link your Apple TV</h1>{/if}
+  {#if !embedded}<h1>{__DEN_TV__ ? 'Open your Den library' : 'Link your Apple TV'}</h1>{/if}
   {#if links.moved}
     <p class="sub" role="status">
       The library linked through {links.moved} got a new key, so this device needs to link again.
@@ -88,7 +88,11 @@
   {/if}
   {#if !embedded}
     <p class="sub">
-      On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
+      {#if __DEN_TV__}
+        On a device with your library, open <b>Settings › Linked devices</b> and enter its code here.
+      {:else}
+        On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
+      {/if}
     </p>
   {/if}
   <form
