@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceOf, loadRouteOf } from './loadReport';
+import { deviceOf, entryOf, loadRouteOf } from './loadReport';
 
 const IPHONE_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -37,5 +37,20 @@ describe('loadRouteOf', () => {
     expect(loadRouteOf('/tv/1399-game-of-thrones')).toBe('title');
     expect(loadRouteOf('/settings')).toBe('settings');
     expect(loadRouteOf('/search?q=blade+runner')).toBe('other');
+  });
+});
+
+describe('entryOf', () => {
+  const page = 'https://d.oxy.fi/tv/90282-the-morning-show';
+  it('tells Den’s own release swap from a load the browser made', () => {
+    expect(entryOf({ type: 'navigate', name: `${page}?den-retry=m4k2` })).toBe('swap');
+    expect(entryOf({ type: 'navigate', name: page })).toBe('navigate');
+    expect(entryOf({ type: 'reload', name: page })).toBe('reload');
+    expect(entryOf({ type: 'back_forward', name: page })).toBe('back_forward');
+  });
+
+  it('sends nothing it does not know', () => {
+    expect(entryOf(undefined)).toBeUndefined();
+    expect(entryOf({ type: 'prerender', name: page })).toBeUndefined();
   });
 });

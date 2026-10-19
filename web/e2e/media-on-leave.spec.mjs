@@ -66,7 +66,7 @@ async function mock(page) {
   });
   // This origin serves Reel v2: prepare names the logical plan, and transport chooses the relay URL only
   // when the retained page reaches that source.
-  await page.route('**/reel/manifest.json', (r) => r.fulfill({ json: { id: 'com.den.reel' } }));
+  await page.route('**/reel/health', (r) => r.fulfill({ json: { status: 'ok' } }));
   await page.route('**/reel/prepare/**', (r) =>
     r.fulfill({
       json: {

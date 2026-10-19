@@ -214,6 +214,10 @@ export async function findAtlas(
  *
  * The same fallback atlas has, and for the same reason: a guest has no library, so no list of plugins, and
  * looking reel up in one found nothing. The billboard then had no trailer to play and said nothing about why.
+ *
+ * The box's own is proved by its `/health`, not a manifest: Hearth serves Reel under `/reel` with no manifest of
+ * its own (its one manifest is the combined addon's), so asking for one found nothing on every page. The answer
+ * must be Reel's JSON, since this origin answers an unknown path with the app's HTML.
  */
 export async function findReel(
   plugins: string[],
@@ -222,8 +226,20 @@ export async function findReel(
 ): Promise<Addon | null> {
   const plugin = await findAddon(plugins, routes, REEL, fetchImpl);
   if (plugin) return plugin;
-  const here = await readManifest(`${REEL.path}${MANIFEST}`, REEL.id, fetchImpl);
-  return here ? { install: REEL.path, base: REEL.path } : null;
+  return (await servesHealth(REEL.path, fetchImpl))
+    ? { install: REEL.path, base: REEL.path }
+    : null;
+}
+
+async function servesHealth(base: string, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    const res = await fetchImpl(`${base}/health`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { status?: unknown } | null;
+    return typeof body?.status === 'string';
+  } catch {
+    return false;
+  }
 }
 
 /** Den's own addons, as Settings names them. */

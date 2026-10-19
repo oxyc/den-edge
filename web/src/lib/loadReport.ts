@@ -25,9 +25,27 @@ export const MILESTONES = {
   episodesMs: 'episodes shown',
 } as const;
 
+/** How the page was entered; `swap` is Den's own load onto a newer release (`release.ts`, under `den-retry`). */
+export type LoadEntry = 'navigate' | 'reload' | 'back_forward' | 'swap';
+
 export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: BrowserEngine } & {
   -readonly [K in keyof typeof MILESTONES]?: number;
-} & { workers: number; hidden?: true; release?: string };
+} & { workers: number; hidden?: true; entry?: LoadEntry; release?: string };
+
+/**
+ * Read from the navigation timing entry, whose `name` is the address as it was loaded: index.html's inline script
+ * has already taken `den-retry` out of `location` by the time this runs.
+ */
+export function entryOf(navigation?: { type: string; name: string }): LoadEntry | undefined {
+  if (!navigation) return undefined;
+  try {
+    if (new URL(navigation.name).searchParams.has('den-retry')) return 'swap';
+  } catch {
+    // Not an address: the type alone still says how the page was entered.
+  }
+  const { type } = navigation;
+  return type === 'navigate' || type === 'reload' || type === 'back_forward' ? type : undefined;
+}
 
 export function loadRouteOf(path: string): LoadRoute {
   try {
@@ -75,6 +93,10 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
     if (at !== undefined) report[field] = at;
   }
   if (hidden) report.hidden = true;
+  const entry = entryOf(
+    performance.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined,
+  );
+  if (entry) report.entry = entry;
   const release = currentRelease();
   if (release) report.release = release;
   return report;

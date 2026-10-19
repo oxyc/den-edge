@@ -25,14 +25,14 @@ test('Settings retires a legacy Reel install whose config Reel refuses, once Hea
         })
       : route.fulfill({ status: 404, json: { error: 'not_found' } }),
   );
-  /** Every Reel manifest asked, in order: the legacy install's, and the box's own (`/reel/manifest.json`). */
+  /** Every Reel address asked, in order: the legacy install's manifest, and the box's own (`/reel/health`). */
   const reel = [];
   await page.route(`${E2E_ORIGIN}/reel/**`, (route) => {
     const path = new URL(route.request().url()).pathname;
     reel.push(path);
-    return path === LEGACY
-      ? route.fulfill({ status: 400, json: { error: 'bad_config' } })
-      : route.fulfill({ json: { id: 'com.den.reel', version: '1.0.0', resources: ['meta'] } });
+    if (path === LEGACY) return route.fulfill({ status: 400, json: { error: 'bad_config' } });
+    if (path === '/reel/health') return route.fulfill({ json: { status: 'ok' } });
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
   });
 
   await page.goto(`${FIXTURE}?seed&legacy-reel`);
@@ -51,6 +51,6 @@ test('Settings retires a legacy Reel install whose config Reel refuses, once Hea
   // install is no longer among them, so it is not asked.
   reel.length = 0;
   await page.goto(`${FIXTURE}?online`);
-  await expect.poll(() => reel.includes('/reel/manifest.json'), { timeout: 30_000 }).toBe(true);
+  await expect.poll(() => reel.includes('/reel/health'), { timeout: 30_000 }).toBe(true);
   expect(reel).not.toContain(LEGACY);
 });
