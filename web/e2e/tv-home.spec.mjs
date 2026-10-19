@@ -47,7 +47,12 @@ test(
     const hero = page.locator('[data-route-page][data-active="true"] .billboard');
     await expect(hero).toContainText('Movie 1002', { timeout: 30_000 });
     await expect(hero.getByRole('heading', { name: 'Movie 1002' })).toBeVisible();
-    await expect(hero.locator('.pager, .expand')).toHaveCount(0);
+    await expect(hero.locator('.expand')).toHaveCount(0);
+    const pager = hero.locator('.pager');
+    await expect(pager).toBeVisible();
+    await expect(pager.locator('.dot')).toHaveCount(3);
+    await expect(pager.getByRole('button')).toHaveCount(0);
+    await expect(pager.locator('.dot.on')).toHaveCount(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
     // The first enriched recommendation renders before the others. Wait for the real slides before asking

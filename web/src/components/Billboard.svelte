@@ -1111,22 +1111,32 @@
   {/if}
 
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
-  {#if !__DEN_TV__ && shown.length > 1}
+  {#if shown.length > 1}
     <div class="pager">
-      <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
+      <div
+        class="dots"
+        class:display-only={__DEN_TV__}
+        role={__DEN_TV__ ? undefined : 'group'}
+        aria-label={__DEN_TV__ ? undefined : `Slide ${index + 1} of ${shown.length}`}
+        aria-hidden={__DEN_TV__ ? 'true' : undefined}
+      >
         {#each window9.at as n (n)}
           {@const edge =
             (n === window9.start && window9.start > 0) ||
             (n === window9.end - 1 && window9.end < window9.count)}
-          <button
-            class="dot"
-            class:on={n === index}
-            class:edge
-            aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
-            aria-current={n === index ? 'true' : undefined}
-            onclick={() => show(n)}
-            onkeydown={keyed}
-          ></button>
+          {#if __DEN_TV__}
+            <span class="dot" class:on={n === index} class:edge></span>
+          {:else}
+            <button
+              class="dot"
+              class:on={n === index}
+              class:edge
+              aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
+              aria-current={n === index ? 'true' : undefined}
+              onclick={() => show(n)}
+              onkeydown={keyed}
+            ></button>
+          {/if}
         {/each}
       </div>
     </div>
@@ -1477,6 +1487,10 @@
     display: flex;
     gap: 2px;
     pointer-events: auto;
+  }
+
+  .dots.display-only {
+    pointer-events: none;
   }
 
   .dot {
