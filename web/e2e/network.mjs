@@ -54,7 +54,7 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
     // A 404 is what "not served here" looks like, which is what a fixture is.
     const probe =
       url.pathname === '/atlas/manifest.json' ||
-      url.pathname === '/reel/manifest.json' ||
+      url.pathname === '/reel/health' ||
       url.pathname === '/remux/health';
     if (url.origin === origin && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });

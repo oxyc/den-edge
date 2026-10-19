@@ -312,9 +312,7 @@ async function routeSvtSubstance(page, reelRequests, tmdbRequests) {
       return route.fulfill({ json: { id: 933260, imdb_id: substance.imdb_id } });
     return route.fulfill({ json: { page: 1, total_pages: 1, total_results: 0, results: [] } });
   });
-  await page.route('**/reel/manifest.json', (route) =>
-    route.fulfill({ json: { id: 'com.den.reel' } }),
-  );
+  await page.route('**/reel/health', (route) => route.fulfill({ json: { status: 'ok' } }));
   await page.route('**/reel/prepare/**', (route) => {
     const request = route.request();
     const url = new URL(request.url());

@@ -11,7 +11,7 @@ test('an Atlas row waits for acknowledged Worker configuration without showing a
   await page.route('**/atlas/manifest.json', (route) =>
     route.fulfill({ json: { id: 'com.den.atlas' } }),
   );
-  await page.route('**/reel/manifest.json', (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route('**/reel/health', (route) => route.fulfill({ status: 404, json: {} }));
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
       contentType: 'image/svg+xml',

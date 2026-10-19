@@ -406,7 +406,11 @@ describe('findReel', () => {
       base: '/reel',
     });
     // A guest lists no plugins, because a guest has no library — and the billboard still wants its trailer.
-    expect((await findReel([], ROUTES, plugin.fetchImpl))?.base).toBe('/reel');
+    // Hearth serves Reel under /reel with a health check and no manifest of its own.
+    const hearth = addons({ '/reel/health': { status: 'ok' } });
+    expect((await findReel([], ROUTES, hearth.fetchImpl))?.base).toBe('/reel');
+    expect(hearth.asked).toEqual(['/reel/health']);
+    // An origin without Reel answers its app's HTML.
     expect(await findReel([], ROUTES, addons({}).fetchImpl), 'nothing under /reel here').toBeNull();
   });
 });
