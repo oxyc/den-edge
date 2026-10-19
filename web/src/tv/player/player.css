@@ -24,11 +24,27 @@
   border-radius: 0.65rem;
 }
 
-.tv-transport button:focus-visible {
+.den-tv.tv-remote-active .player .tv-transport button:focus {
   color: #000;
   background: #fff;
   outline: 0;
+  box-shadow: none;
   transform: scale(1.06);
+}
+
+/* The shared TV ring is for ordinary page controls. Playback already owns its high-contrast transport state,
+   while each transparent select is represented by the visible picker around it. Never draw both surfaces. */
+.den-tv.tv-remote-active .player .pick select:focus,
+.den-tv.tv-remote-active .player video:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.den-tv.tv-remote-active .player .pick:focus-within {
+  border-color: var(--focus-ring);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-width);
+  box-shadow: none;
 }
 
 .player header,

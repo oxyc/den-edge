@@ -39,7 +39,6 @@ test.afterEach(async () => {
 
 async function nativeMediaServer(expired, { holdProbeMaster = false } = {}) {
   let closedHeld = 0;
-  let closedProbeMaster = 0;
   let gone = 0;
   let ends = 0;
   let masters = 0;
@@ -73,12 +72,10 @@ async function nativeMediaServer(expired, { holdProbeMaster = false } = {}) {
     if (file === 'master.m3u8') {
       masters += 1;
       if (holdProbeMaster && masters === 2) {
-        await new Promise((resolve) =>
-          response.once('close', () => {
-            closedProbeMaster += 1;
-            resolve(undefined);
-          }),
-        );
+        // Keep the probe inside response-body consumption until the player lifecycle aborts it.
+        response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+        response.write('#EXTM3U\n');
+        await new Promise((resolve) => response.once('close', resolve));
         return;
       }
       response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
@@ -112,7 +109,6 @@ async function nativeMediaServer(expired, { holdProbeMaster = false } = {}) {
   if (!address || typeof address === 'string') throw new Error('native media server has no port');
   return {
     closedHeld: () => closedHeld,
-    closedProbeMaster: () => closedProbeMaster,
     ends: () => ends,
     gone: () => gone,
     masters: () => masters,
@@ -256,6 +252,9 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
   await transport.first().focus();
   await expect(transport.first()).toBeFocused();
+  await expect(transport.first()).toHaveCSS('outline-style', 'none');
+  await expect(transport.first()).toHaveCSS('box-shadow', 'none');
+  await expect(transport.first()).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(transport.nth(1)).toBeFocused();
 
@@ -268,6 +267,11 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(footerSelects).toHaveCount(3);
   for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(footerSelects.last()).toBeFocused();
+  await expect(footerSelects.last()).toHaveCSS('outline-style', 'none');
+  await expect(footerSelects.last()).toHaveCSS('box-shadow', 'none');
+  const focusedPicker = footerSelects.last().locator('..');
+  await expect(focusedPicker).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
+  await expect(focusedPicker).toHaveCSS('outline-width', '4px');
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   // Escape and hardware Back each cancel track-picker editing without closing playback.
   expect(await remoteKey(page, 'Escape', 27)).toBe(true);
@@ -487,19 +491,52 @@ test('TV cancels a native expiry probe when playback closes', async ({ page, bro
     onSession: (route) =>
       route.fulfill({ status: 201, json: { ...session, playlist: native.playlist } }),
   });
+  // Observe the signal passed to the real probe fetch. A WebKit fetch abort does not guarantee that its pooled
+  // HTTP socket closes, so the browser's abort signal is the deterministic contract—not Node's connection event.
+  await page.addInitScript((playlist) => {
+    const nativeFetch = window.fetch.bind(window);
+    window.__nativeProbeStarts = 0;
+    window.__nativeProbeAborts = 0;
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === playlist && init?.signal) {
+        window.__nativeProbeStarts += 1;
+        init.signal.addEventListener(
+          'abort',
+          () => {
+            window.__nativeProbeAborts += 1;
+          },
+          { once: true },
+        );
+      }
+      return nativeFetch(input, init);
+    };
+  }, native.playlist);
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
-  // Drive the native player's real waiting handler directly. Waiting for WebKit to consume enough of the
-  // fixture to stall makes this an elapsed-time race on a busy CI runner; the contract under test begins when
-  // the native element reports that it is waiting, and still exercises the real probe fetch and teardown.
   await expect
-    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
-    .toBeGreaterThan(0);
-  await video.evaluate((element) => element.dispatchEvent(new Event('waiting')));
-  await expect.poll(native.masters, { timeout: 40_000 }).toBeGreaterThan(1);
-  expect(await remoteKey(page, 'Back', 461)).toBe(true);
+    .poll(
+      () =>
+        video.evaluate((element) =>
+          element.currentTime > 0 && !element.paused && !element.seeking ? 'playing' : 'waiting',
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe('playing');
+  // Dispatch the native stall and hardware Back in one browser task. Otherwise a real `playing` event can land
+  // between two Playwright round trips and cancel the synthetic stall before Back is what closes the probe.
+  const closed = await video.evaluate((element) => {
+    element.dispatchEvent(new Event('waiting'));
+    const started = window.__nativeProbeStarts;
+    const beforeBack = window.__nativeProbeAborts;
+    const event = new KeyboardEvent('keydown', { key: 'Back', bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'keyCode', { value: 461 });
+    (document.activeElement ?? document.body).dispatchEvent(event);
+    return { started, beforeBack, prevented: event.defaultPrevented };
+  });
+  expect(closed).toEqual({ started: 1, beforeBack: 0, prevented: true });
   await expect(video).toHaveCount(0);
-  await expect.poll(native.closedProbeMaster).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__nativeProbeAborts)).toBe(1);
   await expect(page.getByRole('button', { name: /^Resume from / })).toHaveCount(0);
 });
 

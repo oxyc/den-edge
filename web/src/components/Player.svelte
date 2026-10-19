@@ -3845,6 +3845,12 @@
     border: 0;
   }
 
+  /* Chromium can ring both the video host and the focused native control inside its shadow tree. The native
+     play/timeline control remains visibly focused; remove only the redundant rectangle around the whole picture. */
+  video:focus {
+    outline: none;
+  }
+
   /* Out of sight and out of the way of the video's controls, but rendered, so the Cast SDK in it runs as usual. */
   iframe.cast-look {
     inset: auto;

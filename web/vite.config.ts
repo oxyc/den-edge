@@ -17,6 +17,7 @@ const api = [
   '/lib',
   '/recovery',
   '/config',
+  '/capabilities',
   '/health',
   '/routes',
   '/scout',
