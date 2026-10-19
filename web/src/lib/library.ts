@@ -69,9 +69,28 @@ export interface Title {
   services?: string[];
 }
 
+/**
+ * A poster's year line, which also says a series is one: "2019 · 4 seasons", "2019 · 12 episodes" for a single
+ * season, or "2019 · Series" where its season layout is not known here. A film's is its year alone. Specials
+ * (season 0) and seasons TMDB lists with no episodes yet are not counted.
+ */
+export function yearCaption(title: Title, shape?: Shape): string | undefined {
+  const year = title.year ? String(title.year) : undefined;
+  if (title.type !== 'tv') return year;
+  const seasons = shape ? [...shape.counts].filter(([season, n]) => season > 0 && n > 0) : [];
+  const episodes = seasons.length === 1 ? seasons[0]![1] : 0;
+  const size =
+    seasons.length > 1
+      ? `${seasons.length} seasons`
+      : episodes
+        ? `${episodes} episode${episodes === 1 ? '' : 's'}`
+        : 'Series';
+  return year ? `${year} · ${size}` : size;
+}
+
 /** A poster's short second line, including Atlas's confidence tier when the card came from a plot-facet answer. */
-export function titleCaption(title: Title, caption?: string): string | undefined {
-  const ordinary = caption ?? (title.year ? String(title.year) : undefined);
+export function titleCaption(title: Title, caption?: string, shape?: Shape): string | undefined {
+  const ordinary = caption ?? yearCaption(title, shape);
   return (
     [ordinary, title.likely ? 'Likely match' : undefined].filter(Boolean).join(' · ') || undefined
   );

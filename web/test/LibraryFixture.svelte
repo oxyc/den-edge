@@ -144,6 +144,12 @@
               ? addToWatchlist(title, [id, 0, 'test'])
               : updateProgress(title, 0.5, 40, [id, 0, 'test']);
           }),
+          // Series on the watchlist whose stand-in TMDB layouts differ: one season, and four.
+          ...(params.has('series-kinds')
+            ? [2004, 2005].map((id) =>
+                addToWatchlist(blankTitle({ type: 'tv', id }, id), [id, 0, 'test']),
+              )
+            : []),
           ...(params.has('series-continue')
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
             : []),
