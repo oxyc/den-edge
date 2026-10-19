@@ -79,14 +79,24 @@ export interface AssistantRecords {
 
 /**
  * The last projection build: `key`, a digest of everything it was built from; `dueAt`, when it must be built again
- * with those inputs unchanged; `sent`, each grant's digest and when it was sent; `layouts`, the series layouts known,
- * which a page that has not seen those series yet builds with too.
+ * with those inputs unchanged; `sent`, each grant's last projection — the library state it was built from (`state`)
+ * and when it was sent, by this device or, as den-edge said, another; `layouts`, the series layouts known, which a page
+ * that has not seen those series yet builds with too.
  */
 export interface Publication {
   key: string;
   dueAt: number;
-  sent: Record<string, { digest: string; at: number }>;
+  sent: Record<string, Sent>;
   layouts: Record<string, SeriesLayout>;
+}
+
+/**
+ * A grant's projection as sent (§15): `state`, the household's library state it was built from (`libraryState`), the
+ * same digest on every device that has read the same log; `at`, when it was sent, by this device's clock.
+ */
+export interface Sent {
+  state: string;
+  at: number;
 }
 
 const EMPTY: AssistantRecords = { revoked: [], applied: {}, renewedAt: 0, dropped: [] };
@@ -138,16 +148,28 @@ export interface AssistantPort {
   head(): number;
   /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
   inputs(): string;
-  /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
-   * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
-   * (`429` with `Retry-After`) answers that wait. */
+  /** Replace a grant's projection at den-edge with one publish's set and sealed parts and the library state it was
+   * built from, or drop it, with the member's proof: this library's, or `member` (a lent household connection's). A
+   * refusal that said how long to wait (`429` with `Retry-After`) answers that wait. */
   putProjection(
     grant: string,
     set: string,
     parts: string[],
+    state: string,
     member?: AssistantConnection['member'],
   ): Promise<boolean | { retryAfterMs: number }>;
   deleteProjection(grant: string, member?: AssistantConnection['member']): Promise<boolean>;
+  /**
+   * What den-edge holds for each of `grants`, without its parts: the library state its projection was built from
+   * (`''` when its device named none) and when it was stored, by this device's clock; null for a grant it holds none
+   * for. Null when den-edge could not say.
+   */
+  heldProjections(
+    grants: string[],
+    member?: AssistantConnection['member'],
+  ): Promise<Record<string, Sent | null> | null>;
+  /** Claim the library's next build at den-edge: false only when another device of the household has it. */
+  claimBuild(member?: AssistantConnection['member']): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
   membership(): Promise<AssistantConnection['member'] | null>;
   loadRecords(): Promise<AssistantRecords | null | undefined>;
@@ -185,10 +207,18 @@ export interface SeriesLayout {
 interface ProjectionAnswer {
   publish: Array<{ grant: string; set: string; parts: string[] }>;
   delete: string[];
-  digest: string;
 }
 
 export const randomHex = (): string => hex(crypto.getRandomValues(new Uint8Array(32)));
+
+/** `value` as JSON with every object's keys in order, so two equal documents read the same whatever built them. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
 
 /** A record read back as it was written, or empty when there is none or it does not read. */
 function readRecords(value: AssistantRecords | null | undefined): AssistantRecords {
@@ -218,7 +248,7 @@ function readPublication(value: unknown): value is Publication {
     !!sent &&
     typeof sent === 'object' &&
     Object.values(sent).every(
-      (entry) => typeof entry?.digest === 'string' && typeof entry.at === 'number',
+      (entry) => typeof entry?.state === 'string' && typeof entry.at === 'number',
     ) &&
     !!layouts &&
     typeof layouts === 'object'
@@ -575,10 +605,13 @@ export class LibraryAssistantAuthority {
     }
   }
 
-  /** What was last sent for each grant: its digest and when, so a changed one waits, and an unchanged one heartbeats. */
-  #published = new Map<string, { digest: string; at: number }>();
-  /** The digest the library first read as, and when: a change is sent once it has stood `PUBLISH_DEBOUNCE_MS`. */
-  #pending: { digest: string; since: number } | null = null;
+  /**
+   * What was last sent for each grant, by any device: the library state and when, so a changed one waits, and an
+   * unchanged one heartbeats.
+   */
+  #published = new Map<string, Sent>();
+  /** The library state first read, and when: a change is built and sent once it has stood `PUBLISH_DEBOUNCE_MS`. */
+  #pending: { state: string; since: number } | null = null;
   #dropping = new Set<string>();
   /** When den-edge said each grant's next send may come (`Retry-After`), or a failed send is tried again. */
   #retryAt = new Map<string, number>();
@@ -593,19 +626,22 @@ export class LibraryAssistantAuthority {
   #holdRead: string | null = null;
   /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
   #restored = false;
-  /** Whether this service has said the projection was up to date when it was opened. */
+  /** Whether this service has said what its first look found: up to date, or waiting (`#current`, `#waiting`). */
   #saidCurrent = false;
 
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
    * have stood for 30 s, and no sooner than `MIN_INTERVAL_MS` after its last send) or 15 minutes have passed, never
    * before a refusal's `Retry-After`; ask den-edge once to drop every dead grant's. A projection is
-   * rebuilt only when its inputs changed or something is due, so a quiet library's tick builds nothing; and nothing is
+   * built only when a send is due, so a quiet library's tick builds nothing; and nothing is
    * built at all for a library with no read records. Which grants were sent.
    *
    * What was last built and sent is kept on this device (`Publication`), so a page opened again with the library as it
    * was builds nothing until the heartbeat is due: a build reads the whole library, and on a phone it holds the library
-   * Worker for seconds.
+   * Worker for seconds. And what den-edge holds says what any device sent: every device of a household builds the
+   * same projection from the same log, so one that finds den-edge holding it for the library state it has read — sent
+   * by another device, within the heartbeat — builds nothing, and of the devices due to build at once, the one that
+   * claims the build (`claimBuild`) builds it.
    *
    * `lent`: a split household's connection (§15): its library id, read and grants rows and revoked set, and its member
    * proof to send with, around this library's lists, prefs and head.
@@ -653,24 +689,89 @@ export class LibraryAssistantAuthority {
     const localRevoked = this.#revoked(records, lent);
     // The library as it stands now, written once: the inputs' digest and the build's request share it, and later
     // changes to the rows cannot reach a build already on its way.
-    const documents = JSON.stringify(this.port.documents());
+    const docs = this.port.documents();
+    const documents = JSON.stringify(docs);
     const known = JSON.stringify(layouts);
     // Not the log's head, which every write moves, nor the clock: what the lists are made of. Nor a grant's expiry,
     // which only its daily renewal moves: whether it is live is den-core's to decide when it is next built, and the
     // heartbeat builds at least every 15 minutes.
-    const rows = JSON.stringify([
-      withoutExpiry(read),
-      withoutExpiry(grants),
-      prefs,
-      localRevoked,
-    ]).slice(1, -1);
+    const listed = [withoutExpiry(read), withoutExpiry(grants), prefs, localRevoked];
+    const rows = JSON.stringify(listed).slice(1, -1);
     const key = await digestText(`[${JSON.stringify(library)},${documents},${known},${rows}]`);
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;
-      // Said once a page: that a page opened on the library as it was published did not build it again.
-      if (!this.#saidCurrent) console.info('den: assistant projection up to date');
-      this.#saidCurrent = true;
+      this.#current();
+      return [];
+    }
+    // The household's library state: the same on every device that has read the same log, whatever else it knows
+    // (the layouts it has learnt) and whichever device wrote each document. The read row it digests holds every read
+    // key, so den-edge, which is sent it, cannot tell a library from it.
+    const state = await digestText(
+      `[${JSON.stringify(library)},[${docs
+        .map((doc) => canonical(doc))
+        .sort()
+        .join(',')}],${canonical(listed)}]`,
+    );
+    if (this.#pending?.state !== state) this.#pending = { state, since: now };
+    const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
+    await ensureAssistantPolicy();
+    const reads = this.#list(records, lent).reads;
+    const live = reads.flatMap((g) => (g.state === 'active' ? [g.grant] : []));
+    // What den-edge holds is what was last sent, by whichever device. A grant it holds none for is sent at once.
+    const learn = async () => {
+      const stored = live.length ? await this.port.heldProjections(live, lent?.member) : null;
+      if (stored)
+        for (const grant of live) {
+          const sent = stored[grant];
+          if (sent) this.#published.set(grant, sent);
+          else this.#published.delete(grant);
+        }
+    };
+    /** When a grant is next sent: never sent, at once; changed, once the change has settled and `MIN_INTERVAL_MS`
+     * has passed since its last send; else at its heartbeat — and never before den-edge said it may be. */
+    const sendAt = (grant: string) => {
+      const last = this.#published.get(grant);
+      const wait = this.#retryAt.get(grant) ?? 0;
+      if (!last) return Math.max(now, wait);
+      if (last.state !== state) return Math.max(settleAt, last.at + MIN_INTERVAL_MS, wait);
+      return Math.max(last.at + HEARTBEAT_MS, wait);
+    };
+    const due = () => live.some((grant) => now >= sendAt(grant));
+    await learn();
+    this.#builtFrom = inputs;
+    if (due()) {
+      if (!(await this.port.claimBuild(lent?.member))) {
+        // Another device of the household is building it: what it sent is read at the next tick.
+        this.#dueAt = now;
+        this.#waiting('another device’s build');
+        return [];
+      }
+      // Read again under the claim: what another device sent between that read and the claim is not built again.
+      await learn();
+    }
+    if (!due()) {
+      // Nothing to send yet, so nothing is built; a dead grant's projection is dropped as a build's answer would.
+      for (const { grant, state: of } of reads)
+        if (DEAD.has(of) && !records.dropped.includes(grant)) {
+          this.#published.delete(grant);
+          await this.#drop(grant, lent);
+        }
+      this.#dueAt = Math.min(...live.map(sendAt));
+      this.#hold(live, readKey);
+      if (!live.every((grant) => this.#published.get(grant)?.state === state)) {
+        this.#waiting('a change to settle');
+        return [];
+      }
+      await this.#remember({
+        publication: {
+          key,
+          dueAt: Number.isFinite(this.#dueAt) ? this.#dueAt : Number.MAX_SAFE_INTEGER,
+          sent: Object.fromEntries(this.#published),
+          layouts,
+        },
+      });
+      this.#current();
       return [];
     }
     const request = JSON.stringify({
@@ -703,32 +804,19 @@ export class LibraryAssistantAuthority {
       this.#dueAt = now + HEARTBEAT_MS;
       return [];
     }
-    this.#builtFrom = inputs;
-    if (this.#pending?.digest !== built.digest)
-      this.#pending = { digest: built.digest, since: now };
-    const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
-    /** When a grant is next sent: never sent, at once; changed, once the change has settled and `MIN_INTERVAL_MS`
-     * has passed since its last send; else at its heartbeat — and never before den-edge said it may be. */
-    const sendAt = (grant: string) => {
-      const last = this.#published.get(grant);
-      const wait = this.#retryAt.get(grant) ?? 0;
-      if (!last) return Math.max(now, wait);
-      if (last.digest !== built.digest) return Math.max(settleAt, last.at + MIN_INTERVAL_MS, wait);
-      return Math.max(last.at + HEARTBEAT_MS, wait);
-    };
     const sent: string[] = [];
     let dueAt = Infinity;
-    let holdUntil = Infinity;
     for (const entry of built.publish) {
       if (now >= sendAt(entry.grant)) {
         const answer = await this.port.putProjection(
           entry.grant,
           entry.set,
           entry.parts,
+          state,
           lent?.member,
         );
         if (answer === true) {
-          this.#published.set(entry.grant, { digest: built.digest, at: now });
+          this.#published.set(entry.grant, { state, at: now });
           this.#retryAt.delete(entry.grant);
           sent.push(entry.grant);
         } else {
@@ -740,15 +828,11 @@ export class LibraryAssistantAuthority {
         }
       }
       dueAt = Math.min(dueAt, sendAt(entry.grant));
-      const last = this.#published.get(entry.grant);
-      holdUntil = Math.min(
-        holdUntil,
-        Math.max(last ? last.at + MIN_INTERVAL_MS : 0, this.#retryAt.get(entry.grant) ?? 0),
-      );
     }
-    // No live grant holds nothing back: the next change of the inputs builds.
-    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
-    this.#holdRead = readKey;
+    this.#hold(
+      built.publish.map((entry) => entry.grant),
+      readKey,
+    );
     for (const grant of built.delete) {
       this.#published.delete(grant);
       if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
@@ -766,6 +850,33 @@ export class LibraryAssistantAuthority {
     // Once it is recorded: a page opened after this line neither builds nor sends it again.
     console.info(`den: assistant projection built in ${buildMs}ms, sent ${sent.length}`);
     return sent;
+  }
+
+  /**
+   * Until the soonest of `grants` may be sent again (`MIN_INTERVAL_MS` after its last send, or a refusal's wait),
+   * nothing is built for the read row `read`, whatever changes. No grant holds nothing back.
+   */
+  #hold(grants: string[], read: string): void {
+    const until = Math.min(
+      ...grants.map((grant) => {
+        const last = this.#published.get(grant);
+        return Math.max(last ? last.at + MIN_INTERVAL_MS : 0, this.#retryAt.get(grant) ?? 0);
+      }),
+    );
+    this.#holdUntil = Number.isFinite(until) ? until : 0;
+    this.#holdRead = read;
+  }
+
+  /** Said once a page: that a page opened on the library as it was published did not build it again. */
+  #current(): void {
+    if (!this.#saidCurrent) console.info('den: assistant projection up to date');
+    this.#saidCurrent = true;
+  }
+
+  /** Said once a page: that its first look found a projection due later, and on what it waits. */
+  #waiting(on: string): void {
+    if (!this.#saidCurrent) console.info(`den: assistant projection waits for ${on}`);
+    this.#saidCurrent = true;
   }
 
   /**

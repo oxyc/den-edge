@@ -51,8 +51,13 @@ function library() {
     batches,
     /** The library's v4 documents, what a projection is built from (§15). */
     documents: [] as unknown[],
-    /** den-edge's projections by grant, and every PUT and DELETE it was sent, in order. */
-    projections: new Map<string, { set: string; parts: string[] }>(),
+    /**
+     * den-edge's projections by grant, with the library state each was built from and when it was stored, and every
+     * PUT and DELETE it was sent, in order.
+     */
+    projections: new Map<string, { set: string; parts: string[]; state: string; at: number }>(),
+    /** Whether den-edge refuses a device's claim to build, as it does while another device holds one. */
+    claimed: false,
     sent: [] as string[],
     /** Whose member proof each PUT and DELETE went with: a lent connection's library id, or null for its own. */
     members: [] as Array<string | null>,
@@ -110,12 +115,20 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     layouts: () => ({}),
     head: () => 7,
     inputs: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
-    putProjection: async (grant, set, parts, member) => {
-      shared.projections.set(grant, { set, parts });
+    putProjection: async (grant, set, parts, state, member) => {
+      shared.projections.set(grant, { set, parts, state, at: port.now() });
       shared.sent.push(`put:${grant}`);
       shared.members.push(member?.libraryId ?? null);
       return true;
     },
+    heldProjections: async (grants) =>
+      Object.fromEntries(
+        grants.map((grant) => {
+          const held = shared.projections.get(grant);
+          return [grant, held ? { state: held.state, at: held.at } : null];
+        }),
+      ),
+    claimBuild: async () => !shared.claimed,
     deleteProjection: async (grant, member) => {
       shared.projections.delete(grant);
       shared.sent.push(`delete:${grant}`);
@@ -531,7 +544,7 @@ test('a quiet library’s publish tick builds nothing until its rows change or s
     expect(await authority.publish()).toEqual([]);
   }
   expect(builds).toBe(1);
-  // The watchlist changes: built at once, sent once it has stood for 30 s.
+  // The watchlist changes: built once it has stood for 30 s, and sent.
   shared.documents = [
     {
       format: 4,
@@ -543,20 +556,20 @@ test('a quiet library’s publish tick builds nothing until its rows change or s
   ];
   later(1_000);
   expect(await authority.publish()).toEqual([]);
-  expect(builds).toBe(2);
+  expect(builds).toBe(1);
   later(10_000);
   expect(await authority.publish()).toEqual([]);
-  expect(builds).toBe(2);
+  expect(builds).toBe(1);
   later(20_000);
   expect(await authority.publish()).toEqual([grant]);
-  expect(builds).toBe(3);
+  expect(builds).toBe(2);
   // And the heartbeat, 15 minutes on.
   later(14 * 60_000);
   expect(await authority.publish()).toEqual([]);
-  expect(builds).toBe(3);
+  expect(builds).toBe(2);
   later(60_000);
   expect(await authority.publish()).toEqual([grant]);
-  expect(builds).toBe(4);
+  expect(builds).toBe(3);
 });
 
 test('a page opened again on the library as it was published builds and sends nothing until its lists change or the heartbeat is due', async () => {
@@ -582,8 +595,8 @@ test('a page opened again on the library as it was published builds and sends no
   layouts = {};
   expect(await reopen().publish()).toEqual([]);
   expect(builds).toBe(1);
-  // The watchlist changes: the page after builds at once, and sends once the change has stood for 30 s and five
-  // minutes have passed since the last send.
+  // The watchlist changes: the page after builds and sends once the change has stood for 30 s and five minutes have
+  // passed since the last send, and not before.
   shared.documents = [
     {
       format: 4,
@@ -595,12 +608,13 @@ test('a page opened again on the library as it was published builds and sends no
   ];
   const changed = reopen();
   expect(await changed.publish()).toEqual([]);
-  expect(builds).toBe(2);
+  expect(builds).toBe(1);
   later(30_000);
   expect(await changed.publish()).toEqual([]);
-  expect(builds).toBe(2);
+  expect(builds).toBe(1);
   later(3 * 60_000 + 30_000);
   expect(await changed.publish()).toEqual([grant]);
+  expect(builds).toBe(2);
   // Opened again before the heartbeat: nothing; after it: sent, with a fresh `at`.
   later(10 * 60_000);
   expect(await reopen().publish()).toEqual([]);
@@ -638,14 +652,16 @@ test('a change to the household’s hide rules is a change of the projection, se
   builds = 0;
   shared.patch('prefs', { 'den.hideAnime': { bool: true } });
   later(1_000);
-  // Sent a moment ago: nothing is built until a send could follow, five minutes after it.
+  // Sent a moment ago: nothing is built until a send could follow, five minutes after it, once the change has stood
+  // 30 s.
   expect(await authority.publish()).toEqual([]);
   expect(builds).toBe(0);
   later(5 * 60_000);
   expect(await authority.publish()).toEqual([]);
-  expect(builds).toBe(1);
+  expect(builds).toBe(0);
   later(30_000);
   expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(1);
 });
 
 /** A film being watched, as a TV saving its progress writes it: Continue Watching carries `fraction` and `at`. */
@@ -693,7 +709,12 @@ test('a TV saving progress every minute is sent at most every five minutes by ea
     const made = device(shared, [], {
       now: () => now,
       random: () => (builds++, randomHex()),
-      putProjection: async () => (puts++, budget.put()),
+      putProjection: async (grant, set, parts, state) => {
+        puts++;
+        const answer = await budget.put();
+        if (answer === true) shared.projections.set(grant, { set, parts, state, at: now });
+        return answer;
+      },
     });
     return { ...made, builds: () => builds, puts: () => puts };
   };
@@ -764,6 +785,77 @@ test('a grant connected while another is held back is sent at once', async () =>
   const second = await authority.consent('Other', READ_ONLY);
   later(30_000);
   expect(await authority.publish()).toEqual([second.grant]);
+});
+
+test('a device finds den-edge holding what another device sent for the library as it has read it, and builds nothing', async () => {
+  const shared = library();
+  let now = fixed.now;
+  const browser = (layouts: ReturnType<AssistantPort['layouts']>) => {
+    let builds = 0;
+    const made = device(shared, [], {
+      now: () => now,
+      random: () => (builds++, randomHex()),
+      layouts: () => layouts,
+    });
+    return { ...made, builds: () => builds };
+  };
+  const { grant } = await device(shared, [seed('other'), seed('limited')]).authority.consent(
+    'Reader',
+    READ_ONLY,
+  );
+  // The phone has learnt a series' layout the laptop has not: that is the phone's knowledge, not the library's state.
+  const phone = browser({
+    '1399': { seasons: [{ season: 1, episodes: 10 }], last_aired: { season: 1, episode: 10 } },
+  });
+  const laptop = browser({});
+  expect(await phone.authority.publish()).toEqual([grant]);
+  expect(await laptop.authority.publish()).toEqual([]);
+  expect([phone.builds(), laptop.builds()]).toEqual([1, 0]);
+
+  // One change, both pages ticking every 30 s for ten minutes: one build in the household, and one send.
+  now += 6 * 60_000;
+  shared.documents = [watching(0.4, now)];
+  shared.sent.length = 0;
+  for (let t = 0; t < 10 * 60_000; t += 30_000) {
+    now += 30_000;
+    await laptop.authority.publish();
+    await phone.authority.publish();
+  }
+  expect(phone.builds() + laptop.builds()).toBe(2);
+  expect(shared.sent).toEqual([`put:${grant}`]);
+
+  // A page opened later on either device, with its own records forgotten, builds nothing either.
+  expect(await device(shared, [], { now: () => now }).authority.publish()).toEqual([]);
+  expect(shared.sent).toEqual([`put:${grant}`]);
+
+  // The heartbeat is the household's too: one of them sends it.
+  now += 15 * 60_000;
+  for (let t = 0; t < 60_000; t += 30_000) {
+    now += 30_000;
+    await laptop.authority.publish();
+    await phone.authority.publish();
+  }
+  expect(shared.sent).toEqual([`put:${grant}`, `put:${grant}`]);
+});
+
+test('a device due to build while another has claimed the build waits, and builds nothing once that one has sent', async () => {
+  const shared = library();
+  let builds = 0;
+  const { authority, later } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  builds = 0;
+  shared.claimed = true;
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(0);
+  // The other device sends it: what this one would have built.
+  shared.claimed = false;
+  expect(await device(shared, []).authority.publish()).toEqual([grant]);
+  builds = 0;
+  later(30_000);
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(0);
 });
 
 test('a library with no read records builds no projection at all', async () => {

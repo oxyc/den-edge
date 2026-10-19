@@ -83,6 +83,7 @@ import {
   LibraryAssistantAuthority,
   randomHex,
   type AssistantRecords,
+  type Sent,
 } from './libraryAssistantAuthority';
 import type { Vault } from './localVault';
 import { keptSomething } from './localLibraryMove';
@@ -504,11 +505,11 @@ export class LibraryLogAuthority {
         ),
       head: () => this.#log.logHead,
       inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
-      putProjection: async (grant, set, parts, member) => {
+      putProjection: async (grant, set, parts, state, member) => {
         const res = await this.#memberSend(
           `/assistant/projection/${grant}`,
           'PUT',
-          { set, parts },
+          { set, parts, state },
           member,
         );
         if (res?.status === 429) return { retryAfterMs: retryAfterMs(res, 60_000) };
@@ -517,6 +518,34 @@ export class LibraryLogAuthority {
       deleteProjection: async (grant, member) =>
         (await this.#memberSend(`/assistant/projection/${grant}`, 'DELETE', undefined, member))
           ?.ok ?? false,
+      heldProjections: async (grants, member) => {
+        const held: Record<string, Sent | null> = {};
+        for (const grant of grants) {
+          const res = await this.#memberSend(
+            `/assistant/projection/${grant}`,
+            'GET',
+            undefined,
+            member,
+          );
+          if (res?.status === 404) {
+            held[grant] = null;
+            continue;
+          }
+          const body = res?.ok
+            ? ((await res.json().catch(() => null)) as { state?: unknown; age?: unknown } | null)
+            : null;
+          // A den-edge from before answers no such route: it cannot say, so this device goes by its own records.
+          if (typeof body?.age !== 'number') return null;
+          held[grant] = {
+            state: typeof body.state === 'string' ? body.state : '',
+            at: Date.now() - body.age,
+          };
+        }
+        return held;
+      },
+      claimBuild: async (member) =>
+        (await this.#memberSend('/assistant/projection/claim', 'POST', undefined, member))
+          ?.status !== 409,
       membership: () => this.#log.relayMembership(),
       now: () => Date.now(),
       random: randomHex,

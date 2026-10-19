@@ -18,7 +18,9 @@
 //! under a refresh secret it does not keep, and den-mcp fetches it with the session's token.
 //!
 //!   PUT    /assistant/projection/{grant}  member   replace a grant's projection, all its parts at once
+//!   GET    /assistant/projection/{grant}  member   which library state it was built from, and how long ago
 //!   DELETE /assistant/projection/{grant}  member   drop it
+//!   POST   /assistant/projection/claim    member   one device of the library is building: the others wait for it
 //!   GET    /assistant/projection          bearer   the session's grant's projection, every part of one publish
 //!
 //! Log lines name the route and status only (`handler.rs`); nothing here logs a body, a key or a token.
@@ -60,6 +62,9 @@ pub const PROJECTION_BODY_BYTES: usize = 17 * 1024 * 1024;
 /// Publishes per grant an hour.
 const PROJECTIONS_PER_HOUR: u32 = 60;
 const HOUR_MS: u64 = 3_600_000;
+/// How long one device's claim to build its library's projection holds the others off: a phone's build and upload
+/// with time to spare. A device that ends mid-build holds them no longer than this.
+const CLAIM_MS: u64 = 60_000;
 
 #[derive(Serialize, Deserialize)]
 struct Projection {
@@ -68,6 +73,10 @@ struct Projection {
     parts: Vec<String>,
     #[serde(rename = "storedAt")]
     stored_at: u64,
+    /// The library state it was built from, as the publishing device named it: a digest den-edge cannot open, which
+    /// the household's other devices compare with their own to skip building the same projection again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
 }
 
 fn projection_key(grant: &str) -> String {
@@ -186,8 +195,11 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         (Method::POST, "/assistant/ack") => ack(state, req).await,
         (Method::GET | Method::HEAD, "/assistant/projection") => get_projection(state, req).await,
         (Method::GET | Method::HEAD, "/assistant/tv") => get_tv(state, req).await,
+        (Method::POST, "/assistant/projection/claim") => claim_build(state, req).await,
         (_, "/assistant/dropbox" | "/assistant/append" | "/assistant/drain" | "/assistant/ack")
-        | (_, "/assistant/projection" | "/assistant/tv") => crate::handler::method_not_allowed(),
+        | (_, "/assistant/projection" | "/assistant/projection/claim" | "/assistant/tv") => {
+            crate::handler::method_not_allowed()
+        }
         (method, path) if path.starts_with("/assistant/request/") => match method {
             Method::GET | Method::HEAD => {
                 let seq = path["/assistant/request/".len()..].parse::<u64>().ok();
@@ -202,6 +214,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 let grant = grant.to_owned();
                 match method {
                     Method::PUT => put_projection(state, req, &grant).await,
+                    Method::GET | Method::HEAD => projection_state(state, req, &grant).await,
                     Method::DELETE => drop_projection(state, req, &grant).await,
                     _ => crate::handler::method_not_allowed(),
                 }
@@ -226,6 +239,11 @@ fn valid_parts(parts: &[String]) -> bool {
 /// A set id: 32 lowercase hex.
 fn valid_set(set: &str) -> bool {
     set.len() == 32 && set.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A library state: a SHA-256, as 64 lowercase hex.
+fn valid_state(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response {
@@ -255,6 +273,12 @@ async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response
     else {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_sealed"));
     };
+    // Optional: a device from before it names none.
+    let built_from = match body.get("state") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if valid_state(value) => Some(value.clone()),
+        Some(_) => return json_reply(StatusCode::BAD_REQUEST, &error("invalid_state")),
+    };
     // Checked under the lock a session's end deletes the projection under, so a publish racing it is refused or
     // deleted after it, never left behind.
     let _write = state.assistant_lock.lock().await;
@@ -263,11 +287,13 @@ async fn put_projection(state: &AppState, req: Request, grant: &str) -> Response
         Ok(false) => return json_reply(StatusCode::NOT_FOUND, &error("unknown_grant")),
         Err(e) => return internal("assistant projection grant", e),
     }
-    let record = Projection { library, set, parts, stored_at: state.now() };
+    let record = Projection { library, set, parts, stored_at: state.now(), state: built_from };
     let bytes = serde_json::to_vec(&record).expect("a projection always serialises");
     if let Err(e) = state.store.put(NS, &projection_key(grant), &bytes).await {
         return internal("assistant projection write", e);
     }
+    // The build a device claimed has landed: the next one, for a change or a new connection, need not wait.
+    state.assistant_claims.lock().expect("assistant build claims").remove(&record.library);
     no_content()
 }
 
@@ -287,6 +313,43 @@ async fn drop_projection(state: &AppState, req: Request, grant: &str) -> Respons
         Ok(_) => {}
         Err(e) => return internal("assistant projection read", e),
     }
+    no_content()
+}
+
+/// What a device needs to tell, without building, whether the projection it would build is the one held: the state
+/// it was built from (null when its device named none) and its age, ms, by den-edge's clock. Only the member's own
+/// library's; any other grant is `404 no_projection`, as one with none is.
+async fn projection_state(state: &AppState, req: Request, grant: &str) -> Response {
+    let library = match member_library(state, req.headers()).await {
+        Ok(library) => library,
+        Err(refused) => return *refused,
+    };
+    match load_projection(state, grant).await {
+        Ok(Some(held)) if held.library == library => json_reply(
+            StatusCode::OK,
+            &json!({ "state": held.state, "age": state.now().saturating_sub(held.stored_at) }),
+        ),
+        Ok(_) => json_reply(StatusCode::NOT_FOUND, &error("no_projection")),
+        Err(e) => internal("assistant projection read", e),
+    }
+}
+
+/// A device of the member's library is about to build its projection: `204`, and the library's other devices are
+/// answered `409 claimed` until a projection of the library is stored or `CLAIM_MS` has passed, with that wait as
+/// `Retry-After`. Every device of a household builds the same projection from the same log, so one build, sent,
+/// serves them all.
+async fn claim_build(state: &AppState, req: Request) -> Response {
+    let library = match member_library(state, req.headers()).await {
+        Ok(library) => library,
+        Err(refused) => return *refused,
+    };
+    let now = state.now();
+    let mut claims = state.assistant_claims.lock().expect("assistant build claims");
+    claims.retain(|_, until| *until > now);
+    if let Some(until) = claims.get(&library) {
+        return retry_after(StatusCode::CONFLICT, &error("claimed"), until - now);
+    }
+    claims.insert(library, now + CLAIM_MS);
     no_content()
 }
 
@@ -1150,6 +1213,73 @@ mod tests {
         assert_eq!(
             as_assistant(&h, &access, "GET", "/assistant/projection", None).await.0,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    /// A household's other devices learn, without building, what the held projection was built from; one device's
+    /// claim holds them off while it builds.
+    #[tokio::test]
+    async fn a_member_reads_the_state_a_projection_was_built_from_and_one_device_claims_its_build() {
+        let h = write_harness().await;
+        read_access(&h).await;
+        let path = format!("/assistant/projection/{}", grant_id());
+        assert_eq!(
+            as_member(&h, "GET", &path, None).await,
+            (StatusCode::NOT_FOUND, json!({ "error": "no_projection" }))
+        );
+        // A device from before names no state.
+        as_member(&h, "PUT", &path, Some(publish(&[part(1)]))).await;
+        h.advance(5_000);
+        assert_eq!(
+            as_member(&h, "GET", &path, None).await,
+            (StatusCode::OK, json!({ "state": null, "age": 5_000 }))
+        );
+        let built = "ab".repeat(32);
+        for bad in [json!("AB".repeat(32)), json!(&built[1..]), json!(7)] {
+            assert_eq!(
+                as_member(&h, "PUT", &path, Some(json!({ "set": SET, "parts": [part(1)], "state": bad })))
+                    .await,
+                (StatusCode::BAD_REQUEST, json!({ "error": "invalid_state" }))
+            );
+        }
+        let body = json!({ "set": SET, "parts": [part(1)], "state": built });
+        assert_eq!(as_member(&h, "PUT", &path, Some(body)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            as_member(&h, "GET", &path, None).await,
+            (StatusCode::OK, json!({ "state": built, "age": 0 }))
+        );
+        // Only a member asks; den-mcp's read is unchanged.
+        assert_eq!(send(&h, "GET", &path, None, &[]).await.0, StatusCode::FORBIDDEN);
+        assert!(h.state.store.get(super::NS, &super::projection_key(&grant_id())).await.unwrap().is_some());
+
+        // The first claim is the library's for a minute; then another device may claim.
+        assert_eq!(send(&h, "POST", "/assistant/projection/claim", None, &[]).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            as_member(&h, "POST", "/assistant/projection/claim", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        h.advance(20_000);
+        let claim = member();
+        let resp =
+            h.send("POST", "/assistant/projection/claim", None, &[("x-den-library-member", &claim)]).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "40");
+        assert_eq!(body_json(resp).await, json!({ "error": "claimed" }));
+        h.advance(40_000);
+        assert_eq!(
+            as_member(&h, "POST", "/assistant/projection/claim", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        // Its projection stored, the claim is done with.
+        let body = json!({ "set": SET, "parts": [part(2)], "state": built });
+        assert_eq!(as_member(&h, "PUT", &path, Some(body)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            as_member(&h, "POST", "/assistant/projection/claim", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            as_member(&h, "GET", "/assistant/projection/claim", None).await.0,
+            StatusCode::METHOD_NOT_ALLOWED
         );
     }
 

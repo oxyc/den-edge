@@ -58,6 +58,9 @@ pub struct AppState {
     /// When each library's TV queue was last drained (assistant v1 §16), ms: whether its TV is awake. Kept in memory
     /// alone: a TV draining refreshes it within seconds of a restart.
     pub assistant_tv_seen: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Until when a device of each library is building its assistant projection (assistant v1 §15), ms, so the
+    /// household's other devices do not build the same one beside it. Kept in memory alone: it only spares work.
+    pub assistant_claims: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
     /// migrates none, so startup work is independent of library history length.
     pub(crate) library_v3: Arc<library::v3::StoreManager>,
@@ -351,6 +354,7 @@ impl AppState {
             assistant_holds: hold::Holds::new(assistant::MAX_HELD, assistant::MAX_HELD_PER_ADDRESS),
             assistant_lock: tokio::sync::Mutex::new(()),
             assistant_tv_seen: std::sync::Mutex::default(),
+            assistant_claims: std::sync::Mutex::default(),
             library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),

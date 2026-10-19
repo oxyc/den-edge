@@ -162,11 +162,16 @@ export async function assistantRows(now = fixtureNow()) {
 
 const memberOf = (request) => request.headers()['x-den-library-member']?.split(':')[0] ?? null;
 
+/** How long den-edge holds off a library's other devices once one has claimed its build (`src/assistant.rs`). */
+const CLAIM_MS = 60_000;
+
 /**
  * den-edge's assistant routes for the household's connection (`assistantRows`): it is listed to every member, its
  * projection taken, `projectionMs` late, and its queue held empty. What was uploaded is kept on `edge.assistant`;
  * while `edge.assistant.retryAfter` is set, every upload is refused as den-edge refuses one past its budget (`429` with
- * that `Retry-After`, in seconds), and kept on `edge.assistant.refused`.
+ * that `Retry-After`, in seconds), and kept on `edge.assistant.refused`. `held`: each grant's stored projection, as a
+ * member reads it back (the library state it was built from, and when), reported `edge.assistant.agedMs` older than
+ * it is; `claims`: every claim to build, and whether den-edge gave it.
  */
 async function routeBigAssistant(page, edge, projectionMs) {
   const seen = (edge.assistant ??= {
@@ -175,6 +180,10 @@ async function routeBigAssistant(page, edge, projectionMs) {
     refused: [],
     retryAfter: null,
     publishing: 0,
+    held: new Map(),
+    agedMs: 0,
+    claims: [],
+    claimedUntil: new Map(),
   });
   await page.route(`${E2E_ORIGIN}/oauth/connections`, (route) =>
     route.fulfill({
@@ -202,6 +211,27 @@ async function routeBigAssistant(page, edge, projectionMs) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === '/assistant/dropbox') return route.fulfill({ status: 204 });
+    if (path === '/assistant/projection/claim') {
+      const member = memberOf(request);
+      const until = seen.claimedUntil.get(member) ?? 0;
+      const given = until <= Date.now();
+      seen.claims.push({ member, given, at: Date.now() });
+      if (!given)
+        return route.fulfill({
+          status: 409,
+          headers: { 'retry-after': String(Math.ceil((until - Date.now()) / 1000)) },
+          json: { error: 'claimed' },
+        });
+      seen.claimedUntil.set(member, Date.now() + CLAIM_MS);
+      return route.fulfill({ status: 204 });
+    }
+    if (path.startsWith('/assistant/projection/') && request.method() === 'GET') {
+      const held = seen.held.get(path.split('/').at(-1));
+      if (!held) return route.fulfill({ status: 404, json: { error: 'no_projection' } });
+      return route.fulfill({
+        json: { state: held.state, age: Date.now() - held.at + seen.agedMs },
+      });
+    }
     if (path.startsWith('/assistant/projection/') && request.method() === 'PUT') {
       if (seen.retryAfter) {
         seen.refused.push({ member: memberOf(request), at: Date.now() });
@@ -212,8 +242,11 @@ async function routeBigAssistant(page, edge, projectionMs) {
         });
       }
       seen.publishing ||= Date.now();
-      seen.projections.push({ member: memberOf(request), at: Date.now() });
+      const state = request.postDataJSON()?.state ?? null;
+      seen.projections.push({ member: memberOf(request), state, at: Date.now() });
       if (projectionMs) await new Promise((done) => setTimeout(done, projectionMs));
+      seen.held.set(path.split('/').at(-1), { state, at: Date.now() });
+      seen.claimedUntil.delete(memberOf(request));
       return route.fulfill({ status: 204 });
     }
     if (path === '/assistant/drain') return route.fulfill({ json: { messages: [] } });
@@ -505,7 +538,8 @@ export async function routeBigHousehold(
 
 /**
  * What the first publish of a page opened now makes of the household's assistant projection, as its library Worker
- * says (`LibraryAssistantAuthority.publish`): `built` (and recorded) or `current`.
+ * says (`LibraryAssistantAuthority.publish`): `built` (and recorded), `current`, or `waiting` for a change to settle or
+ * another device's build — unless `options.past` waiting, when what it builds once it has waited is the answer.
  */
 export async function firstPublish(page, path, options = {}) {
   const outcome = new Promise((resolve) =>
@@ -513,6 +547,8 @@ export async function firstPublish(page, path, options = {}) {
       const text = message.text();
       if (text.startsWith('den: assistant projection built')) resolve('built');
       else if (text === 'den: assistant projection up to date') resolve('current');
+      else if (text.startsWith('den: assistant projection waits') && !options.past)
+        resolve('waiting');
     }),
   );
   await page.goto(`${E2E_ORIGIN}${path}`);
@@ -525,10 +561,17 @@ export async function firstPublish(page, path, options = {}) {
 }
 
 /**
- * This browser forgets what it last published for the household's assistant (`assistant.records.v1`), so the next
- * page builds the projection and uploads it at once, as after a change, the heartbeat or the day's renewal.
+ * This browser forgets what it last published for the household's assistant (`assistant.records.v1`), and den-edge
+ * holds none, so the next page builds the projection and uploads it at once, as after a change, the heartbeat or the
+ * day's renewal.
  */
 export async function forgetPublication(context, edge) {
+  edge.assistant?.held.clear();
+  await forgetRecords(context, edge);
+}
+
+/** This browser forgets what it last published for the household's assistant (`assistant.records.v1`). */
+export async function forgetRecords(context, edge) {
   const forget = await context.newPage();
   await routeBigHousehold(forget, edge);
   await forget.goto(`${E2E_ORIGIN}/test/seed-library.html`);
@@ -551,17 +594,32 @@ export async function forgetPublication(context, edge) {
   await forget.close();
 }
 
-/** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
+/**
+ * Open Home and the Watchlist until both find the projection up to date: a browser that has published it. A page that
+ * waits — the household changed again within five minutes of its last send, which a slow machine's setup does — is
+ * followed by one that finds den-edge's copy five minutes older, as if those minutes had passed, and sends the change
+ * once it has stood its 30 s.
+ */
 export async function settleProjection(context, edge, options = {}) {
   for (let round = 0; round < 4; round += 1) {
     const outcomes = [];
     for (const path of ['/', '/watchlist']) {
-      const page = await context.newPage();
-      try {
-        await routeBigHousehold(page, edge, options);
-        outcomes.push(await firstPublish(page, path));
-      } finally {
-        await page.close();
+      let past = false;
+      for (;;) {
+        const page = await context.newPage();
+        let outcome;
+        try {
+          await routeBigHousehold(page, edge, options);
+          outcome = await firstPublish(page, path, { past, timeout: past ? 90_000 : 60_000 });
+        } finally {
+          await page.close();
+        }
+        if (outcome !== 'waiting') {
+          outcomes.push(outcome);
+          break;
+        }
+        for (const held of edge.assistant.held.values()) held.at -= 5 * 60_000;
+        past = true;
       }
     }
     if (outcomes.every((outcome) => outcome === 'current')) return;

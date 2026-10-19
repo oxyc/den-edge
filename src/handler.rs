@@ -1144,7 +1144,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
         "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
-        "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
+        "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE, Method::POST]),
         "/assistant/tv" | "/assistant/request" => Some(GET),
         "/inbox/append"
         | "/inbox/pending"
