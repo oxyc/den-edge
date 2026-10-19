@@ -111,6 +111,7 @@ import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { syncPolicy } from './syncCore';
 import { recordTrackerEvent } from './trackerEvents';
+import { retryAfterMs } from './retryAfter';
 import {
   approveSimklRemovalsWithClock,
   heldSimklRemovals,
@@ -503,10 +504,19 @@ export class LibraryLogAuthority {
         ),
       head: () => this.#log.logHead,
       inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
-      putProjection: (grant, set, parts, member) =>
-        this.#memberSend(`/assistant/projection/${grant}`, 'PUT', { set, parts }, member),
-      deleteProjection: (grant, member) =>
-        this.#memberSend(`/assistant/projection/${grant}`, 'DELETE', undefined, member),
+      putProjection: async (grant, set, parts, member) => {
+        const res = await this.#memberSend(
+          `/assistant/projection/${grant}`,
+          'PUT',
+          { set, parts },
+          member,
+        );
+        if (res?.status === 429) return { retryAfterMs: retryAfterMs(res, 60_000) };
+        return res?.ok ?? false;
+      },
+      deleteProjection: async (grant, member) =>
+        (await this.#memberSend(`/assistant/projection/${grant}`, 'DELETE', undefined, member))
+          ?.ok ?? false,
       membership: () => this.#log.relayMembership(),
       now: () => Date.now(),
       random: randomHex,
@@ -515,18 +525,18 @@ export class LibraryLogAuthority {
 
   /**
    * A member route of den-edge's (`/assistant/…`), with this library's proof, or a lent household connection's:
-   * whether it answered success.
+   * its answer, or null when there is no proof or no answer.
    */
   async #memberSend(
     path: string,
     method: string,
     body?: unknown,
     lent?: { libraryId: string; memberToken: string },
-  ): Promise<boolean> {
+  ): Promise<Response | null> {
     const member = lent ?? (await this.#log.relayMembership());
-    if (!member) return false;
+    if (!member) return null;
     try {
-      const res = await this.#fetch(path, {
+      return await this.#fetch(path, {
         method,
         headers: {
           'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
@@ -534,9 +544,8 @@ export class LibraryLogAuthority {
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      return res.ok;
     } catch {
-      return false;
+      return null;
     }
   }
 

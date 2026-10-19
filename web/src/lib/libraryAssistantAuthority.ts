@@ -44,6 +44,13 @@ export interface AssistantGrantList {
  * this often, so its `at` stays fresh. */
 const PUBLISH_DEBOUNCE_MS = 30_000;
 const HEARTBEAT_MS = 15 * 60_000;
+/**
+ * The least time between two sends of one grant's changed projection from this device. Every device of a household
+ * publishes, and den-edge takes 60 an hour per grant from all of them together (§15), while a library that changes
+ * every minute — a TV saving playback progress, which Continue Watching carries — would otherwise be sent every
+ * minute by each.
+ */
+const MIN_INTERVAL_MS = 5 * 60_000;
 
 /** Every op a grant made here allows, and the requests a day it may make (§5: 1–1000). */
 const OPS = ['rate', 'seen', 'watchlist_add', 'watchlist_remove'] as const;
@@ -132,13 +139,14 @@ export interface AssistantPort {
   /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
   inputs(): string;
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
-   * proof: this library's, or `member` (a lent household connection's). */
+   * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
+   * (`429` with `Retry-After`) answers that wait. */
   putProjection(
     grant: string,
     set: string,
     parts: string[],
     member?: AssistantConnection['member'],
-  ): Promise<boolean>;
+  ): Promise<boolean | { retryAfterMs: number }>;
   deleteProjection(grant: string, member?: AssistantConnection['member']): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
   membership(): Promise<AssistantConnection['member'] | null>;
@@ -572,9 +580,17 @@ export class LibraryAssistantAuthority {
   /** The digest the library first read as, and when: a change is sent once it has stood `PUBLISH_DEBOUNCE_MS`. */
   #pending: { digest: string; since: number } | null = null;
   #dropping = new Set<string>();
+  /** When den-edge said each grant's next send may come (`Retry-After`), or a failed send is tried again. */
+  #retryAt = new Map<string, number>();
   /** The projection's inputs at the last build, and when a build is next due with the inputs unchanged. */
   #builtFrom: string | null = null;
   #dueAt = 0;
+  /**
+   * Before this time no grant of the last build may be sent, whatever changes (`MIN_INTERVAL_MS`, `Retry-After`), so
+   * nothing is built; `#holdRead` is the read row it holds for, since a grant connected since is sent at once.
+   */
+  #holdUntil = 0;
+  #holdRead: string | null = null;
   /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
   #restored = false;
   /** Whether this service has said the projection was up to date when it was opened. */
@@ -582,7 +598,8 @@ export class LibraryAssistantAuthority {
 
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
-   * have stood for 30 s) or 15 minutes have passed; ask den-edge once to drop every dead grant's. A projection is
+   * have stood for 30 s, and no sooner than `MIN_INTERVAL_MS` after its last send) or 15 minutes have passed, never
+   * before a refusal's `Retry-After`; ask den-edge once to drop every dead grant's. A projection is
    * rebuilt only when its inputs changed or something is due, so a quiet library's tick builds nothing; and nothing is
    * built at all for a library with no read records. Which grants were sent.
    *
@@ -613,6 +630,8 @@ export class LibraryAssistantAuthority {
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
+    const readKey = JSON.stringify(withoutExpiry(read));
+    if (now < this.#holdUntil && readKey === this.#holdRead) return [];
     // A change in either log is a change of the inputs.
     const inputs = lent
       ? `${this.port.inputs()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
@@ -688,27 +707,48 @@ export class LibraryAssistantAuthority {
     if (this.#pending?.digest !== built.digest)
       this.#pending = { digest: built.digest, since: now };
     const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
+    /** When a grant is next sent: never sent, at once; changed, once the change has settled and `MIN_INTERVAL_MS`
+     * has passed since its last send; else at its heartbeat — and never before den-edge said it may be. */
+    const sendAt = (grant: string) => {
+      const last = this.#published.get(grant);
+      const wait = this.#retryAt.get(grant) ?? 0;
+      if (!last) return Math.max(now, wait);
+      if (last.digest !== built.digest) return Math.max(settleAt, last.at + MIN_INTERVAL_MS, wait);
+      return Math.max(last.at + HEARTBEAT_MS, wait);
+    };
     const sent: string[] = [];
     let dueAt = Infinity;
+    let holdUntil = Infinity;
     for (const entry of built.publish) {
-      const last = this.#published.get(entry.grant);
-      const changed = last?.digest !== built.digest;
-      const due = !last || (changed && now >= settleAt) || now - last.at >= HEARTBEAT_MS;
-      if (
-        due &&
-        (await this.port.putProjection(entry.grant, entry.set, entry.parts, lent?.member))
-      ) {
-        this.#published.set(entry.grant, { digest: built.digest, at: now });
-        sent.push(entry.grant);
+      if (now >= sendAt(entry.grant)) {
+        const answer = await this.port.putProjection(
+          entry.grant,
+          entry.set,
+          entry.parts,
+          lent?.member,
+        );
+        if (answer === true) {
+          this.#published.set(entry.grant, { digest: built.digest, at: now });
+          this.#retryAt.delete(entry.grant);
+          sent.push(entry.grant);
+        } else {
+          // Refused with a wait: that long. Failed otherwise: tried again once the next tick builds.
+          this.#retryAt.set(
+            entry.grant,
+            now + (typeof answer === 'object' ? answer.retryAfterMs : PUBLISH_DEBOUNCE_MS),
+          );
+        }
       }
-      // When this grant next needs a build: a send that failed at once, a change once it has settled, else its
-      // heartbeat.
-      const held = this.#published.get(entry.grant);
-      dueAt = Math.min(
-        dueAt,
-        !held ? now : held.digest !== built.digest ? settleAt : held.at + HEARTBEAT_MS,
+      dueAt = Math.min(dueAt, sendAt(entry.grant));
+      const last = this.#published.get(entry.grant);
+      holdUntil = Math.min(
+        holdUntil,
+        Math.max(last ? last.at + MIN_INTERVAL_MS : 0, this.#retryAt.get(entry.grant) ?? 0),
       );
     }
+    // No live grant holds nothing back: the next change of the inputs builds.
+    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
+    this.#holdRead = readKey;
     for (const grant of built.delete) {
       this.#published.delete(grant);
       if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
