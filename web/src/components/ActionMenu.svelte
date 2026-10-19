@@ -239,7 +239,11 @@
     if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
     focusFrame = requestAnimationFrame(() => {
       focusFrame = undefined;
-      enabledItemEls()[0]?.focus();
+      const enabled = enabledItemEls();
+      // `showModal()` and its open event do not focus consistently across TV engines. Supply the missing initial
+      // focus on the next frame, but never steal back a later choice when a fast remote press has already moved
+      // within the menu during that frame.
+      if (!enabled.includes(document.activeElement as HTMLButtonElement)) enabled[0]?.focus();
     });
   }
 

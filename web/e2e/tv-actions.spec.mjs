@@ -149,7 +149,7 @@ test('TV search opens a poster without action menus and Back restores it', async
   // Exercise the actual lazy detail tail: a person owns one circular white ring, never the generic square link
   // ring around the whole card.
   await page.evaluate(() => scrollTo(0, document.body.scrollHeight));
-  const actor = page.getByRole('link', { name: /Actor One/ });
+  const actor = page.locator('a.person').filter({ hasText: 'Actor One' });
   await expect(actor).toBeVisible({ timeout: 30_000 });
   await actor.focus();
   await expect(actor).toHaveCSS('outline-style', 'none');

@@ -489,6 +489,13 @@ test('TV cancels a native expiry probe when playback closes', async ({ page, bro
   });
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
+  // Drive the native player's real waiting handler directly. Waiting for WebKit to consume enough of the
+  // fixture to stall makes this an elapsed-time race on a busy CI runner; the contract under test begins when
+  // the native element reports that it is waiting, and still exercises the real probe fetch and teardown.
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(0);
+  await video.evaluate((element) => element.dispatchEvent(new Event('waiting')));
   await expect.poll(native.masters, { timeout: 40_000 }).toBeGreaterThan(1);
   expect(await remoteKey(page, 'Back', 461)).toBe(true);
   await expect(video).toHaveCount(0);

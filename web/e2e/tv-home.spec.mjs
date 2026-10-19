@@ -16,6 +16,9 @@ test(
     ? 'TV Home sustained remote browsing @soak'
     : 'real TV Home keeps remote focus and retained resources bounded across repeated visits',
   async ({ page, browserName }, info) => {
+    // The normal Chromium journey intentionally completes 200 Home/detail/Back cycles and retains periodic
+    // resource samples. On a shared runner that useful work can exceed the suite's two-minute default.
+    test.setTimeout(240_000);
     if (soak) test.setTimeout(soakMinutes * 60_000 + 120_000);
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
