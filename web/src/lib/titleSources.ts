@@ -1,4 +1,4 @@
-import type { Addon } from './scout';
+import { DEN, type Addon } from './scout';
 import { releaseIdentity } from './downloadRows';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
@@ -34,17 +34,34 @@ export const rankable = (sources: TitleSource[]) =>
     filename: source.filename,
   }));
 
-/** Playback tickets stay on our Scout relay. Never follow the media redirect while queuing a download. */
+/** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
+const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
+
+/**
+ * Playback tickets stay on our own relay. Never follow the media redirect while queuing a download.
+ *
+ * Scout's are redeemed under `/scout`, the combined Den addon's under `/den`: Hearth keys its tickets apart from Scout's,
+ * so neither takes the other's. Hearth names them under the base the install itself is on (`<base>/den/p/<ticket>`
+ * beside `<base>/den/<config>`), and its `/den/play/…` is Reel's, never a release.
+ */
 export function scoutTicket(url: string, addon: Addon, routes: Routes): string | null {
-  const suffix = within(url, [
-    ...(routes.play ?? []),
-    ...(routes.scout ?? []),
-    { url: addon.install },
-  ]);
+  const den = isDen(addon);
+  const mount = addon.install.slice(0, addon.install.lastIndexOf('/'));
+  const suffix = within(
+    url,
+    den
+      ? [
+          ...(routes.den ?? []),
+          ...(mount.endsWith(DEN.path) ? [{ url: mount }] : []),
+          { url: addon.install },
+        ]
+      : [...(routes.play ?? []), ...(routes.scout ?? []), { url: addon.install }],
+  );
   if (!suffix || !/^\/(?:p\/[\w.~%-]+|(?:[\w.~%-]+\/)?play\/[\w.~%-]+)(?:\?[^#]*)?$/.test(suffix))
     return null;
   if (url.startsWith(addon.install + '/') && suffix.startsWith('/play/'))
     return addon.base + suffix;
+  if (den) return suffix.startsWith('/play/') ? null : DEN.path + suffix;
   return '/scout' + suffix;
 }
 
@@ -194,7 +211,9 @@ export type Preparation = {
   message?: string;
 };
 
-const SCOUT_URL = /^\/scout\/(?:p\/[\w.~%-]+|(?:[\w.~%-]+\/)?play\/[\w.~%-]+)(?:\?[^#]*)?$/;
+/** A play ticket `scoutTicket` names: Scout's under `/scout`, or Hearth's own two (`/den/p/…`, `/den/<config>/play/…`). */
+const TICKET_URL =
+  /^\/(?:scout\/(?:p\/[\w.~%-]+|(?:[\w.~%-]+\/)?play\/[\w.~%-]+)|den\/(?:p\/[\w.~%-]+|[\w.~%-]+\/play\/[\w.~%-]+))(?:\?[^#]*)?$/;
 const FETCH_STATES = new Set(['queued', 'fetching', 'downloading', 'stalled', 'failed']);
 const count = (value: unknown) =>
   typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
@@ -223,7 +242,7 @@ export async function prepareSource(
   prefetch = false,
 ): Promise<Preparation> {
   // Only URLs validated by scoutTicket belong here; refuse a caller supplying a different origin or route.
-  if (!SCOUT_URL.test(url)) return { state: 'failed' };
+  if (!TICKET_URL.test(url)) return { state: 'failed' };
   const target = new URL(url, globalThis.location?.origin ?? 'https://den.invalid');
   if (!queue) target.searchParams.set('probe', '1');
   else if (prefetch) target.searchParams.set('prefetch', '1');
@@ -312,7 +331,7 @@ export async function cancelSource(
   reannounce = false,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<boolean> {
-  if (!SCOUT_URL.test(url)) return false;
+  if (!TICKET_URL.test(url)) return false;
   const target = new URL(url, globalThis.location?.origin ?? 'https://den.invalid');
   if (reannounce) target.searchParams.set('op', 'reannounce');
   try {

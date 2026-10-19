@@ -69,7 +69,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         prepare: (url, queue, prefetch) => prepareSource(url, queue, this.fetchImpl, prefetch),
         cancel: (url, reannounce) => cancelSource(url, reannounce, this.fetchImpl),
         ticket: (url) => {
-          if (url.startsWith('/scout/')) return url;
+          if (url.startsWith('/scout/') || url.startsWith('/den/')) return url;
           const current = this.#resolved;
           // Foreign tickets are renewed by identity. Never block a synchronous policy decision on discovery.
           return current?.scout ? scoutTicket(url, current.scout, current.routes) : null;
@@ -228,12 +228,11 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     this.#providerInput = input;
     const request = (async () => {
       const routes = await fetchRoutes(this.fetchImpl);
-      const scout = await findAddon(plugins, routes, SCOUT, this.fetchImpl);
-      // Hearth, which searches on for the wanted downloads while this page is closed.
-      const den = scout
-        ? await findAddon(plugins, routes, { ...DEN, id: DEN_IDS }, this.fetchImpl)
-        : null;
-      return { scout, den, routes, input };
+      const legacy = await findAddon(plugins, routes, SCOUT, this.fetchImpl);
+      // Hearth, which searches on for the wanted downloads while this page is closed. Without a legacy Scout it is
+      // also the source service, as playback takes it (`findScout`).
+      const den = await findAddon(plugins, routes, { ...DEN, id: DEN_IDS }, this.fetchImpl);
+      return { scout: legacy ?? den, den, routes, input };
     })();
     this.#providers = request;
     try {

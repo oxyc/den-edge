@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import {
   ageOf,
+  cancelSource,
   fetchSourceList,
   parseAnswer,
   parseSources,
@@ -23,6 +24,47 @@ it('rewrites current tickets and legacy play URLs only from configured Scout ori
   );
   expect(scoutTicket('https://untrusted.example/p/ticket', addon, routes)).toBeNull();
   expect(scoutTicket('http://lan:8080/manifest.json', addon, routes)).toBeNull();
+});
+it('keeps Hearth’s tickets on the combined addon’s own /den routes, never Scout’s or Reel’s', () => {
+  const hearth = { install: 'https://d.example/den/cfg', base: '/den/cfg' };
+  const table = {
+    den: [{ url: 'http://lan:8090/den' }, { url: 'https://d.example/den' }],
+    scout: [{ url: 'http://lan:8080' }],
+    play: [{ url: 'http://lan:8080' }],
+  };
+  expect(scoutTicket('https://d.example/den/p/T1', hearth, table)).toBe('/den/p/T1');
+  expect(scoutTicket('http://lan:8090/den/p/T1', hearth, table)).toBe('/den/p/T1');
+  // Hearth names its tickets under the base its install is on, whatever the table says.
+  expect(scoutTicket('https://d.example/den/p/T1', hearth, {})).toBe('/den/p/T1');
+  // Sealing off: the install's own config play route.
+  expect(scoutTicket('https://d.example/den/cfg/play/tok', hearth, {})).toBe('/den/cfg/play/tok');
+  // `/den/play/…` is Reel's; a Scout address is Scout's; anyone else's is nobody's.
+  expect(scoutTicket('https://d.example/den/play/tok', hearth, table)).toBeNull();
+  expect(scoutTicket('http://lan:8080/p/T1', hearth, table)).toBeNull();
+  expect(scoutTicket('https://untrusted.example/den/p/T1', hearth, table)).toBeNull();
+  expect(scoutTicket('https://d.example/den/manifest.json', hearth, table)).toBeNull();
+  // A Scout install never names a ticket on Hearth's routes.
+  expect(scoutTicket('https://d.example/den/p/T1', addon, table)).toBeNull();
+});
+it('asks and cancels only tickets on Scout’s or Hearth’s own ticket routes', async () => {
+  const asked: string[] = [];
+  const network = (async (input, init) => {
+    asked.push(`${init?.method ?? 'GET'} ${String(input)}`);
+    return new Response(null, { status: init?.method === 'DELETE' ? 204 : 302 });
+  }) as typeof fetch;
+  expect(await prepareSource('/den/p/T1', false, network)).toEqual({ state: 'ready' });
+  expect(await prepareSource('/den/cfg/play/tok', true, network, true)).toEqual({
+    state: 'ready',
+  });
+  expect(await cancelSource('/den/p/T1', true, network)).toBe(true);
+  for (const refused of ['/den/play/tok', '/den/cfg/wanted', '/den/configure', '/denx/p/T1'])
+    expect(await prepareSource(refused, true, network), refused).toEqual({ state: 'failed' });
+  expect(await cancelSource('/den/cfg/wanted', false, network)).toBe(false);
+  expect(asked).toEqual([
+    'GET /den/p/T1?probe=1',
+    'GET /den/cfg/play/tok?prefetch=1',
+    'DELETE /den/p/T1?op=reannounce',
+  ]);
 });
 it('preserves unknown readiness and only trusts supplied display metadata', () => {
   const sources = parseSources(
