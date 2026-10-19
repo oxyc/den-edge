@@ -4,12 +4,19 @@
     value,
     label,
     panel,
+    href,
     onchange,
   }: {
     tabs: { value: string; label: string }[];
     value: string;
     label: string;
     panel: string;
+    /**
+     * Where each tab lives. A tab is a link, so it opens in a new tab like any other; a plain click is the Router's,
+     * which follows it in place (`Router.svelte`), and a modified or middle click is the browser's.
+     */
+    href: (value: string) => string;
+    /** A tab chosen from the keyboard's arrows, Home and End; Enter follows the link itself. */
     onchange: (value: string) => void;
   } = $props();
   function keyboard(event: KeyboardEvent, index: number) {
@@ -26,24 +33,23 @@
               : undefined;
     if (next === undefined) return;
     event.preventDefault();
-    const button = event.currentTarget as HTMLButtonElement;
-    (button.parentElement?.children[next] as HTMLButtonElement)?.focus({ preventScroll: true });
+    const tab = event.currentTarget as HTMLAnchorElement;
+    (tab.parentElement?.children[next] as HTMLAnchorElement)?.focus({ preventScroll: true });
     onchange(tabs[next]!.value);
   }
 </script>
 
 <div class="tabs" class:many={tabs.length > 6} role="tablist" aria-label={label}>
   {#each tabs as tab, i (tab.value)}
-    <button
-      type="button"
+    <a
+      href={href(tab.value)}
       role="tab"
       id={`${panel}-tab-${i}`}
       aria-controls={panel}
       aria-selected={value === tab.value}
       tabindex={value === tab.value ? 0 : -1}
       class:on={value === tab.value}
-      onclick={() => onchange(tab.value)}
-      onkeydown={(e) => keyboard(e, i)}>{tab.label}</button
+      onkeydown={(e) => keyboard(e, i)}>{tab.label}</a
     >
   {/each}
 </div>
@@ -62,8 +68,11 @@
     background: rgb(255 255 255 / 0.07);
   }
 
-  button {
+  a {
+    display: flex;
     flex: 1 0 auto;
+    align-items: center;
+    justify-content: center;
     min-height: 44px;
     padding: 8px 20px;
     border: 0;
@@ -71,17 +80,18 @@
     background: none;
     color: var(--muted);
     font-weight: 600;
+    text-decoration: none;
     cursor: pointer;
     white-space: nowrap;
   }
 
-  button.on {
+  a.on {
     color: var(--fg);
     background: rgb(255 255 255 / 0.16);
     box-shadow: 0 1px 6px #0003;
   }
 
-  button:focus-visible {
+  a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
@@ -92,13 +102,13 @@
     background: none;
   }
 
-  .many button {
+  .many a {
     border: 1px solid var(--line);
     border-radius: 999px;
   }
 
   @media (width <= 759px) {
-    button {
+    a {
       padding-inline: 16px;
     }
   }

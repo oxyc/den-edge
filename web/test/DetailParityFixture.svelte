@@ -5,6 +5,7 @@
   import Person from '../src/components/Person.svelte';
   import type { EpisodeRow, TitleRow } from '../src/lib/wire';
   import type { Title } from '../src/lib/library';
+  import type { TitleSeason } from '../src/lib/route';
   import '../src/app.css';
   import { testLog } from '../src/lib/downloadTestLog';
   import { fetchSourceList } from '../src/lib/titleSources';
@@ -42,6 +43,8 @@
   const downloadPoll = setInterval(() => void library.model.refreshDownloads(), 300);
   onDestroy(() => clearInterval(downloadPoll));
   const noop = () => {};
+  // The season the address names, as `App.svelte` hands it down.
+  let address = $state.raw<TitleSeason>();
   const at = [100, 0, 'test'] as const;
   const stamped = <T,>(value: T) => ({ value, at });
   let row = $state<TitleRow>({
@@ -91,12 +94,17 @@
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
-  <Router onchange={noop}>
+  <Router
+    onchange={(route) => {
+      if (route.page === 'title') address = route;
+    }}
+  >
     {#snippet children(route, active)}
       {#if route.page === 'person'}<Person id={route.id} {content} {active} />
       {:else if route.page === 'title'}
         <Detail
           ref={{ type: route.type, id: route.id }}
+          {address}
           {active}
           {content}
           atlas="/atlas"
