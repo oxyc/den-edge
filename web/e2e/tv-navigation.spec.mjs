@@ -263,7 +263,7 @@ test('Home returns to the TV root without loading a backend document', async ({ 
 
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
-}, testInfo) => {
+}) => {
   await setup(page);
   await browse(page);
 
@@ -285,20 +285,32 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(contentSection).toBeFocused();
   await page.keyboard.press('Enter');
   await page.waitForTimeout(500);
-  const expandContent = page.getByRole('button', { name: 'Expand all in Content' });
-  await remoteTo(page, expandContent, ['ArrowRight'], 4);
-  const hiddenGenres = page.getByRole('button', { name: 'Hidden genres', exact: true });
-  await remoteTo(page, hiddenGenres, ['ArrowLeft', 'ArrowDown'], 12);
-  await page.keyboard.press('Enter');
-  const hiddenGenre = page.locator('#hidden-genres input[type="checkbox"]').first();
-  await expect(hiddenGenre).toBeVisible();
+  await expect(page.getByRole('button', { name: /(?:Expand|Collapse) all/ })).toHaveCount(0);
+
+  const subtitleChoices = page.locator('#subtitles-per-language input[type="radio"]');
+  const selectedBefore = await subtitleChoices.evaluateAll((radios) =>
+    radios.findIndex((radio) => radio.checked),
+  );
+  expect(selectedBefore).toBeGreaterThanOrEqual(0);
+  // Start on the real row immediately above: this isolates the regression where a remote Down skipped both
+  // transparent native radios and the following switch while still exercising the production focus engine.
+  await page.getByRole('button', { name: /^Visible subtitle languages/ }).focus();
   await page.keyboard.press('ArrowDown');
-  await remoteTo(page, hiddenGenre, ['ArrowLeft'], 10);
+  await expect(subtitleChoices.nth(selectedBefore)).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  const selectedAfter = (selectedBefore + 1) % (await subtitleChoices.count());
+  await expect(subtitleChoices.nth(selectedAfter)).toBeFocused();
+  await expect(subtitleChoices.nth(selectedAfter)).toBeChecked();
+
+  const hideWatched = page.getByRole('switch', { name: 'Hide watched', exact: true });
+  await expect(hideWatched).toBeEnabled();
+  await page.keyboard.press('ArrowDown');
+  await expect(hideWatched).toBeFocused();
+  const wasHidingWatched = await hideWatched.isChecked();
   await page.keyboard.press('Enter');
-  await expect(hiddenGenre).toBeChecked();
-  await expect(hiddenGenre.locator('xpath=..').locator('.mark')).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath('tv-settings-checkbox.png'), fullPage: false });
-  await page.waitForTimeout(500);
+  await expect(hideWatched).toBeChecked({ checked: !wasHidingWatched });
+  await expect(hideWatched).toBeEnabled();
+  await expect(hideWatched).toBeFocused();
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/$/);
@@ -352,7 +364,10 @@ test('LG Back closes a real ARIA trailer dialog without leaving its detail route
   await page.goto(`${E2E_ORIGIN}/movie/1002`);
 
   const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
-  await remoteTo(page, trailer, ['ArrowDown', 'ArrowLeft'], 20);
+  const sources = page.locator('header.hero').getByRole('button', { name: 'Sources', exact: true });
+  await sources.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(trailer).toBeFocused();
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'Movie 1002: trailer' });
   await expect(dialog).toBeVisible();

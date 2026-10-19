@@ -260,6 +260,58 @@ export function installTVNavigation(): () => void {
       // Arrow keys inside a native editor belong to its caret/list selection. Up/down at a search field is
       // likewise left to that field's own results behavior.
       if (isEditable(target) && editing === target) return;
+      // A radio group uses roving tabindex, so only its selected input participates in the page-wide spatial
+      // scan. Keep horizontal presses inside the segmented control and commit the newly focused option just as
+      // a native keyboard interaction does; vertical presses still leave the row.
+      if (
+        target instanceof HTMLInputElement &&
+        target.type === 'radio' &&
+        (direction === 'left' || direction === 'right')
+      ) {
+        const group = target.closest('[role="radiogroup"]');
+        const radios = group
+          ? Array.from(
+              group.querySelectorAll<HTMLInputElement>('input[type="radio"]:not(:disabled)'),
+            )
+          : [];
+        const here = radios.indexOf(target);
+        if (here >= 0 && radios.length > 1) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const step = direction === 'left' ? -1 : 1;
+          const next = radios[(here + step + radios.length) % radios.length]!;
+          next.focus({ preventScroll: true });
+          next.click();
+          return;
+        }
+      }
+      // Settings are semantic rows: a control aligned to the far right still belongs immediately after the row
+      // above it. Pure center-distance scoring otherwise jumps over compact segmented controls and switches in
+      // favor of a later full-width disclosure whose center happens to line up with the current row.
+      if (
+        target instanceof HTMLElement &&
+        (direction === 'up' || direction === 'down') &&
+        target.closest('.settings .row')
+      ) {
+        const item = target.closest<HTMLElement>('.settings .item');
+        const sibling =
+          direction === 'down' ? item?.nextElementSibling : item?.previousElementSibling;
+        if (sibling instanceof HTMLElement && sibling.classList.contains('item')) {
+          const choices = Array.from(sibling.querySelectorAll<HTMLElement>(FOCUSABLE));
+          const destination =
+            choices.find(
+              (choice) =>
+                choice instanceof HTMLInputElement && choice.type === 'radio' && choice.checked,
+            ) ?? choices.find((choice) => choice.tabIndex >= 0 && visible(choice));
+          if (destination && visible(destination)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            destination.focus({ preventScroll: true });
+            destination.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+            return;
+          }
+        }
+      }
       // Home's billboard is the first content row. Pure center-distance scoring can prefer a service tile far
       // below Search because the hero action is intentionally left-aligned; Down from the top bar must enter
       // the visible slide before it can skip to lower shelves.

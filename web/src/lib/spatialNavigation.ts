@@ -44,7 +44,15 @@ export function visible(
     if (known === false) return false;
     if (known === true) break;
     const style = getComputedStyle(node);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    // Some native controls deliberately paint through a visible sibling (for example a radio beneath a
+    // segmented-control label). They still provide the focus/selection semantics, so an explicit marker lets
+    // spatial navigation use their real geometry without making arbitrary visually-hidden inputs reachable.
+    const representedControl = node === element && element.hasAttribute('data-spatial-visible');
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      (style.opacity === '0' && !representedControl)
+    ) {
       ancestry.set(node, false);
       return false;
     }

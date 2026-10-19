@@ -132,6 +132,9 @@ test('TV search opens a poster without action menus and Back restores it', async
   await expect(page.getByRole('heading', { name: 'Movie 1', level: 1 })).toBeVisible({
     timeout: 30_000,
   });
+  await expect(page.locator('.hero .head a')).toHaveCount(0);
+  await expect(page.locator('.hero .head').getByText('2026', { exact: true })).toBeVisible();
+  await expect(page.locator('.hero .head').getByText('Drama', { exact: true })).toBeVisible();
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/search/);

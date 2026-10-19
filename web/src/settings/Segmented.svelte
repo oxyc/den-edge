@@ -24,6 +24,7 @@
       <input
         type="radio"
         {name}
+        data-spatial-visible
         checked={option.value === value}
         {disabled}
         onchange={() => onchange(option.value)}

@@ -45,24 +45,33 @@
 {#if primary !== undefined || pending || (ratings && enabled.length)}
   <div class="ratings" class:expanded={pending} aria-label="Ratings">
     {#if primary !== undefined}
-      <a
-        class="primary"
-        href={primaryHref}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`${imdb !== undefined ? 'IMDb' : 'TMDB'} rating ${primary.toFixed(1)}`}
-        ><span class="star" aria-hidden="true">★</span><b>{primary.toFixed(1)}</b><span
-          class="source">{imdb !== undefined ? 'IMDb' : 'TMDB'}</span
-        >{#if votes}<span class="votes">({compact(votes)})</span>{/if}</a
-      >
+      {@const primaryLabel = `${imdb !== undefined ? 'IMDb' : 'TMDB'} rating ${primary.toFixed(1)}`}
+      {#snippet primaryRating()}<span class="star" aria-hidden="true">★</span><b
+          >{primary.toFixed(1)}</b
+        ><span class="source">{imdb !== undefined ? 'IMDb' : 'TMDB'}</span>{#if votes}<span
+            class="votes">({compact(votes)})</span
+          >{/if}{/snippet}
+      {#if __DEN_TV__}<span class="primary" aria-label={primaryLabel}
+          >{@render primaryRating()}</span
+        >{:else}<a
+          class="primary"
+          href={primaryHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={primaryLabel}>{@render primaryRating()}</a
+        >{/if}
     {/if}
-    {#if imdb !== undefined && tmdb !== undefined}<a
-        href={tmdbHref}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
-        ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></a
-      >{/if}
+    {#if imdb !== undefined && tmdb !== undefined}
+      {#if __DEN_TV__}<span aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
+          ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></span
+        >{:else}<a
+          href={tmdbHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
+          ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></a
+        >{/if}
+    {/if}
     {#if enabled.includes('rottenTomatoes') && ratings?.rottenTomatoes !== undefined}<span
         aria-label={`Rotten Tomatoes ${ratings.rottenTomatoes}%`}
         ><b>{ratings.rottenTomatoes}%</b><span class="source">RT</span></span
@@ -75,7 +84,8 @@
 {/if}
 <div class="facts">
   {#each facts as fact, i (`${i}:${fact}`)}{#if i}<span aria-hidden="true">·</span
-      >{/if}{#if factHref(fact, i)}<a class="filter-link" href={factHref(fact, i)}>{fact}</a
+      >{/if}{#if factHref(fact, i) && !__DEN_TV__}<a class="filter-link" href={factHref(fact, i)}
+        >{fact}</a
       >{:else}<span>{fact}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
   <ContentWarnings {warnings} />
@@ -85,36 +95,43 @@
       aria-label={`Streaming on ${d.providers.map((p) => p.name).join(', ')}`}
     >
       {#each d.providers as provider (provider.id)}
-        <a
-          class="provider"
-          href={serviceHref(provider.id, region, provider.name)}
-          aria-label={`Browse ${provider.name}`}
-          title={`Browse ${provider.name}`}
-          >{#if provider.logoPath}<img
-              src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
-              alt=""
-              width="26"
-              height="26"
-            />{:else}{provider.name}{/if}</a
-        >
-      {/each}<a
-        class="attribution"
-        href={d.watchLink ?? 'https://www.justwatch.com/'}
-        target="_blank"
-        rel="noopener noreferrer">JustWatch</a
-      >
+        {#if __DEN_TV__}<span class="provider" title={provider.name}
+            >{#if provider.logoPath}<img
+                src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
+                alt=""
+                width="26"
+                height="26"
+              />{:else}{provider.name}{/if}</span
+          >{:else}<a
+            class="provider"
+            href={serviceHref(provider.id, region, provider.name)}
+            aria-label={`Browse ${provider.name}`}
+            title={`Browse ${provider.name}`}
+            >{#if provider.logoPath}<img
+                src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
+                alt=""
+                width="26"
+                height="26"
+              />{:else}{provider.name}{/if}</a
+          >{/if}
+      {/each}{#if __DEN_TV__}<span class="attribution">JustWatch</span>{:else}<a
+          class="attribution"
+          href={d.watchLink ?? 'https://www.justwatch.com/'}
+          target="_blank"
+          rel="noopener noreferrer">JustWatch</a
+        >{/if}
     </span>
   {/if}
 </div>
 {#if d.genres.length}<p class="genres">
     {#each d.genres as genre, i (genre.id)}{#if i}<span class="separator" aria-hidden="true">·</span
-        >{/if}<a
-        class="filter-link"
-        href={searchHref('', {
-          type: d.title.type === 'tv' ? 'tv' : 'movie',
-          chips: [`genre-${genre.id}`],
-        })}>{genre.name}</a
-      >{/each}
+        >{/if}{#if __DEN_TV__}<span>{genre.name}</span>{:else}<a
+          class="filter-link"
+          href={searchHref('', {
+            type: d.title.type === 'tv' ? 'tv' : 'movie',
+            chips: [`genre-${genre.id}`],
+          })}>{genre.name}</a
+        >{/if}{/each}
   </p>{/if}
 
 <style>

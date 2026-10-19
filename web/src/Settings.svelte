@@ -13,7 +13,7 @@
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
   import { thisDevice } from './lib/device.svelte';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
@@ -111,6 +111,10 @@
   let hearthMigrationAttempt = '';
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
+    const restoreFocus =
+      __DEN_TV__ && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
     if (!quiet) {
       saving = true;
       failure = null;
@@ -124,6 +128,17 @@
       return false;
     } finally {
       if (!quiet) saving = false;
+      // Saving temporarily disables the settings surface. TV engines move focus to the document when the active
+      // native control becomes disabled, which strands the next remote press. Return to that same connected
+      // control once the save settles, unless a dialog/route/user action deliberately focused something else.
+      if (restoreFocus) {
+        await tick();
+        if (
+          restoreFocus.isConnected &&
+          (document.activeElement === document.body || document.activeElement === null)
+        )
+          restoreFocus.focus({ preventScroll: true });
+      }
     }
   }
 
