@@ -187,10 +187,11 @@ test('a release the viewer picked is never switched away from, and the pick outl
       delayMs: (release, _n, k) => (release === B && k > 3 ? 5_000 : 0),
     });
     await page.goto(`${ORIGIN}/test/player.html`);
-    await expect(page.locator('select[aria-label="Release"] option')).toHaveCount(3);
     await playsTo(page, 1);
 
-    await page.locator('select[aria-label="Release"]').selectOption(B.filename);
+    await page.getByRole('button', { name: /^Stream: / }).click();
+    await expect(page.getByRole('menuitemradio')).toHaveCount(3);
+    await page.getByRole('menuitemradio').filter({ hasText: B.filename }).click();
     await expect.poll(() => remux.served.at(-1)).toBe(B.filename);
     await expect(page.locator('.release')).toContainText(B.label);
 

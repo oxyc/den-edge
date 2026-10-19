@@ -120,7 +120,11 @@
     // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
     // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
     position();
-    if (!menu.matches(':popover-open')) menu.showPopover();
+    if (!menu.matches(':popover-open')) {
+      menu.showPopover();
+      // Measured now that it is laid out, and placed again before it is painted.
+      position();
+    }
   }
 
   function toggleFromTrigger(event: MouseEvent) {
@@ -173,10 +177,11 @@
     }
     const vw = window.innerWidth,
       vh = window.innerHeight;
-    // Not yet laid out at this point, so a representative size stands in for the real one — close enough to
-    // decide which side of the viewport it has to flip away from.
-    const width = 240,
-      height = shownItems.length * 44 + 16;
+    // Before its first showing it is not laid out, so a representative size stands in for the real one — close
+    // enough to decide which side of the viewport it has to flip away from. Once shown, its own size is used:
+    // items with a second line are taller than the estimate.
+    const width = positioned.offsetWidth || 240,
+      height = positioned.offsetHeight || shownItems.length * 44 + 16;
     let x: number, y: number;
     if (coords) {
       x = coords.x;
@@ -272,7 +277,8 @@
   }
 
   function sheetPointerDown(event: PointerEvent) {
-    if (!mobile || event.pointerType === 'mouse') return;
+    // A sheet scrolled down its own list is scrolled back up by the same drag: only one at its top closes.
+    if (!mobile || event.pointerType === 'mouse' || (menu?.scrollTop ?? 0) > 0) return;
     sheetDragStart = { y: event.clientY, pointerId: event.pointerId };
   }
   function sheetPointerMove(event: PointerEvent) {
@@ -414,6 +420,8 @@
     width: max-content;
     min-width: 220px;
     max-width: min(320px, 90vw);
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     margin: 0;
     padding: 6px;
     border: 1px solid var(--line);
@@ -475,6 +483,22 @@
     padding-block: 10px;
     line-height: 1.3;
     white-space: normal;
+  }
+
+  /* A choice among described items carries a tick column, so the one chosen is marked by more than weight and
+     the labels line up whichever it is. */
+  .menu :global(.item.described[role='menuitemradio']) {
+    position: relative;
+    padding-left: 36px;
+  }
+
+  .menu :global(.item.described[role='menuitemradio'][aria-checked='true'])::before {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    content: '✓';
+    color: var(--accent);
+    font-weight: 700;
   }
 
   .item-description {
