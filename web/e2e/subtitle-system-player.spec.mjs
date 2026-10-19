@@ -15,6 +15,25 @@ const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
   'Version/18.0 Mobile/15E148 Safari/604.1';
 
+/**
+ * A context that answers "is this an iPhone?" as an iPhone does on every platform. macOS WebKit plays HLS itself, as an
+ * iPhone does; Linux WebKit, which CI runs, has no native HLS (`canPlayType` answers '' for it), so there the page took
+ * itself for hls.js and the iPhone path never ran. The page asks that question of a fresh, unattached `<video>`
+ * (`nativeHls`); that answer is made an iPhone's. The player's own element keeps this engine's real answer, so it still
+ * plays with what the engine has: natively on macOS, through hls.js on Linux.
+ */
+async function iphone(browser, locale) {
+  const context = await browser.newContext({ userAgent: IPHONE_UA, locale });
+  await context.addInitScript(() => {
+    const canPlayType = HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType = function (type) {
+      const answer = canPlayType.call(this, type);
+      return answer || this.isConnected || !/mpegurl/i.test(type) ? answer : 'maybe';
+    };
+  });
+  return context;
+}
+
 const direct = { url: `${ORIGIN}/torbox/t/media.m3u8`, release };
 const remux = {
   url: '/managed-remux/s/r1/sig/master.m3u8',
@@ -128,12 +147,13 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
   test('a subtitle picked on a TorBox stream moves it to Den Remux, whose playlist names it', async () => {
     const browser = await webkit.launch();
     try {
-      const context = await browser.newContext({ userAgent: IPHONE_UA, locale: 'en-US' });
+      const context = await iphone(browser, 'en-US');
       const page = await context.newPage();
       const operations = await mockHearth(page);
       await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
       await playing(page);
       expect(operations).toHaveLength(1);
+      expect(operations[0].player).toBe('native');
       expect(operations[0]).not.toHaveProperty('directFailed');
       expect(operations[0].originalLanguage).toBe('en');
       // Nothing is named showing that the system player could not show.
@@ -159,12 +179,13 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
   test('a title in a language the browser doesn’t name starts on Den Remux, its subtitle shown', async () => {
     const browser = await webkit.launch();
     try {
-      const context = await browser.newContext({ userAgent: IPHONE_UA, locale: 'sv-SE' });
+      const context = await iphone(browser, 'sv-SE');
       const page = await context.newPage();
       const operations = await mockHearth(page);
       await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=he`);
       await playing(page);
       expect(operations).toHaveLength(1);
+      expect(operations[0].player).toBe('native');
       expect(operations[0].directFailed).toBe(true);
       await expect
         .poll(() => page.evaluate(shown), { timeout: 15_000 })
@@ -177,12 +198,13 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
   test('a subtitle language set in Settings starts on Den Remux', async () => {
     const browser = await webkit.launch();
     try {
-      const context = await browser.newContext({ userAgent: IPHONE_UA, locale: 'en-US' });
+      const context = await iphone(browser, 'en-US');
       const page = await context.newPage();
       const operations = await mockHearth(page);
       await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
       await playing(page);
       expect(operations).toHaveLength(1);
+      expect(operations[0].player).toBe('native');
       expect(operations[0].directFailed).toBe(true);
       await expect
         .poll(() => page.evaluate(shown), { timeout: 15_000 })
