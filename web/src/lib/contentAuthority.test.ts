@@ -4,6 +4,8 @@ import {
   WorkerContentCredentials,
   type ContentCredentialSource,
 } from './contentAuthority';
+import { titleBrief } from './tmdb';
+import { cachingFetch, type Brief, type Entry, type Store } from './tmdbCache';
 
 const credentials = (
   values: {
@@ -79,6 +81,43 @@ describe('ContentAuthority', () => {
       complete: false,
       services: [{ id: 8, movies: true, series: false }],
     });
+  });
+
+  it('names a title kept before briefs from its answer once, then from its brief alone', async () => {
+    const answers = new Map<string, Entry>();
+    const briefs = new Map<string, Brief>();
+    const reads = { answers: 0 };
+    const store: Store = {
+      get: async (key) => (reads.answers++, answers.get(key)),
+      put: async (key, entry) => void answers.set(key, entry),
+      prune: async () => 0,
+      clear: async () => answers.clear(),
+      briefs: {
+        get: async (key) => briefs.get(key),
+        put: async (key, brief) => void briefs.set(key, brief),
+        prune: async () => 0,
+        clear: async () => briefs.clear(),
+      },
+    };
+    answers.set('https://api.themoviedb.org/3/movie/603?append_to_response=credits', {
+      body: JSON.stringify({ id: 603, title: 'The Matrix', poster_path: '/m.jpg', credits: {} }),
+      fetchedAt: 0,
+      checked: true,
+    });
+    const network = vi.fn<typeof fetch>();
+    const tmdbFetch = cachingFetch(store, network, () => 1_000, titleBrief);
+    const ref = { type: 'movie', id: 603 } as const;
+
+    const first = await new ContentAuthority(credentials(), { tmdbFetch }).title(ref);
+    expect(first).toMatchObject({ kind: 'found', value: { title: { title: 'The Matrix' } } });
+    expect(reads.answers, 'no brief yet: the kept answer names it').toBe(1);
+    await vi.waitFor(() => expect(briefs.size).toBe(1));
+
+    reads.answers = 0;
+    const again = await new ContentAuthority(credentials(), { tmdbFetch }).title(ref);
+    expect(again).toEqual(first);
+    expect(reads.answers, 'named from its brief').toBe(0);
+    expect(network).not.toHaveBeenCalled();
   });
 
   it('configures one discovered Atlas source for later Worker-owned queries', async () => {

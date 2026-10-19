@@ -12,11 +12,14 @@ import {
   PRUNE_PAUSE_MS,
   RETENTION,
   sharingFlights,
+  STALE_FOR,
   TMDB_PROXY_KEY,
   tmdbJson,
+  type Brief,
   type Entry,
   type Store,
 } from './tmdbCache';
+import { briefDetails, titleBrief } from './tmdb';
 
 const HOUR = 3_600_000;
 
@@ -681,6 +684,125 @@ describe('cachingFetch', () => {
     const quiet = network();
     await cachingFetch(settled.store, quiet.fetchImpl, () => 7 * HOUR)(series);
     expect(quiet.asked, 'a finished series is what it was six hours ago').toHaveLength(0);
+  });
+});
+
+/** `memory()`, with briefs, counting how often an answer is read from it. */
+function briefedMemory() {
+  const kept = memory();
+  const briefs = new Map<string, Brief>();
+  const reads = { answers: 0 };
+  const store: Store = {
+    ...kept.store,
+    get: async (key) => (reads.answers++, kept.entries.get(key)),
+    briefs: {
+      get: async (key) => briefs.get(key),
+      put: async (key, brief) => void briefs.set(key, brief),
+      prune: async () => 0,
+      clear: async () => briefs.clear(),
+    },
+  };
+  return { ...kept, briefs, reads, store };
+}
+
+describe('briefs', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  const series = (status: string) =>
+    JSON.stringify({
+      id: 1399,
+      name: 'Game of Thrones',
+      status,
+      poster_path: '/got.jpg',
+      seasons: [{ season_number: 1, episode_count: 10 }],
+      credits: { cast: Array.from({ length: 50 }, (_, id) => ({ id, name: `Actor ${id}` })) },
+    });
+  const named =
+    'https://api.themoviedb.org/3/tv/1399?api_key=secret&append_to_response=credits,external_ids';
+  const key = 'https://api.themoviedb.org/3/tv/1399?append_to_response=credits%2Cexternal_ids';
+
+  it('keeps a title’s brief with its answer, and reads it without the answer', async () => {
+    const { briefs, reads, store } = briefedMemory();
+    const asked: string[] = [];
+    const cached = cachingFetch(
+      store,
+      async (input) => (asked.push(String(input)), new Response(series('Ended'))),
+      () => 0,
+      titleBrief,
+    );
+    await cached(named);
+    await vi.waitFor(() => expect(briefs.get(key)).toBeDefined());
+    expect(briefs.get(key)).toMatchObject({ fetchedAt: 0, freshMs: RETENTION });
+
+    reads.answers = 0;
+    const details = briefDetails(await cached.brief(named));
+    expect(details?.title).toMatchObject({ type: 'tv', id: 1399, title: 'Game of Thrones' });
+    expect(details?.shape?.counts).toEqual(new Map([[1, 10]]));
+    expect(reads.answers, 'the whole answer is not read').toBe(0);
+    expect(asked).toHaveLength(1);
+  });
+
+  it('takes the brief from an answer kept before briefs were, once', async () => {
+    const { briefs, entries, reads, store } = briefedMemory();
+    entries.set(key, { body: series('Ended'), fetchedAt: 0, checked: true });
+    const net = network();
+    const cached = cachingFetch(store, net.fetchImpl, () => HOUR, titleBrief);
+
+    expect(await cached.brief(named), 'nothing kept yet').toBeUndefined();
+    const answer = (await tmdbJson(await cached(named))) as { name: string };
+    expect(answer.name).toBe('Game of Thrones');
+    await vi.waitFor(() => expect(briefs.get(key)).toBeDefined());
+
+    reads.answers = 0;
+    expect(briefDetails(await cached.brief(named))?.title.title).toBe('Game of Thrones');
+    expect(reads.answers).toBe(0);
+    expect(net.asked, 'the kept answer was fresh').toHaveLength(0);
+  });
+
+  it('shows a brief past fresh while it is asked again, and none past showing', async () => {
+    const { briefs, store } = briefedMemory();
+    briefs.set(key, {
+      value: titleBrief(new URL(named))!(JSON.parse(series('Returning Series'))),
+      fetchedAt: 0,
+      freshMs: 6 * HOUR,
+    });
+    const net = { asked: 0 };
+    let clock = 7 * HOUR;
+    const cached = cachingFetch(
+      store,
+      async () => (net.asked++, new Response(series('Ended'))),
+      () => clock,
+      titleBrief,
+    );
+    expect(briefDetails(await cached.brief(named))?.title.title).toBe('Game of Thrones');
+    await vi.waitFor(() => expect(briefs.get(key)?.fetchedAt).toBe(7 * HOUR));
+    expect(net.asked, 'refreshed behind the brief').toBe(1);
+    expect(briefs.get(key)?.freshMs, 'the series has ended since').toBe(RETENTION);
+
+    briefs.get(key)!.freshMs = 6 * HOUR;
+    clock = 7 * HOUR + 6 * HOUR + STALE_FOR;
+    expect(await cached.brief(named), 'too old to show without asking').toBeUndefined();
+  });
+
+  it('briefs only the question a title is named by', () => {
+    expect(titleBrief(new URL(named))).toBeDefined();
+    expect(titleBrief(new URL(detail))).toBeDefined();
+    expect(
+      titleBrief(
+        new URL('https://api.themoviedb.org/3/movie/603?append_to_response=credits,videos'),
+      ),
+    ).toBeUndefined();
+    expect(titleBrief(new URL(discover))).toBeUndefined();
+    expect(
+      briefDetails({ v: 0, details: { title: { type: 'movie', id: 1, title: 'Old' } } }),
+      'a brief another version wrote',
+    ).toBeUndefined();
   });
 });
 

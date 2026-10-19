@@ -40,7 +40,7 @@ import { parseIconicStudios, type IconicStudio } from './iconicStudios';
 import type { MediaType } from './library';
 import { onGrantEnded, relayFetch, useHeldGrants } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
-import { seriesShape, toTitle, type Details } from './tmdb';
+import { briefDetails, seriesShape, titleAppends, toTitle, type Details } from './tmdb';
 import { parseTitleFacts, type TitleFacts } from './titleFacts';
 import {
   clearTmdbCache,
@@ -49,6 +49,7 @@ import {
   tmdbFetch,
   tmdbJson,
   tmdbMissing,
+  type TmdbFetch,
 } from './tmdbCache';
 import {
   fillSharedTitleMetadata,
@@ -193,8 +194,11 @@ export class WorkerContentCredentials implements ContentCredentialSource {
   }
 }
 
+/** A TMDB `fetch`, and where it keeps briefs, the brief of an answer (`TmdbFetch`). */
+type BriefingFetch = typeof fetch & Partial<Pick<TmdbFetch, 'brief'>>;
+
 export interface ContentAuthorityOptions {
-  tmdbFetch?: typeof fetch;
+  tmdbFetch?: BriefingFetch;
   providerFetch?: typeof fetch;
   now?: () => number;
 }
@@ -298,7 +302,7 @@ function tmdbUrl(path: string, key: string, params: Record<string, string> = {})
 
 /** A single Worker-session owner for provider access and exact in-flight coalescing. */
 export class ContentAuthority implements ContentReader, ContentServiceAuthority {
-  readonly #tmdbFetch: typeof fetch;
+  readonly #tmdbFetch: BriefingFetch;
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
   readonly #flights = new Map<string, Promise<unknown>>();
@@ -677,8 +681,13 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     if (!validRef(ref)) return Promise.resolve(unavailable('invalid-answer'));
     const key = this.#tmdbKey();
     return this.#join(`title\0${ref.type}:${ref.id}\0${key}`, async () => {
-      const append = ref.type === 'tv' ? 'credits,external_ids' : 'credits';
-      const body = await this.#tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append });
+      const path = `/${ref.type}/${ref.id}`;
+      const params = { append_to_response: titleAppends(ref.type) };
+      // A library names every title it holds: from the brief kept of each answer where there is one, rather than
+      // from the whole answer, credits and all, read and parsed for a name and a poster.
+      const kept = briefDetails(await this.#tmdbFetch.brief?.(tmdbUrl(path, key, params)));
+      if (kept) return { kind: 'found', value: kept };
+      const body = await this.#tmdb(path, key, params);
       if (body.kind !== 'found') return body;
       const title = toTitle(ref, body.value);
       if (!title) return unavailable('invalid-answer');
