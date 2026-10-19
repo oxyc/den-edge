@@ -275,7 +275,8 @@
 /* Cards already mark their artwork. Suppress the broad TV anchor ring so it never draws a second rectangle
    around the label, and keep the one surface ring inside each card's paint boundary. */
 :root.den-tv.tv-remote-active .tile:focus,
-:root.den-tv.tv-remote-active .card.pick:focus {
+:root.den-tv.tv-remote-active .card.pick:focus,
+:root.den-tv.tv-remote-active a.person:focus {
   outline: none;
   box-shadow: none;
 }
@@ -313,6 +314,41 @@
 :root.den-tv.tv-remote-active .card.pick:focus .art {
   box-shadow: none;
   transform: scale(1);
+}
+
+:root.den-tv.tv-remote-active a.person:focus .portrait {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+/* Apple TV presents warnings as quiet, non-interactive hero context. Keep this in the TV sheet so the web app
+   retains its expandable warning disclosure without carrying TV-only layout CSS in its bundle. */
+.den-tv .content-warnings-overlay {
+  position: absolute;
+  z-index: 2;
+  top: calc(var(--bar-space) + 40px);
+  right: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
+  display: grid;
+  max-width: min(360px, 28vw);
+  justify-items: end;
+  color: rgb(231 231 234 / 0.7);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: right;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.9);
+  pointer-events: none;
+}
+
+.den-tv .content-warnings-overlay strong,
+.den-tv .content-warnings-overlay small {
+  color: rgb(231 231 234 / 0.52);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.den-tv .content-warnings-overlay small {
+  margin-top: 4px;
+  font-weight: 400;
 }
 
 .den-tv .billboard {

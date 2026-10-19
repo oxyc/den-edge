@@ -201,6 +201,16 @@ test('watched action chooses a season without changing the episode tab', async (
   await expect(page.getByRole('button', { name: /Mark season 2/ })).toHaveCount(0);
 
   const seen = page.getByRole('button', { name: 'Mark watched', exact: true });
+  await expect(seen).toHaveCSS('display', 'flex');
+  const [seenIcon, seenLabel] = await Promise.all([
+    seen.locator('svg').boundingBox(),
+    seen.getByText('Seen', { exact: true }).boundingBox(),
+  ]);
+  expect(seenIcon).not.toBeNull();
+  expect(seenLabel).not.toBeNull();
+  expect(
+    Math.abs(seenIcon.y + seenIcon.height / 2 - (seenLabel.y + seenLabel.height / 2)),
+  ).toBeLessThan(2);
   await seen.focus();
   await page.keyboard.press('Enter');
   const season1 = page.getByRole('menuitemcheckbox', { name: 'Season 1', exact: true });
@@ -333,6 +343,15 @@ test('episode Sources hands remote focus to the ranked source choices', async ({
 }, testInfo) => {
   await setupSeries(page, { playback: true });
   await installSourcePlugin(page);
+
+  const search = page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', {
+    name: 'Search',
+    exact: true,
+  });
+  const titlePlay = page.locator('header.hero').getByRole('button', { name: 'Play', exact: true });
+  await search.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(titlePlay).toBeFocused();
 
   const episodeMenu = page.getByRole('button', { name: 'Options for episode 1' });
   await expect(episodeMenu).toBeVisible({ timeout: 30_000 });

@@ -858,6 +858,13 @@
       </div>
     {:else}
       {@const d = detail}
+      {#if __DEN_TV__ && warnings?.length}
+        <aside class="content-warnings-overlay" aria-label="Content warnings">
+          <strong>Content warnings</strong>
+          {#each warnings as warning (warning.id)}<span>{warning.label}</span>{/each}
+          <small>Powered by DoesTheDogDie.com</small>
+        </aside>
+      {/if}
       <div class="hero-content">
         <div class="head">
           {#if d.title.posterPath}<img

@@ -430,11 +430,16 @@
   }
 
   .utilities :global(.season-seen-trigger) {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
     padding: 0 16px;
     border: 1px solid var(--button-border);
     background: var(--button-bg);
     color: var(--button-fg);
     font-weight: 600;
+    white-space: nowrap;
   }
 
   .utilities :global(.season-seen-trigger.on) {

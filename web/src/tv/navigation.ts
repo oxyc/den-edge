@@ -316,9 +316,22 @@ export function installTVNavigation(): () => void {
       // below Search because the hero action is intentionally left-aligned; Down from the top bar must enter
       // the visible slide before it can skip to lower shelves.
       if (direction === 'down' && target instanceof HTMLElement && target.closest('.tv-bar')) {
-        const heroAction = document.querySelector<HTMLElement>(
-          '[data-route-page][data-active="true"] .billboard .slide[aria-hidden="false"] [data-tv-carousel-action="hero"]',
+        const activePage = document.querySelector<HTMLElement>(
+          '[data-route-page][data-active="true"]',
         );
+        // Detail owns one visual action sequence. Query the complete content block so a Resume/Continue control
+        // which precedes TitleActions remains the first stop as well; metadata is deliberately inert on TV.
+        const detailActions = activePage?.querySelector<HTMLElement>('.hero .hero-content');
+        const detailAction = detailActions
+          ? Array.from(detailActions.querySelectorAll<HTMLElement>(FOCUSABLE)).find(
+              (element) => element.tabIndex >= 0 && visible(element),
+            )
+          : undefined;
+        const heroAction =
+          detailAction ??
+          activePage?.querySelector<HTMLElement>(
+            '.billboard .slide[aria-hidden="false"] [data-tv-carousel-action="hero"]',
+          );
         if (heroAction && visible(heroAction)) {
           event.preventDefault();
           event.stopImmediatePropagation();

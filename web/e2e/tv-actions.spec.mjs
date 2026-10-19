@@ -76,7 +76,17 @@ async function setup(page) {
           ...film(1),
           overview: 'A movie found with the TV search.',
           genres: [{ id: 18, name: 'Drama' }],
-          credits: { cast: [], crew: [] },
+          credits: {
+            cast: [
+              {
+                id: 77,
+                name: 'Actor One',
+                character: 'Lead',
+                profile_path: '/actor-one.jpg',
+              },
+            ],
+            crew: [],
+          },
           recommendations: { results: [] },
           external_ids: {},
           videos: { results: [] },
@@ -135,6 +145,17 @@ test('TV search opens a poster without action menus and Back restores it', async
   await expect(page.locator('.hero .head a')).toHaveCount(0);
   await expect(page.locator('.hero .head').getByText('2026', { exact: true })).toBeVisible();
   await expect(page.locator('.hero .head').getByText('Drama', { exact: true })).toBeVisible();
+
+  // Exercise the actual lazy detail tail: a person owns one circular white ring, never the generic square link
+  // ring around the whole card.
+  await page.evaluate(() => scrollTo(0, document.body.scrollHeight));
+  const actor = page.getByRole('link', { name: /Actor One/ });
+  await expect(actor).toBeVisible({ timeout: 30_000 });
+  await actor.focus();
+  await expect(actor).toHaveCSS('outline-style', 'none');
+  await expect(actor).toHaveCSS('box-shadow', 'none');
+  await expect(actor.locator('.portrait')).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
+  await expect(actor.locator('.portrait')).toHaveCSS('outline-offset', '-4px');
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/search/);

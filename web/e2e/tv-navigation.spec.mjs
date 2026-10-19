@@ -365,7 +365,14 @@ test('LG Back closes a real ARIA trailer dialog without leaving its detail route
 
   const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
   const sources = page.locator('header.hero').getByRole('button', { name: 'Sources', exact: true });
-  await sources.focus();
+  const search = page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', {
+    name: 'Search',
+    exact: true,
+  });
+  await expect(sources).toBeVisible({ timeout: 30_000 });
+  await search.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(sources).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await expect(trailer).toBeFocused();
   await page.keyboard.press('Enter');

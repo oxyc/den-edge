@@ -88,7 +88,7 @@
         >{fact}</a
       >{:else}<span>{fact}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
-  <ContentWarnings {warnings} />
+  {#if !__DEN_TV__}<ContentWarnings {warnings} />{/if}
   {#if d.providers.length}
     <span
       class="providers"
