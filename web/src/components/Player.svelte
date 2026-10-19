@@ -3322,6 +3322,12 @@
     min-width: 0;
     max-width: 70ch;
     margin: 0;
+
+    /* The release's name is there to be copied — to look it up, or to report it — so it selects as text, unlike
+       the rest of the player. It sits in the footer, apart from the video, so selecting it plays or pauses nothing. */
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
   }
 
   /* What playback says as it goes: banners in a row of their own between the title and the video, so they cover
