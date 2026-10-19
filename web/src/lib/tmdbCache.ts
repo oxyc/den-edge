@@ -8,6 +8,7 @@
 import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
+import { titleBrief } from './tmdb';
 
 const TMDB = 'https://api.themoviedb.org/3/';
 
@@ -89,9 +90,20 @@ export interface Entry {
   status?: 404;
 }
 
-export interface Store {
-  get(key: string): Promise<Entry | undefined>;
-  put(key: string, entry: Entry): Promise<void>;
+/**
+ * What `cachingFetch`'s `briefOf` takes of an answer, kept beside it under the same key and as fresh for as long:
+ * read on its own, it spares its reader the whole answer.
+ */
+export interface Brief {
+  value: unknown;
+  fetchedAt: number;
+  /** The answer's `freshFor` when it was kept. */
+  freshMs: number;
+}
+
+export interface Kept<T> {
+  get(key: string): Promise<T | undefined>;
+  put(key: string, value: T): Promise<void>;
   /**
    * Drop what was fetched before `cutoff`, and the oldest beyond the `most` newest: at most `batch` of them, oldest
    * first. Returns how many it dropped; a full batch means more may be left.
@@ -99,6 +111,16 @@ export interface Store {
   prune(cutoff: number, most: number, batch: number): Promise<number>;
   clear(): Promise<void>;
 }
+
+export interface Store extends Kept<Entry> {
+  briefs?: Kept<Brief>;
+}
+
+/** For a question whose answers are briefed, what to keep of one; undefined for any other question. */
+export type BriefOf = (url: URL) => ((answer: Record<string, unknown>) => unknown) | undefined;
+
+/** `fetch`, and the brief kept of an answer (`Brief`), where one is kept and still to be shown. */
+export type TmdbFetch = typeof fetch & { brief(href: string): Promise<unknown> };
 
 export interface TmdbThrottle {
   retryMs: number;
@@ -309,12 +331,16 @@ function absent(): Response {
   });
 }
 
-/** `fetch`, keeping TMDB's GET answers in `store`; everything else goes straight to the network. */
+/**
+ * `fetch`, keeping TMDB's GET answers in `store`; everything else goes straight to the network. With `briefOf`, what
+ * it takes of an answer is kept in `store.briefs` whenever the answer is, and `brief` reads it without the answer.
+ */
 export function cachingFetch(
   store: Store | null,
   network: typeof fetch = relayFetch,
   now: () => number = Date.now,
-): typeof fetch {
+  briefOf?: BriefOf,
+): TmdbFetch {
   const handoff = store ? answersFor(store) : null;
   const remember = (key: string, entry: Entry, parsed?: object) => {
     if (!handoff) return;
@@ -384,9 +410,11 @@ export function cachingFetch(
       let dropped: number;
       do {
         await pauseForHousekeeping();
-        const result = await exclusively(() =>
-          store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH),
-        );
+        const result = await exclusively(async () => {
+          const answers = await store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH);
+          const briefs = await store.briefs?.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH);
+          return Math.max(answers, briefs ?? 0);
+        });
         // Another tab is doing this origin's same housekeeping. Its IndexedDB transaction is sufficient.
         if (result === undefined) return;
         dropped = result;
@@ -395,14 +423,74 @@ export function cachingFetch(
       .catch(() => undefined)
       .finally(() => (pruning = false));
   };
-  const keep = async (key: string, entry: Entry, parsed?: object) => {
+  /** What `briefOf` takes of an answer, kept beside it with the answer's own age and freshness. */
+  const keepBrief = (key: string, url: URL, entry: Entry, parsed: object | undefined) => {
+    const reduce = briefOf?.(url);
+    if (!reduce || !parsed || !store?.briefs) return;
+    void store.briefs
+      .put(key, {
+        value: reduce(parsed as Record<string, unknown>),
+        fetchedAt: entry.fetchedAt,
+        freshMs: freshFor(url.pathname, entry.body, url.searchParams.get('append_to_response')),
+      })
+      .catch(() => undefined);
+  };
+  const keep = async (key: string, url: URL, entry: Entry, parsed?: object) => {
     // Publish synchronously before the first await: a settled flight is removed in this same microtask turn.
     remember(key, entry, parsed);
+    keepBrief(key, url, entry, parsed);
     await store?.put(key, entry);
     if (keptSince !== undefined && ++keptSince >= PRUNE_EVERY) prune();
   };
+  /** An answer fetched now, as it is kept: checked, and dated as `fetchedAtOf` says. */
+  const entry = (
+    url: URL,
+    res: Response,
+    body: string,
+    parsed: object | undefined,
+  ): Entry | undefined => {
+    // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
+    // already has rather than asking again.
+    const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
+    const fetchedAt = fetchedAtOf(res, lent, now());
+    return parsed && now() - fetchedAt < RETENTION ? { body, fetchedAt, checked: true } : undefined;
+  };
   const refreshing = new Set<string>();
-  return async (input, init) => {
+  /** Ask again behind a kept answer that is past fresh; what comes back is kept for the next visit. */
+  const refresh = (key: string, url: URL, init?: RequestInit) => {
+    if (refreshing.has(key)) return;
+    refreshing.add(key);
+    // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
+    void network(proxied(url), { ...init, signal: AbortSignal.timeout(SHARED_MS) })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const body = await res.text();
+        const parsed = keepable(body);
+        const refreshed = entry(url, res, body, parsed);
+        if (refreshed) await keep(key, url, refreshed, parsed);
+      })
+      .catch(() => undefined)
+      .finally(() => refreshing.delete(key));
+  };
+  /**
+   * The brief kept of `href`'s answer, while the answer it was taken from could be shown: fresh, or past fresh for up
+   * to `STALE_FOR` (and then asked again behind it, as the answer would be). Undefined otherwise, and the caller asks
+   * for the whole answer, which keeps a brief of it.
+   */
+  const brief = async (href: string): Promise<unknown> => {
+    const briefs = store?.briefs;
+    if (!briefs || !href.startsWith(TMDB)) return undefined;
+    if (keptSince === undefined) prune();
+    const url = new URL(href);
+    const key = keyOf(url);
+    const kept = await briefs.get(key).catch(() => undefined);
+    if (!kept) return undefined;
+    const age = now() - kept.fetchedAt;
+    if (age >= RETENTION || age >= kept.freshMs + STALE_FOR) return undefined;
+    if (age >= kept.freshMs) refresh(key, url);
+    return kept.value;
+  };
+  const fetcher: typeof fetch = async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!href.startsWith(TMDB)) return network(input, init);
     const url = new URL(href);
@@ -412,15 +500,6 @@ export function cachingFetch(
     if (!store || (init?.method ?? 'GET') !== 'GET') return network(asked, init);
     if (keptSince === undefined) prune();
     const key = keyOf(url);
-    // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
-    // already has rather than asking again.
-    const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
-    const entry = (res: Response, body: string, parsed: object | undefined): Entry | undefined => {
-      const fetchedAt = fetchedAtOf(res, lent, now());
-      return parsed && now() - fetchedAt < RETENTION
-        ? { body, fetchedAt, checked: true }
-        : undefined;
-    };
     const remembered = recall(key);
     const stored = remembered?.entry ?? (await store.get(key).catch(() => undefined));
     if (stored?.status === 404 && now() - stored.fetchedAt < ABSENT_FOR) return absent();
@@ -436,24 +515,22 @@ export function cachingFetch(
     // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
     const fresh = freshFor(url.pathname, kept?.body, url.searchParams.get('append_to_response'));
     const age = kept ? now() - kept.fetchedAt : Infinity;
-    const keptParsed = kept && kept === remembered?.entry ? remembered.parsed : undefined;
-    if (kept && age < fresh) return answer(kept.body, keptParsed);
-    if (kept && age < fresh + STALE_FOR) {
-      if (!refreshing.has(key)) {
-        refreshing.add(key);
-        // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
-        void network(asked, { ...init, signal: AbortSignal.timeout(SHARED_MS) })
-          .then(async (res) => {
-            if (!res.ok) return;
-            const body = await res.text();
-            const parsed = keepable(body);
-            const refreshed = entry(res, body, parsed);
-            if (refreshed) await keep(key, refreshed, parsed);
-          })
-          .catch(() => undefined)
-          .finally(() => refreshing.delete(key));
+    /**
+     * The kept answer, handed out. A briefed question reaches here only where its brief was not kept or is past
+     * showing (`brief`), as for an answer kept before briefs were: the brief is taken from it now, once.
+     */
+    const keptAnswer = (shown: Entry) => {
+      let parsed = shown === remembered?.entry ? remembered.parsed : undefined;
+      if (store.briefs && briefOf?.(url)) {
+        parsed ??= keepable(shown.body);
+        keepBrief(key, url, shown, parsed);
       }
-      return answer(kept.body, keptParsed);
+      return answer(shown.body, parsed);
+    };
+    if (kept && age < fresh) return keptAnswer(kept);
+    if (kept && age < fresh + STALE_FOR) {
+      refresh(key, url, init);
+      return keptAnswer(kept);
     }
     try {
       const res = await network(asked, init);
@@ -463,25 +540,26 @@ export function cachingFetch(
           // Publish to the bounded handoff before IndexedDB settles, as successful answers do. The same six-hour
           // lifetime as den-edge avoids repeated origin RTTs and failed-resource console entries without hiding a
           // disabled proxy, rate limit, outage, or arbitrary 404.
-          void keep(key, { body: ABSENT_BODY, fetchedAt: now(), status: 404 }).catch(
+          void keep(key, url, { body: ABSENT_BODY, fetchedAt: now(), status: 404 }).catch(
             () => undefined,
           );
         }
         // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
-        if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body, keptParsed);
+        if (kept && (res.status >= 500 || res.status === 429)) return keptAnswer(kept);
         return res;
       }
       const body = await res.text();
       const parsed = keepable(body);
-      const fetched = entry(res, body, parsed);
+      const fetched = entry(url, res, body, parsed);
       // What it says about its titles den-edge kept as it fetched it (`src/title_metadata.rs`).
-      if (fetched) void keep(key, fetched, parsed).catch(() => undefined);
+      if (fetched) void keep(key, url, fetched, parsed).catch(() => undefined);
       return answer(body, parsed);
     } catch (error) {
-      if (kept) return answer(kept.body, keptParsed);
+      if (kept) return keptAnswer(kept);
       throw error;
     }
   };
+  return Object.assign(fetcher, { brief });
 }
 
 /**
@@ -528,25 +606,38 @@ function indexedStore(): Store | null {
   } catch {
     return null;
   }
+  // A database of their own, so a list's read of a few hundred briefs never clones an answer's body.
+  return {
+    ...indexedKept<Entry>(factory, 'den-tmdb', 'answers'),
+    briefs: indexedKept<Brief>(factory, 'den-tmdb-briefs', 'briefs'),
+  };
+}
+
+/** One object store of `Kept` values, each dated by its `fetchedAt`. */
+function indexedKept<T extends { fetchedAt: number }>(
+  factory: IDBFactory,
+  name: string,
+  storeName: string,
+): Kept<T> {
   const run = transactions(
     factory,
-    'den-tmdb',
+    name,
     1,
-    (database) => database.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt'),
-    'answers',
+    (database) => database.createObjectStore(storeName).createIndex('fetchedAt', 'fetchedAt'),
+    storeName,
   );
   // Answers arrive one by one off the network; nothing reads them back from here before the handoff (`remember`)
   // expires, so they are written a moment later, together.
-  const put = coalesced<[string, Entry], void>(async (puts) => {
+  const put = coalesced<[string, T], void>(async (puts) => {
     await run('readwrite', (answers) => {
       for (const [key, entry] of puts) answers.put(entry, key);
     });
     return puts.map(() => undefined);
   }, PUT_GATHER_MS);
   return {
-    get: coalesced<string, Entry | undefined>((keys) =>
+    get: coalesced<string, T | undefined>((keys) =>
       run('readonly', (answers) => {
-        const asked = keys.map((key) => answers.get(key) as IDBRequest<Entry | undefined>);
+        const asked = keys.map((key) => answers.get(key) as IDBRequest<T | undefined>);
         return () => asked.map((request) => request.result);
       }).then((found) => found ?? keys.map(() => undefined)),
     ),
@@ -645,12 +736,18 @@ export function sharingFlights(inner: typeof fetch): typeof fetch {
 }
 
 const store = indexedStore();
+const caching = cachingFetch(store, relayFetch, Date.now, titleBrief);
 
-/** `fetch`, with TMDB's answers kept in this browser. */
-export const tmdbFetch = sharingFlights(cachingFetch(store));
+/** `fetch`, with TMDB's answers kept in this browser, and a title's brief (`titleBrief`) beside its answer. */
+export const tmdbFetch: TmdbFetch = Object.assign(sharingFlights(caching), {
+  brief: caching.brief,
+});
 
 /** Forget every kept answer: the TMDB key was removed. */
 export async function clearTmdbCache(): Promise<void> {
   if (store) handoffAnswers.get(store)?.clear();
-  await store?.clear().catch(() => undefined);
+  await Promise.all([
+    store?.clear().catch(() => undefined),
+    store?.briefs?.clear().catch(() => undefined),
+  ]);
 }

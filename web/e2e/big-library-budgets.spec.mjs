@@ -57,11 +57,11 @@ const MEMORY_MB = 48;
  * loads, not what it keeps. About 66 MB for the Owner's on Home, most of it the one fold its Home view is chosen from.
  * While a pass that read back only this browser's own writes kept no head, a library this browser had written (the
  * household's move writes the Owner's whole history) was read from den-edge and opened again on every visit: 3,079
- * rows (`ROWS_READ`), and 140 MB. The Watchlist names the whole history from each title's kept TMDB answer, every
- * one read and parsed whole for its name and poster: about 225 MB, and its own budget until naming reads less.
+ * rows (`ROWS_READ`), and 140 MB. The Watchlist names the whole history: from each title's kept TMDB answer, every
+ * one read and parsed whole for its name and poster, it allocated about 225 MB; from each one's brief beside it
+ * (`titleBrief`), it allocates no more than Home.
  */
-const ALLOCATED_MB = { Watchlist: 260 };
-const ALLOCATED_DEFAULT_MB = 100;
+const ALLOCATED_MB = 100;
 /** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
 const ROWS_READ = 100;
 
@@ -489,7 +489,7 @@ for (const [label, type, device, options] of ENGINES) {
               Math.max(...result.held.map(({ allocated }) => allocated ?? 0)),
               `${surface.name}: MB a library Worker allocated ${JSON.stringify(result.held)}`,
             )
-            .toBeLessThan(ALLOCATED_MB[surface.name] ?? ALLOCATED_DEFAULT_MB);
+            .toBeLessThan(ALLOCATED_MB);
         if (options.cpu)
           expect
             .soft(result.longest, `${surface.name}: longest task ms`)

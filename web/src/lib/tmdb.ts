@@ -8,6 +8,53 @@ export interface Details {
   shape?: Shape;
 }
 
+/** What a title's own record is asked with when only its display and season layout are wanted. */
+export const titleAppends = (type: MediaType): string =>
+  type === 'tv' ? 'credits,external_ids' : 'credits';
+
+/**
+ * Raised whenever `toTitle` or `seriesShape` change what they keep: a brief written before then is not read, and the
+ * title is named from its whole answer once more, which writes the new brief.
+ */
+const BRIEF_VERSION = 1;
+
+/** A title's `Details`, kept beside its whole TMDB answer (`tmdbCache`); `details` is null where it names nothing. */
+export interface TitleBrief {
+  v: number;
+  details: Details | null;
+}
+
+/**
+ * For the question `titleAppends` asks of a title's record, what to keep of its answer: the few fields a list names
+ * it by. The answer itself carries the title's whole credits, tens of kilobytes read and parsed for a name and a
+ * poster; a library names every title it holds that way.
+ */
+export function titleBrief(
+  url: URL,
+): ((answer: Record<string, unknown>) => TitleBrief) | undefined {
+  const match = /^\/3\/(movie|tv)\/(\d+)$/.exec(url.pathname);
+  if (!match) return undefined;
+  const ref = { type: match[1] as MediaType, id: Number(match[2]) };
+  if (url.searchParams.get('append_to_response') !== titleAppends(ref.type)) return undefined;
+  return (answer) => {
+    const title = toTitle(ref, answer);
+    return {
+      v: BRIEF_VERSION,
+      details: title
+        ? ref.type === 'tv'
+          ? { title, shape: seriesShape(answer) }
+          : { title }
+        : null,
+    };
+  };
+}
+
+/** A kept brief's `Details`, where it was written by this version and names the title. */
+export function briefDetails(brief: unknown): Details | undefined {
+  const kept = brief as Partial<TitleBrief> | null | undefined;
+  return kept?.v === BRIEF_VERSION && kept.details ? kept.details : undefined;
+}
+
 /** Episodes per season and the newest aired episode, from a series' TMDB details. */
 export function seriesShape(details: Record<string, unknown>): Shape | undefined {
   if (!Array.isArray(details.seasons)) return undefined;
