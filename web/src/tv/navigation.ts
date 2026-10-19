@@ -1,4 +1,6 @@
 import { flushSync } from 'svelte';
+import { routeKey as pageRouteKey } from '../lib/navigation';
+import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
 import { exitTvApp } from './platform';
@@ -191,12 +193,26 @@ export function installTVNavigation(): () => void {
   const routeChanged = (event?: Event) => {
     remember();
     const requested = (event as CustomEvent<{ path?: string }> | undefined)?.detail?.path;
-    locationKey = routeKey(requested);
+    const previousKey = locationKey;
+    const nextKey = routeKey(requested);
+    const active = document.activeElement;
+    const identity = active instanceof HTMLElement ? focusIdentity(active) : undefined;
+    locationKey = nextKey;
+    // A link that changes only the active page's address (a series season, Search facet, or watched year) remains
+    // the same control in the same retained page. Keep it focused and teach the new history entry its identity;
+    // route-level restoration is for a page boundary or Back, and would otherwise jump to the page's first control.
+    if (
+      active instanceof HTMLAnchorElement &&
+      identity &&
+      routeKey(active.href) === nextKey &&
+      pageRouteKey(parseRoute(previousKey)) === pageRouteKey(parseRoute(nextKey))
+    ) {
+      rememberAt(nextKey, identity);
+      return;
+    }
     // Focusing Search itself opens /search. Carry that field into the destination instead of resetting to
     // the brand between the focus event and the route mount.
-    const active = document.activeElement;
     if (!memory.has(locationKey) && isEditable(active)) {
-      const identity = focusIdentity(active);
       if (identity) rememberAt(locationKey, identity);
     }
     restoreSoon(memory.get(locationKey));
