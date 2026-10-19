@@ -320,6 +320,38 @@ for (const width of [390, 834, 1280])
         'href',
         'https://www.themoviedb.org/tv/9/watch',
       );
+      const watchedMenu = active.getByRole('button', { name: 'Mark watched', exact: true });
+      await expect(watchedMenu).toBeVisible();
+      await watchedMenu.click();
+      await expect(active.getByRole('menuitemcheckbox', { name: 'Whole series' })).toBeFocused();
+      await expect(active.getByRole('menuitemcheckbox', { name: 'Season 1' })).toBeVisible();
+      await page.keyboard.press('Escape');
+
+      const promotedSources = active
+        .locator('header.hero')
+        .getByRole('button', { name: 'Sources', exact: true });
+      if (width < 760) await expect(promotedSources).toBeHidden();
+      else await expect(promotedSources).toBeVisible();
+
+      if (width === 1280) {
+        // Metadata stays natively focusable. Directional navigation treats those links as supporting context and
+        // crosses directly to the primary action instead of making the title facts into an obstacle course.
+        const imdb = active.getByRole('link', { name: /IMDb rating/ });
+        const tmdb = active.getByRole('link', { name: /TMDB rating/ });
+        await tmdb.focus();
+        await expect(tmdb).toBeFocused();
+        await page.keyboard.press('Tab');
+        await imdb.focus();
+        await page.keyboard.press('ArrowDown');
+        await expect
+          .poll(() =>
+            page.evaluate(() => document.activeElement?.closest('.hero-actions') !== null),
+          )
+          .toBe(true);
+        expect(
+          await page.evaluate(() => document.activeElement?.hasAttribute('data-spatial-skip')),
+        ).toBe(false);
+      }
       const row = active.locator('.episode').first();
       await row.scrollIntoViewIfNeeded();
       await expect(row.locator('.still img')).toBeVisible();
@@ -375,6 +407,19 @@ for (const width of [390, 834, 1280])
       await browser.close();
     }
   });
+
+test('phone promotes Sources only when it replaces unavailable playback', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await setup(page);
+  await page.addInitScript(() => history.replaceState(null, '', '/tv/9?no-play'));
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?no-play`);
+  const active = page.locator('[data-active="true"]');
+  await expect(active.locator('h1')).toHaveText('The Series');
+  await expect(
+    active.locator('header.hero').getByRole('button', { name: 'Sources', exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test('season requests cannot overwrite a newer selection and retained detail and person filters survive history', async () => {
   const browser = await chromium.launch({

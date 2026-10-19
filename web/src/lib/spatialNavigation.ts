@@ -218,9 +218,12 @@ function score(from: DOMRect, to: DOMRect, direction: Direction): number | null 
 
 export function moveFocus(direction: Direction): boolean {
   const current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const candidates = focusables();
+  const allCandidates = focusables();
+  // Progressive enhancement only: low-priority links remain in the document's native Tab order and keep all
+  // pointer/screen-reader semantics, but they do not interrupt the short directional path between primary controls.
+  const candidates = allCandidates.filter((element) => !element.hasAttribute('data-spatial-skip'));
   if (!candidates.length) return false;
-  if (!current || !visible(current) || !candidates.includes(current)) {
+  if (!current || !visible(current) || !allCandidates.includes(current)) {
     const first = candidates[0]!;
     first.focus({ preventScroll: true });
     first.scrollIntoView({ block: 'center', inline: 'center' });

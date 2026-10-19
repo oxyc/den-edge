@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import Router from '../src/Router.svelte';
   import Detail from '../src/components/Detail.svelte';
   import Person from '../src/components/Person.svelte';
@@ -11,6 +11,9 @@
   import { fetchSourceList } from '../src/lib/titleSources';
   import { fixtureLibraryService } from './libraryService';
   import { fixtureContentServiceContext } from './contentService';
+  import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
+
+  onMount(installKeyboardNavigation);
 
   const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
   const routes = { scout: [{ url: 'http://scout.internal' }] };
@@ -91,6 +94,10 @@
       progress: { value: value ? 1 : 0, at: [200, 0, 'test'], viewing: 1 },
     });
   }
+  function seenSeason(t: Title, s: number, numbers: number[], value: boolean) {
+    for (const number of numbers) seen(t, s, number, value);
+  }
+  const noDirectPlayback = new URLSearchParams(location.search).has('no-play');
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
@@ -119,9 +126,10 @@
           onwatchlist={noop}
           onseen={noop}
           onreact={(title, value) => (row = { ...row, reaction: stamped(value) })}
-          onplay={play}
-          onplayhere={play}
+          onplay={noDirectPlayback ? undefined : play}
+          onplayhere={noDirectPlayback ? undefined : play}
           onepisode={seen}
+          onseason={seenSeason}
           model={library.model}
         />
       {/if}

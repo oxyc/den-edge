@@ -215,7 +215,7 @@
     <Button
       variant="secondary"
       size="large"
-      class="pill sources"
+      class={`pill sources${onplayhere || onplay ? ' with-primary' : ''}`}
       icon="sources"
       label="Sources"
       busy={externallyBusy()}
@@ -481,6 +481,12 @@
   /* Four quiet, equal tap targets on a phone: state belongs to the glyph and a restrained tint, not a row of
      permanent cards. Focus remains the shared high-contrast ring, while hover/press briefly reveals the target. */
   @media (width < 760px) {
+    /* Source selection already has its full disclosure below the hero. On a phone, promote it only into a vacant
+       Play slot; beside Play it would crowd the action row without adding a capability. */
+    .detail-page :global(.sources.with-primary) {
+      display: none;
+    }
+
     .detail-page .pills {
       display: flex;
       flex-wrap: wrap;
@@ -516,6 +522,15 @@
       flex: 0 0 44px;
       width: 44px;
       padding: 0;
+    }
+
+    .detail-page .utilities :global(.season-seen-trigger span) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
 
     .detail-page .utilities > :global(.pill[aria-pressed='true']),

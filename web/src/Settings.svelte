@@ -34,6 +34,7 @@
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
   import Button from './components/Button.svelte';
+  import { keyboardInput } from './lib/inputModality';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -112,7 +113,8 @@
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
     const restoreFocus =
-      __DEN_TV__ && document.activeElement instanceof HTMLElement
+      document.activeElement instanceof HTMLElement &&
+      (__DEN_TV__ || keyboardInput() || document.activeElement.matches(':focus-visible'))
         ? document.activeElement
         : undefined;
     if (!quiet) {
@@ -128,9 +130,9 @@
       return false;
     } finally {
       if (!quiet) saving = false;
-      // Saving temporarily disables the settings surface. TV engines move focus to the document when the active
-      // native control becomes disabled, which strands the next remote press. Return to that same connected
-      // control once the save settles, unless a dialog/route/user action deliberately focused something else.
+      // Saving temporarily disables the settings surface. Some engines move focus to the document when the active
+      // native control becomes disabled, which strands the next keyboard/remote press. Return keyboard users to that
+      // same connected control once the save settles, without reopening a phone keyboard after a pointer save.
       if (restoreFocus) {
         await tick();
         if (

@@ -55,6 +55,7 @@
           >{@render primaryRating()}</span
         >{:else}<a
           class="primary"
+          data-spatial-skip
           href={primaryHref}
           target="_blank"
           rel="noopener noreferrer"
@@ -65,6 +66,7 @@
       {#if __DEN_TV__}<span aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
           ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></span
         >{:else}<a
+          data-spatial-skip
           href={tmdbHref}
           target="_blank"
           rel="noopener noreferrer"
@@ -84,8 +86,10 @@
 {/if}
 <div class="facts">
   {#each facts as fact, i (`${i}:${fact}`)}{#if i}<span aria-hidden="true">·</span
-      >{/if}{#if factHref(fact, i) && !__DEN_TV__}<a class="filter-link" href={factHref(fact, i)}
-        >{fact}</a
+      >{/if}{#if factHref(fact, i) && !__DEN_TV__}<a
+        class="filter-link"
+        data-spatial-skip
+        href={factHref(fact, i)}>{fact}</a
       >{:else}<span>{fact}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
   {#if !__DEN_TV__}<ContentWarnings {warnings} />{/if}
@@ -104,6 +108,7 @@
               />{:else}{provider.name}{/if}</span
           >{:else}<a
             class="provider"
+            data-spatial-skip
             href={serviceHref(provider.id, region, provider.name)}
             aria-label={`Browse ${provider.name}`}
             title={`Browse ${provider.name}`}
@@ -116,6 +121,7 @@
           >{/if}
       {/each}{#if __DEN_TV__}<span class="attribution">JustWatch</span>{:else}<a
           class="attribution"
+          data-spatial-skip
           href={d.watchLink ?? 'https://www.justwatch.com/'}
           target="_blank"
           rel="noopener noreferrer">JustWatch</a
@@ -127,6 +133,7 @@
     {#each d.genres as genre, i (genre.id)}{#if i}<span class="separator" aria-hidden="true">·</span
         >{/if}{#if __DEN_TV__}<span>{genre.name}</span>{:else}<a
           class="filter-link"
+          data-spatial-skip
           href={searchHref('', {
             type: d.title.type === 'tv' ? 'tv' : 'movie',
             chips: [`genre-${genre.id}`],

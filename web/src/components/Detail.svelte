@@ -733,7 +733,7 @@
     return Array.from({ length: Math.min(listed, count) }, (_, index) => index + 1);
   }
 
-  async function markTvSeasons(picked: number | undefined, seen: boolean) {
+  async function markSeasons(picked: number | undefined, seen: boolean) {
     const d = untrack(() => detail);
     if (!d || !onseason) return;
     const selected = d.seasons.filter(
@@ -756,9 +756,9 @@
     }
   }
 
-  const tvSeenItems = $derived.by((): MenuItem[] | undefined => {
+  const seriesSeenItems = $derived.by((): MenuItem[] | undefined => {
     const d = detail;
-    if (!__DEN_TV__ || d?.title.type !== 'tv' || !onseason) return undefined;
+    if (d?.title.type !== 'tv' || !onseason) return undefined;
     const regular = d.seasons.filter((item) => item.number > 0);
     const state = (picked?: number) => {
       const selected =
@@ -777,14 +777,14 @@
         label: 'Whole series',
         checked: state(),
         disabled: busy,
-        onselect: () => void markTvSeasons(undefined, !state()),
+        onselect: () => void markSeasons(undefined, !state()),
       },
       ...regular.map((item) => ({
         kind: 'checkbox' as const,
         label: item.name,
         checked: state(item.number),
         disabled: busy,
-        onselect: () => void markTvSeasons(item.number, !state(item.number)),
+        onselect: () => void markSeasons(item.number, !state(item.number)),
       })),
     ];
   });
@@ -944,7 +944,7 @@
             onwatchlist={(on) => onwatchlist(d.title, on)}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}
-            seenItems={tvSeenItems}
+            seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
             onplay={!__DEN_TV__ && onplay
               ? () => onplay(d.title, target?.season, target?.episode)
@@ -952,7 +952,7 @@
             onplayhere={onplayhere
               ? () => onplayhere(d.title, target?.season, target?.episode)
               : undefined}
-            onsources={__DEN_TV__ && !guestScout && !restricted
+            onsources={!guestScout && !restricted
               ? () => {
                   sourceTarget = target;
                   void sourcesPanel?.show();
