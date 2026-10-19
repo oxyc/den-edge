@@ -32,6 +32,7 @@
   let {
     title,
     caption,
+    lead,
     progress,
     live,
     href,
@@ -53,6 +54,8 @@
      * "2019 · Series"). A landscape card — an episode or a download — has no year line, only this.
      */
     caption?: string;
+    /** In place of the year only, keeping the rest of the year line: "Netflix · Series". */
+    lead?: string;
     progress?: number;
     /** Where it is playing right now on some device, as a clock that ticks (`livePosition`). */
     live?: string;
@@ -150,7 +153,7 @@
   const faded = $derived(checkAvailability && availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   const line = $derived(
-    landscape ? caption : titleCaption(title, caption, libraryShapes.of(title)),
+    landscape ? caption : titleCaption(title, caption, libraryShapes.of(title), lead),
   );
   // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
   // earlier season, which says nothing about the episode this card is fetching.

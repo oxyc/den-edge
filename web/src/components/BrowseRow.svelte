@@ -284,6 +284,7 @@
           <PosterCard
             {title}
             caption={row.caption?.(title)}
+            lead={row.lead?.(title)}
             href={titleHref(title)}
             onscreen={index >= onscreen.start && index < onscreen.end}
           />

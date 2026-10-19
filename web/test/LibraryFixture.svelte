@@ -273,7 +273,9 @@
           true,
         )
       : library.session;
-  if (kid) void session.model?.ready.then(() => session.configureServices());
+  // `services`: find atlas and the rest as the app does, so Home draws its service rows.
+  if (kid || params.has('services'))
+    void session.model?.ready.then(() => session.configureServices());
   let visitorReady = $state(!visitor);
   if (visitor) {
     const activity = (session as VisitorProfileSession).profileActivity!;

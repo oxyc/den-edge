@@ -93,16 +93,32 @@ describe('poster captions', () => {
           ]),
         ),
       ).toBe('2019 · 2 seasons · Likely match');
+      // A row's own caption replaces the whole line.
       expect(
         titleCaption(
           series,
-          'Netflix',
+          '2019 · Remake',
           shape([
             [1, 5],
             [2, 5],
           ]),
         ),
-      ).toBe('Netflix');
+      ).toBe('2019 · Remake');
+    });
+
+    it('keeps saying so where a service name takes the year’s place', () => {
+      const two = shape([
+        [1, 5],
+        [2, 5],
+      ]);
+      expect(titleCaption(series, undefined, undefined, 'Netflix')).toBe('Netflix · Series');
+      expect(titleCaption(series, undefined, two, 'Netflix')).toBe('Netflix · 2 seasons');
+      expect(titleCaption(series, undefined, shape([[1, 5]]), 'Netflix · Max')).toBe(
+        'Netflix · Max · 5 episodes',
+      );
+      expect(titleCaption(title, undefined, undefined, 'Netflix')).toBe('Netflix');
+      // A row with nothing to say of a title leaves its year line as it is.
+      expect(titleCaption(series, undefined, undefined, undefined)).toBe('2019 · Series');
     });
   });
 });

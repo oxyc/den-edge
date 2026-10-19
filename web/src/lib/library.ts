@@ -73,9 +73,12 @@ export interface Title {
  * A poster's year line, which also says a series is one: "2019 · 4 seasons", "2019 · 12 episodes" for a single
  * season, or "2019 · Series" where its season layout is not known here. A film's is its year alone. Specials
  * (season 0) and seasons TMDB lists with no episodes yet are not counted.
+ *
+ * `lead` stands in for the year where a row says something more useful in its place — the service a pooled row
+ * found the title on: "Netflix · 4 seasons", "Netflix · Series", a film's "Netflix".
  */
-export function yearCaption(title: Title, shape?: Shape): string | undefined {
-  const year = title.year ? String(title.year) : undefined;
+export function yearCaption(title: Title, shape?: Shape, lead?: string): string | undefined {
+  const year = lead ?? (title.year ? String(title.year) : undefined);
   if (title.type !== 'tv') return year;
   const seasons = shape ? [...shape.counts].filter(([season, n]) => season > 0 && n > 0) : [];
   const episodes = seasons.length === 1 ? seasons[0]![1] : 0;
@@ -89,8 +92,13 @@ export function yearCaption(title: Title, shape?: Shape): string | undefined {
 }
 
 /** A poster's short second line, including Atlas's confidence tier when the card came from a plot-facet answer. */
-export function titleCaption(title: Title, caption?: string, shape?: Shape): string | undefined {
-  const ordinary = caption ?? yearCaption(title, shape);
+export function titleCaption(
+  title: Title,
+  caption?: string,
+  shape?: Shape,
+  lead?: string,
+): string | undefined {
+  const ordinary = caption ?? yearCaption(title, shape, lead);
   return (
     [ordinary, title.likely ? 'Likely match' : undefined].filter(Boolean).join(' · ') || undefined
   );
