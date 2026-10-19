@@ -200,14 +200,32 @@ async function modifiedClickLeavesThePage(browser) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${PAGE}`);
     await showing(page, 'Season 1', 'Season 1 premiere');
-    // The new tab's own document: what matters here is only where the browser opened it.
-    await context.route(`${E2E_ORIGIN}${PAGE}?season=2`, (route) =>
+    // The new tab is the browser's own, and only where it opened matters: its document is a stub.
+    const opening = `${E2E_ORIGIN}${PAGE}?season=2`;
+    await context.route(opening, (route) =>
       route.fulfill({ contentType: 'text/html', body: '<title>Opened</title>' }),
+    );
+    // No route sees the tab's document request in WebKit, nor in Chromium when the tab asks before Playwright has
+    // attached to it, so the dev server answers with the app's page. What that page then asks for is refused here: its
+    // manifest and icons, and its entry script, so the app never starts there and makes none of its requests. This
+    // page's own requests to this origin are its page routes' to answer, which come first, so it never meets this one.
+    // Only these paths: a context route over the whole origin sometimes kept Chromium's new tab from ever finishing
+    // its attach, and the click never returned.
+    await context.route(
+      new RegExp(
+        `^${E2E_ORIGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(?:src/main\\.ts|manifest\\.webmanifest|favicon[^/]*|apple-touch-icon\\.png)$`,
+      ),
+      (route) => route.abort('blockedbyclient'),
     );
     const opened = context.waitForEvent('page');
     await tab(page, 'Season 2').click({ modifiers: ['ControlOrMeta'] });
     const other = await opened;
-    await expect.poll(() => other.url()).toBe(`${E2E_ORIGIN}${PAGE}?season=2`);
+    // Where the browser opened it, read from the tab itself. Chromium can hand the tab over while its first navigation
+    // is still committing, and Playwright then never records that commit: `other.url()` stays about:blank although the
+    // tab is at the season's address. Asking the tab's own document is what holds for both.
+    await expect
+      .poll(() => other.evaluate(() => location.href).catch(() => 'not yet'), { timeout: 30_000 })
+      .toBe(opening);
     await other.close();
     expect(address(page)).toBe(PAGE);
     await showing(page, 'Season 1', 'Season 1 premiere');
