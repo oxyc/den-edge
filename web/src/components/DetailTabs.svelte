@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import ButtonIcon from './ButtonIcon.svelte';
+  import ChipSelect from './ChipSelect.svelte';
 
   let {
     tabs,
@@ -124,18 +124,16 @@
     </div>
   </div>
   {#if collapsed}
-    <!-- A native select, so a phone opens its own picker and a screen reader reads a pop-up button. It lies unseen
-         over the chip that shows the season, as the opinion picker does (`TitleActions.svelte`). -->
     <div class="tabs" class:many={tabs.length > 6}>
-      <div class="pick on season-picker">
-        <span aria-hidden="true">{current?.label}</span>
-        <ButtonIcon name="chevron" />
-        <select aria-label={one} {value} onchange={(event) => onchange(event.currentTarget.value)}>
-          {#each tabs as tab (tab.value)}
-            <option value={tab.value}>{tab.option ?? tab.label}</option>
-          {/each}
-        </select>
-      </div>
+      <ChipSelect
+        class="season-picker"
+        label={one}
+        text={current?.label ?? ''}
+        {value}
+        options={tabs.map((tab) => ({ value: tab.value, label: tab.option ?? tab.label }))}
+        round={tabs.length > 6}
+        {onchange}
+      />
     </div>
   {/if}
 </div>
@@ -168,8 +166,7 @@
     background: rgb(255 255 255 / 0.07);
   }
 
-  a,
-  .pick {
+  a {
     display: flex;
     flex: 1 0 auto;
     align-items: center;
@@ -186,43 +183,15 @@
     white-space: nowrap;
   }
 
-  a.on,
-  .pick.on {
+  a.on {
     color: var(--fg);
     background: rgb(255 255 255 / 0.16);
     box-shadow: 0 1px 6px #0003;
   }
 
-  .pick {
-    --button-icon-size: 18px;
-
-    position: relative;
-    gap: 6px;
-    padding-inline-end: 14px;
-
-    /* No text-selection caret or loupe on iOS over the label and glyph under the select that takes the tap. */
-    -webkit-touch-callout: none;
-    -webkit-user-select: none;
-    user-select: none;
-  }
-
-  /* The control itself fills the chip — never hidden, which would stop a phone opening it. */
-  .pick select {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    padding: 0;
-    border: 0;
-    opacity: 0;
-    appearance: none;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  /* Where the browser draws the open menu itself, on its own ground. */
-  .pick option {
-    color: initial;
+  a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .many {
@@ -231,26 +200,14 @@
     background: none;
   }
 
-  .many a,
-  .many .pick {
+  .many a {
     border: 1px solid var(--line);
     border-radius: 999px;
   }
 
   @media (width <= 759px) {
-    a,
-    .pick {
+    a {
       padding-inline: 16px;
     }
-
-    .pick {
-      padding-inline-end: 12px;
-    }
-  }
-
-  a:focus-visible,
-  .pick:has(select:focus-visible) {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
   }
 </style>

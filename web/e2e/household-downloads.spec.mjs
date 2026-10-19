@@ -2,14 +2,17 @@
 // The download queue and the source plugins it searches are the household's (profiles-v1 §6.1): Owner's activity
 // moves to a library of its own, but `set:plugins` and every `download:*` row stay on the household's library, which
 // is also where the TV reads the queue. A title page opened as Owner lists the household's sources and queues there.
-import { test, expect, chromium } from '@playwright/test';
+import { test, expect, chromium, webkit } from '@playwright/test';
+import { existsSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { routeBigHousehold } from './big-library.mjs';
 import { CODE, newEdge } from './guest-edge.mjs';
 
 const SERIES = 1399;
 const IMDB = 'tt0001399';
-const RELEASE = 'Series.1399.S02E01.1080p.WEB.H264-GRP.mkv';
+/** The one release the plugin lists for an episode of season 2. */
+const release = (episode) => `Series.1399.S02E0${episode}.1080p.WEB.H264-GRP.mkv`;
+const RELEASE = release(1);
 
 /** den-edge's routes table, as the public name serves it: each Den service under this origin. */
 const ROUTES = {
@@ -47,7 +50,8 @@ const HEARTH = {
 
 /**
  * One page of the household: the big-library fixture's den-edge and TMDB, the routes table, and `addon` answering its
- * manifest, the episode's list and its play ticket (every ticket request is kept on `asked`).
+ * manifest, each season 2 episode's list and its play ticket (every ticket request is kept on `asked`). Episode 1's
+ * ticket is `addon.ticket`, and episode N's `addon.ticket-N`.
  */
 async function routeHousehold(page, edge, addon, asked = []) {
   await routeBigHousehold(page, edge, { atlas: false });
@@ -57,19 +61,24 @@ async function routeHousehold(page, edge, addon, asked = []) {
     const path = new URL(request.url()).pathname;
     if (path === `${addon.base}/manifest.json`)
       return route.fulfill({ json: { id: addon.id, version: '1.0.0', resources: ['stream'] } });
-    if (path === `${addon.base}/stream/series/${encodeURIComponent(`${IMDB}:2:1`)}.json`)
+    const episode = decodeURIComponent(path).match(
+      new RegExp(`^${addon.base}/stream/series/${IMDB}:2:(\\d+)\\.json$`),
+    );
+    if (episode) {
+      const n = Number(episode[1]);
       return route.fulfill({
         json: {
           streams: [
             {
-              title: RELEASE,
-              url: addon.ticket,
-              behaviorHints: { filename: RELEASE },
+              title: release(n),
+              url: n === 1 ? addon.ticket : `${addon.ticket}-${n}`,
+              behaviorHints: { filename: release(n) },
               attributes: { resolution: '1080p', cached: false, seeders: 12, sizeBytes: 2e9 },
             },
           ],
         },
       });
+    }
     return route.fulfill({ status: 404, json: { error: 'not_found' } });
   });
   await page.route(`${E2E_ORIGIN}${addon.relayed}**`, (route) => {
@@ -176,6 +185,101 @@ async function downloadsAnEpisode(addon) {
   } finally {
     await browser.close();
   }
+}
+
+/**
+ * Sources opened for S2·E1 switch to E3 from the picker beside their heading: the heading, the list and a Download are
+ * then E3's, as if Sources had been opened from E3's own menu.
+ */
+async function switchesEpisode(browserType, viewport) {
+  const browser = await browserType.launch(
+    browserType === chromium
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+      : {},
+  );
+  try {
+    const edge = newEdge({ profiles: true });
+    const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+    const page = await context.newPage();
+    const asked = await routeHousehold(page, edge, SCOUT);
+    await splitHousehold(page, edge, SCOUT);
+
+    await page.setViewportSize(viewport);
+    await page.goto(`${E2E_ORIGIN}/tv/${SERIES}`);
+    // Once the series page is open: WebKit reports the service probes a navigation cuts short as page errors.
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const active = page.locator('[data-active="true"]');
+    // A phone is too narrow for the four seasons' chips, and offers them as one picker.
+    const seasons = active.getByRole('combobox', { name: 'Season', exact: true });
+    const seasonTab = active.getByRole('tab', { name: 'Season 2', exact: true });
+    await expect(seasons.or(seasonTab)).toBeVisible({ timeout: 30_000 });
+    if (await seasons.isVisible()) await seasons.selectOption('2');
+    else await seasonTab.click();
+    const row = active.locator('.episode').first();
+    await expect(row).toContainText('Episode 1');
+    await row.getByRole('button', { name: 'Options for episode 1', exact: true }).click();
+    await row.getByRole('menuitem', { name: 'Sources', exact: true }).click();
+
+    const panel = active.locator('.source-panel');
+    await expect(panel.getByText('Sources for S2 · E1')).toBeVisible();
+    await expect(panel.locator('li').filter({ hasText: release(1) })).toBeVisible({
+      timeout: 30_000,
+    });
+    const episodes = panel.getByRole('combobox', { name: 'Episode', exact: true });
+    await expect(episodes).toHaveValue('1');
+    const options = await episodes.locator('option').allTextContents();
+    expect(options).toHaveLength(10);
+    expect(options[2]).toBe('E3 · Episode 3');
+
+    // The picker sits at the heading's right, and neither runs out of the panel.
+    const [heading, picker, box] = await Promise.all([
+      panel.getByText('Sources for S2 · E1').boundingBox(),
+      episodes.locator('..').boundingBox(),
+      panel.boundingBox(),
+    ]);
+    expect(picker.x).toBeGreaterThan(heading.x);
+    expect(picker.x + picker.width).toBeLessThanOrEqual(box.x + box.width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+
+    await episodes.selectOption('3');
+    await expect(panel.getByText('Sources for S2 · E3')).toBeVisible();
+    const source = panel.locator('li').filter({ hasText: release(3) });
+    await expect(source).toBeVisible({ timeout: 30_000 });
+    await expect(panel.locator('li').filter({ hasText: release(1) })).toHaveCount(0);
+    await expect(episodes).toHaveValue('3');
+
+    await source.getByRole('button', { name: 'Download', exact: true }).click();
+    await expect.poll(() => asked[0]).toBe(`GET ${SCOUT.relayed}episode-ticket-3?prefetch=1`);
+    // Read before leaving the page, for the same reason.
+    expect(errors).toEqual([]);
+    await page.goto(`${E2E_ORIGIN}/downloads`);
+    await expect(page.locator(`[data-download="tv:${SERIES}:2:3"]`)).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.locator(`[data-download="tv:${SERIES}:2:1"]`)).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+}
+
+const needsWebKit = () =>
+  test.skip(
+    !process.env.CI && !existsSync(webkit.executablePath()),
+    'needs WebKit: npx playwright install webkit',
+  );
+
+for (const [name, viewport] of [
+  ['a phone', { width: 390, height: 844 }],
+  ['a desktop', { width: 1280, height: 900 }],
+]) {
+  test(`Sources switch to another episode from the picker by their heading, on ${name}`, async () => {
+    await switchesEpisode(chromium, viewport);
+  });
+  test(`Sources switch to another episode from the picker by their heading, on ${name}, in WebKit`, async () => {
+    needsWebKit();
+    await switchesEpisode(webkit, viewport);
+  });
 }
 
 test('on a split household Owner lists the household’s Scout sources and queues on the household', async () => {
