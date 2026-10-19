@@ -52,6 +52,19 @@ const LONGEST_TASK_MS = 600;
  */
 const MEMORY_MB = 48;
 
+/**
+ * MB any one library Worker may allocate over a returning visit, collected or not: what a phone's tab peaks at while it
+ * loads, not what it keeps. About 66 MB for the Owner's on Home, most of it the one fold its Home view is chosen from.
+ * While a pass that read back only this browser's own writes kept no head, a library this browser had written (the
+ * household's move writes the Owner's whole history) was read from den-edge and opened again on every visit: 3,079
+ * rows (`ROWS_READ`), and 140 MB. The Watchlist names the whole history from each title's kept TMDB answer, every
+ * one read and parsed whole for its name and poster: about 225 MB, and its own budget until naming reads less.
+ */
+const ALLOCATED_MB = { Watchlist: 260 };
+const ALLOCATED_DEFAULT_MB = 100;
+/** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
+const ROWS_READ = 100;
+
 /** Milliseconds from navigation start to a library surface's `shelves ready` milestone (`startupTiming.ts`). */
 const SHELVES_MS = 4_000;
 /** Milliseconds a library Worker may take to answer, and a series' episodes to draw, while the projection is rebuilt. */
@@ -218,6 +231,11 @@ async function watchMemory(cdp) {
     if (targetInfo.type !== 'worker') return;
     workers.set(sessionId, targetInfo.url.replace(/^.*\//, '').replace(/-[\w-]{8}\.js$/, ''));
     await ask(sessionId, 'Runtime.evaluate', { expression: `(${keep})()` });
+    // Everything it allocates from its start, collected or not (`ALLOCATED_MB`).
+    await ask(sessionId, 'HeapProfiler.startSampling', {
+      includeObjectsCollectedByMajorGC: true,
+      includeObjectsCollectedByMinorGC: true,
+    });
     if (waitingForDebugger) await ask(sessionId, 'Runtime.runIfWaitingForDebugger');
   });
   cdp.on('Target.detachedFromTarget', ({ sessionId }) => workers.delete(sessionId));
@@ -234,6 +252,9 @@ async function watchMemory(cdp) {
       { name: 'page', heap: mb((await cdp.send('Runtime.getHeapUsage')).usedSize), wasm: 0 },
     ];
     for (const [sessionId, name] of workers) {
+      const sampled = await ask(sessionId, 'HeapProfiler.stopSampling');
+      const allocated = (node) =>
+        node.selfSize + node.children.reduce((sum, child) => sum + allocated(child), 0);
       await ask(sessionId, 'HeapProfiler.enable');
       await ask(sessionId, 'HeapProfiler.collectGarbage');
       const heap = await ask(sessionId, 'Runtime.getHeapUsage');
@@ -242,7 +263,12 @@ async function watchMemory(cdp) {
           '(globalThis.__denWasm ?? []).reduce((sum, memory) => sum + memory.buffer.byteLength, 0)',
         returnByValue: true,
       });
-      held.push({ name, heap: mb(heap?.usedSize ?? 0), wasm: mb(wasm?.result?.value ?? 0) });
+      held.push({
+        name,
+        heap: mb(heap?.usedSize ?? 0),
+        wasm: mb(wasm?.result?.value ?? 0),
+        allocated: sampled ? mb(allocated(sampled.profile.head)) : 0,
+      });
     }
     return held;
   };
@@ -285,6 +311,17 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
   });
   const projectionsBefore = edge.assistant?.projections.length ?? 0;
+  // Rows den-edge sent the library Workers, from every changes page.
+  const reads = [];
+  page.on('response', (response) => {
+    if (/\/lib\/[^/]+\/changes\?/.test(response.url()))
+      reads.push(
+        response.json().then(
+          (body) => body.entries?.length ?? 0,
+          () => 0,
+        ),
+      );
+  });
   await page.goto(`${E2E_ORIGIN}${surface.path}`);
   const drawn = (ready) =>
     surface.content.every((name) => ready?.[name] !== undefined) &&
@@ -311,6 +348,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     compiles,
     projections: (edge.assistant?.projections.length ?? 0) - projectionsBefore,
     builds: Math.max(built.page, built.worker),
+    rowsRead: (await Promise.all(reads)).reduce((sum, count) => sum + count, 0),
     longest,
     ...heldMB(held),
     drawnAt,
@@ -442,6 +480,16 @@ for (const [label, type, device, options] of ENGINES) {
         // The household's lists are as the last visit published them: nothing is built or sent again.
         expect.soft(result.builds, `${surface.name}: assistant projections built`).toBe(0);
         expect.soft(result.projections, `${surface.name}: assistant projections uploaded`).toBe(0);
+        expect
+          .soft(result.rowsRead, `${surface.name}: rows read from den-edge`)
+          .toBeLessThan(ROWS_READ);
+        if (result.held)
+          expect
+            .soft(
+              Math.max(...result.held.map(({ allocated }) => allocated ?? 0)),
+              `${surface.name}: MB a library Worker allocated ${JSON.stringify(result.held)}`,
+            )
+            .toBeLessThan(ALLOCATED_MB[surface.name] ?? ALLOCATED_DEFAULT_MB);
         if (options.cpu)
           expect
             .soft(result.longest, `${surface.name}: longest task ms`)
