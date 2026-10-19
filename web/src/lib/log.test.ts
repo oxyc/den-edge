@@ -1257,6 +1257,32 @@ describe('LibraryLog', () => {
   });
 
   /**
+   * A refresh that reads back only this browser's own writes changes no row. The head it read to was kept only with
+   * a changed row, so a library this browser had written (a household's move writes its whole history) was read from
+   * den-edge and opened row by row again on every visit.
+   */
+  it('keeps the head it read its own writes back to, so the next visit does not read them again', async () => {
+    const { vault } = memoryVault();
+    const server = await edge([row(1)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    await log.write(row(2));
+    await log.write(row(3));
+    expect(await log.refresh(), 'its own writes read back').toBe(false);
+    const asked: string[] = [];
+    const counting: typeof fetch = (input, init) => {
+      asked.push(String(input));
+      return server.fetchImpl(input, init);
+    };
+    await vi.waitFor(async () => {
+      asked.length = 0;
+      const next = (await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault))!;
+      expect(next.fromCache).toBe(true);
+      await next.refresh();
+      expect(asked[0]).toContain('since=3');
+    });
+  });
+
+  /**
    * `LibrarySession` bumps its revision on a refresh that returns true, and every page built from the library is
    * rebuilt on that. A 30-second poll that found nothing returned true, and rebuilt them all every 30 seconds.
    */

@@ -3330,7 +3330,11 @@ export class LibraryLog {
               this.dirty = true;
             }
           }
-          this.head = page.entries.at(-1)?.seq ?? page.head;
+          const head = page.entries.at(-1)?.seq ?? page.head;
+          // Kept with the rows: a pass that reads back only this browser's own writes changes no row, and without this
+          // the kept head stayed behind them, so every later visit read and opened them all again.
+          if (head !== this.head) this.dirty = true;
+          this.head = head;
           if (!page.more || page.entries.length === 0) return 'head';
         }
       } catch {
