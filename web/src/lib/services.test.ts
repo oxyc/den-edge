@@ -1012,6 +1012,36 @@ describe('radarRows', () => {
     expect((await mergeNewRow(arrivals, releases).load(1)).map((t) => t.id)).toEqual([9]);
   });
 
+  it('pages a household-wide arrivals pool before admitting release-date pages', async () => {
+    const arrivals: RowDef = {
+      id: 'many-arrivals',
+      title: 'New Releases',
+      load: async () => Array.from({ length: 95 }, (_, index) => title(index + 1)),
+    };
+    const asked: number[] = [];
+    const releases: RowDef = {
+      id: 'new-releases',
+      title: 'New Releases',
+      load: async (page) => {
+        asked.push(page);
+        return [title(1), title(1_000 + page)];
+      },
+    };
+    const merged = mergeNewRow(arrivals, releases);
+
+    expect((await merged.load(1)).map((item) => item.id)).toEqual(
+      Array.from({ length: 40 }, (_, index) => index + 1),
+    );
+    expect((await merged.load(2)).map((item) => item.id)).toEqual(
+      Array.from({ length: 40 }, (_, index) => index + 41),
+    );
+    expect((await merged.load(3)).map((item) => item.id)).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 81),
+    );
+    expect((await merged.load(4)).map((item) => item.id)).toEqual([1_001]);
+    expect(asked).toEqual([1]);
+  });
+
   it('builds no row for a kind atlas has no chart of, and none at all without a pick it covers', () => {
     const onlyPopular = catalogs.filter((c) => !c.id.includes('-new') && !c.id.includes('-coming'));
     expect(radarRows('/atlas', onlyPopular, picks, { content: fixtureContent() })).toEqual([]);
