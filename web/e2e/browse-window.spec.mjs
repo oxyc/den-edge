@@ -159,10 +159,10 @@ test('a windowed row draws art for its on-screen cards without an observer per c
         .filter((slot) => slot.querySelector('img'))
         .map((slot) => Number(slot.dataset.cardIndex)),
     );
-  // A 1280px track has 48px gutters: card 6 starts inside the right one, which a card's own observer did not count.
-  await expect.poll(drawn).toEqual([0, 1, 2, 3, 4, 5]);
+  // The shelf has no trailing gutter now: the partially visible seventh card is artwork on screen too.
+  await expect.poll(drawn).toEqual([0, 1, 2, 3, 4, 5, 6]);
   await row.locator('.track').evaluate((node) => (node.scrollLeft = 10 * 204));
-  await expect.poll(drawn).toEqual([10, 11, 12, 13, 14, 15]);
+  await expect.poll(drawn).toEqual([10, 11, 12, 13, 14, 15, 16]);
   expect(await page.evaluate(() => window.observedCards)).toBe(0);
   await page.close();
 });
