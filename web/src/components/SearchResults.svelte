@@ -6,8 +6,6 @@
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
 
-  import { titleCaption } from '../lib/library';
-
   let {
     hits,
     onend,
@@ -46,12 +44,7 @@
 <div class="grid">
   {#each hits as hit (hitKey(hit))}
     {#if hit.kind === 'title'}
-      <PosterCard
-        title={hit.title}
-        caption={titleCaption(hit.title)}
-        href={titleHref(hit.title)}
-        {onopen}
-      />
+      <PosterCard title={hit.title} href={titleHref(hit.title)} {onopen} />
     {:else}
       <PersonCard
         id={hit.person.id}

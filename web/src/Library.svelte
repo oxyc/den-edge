@@ -42,7 +42,7 @@
     type Sighting,
   } from './lib/livePosition';
   import { blockedTitles } from './lib/blockedTitles.svelte';
-  import { libraryStandings } from './lib/standing.svelte';
+  import { libraryShapes, libraryStandings } from './lib/standing.svelte';
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
@@ -522,8 +522,11 @@
       ),
     ),
   );
+  // And a series poster says how many seasons it has, where the library already holds its layout.
+  $effect(() => libraryShapes.set(session.shapes));
   $effect(() => () => {
     libraryStandings.set(new Map());
+    libraryShapes.set(new Map());
     blockedTitles.reset();
   });
 
@@ -1752,8 +1755,8 @@
   const shelfMounted = (shelf: Shelf) => shelvesReady && (lowerShelvesReady || shelf === topShelf);
 
   function caption(entry: ContinueEntry): string | undefined {
-    if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
-    return entry.title.year ? String(entry.title.year) : undefined;
+    // Otherwise the card's own year line.
+    return entry.episode ? `S${entry.episode.season} · E${entry.episode.episode}` : undefined;
   }
 
   async function retryLibrary(): Promise<void> {
@@ -2046,12 +2049,7 @@
         onintent={admitWatchlistNames}
       >
         {#snippet children(title, onscreen)}
-          <PosterCard
-            {title}
-            caption={title.year ? String(title.year) : undefined}
-            href={titleHref(title)}
-            {onscreen}
-          />
+          <PosterCard {title} href={titleHref(title)} {onscreen} />
         {/snippet}
       </WindowedPosterRow>
     {:else if !lowerShelvesReady && !facet && shelfPlan?.watchlist}

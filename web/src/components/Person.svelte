@@ -172,12 +172,7 @@
                      which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
                      corner button made the two disagree by a few stray pixels (focus/hover state the clone doesn't
                      carry the same way), without changing either page's actual content. -->
-                <PosterCard
-                  title={c.title}
-                  caption={c.title.year ? String(c.title.year) : undefined}
-                  href={titleHref(c.title)}
-                  menu={false}
-                />
+                <PosterCard title={c.title} href={titleHref(c.title)} menu={false} />
               {/each}
             </div>
             {#if (counts[group.id] ?? 20) < group.films.length}

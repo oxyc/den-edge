@@ -21,8 +21,8 @@
   import { notePressed } from '../lib/detail';
   import { contentServiceContext } from '../lib/contentContext';
   import { posterReleaseBadge } from '../lib/detailPresentation';
-  import type { Title } from '../lib/library';
-  import { libraryStandings } from '../lib/standing.svelte';
+  import { titleCaption, type Title } from '../lib/library';
+  import { libraryShapes, libraryStandings } from '../lib/standing.svelte';
   import { startupMarkOnce } from '../lib/startupTiming';
   import ActionMenu from './ActionMenu.svelte';
   import DetailIcon from './DetailIcon.svelte';
@@ -32,6 +32,7 @@
   let {
     title,
     caption,
+    lead,
     progress,
     live,
     href,
@@ -48,7 +49,13 @@
     onscreen,
   }: {
     title: Title;
+    /**
+     * The line under the title in place of the poster's own year line (`yearCaption`: "2019", "2019 · 4 seasons",
+     * "2019 · Series"). A landscape card — an episode or a download — has no year line, only this.
+     */
     caption?: string;
+    /** In place of the year only, keeping the rest of the year line: "Netflix · Series". */
+    lead?: string;
     progress?: number;
     /** Where it is playing right now on some device, as a clock that ticks (`livePosition`). */
     live?: string;
@@ -145,6 +152,9 @@
   $effect(() => onvisibilitychange?.(showImage));
   const faded = $derived(checkAvailability && availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
+  const line = $derived(
+    landscape ? caption : titleCaption(title, caption, libraryShapes.of(title), lead),
+  );
   // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
   // earlier season, which says nothing about the episode this card is fetching.
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
@@ -327,7 +337,7 @@
   </span>
   <span class="meta">
     <span class="name">{title.title}</span>
-    {#if caption}<span class="caption">{caption}</span>{/if}
+    {#if line}<span class="caption">{line}</span>{/if}
   </span>
 {/snippet}
 

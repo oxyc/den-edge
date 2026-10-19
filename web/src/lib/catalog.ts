@@ -808,10 +808,15 @@ export interface RowDef {
   /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
   filter?: (title: Title) => boolean;
   /**
-   * What a card says under its name, where the year is not the useful thing. A row pooling several services says
-   * which of them a title is on, and when it lands there.
+   * What a card says under its name in place of its whole year line, where that is not the useful thing: Other
+   * versions says which cut or remake a title is.
    */
   caption?: (title: Title) => string | undefined;
+  /**
+   * What a card says in place of its year, keeping the rest of its year line: a row pooling several services names
+   * the one a title is on (and when it lands there), and a series still says it is one ("Netflix · Series").
+   */
+  lead?: (title: Title) => string | undefined;
 }
 
 /**

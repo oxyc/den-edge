@@ -239,7 +239,7 @@ export function radarRows(
       {
         id: `radar-${pool.id}-${only ?? 'all'}`,
         title: pool.title,
-        caption: (title: Title) => captionOf(title, pool.soonest),
+        lead: (title: Title) => captionOf(title, pool.soonest),
         load: async (page: number) => {
           if (page > 1) return [];
           const charts = await inBatches(wanted, POOL_AT_ONCE, async ({ catalog, country }) => {
@@ -277,8 +277,8 @@ export function mergeNewRow(arrivals: RowDef, releases: RowDef, title = 'New Rel
   return {
     id: `new-merged-${arrivals.id}`,
     title,
-    // A chart title says which service it landed on; a TMDB one has no service and keeps the year.
-    caption: (t: Title) => arrivals.caption?.(t) ?? (t.year ? String(t.year) : undefined),
+    // A chart title says which service it landed on; a TMDB one has no service and keeps the card's year line.
+    lead: (t: Title) => arrivals.lead?.(t),
     load: async (page: number) => {
       // The charts are one page; past the first, the row is TMDB's alone, which is what pages on.
       if (page > 1) return releases.load(page);

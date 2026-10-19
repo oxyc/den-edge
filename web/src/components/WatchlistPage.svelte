@@ -160,8 +160,8 @@
   }
 
   function resumeCaption(entry: ContinueEntry): string | undefined {
-    if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
-    return entry.title.year ? String(entry.title.year) : undefined;
+    // Otherwise the card's own year line.
+    return entry.episode ? `S${entry.episode.season} · E${entry.episode.episode}` : undefined;
   }
 
   function watchedCaption(entry: WatchedEntry): string | undefined {
@@ -263,12 +263,7 @@
   <div class="grid">
     {#each titles as title (key(title))}
       {#snippet card()}
-        <PosterCard
-          {title}
-          caption={title.year ? String(title.year) : undefined}
-          href={titleHref(title)}
-          menu={false}
-        />
+        <PosterCard {title} href={titleHref(title)} menu={false} />
       {/snippet}
       {@render framed(title, savedControls, card)}
     {/each}

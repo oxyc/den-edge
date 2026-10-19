@@ -864,7 +864,7 @@ describe('radarRows', () => {
       titles.map((t) => t.id),
       'a turn each, so neither service owns the head',
     ).toEqual([1, 2]);
-    expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix');
+    expect(at(rows, 0).lead?.(at(titles, 0))).toBe('Netflix');
     // A chart is one page: asking for a second must not repeat the first.
     expect(await at(rows, 0).load(2)).toEqual([]);
     expect(asked).toHaveLength(4);
@@ -909,7 +909,7 @@ describe('radarRows', () => {
     });
     const titles = await at(rows, 0).load(1);
     expect(titles.map((t) => t.id)).toEqual([7]);
-    expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix · Max');
+    expect(at(rows, 0).lead?.(at(titles, 0))).toBe('Netflix · Max');
   });
 
   it('caps the whole provider list so several services cannot crowd out an arrival date', async () => {
@@ -926,7 +926,7 @@ describe('radarRows', () => {
       fetchImpl,
     });
     const titles = await at(rows, 0).load(1);
-    expect(at(rows, 0).caption?.(at(titles, 0))).toMatch(/^Netflix · An E… · /);
+    expect(at(rows, 0).lead?.(at(titles, 0))).toMatch(/^Netflix · An E… · /);
   });
 
   it('leads with what lands soonest, and leaves what carries no date in the charts’ order', async () => {
@@ -952,10 +952,8 @@ describe('radarRows', () => {
     ).toEqual([3, 2, 1]);
     expect(at(titles, 0).arrivesAt).toBe(Math.floor(soon / 1000) * 1000);
     // The caption of a row about what is still to come says when, as well as where.
-    expect(at(rows, 1).caption?.(at(titles, 0))).toMatch(/^Netflix · /);
-    expect(at(rows, 1).caption?.(at(titles, 2)), 'nothing to say beyond the service').toBe(
-      'Netflix',
-    );
+    expect(at(rows, 1).lead?.(at(titles, 0))).toMatch(/^Netflix · /);
+    expect(at(rows, 1).lead?.(at(titles, 2)), 'nothing to say beyond the service').toBe('Netflix');
   });
 
   it('leads New Releases with what just landed, and pages on with TMDB alone', async () => {
@@ -989,8 +987,8 @@ describe('radarRows', () => {
       first.map((t) => t.id),
       'the arrivals lead, and what TMDB repeats is not shown twice',
     ).toEqual([1, 2, 9]);
-    expect(merged.caption?.(at(first, 0)), 'a chart title says where it landed').toBe('Netflix');
-    expect(merged.caption?.(at(first, 2)), 'a TMDB title keeps its year').toBe('2026');
+    expect(merged.lead?.(at(first, 0)), 'a chart title says where it landed').toBe('Netflix');
+    expect(merged.lead?.(at(first, 2)), 'a TMDB title keeps the card’s year line').toBeUndefined();
 
     expect((await merged.load(2)).map((t) => t.id)).toEqual([20]);
     expect(asked, 'the charts are one page; past it the row is TMDB alone').toEqual([1, 2]);

@@ -13,6 +13,7 @@ import {
   watchlist,
   watchlistSlides,
   withDisplay,
+  yearCaption,
   type Library,
 } from './library';
 import { syncPolicy } from './syncCore';
@@ -25,6 +26,100 @@ describe('poster captions', () => {
     expect(titleCaption(title)).toBe('2020');
     expect(titleCaption({ ...title, likely: true })).toBe('2020 · Likely match');
     expect(titleCaption({ ...title, likely: true }, 'Netflix')).toBe('Netflix · Likely match');
+  });
+
+  describe('a series says it is one', () => {
+    const series = { type: 'tv' as const, id: 2, title: 'Two', year: 2019 };
+    const shape = (counts: [number, number][]) => ({ counts: new Map(counts) });
+
+    it('leaves a film its year alone, even when handed a layout', () => {
+      expect(yearCaption(title, shape([[1, 8]]))).toBe('2020');
+      expect(yearCaption({ ...title, year: undefined })).toBeUndefined();
+    });
+
+    it('counts seasons, or the episodes of its only season', () => {
+      expect(
+        yearCaption(
+          series,
+          shape([
+            [1, 8],
+            [2, 10],
+            [3, 6],
+            [4, 9],
+          ]),
+        ),
+      ).toBe('2019 · 4 seasons');
+      expect(yearCaption(series, shape([[1, 12]]))).toBe('2019 · 12 episodes');
+      expect(yearCaption(series, shape([[1, 1]]))).toBe('2019 · 1 episode');
+    });
+
+    it('counts neither specials nor a season listed with no episodes yet', () => {
+      expect(
+        yearCaption(
+          series,
+          shape([
+            [0, 3],
+            [1, 8],
+            [2, 0],
+          ]),
+        ),
+      ).toBe('2019 · 8 episodes');
+      expect(
+        yearCaption(
+          series,
+          shape([
+            [0, 3],
+            [1, 8],
+            [2, 10],
+          ]),
+        ),
+      ).toBe('2019 · 2 seasons');
+    });
+
+    it('says only "Series" where no layout is known', () => {
+      expect(yearCaption(series)).toBe('2019 · Series');
+      expect(yearCaption(series, shape([]))).toBe('2019 · Series');
+      expect(yearCaption({ ...series, year: undefined })).toBe('Series');
+    });
+
+    it('is what a poster draws without a row caption, beside a likely match', () => {
+      expect(
+        titleCaption(
+          { ...series, likely: true },
+          undefined,
+          shape([
+            [1, 5],
+            [2, 5],
+          ]),
+        ),
+      ).toBe('2019 · 2 seasons · Likely match');
+      // A row's own caption replaces the whole line.
+      expect(
+        titleCaption(
+          series,
+          '2019 · Remake',
+          shape([
+            [1, 5],
+            [2, 5],
+          ]),
+        ),
+      ).toBe('2019 · Remake');
+    });
+
+    it('keeps saying so where a service name takes the year’s place', () => {
+      const two = shape([
+        [1, 5],
+        [2, 5],
+      ]);
+      expect(titleCaption(series, undefined, undefined, 'Netflix')).toBe('Netflix · Series');
+      expect(titleCaption(series, undefined, two, 'Netflix')).toBe('Netflix · 2 seasons');
+      expect(titleCaption(series, undefined, shape([[1, 5]]), 'Netflix · Max')).toBe(
+        'Netflix · Max · 5 episodes',
+      );
+      expect(titleCaption(title, undefined, undefined, 'Netflix')).toBe('Netflix');
+      // A row with nothing to say of a title leaves its year line as it is.
+      expect(titleCaption(series, undefined, undefined, undefined)).toBe('2019 · Series');
+    });
   });
 });
 

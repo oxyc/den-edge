@@ -10,7 +10,7 @@
     cardWindow,
     posterCardWidth,
   } from '../lib/cardWindow';
-  import { titleCaption, type Title } from '../lib/library';
+  import type { Title } from '../lib/library';
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
@@ -283,7 +283,8 @@
         {#if mounted(index)}
           <PosterCard
             {title}
-            caption={titleCaption(title, row.caption?.(title))}
+            caption={row.caption?.(title)}
+            lead={row.lead?.(title)}
             href={titleHref(title)}
             onscreen={index >= onscreen.start && index < onscreen.end}
           />
