@@ -24,6 +24,7 @@ import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
   bigHousehold,
+  forgetPublication,
   holdProjectionBuilds,
   settleProjection,
   PHONE_PROJECTION_MS,
@@ -227,26 +228,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
  * took, how long the build took, and whether the publish was still under way when they had all answered.
  */
 async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
-  const forget = await context.newPage();
-  await routeBigHousehold(forget, edge);
-  await forget.goto(`${E2E_ORIGIN}/test/seed-library.html`);
-  await forget.evaluate(
-    () =>
-      new Promise((done, fail) => {
-        const open = indexedDB.open('den-library');
-        open.onerror = () => fail(open.error);
-        open.onsuccess = () => {
-          const kept = open.result.transaction('kept', 'readwrite').objectStore('kept');
-          const keys = kept.getAllKeys();
-          keys.onsuccess = () => {
-            for (const key of keys.result)
-              if (String(key).endsWith(':assistant.records.v1')) kept.delete(key);
-            kept.transaction.oncomplete = () => (open.result.close(), done());
-          };
-        };
-      }),
-  );
-  await forget.close();
+  await forgetPublication(context, edge);
 
   const page = await context.newPage();
   await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });

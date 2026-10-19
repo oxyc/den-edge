@@ -164,10 +164,18 @@ const memberOf = (request) => request.headers()['x-den-library-member']?.split('
 
 /**
  * den-edge's assistant routes for the household's connection (`assistantRows`): it is listed to every member, its
- * projection taken, `projectionMs` late, and its queue held empty. What was uploaded is kept on `edge.assistant`.
+ * projection taken, `projectionMs` late, and its queue held empty. What was uploaded is kept on `edge.assistant`;
+ * while `edge.assistant.retryAfter` is set, every upload is refused as den-edge refuses one past its budget (`429` with
+ * that `Retry-After`, in seconds), and kept on `edge.assistant.refused`.
  */
 async function routeBigAssistant(page, edge, projectionMs) {
-  const seen = (edge.assistant ??= { grant: null, projections: [], publishing: 0 });
+  const seen = (edge.assistant ??= {
+    grant: null,
+    projections: [],
+    refused: [],
+    retryAfter: null,
+    publishing: 0,
+  });
   await page.route(`${E2E_ORIGIN}/oauth/connections`, (route) =>
     route.fulfill({
       json: {
@@ -195,6 +203,14 @@ async function routeBigAssistant(page, edge, projectionMs) {
     const path = new URL(request.url()).pathname;
     if (path === '/assistant/dropbox') return route.fulfill({ status: 204 });
     if (path.startsWith('/assistant/projection/') && request.method() === 'PUT') {
+      if (seen.retryAfter) {
+        seen.refused.push({ member: memberOf(request), at: Date.now() });
+        return route.fulfill({
+          status: 429,
+          headers: { 'retry-after': String(seen.retryAfter) },
+          json: { error: 'rate_limited' },
+        });
+      }
       seen.publishing ||= Date.now();
       seen.projections.push({ member: memberOf(request), at: Date.now() });
       if (projectionMs) await new Promise((done) => setTimeout(done, projectionMs));
@@ -506,6 +522,33 @@ export async function firstPublish(page, path, options = {}) {
       setTimeout(() => fail(new Error(`${path}: no assistant publish`)), options.timeout ?? 60_000),
     ),
   ]);
+}
+
+/**
+ * This browser forgets what it last published for the household's assistant (`assistant.records.v1`), so the next
+ * page builds the projection and uploads it at once, as after a change, the heartbeat or the day's renewal.
+ */
+export async function forgetPublication(context, edge) {
+  const forget = await context.newPage();
+  await routeBigHousehold(forget, edge);
+  await forget.goto(`${E2E_ORIGIN}/test/seed-library.html`);
+  await forget.evaluate(
+    () =>
+      new Promise((done, fail) => {
+        const open = indexedDB.open('den-library');
+        open.onerror = () => fail(open.error);
+        open.onsuccess = () => {
+          const kept = open.result.transaction('kept', 'readwrite').objectStore('kept');
+          const keys = kept.getAllKeys();
+          keys.onsuccess = () => {
+            for (const key of keys.result)
+              if (String(key).endsWith(':assistant.records.v1')) kept.delete(key);
+            kept.transaction.oncomplete = () => (open.result.close(), done());
+          };
+        };
+      }),
+  );
+  await forget.close();
 }
 
 /** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */

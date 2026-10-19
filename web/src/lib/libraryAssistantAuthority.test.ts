@@ -582,7 +582,8 @@ test('a page opened again on the library as it was published builds and sends no
   layouts = {};
   expect(await reopen().publish()).toEqual([]);
   expect(builds).toBe(1);
-  // The watchlist changes: the page after builds at once, and sends once the change has stood for 30 s.
+  // The watchlist changes: the page after builds at once, and sends once the change has stood for 30 s and five
+  // minutes have passed since the last send.
   shared.documents = [
     {
       format: 4,
@@ -596,6 +597,9 @@ test('a page opened again on the library as it was published builds and sends no
   expect(await changed.publish()).toEqual([]);
   expect(builds).toBe(2);
   later(30_000);
+  expect(await changed.publish()).toEqual([]);
+  expect(builds).toBe(2);
+  later(3 * 60_000 + 30_000);
   expect(await changed.publish()).toEqual([grant]);
   // Opened again before the heartbeat: nothing; after it: sent, with a fresh `at`.
   later(10 * 60_000);
@@ -634,10 +638,132 @@ test('a change to the household’s hide rules is a change of the projection, se
   builds = 0;
   shared.patch('prefs', { 'den.hideAnime': { bool: true } });
   later(1_000);
+  // Sent a moment ago: nothing is built until a send could follow, five minutes after it.
+  expect(await authority.publish()).toEqual([]);
+  expect(builds).toBe(0);
+  later(5 * 60_000);
   expect(await authority.publish()).toEqual([]);
   expect(builds).toBe(1);
   later(30_000);
   expect(await authority.publish()).toEqual([grant]);
+});
+
+/** A film being watched, as a TV saving its progress writes it: Continue Watching carries `fraction` and `at`. */
+const watching = (fraction: number, at: number) => ({
+  format: 4,
+  kind: 'title',
+  title: { type: 'movie', id: 680 },
+  status: { value: 'inProgress', at: [fixed.now, 0, DEVICE] },
+  resume: {
+    value: fraction,
+    at: [at, 0, DEVICE],
+    viewing: 0,
+    seconds: Math.round(fraction * 6000),
+  },
+});
+
+/**
+ * den-edge's projection budget (`src/assistant.rs`): 60 an hour per grant, from every device together, in a fixed
+ * hour; past it `429` with `Retry-After` to the hour's end.
+ */
+function projectionBudget(now: () => number) {
+  let windowEnd = 0;
+  let count = 0;
+  const budget = {
+    accepted: 0,
+    refused: 0,
+    put: async (): Promise<true | { retryAfterMs: number }> => {
+      if (windowEnd <= now()) [windowEnd, count] = [now() + 60 * 60_000, 0];
+      if (count >= 60) return (budget.refused++, { retryAfterMs: windowEnd - now() });
+      count++;
+      budget.accepted++;
+      return true;
+    },
+  };
+  return budget;
+}
+
+test('a TV saving progress every minute is sent at most every five minutes by each browser, within den-edge’s budget for two', async () => {
+  const shared = library();
+  let now = fixed.now;
+  const budget = projectionBudget(() => now);
+  const browser = () => {
+    let builds = 0;
+    let puts = 0;
+    const made = device(shared, [], {
+      now: () => now,
+      random: () => (builds++, randomHex()),
+      putProjection: async () => (puts++, budget.put()),
+    });
+    return { ...made, builds: () => builds, puts: () => puts };
+  };
+  const { grant } = await device(shared, [seed('other'), seed('limited')]).authority.consent(
+    'Reader',
+    READ_ONLY,
+  );
+  const phone = browser();
+  const mac = browser();
+  // Three hours of the TV playing, each browser's page ticking every 30 s (`publishWhileOpen`).
+  for (let t = 0; t < 3 * 60 * 60_000; t += 30_000) {
+    now = fixed.now + t;
+    if (t % 60_000 === 0) shared.documents = [watching(0.1 + t / (4 * 60 * 60_000), now)];
+    await phone.authority.publish();
+    await mac.authority.publish();
+  }
+  for (const page of [phone, mac]) {
+    // Every five minutes, and the first: 37 in three hours, not one a minute.
+    expect(page.puts()).toBeLessThanOrEqual(37);
+    // A build is made only when a send could follow it: the change, and again until it has stood 30 s — not every
+    // tick (360 in three hours).
+    expect(page.builds()).toBeLessThanOrEqual(3 * page.puts());
+  }
+  expect(budget.refused).toBe(0);
+  expect(budget.accepted).toBe(phone.puts() + mac.puts());
+  expect(grant).toMatch(/^[0-9a-f]{32}$/);
+});
+
+test('a send den-edge refuses waits out its Retry-After, building nothing meanwhile, then goes', async () => {
+  const shared = library();
+  let builds = 0;
+  let refuse = true;
+  const attempts: number[] = [];
+  const { authority, later } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+    putProjection: async () => {
+      attempts.push(builds);
+      return refuse ? { retryAfterMs: 10 * 60_000 } : true;
+    },
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  builds = 0;
+  expect(await authority.publish()).toEqual([]);
+  expect(attempts).toHaveLength(1);
+  // The library changes all the while; nothing is built or sent until den-edge said it may be.
+  for (let t = 30_000; t < 10 * 60_000; t += 30_000) {
+    later(30_000);
+    shared.documents = [watching(t / (60 * 60_000), fixed.now + t)];
+    expect(await authority.publish()).toEqual([]);
+  }
+  expect(attempts).toHaveLength(1);
+  expect(builds).toBe(1);
+  refuse = false;
+  later(30_000);
+  expect(await authority.publish()).toEqual([grant]);
+  expect(attempts).toHaveLength(2);
+});
+
+test('a grant connected while another is held back is sent at once', async () => {
+  const shared = library();
+  const { authority, later } = device(shared, [seed('other'), seed('limited'), seed('grant')]);
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  expect(await authority.publish()).toEqual([grant]);
+  shared.documents = [watching(0.2, fixed.now)];
+  later(60_000);
+  expect(await authority.publish()).toEqual([]);
+  // A second connection: its read record is a change of the read row, which no hold covers.
+  const second = await authority.consent('Other', READ_ONLY);
+  later(30_000);
+  expect(await authority.publish()).toEqual([second.grant]);
 });
 
 test('a library with no read records builds no projection at all', async () => {
