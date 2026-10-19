@@ -15,6 +15,10 @@
 // publish the phone's cost (`PHONE_PROJECTION_MS`), and a returning visit, with the household as the last one
 // published it, must build and upload none.
 //
+// In Chromium each visit also has a memory budget (`MEMORY_MB`): what the page and its library Workers still hold once
+// it has settled. iOS ends a tab's WebContent process under memory pressure, and the tab then reloads when it is
+// returned to; what a phone's tab holds between visits is what decides how soon.
+//
 // A new surface: add an entry to SURFACES with the path and the `markReady` fields that mean it has drawn (adding
 // one to `markReady` if none fits).
 
@@ -38,6 +42,15 @@ const READY_MS = 4_000;
 const WORKER_TRANSACTIONS = 200;
 /** The longest a single main-thread task may run on the throttled phone. */
 const LONGEST_TASK_MS = 600;
+
+/**
+ * MB a page and its library Workers may hold once a returning visit has settled: each one's JS heap after a
+ * collection, and the wasm memory of every den-core instance in them. About 21 MB on Home and 26 MB on the Watchlist.
+ * A wasm memory never shrinks, so a Worker that lives as long as the page keeps whatever its largest op needed:
+ * 0.271.65-0.271.70 built the assistant projection in the library Worker (61 MB of wasm for this household) and kept
+ * it for the life of the tab, about 80 MB here and two to three times the WebKit process's footprint.
+ */
+const MEMORY_MB = 48;
 
 /** Milliseconds from navigation start to a library surface's `shelves ready` milestone (`startupTiming.ts`). */
 const SHELVES_MS = 4_000;
@@ -160,14 +173,98 @@ function countWorkerWork(page) {
   };
 }
 
+/**
+ * What the page behind `cdp` (Chromium) and each Worker it starts hold: the function it returns reads, by script, the
+ * MB of each one's JS heap after a collection and of its wasm memories. A Worker's wasm memories are not
+ * reachable from its globals, so each Worker is held at its start until it keeps every instance it makes. Only the
+ * page's own Workers: a Worker one of them starts (the projection's) ends with its build.
+ */
+async function watchMemory(cdp) {
+  const keep = () => {
+    const memories = (globalThis.__denWasm = []);
+    const kept = (made) => {
+      const instance = made instanceof WebAssembly.Instance ? made : made?.instance;
+      for (const value of Object.values(instance?.exports ?? {}))
+        if (value instanceof WebAssembly.Memory) memories.push(value);
+      return made;
+    };
+    for (const name of ['instantiate', 'instantiateStreaming']) {
+      const instantiate = WebAssembly[name];
+      if (instantiate)
+        WebAssembly[name] = function (...args) {
+          return instantiate.apply(this, args).then(kept);
+        };
+    }
+  };
+  const workers = new Map();
+  const answers = new Map();
+  let next = 0;
+  cdp.on('Target.receivedMessageFromTarget', ({ message }) => {
+    const answer = JSON.parse(message);
+    answers.get(answer.id)?.(answer);
+  });
+  const ask = (sessionId, method, params = {}) =>
+    new Promise((resolve) => {
+      const id = ++next;
+      answers.set(id, (answer) => (answers.delete(id), resolve(answer.result)));
+      void cdp
+        .send('Target.sendMessageToTarget', {
+          sessionId,
+          message: JSON.stringify({ id, method, params }),
+        })
+        .catch(() => (answers.delete(id), resolve(undefined)));
+    });
+  cdp.on('Target.attachedToTarget', async ({ sessionId, targetInfo, waitingForDebugger }) => {
+    if (targetInfo.type !== 'worker') return;
+    workers.set(sessionId, targetInfo.url.replace(/^.*\//, '').replace(/-[\w-]{8}\.js$/, ''));
+    await ask(sessionId, 'Runtime.evaluate', { expression: `(${keep})()` });
+    if (waitingForDebugger) await ask(sessionId, 'Runtime.runIfWaitingForDebugger');
+  });
+  cdp.on('Target.detachedFromTarget', ({ sessionId }) => workers.delete(sessionId));
+  await cdp.send('Target.setAutoAttach', {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: false,
+  });
+  const mb = (bytes) => Math.round((bytes / 2 ** 20) * 10) / 10;
+  return async () => {
+    await cdp.send('HeapProfiler.enable');
+    await cdp.send('HeapProfiler.collectGarbage');
+    const held = [
+      { name: 'page', heap: mb((await cdp.send('Runtime.getHeapUsage')).usedSize), wasm: 0 },
+    ];
+    for (const [sessionId, name] of workers) {
+      await ask(sessionId, 'HeapProfiler.enable');
+      await ask(sessionId, 'HeapProfiler.collectGarbage');
+      const heap = await ask(sessionId, 'Runtime.getHeapUsage');
+      const wasm = await ask(sessionId, 'Runtime.evaluate', {
+        expression:
+          '(globalThis.__denWasm ?? []).reduce((sum, memory) => sum + memory.buffer.byteLength, 0)',
+        returnByValue: true,
+      });
+      held.push({ name, heap: mb(heap?.usedSize ?? 0), wasm: mb(wasm?.result?.value ?? 0) });
+    }
+    return held;
+  };
+}
+
+/** `memoryMB`, the total of what `watchMemory` read, and `held`, the reading; nothing where nothing was read. */
+const heldMB = (held) =>
+  held
+    ? { memoryMB: Math.round(held.reduce((sum, { heap, wasm }) => sum + heap + wasm, 0)), held }
+    : {};
+
 /** One returning visit to `surface`: the ms its content took, the Worker transactions, the longest task. */
 async function visit(context, edge, surface, { cpu = 1 } = {}) {
   const page = await context.newPage();
   // The household's assistant projection costs the library Worker what it costs a phone's (`PHONE_PROJECTION_MS`).
   await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });
+  // Chromium's (the only engine slowed): what the page and its Workers hold, too.
+  let memory;
   if (cpu > 1) {
     const cdp = await context.newCDPSession(page);
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
+    memory = await watchMemory(cdp);
   }
   const workerWork = countWorkerWork(page);
   // Where a slow surface's time went, printed with its result: the page's startup milestones (`startupTiming.ts`).
@@ -206,6 +303,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
   await page.waitForTimeout(2_000);
   const { longest, ...drawnAt } = ready;
   const { transactions, compiles } = await workerWork();
+  const held = await memory?.();
   const result = {
     contentMs,
     ...(surface.shelves ? { shelvesMs } : {}),
@@ -214,6 +312,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     projections: (edge.assistant?.projections.length ?? 0) - projectionsBefore,
     builds: Math.max(built.page, built.worker),
     longest,
+    ...heldMB(held),
     drawnAt,
     marks,
   };
@@ -232,8 +331,12 @@ async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
 
   const page = await context.newPage();
   await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });
-  if (cpu > 1)
-    await (await context.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: cpu });
+  let memory;
+  if (cpu > 1) {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
+    memory = await watchMemory(cdp);
+  }
   edge.assistant.publishing = 0;
   const library = holdProjectionBuilds(page);
   let buildMs;
@@ -267,11 +370,13 @@ async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
   const buildingThroughout = edge.assistant.projections.length === uploads;
   // Let the upload land and the publication be recorded (the Worker says it built only then).
   await expect.poll(() => buildMs, { timeout: 30_000 }).toBeDefined();
+  // What the tab keeps once it has published: a phone's tab publishes after each change and at the heartbeat.
+  const held = await memory?.();
   await page.close();
   // The records forgotten held the layouts the device knew too: the surfaces after this are returning visits again
   // once Home and the Watchlist find the projection up to date.
   await settleProjection(context, edge);
-  return { namesMs, episodesMs, buildingThroughout, buildMs };
+  return { namesMs, episodesMs, buildingThroughout, buildMs, ...heldMB(held) };
 }
 
 const ENGINES = [
@@ -307,6 +412,13 @@ for (const [label, type, device, options] of ENGINES) {
       expect
         .soft(rebuild.buildingThroughout, 'answered while the publish was still under way')
         .toBe(true);
+      if (rebuild.held)
+        expect
+          .soft(
+            rebuild.memoryMB,
+            `MB the page and its Workers hold once the projection is published ${JSON.stringify(rebuild.held)}`,
+          )
+          .toBeLessThan(MEMORY_MB);
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {
@@ -334,6 +446,13 @@ for (const [label, type, device, options] of ENGINES) {
           expect
             .soft(result.longest, `${surface.name}: longest task ms`)
             .toBeLessThan(LONGEST_TASK_MS);
+        if (result.held)
+          expect
+            .soft(
+              result.memoryMB,
+              `${surface.name}: MB held by the page and its Workers ${JSON.stringify(result.held)}`,
+            )
+            .toBeLessThan(MEMORY_MB);
       }
       console.log(`${label}\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
     } finally {
