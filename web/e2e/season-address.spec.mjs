@@ -2,7 +2,8 @@
 // Router and the library around it, as a guest looking around. Picking a season is somewhere the viewer went, so Back
 // returns to the season before, then leaves the page; a reload or a shared link opens on that season, and only that
 // season is ever asked for. Each season is a real link, so it can be opened in a new tab without moving this page.
-// At a phone's size, with touch, in Chromium and WebKit.
+// On a phone turned sideways, with touch, where this series' four seasons fit as chips (upright, they are one picker:
+// `season-picker.spec.mjs`), in Chromium and WebKit.
 import { test, expect, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
@@ -11,6 +12,8 @@ import { routeTmdb } from './network.mjs';
 
 const ID = 77;
 const PAGE = `/tv/${ID}-the-series`;
+
+const SIDEWAYS = { width: 844, height: 390 };
 
 const series = {
   id: ID,
@@ -107,7 +110,7 @@ async function showing(page, name, episode) {
 }
 
 async function backThroughSeasons(browser) {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  const page = await browser.newPage({ viewport: SIDEWAYS, hasTouch: true });
   try {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}/`);
@@ -158,7 +161,7 @@ async function backThroughSeasons(browser) {
 }
 
 async function opensOnTheAddressedSeason(browser) {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  const page = await browser.newPage({ viewport: SIDEWAYS, hasTouch: true });
   try {
     const { seasons, errors } = await guest(page);
     await recordSelections(page);
@@ -191,7 +194,7 @@ async function opensOnTheAddressedSeason(browser) {
 
 /** A modified click opens the season's link in a new tab and leaves this page on the season it shows. */
 async function modifiedClickLeavesThePage(browser) {
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext({ viewport: SIDEWAYS });
   try {
     const page = await context.newPage();
     const { errors } = await guest(page);
