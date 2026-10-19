@@ -136,8 +136,12 @@
 
   const model = untrack(() => session.model);
   // The download queue spends household credentials and bandwidth, so only a session that administers the household
-  // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page.
-  const downloadsModel = untrack(() => (session.administersHousehold ? session.model : null));
+  // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page. The
+  // queue and the source plugins it searches are the household's, on its control library: an Owner whose activity
+  // moved to a profile library finds neither there.
+  const downloadsModel = untrack(() =>
+    session.administersHousehold ? (session.household.ownerSettingsModel() ?? session.model) : null,
+  );
   // Visitor owns only this device-local activity adapter. It is deliberately independent of LibraryModel, so none
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
