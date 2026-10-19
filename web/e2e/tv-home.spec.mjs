@@ -62,6 +62,12 @@ test(
     expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
+    const shelfTrack = page.locator('section.row .track').first();
+    await expect(shelfTrack).toBeVisible();
+    const shelfBox = await shelfTrack.boundingBox();
+    expect(shelfBox).not.toBeNull();
+    expect(Math.abs(shelfBox.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(shelfBox.width - page.viewportSize().width)).toBeLessThanOrEqual(1);
     // The first enriched recommendation renders before the others. Wait for the real slides before asking
     // the remote to page; an early ArrowRight correctly has nowhere to go and must not be queued speculatively.
     await expect(hero.locator('.slide')).toHaveCount(3);
