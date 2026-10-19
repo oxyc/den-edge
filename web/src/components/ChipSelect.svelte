@@ -55,6 +55,10 @@
     cursor: pointer;
     white-space: nowrap;
 
+    /* The select can be laid out wider than the chip for a moment (WebKit), which would widen the page where the chip
+       ends at its edge. `clip` rather than `hidden`: no scroll container to move. */
+    overflow: clip;
+
     /* No text-selection caret or loupe on iOS over the label and glyph under the select that takes the tap. */
     -webkit-touch-callout: none;
     -webkit-user-select: none;

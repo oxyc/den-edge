@@ -399,6 +399,10 @@
   .pick {
     position: relative;
 
+    /* WebKit can lay the select out wider than the pill for a moment, and on a phone, where the pill is the row's last,
+       that left the page 3px wider than the screen. `clip` rather than `hidden`: no scroll container to move. */
+    overflow: clip;
+
     /* The oddity tapping it looked like: iOS showing a text-selection caret/loupe over the value and glyph,
        which sit, as plain text and an SVG, under the invisible `<select>` that actually takes the tap. */
     -webkit-touch-callout: none;
