@@ -1,15 +1,8 @@
 /** Directional focus geometry shared by the browser enhancement and TV remote adapter. */
 export type Direction = 'left' | 'right' | 'up' | 'down';
 
-export const FOCUSABLE = [
-  'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  'summary',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
+export const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
 
 export const isEditable = (element: Element | null): element is HTMLElement => {
   if (!(element instanceof HTMLElement)) return false;
@@ -38,27 +31,24 @@ export function visible(
   if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
   const closedDetails = element.closest('details:not([open])');
   if (closedDetails && element !== closedDetails.querySelector(':scope > summary')) return false;
-  const checked: HTMLElement[] = [];
-  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+  const shown = (node: HTMLElement | null, representedControl: boolean): boolean => {
+    if (!node) return true;
     const known = ancestry.get(node);
-    if (known === false) return false;
-    if (known === true) break;
+    if (known !== undefined) return known;
     const style = getComputedStyle(node);
     // Some native controls deliberately paint through a visible sibling (for example a radio beneath a
     // segmented-control label). They still provide the focus/selection semantics, so an explicit marker lets
     // spatial navigation use their real geometry without making arbitrary visually-hidden inputs reachable.
-    const representedControl = node === element && element.hasAttribute('data-spatial-visible');
-    if (
-      style.display === 'none' ||
-      style.visibility === 'hidden' ||
-      (style.opacity === '0' && !representedControl)
-    ) {
-      ancestry.set(node, false);
-      return false;
-    }
-    checked.push(node);
-  }
-  for (const node of checked) ancestry.set(node, true);
+    const result =
+      !(
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        (style.opacity === '0' && !representedControl)
+      ) && shown(node.parentElement, false);
+    ancestry.set(node, result);
+    return result;
+  };
+  if (!shown(element, element.hasAttribute('data-spatial-visible'))) return false;
   const rect = element.getBoundingClientRect();
   return rect.width > 1 && rect.height > 1;
 }
@@ -79,10 +69,6 @@ export const focusables = () => {
     (element) => element.tabIndex >= 0 && visible(element, ancestry),
   );
 };
-
-export function center(rect: DOMRect) {
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-}
 
 function firstChoice(region: ParentNode, candidates: HTMLElement[]): HTMLElement | undefined {
   const choices = Array.from(region.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((choice) =>
@@ -189,7 +175,7 @@ function semanticDestination(
         if (choice === current || !grid.contains(choice)) return false;
         const other = choice.getBoundingClientRect();
         return (
-          center(other).x < center(from).x - 2 &&
+          other.left + other.width / 2 < from.left + from.width / 2 - 2 &&
           Math.min(from.bottom, other.bottom) > Math.max(from.top, other.top)
         );
       });
@@ -201,10 +187,8 @@ function semanticDestination(
 
 /** Prefer the same row/column, while still allowing a diagonal escape at an edge. */
 function score(from: DOMRect, to: DOMRect, direction: Direction): number | null {
-  const a = center(from);
-  const b = center(to);
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
+  const dx = to.left + to.width / 2 - from.left - from.width / 2;
+  const dy = to.top + to.height / 2 - from.top - from.height / 2;
   const primary =
     direction === 'left' ? -dx : direction === 'right' ? dx : direction === 'up' ? -dy : dy;
   if (primary <= 2) return null;

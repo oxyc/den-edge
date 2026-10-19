@@ -197,6 +197,7 @@ export function seriesPresentation(
     }
   }
   return {
+    aired: coords,
     total: coords.length,
     watched,
     target,

@@ -1,5 +1,11 @@
 import type { Direction, moveFocus } from './spatialNavigation';
-import { noteOptionalImportFailure } from './optionalImport';
+
+// Keep error identity rather than matching filenames/messages: WebKit's module-load error can omit the failed URL.
+const failedImports = new WeakSet<object>();
+export const isOptionalImportFailure = (error: unknown) =>
+  error !== null &&
+  (typeof error === 'object' || typeof error === 'function') &&
+  failedImports.has(error);
 
 /** Native Tab, activation, editing and component-owned keys work before (and without) this enhancement. */
 export function installKeyboardNavigation(): () => void {
@@ -15,7 +21,8 @@ export function installKeyboardNavigation(): () => void {
       })
       .catch((error: unknown) => {
         // Failure must not disable native Tab/Enter or report an unhandled optional-import rejection.
-        noteOptionalImportFailure(error);
+        if (error !== null && (typeof error === 'object' || typeof error === 'function'))
+          failedImports.add(error);
         loading = undefined;
       }));
 
@@ -38,7 +45,7 @@ export function installKeyboardNavigation(): () => void {
     if (
       !(target instanceof HTMLElement) ||
       target !== document.activeElement ||
-      !target.matches('a[href], button, summary, [tabindex]') ||
+      !target.matches('a[href],button,summary,[tabindex]') ||
       target.closest(
         'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="tablist"], [role="menu"], [role="listbox"], [role="tree"], [role="grid"], [role="slider"], .player, video',
       )
@@ -64,22 +71,15 @@ export function installKeyboardNavigation(): () => void {
     });
   };
   // Bubble after controls' own handlers, so search results, menus and native editors keep their key contracts.
-  window.addEventListener('keydown', invalidate, true);
+  const invalidatingEvents = ['keydown', 'focusin', 'pointerdown', 'popstate', 'blur'] as const;
+  for (const type of invalidatingEvents) window.addEventListener(type, invalidate, true);
   window.addEventListener('keydown', keydown);
-  window.addEventListener('focusin', invalidate);
-  window.addEventListener('pointerdown', invalidate, true);
-  window.addEventListener('popstate', invalidate);
-  window.addEventListener('blur', invalidate);
   document.addEventListener('den:navigate', invalidate);
   return () => {
     disposed = true;
     invalidate();
-    window.removeEventListener('keydown', invalidate, true);
+    for (const type of invalidatingEvents) window.removeEventListener(type, invalidate, true);
     window.removeEventListener('keydown', keydown);
-    window.removeEventListener('focusin', invalidate);
-    window.removeEventListener('pointerdown', invalidate, true);
-    window.removeEventListener('popstate', invalidate);
-    window.removeEventListener('blur', invalidate);
     document.removeEventListener('den:navigate', invalidate);
   };
 }

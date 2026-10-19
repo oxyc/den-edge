@@ -58,14 +58,13 @@
     target.focus({ preventScroll: true, focusVisible: keyboard });
   };
   onMount(() => {
-    const stopInput = trackInputModality();
+    trackInputModality();
     root.addEventListener('pointerdown', rememberRouteFocus, { passive: true });
     return () => {
       if (__DEN_TV__) cancelFrameRestore?.();
       focusReplacement?.disconnect();
       clearPointerFocus?.();
       root.removeEventListener('pointerdown', rememberRouteFocus);
-      stopInput?.();
     };
   });
   $effect.pre(() => {

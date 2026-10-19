@@ -725,13 +725,10 @@
     }
   }
 
-  function seasonEpisodeNumbers(d: TitleDetail, picked: number): number[] {
-    const listed = d.seasons.find((item) => item.number === picked)?.episodeCount ?? 0;
-    const aired = d.lastAired;
-    const count =
-      !aired || picked < aired.season ? listed : picked === aired.season ? aired.episode : 0;
-    return Array.from({ length: Math.min(listed, count) }, (_, index) => index + 1);
-  }
+  const seasonEpisodeNumbers = (picked: number) =>
+    series?.aired
+      .filter((episode) => episode.season === picked)
+      .map((episode) => episode.episode) ?? [];
 
   async function markSeasons(picked: number | undefined, seen: boolean) {
     const d = untrack(() => detail);
@@ -740,7 +737,7 @@
       (item) => item.number > 0 && (picked === undefined || item.number === picked),
     );
     for (const item of selected) {
-      let numbers = seasonEpisodeNumbers(d, item.number);
+      let numbers = seasonEpisodeNumbers(item.number);
       try {
         const answer = await content.query({
           kind: 'season',
@@ -760,33 +757,26 @@
     const d = detail;
     if (d?.title.type !== 'tv' || !onseason) return undefined;
     const regular = d.seasons.filter((item) => item.number > 0);
-    const state = (picked?: number) => {
-      const selected =
-        picked === undefined ? regular : regular.filter((item) => item.number === picked);
-      const numbers = selected.flatMap((item) =>
-        seasonEpisodeNumbers(d, item.number).map((episode) => `${item.number}:${episode}`),
+    const item = (season?: (typeof regular)[number]): MenuItem => {
+      const picked = season?.number;
+      const numbers = series?.aired.filter(
+        (episode) => picked === undefined || episode.season === picked,
       );
-      return (
-        numbers.length > 0 &&
-        numbers.every((key) => episodeProgress(episodes.get(key), row) >= WATCHED)
-      );
-    };
-    return [
-      {
+      const checked =
+        !!numbers?.length &&
+        numbers.every(
+          (episode) =>
+            episodeProgress(episodes.get(`${episode.season}:${episode.episode}`), row) >= WATCHED,
+        );
+      return {
         kind: 'checkbox',
-        label: 'Whole series',
-        checked: state(),
+        label: season?.name ?? 'Whole series',
+        checked,
         disabled: busy,
-        onselect: () => void markSeasons(undefined, !state()),
-      },
-      ...regular.map((item) => ({
-        kind: 'checkbox' as const,
-        label: item.name,
-        checked: state(item.number),
-        disabled: busy,
-        onselect: () => void markSeasons(item.number, !state(item.number)),
-      })),
-    ];
+        onselect: () => void markSeasons(picked, !checked),
+      };
+    };
+    return [item(), ...regular.map(item)];
   });
 </script>
 
