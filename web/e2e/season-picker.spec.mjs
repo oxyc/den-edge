@@ -89,7 +89,14 @@ async function guest(page, series) {
   return { errors };
 }
 
-const forms = (page) => page.evaluate(() => window.seasonForms);
+/**
+ * The forms noted so far, read once two more frames have run: a locator can find the page's state before any frame has
+ * drawn it, and on a busy machine the sampler would not have seen it yet.
+ */
+const forms = async (page) => {
+  await frames(page);
+  return page.evaluate(() => window.seasonForms);
+};
 const frames = (page, n = 2) =>
   page.evaluate(
     (count) =>
