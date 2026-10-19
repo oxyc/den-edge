@@ -147,14 +147,17 @@
     gap: 14px;
     width: 100%;
     margin: 0;
-    padding: 0 0 8px;
+
+    /* The scroller reaches the viewport, but its resting first card follows the readable column. Later cards can
+       still travel through the leading edge because this is content padding, not an ancestor clip. */
+    padding: 0 0 8px var(--page-inset);
     overflow: auto hidden;
 
     /* Replacing a virtual slot with its equal-sized PosterCard must not make scroll anchoring move
        the shelf by one snap point. Chromium otherwise attributed exactly that movement to two cards. */
     overflow-anchor: none;
     scroll-snap-type: x proximity;
-    scroll-padding-inline: 0;
+    scroll-padding-inline: var(--page-inset) 0;
     scrollbar-width: none;
   }
 

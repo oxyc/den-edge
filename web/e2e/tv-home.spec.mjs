@@ -103,15 +103,16 @@ test(
         paddingLeft: style.paddingLeft,
         paddingRight: style.paddingRight,
         firstChildLeft: track.firstElementChild?.getBoundingClientRect().left,
+        headingLeft: track.closest('.row')?.querySelector('h2')?.getBoundingClientRect().left,
         wrapperLeft: wrapperBox.left,
         wrapperRight: wrapperBox.right,
       };
     });
     expect(Math.abs(shelf.left)).toBeLessThanOrEqual(1);
     expect(Math.abs(shelf.right - page.viewportSize().width)).toBeLessThanOrEqual(1);
-    expect(shelf.paddingLeft).toBe('0px');
+    expect(Number.parseFloat(shelf.paddingLeft)).toBeGreaterThan(0);
     expect(shelf.paddingRight).toBe('0px');
-    expect(Math.abs(shelf.firstChildLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(shelf.firstChildLeft - shelf.headingLeft)).toBeLessThanOrEqual(1);
     expect(Math.abs(shelf.wrapperLeft)).toBeLessThanOrEqual(1);
     expect(Math.abs(shelf.wrapperRight - page.viewportSize().width)).toBeLessThanOrEqual(1);
     const services = page.getByRole('region', { name: 'Services' });

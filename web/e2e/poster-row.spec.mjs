@@ -42,6 +42,13 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
   expect(trackBox).not.toBeNull();
   expect(Math.abs(trackBox.x)).toBeLessThanOrEqual(1);
   expect(Math.abs(trackBox.width - page.viewportSize().width)).toBeLessThanOrEqual(1);
+  const [headingBox, firstCardBox] = await Promise.all([
+    row.getByRole('heading', { name: 'Coming Soon' }).boundingBox(),
+    row.locator('.card').first().boundingBox(),
+  ]);
+  expect(headingBox).not.toBeNull();
+  expect(firstCardBox).not.toBeNull();
+  expect(Math.abs(firstCardBox.x - headingBox.x)).toBeLessThanOrEqual(1);
   const geometry = await track.evaluate((node) => {
     // Move past the first snap point; a smaller assignment can legitimately snap straight back to zero.
     node.scrollLeft = 250;
@@ -61,11 +68,11 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
     overflowX: 'auto',
     overflowY: 'hidden',
     overflowAnchor: 'none',
-    paddingLeft: '0px',
     paddingRight: '0px',
     scrollTop: 0,
     scrollable: true,
   });
+  expect(Number.parseFloat(geometry.paddingLeft)).toBeGreaterThan(0);
   expect(geometry.scrollLeft).toBeGreaterThan(0);
   await page.close();
 });
