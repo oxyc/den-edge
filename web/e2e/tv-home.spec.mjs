@@ -53,6 +53,13 @@ test(
     await expect(pager.locator('.dot')).toHaveCount(3);
     await expect(pager.getByRole('button')).toHaveCount(0);
     await expect(pager.locator('.dot.on')).toHaveCount(1);
+    const [copyBox, dotsBox] = await Promise.all([
+      hero.locator('.slide[aria-hidden="false"] .text').boundingBox(),
+      pager.locator('.dots').boundingBox(),
+    ]);
+    expect(copyBox).not.toBeNull();
+    expect(dotsBox).not.toBeNull();
+    expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
     // The first enriched recommendation renders before the others. Wait for the real slides before asking
@@ -61,16 +68,14 @@ test(
     const more = hero.getByRole('link', { name: 'More', exact: true });
     await expect(more).toHaveCount(1);
     await expect(hero.locator('.slide[aria-hidden="false"] a')).toHaveCount(1);
-    // Reach the hero from the navbar exactly as a remote does; direct DOM focus masked geometry regressions.
-    const approach = ['ArrowUp', 'ArrowRight', 'ArrowLeft', 'ArrowDown'];
-    for (
-      let press = 0;
-      press < 32 && !(await more.evaluate((node) => node === document.activeElement));
-      press++
-    ) {
-      await page.keyboard.press(approach[press % approach.length]);
-      await page.waitForTimeout(80);
-    }
+    // The billboard is the first content row. Down from Search must enter it, even though a lower service tile
+    // happens to have a closer horizontal center and would win a generic geometry-only scan.
+    const search = page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', {
+      name: 'Search',
+      exact: true,
+    });
+    await search.focus();
+    await page.keyboard.press('ArrowDown');
     await expect(more).toBeFocused();
     await expect(more).toHaveAttribute('data-tv-carousel-action', 'hero');
     await page.screenshot({ path: info.outputPath('tv-home.png') });

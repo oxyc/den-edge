@@ -1363,7 +1363,7 @@
      The room at the bottom is the pager's, which sits over every slide rather than in one. */
   .told {
     width: 100%;
-    max-width: 1400px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) 76px;
   }
@@ -1476,7 +1476,7 @@
     bottom: 32px;
     left: 0;
     display: flex;
-    max-width: 1400px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding-inline: var(--gutter);
     pointer-events: none;

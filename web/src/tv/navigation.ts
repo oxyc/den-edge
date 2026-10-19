@@ -260,6 +260,21 @@ export function installTVNavigation(): () => void {
       // Arrow keys inside a native editor belong to its caret/list selection. Up/down at a search field is
       // likewise left to that field's own results behavior.
       if (isEditable(target) && editing === target) return;
+      // Home's billboard is the first content row. Pure center-distance scoring can prefer a service tile far
+      // below Search because the hero action is intentionally left-aligned; Down from the top bar must enter
+      // the visible slide before it can skip to lower shelves.
+      if (direction === 'down' && target instanceof HTMLElement && target.closest('.tv-bar')) {
+        const heroAction = document.querySelector<HTMLElement>(
+          '[data-route-page][data-active="true"] .billboard .slide[aria-hidden="false"] [data-tv-carousel-action="hero"]',
+        );
+        if (heroAction && visible(heroAction)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          heroAction.focus({ preventScroll: true });
+          heroAction.scrollIntoView({ block: 'nearest', inline: 'center' });
+          return;
+        }
+      }
       // A tablist owns horizontal selection. Its inactive tabs use the required roving tabindex=-1, so the
       // spatial scan cannot see them; let the component move focus and select the adjacent season itself.
       if (
