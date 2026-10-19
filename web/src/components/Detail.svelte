@@ -865,7 +865,7 @@
           <small>Powered by DoesTheDogDie.com</small>
         </aside>
       {/if}
-      <div class="hero-content">
+      <div class="hero-content" data-spatial-page-entry>
         <div class="head">
           {#if d.title.posterPath}<img
               class="poster"

@@ -221,10 +221,10 @@
 <svelte:window onpointerdown={dismissQuestion} onkeydown={dismissQuestion} />
 
 {#snippet framed(title: Title, controls: Control[], card: Snippet)}
-  <div class="framed">
+  <div class="framed" data-spatial-overlay>
     {@render card()}
     {#if controls.length}
-      <div class="controls">
+      <div class="controls" data-spatial-overlay-actions>
         {#each controls as control (control.icon)}
           {@const asking = confirming?.id === `${control.icon}:${key(title)}`}
           <button

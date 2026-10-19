@@ -5,7 +5,6 @@ import { exitTvApp } from './platform';
 import {
   activeDialog,
   activeModal,
-  center,
   focusables,
   FOCUSABLE,
   isEditable,
@@ -285,33 +284,6 @@ export function installTVNavigation(): () => void {
           return;
         }
       }
-      // Settings are semantic rows: a control aligned to the far right still belongs immediately after the row
-      // above it. Pure center-distance scoring otherwise jumps over compact segmented controls and switches in
-      // favor of a later full-width disclosure whose center happens to line up with the current row.
-      if (
-        target instanceof HTMLElement &&
-        (direction === 'up' || direction === 'down') &&
-        target.closest('.settings .row')
-      ) {
-        const item = target.closest<HTMLElement>('.settings .item');
-        const sibling =
-          direction === 'down' ? item?.nextElementSibling : item?.previousElementSibling;
-        if (sibling instanceof HTMLElement && sibling.classList.contains('item')) {
-          const choices = Array.from(sibling.querySelectorAll<HTMLElement>(FOCUSABLE));
-          const destination =
-            choices.find(
-              (choice) =>
-                choice instanceof HTMLInputElement && choice.type === 'radio' && choice.checked,
-            ) ?? choices.find((choice) => choice.tabIndex >= 0 && visible(choice));
-          if (destination && visible(destination)) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            destination.focus({ preventScroll: true });
-            destination.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-            return;
-          }
-        }
-      }
       // Home's billboard is the first content row. Pure center-distance scoring can prefer a service tile far
       // below Search because the hero action is intentionally left-aligned; Down from the top bar must enter
       // the visible slide before it can skip to lower shelves.
@@ -319,24 +291,17 @@ export function installTVNavigation(): () => void {
         const activePage = document.querySelector<HTMLElement>(
           '[data-route-page][data-active="true"]',
         );
-        // Detail owns one visual action sequence. Query the complete content block so a Resume/Continue control
-        // which precedes TitleActions remains the first stop as well; metadata is deliberately inert on TV.
-        const detailActions = activePage?.querySelector<HTMLElement>('.hero .hero-content');
-        const detailAction = detailActions
-          ? Array.from(detailActions.querySelectorAll<HTMLElement>(FOCUSABLE)).find(
+        const entry = activePage?.querySelector<HTMLElement>('[data-spatial-page-entry]');
+        const destination = entry?.matches(FOCUSABLE)
+          ? entry
+          : Array.from(entry?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []).find(
               (element) => element.tabIndex >= 0 && visible(element),
-            )
-          : undefined;
-        const heroAction =
-          detailAction ??
-          activePage?.querySelector<HTMLElement>(
-            '.billboard .slide[aria-hidden="false"] [data-tv-carousel-action="hero"]',
-          );
-        if (heroAction && visible(heroAction)) {
+            );
+        if (destination && destination.tabIndex >= 0 && visible(destination)) {
           event.preventDefault();
           event.stopImmediatePropagation();
-          heroAction.focus({ preventScroll: true });
-          heroAction.scrollIntoView({ block: 'nearest', inline: 'center' });
+          destination.focus({ preventScroll: true });
+          destination.scrollIntoView({ block: 'nearest', inline: 'center' });
           return;
         }
       }
@@ -348,95 +313,6 @@ export function installTVNavigation(): () => void {
         (direction === 'left' || direction === 'right')
       )
         return;
-      if (target instanceof HTMLElement) {
-        // Source actions sit at the far right of their rows. Geometry alone skips them for the season tabs
-        // below the left-aligned disclosure, so make entering/leaving this panel an explicit vertical step.
-        const containingPanel = target.closest<HTMLElement>('.source-panel');
-        const disclosure = target.matches('.sources-disclosure[aria-expanded="true"]')
-          ? target
-          : containingPanel
-            ? document.querySelector<HTMLElement>(
-                `.sources-disclosure[aria-expanded="true"][aria-controls="${CSS.escape(containingPanel.id)}"]`,
-              )
-            : null;
-        const controlledId = disclosure?.getAttribute('aria-controls');
-        const sourceAction = (
-          controlledId ? document.getElementById(controlledId) : null
-        )?.querySelectorAll<HTMLElement>(FOCUSABLE);
-        const firstSourceAction =
-          sourceAction && Array.from(sourceAction).find((element) => visible(element));
-        const sourceDestination =
-          direction === 'down' && target === disclosure
-            ? firstSourceAction
-            : direction === 'up' && target === firstSourceAction
-              ? disclosure
-              : undefined;
-        if (sourceDestination && visible(sourceDestination)) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          sourceDestination.focus({ preventScroll: true });
-          sourceDestination.scrollIntoView({ block: 'nearest', inline: 'center' });
-          return;
-        }
-        const framed = target.closest<HTMLElement>('.framed');
-        const listCard = framed?.querySelector<HTMLElement>('.card');
-        const listAction = framed?.querySelector<HTMLElement>('.controls button');
-        const withinListCard = listCard && (target === listCard || listCard.contains(target));
-        if (
-          (direction === 'up' && withinListCard && listAction && visible(listAction)) ||
-          (direction === 'down' && target.closest('.controls') && listCard && visible(listCard))
-        ) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          const destination = direction === 'up' ? listAction! : listCard!;
-          destination.focus({ preventScroll: true });
-          destination.scrollIntoView({ block: 'nearest', inline: 'center' });
-          return;
-        }
-      }
-      if (
-        direction === 'right' &&
-        target instanceof HTMLElement &&
-        target.closest('section.search .rail')
-      ) {
-        const result = document.querySelector<HTMLElement>(
-          '[data-route-page][data-active="true"] section.search .grid a',
-        );
-        if (result && visible(result)) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          result.focus({ preventScroll: true });
-          result.scrollIntoView({ block: 'center', inline: 'nearest' });
-          return;
-        }
-      }
-      if (direction === 'left' && target instanceof HTMLElement) {
-        const grid = target.closest<HTMLElement>('section.search .grid');
-        if (grid) {
-          const here = target.getBoundingClientRect();
-          const hasGridChoiceToLeft = focusables().some((candidate) => {
-            if (candidate === target || candidate.closest('section.search .grid') !== grid)
-              return false;
-            const other = candidate.getBoundingClientRect();
-            return (
-              center(other).x < center(here).x - 2 &&
-              Math.min(here.bottom, other.bottom) > Math.max(here.top, other.top)
-            );
-          });
-          if (!hasGridChoiceToLeft) {
-            const rail = document.querySelector<HTMLElement>(
-              '[data-route-page][data-active="true"] section.search .rail [aria-pressed="true"], [data-route-page][data-active="true"] section.search .rail .chip',
-            );
-            if (rail && visible(rail)) {
-              event.preventDefault();
-              event.stopImmediatePropagation();
-              rail.focus({ preventScroll: true });
-              rail.scrollIntoView({ block: 'center', inline: 'nearest' });
-              return;
-            }
-          }
-        }
-      }
       if (
         (direction === 'left' || direction === 'right') &&
         target instanceof HTMLElement &&

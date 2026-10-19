@@ -1078,6 +1078,7 @@
                   class="den-button den-button-secondary den-button-large more"
                   href={titleHref(title)}
                   data-tv-carousel-action={__DEN_TV__ ? 'hero' : undefined}
+                  data-spatial-page-entry={n === index ? '' : undefined}
                   use:remotePaging
                   tabindex={n === index ? 0 : -1}>More</a
                 >

@@ -565,7 +565,7 @@
 <!-- The type and the rail. While a query is typed the rail follows the results in the page, so they come first in
      focus order; a wide screen still draws it down the side. -->
 {#snippet rail()}
-  <div class="rail" class:after={typing}>
+  <div class="rail" class:after={typing} data-spatial-rail>
     {#if !typing}
       <TypeFilter
         value={explore.type ?? null}
@@ -628,7 +628,7 @@
       people={peopleHref(peopleFromExplore(explore))}
     />
   {/if}
-  <div class="explore">
+  <div class="explore" data-spatial-split>
     {#if !typing}{@render rail()}{/if}
     <div class="feed">
       {#if typing}

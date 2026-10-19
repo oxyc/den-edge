@@ -161,6 +161,13 @@ test('remote changes seasons from the focused season tab', async ({ page }) => {
   await expect(
     page.getByRole('button', { name: 'Play episode 1: Season 2 episode 1' }),
   ).toBeVisible();
+
+  const firstEpisode = page.getByRole('button', {
+    name: 'Play episode 1: Season 2 episode 1',
+  });
+  await firstEpisode.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(season2).toBeFocused();
 });
 
 test('season download asks for its target instead of inheriting the focused tab', async ({
@@ -391,6 +398,8 @@ test('episode overflow exposes the Apple TV actions without a TV handoff', async
   await mark.focus();
   await page.keyboard.press('Enter');
   await expect(mark).toHaveCount(0);
+  // The menu closes immediately; wait for the library write to come back before asserting the next menu state.
+  await expect(page.getByText('1 of 4 watched', { exact: true })).toBeVisible();
   await options.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('menuitem', { name: 'Mark unwatched', exact: true })).toBeVisible();

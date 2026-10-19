@@ -84,6 +84,121 @@ export function center(rect: DOMRect) {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
+function firstChoice(region: ParentNode, candidates: HTMLElement[]): HTMLElement | undefined {
+  const choices = Array.from(region.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((choice) =>
+    candidates.includes(choice),
+  );
+  return (
+    choices.find(
+      (choice) => choice instanceof HTMLInputElement && choice.type === 'radio' && choice.checked,
+    ) ??
+    choices.find((choice) =>
+      choice.matches('[aria-current]:not([aria-current="false"]), [aria-pressed="true"]'),
+    ) ??
+    choices[0]
+  );
+}
+
+function controlledRegion(root: Document | ShadowRoot, id: string): HTMLElement | null {
+  return root.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+}
+
+/** Prefer declared ownership and ordering before falling back to screen geometry. */
+function semanticDestination(
+  current: HTMLElement,
+  direction: Direction,
+  candidates: HTMLElement[],
+): HTMLElement | undefined {
+  const root = current.getRootNode();
+  if (!(root instanceof Document || root instanceof ShadowRoot)) return undefined;
+
+  if (direction === 'up') {
+    const panel = current.closest<HTMLElement>('[role="tabpanel"][id]');
+    const selected = panel
+      ? root.querySelector<HTMLElement>(
+          `[role="tab"][aria-selected="true"][aria-controls="${CSS.escape(panel.id)}"]`,
+        )
+      : null;
+    if (selected && candidates.includes(selected)) return selected;
+  }
+
+  // An expanded controller and its region form one vertical unit. Down enters the first usable control; Up from
+  // that first control returns to the controller. Sources, disclosure rows and menus all get the same behavior.
+  if (direction === 'down' && current.getAttribute('aria-expanded') === 'true') {
+    const id = current.getAttribute('aria-controls');
+    const region = id ? controlledRegion(root, id) : null;
+    const first = region ? firstChoice(region, candidates) : undefined;
+    if (first) return first;
+  }
+  if (direction === 'up') {
+    for (let region = current.parentElement; region; region = region.parentElement) {
+      if (!region.id) continue;
+      const controller = root.querySelector<HTMLElement>(
+        `[aria-expanded="true"][aria-controls="${CSS.escape(region.id)}"]`,
+      );
+      if (
+        controller &&
+        candidates.includes(controller) &&
+        firstChoice(region, candidates) === current
+      )
+        return controller;
+    }
+  }
+
+  // Some visual rows contain differently sized controls. Their DOM order is the reliable reading order; the
+  // checked radio is the representative focus stop for a segmented control.
+  if (direction === 'up' || direction === 'down') {
+    const anchor = current.closest<HTMLElement>('[data-spatial-anchor]');
+    const item = anchor?.closest<HTMLElement>('[data-spatial-item]');
+    const list = item?.parentElement;
+    if (item && list?.matches('[data-spatial-list="vertical"]')) {
+      let sibling = direction === 'down' ? item.nextElementSibling : item.previousElementSibling;
+      while (sibling && !sibling.matches('[data-spatial-item]'))
+        sibling =
+          direction === 'down' ? sibling.nextElementSibling : sibling.previousElementSibling;
+      if (sibling) {
+        const next = firstChoice(sibling, candidates);
+        if (next) return next;
+      }
+    }
+  }
+
+  // An action painted over a primary surface is spatially above it even when both occupy the same rectangle.
+  // The relationship is declared by the component, so the engine need not know what kind of card it contains.
+  const overlay = current.closest<HTMLElement>('[data-spatial-overlay]');
+  const actions = overlay?.querySelector<HTMLElement>('[data-spatial-overlay-actions]');
+  if (overlay && actions) {
+    const action = firstChoice(actions, candidates);
+    const primary = Array.from(overlay.querySelectorAll<HTMLElement>(FOCUSABLE)).find(
+      (choice) => candidates.includes(choice) && !actions.contains(choice),
+    );
+    if (direction === 'up' && !actions.contains(current) && action) return action;
+    if (direction === 'down' && actions.contains(current) && primary) return primary;
+  }
+
+  // A side rail and result grid are separate focus regions. Geometry remains in charge inside the grid; only its
+  // left edge crosses back to the selected rail choice, and Right from the rail enters the first result.
+  const split = current.closest<HTMLElement>('[data-spatial-split]');
+  const rail = split?.querySelector<HTMLElement>('[data-spatial-rail]');
+  const grid = split?.querySelector<HTMLElement>('[data-spatial-grid]');
+  if (split && rail && grid) {
+    if (direction === 'right' && rail.contains(current)) return firstChoice(grid, candidates);
+    if (direction === 'left' && grid.contains(current)) {
+      const from = current.getBoundingClientRect();
+      const hasGridChoiceToLeft = candidates.some((choice) => {
+        if (choice === current || !grid.contains(choice)) return false;
+        const other = choice.getBoundingClientRect();
+        return (
+          center(other).x < center(from).x - 2 &&
+          Math.min(from.bottom, other.bottom) > Math.max(from.top, other.top)
+        );
+      });
+      if (!hasGridChoiceToLeft) return firstChoice(rail, candidates);
+    }
+  }
+  return undefined;
+}
+
 /** Prefer the same row/column, while still allowing a diagonal escape at an edge. */
 function score(from: DOMRect, to: DOMRect, direction: Direction): number | null {
   const a = center(from);
@@ -109,6 +224,15 @@ export function moveFocus(direction: Direction): boolean {
     const first = candidates[0]!;
     first.focus({ preventScroll: true });
     first.scrollIntoView({ block: 'center', inline: 'center' });
+    return true;
+  }
+  // ARIA ownership outranks visual proximity. For example, Up from an episode in a season tab panel returns to
+  // the selected season rather than a title-level action which happens to be geometrically nearer. Keeping this
+  // in the shared engine gives the browser keyboard enhancement and every TV adapter the same rule.
+  const semantic = semanticDestination(current, direction, candidates);
+  if (semantic && candidates.includes(semantic)) {
+    semantic.focus({ preventScroll: true });
+    semantic.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
     return true;
   }
   const from = current.getBoundingClientRect();

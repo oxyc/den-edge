@@ -37,11 +37,12 @@
   });
 </script>
 
-<div class="item" {id}>
+<div class="item" {id} data-spatial-item>
   {#if children}
     <button
       type="button"
       class="row"
+      data-spatial-anchor
       aria-expanded={open}
       aria-controls="{id}-panel"
       onclick={() => rows.toggle(id)}
@@ -71,7 +72,7 @@
       {#if open}{@render children()}{/if}
     </div>
   {:else}
-    <div class="row static">
+    <div class="row static" data-spatial-anchor>
       <span class="label" id="{id}-label"
         >{label}{#if detail}<small>{detail}</small>{/if}</span
       >
