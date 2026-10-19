@@ -909,9 +909,10 @@ fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: 
 
 /// A download's cancel or reannounce (oxyc/den#202, den-scout's `DELETE /p/<ticket>`): the one `DELETE` relayed, on a
 /// play ticket and nothing else, with no query but `op=reannounce`. It reaches no route a `GET` could not, and scout
-/// acts only on a torrent it added itself.
+/// acts only on a torrent it added itself. The combined Den addon's tickets are `/den/p/<ticket>`, which Hearth hands
+/// to the same Scout handler.
 fn scout_cancel(path: &str, query: Option<&str>) -> bool {
-    let ticket = path.strip_prefix("/scout/p/").unwrap_or_default();
+    let ticket = path.strip_prefix("/scout/p/").or_else(|| path.strip_prefix("/den/p/")).unwrap_or_default();
     !ticket.is_empty()
         && ticket.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
         && matches!(query, None | Some("op=reannounce"))
@@ -5479,8 +5480,9 @@ mod tests {
         });
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
         let mut h = Harness::new();
-        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/scout=http://{addr}"));
-        for allowed in ["/scout/p/AbC_-9", "/scout/p/AbC_-9?op=reannounce"] {
+        Arc::get_mut(&mut h.state).unwrap().relays =
+            crate::parse_relays(&format!("/scout=http://{addr},/den=http://{addr}"));
+        for allowed in ["/scout/p/AbC_-9", "/scout/p/AbC_-9?op=reannounce", "/den/p/AbC_-9?op=reannounce"] {
             assert_eq!(
                 h.send("DELETE", allowed, None, &[]).await.status(),
                 StatusCode::NO_CONTENT,
@@ -5493,11 +5495,18 @@ mod tests {
             "/scout/p/a/b",
             "/scout/p/..%2Fconfigure",
             "/scout/cfg/play/token",
+            "/den/cfg/wanted",
+            "/den/p/AbC_-9?op=purge",
+            "/den/play/token",
         ] {
             let answer = h.send("DELETE", refused, None, &[]).await;
             assert_eq!(answer.status(), StatusCode::METHOD_NOT_ALLOWED, "{refused}");
         }
-        assert_eq!(*asked.lock().unwrap(), ["DELETE /p/AbC_-9", "DELETE /p/AbC_-9?op=reannounce"]);
+        // Hearth owns its `/den` mount, so the relay keeps the prefix there.
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["DELETE /p/AbC_-9", "DELETE /p/AbC_-9?op=reannounce", "DELETE /den/p/AbC_-9?op=reannounce"]
+        );
     }
 
     /// A profile's content policy rides on atlas' query (`maximumAge`, `unknownRatings`, `region`, `kidAudience`) or, for

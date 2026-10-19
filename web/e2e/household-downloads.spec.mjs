@@ -22,8 +22,8 @@ const ROUTES = {
 };
 
 /**
- * The household's own source plugin: `install` its manifest URL, `stream` the path its episode list is asked on,
- * `ticket` the play URL that list names, and `relayed` the prefix this page redeems that ticket under.
+ * The household's own source plugin: `install` its manifest URL, `base` where this page asks it, `ticket` the play URL
+ * its episode list names, and `relayed` the prefix this page redeems that ticket under.
  */
 const SCOUT = {
   id: 'com.den.scout',
@@ -31,6 +31,18 @@ const SCOUT = {
   base: '/scout/scoutcfg',
   ticket: `${E2E_ORIGIN}/scout/p/episode-ticket`,
   relayed: '/scout/p/',
+};
+
+/**
+ * The combined Den addon (den-hearth `den.rs`): streams at `/den/<config>/stream/…`, and play tickets at `/den/p/…`,
+ * keyed apart from Scout's so that Scout's `/scout/p/` refuses them.
+ */
+const HEARTH = {
+  id: 'com.den.hearth',
+  install: `${E2E_ORIGIN}/den/hearthcfg/manifest.json`,
+  base: '/den/hearthcfg',
+  ticket: `${E2E_ORIGIN}/den/p/episode-ticket`,
+  relayed: '/den/p/',
 };
 
 /**
@@ -121,6 +133,13 @@ async function downloadsAnEpisode(addon) {
     const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
     const page = await context.newPage();
     const asked = await routeHousehold(page, edge, addon);
+    // Every ticket either addon could be asked about, wherever it went: one addon's ticket on the other's route
+    // would be refused there.
+    const tickets = [];
+    page.on('request', (request) => {
+      const { pathname } = new URL(request.url());
+      if (/^\/(?:scout|den)\/p\//.test(pathname)) tickets.push(pathname);
+    });
     const household = await splitHousehold(page, edge, addon);
 
     await page.goto(`${E2E_ORIGIN}/tv/${SERIES}`);
@@ -152,6 +171,7 @@ async function downloadsAnEpisode(addon) {
       .poll(() => asked.some((ask) => ask === `GET ${addon.relayed}episode-ticket?probe=1`))
       .toBe(true);
     expect(asked.every((ask) => ask.startsWith(`GET ${addon.relayed}episode-ticket?`))).toBe(true);
+    expect(new Set(tickets)).toEqual(new Set([`${addon.relayed}episode-ticket`]));
     expect(rowCounts(edge, household).others).toBe(before.others);
   } finally {
     await browser.close();
@@ -160,4 +180,10 @@ async function downloadsAnEpisode(addon) {
 
 test('on a split household Owner lists the household’s Scout sources and queues on the household', async () => {
   await downloadsAnEpisode(SCOUT);
+});
+
+// The owner's household after it moved to Den Hearth: the combined addon is its only source plugin. Sources and
+// downloads use it as playback does, and its tickets are redeemed on Hearth's own `/den/p/` route.
+test('on a split household with only Den Hearth, Owner lists Hearth’s sources and queues on the household', async () => {
+  await downloadsAnEpisode(HEARTH);
 });
