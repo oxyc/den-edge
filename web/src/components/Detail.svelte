@@ -867,9 +867,16 @@
         </div>
         <div class="season-bar">
           <DetailTabs
-            tabs={d.seasons.map((s) => ({ value: String(s.number), label: s.name }))}
+            tabs={d.seasons.map((s) => ({
+              value: String(s.number),
+              label: s.name,
+              option: s.episodeCount
+                ? `${s.name} · ${s.episodeCount} ${s.episodeCount === 1 ? 'episode' : 'episodes'}`
+                : s.name,
+            }))}
             value={String(season)}
             label="Seasons"
+            one="Season"
             {panel}
             href={(value) => titleHref({ ...d.title, season: Number(value) })}
             onchange={(value) => pickSeason(d, Number(value))}
