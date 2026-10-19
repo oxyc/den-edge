@@ -514,25 +514,28 @@ test('TV cancels a native expiry probe when playback closes', async ({ page, bro
   }, native.playlist);
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
-  await expect
-    .poll(
-      () =>
-        video.evaluate((element) =>
-          element.currentTime > 0 && !element.paused && !element.seeking ? 'playing' : 'waiting',
-        ),
-      { timeout: 30_000 },
-    )
-    .toBe('playing');
-  // Dispatch the native stall and hardware Back in one browser task. Otherwise a real `playing` event can land
-  // between two Playwright round trips and cancel the synthetic stall before Back is what closes the probe.
-  const closed = await video.evaluate((element) => {
-    element.dispatchEvent(new Event('waiting'));
-    const started = window.__nativeProbeStarts;
-    const beforeBack = window.__nativeProbeAborts;
-    const event = new KeyboardEvent('keydown', { key: 'Back', bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'keyCode', { value: 461 });
-    (document.activeElement ?? document.body).dispatchEvent(event);
-    return { started, beforeBack, prevented: event.defaultPrevented };
+  // Wait for Player's first-frame proof by offering `waiting` on successive browser tasks. currentTime alone is not
+  // that proof on a loaded CI runner. The first accepted stall and hardware Back still happen in one task, so a real
+  // `playing` event cannot cancel the synthetic stall between two Playwright round trips.
+  const closed = await video.evaluate(async (element) => {
+    const deadline = performance.now() + 30_000;
+    while (performance.now() < deadline) {
+      element.dispatchEvent(new Event('waiting'));
+      if (window.__nativeProbeStarts) {
+        const started = window.__nativeProbeStarts;
+        const beforeBack = window.__nativeProbeAborts;
+        const event = new KeyboardEvent('keydown', {
+          key: 'Back',
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(event, 'keyCode', { value: 461 });
+        (document.activeElement ?? document.body).dispatchEvent(event);
+        return { started, beforeBack, prevented: event.defaultPrevented };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return { started: 0, beforeBack: window.__nativeProbeAborts, prevented: false };
   });
   expect(closed).toEqual({ started: 1, beforeBack: 0, prevented: true });
   await expect(video).toHaveCount(0);
