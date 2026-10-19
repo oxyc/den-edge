@@ -463,11 +463,27 @@
    * arrives later goes in as a promised item started now; a browser that refuses leaves the code on screen.
    */
   function copyCode(text: string | Promise<string>) {
-    const blob = Promise.resolve(text).then((t) => new Blob([t], { type: 'text/plain' }));
-    const write =
-      typeof ClipboardItem === 'function' && navigator.clipboard?.write
-        ? navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })])
-        : Promise.resolve(text).then((t) => navigator.clipboard?.writeText(t));
+    const plain = Promise.resolve(text);
+    const writeText = () =>
+      plain.then((value) => {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+        return navigator.clipboard.writeText(value);
+      });
+    let write: Promise<unknown>;
+    if (typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
+      const blob = plain.then((value) => new Blob([value], { type: 'text/plain' }));
+      try {
+        // Older Chromium exposes ClipboardItem but accepts only a Blob, not the promised Blob Safari requires.
+        // Constructing it throws synchronously there; copying is best-effort and must never stop pairing itself.
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+      } catch {
+        // The rejected no-code promise still owns this derived promise even though the native constructor refused it.
+        void blob.catch(() => {});
+        write = writeText();
+      }
+    } else {
+      write = writeText();
+    }
     void write.then(
       () => (codeCopied = true),
       (error: unknown) => console.warn('link code not copied', error),

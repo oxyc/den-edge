@@ -104,8 +104,7 @@ export function appPath(href: string, base: string): string | null {
       url.pathname === here.pathname && url.hash.startsWith('#/')
         ? url.hash.slice(1).split('#')[0]!
         : url.pathname + url.search;
-    // The shared navbar's Home link uses the legacy /library alias. A widget has no server to
-    // answer that document URL: keep the alias inside the router just like canonical Home.
+    // Keep legacy /library links inside the widget router; a widget has no server to answer them.
     if (path === '/library') return '/';
     return parseRoute(path).page !== 'library' || path === '/' ? path : null;
   }

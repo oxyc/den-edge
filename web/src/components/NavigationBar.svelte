@@ -252,148 +252,177 @@
 </script>
 
 <div class="bar-anchor">
-  <header class="bar glass" class:searching={expanded} class:people={onPeople}>
-    <div class="leading">
-      <a class="brand" href="/" aria-label="Den home"
-        ><img src={icon} width="54" height="32" alt="" /></a
-      >
-      {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
-        <button class="back" type="button" onclick={navigateBack} aria-label="Back">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-            ><path d="m14 5-7 7 7 7" /></svg
+  {#if __DEN_TV__}
+    <header class="bar tv-bar">
+      <nav aria-label="Main navigation">
+        <button
+          class="tv-search-button"
+          type="button"
+          aria-label="Search"
+          aria-current={route.page === 'search' ? 'page' : undefined}
+          onclick={() => navigate(searchHref(''))}
+        >
+          <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
+            ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
           >
-          Back
         </button>
-      {/if}
-    </div>
-    <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
+        {#each tabs as tab (tab.page)}
+          <a
+            href={tab.page === 'library' ? '/' : `/${tab.page}`}
+            aria-current={route.page === tab.page ? 'page' : undefined}
+          >
+            {tab.label}
+          </a>
+        {/each}
+      </nav>
+      {#if profiles}<ProfileSwitcher {profiles} />{:else if profileHint}<ProfileHintTrigger
+          choice={hintChoice(profileHint)}
+        />{/if}
+    </header>
+  {:else}
+    <header class="bar glass" class:searching={expanded} class:people={onPeople}>
+      <div class="leading">
+        <a class="brand" href="/" aria-label="Den home"
+          ><img src={icon} width="54" height="32" alt="" /></a
+        >
+        {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
+          <button class="back" type="button" onclick={navigateBack} aria-label="Back">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+              ><path d="m14 5-7 7 7 7" /></svg
+            >
+            Back
+          </button>
+        {/if}
+      </div>
+      <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
        left a guest on Home with no way to reach Movies, Series or Settings — which is also where pairing is —
        and no way to search, though den-edge lends a keyless browser the key that search needs. -->
-    <form
-      class="search"
-      role="search"
-      id="nav-search"
-      onsubmit={submitted}
-      onfocusin={() => {
-        searchFocused = true;
-      }}
-      onfocusout={(event) => {
-        const next = event.relatedTarget;
-        if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
-          searchFocused = false;
-          recentDismissed = false;
-        }
-      }}
-    >
-      <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
-      >
-      <input
-        name="search"
-        bind:this={input}
-        bind:value={text}
-        type="search"
-        aria-label={onPeople
-          ? 'Search people, nationalities, roles…'
-          : 'Search titles, people, moods, languages…'}
-        placeholder={onPeople
-          ? narrow.current
-            ? 'People, nationalities, roles…'
-            : 'Search people, nationalities, roles…'
-          : narrow.current
-            ? 'Titles, people, moods…'
-            : 'Search titles, people, moods, languages…'}
-        autocomplete="off"
-        aria-controls={showRecent ? 'recent-searches' : undefined}
-        enterkeyhint="search"
-        onfocus={() => {
-          // On a TV, merely landing on Search with the D-pad is not an activation and must not add a history
-          // entry. Typing still reaches `searchChanged`, and Select enters the navigation layer's edit mode.
-          if (!__DEN_TV__ && route.page !== 'search' && !onPeople) navigate(searchHref(text));
+      <form
+        class="search"
+        role="search"
+        id="nav-search"
+        onsubmit={submitted}
+        onfocusin={() => {
+          searchFocused = true;
         }}
-        oninput={searchChanged}
-        onkeydown={(event) => {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            escaped();
-          } else if (event.key === 'ArrowDown' && (route.page === 'search' || onPeople)) {
-            event.preventDefault();
-            void intoResults();
+        onfocusout={(event) => {
+          const next = event.relatedTarget;
+          if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+            searchFocused = false;
+            recentDismissed = false;
           }
         }}
-      />
-      <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
-      {#if showRecent}
-        <span class="recent-status" role="status"
-          >Recent searches available. Press Down Arrow to review.</span
+      >
+        <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+          ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
         >
-        <!-- Pressing in the list keeps the field focused. iOS Safari doesn't focus a tapped button, so the field's
+        <input
+          name="search"
+          bind:this={input}
+          bind:value={text}
+          type="search"
+          aria-label={onPeople
+            ? 'Search people, nationalities, roles…'
+            : 'Search titles, people, moods, languages…'}
+          placeholder={onPeople
+            ? narrow.current
+              ? 'People, nationalities, roles…'
+              : 'Search people, nationalities, roles…'
+            : narrow.current
+              ? 'Titles, people, moods…'
+              : 'Search titles, people, moods, languages…'}
+          autocomplete="off"
+          aria-controls={showRecent ? 'recent-searches' : undefined}
+          enterkeyhint="search"
+          onfocus={() => {
+            // On a TV, merely landing on Search with the D-pad is not an activation and must not add a history
+            // entry. Typing still reaches `searchChanged`, and Select enters the navigation layer's edit mode.
+            if (!__DEN_TV__ && route.page !== 'search' && !onPeople) navigate(searchHref(text));
+          }}
+          oninput={searchChanged}
+          onkeydown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              escaped();
+            } else if (event.key === 'ArrowDown' && (route.page === 'search' || onPeople)) {
+              event.preventDefault();
+              void intoResults();
+            }
+          }}
+        />
+        <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
+        {#if showRecent}
+          <span class="recent-status" role="status"
+            >Recent searches available. Press Down Arrow to review.</span
+          >
+          <!-- Pressing in the list keeps the field focused. iOS Safari doesn't focus a tapped button, so the field's
              blur had nowhere to go, the bar took search as left, and the list was gone before the tap's click.
              The handler only holds focus; the list's buttons are what is interactive. -->
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <div
-          id="recent-searches"
-          class="recent"
-          role="group"
-          aria-label="Recent searches"
-          onmousedown={(event) => event.preventDefault()}
-        >
-          <div class="recent-heading">
-            <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <div
+            id="recent-searches"
+            class="recent"
+            role="group"
+            aria-label="Recent searches"
+            onmousedown={(event) => event.preventDefault()}
+          >
+            <div class="recent-heading">
+              <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
+            </div>
+            <ul>
+              {#each recent as value, index (value.toLocaleLowerCase())}
+                <li>
+                  <button
+                    class="recent-query"
+                    type="button"
+                    onclick={() => useRecent(value)}
+                    onkeydown={(event) => moveRecent(event, index)}
+                    ><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
+                      ><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg
+                    ><span>{value}</span></button
+                  ><button
+                    class="recent-remove"
+                    type="button"
+                    aria-label={`Remove ${value} from recent searches`}
+                    onclick={() => removeRecent(value)}>×</button
+                  >
+                </li>
+              {/each}
+            </ul>
           </div>
-          <ul>
-            {#each recent as value, index (value.toLocaleLowerCase())}
-              <li>
-                <button
-                  class="recent-query"
-                  type="button"
-                  onclick={() => useRecent(value)}
-                  onkeydown={(event) => moveRecent(event, index)}
-                  ><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
-                    ><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg
-                  ><span>{value}</span></button
-                ><button
-                  class="recent-remove"
-                  type="button"
-                  aria-label={`Remove ${value} from recent searches`}
-                  onclick={() => removeRecent(value)}>×</button
-                >
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-    </form>
-    <nav aria-label="Main navigation">
-      {#each tabs as tab (tab.page)}
-        <a
-          href="/{tab.page}"
-          class:home={tab.page === 'library'}
-          aria-current={route.page === tab.page ? 'page' : undefined}
-        >
-          {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
-          {:else}{tab.label}{/if}
-        </a>
-      {/each}
-    </nav>
-    {#if profiles}<ProfileSwitcher
-        {profiles}
-        hideOnMobile
-      />{:else if profileHint}<ProfileHintTrigger choice={hintChoice(profileHint)} />{/if}
-    <button
-      class="search-toggle"
-      type="button"
-      aria-label="Search"
-      aria-expanded={expanded}
-      aria-controls="nav-search"
-      onclick={openSearch}
-      bind:this={toggle}
-    >
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+        {/if}
+      </form>
+      <nav aria-label="Main navigation">
+        {#each tabs as tab (tab.page)}
+          <a
+            href={tab.page === 'library' ? '/' : `/${tab.page}`}
+            class:home={tab.page === 'library'}
+            aria-current={route.page === tab.page ? 'page' : undefined}
+          >
+            {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
+            {:else}{tab.label}{/if}
+          </a>
+        {/each}
+      </nav>
+      {#if profiles}<ProfileSwitcher
+          {profiles}
+          hideOnMobile
+        />{:else if profileHint}<ProfileHintTrigger choice={hintChoice(profileHint)} />{/if}
+      <button
+        class="search-toggle"
+        type="button"
+        aria-label="Search"
+        aria-expanded={expanded}
+        aria-controls="nav-search"
+        onclick={openSearch}
+        bind:this={toggle}
       >
-    </button>
-  </header>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+          ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+        >
+      </button>
+    </header>
+  {/if}
 </div>
 
 <style>

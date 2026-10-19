@@ -61,12 +61,25 @@ async function setup(page) {
   });
   await routeGuestEdge(page, newEdge());
   await page.route('**/tmdb/**', (route) => {
-    if (new URL(route.request().url()).pathname.includes('/search/'))
+    const path = new URL(route.request().url()).pathname;
+    if (path.includes('/search/'))
       return route.fulfill({
         json: {
           page: 1,
           total_pages: 1,
           results: Array.from({ length: 12 }, (_, i) => film(i + 1)),
+        },
+      });
+    if (path.includes('/movie/1'))
+      return route.fulfill({
+        json: {
+          ...film(1),
+          overview: 'A movie found with the TV search.',
+          genres: [{ id: 18, name: 'Drama' }],
+          credits: { cast: [], crew: [] },
+          recommendations: { results: [] },
+          external_ids: {},
+          videos: { results: [] },
         },
       });
     return route.fulfill({ status: 404, json: {} });
@@ -87,24 +100,18 @@ async function setup(page) {
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
 }
 
-async function numericBack(page, keyCode) {
-  await page.evaluate((code) => {
-    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'keyCode', { get: () => code });
-    (document.activeElement ?? window).dispatchEvent(event);
-  }, keyCode);
-}
-
-test('TV poster actions work without the native popover API', async ({ page }, testInfo) => {
+test('TV search opens a poster without action menus and Back restores it', async ({ page }) => {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await setup(page);
 
-  const search = page.getByRole('searchbox', {
-    name: 'Search titles, people, moods, languages…',
-  });
+  const search = page.getByRole('button', { name: 'Search', exact: true });
+  await expect(
+    page.getByRole('navigation', { name: 'Main navigation' }).locator(':scope > *').first(),
+  ).toHaveAttribute('aria-label', 'Search');
   await remoteTo(page, search, ['ArrowUp', 'ArrowRight', 'ArrowLeft']);
   await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/search/);
   const editor = page.locator('section.search').getByRole('searchbox');
   await expect(editor).toBeFocused();
   await page.keyboard.type('Movie');
@@ -113,52 +120,22 @@ test('TV poster actions work without the native popover API', async ({ page }, t
   await expect(card).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press('ArrowDown');
   await remoteTo(page, card, ['ArrowDown'], 20);
-  const trigger = page.getByRole('button', { name: 'Actions for Movie 1', exact: true });
-  await expect(trigger).toHaveCSS('opacity', '0.8');
-  await page.keyboard.press('ArrowUp');
-  await expect(trigger).toBeFocused();
-  await page.keyboard.press('Enter');
-
-  const menu = page.getByRole('menu', { name: 'Actions for Movie 1' });
-  await expect(menu).toBeVisible();
-  await expect(menu.locator('[role^="menuitem"]').first()).toBeFocused();
-  const presentation = await menu.evaluate((element) => {
-    const item = element.querySelector('[role^="menuitem"]');
-    const menuBox = element.getBoundingClientRect();
-    const itemBox = item?.getBoundingClientRect();
-    return {
-      menu: { left: menuBox.left, top: menuBox.top, width: menuBox.width, height: menuBox.height },
-      item: itemBox
-        ? { left: itemBox.left, top: itemBox.top, width: itemBox.width, height: itemBox.height }
-        : null,
-      fontSize: item ? getComputedStyle(item).fontSize : null,
-    };
-  });
-  expect(presentation.menu.left).toBeGreaterThanOrEqual(0);
-  expect(presentation.menu.top).toBeGreaterThanOrEqual(0);
-  expect(presentation.menu.left + presentation.menu.width).toBeLessThanOrEqual(1920);
-  expect(presentation.menu.top + presentation.menu.height).toBeLessThanOrEqual(1080);
-  expect(presentation.item?.width).toBeGreaterThan(200);
-  await testInfo.attach('tv-action-menu-layout.json', {
-    body: Buffer.from(JSON.stringify(presentation, null, 2)),
-    contentType: 'application/json',
-  });
-  await page.screenshot({ path: testInfo.outputPath('tv-action-menu.png') });
-  await numericBack(page, 461);
-  await expect(menu).toBeHidden();
-  await expect(trigger).toBeFocused();
+  await expect(card).toBeFocused();
+  await expect(page.getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  await card.press('Shift+F10');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await card.dispatchEvent('contextmenu', { button: 2 });
+  await expect(page.getByRole('menu')).toHaveCount(0);
 
   await page.keyboard.press('Enter');
-  await expect(menu).toBeVisible();
-  await page.evaluate(() => {
-    window.__actionNavigations = 0;
-    document.addEventListener('den:navigate', () => window.__actionNavigations++);
+  await expect(page).toHaveURL(/\/movie\/1(?:-|$)/);
+  await expect(page.getByRole('heading', { name: 'Movie 1', level: 1 })).toBeVisible({
+    timeout: 30_000,
   });
-  const moreLikeThis = menu.getByRole('menuitem', { name: 'More like this' });
-  await remoteTo(page, moreLikeThis, ['ArrowDown']);
-  await page.keyboard.press('Enter');
-  await expect(page).toHaveURL(/\/search\?c=like-movie-1$/);
-  await expect(menu).toBeHidden();
-  await expect.poll(() => page.evaluate(() => window.__actionNavigations)).toBe(1);
+
+  await page.keyboard.press('Escape');
+  await expect(page).toHaveURL(/\/search/);
+  await expect(editor).toHaveValue('Movie');
+  await expect(card).toBeFocused({ timeout: 5_000 });
   expect(errors).toEqual([]);
 });

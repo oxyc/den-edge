@@ -199,8 +199,8 @@
   /* The shell stays visually stable. Focus identifies the single control, and the light region fill says which
      of its two semantic buttons owns keyboard focus without turning either region into a second pill. */
   .split-button:not(.pointer-open) .split-surface:has(:global(.split-region:focus-visible)) {
-    outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
-    outline-offset: 3px;
+    outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
+    outline-offset: var(--focus-ring-width);
   }
 
   .split-surface.busy {

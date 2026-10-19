@@ -9,6 +9,7 @@ const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
 const compat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
+const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
 const packaged = process.env.DEN_TV_PACKAGED === '1';
 const apiOriginText = process.env.DEN_TV_API_ORIGIN;
@@ -53,6 +54,15 @@ function workerCompatibility(): Plugin {
     name: 'den-tv-worker-compatibility',
     enforce: 'pre',
     transform(code, id) {
+      if (/\/src\/lib\/syncPolicyModule\.ts$/.test(id)) {
+        const original = '../vendor/den-core/generated/den_core_bg.wasm';
+        if (!code.includes(original))
+          throw new Error('TV den-core URL seam no longer matches syncPolicyModule');
+        return {
+          code: code.replace(original, '../vendor/den-core-tv/generated/den_core_bg.wasm'),
+          map: null,
+        };
+      }
       if (/\/src\/lib\/(?:libraryServiceWorker|libraryWorker|recoveryWorker)\.ts$/.test(id))
         return {
           code: `import ${JSON.stringify(compat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
@@ -96,6 +106,24 @@ const packagedMetadata: Plugin = {
         fileName: 'den-tv-package.json',
         source: JSON.stringify({ packaged: true, platform, apiOrigin, e2e }, null, 2),
       });
+  },
+};
+
+// Svelte 5 keeps a component's descendant selectors at their authored specificity by putting the repeated scope
+// class in :where(). Chrome 87 predates :where() and drops each complete rule that contains it. The TV build targets
+// those engines, so lower only Svelte's generated, single-class form; never unwrap an authored selector or remove
+// the scope class. Old Svelte output repeated this class directly too. There is no zero-specificity equivalent in
+// these engines, so descendant rules gain that one generated class while retaining their component isolation.
+const legacyScopedCss = {
+  postcssPlugin: 'den-tv-legacy-scoped-css',
+  Once(root: { walkRules: (visit: (rule: { selector: string }) => void) => void }) {
+    root.walkRules((rule) => {
+      rule.selector = rule.selector.replace(/:where\((\.svelte-[a-z0-9]+)\)/g, '$1');
+      if (rule.selector.includes(':where('))
+        throw new Error(
+          `TV CSS contains an unsupported non-Svelte :where() selector: ${rule.selector}`,
+        );
+    });
   },
 };
 
@@ -154,8 +182,20 @@ export default mergeConfig(
       __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
     },
+    // The TV artifact is built without Wasm reference types for one-table engines such as Chromium 87. Keep the
+    // browser's vendored den-core untouched; this config and its Worker builds alone resolve the two JS entry points
+    // to wrappers with byte-identical APIs beside the compatible generated modules.
+    resolve: {
+      alias: [
+        {
+          find: /^(?:.*\/)?vendor\/den-core\/(index|assistant)\.js$/,
+          replacement: `${tvCore}/$1.js`,
+        },
+      ],
+    },
     plugins: [tvEntry, workerCompatibility(), packagedMetadata, samsungBridge],
     worker: { plugins: () => [workerCompatibility(), svelte()] },
+    css: { postcss: { plugins: [legacyScopedCss] } },
     build: {
       target: 'chrome85',
       cssTarget: 'chrome85',

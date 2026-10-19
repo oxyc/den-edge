@@ -61,4 +61,51 @@ test.describe('Samsung TV platform bootstrap', () => {
       .poll(() => page.evaluate(() => globalThis.__denTvPlatformCalls))
       .toEqual([['webos-exit']]);
   });
+
+  test('hardware Back can exit while the application chunk is still loading', async ({ page }) => {
+    await routeGuestEdge(page, newEdge());
+    await page.addInitScript(() => {
+      globalThis.__denTvPlatformCalls = [];
+      globalThis.tizen = {
+        application: {
+          getCurrentApplication: () => ({
+            exit: () => globalThis.__denTvPlatformCalls.push('exit'),
+          }),
+        },
+        tvinputdevice: {
+          registerKeyBatch: () => {},
+          getSupportedKeys: () => {
+            globalThis.__denTvPlatformCalls.push('keys-ready');
+            return [];
+          },
+        },
+      };
+      window.confirm = () => true;
+    });
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/assets/appMain-*.js', async (route) => {
+      await held;
+      await route.continue().catch(() => {});
+    });
+    try {
+      await page.goto(E2E_ORIGIN, { waitUntil: 'domcontentloaded' });
+      await expect(page.locator('#app')).toHaveText('Starting Den…');
+      await expect
+        .poll(() => page.evaluate(() => globalThis.__denTvPlatformCalls))
+        .toEqual(['keys-ready']);
+      await page.evaluate(() => {
+        const event = new KeyboardEvent('keydown', { key: 'Unidentified', bubbles: true });
+        Object.defineProperty(event, 'keyCode', { value: 10009 });
+        document.body.dispatchEvent(event);
+      });
+      await expect
+        .poll(() => page.evaluate(() => globalThis.__denTvPlatformCalls))
+        .toEqual(['keys-ready', 'exit']);
+    } finally {
+      release();
+    }
+  });
 });

@@ -45,7 +45,6 @@
     routeKind,
     segmentAnswer,
     sendHeartbeat,
-    sourceFailed,
     startSession,
     wantedLanguages,
     type AudioTrack,
@@ -1265,7 +1264,9 @@
     const current = session;
     if (!current) return;
     const total = length() || current.duration;
-    startAt = total && lostAt >= 1 ? { seconds: lostAt, fraction: lostAt / total } : null;
+    // Zero is a deliberate resume position too. `null` means fall back to the library's original resume, which
+    // would make a "Resume from 0:00" action jump forward again after the viewer had sought back to the start.
+    startAt = { seconds: lostAt, fraction: total ? lostAt / total : 0 };
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
@@ -1405,6 +1406,29 @@
         stalledMs += performance.now() - stallSince;
       if (session === current) stallSince = undefined;
     };
+    let nativeExpiryProbe: AbortController | undefined;
+    const probeNativeExpiry = async () => {
+      if (nativeExpiryProbe || current.publicBase) return;
+      const probe = new AbortController();
+      nativeExpiryProbe = probe;
+      const answer = await segmentAnswer(current, stalledAt(), (input, init) => {
+        const deadline = init?.signal;
+        return fetch(input, {
+          ...init,
+          signal: deadline ? AbortSignal.any([deadline, probe.signal]) : probe.signal,
+        });
+      });
+      if (
+        nativeExpiryProbe !== probe ||
+        session !== current ||
+        failure ||
+        !stalling ||
+        document.visibilityState === 'hidden'
+      )
+        return;
+      if (answer?.status === 410) lose(element.currentTime || lastPosition || 0);
+      else nativeExpiryProbe = undefined;
+    };
     const onStallWaiting = () => {
       // A background tab and a deliberately paused player are waited on by nobody. In particular, do not leave the
       // 500 ms progress clock running after WebKit reports `waiting` while it suspends hidden media.
@@ -1418,8 +1442,13 @@
       updateStallProgress();
       clearInterval(stallTimer);
       stallTimer = setInterval(updateStallProgress, 500);
+      if (__DEN_TV__ && playsNatively) void probeNativeExpiry();
     };
     const onStallResume = () => {
+      if (__DEN_TV__) {
+        nativeExpiryProbe?.abort();
+        nativeExpiryProbe = undefined;
+      }
       endStall();
       stalling = false;
       clearInterval(stallTimer);
@@ -1581,6 +1610,10 @@
       ? undefined
       : (current.control?.report ?? reportUrlOf(current.playlist));
     const stopWatching = () => {
+      if (__DEN_TV__) {
+        nativeExpiryProbe?.abort();
+        nativeExpiryProbe = undefined;
+      }
       cleanup();
       cancelFirstFrame();
       watcher?.stop();
@@ -1725,7 +1758,9 @@
           data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
           (code === 410 || (code === 0 && connection.down))
         ) {
-          lose(element.currentTime);
+          // hls.js can clear the media clock before reporting that an expired session returned 410. Keep the
+          // last position this element reported instead of offering to resume the film from zero.
+          lose(element.currentTime || lastPosition || 0);
           return;
         }
         void broke(
@@ -2272,9 +2307,19 @@
     // and it spends the one GPU slot the box has (oxyc/den#43).
     // The signed public origin intentionally cannot be connected to by the d.<domain> page; asking it here
     // would be a CSP violation. The receiver's media error is enough to select the conservative Cast profile.
-    if (!current.publicBase && (await sourceFailed(current, stalledAt()))) {
-      if (session === current && !failure) failure = 'source';
-      return;
+    if (!current.publicBase) {
+      const answer = await segmentAnswer(current, stalledAt());
+      if (session !== current || failure) return;
+      // Native HLS does not expose a failed fragment's HTTP status. Ask den-remux once: 410 means this session
+      // expired and can resume at the last position; 502 means the release itself stopped producing bytes.
+      if (answer?.status === 410) {
+        lose(video?.currentTime || lastPosition || 0);
+        return;
+      }
+      if (answer?.status === 502) {
+        failure = 'source';
+        return;
+      }
     }
     // The session may have been replaced while that was asked.
     if (session !== current || failure) return;
@@ -2282,7 +2327,7 @@
     // the viewer's word; not yet playing, the release stopped answering. Neither is "couldn't play" — a cast page's
     // is, as before: it has no other way of saying it couldn't.
     if (!judging.refused && !current.castOrigin) {
-      if (played) lose(video?.currentTime ?? lastPosition ?? 0);
+      if (played) lose(video?.currentTime || lastPosition || 0);
       else failure = 'source';
       return;
     }

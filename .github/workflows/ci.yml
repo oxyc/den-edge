@@ -66,8 +66,10 @@ jobs:
       - run: npm run audit
       - run: npm run lint
       - run: npm test
+      - run: node scripts/test-tv-core.mjs
       - run: npm run build
       - run: npm run check:tv-isolation
+      - run: npm run test:e2e:keyboard
       - run: npm run test:e2e:tv
       - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv
       - run: npm run test:e2e:tv-package

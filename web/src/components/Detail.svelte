@@ -48,6 +48,7 @@
   import type { DownloadsView } from '../lib/libraryServiceProtocol';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Warning } from '../lib/contentWarnings';
+  import type { MenuItem } from '../lib/titleActions';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -140,7 +141,12 @@
      * Mark a whole season at once, in one write rather than one per episode. Optional: a surface that has no
      * way to write a season simply shows no season control, rather than one that half works.
      */
-    onseason?: (title: Title, season: number, episodes: number[], seen: boolean) => void;
+    onseason?: (
+      title: Title,
+      season: number,
+      episodes: number[],
+      seen: boolean,
+    ) => void | Promise<unknown>;
     shown?: (title: Title) => boolean;
     /**
      * What the page that linked here already knew about this title.
@@ -703,6 +709,85 @@
     else if (result === 'uncertain')
       notify?.('Couldn’t start that download. Try again in a moment.');
   }
+
+  async function seasonEpisodesForDownload(
+    picked: number,
+    signal: AbortSignal,
+  ): Promise<Episode[] | null> {
+    try {
+      const answer = await content.query(
+        { kind: 'season', title: { type: 'tv', id: ref.id }, season: picked },
+        signal,
+      );
+      return answer.episodes.state === 'ready' ? answer.episodes.value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function seasonEpisodeNumbers(d: TitleDetail, picked: number): number[] {
+    const listed = d.seasons.find((item) => item.number === picked)?.episodeCount ?? 0;
+    const aired = d.lastAired;
+    const count =
+      !aired || picked < aired.season ? listed : picked === aired.season ? aired.episode : 0;
+    return Array.from({ length: Math.min(listed, count) }, (_, index) => index + 1);
+  }
+
+  async function markTvSeasons(picked: number | undefined, seen: boolean) {
+    const d = untrack(() => detail);
+    if (!d || !onseason) return;
+    const selected = d.seasons.filter(
+      (item) => item.number > 0 && (picked === undefined || item.number === picked),
+    );
+    for (const item of selected) {
+      let numbers = seasonEpisodeNumbers(d, item.number);
+      try {
+        const answer = await content.query({
+          kind: 'season',
+          title: { type: 'tv', id: ref.id },
+          season: item.number,
+        });
+        if (answer.episodes.state === 'ready')
+          numbers = markableEpisodes(item.number, answer.episodes.value);
+      } catch {
+        // The detail's aired count is still an exact-enough fallback when TMDB is temporarily unavailable.
+      }
+      if (numbers.length) await onseason(d.title, item.number, numbers, seen);
+    }
+  }
+
+  const tvSeenItems = $derived.by((): MenuItem[] | undefined => {
+    const d = detail;
+    if (!__DEN_TV__ || d?.title.type !== 'tv' || !onseason) return undefined;
+    const regular = d.seasons.filter((item) => item.number > 0);
+    const state = (picked?: number) => {
+      const selected =
+        picked === undefined ? regular : regular.filter((item) => item.number === picked);
+      const numbers = selected.flatMap((item) =>
+        seasonEpisodeNumbers(d, item.number).map((episode) => `${item.number}:${episode}`),
+      );
+      return (
+        numbers.length > 0 &&
+        numbers.every((key) => episodeProgress(episodes.get(key), row) >= WATCHED)
+      );
+    };
+    return [
+      {
+        kind: 'checkbox',
+        label: 'Whole series',
+        checked: state(),
+        disabled: busy,
+        onselect: () => void markTvSeasons(undefined, !state()),
+      },
+      ...regular.map((item) => ({
+        kind: 'checkbox' as const,
+        label: item.name,
+        checked: state(item.number),
+        disabled: busy,
+        onselect: () => void markTvSeasons(item.number, !state(item.number)),
+      })),
+    ];
+  });
 </script>
 
 {#if withheld}
@@ -752,11 +837,13 @@
       <div class="hero-content" aria-hidden="true">
         <div class="head">
           {#if seed?.posterPath}
+            <!-- The TV loading shell uses the fixed poster URL: the browsing soak found detached responsive
+                 loading posters retained through Chromium's viewport listeners after this shell was replaced. -->
             <img
               class="poster"
-              src="https://image.tmdb.org/t/p/w500{seed.posterPath}"
-              srcset={detailPosterSrcset(seed.posterPath)}
-              sizes={DETAIL_POSTER_SIZES}
+              src="https://image.tmdb.org/t/p/w{__DEN_TV__ ? 342 : 500}{seed.posterPath}"
+              srcset={__DEN_TV__ ? undefined : detailPosterSrcset(seed.posterPath)}
+              sizes={__DEN_TV__ ? undefined : DETAIL_POSTER_SIZES}
               alt=""
               width="280"
               height="420"
@@ -828,6 +915,18 @@
           </button>
         {/if}
         <div class="hero-actions">
+          {#snippet tvSeasonDownload()}
+            <SeasonDownload
+              model={model!}
+              allowed={entitled}
+              title={d.title}
+              imdb={d.imdbId!}
+              season={displayedSeason ?? d.seasons.find((item) => item.number > 0)?.number ?? 1}
+              episodes={seasonEpisodes ?? undefined}
+              choices={d.seasons.filter((item) => item.number > 0)}
+              episodesFor={seasonEpisodesForDownload}
+            />
+          {/snippet}
           <TitleActions
             {row}
             {busy}
@@ -838,24 +937,44 @@
             onwatchlist={(on) => onwatchlist(d.title, on)}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}
+            seenItems={tvSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
-            onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
+            onplay={!__DEN_TV__ && onplay
+              ? () => onplay(d.title, target?.season, target?.episode)
+              : undefined}
             onplayhere={onplayhere
               ? () => onplayhere(d.title, target?.season, target?.episode)
+              : undefined}
+            onsources={__DEN_TV__ && !guestScout && !restricted
+              ? () => {
+                  sourceTarget = target;
+                  void sourcesPanel?.show();
+                }
               : undefined}
             {away}
             {blocked}
             {restricted}
+            extraAction={__DEN_TV__ &&
+            model &&
+            scout &&
+            !guestScout &&
+            !restricted &&
+            d.imdbId &&
+            d.seasons.some((item) => item.number > 0)
+              ? tvSeasonDownload
+              : undefined}
             trailerHref={d.trailer
               ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
               : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
             ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
-            share={{
-              title: d.title.title,
-              // The title's own address, named: what the person sharing it means, and what a preview can
-              // describe. Built from the route rather than from wherever this page happens to be open.
-              url: `${__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
-            }}
+            share={__DEN_TV__
+              ? undefined
+              : {
+                  title: d.title.title,
+                  // The title's own address, named: what the person sharing it means, and what a preview can
+                  // describe. Built from the route rather than from wherever this page happens to be open.
+                  url: `${__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
+                }}
           />
         </div>
       </div>
@@ -932,7 +1051,7 @@
           />
           <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
              foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
-          {#if model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+          {#if !__DEN_TV__ && model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
             <SeasonDownload
               {model}
               allowed={entitled}
@@ -944,7 +1063,7 @@
               compact
             />
           {/if}
-          {#if onseason && seasonMarkable.length}
+          {#if !__DEN_TV__ && onseason && seasonMarkable.length}
             <button
               class="season-seen"
               class:on={seasonSeen}
@@ -1016,7 +1135,7 @@
                   onplay={() => playEpisode(e.number)}
                   onseen={(seen) =>
                     displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
-                  onplaytv={onplay && displayedSeason !== null
+                  onplaytv={!__DEN_TV__ && onplay && displayedSeason !== null
                     ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
                     : undefined}
                   onsources={guestScout

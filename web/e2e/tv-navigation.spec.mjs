@@ -117,11 +117,10 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   await setup(page);
   await browse(page);
   await expect(page.getByText('Services unavailable')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Services unavailable')).toBeInViewport();
   await page.screenshot({ path: testInfo.outputPath('tv-home-1920.png'), fullPage: false });
 
-  const search = page.getByRole('searchbox', {
-    name: 'Search titles, people, moods, languages…',
-  });
+  const search = page.getByRole('button', { name: 'Search', exact: true });
   await remoteTo(page, search, ['ArrowUp', 'ArrowRight', 'ArrowLeft']);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/search/);
@@ -143,6 +142,28 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   await page.evaluate(() => (window.__tvFocusLatencies = []));
   await page.keyboard.press('ArrowDown');
   await remoteTo(page, result, ['ArrowDown'], 20);
+  const focusRing = await result.evaluate((card) => {
+    const cardStyle = getComputedStyle(card);
+    const artStyle = getComputedStyle(card.querySelector('.art'));
+    return {
+      cardOutline: cardStyle.outlineStyle,
+      cardShadow: cardStyle.boxShadow,
+      artOutline: artStyle.outlineStyle,
+      artOutlineColor: artStyle.outlineColor,
+      artOutlineWidth: artStyle.outlineWidth,
+      artOutlineOffset: artStyle.outlineOffset,
+      artShadow: artStyle.boxShadow,
+    };
+  });
+  expect(focusRing).toMatchObject({
+    cardOutline: 'none',
+    cardShadow: 'none',
+    artOutline: 'solid',
+    artOutlineColor: 'rgb(255, 255, 255)',
+    artOutlineWidth: '4px',
+    artOutlineOffset: '-4px',
+    artShadow: 'none',
+  });
   await page.keyboard.press('ArrowLeft');
   expect(
     await focusedInside(page.locator('section.search .rail')),
@@ -153,14 +174,7 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   await expect(page.getByRole('link', { name: /Movie 1006/ }).first()).toBeFocused();
   await page.keyboard.press('ArrowDown');
   const secondRowResult = page.getByRole('link', { name: /Movie 1011/ }).first();
-  const secondRowAction = page.getByRole('button', { name: 'Actions for Movie 1011' });
   await expect(secondRowResult).toBeFocused();
-  await page.keyboard.press('ArrowUp');
-  await expect(secondRowAction).toBeFocused();
-  await page.keyboard.press('ArrowDown');
-  await expect(secondRowResult).toBeFocused();
-  await page.keyboard.press('ArrowUp');
-  await expect(secondRowAction).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await expect(page.getByRole('link', { name: /Movie 1006/ }).first()).toBeFocused();
   for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
@@ -192,6 +206,61 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   await expect(result).toBeFocused({ timeout: 5_000 });
 });
 
+test('a touch preview opens Search and focuses its editor within the activating tap', async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+  try {
+    await page.addInitScript(() => {
+      window.__tvSearchTouchActivation = null;
+      document.addEventListener('click', (event) => {
+        if (!(event.target instanceof Element) || !event.target.closest('.tv-search-button'))
+          return;
+        window.__tvSearchTouchActivation = {
+          active: navigator.userActivation.isActive,
+          editorFocused: document.activeElement?.classList.contains('tv-search-input') ?? false,
+        };
+      });
+    });
+    await setup(page);
+    await browse(page);
+    await page.getByRole('button', { name: 'Search', exact: true }).tap();
+    await expect(page).toHaveURL(/\/search/);
+    await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
+    expect(await page.evaluate(() => window.__tvSearchTouchActivation)).toEqual({
+      active: true,
+      editorFocused: true,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('Home returns to the TV root without loading a backend document', async ({ page }) => {
+  await setup(page, '/movies');
+  await browse(page);
+  const documents = [];
+  page.on('request', (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame())
+      documents.push(request.url());
+  });
+  await page.getByRole('link', { name: 'Home', exact: true }).click();
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Home', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  expect(documents).toEqual([]);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
+  await expect(page.locator('html')).toHaveClass(/den-tv/);
+});
+
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
 }, testInfo) => {
@@ -207,15 +276,10 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   const audioLanguage = page.getByRole('combobox', { name: 'Audio language', exact: true });
   await expect(audioLanguage).toBeVisible({ timeout: 30_000 });
   await expect(audioLanguage).toBeEnabled();
-  // Follow one intentional route through the rendered geometry, asserting every junction. A generic
-  // alternating search can validly cycle between the navbar and the page-level Expand all control.
+  // Follow intentional routes through the rendered geometry. The wide TV navbar can place different tabs
+  // over the first settings control, so descend from the selected Settings tab itself.
   await expect(settings).toBeFocused();
-  await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('link', { name: 'Watchlist', exact: true })).toBeFocused();
-  await page.keyboard.press('ArrowDown');
-  await expect(page.getByRole('button', { name: 'Expand all in Settings' })).toBeFocused();
-  await page.keyboard.press('ArrowDown');
-  await expect(audioLanguage).toBeFocused();
+  await remoteTo(page, audioLanguage, ['ArrowDown'], 4);
   await page.keyboard.press('ArrowLeft');
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
   await expect(contentSection).toBeFocused();
@@ -257,7 +321,7 @@ test('directional focus remains inside a native modal until remote Back closes i
   }
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole('link', { name: 'Den home' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeFocused();
 });
 
 test('LG Back closes a real ARIA trailer dialog without leaving its detail route', async ({
@@ -288,7 +352,7 @@ test('LG Back closes a real ARIA trailer dialog without leaving its detail route
   await page.goto(`${E2E_ORIGIN}/movie/1002`);
 
   const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
-  await remoteTo(page, trailer, ['ArrowDown', 'ArrowRight'], 20);
+  await remoteTo(page, trailer, ['ArrowDown', 'ArrowLeft'], 20);
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'Movie 1002: trailer' });
   await expect(dialog).toBeVisible();

@@ -21,13 +21,18 @@ async function storageProbe(): Promise<void> {
           indexedDB.deleteDatabase(name);
           return;
         }
-        const transaction = database.transaction('probe', 'readwrite');
-        const store = transaction.objectStore('probe');
-        store.put('ready', 'check');
-        const read = store.get('check');
-        transaction.oncomplete = () =>
-          read.result === 'ready' ? resolve() : reject(new Error('Storage read failed'));
-        transaction.onabort = transaction.onerror = () => reject(new Error('Storage failed'));
+        try {
+          const transaction = database.transaction('probe', 'readwrite');
+          const store = transaction.objectStore('probe');
+          store.put('ready', 'check');
+          const read = store.get('check');
+          transaction.oncomplete = () =>
+            read.result === 'ready' ? resolve() : reject(new Error('Storage read failed'));
+          transaction.onabort = transaction.onerror = () => reject(new Error('Storage failed'));
+        } catch {
+          // A synchronous write refusal in this event callback otherwise escapes the probe's promise.
+          reject(new Error('Storage failed'));
+        }
       };
     });
   } finally {

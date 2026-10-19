@@ -3,10 +3,13 @@ dist/
 dist-cast/
 dist-shell/
 dist-tv-*/
+dist-keyboard-e2e-*/
 dist-browser-baseline/
 tv-packages/
 test-results/
 test-results-tv/
+test-results-keyboard/
+test-results-keyboard-port/
 playwright-report/
 coverage/
 .vite/

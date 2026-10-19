@@ -102,8 +102,22 @@
           .filter((element) => element.scrollLeft !== 0 || element.scrollTop !== 0)
           .map((element) => ({ element, x: element.scrollLeft, y: element.scrollTop }));
       } else {
+        let interrupted = false;
+        let stopRestore: (() => void) | undefined;
+        if (__DEN_TV__) {
+          // The navigation observer can focus this page before tick resolves. Input at that boundary
+          // must cancel the initial restoration as well as its later animation-frame pass.
+          const cancel = () => {
+            interrupted = true;
+            window.removeEventListener('den:tv-input', cancel);
+            window.removeEventListener('pointerdown', cancel, true);
+          };
+          stopRestore = cancelFrameRestore = cancel;
+          window.addEventListener('den:tv-input', cancel, { once: true });
+          window.addEventListener('pointerdown', cancel, { capture: true, once: true });
+        }
         void tick().then(() => {
-          if (!active || activation !== ticket) return;
+          if (!active || activation !== ticket || (__DEN_TV__ && interrupted)) return;
           // A persistent shell control (such as navbar search) may have opened this page.
           // Restoring the page's old focus must not take focus or the keyboard away from it.
           const restoreFocus = (allowCurrentPage: boolean) => {
@@ -154,22 +168,10 @@
           restore();
           // Browsers may restore persisted form state after popstate, independently of scrollRestoration.
           if (__DEN_TV__) {
-            // Delaying this frame across Back + ArrowRight reproduced a jump back to the previous hero slide.
-            // Once the viewer acts on the restored page, its saved scroll/form state no longer owns that frame.
-            let cancelled = false;
-            const cancel = () => {
-              cancelled = true;
-              window.removeEventListener('den:tv-input', cancel);
-              window.removeEventListener('pointerdown', cancel, true);
-            };
-            cancelFrameRestore = cancel;
-            // TV navigation consumes arrow events in window capture; observe its explicit input signal.
-            window.addEventListener('den:tv-input', cancel, { once: true });
-            window.addEventListener('pointerdown', cancel, { capture: true, once: true });
             requestAnimationFrame(() => {
-              const shouldRestore = !cancelled;
-              cancel();
-              if (cancelFrameRestore === cancel) cancelFrameRestore = undefined;
+              const shouldRestore = !interrupted;
+              stopRestore?.();
+              if (cancelFrameRestore === stopRestore) cancelFrameRestore = undefined;
               if (shouldRestore) restore();
             });
           } else requestAnimationFrame(restore);

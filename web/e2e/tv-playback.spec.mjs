@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
-import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
+import { readFile, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { E2E_ORIGIN as ORIGIN, E2E_PORT } from './base-url.mjs';
 
 const media = new URL('./media/hls/', import.meta.url);
 const session = {
@@ -17,8 +18,132 @@ const session = {
   subtitles: [{ language: 'en', name: 'English' }],
 };
 const alternate = { label: 'TV fixture 720p', filename: 'tv-fixture-720.mkv', size: 2 };
+const mediaServers = new Set();
 
-async function routePlayback(page, { onSession, releases = [] } = {}) {
+test.afterEach(async () => {
+  await Promise.all(
+    [...mediaServers].map(
+      (server) =>
+        new Promise((resolve) => {
+          const timeout = setTimeout(resolve, 1_000);
+          server.closeAllConnections();
+          server.close(() => {
+            clearTimeout(timeout);
+            resolve(undefined);
+          });
+        }),
+    ),
+  );
+  mediaServers.clear();
+});
+
+async function nativeMediaServer(expired, { holdProbeMaster = false } = {}) {
+  let closedHeld = 0;
+  let closedProbeMaster = 0;
+  let gone = 0;
+  let ends = 0;
+  let masters = 0;
+  const server = createServer(async (request, response) => {
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    const file = new URL(request.url ?? '/', 'http://127.0.0.1').pathname.slice(1);
+    if (file === 'end') {
+      ends += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (expired()) {
+      gone += 1;
+      response.writeHead(410, { 'Content-Type': 'application/json' });
+      response.end('{"error":"session_gone"}');
+      return;
+    }
+    if (/^seg(?:1[2-9]|2[0-9])\.m4s$/.test(file)) {
+      response.once('close', () => {
+        if (!expired()) closedHeld += 1;
+      });
+      while (!expired() && !response.destroyed)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      if (response.destroyed) return;
+      gone += 1;
+      response.writeHead(410, { 'Content-Type': 'application/json' });
+      response.end('{"error":"session_gone"}');
+      return;
+    }
+    if (file === 'master.m3u8') {
+      masters += 1;
+      if (holdProbeMaster && masters === 2) {
+        await new Promise((resolve) =>
+          response.once('close', () => {
+            closedProbeMaster += 1;
+            resolve(undefined);
+          }),
+        );
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      response.end('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n');
+      return;
+    }
+    if (file !== 'media.m3u8' && file !== 'init.mp4' && !/^seg[0-9]+\.m4s$/.test(file)) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    try {
+      const body = await readFile(new URL(file, media));
+      response.writeHead(200, {
+        'Content-Type': file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+      });
+      response.end(body);
+    } catch {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  server.unref();
+  mediaServers.add(server);
+  server.once('close', () => mediaServers.delete(server));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('native media server has no port');
+  return {
+    closedHeld: () => closedHeld,
+    closedProbeMaster: () => closedProbeMaster,
+    ends: () => ends,
+    gone: () => gone,
+    masters: () => masters,
+    playlist: `http://127.0.0.1:${address.port}/master.m3u8`,
+    server,
+  };
+}
+
+async function repeatedMediaPlaylist(minutes = 10) {
+  const source = await readFile(new URL('media.m3u8', media), 'utf8');
+  const segments = source.match(/#EXTINF:[^\n]+\nseg[0-9]+\.m4s/g) ?? [];
+  // One cycle beyond the requested wall-clock duration lets the assertion observe the full requested minute while
+  // playback is still live, rather than passing thirty seconds early or racing a natural end.
+  const cycles = Math.ceil((minutes * 60) / (segments.length * 2)) + 1;
+  const body = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    '#EXT-X-TARGETDURATION:2',
+    '#EXT-X-MEDIA-SEQUENCE:0',
+  ];
+  for (let cycle = 0; cycle < cycles; cycle += 1) {
+    if (cycle) body.push('#EXT-X-DISCONTINUITY');
+    body.push(`#EXT-X-MAP:URI="init.mp4?cycle=${cycle}"`);
+    for (const segment of segments)
+      body.push(segment.replace(/(seg[0-9]+\.m4s)$/, `$1?cycle=${cycle}`));
+  }
+  body.push('#EXT-X-ENDLIST');
+  return body.join('\n');
+}
+
+async function routePlayback(page, { onSession, onMedia, releases = [] } = {}) {
   const ended = [];
   await page.route('**/tmdb/3/**', (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -37,7 +162,14 @@ async function routePlayback(page, { onSession, releases = [] } = {}) {
       return route.fulfill({ status: 204 });
     }
     if (request.method() === 'POST') return route.fulfill({ status: 204 });
-    const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
+    const file = path.split('/').pop();
+    const handled = await onMedia?.(route, { path, file });
+    if (handled) return;
+    if (path.endsWith('/master.m3u8'))
+      return route.fulfill({
+        contentType: 'application/vnd.apple.mpegurl',
+        body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n',
+      });
     return route.fulfill({
       contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
       body: await readFile(new URL(file, media)),
@@ -92,6 +224,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   // TV engines commonly expose only a numeric remote code and the key name "Unidentified".
   expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+  await expect(page.getByRole('button', { name: /^Resume from / })).toHaveCount(0);
   await expect
     .poll(async () => {
       const value = await page.getByTestId('player-progress').textContent();
@@ -224,7 +357,7 @@ test('TV visibility suspension flushes progress and releases its session', async
   const video = page.locator('.player video');
   await expect
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
-    .toBeGreaterThan(1);
+    .toBeGreaterThan(6);
 
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -239,4 +372,245 @@ test('TV visibility suspension flushes progress and releases its session', async
         JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}').seconds ?? 0,
     )
     .toBeGreaterThan(0);
+});
+
+test('TV resumes real HLS in a fresh session after the playing session disappears', async ({
+  page,
+  browserName,
+}) => {
+  test.setTimeout(browserName === 'webkit' ? 120_000 : 60_000);
+  const starts = [];
+  let sessions = 0;
+  let failedSegments = 0;
+  let faultSession = 0;
+  const native =
+    browserName === 'webkit' ? await nativeMediaServer(() => faultSession === 1) : null;
+  const ended = await routePlayback(page, {
+    onSession: async (route) => {
+      starts.push(JSON.parse(route.request().postData() ?? '{}'));
+      sessions += 1;
+      await route.fulfill({
+        status: 201,
+        json: {
+          ...session,
+          sid: `tv${sessions}`,
+          playlist:
+            native && sessions === 1 ? native.playlist : `/direct/s/tv${sessions}/sig/master.m3u8`,
+        },
+      });
+    },
+    onMedia: async (route, { file }) => {
+      if (!file?.match(/^seg[0-9]+\.m4s$/)) return false;
+      if (sessions !== faultSession) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return false;
+      }
+      failedSegments += 1;
+      await route.fulfill({ status: 410, json: { error: 'session_gone' } });
+      return true;
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?resume=12`);
+
+  const video = page.locator('.player video');
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(12);
+  if (browserName === 'webkit') {
+    faultSession = 1;
+    await expect.poll(native.gone).toBeGreaterThan(0);
+    const resume = page.getByRole('button', { name: /^Resume from / });
+    await expect(resume).toBeVisible({ timeout: 80_000 });
+    await resume.click();
+    await expect.poll(() => sessions).toBe(2);
+    expect(starts[1].startAt).toBeGreaterThan(12);
+    expect(starts[1].startAt).toBeLessThan(30);
+    await expect.poll(native.ends).toBe(1);
+    await expect
+      .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+      .toBeGreaterThan(starts[1].startAt);
+    expect(await remoteKey(page, 'Back', 461)).toBe(true);
+    await expect(video).toHaveCount(0);
+    await expect.poll(() => ended.length).toBe(1);
+    await new Promise((resolve) => native.server.close(resolve));
+    return;
+  }
+  await video.evaluate(
+    (element) =>
+      new Promise((resolve) => {
+        element.addEventListener('seeked', resolve, { once: true });
+        element.currentTime = 7;
+      }),
+  );
+  faultSession = 1;
+  await expect.poll(() => failedSegments).toBeGreaterThan(0);
+  const resume = page.getByRole('button', { name: /^Resume from / });
+  await expect(resume).toBeVisible({ timeout: 30_000 });
+  await expect(resume).not.toHaveText('Resume from 0:00');
+  expect(failedSegments).toBeGreaterThan(0);
+
+  await resume.click();
+  await expect.poll(() => sessions).toBe(2);
+  expect(starts[1].startAt).toBeGreaterThan(6);
+  expect(starts[1].startAt).toBeLessThan(10);
+  await expect.poll(() => ended.length).toBe(1);
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(starts[1].startAt);
+
+  await video.evaluate(
+    (element) =>
+      new Promise((resolve) => {
+        element.addEventListener('seeked', resolve, { once: true });
+        element.currentTime = 0;
+      }),
+  );
+  const firstFaultCount = failedSegments;
+  faultSession = 2;
+  await expect.poll(() => failedSegments).toBeGreaterThan(firstFaultCount);
+  const fromStart = page.getByRole('button', { name: 'Resume from 0:00' });
+  await expect(fromStart).toBeVisible({ timeout: 30_000 });
+  await fromStart.click();
+  await expect.poll(() => sessions).toBe(3);
+  expect(starts[2].startAt).toBeUndefined();
+  await expect.poll(() => ended.length).toBe(2);
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(0);
+});
+
+test('TV cancels a native expiry probe when playback closes', async ({ page, browserName }) => {
+  test.skip(browserName !== 'webkit', 'native HLS lifecycle control');
+  test.setTimeout(60_000);
+  const native = await nativeMediaServer(() => false, { holdProbeMaster: true });
+  await routePlayback(page, {
+    onSession: (route) =>
+      route.fulfill({ status: 201, json: { ...session, playlist: native.playlist } }),
+  });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(native.masters, { timeout: 40_000 }).toBeGreaterThan(1);
+  expect(await remoteKey(page, 'Back', 461)).toBe(true);
+  await expect(video).toHaveCount(0);
+  await expect.poll(native.closedProbeMaster).toBe(1);
+  await expect(page.getByRole('button', { name: /^Resume from / })).toHaveCount(0);
+});
+
+test('TV repeatedly suspends and reopens without leaking playback sessions', async ({ page }) => {
+  let sessions = 0;
+  const ended = await routePlayback(page, {
+    onSession: async (route) => {
+      sessions += 1;
+      await route.fulfill({
+        status: 201,
+        json: {
+          ...session,
+          sid: `cycle${sessions}`,
+          playlist: `/direct/s/cycle${sessions}/sig/master.m3u8`,
+        },
+      });
+    },
+  });
+
+  for (let cycle = 1; cycle <= 3; cycle += 1) {
+    await page.goto(`${ORIGIN}/test/player.html`);
+    const video = page.locator('.player video');
+    await expect
+      .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+      .toBeGreaterThan(1);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect(video).toHaveCount(0);
+    await expect(page.getByTestId('player-close-count')).toHaveText('1');
+    await expect.poll(() => ended.length).toBe(cycle);
+  }
+
+  expect(sessions).toBe(3);
+  expect(new Set(ended)).toEqual(
+    new Set(['/direct/s/cycle1/sig/end', '/direct/s/cycle2/sig/end', '/direct/s/cycle3/sig/end']),
+  );
+});
+
+test('@soak TV plays a discontinuous real-media fixture for ten minutes at wall-clock speed', async ({
+  browser,
+  browserName,
+  page,
+}, testInfo) => {
+  test.skip(!process.env.DEN_TV_PLAYBACK_SOAK, 'set DEN_TV_PLAYBACK_SOAK=1 for the real-time soak');
+  const configured = process.env.DEN_TV_PLAYBACK_SOAK_MINUTES;
+  const minutes = configured === undefined ? 10 : Number(configured);
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60)
+    throw new Error('DEN_TV_PLAYBACK_SOAK_MINUTES must be a finite number from 1 through 60');
+  test.setTimeout((minutes * 60 + 90) * 1_000);
+  const playlist = await repeatedMediaPlaylist(minutes);
+  let sessions = 0;
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const startedAt = Date.now();
+  const ended = await routePlayback(page, {
+    onSession: async (route) => {
+      sessions += 1;
+      await route.fulfill({
+        status: 201,
+        json: { ...session, duration: minutes * 60, playlist: '/direct/s/soak/sig/master.m3u8' },
+      });
+    },
+    onMedia: async (route, { file }) => {
+      if (file === 'media.m3u8') {
+        await route.fulfill({ contentType: 'application/vnd.apple.mpegurl', body: playlist });
+        return true;
+      }
+      if (file?.match(/^seg[0-9]+\.m4s$/)) {
+        const url = new URL(route.request().url());
+        const segment = Number(file.match(/[0-9]+/)?.[0] ?? 0);
+        const cycle = Number(url.searchParams.get('cycle') ?? 0);
+        await new Promise((resolve) => setTimeout(resolve, (cycle * 7 + segment * 13) % 41));
+      }
+      return false;
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  const target = minutes * 60;
+  // Persisted progress is floored to whole seconds. Cross the next whole second before Back so the
+  // subsequent saved-position assertion cannot race a valid 60.1s media clock being reported as 60s.
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), {
+      timeout: (minutes * 60 + 60) * 1_000,
+      intervals: [5_000],
+    })
+    .toBeGreaterThanOrEqual(target + 1);
+  expect(sessions).toBe(1);
+  expect(await remoteKey(page, 'Back', 461)).toBe(true);
+  await expect(video).toHaveCount(0);
+  await expect(page.getByTestId('player-close-count')).toHaveText('1');
+  await expect.poll(() => ended.length).toBe(1);
+  await expect
+    .poll(
+      async () =>
+        JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}').seconds ?? 0,
+    )
+    .toBeGreaterThan(target);
+  const summary = {
+    engine: browserName,
+    engineVersion: browser.version(),
+    port: E2E_PORT,
+    requestedMinutes: minutes,
+    realElapsedMs: Date.now() - startedAt,
+    mediaTime: await page
+      .getByTestId('player-progress')
+      .evaluate((element) => JSON.parse(element.textContent ?? '{}').seconds ?? 0),
+    sessionCount: sessions,
+    endCount: ended.length,
+    unexpectedPageErrors: pageErrors,
+  };
+  const summaryPath = testInfo.outputPath('playback-soak-summary.json');
+  await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+  await testInfo.attach('playback-soak-summary', {
+    path: summaryPath,
+    contentType: 'application/json',
+  });
+  expect(pageErrors).toEqual([]);
 });

@@ -10,6 +10,9 @@
   --card: #16161c;
   --line: #26262f;
   --accent: #5b8cff;
+  --focus-ring: #fff;
+  --focus-ring-width: 3px;
+  --control-focus-ring-color: color-mix(in srgb, var(--accent) 82%, white);
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
@@ -169,8 +172,8 @@ input {
 }
 
 .den-button:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
-  outline-offset: 3px;
+  outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
+  outline-offset: var(--focus-ring-width);
 }
 
 .den-button:disabled,

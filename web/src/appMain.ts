@@ -18,6 +18,7 @@ import {
 } from './lib/release';
 import { legacyPath } from './lib/route';
 import { currentAppPath } from './lib/runtimeUrl';
+import { isOptionalImportFailure } from './lib/optionalImport';
 
 // Read once, now, rather than lazily when the first error report needs it: a page open across a deploy must
 // report the release it actually loaded, not one den-edge has since moved on to (`diagnosticsReport.ts`).
@@ -119,12 +120,17 @@ mount(App, { target });
 // and whatever asked for it then never learns it failed.
 window.addEventListener('beforeunload', pageLeaving);
 window.addEventListener('pageshow', pageStayed);
-window.addEventListener('vite:preloadError', () => {
-  // Not for imports a navigation away cancelled (`pageLeaving`): nothing is missing, and no one should be told so.
-  if (navigator.onLine && !isLeaving()) {
-    sendPageError(pageError('chunk_load', 'app'));
-    recoverChunkFailure();
-  }
+window.addEventListener('vite:preloadError', (event) => {
+  const error = (event as Event & { payload?: unknown }).payload;
+  // Vite dispatches before rejecting the import. Let its catch identify optional enhancement failures before
+  // deciding whether the page needs recovery; a missing screen still follows the existing reload policy. A
+  // navigation-away cancellation (`pageLeaving`) is likewise not a missing chunk and must not be reported.
+  setTimeout(() => {
+    if (navigator.onLine && !isLeaving() && !isOptionalImportFailure(error)) {
+      sendPageError(pageError('chunk_load', 'app'));
+      recoverChunkFailure();
+    }
+  }, 0);
 });
 
 // A tab can sit open across a release: den-edge's image only ever carries the current build's assets, so a

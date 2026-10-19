@@ -17,6 +17,8 @@
     "test:tv-preflight": "node scripts/tv-preflight.integration.mjs",
     "check:tv-isolation": "node scripts/check-tv-isolation.mjs",
     "test:e2e:tv": "playwright test --config playwright.tv.config.ts",
+    "test:e2e:keyboard": "playwright test --config playwright.keyboard.config.ts",
+    "test:e2e:tv-soak": "DEN_TV_SOAK=1 playwright test --config playwright.tv.config.ts tv-home.spec.mjs --workers=1",
     "test:e2e:tv-package": "playwright test --config playwright.tv-package.config.ts",
     "build": "vite build && node scripts/verify-worker-build.mjs && vite build --ssr src/shell.ts --outDir dist-shell && node scripts/shell.mjs && node scripts/precompress.mjs",
     "build:cast": "vite build --config vite.cast.config.ts",

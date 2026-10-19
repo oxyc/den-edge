@@ -847,7 +847,9 @@
       await tick();
       goTo(index, false);
       frame
-        ?.querySelector<HTMLElement>('.slide:not([inert]) [data-tv-carousel-action]')
+        // Chromium 87 has no native `inert`: Svelte assigns an expando property there, so an attribute selector
+        // cannot distinguish the active slide. `tabindex` is the carousel's own authoritative focus state.
+        ?.querySelector<HTMLElement>('.slide [data-tv-carousel-action][tabindex="0"]')
         ?.focus({ preventScroll: true });
     };
     node.addEventListener('den:tv-page', page);
@@ -1032,13 +1034,15 @@
              place in the rail as empty boxes: on Home they were 20 slides of 26 elements, 46% of the page (measured
              on d.oxy.fi), and the first render built every one's controls. -->
         {#if n === index || n === index - 1 || n === nextSlide(index, shown.length)}
-          <a
-            class="slide-link"
-            href={titleHref(title)}
-            aria-label={`Open details for ${title.title}`}
-            tabindex={n === index ? 0 : -1}
-            draggable="false"
-          ></a>
+          {#if !__DEN_TV__}
+            <a
+              class="slide-link"
+              href={titleHref(title)}
+              aria-label={`Open details for ${title.title}`}
+              tabindex={n === index ? 0 : -1}
+              draggable="false"
+            ></a>
+          {/if}
           <div class="told">
             <div class="text">
               <h2>
@@ -1056,7 +1060,7 @@
               <p class="facts">{billboardFacts(title, found)}</p>
               <p class="overview">{found?.overview ?? ''}</p>
               <div class="actions">
-                {#if onplay}
+                {#if !__DEN_TV__ && onplay}
                   <Button
                     variant="primary"
                     size="large"

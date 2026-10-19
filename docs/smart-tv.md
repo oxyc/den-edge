@@ -89,11 +89,30 @@ source actually uses `Array.prototype.at`, `String.prototype.at`,
 `Object.hasOwn`, `structuredClone`, `crypto.randomUUID`, and
 `AbortSignal.reason`/`throwIfAborted`/`timeout`/`any`; the TV bundle supplies
 polyfills for all of these. It still requires secure-context Web Crypto,
-Workers, IndexedDB and WebAssembly. The shipped Rust/WASM glue uses
-`WebAssembly.instantiateStreaming` with an `instantiate` fallback and an
-`externref` table; reference types predate the Chrome 85 baseline, but the
-actual `.wasm` must still be loaded on each TV because firmware engines can
-diverge.
+Workers, IndexedDB and WebAssembly. A genuine Linux Chromium 87 run rejected the
+browser core's two WebAssembly tables, before the library could open. TV builds
+therefore resolve the same policy to `src/vendor/den-core-tv`: the exact same
+source-manifest hashes, compiled without reference types, including the Rust
+standard library. The browser artifacts are unchanged. The TV build checks both
+source-version parity and emitted WASM hashes, so a future shared-core update
+cannot silently leave TV policy behind. `node scripts/test-tv-core.mjs` executes
+the shared golden policy vectors against both binaries.
+
+To regenerate the TV artifacts, use Rust and wasm-bindgen versions recorded in
+the browser core's `SOURCE.json`, install the matching `rust-src` component, then
+run `node scripts/build-tv-core.mjs /path/to/pinned/den-core`. The command verifies
+every source hash before compiling; `WASM_BINDGEN` can name an explicit CLI.
+Ordinary builds use the checked-in artifacts and need no Rust toolchain. The
+maintenance build enables `build-std` on that pinned compiler with
+`RUSTC_BOOTSTRAP=1`, disables reference types in both the application and std, and
+omits the debug-name section. It does not alter shared policy source.
+
+The same actual-engine check found that Chromium 87 drops Svelte's generated
+`:where(.svelte-…)` selectors and ignores `aspect-ratio`. A TV-only PostCSS pass
+retains the scope classes without `:where`; TV geometry has explicit height
+fallbacks. This changes descendant-selector specificity in TV output, so the
+real navigation/geometry checks matter. Neither transform affects browser CSS.
+Old desktop-engine evidence still does not establish TV firmware or codec support.
 
 ## Samsung Tizen
 
@@ -170,11 +189,33 @@ integration.
 
 ## Apple TV reference and intentional differences
 
+`Shell/AppTab.swift` and `RootView.swift` inform the TV navigation: an icon-only
+Search button first, followed by Home, Movies, Series, Watchlist and Settings.
+The TV-only centered bar uses 24px labels, wider spacing and a filled focus pill;
+Search opens the page's query editor instead of embedding a field in the bar.
+Home links to the canonical `/` route, not the `/library` URL that bypasses client routing.
+Poster menus are omitted on TV. Cards keep a single inset white artwork ring,
+without a second outer link outline. Posters rest at 97% of their reserved surface
+and ease to 100% on focus, retaining the slight zoom without crossing a shelf's
+paint or overflow boundary. That geometry and ring treatment is shared with browser
+keyboard focus; TV only raises the ring-width custom property from 3px to 4px.
+Ordinary controls and composite picker/split-button shells consume the same width;
+TV changes their accent ring to white and suppresses the focused inner hit surface,
+so a remote exposes one ring even on the Chrome 85-class engine without `:has()`.
+The TV Search editor follows the same rule: its ring encloses the icon and input as
+one control. Shelf headings keep the shared single-line geometry instead of reserving
+a second mobile line that short headings never use.
+On coarse-pointer previews, Search is warmed without joining the initial browser bundle;
+the route and editor focus complete inside the activating tap so mobile WebKit can open
+its software keyboard. Remote focus provides the same intent warm-up on a TV.
+The browser navbar and poster menus remain unchanged.
+
 The reference inspected was `den/App/Den/Components/FeaturedHero.swift` and
 `Screens/DetailView.swift`, not the hero's stale introductory comment. Its current
 hero has one **Details** button. The shared TV billboard keeps one **More** link
-to the detail page, with a noninteractive title; browser-only Watchlist/Seen,
-pagination dots and the fullscreen shortcut are removed from the TV hero.
+to the detail page, with a noninteractive title; browser-only Play, Watchlist/Seen,
+the full-slide link, pagination dots and the fullscreen shortcut are removed from
+the TV hero. Thus an active TV slide has exactly one interactive element.
 Watchlist/Seen and the available playback/source/trailer actions remain on the
 shared detail screen. The normal browser presentation is unchanged.
 
@@ -184,6 +225,14 @@ page; the first result column's Left returns to the active category, and Right f
 the rail enters results. Querying, debounce, filters, caching and paging remain
 shared with the browser. A dense-result E2E journey covers keyboard editing,
 row/column movement and detail/Back focus restoration.
+
+Directional focus geometry is shared with the browser as progressive enhancement.
+Normal browser Tab, Enter, editing, pointer input and component-owned arrow keys stay
+native; the small geometry chunk is fetched only after Tab prefetches it or an
+eligible focused control receives an arrow key. If that optional chunk is missing,
+the page does not reload and native keyboard behavior remains usable. Production
+Chromium and WebKit E2E fault-inject the missing and delayed chunk, so this contract
+is checked without adding TV code to the browser's initial bundle.
 
 This is not full native-tvOS parity. Native downloads, platform player menus and
 codec/HDR behavior do not become available merely by reusing a screen. TV playback
@@ -205,10 +254,17 @@ npm run lint
 npm run build
 npm run check:tv-isolation
 npm run test:e2e
+npm run test:e2e:keyboard
 npm run test:e2e:tv
 DEN_TV_PLATFORM=tizen npm run test:e2e:tv
 npm run test:e2e:tv-package
 DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv
+npm run test:e2e:tv-soak
+DEN_TV_PLAYBACK_SOAK=1 npm run test:e2e:tv -- tv-playback.spec.mjs --grep @soak
+DEN_TV_LIBRARY_STRESS_200=1 npm run test:e2e:tv -- tv-library-stress.spec.mjs
+node scripts/test-tv-core.mjs
+node scripts/test-tv-chromium87.mjs
+DEN_TV_LIBRARY_STRESS_200=1 node scripts/test-tv-chromium87.mjs
 npm run build:tv:webos
 npm run build:tv:tizen
 node scripts/tv-package.integration.mjs
@@ -222,11 +278,33 @@ media segments (not mocked `play()` or `currentTime`). Separate AVPlay tests use
 workstation SDK fixture: they verify bridge state/transport, caption rendering, error redaction,
 cleanup, and the actual packaged script/CSP path, not Samsung decoding. Backend responses are fixtures;
 these tests do not use or modify the live library. They also cover remote navigation,
-focus restoration, forty detail/Back cycles, remote source/audio/subtitle selection,
+focus restoration, repeated detail/Back cycles, remote source/audio/subtitle selection,
 resume, Next, retry after a failed session, visibility cleanup and Back during loading.
 The compatibility journey removes newer APIs in both page and Worker globals;
 it is not an emulator of an older Chromium engine. Native WebKit HLS evidence is
 not LG decoder evidence.
+
+The optional Chromium 87 runner uses the real official Linux x64 snapshot
+`812859` (`87.0.4280.0`), verifies the pinned archive SHA-256 and engine version,
+then executes the production build in an amd64 Docker container with networking
+disabled. Docker, curl and unzip are prerequisites; image preparation/downloads
+need internet, but the browser only reaches local fixture endpoints. The build
+context contains only the Dockerfile. Only generated assets, E2E fixtures,
+Playwright and an empty browser profile enter the runtime—not workspace secrets,
+personal profiles or live libraries. Evidence persists in
+`web/test-results-tv/chromium87-<port>-<suffix>/`; scratch builds are removed.
+This exercises startup, encrypted pairing/save/reload, Search, detail/Back,
+Settings, diagnostics and retained Home navigation. It is old-engine evidence,
+not LG firmware or decoder qualification.
+The optional saved-library flag also runs the 200-title journey in this actual
+engine. Its test timeout bounds the workstation fixture; it is not a TV timing SLA.
+The 2026-10-18 actual-engine run passed all 23 selected journeys with this flag,
+including encrypted 200-title persistence and 200 Home/detail/Back visits. After
+forty warm-up visits it retained 4,274 DOM nodes, 138 listeners and about 8.7 MB
+post-GC heap; at 200 visits it retained 4,299 nodes, 139 listeners and about 8.7 MB,
+with two route surfaces and one Worker throughout. The TV core's clean-room
+regeneration also reproduced every checked-in artifact byte for byte, and all
+242 shared policy vectors agreed with the unchanged browser core.
 
 The browser build rejects any TV/core-js module in its output graph, including lazy
 chunks. A checked-in clean-main baseline also gates compressed initial/all JS+CSS
@@ -251,12 +329,21 @@ the browser module gate rejects that helper too, preventing an extra browser
 request merely to preserve the browser's existing path behavior. CI retains browser and TV
 failure traces and screenshots for seven days.
 
-After merging current main, the 2026-10-18 comparison against a clean `3fccf42`
-build, including the follow-up audit fixes, measured **+119 bytes initial gzip and
-+315 bytes total gzip**, with no
-additional browser asset chunk or TV module (80 JS/CSS assets in each build).
+After merging current main, the 2026-10-18 final isolation check against a clean
+`3fccf42` build measured **+659 bytes initial gzip and +1,898 bytes total gzip**.
+The one additional browser asset is the 960-byte-gzip optional spatial-navigation
+chunk (81 versus 80 JS/CSS assets); it is not in the initial preload graph. No TV
+module is present in the browser output.
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
+Six fresh counterbalanced pairs per engine found no reproducible slowdown. The
+final build kept the same request count as the baseline (41 initial/91 through
+idle in Chromium, 42 initial/91 through idle in WebKit) and transferred 1,847
+additional uncompressed bytes initially and 2,323 through idle. Timing samples
+had overlapping ranges and mixed directions; for example baseline/current entry
+medians were 69/69 ms in Chromium and 80/82 ms in WebKit. These do not establish
+a speedup. The reports retain every sample and both bundle fingerprints (current
+`44225ff22707baf512b221b8f899fc6f00f825e02a19384462eca7154876aabd`).
 Use six counterbalanced pairs against that baseline in each engine and run the comparison
 after local test suites finish. Record the generated report and its fingerprints with
 the PR's validation evidence; overlapping variable samples do not establish a hardware
@@ -278,6 +365,12 @@ qualification tasks, not reasons to block the local preview.
 Focus restoration keys include the originating shelf, so duplicate titles in
 different shelves remain distinct. The existing bounded route cache is reused (two inactive details),
 not replaced with a separate TV router.
+Restoring focus no longer scrolls an already-visible poster after the router has
+restored the document offset. The full WebKit stress journey exposed a 12px move
+caused by aligning the card's trailing metadata instead of its poster. The TV
+restore path checks the poster surface and horizontal shelf bounds; genuinely
+offscreen controls still receive scroll-into-view handling. This is separate from
+directional navigation, which keeps its intentional scrolling behavior.
 TV builds omit touch-only page snapshots and limit Home's idle screen warm-up to
 Details. Search, People, Settings and Player load on intent; browser preload policy
 and touch behavior stay unchanged.
@@ -289,8 +382,59 @@ the change and 10–15 ms after it. Suppressing `scrollend` listeners before sta
 exposed the old one-second fallback (1015–1035 ms); the new path took 19–35 ms.
 These are small workstation diagnostic samples, not TV latency guarantees. The
 older target engines predate [Chromium's `scrollend` support](https://developer.chrome.com/blog/scrollend-a-new-javascript-event).
-The browsing soak checks forty detail/Back cycles across three titles, both arrow
-directions, retained-page bounds and Worker counts, without retrying missed presses.
+Chromium 87 also lacks native `inert`: Svelte's property assignment did not create
+an attribute there. The arrow path therefore selects the current action by its
+explicit `tabindex="0"`, not by an absent `inert` attribute. Actual-engine tests
+reproduced the previous-slide focus error and verify the corrected route.
+The normal browsing resource check runs 200 detail/Back cycles in Chromium and forty
+in WebKit across three titles, both arrow directions, retained-page bounds and Worker
+counts, without retrying missed presses. Chromium additionally samples DOM nodes,
+event listeners and post-GC JavaScript heap after warm-up and at completion.
+`npm run test:e2e:tv-soak` extends this same real remote journey to thirty minutes;
+set `DEN_TV_SOAK_MINUTES` for another duration (up to four hours). Samples follow a
+two-second idle interval and are saved incrementally as `tv-browsing-soak.json` in
+the run's Playwright output directory, including when a later assertion fails.
+`DEN_TV_SOAK_HEAP=1` additionally saves warm/final Chromium heap snapshots. Traces
+and video are disabled for this resource experiment; failures still save screenshots.
+These are workstation, post-GC page measurements, not natural-GC pauses, decoder/GPU
+memory, or a guarantee of leak freedom. WebKit does not expose these CDP counters.
+
+The 2026-10-18 thirty-minute Chromium run completed 4,431 detail/Back visits.
+After warm-up it measured 4,146 DOM nodes and 132 listeners; the final sample had
+4,191 nodes, 133 listeners and about 12.5 MB JavaScript heap. That run included the
+retained loading-poster and restoration fixes, before the later old-engine
+compatibility work; it is not a thirty-minute run of the final artifact. The
+ordinary bounded-resource journey is rerun against the final production output.
+
+The opt-in playback soak uses the checked-in fMP4 fixture with explicit HLS
+discontinuities and modest deterministic segment delay. It runs media at normal
+wall-clock speed, requires a single session throughout, and checks progress/end
+cleanup on remote Back. It does not mock `play()` or advance media clocks.
+Full ten-minute runs passed in Chromium and WebKit on 2026-10-18: respectively
+601 seconds of media over 601/603 seconds wall time, one session and one end
+request each, and no uncaught page errors. Their source snapshot includes the
+native expiry check, before the final in-flight-probe cancellation guard; that guard has a
+separate held-response lifecycle regression. The test saves engine/version,
+elapsed time, persisted media position, session/end counts and errors as JSON evidence.
+An extended native WebKit expiry probe found that a segment HTTP 410 first drains
+the buffer, then eventually surfaces as a decode error. Previously Den discarded
+the authoritative 410 response and entered decode recovery. The shared player now
+classifies that response as an expired session once a media error arrives;
+playlist-level 410 responses are preserved too. For native TV playback, the existing
+stall observer also checks for an authoritative 410, without waiting indefinitely
+for a media error. This check is TV-only and ignores ambiguous replies.
+A real loopback HTTP media server proves native WebKit expiry/Resume into a fresh
+session; a deliberate pause remains paused. Chromium/hls.js also verifies backward
+and explicit-zero resume positions. Native media requests are not intercepted in
+the WebKit expiry case. This establishes workstation behavior, not LG decoder
+qualification or a firmware-independent recovery deadline.
+
+The dense Search fixture contains 72 results. The separate saved-library journey
+creates 24 actual encrypted library entries through production Watchlist controls;
+`DEN_TV_LIBRARY_STRESS_200=1` enables the larger 200-title case. Both verify deep-grid
+remote navigation and detail/Back restoration; Search also checks long-title bounds.
+The Watchlist grid currently mounts every saved card. The optional case records its
+DOM/card counts and focus-handling samples, without a machine-sensitive timing gate.
 The dense Search journey also records native keydown-to-focusin timing. Across 17
 transitions per run, workstation medians/p95 were 1.1/3.5 ms for the LG-targeted
 Chromium build, 1.0/2.3 ms for the Samsung-targeted Chromium build and 1.0/1.0 ms
@@ -306,6 +450,9 @@ Source metadata is enlarged for viewing distance and season focus rings stay ins
 their scrollable strip instead of being clipped.
 Hardware Back leaves a Settings editor before closing its row. Production E2E exercises
 each of these flows, including encrypted two-device pairing and relaunch persistence.
+Remote handling is installed before downloading the main application chunk, keeping
+hardware Back/exit available on the starting screen. A held-chunk regression proves
+this without depending on the download completing first.
 Missing-screen recovery is fault-injected against the compiled application: one fresh
 document can load a replacement asset graph, while a persistent failure exposes Retry
 without a reload loop. Opt-in diagnostics also work from the startup-failure surface.
@@ -314,6 +461,19 @@ Linux WebKit CI exposed an arrow press lost immediately after Back. Holding and 
 releasing the browser's restoration frame reproduced the old rail position overwriting
 the newly selected slide. TV input now cancels that pending restoration; the regression
 journey exercises this exact ordering without retrying presses. Browser restoration is unchanged.
+The no-trace resource run exposed an earlier ordering too: input could arrive after
+the navigation observer restored focus but before the initial post-flush restoration.
+TV cancellation now begins before that flush, and separate E2E variants cover both
+the first-restored-focus and delayed-frame boundaries.
+
+The extended resource check also caught detached loading-poster trees retained via
+Chromium's responsive-image viewport listeners. The TV loading shell now uses a fixed
+342px poster URL; the resolved detail and ordinary browser retain responsive images.
+The controlled short run changed from roughly eleven retained nodes per visit to a
+flat post-GC count (4,115 nodes at both forty and 280 visits). This does not substitute
+for a device memory soak. Diagnostics also catch synchronous IndexedDB write refusal
+inside their callback, so the check reports failure without an uncaught storage error
+and can be retried after storage becomes available.
 
 Samsung AVPlay opens relative playback URLs at the configured API origin, waits for
 resume seeking before Play, and fences callbacks after teardown. SDK error details can
@@ -322,16 +482,11 @@ External WebVTT uses browser cue parsing and an overlay synchronized to the AVPl
 The five AVPlay journeys and the packaged bridge journey use an explicitly mocked SDK;
 the separate HLS journeys exercise actual media decoding.
 
-Poster action buttons previously depended on hover and were excluded from the
-TV focus scan at zero opacity. They are visible in TV builds; Up from a poster
-reaches its own Actions button, and Down returns to that poster. A second Up
-continues to the preceding row's poster; it does not strand focus in a parallel
-lane of action buttons. Left/right grid navigation is unchanged. TV action menus use native dialogs instead of the
-[Popover API introduced in Chrome 114](https://developer.chrome.com/blog/new-in-chrome-114),
-which is newer than the target engines. Browser builds keep their native popovers.
-A production E2E journey removes popover methods and rejects the unsupported
-selector, then opens the real poster menu, closes it through hardware Back and
-runs a menu action once. This is an API-absence simulation, not a TV emulator.
+TV posters now open Details directly, without separate action-menu stops in the
+remote focus path. A production E2E journey verifies that neither a visible
+trigger nor a keyboard context-menu action opens a poster menu, then opens Details
+and restores the original result on Back. Other TV menus retain their native-dialog
+fallback for old engines; browser builds keep native popovers.
 
 A repeated hardware Back event before player unmount previously called the parent
 close callback twice. Closing is now idempotent, and the real HLS journey checks

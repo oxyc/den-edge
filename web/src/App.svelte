@@ -4,6 +4,7 @@
   import RoutedLibrary from './RoutedLibrary.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
+  import { installKeyboardNavigation } from './lib/keyboardNavigation';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
   import { guestGrants } from './lib/grants.svelte';
@@ -80,12 +81,14 @@
   $effect(() => syncIdentities());
 
   onMount(() => {
+    const stopKeyboard = !__DEN_TV__ ? installKeyboardNavigation() : undefined;
     const visible = () => {
       if (document.visibilityState === 'visible') syncIdentities();
     };
     window.addEventListener('online', syncIdentities);
     document.addEventListener('visibilitychange', visible);
     return () => {
+      stopKeyboard?.();
       window.removeEventListener('online', syncIdentities);
       document.removeEventListener('visibilitychange', visible);
     };

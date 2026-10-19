@@ -30,8 +30,10 @@ async function start() {
   if (!globalThis.Worker || !globalThis.indexedDB || !globalThis.WebAssembly) {
     throw new Error('This TV is missing Worker, IndexedDB or WebAssembly support required by Den.');
   }
-  await import('../appMain');
+  // The application is a separate download. Keep hardware Back/exit available on the starting screen too;
+  // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).
   installRemote();
+  await import('../appMain');
 }
 
 void start().catch((error) => {

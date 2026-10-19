@@ -74,7 +74,9 @@
                 ? 'Downloaded'
                 : downloadState === 'downloading'
                   ? 'Downloading'
-                  : 'Download',
+                  : __DEN_TV__
+                    ? 'Start download'
+                    : 'Download',
             disabled: downloadState !== undefined,
             onselect: ondownload,
           },

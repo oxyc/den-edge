@@ -145,7 +145,9 @@ export default defineConfig({
         for (const output of Object.values(bundle)) {
           if (output.type !== 'chunk') continue;
           const leaked = output.moduleIds.find((id) =>
-            /\/src\/tv\/|\/src\/lib\/runtimeUrl\.ts$|\/node_modules\/core-js\//.test(id),
+            /\/src\/tv\/|\/src\/vendor\/den-core-tv\/|\/src\/lib\/runtimeUrl\.ts$|\/node_modules\/core-js\//.test(
+              id,
+            ),
           );
           if (leaked) this.error(`TV-only module leaked into browser build: ${leaked}`);
         }

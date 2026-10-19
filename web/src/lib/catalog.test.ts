@@ -231,7 +231,6 @@ describe('the screens', () => {
         href: '/tv/693134-dune-prophecy',
       },
     ]);
-    expect(rows.map((r) => r.mobileHeadingLines)).toEqual([2, 2]);
     expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
     expect(asked).toEqual(['/movie/329865/recommendations']);
   });

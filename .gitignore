@@ -5,6 +5,7 @@
 /web/dist-cast
 /web/dist-shell
 /web/dist-tv-*
+/web/dist-keyboard-e2e-*
 /web/dist-browser-baseline
 /web/tv-packages
 .env
@@ -12,4 +13,6 @@
 
 /web/test-results
 /web/test-results-tv
+/web/test-results-keyboard
+/web/test-results-keyboard-port
 /web/playwright-report

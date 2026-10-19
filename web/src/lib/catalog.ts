@@ -796,8 +796,6 @@ export interface RowDef {
   title: string;
   /** Optional profile signals used only to order Home's discovery rows; membership and paging stay unchanged. */
   affinity?: HomeRowAffinity;
-  /** Personal explanations may use a second heading line on a narrow screen; ordinary labels never do. */
-  mobileHeadingLines?: 2;
   /** A more specific accessible name where the visible heading is deliberately shared between several rows. */
   ariaLabel?: string;
   /** The named title/person within a contextual heading, and its destination. */
@@ -1118,7 +1116,6 @@ export function personalRows(
   const row = (id: string, before: string, after: string, seed: Title): RowDef => ({
     id: `${id}-${seed.type}-${seed.id}`,
     title: `${before}${seed.title}${after}`,
-    mobileHeadingLines: 2,
     headingLink: { before, label: seed.title, after, href: titleHref(seed) },
     load: async (page) =>
       (

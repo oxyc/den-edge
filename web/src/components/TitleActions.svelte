@@ -5,14 +5,17 @@
      are read out rather than drawn until there is room for them. The opinion is one picker, as the player's are:
      the browser opens its own menu, and "No rating" clears it — which pressing the active button twice never said. -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import Button from './Button.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
+  import ActionMenu from './ActionMenu.svelte';
   import SplitButton from './SplitButton.svelte';
   import type { TitleRow } from '../lib/wire';
   import { shareOrCopy } from '../lib/share';
   import { PressedTitle } from '../lib/pressedTitle.svelte';
   import type { SaveKind } from '../lib/pressedTitleState';
   import type { Reaction } from '../lib/titleState';
+  import type { MenuItem } from '../lib/titleActions';
   import { toastContext } from '../lib/toast';
   import { tick } from 'svelte';
 
@@ -25,6 +28,7 @@
     onreact,
     onplay,
     onplayhere,
+    onsources,
     away = false,
     blocked = false,
     restricted = false,
@@ -36,6 +40,8 @@
     playLabel = 'Play',
     compact = false,
     seenOverride = undefined,
+    seenItems,
+    extraAction,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -49,6 +55,8 @@
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
+    /** Open sources for the same movie or episode as the primary Play action. */
+    onsources?: () => void;
     /**
      * This device reaches no route to Den's player — away from home, without Tailscale — so there is no Play here: said
      * plainly under the actions, rather than leaving the button's absence to explain itself.
@@ -91,6 +99,10 @@
      * can never read Seen over an episode list showing nothing watched.
      */
     seenOverride?: boolean;
+    /** TV series choose the exact season here; moving across episode tabs must never choose it implicitly. */
+    seenItems?: MenuItem[];
+    /** A surface-specific action which belongs beside the title controls (the TV season picker). */
+    extraAction?: Snippet;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
@@ -199,6 +211,18 @@
     />
   {/if}
 
+  {#if onsources}
+    <Button
+      variant="secondary"
+      size="large"
+      class="pill sources"
+      icon="sources"
+      label="Sources"
+      busy={externallyBusy()}
+      onclick={onsources}
+    />
+  {/if}
+
   <div class="pills">
     <div class="promoted">
       {#if trailerHref && !restricted && ontrailer}
@@ -247,22 +271,33 @@
           void save('watchlist', on, () => onwatchlist(on));
         }}
       />
-      <Button
-        variant="stateful"
-        class={seen ? 'pill on' : 'pill'}
-        icon="eye"
-        iconFilled={seen}
-        label={compact ? undefined : 'Seen'}
-        pressed={compact ? undefined : seen}
-        ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
-        busy={pressed.saving('seen')}
-        saving={pressed.saving('seen')}
-        aria-disabled={mutationBlocked() || undefined}
-        onclick={() => {
-          const on = !seen;
-          void save('seen', on, () => onseen(on));
-        }}
-      />
+      {#if seenItems?.length}
+        <ActionMenu
+          items={seenItems}
+          label="Mark watched"
+          heading="Mark watched"
+          triggerClass={`den-button den-button-stateful den-button-large pill season-seen-trigger${seen ? ' on' : ''}`}
+          glyph={seenPicker}
+        />
+      {:else}
+        <Button
+          variant="stateful"
+          class={seen ? 'pill on' : 'pill'}
+          icon="eye"
+          iconFilled={seen}
+          label={compact ? undefined : 'Seen'}
+          pressed={compact ? undefined : seen}
+          ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
+          busy={pressed.saving('seen')}
+          saving={pressed.saving('seen')}
+          aria-disabled={mutationBlocked() || undefined}
+          onclick={() => {
+            const on = !seen;
+            void save('seen', on, () => onseen(on));
+          }}
+        />
+      {/if}
+      {#if extraAction}{@render extraAction()}{/if}
       {#if onreact}
         <div class="desktop-reactions" role="group" aria-label="Your opinion">
           {#each reactions as [value, label] (value)}
@@ -326,6 +361,10 @@
     </div>
   </div>
 </div>
+
+{#snippet seenPicker()}
+  <ButtonIcon name="eye" filled={seen} /><span>Seen</span>
+{/snippet}
 {#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
     class="notice"
     role="status"
@@ -388,6 +427,20 @@
   .utilities > :global(.pill),
   .pick {
     width: 100%;
+  }
+
+  .utilities :global(.season-seen-trigger) {
+    padding: 0 16px;
+    border: 1px solid var(--button-border);
+    background: var(--button-bg);
+    color: var(--button-fg);
+    font-weight: 600;
+  }
+
+  .utilities :global(.season-seen-trigger.on) {
+    --button-bg: var(--fg);
+    --button-border: var(--fg);
+    --button-fg: var(--bg);
   }
 
   .promoted :global(.den-button-label) {
@@ -473,8 +526,8 @@
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */
   .pick:focus-within {
-    outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
-    outline-offset: 3px;
+    outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
+    outline-offset: var(--focus-ring-width);
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */

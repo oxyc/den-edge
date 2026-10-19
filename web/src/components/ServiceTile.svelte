@@ -103,7 +103,7 @@
   }
 
   .tile:focus-visible .art {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--focus-ring-width));
   }
 </style>

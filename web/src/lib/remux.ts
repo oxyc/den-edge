@@ -1221,15 +1221,19 @@ export async function segmentAnswer(
   const signal = AbortSignal.timeout(deadlineMs);
   try {
     const master = new URL(session.playlist, globalThis.location?.href ?? 'https://den.invalid/');
-    const variant = (await (await fetchImpl(master.href, { signal })).text())
+    const masterAnswer = await fetchImpl(master.href, { signal });
+    if (masterAnswer.status === 410 || masterAnswer.status === 502)
+      return { status: masterAnswer.status, ms: 0 };
+    const variant = (await masterAnswer.text())
       .split('\n')
       .map((line) => line.trim())
       .find((line) => line && !line.startsWith('#'));
     if (!variant) return undefined;
     const media = new URL(variant, master);
-    const lines = (await (await fetchImpl(media.href, { signal })).text())
-      .split('\n')
-      .map((line) => line.trim());
+    const mediaAnswer = await fetchImpl(media.href, { signal });
+    if (mediaAnswer.status === 410 || mediaAnswer.status === 502)
+      return { status: mediaAnswer.status, ms: 0 };
+    const lines = (await mediaAnswer.text()).split('\n').map((line) => line.trim());
     let start = 0;
     let stalled: string | undefined;
     for (const [index, line] of lines.entries()) {

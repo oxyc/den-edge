@@ -64,13 +64,17 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300"><rect width="500" height="300" fill="#345"/></svg>',
     }),
   );
-  await page.goto(E2E_ORIGIN);
+  // Enter on the title itself. Hard-reloading immediately after onboarding can abort the still-loading
+  // Home Worker/WASM in WebKit, reporting unload errors unrelated to the pairing journey being checked.
+  await page.goto(`${E2E_ORIGIN}/tv/9`);
   await page.getByRole('button', { name: 'Look around instead' }).click();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible({
+    timeout: 30_000,
+  });
   if (linked) {
     // A local-only library has nothing for another device to open. Saving one real row before accepting the
     // invite starts the same relay-backed guest library used by the established pairing coverage.
-    await page.goto(`${E2E_ORIGIN}/tv/9`);
     const saved = page.getByRole('button', { name: 'Watchlist', exact: true });
     await saved.click();
     await expect(saved).toHaveAttribute('aria-pressed', 'true');
@@ -98,14 +102,10 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
     ).toBeVisible();
     return edge;
   }
-  await page.goto(`${E2E_ORIGIN}/tv/9`);
-  await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible({
-    timeout: 30_000,
-  });
   return edge;
 }
 
-async function installSourcePlugin(page) {
+async function installSourcePlugin(page, sourceRequests = []) {
   await page.route('**/scout/fixture-install/manifest.json', (route) =>
     route.fulfill({
       json: {
@@ -116,8 +116,9 @@ async function installSourcePlugin(page) {
       },
     }),
   );
-  await page.route('**/scout/fixture-install/stream/series/**', (route) =>
-    route.fulfill({
+  await page.route('**/scout/fixture-install/stream/series/**', (route) => {
+    sourceRequests.push(decodeURIComponent(route.request().url()));
+    return route.fulfill({
       json: {
         streams: [
           {
@@ -128,8 +129,8 @@ async function installSourcePlugin(page) {
           },
         ],
       },
-    }),
-  );
+    });
+  });
   await page.goto(`${E2E_ORIGIN}/settings`);
   await page.getByRole('button', { name: 'Plugins', exact: true }).click();
   await page
@@ -162,6 +163,58 @@ test('remote changes seasons from the focused season tab', async ({ page }) => {
   ).toBeVisible();
 });
 
+test('season download asks for its target instead of inheriting the focused tab', async ({
+  page,
+}) => {
+  const sourceRequests = [];
+  await setupSeries(page);
+  await installSourcePlugin(page, sourceRequests);
+
+  const season2 = page.getByRole('tab', { name: 'Season 2' });
+  await season2.focus();
+  await page.keyboard.press('Enter');
+  await expect(season2).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByRole('button', { name: 'Play episode 1: Season 2 episode 1' }),
+  ).toBeVisible();
+  sourceRequests.length = 0;
+
+  const download = page.getByRole('button', { name: 'Download a season' });
+  await download.focus();
+  await page.keyboard.press('Enter');
+  const firstSeason = page.getByRole('menuitem', { name: 'Season 1', exact: true });
+  await expect(firstSeason).toBeFocused();
+  await page.keyboard.press('Enter');
+
+  await expect(season2).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('status')).toContainText('2 already ready');
+  await expect.poll(() => sourceRequests.some((url) => url.includes('tt9:1:'))).toBe(true);
+  expect(sourceRequests.some((url) => url.includes('tt9:2:'))).toBe(false);
+});
+
+test('watched action chooses a season without changing the episode tab', async ({ page }) => {
+  await setupSeries(page);
+  const season2 = page.getByRole('tab', { name: 'Season 2' });
+  await season2.focus();
+  await page.keyboard.press('Enter');
+  await expect(season2).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('button', { name: /Mark season 2/ })).toHaveCount(0);
+
+  const seen = page.getByRole('button', { name: 'Mark watched', exact: true });
+  await seen.focus();
+  await page.keyboard.press('Enter');
+  const season1 = page.getByRole('menuitemcheckbox', { name: 'Season 1', exact: true });
+  await expect(season1).toHaveAttribute('aria-checked', 'false');
+  await season1.focus();
+  await page.keyboard.press('Enter');
+
+  await expect(page.getByText('2 of 4 watched', { exact: true })).toBeVisible();
+  await expect(season2).toHaveAttribute('aria-selected', 'true');
+  await seen.focus();
+  await page.keyboard.press('Enter');
+  await expect(season1).toHaveAttribute('aria-checked', 'true');
+});
+
 test('remote reaches the actions on a saved title without hover', async ({ page }) => {
   await setupSeries(page);
 
@@ -185,6 +238,15 @@ test('remote reaches the actions on a saved title without hover', async ({ page 
 });
 
 test('pairing keeps remote focus as its code becomes an approval', async ({ browser, page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    globalThis.ClipboardItem = class RefusesPromisedBlob {
+      constructor() {
+        throw new TypeError('This engine accepts a Blob, not a promised Blob');
+      }
+    };
+  });
   const edge = await setupSeries(page, { linked: true });
   await page.goto(`${E2E_ORIGIN}/settings`);
 
@@ -216,9 +278,31 @@ test('pairing keeps remote focus as its code becomes an approval', async ({ brow
     await page.keyboard.press('Enter');
     await expect(joiner.getByRole('heading', { name: 'Open your Den library' })).toBeHidden();
     await expect(region.getByRole('button', { name: 'Get a code' })).toBeFocused();
+    expect(errors).toEqual([]);
   } finally {
     await context.close();
   }
+});
+
+test('a promised-Blob clipboard refusal cannot strand a failed pairing', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    globalThis.ClipboardItem = class RefusesPromisedBlob {
+      constructor() {
+        throw new TypeError('This engine accepts a Blob, not a promised Blob');
+      }
+    };
+  });
+  await setupSeries(page, { linked: true });
+  await page.route('**/pair/new', (route) => route.fulfill({ status: 503, json: {} }));
+  await page.goto(`${E2E_ORIGIN}/settings`);
+  await page.getByRole('button', { name: /Linked devices/ }).click();
+  const region = page.getByRole('region', { name: 'Linked devices' });
+  await region.getByRole('button', { name: 'Get a code' }).click();
+  await expect(region.getByText('Too many pairings started here just now.')).toBeVisible();
+  await expect(region.getByRole('button', { name: 'Get a code' })).toBeEnabled();
+  expect(errors).toEqual([]);
 });
 
 test('hardware Back leaves recovery editing, then closes its Settings row', async ({ page }) => {
@@ -271,4 +355,31 @@ test('episode Sources hands remote focus to the ranked source choices', async ({
   await page.screenshot({ path: testInfo.outputPath('sources-focus.png') });
   await page.keyboard.press('ArrowUp');
   await expect(disclosure).toBeFocused();
+});
+
+test('episode overflow exposes the Apple TV actions without a TV handoff', async ({ page }) => {
+  await setupSeries(page);
+  await installSourcePlugin(page);
+
+  const options = page.getByRole('button', { name: 'Options for episode 1' });
+  await options.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('menuitem', { name: 'Sources', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Start download', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Play on TV', exact: true })).toHaveCount(0);
+
+  const mark = page.getByRole('menuitem', { name: 'Mark watched', exact: true });
+  await mark.focus();
+  await page.keyboard.press('Enter');
+  await expect(mark).toHaveCount(0);
+  await options.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('menuitem', { name: 'Mark unwatched', exact: true })).toBeVisible();
+
+  const start = page.getByRole('menuitem', { name: 'Start download', exact: true });
+  await start.focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText('This episode is already ready to play.', { exact: true }),
+  ).toBeVisible();
 });

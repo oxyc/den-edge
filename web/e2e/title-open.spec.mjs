@@ -268,6 +268,8 @@ const rings = (card) =>
       visible: link.matches(':focus-visible'),
       link: getComputedStyle(link).outlineStyle,
       art: ring.outlineStyle,
+      width: ring.outlineWidth,
+      transform: ring.transform,
       clipped: box.top - reach < track.top || box.bottom + reach > track.bottom,
     };
   });
@@ -281,7 +283,15 @@ test('a poster card shows one unclipped ring for the keyboard, and none after a 
   // Reached by the keyboard.
   await page.keyboard.press('Shift');
   await card.focus();
-  expect(await rings(card)).toEqual({ visible: true, link: 'none', art: 'solid', clipped: false });
+  await expect(card.locator('.art')).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+  expect(await rings(card)).toEqual({
+    visible: true,
+    link: 'none',
+    art: 'solid',
+    width: '3px',
+    transform: 'matrix(1, 0, 0, 1, 0, 0)',
+    clipped: false,
+  });
 
   // Tapped, opened, and come back to: focus returns to the card, but no ring, since no key was pressed.
   await card.tap();
@@ -289,6 +299,11 @@ test('a poster card shows one unclipped ring for the keyboard, and none after a 
   await page.goBack();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
   await expect.poll(() => card.evaluate((link) => document.activeElement === link)).toBe(true);
-  expect(await rings(card)).toMatchObject({ link: 'none', art: 'none' });
+  await expect(card.locator('.art')).toHaveCSS('transform', 'matrix(0.97, 0, 0, 0.97, 0, 0)');
+  expect(await rings(card)).toMatchObject({
+    link: 'none',
+    art: 'none',
+    transform: 'matrix(0.97, 0, 0, 0.97, 0, 0)',
+  });
   await page.close();
 });

@@ -1,5 +1,8 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { verifyTvCore, sha256 } from './tv-core-artifacts.mjs';
+
+const tvCore = verifyTvCore();
 
 const platform = process.argv[2];
 if (!['webos', 'tizen'].includes(platform)) throw new Error('Expected webos or tizen');
@@ -10,6 +13,13 @@ const directory = resolve(
     (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
+for (const name of ['den_core', 'den_core_assistant']) {
+  const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
+  if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);
+  const bytes = await readFile(resolve(directory, 'assets', matches[0]));
+  if (sha256(bytes) !== tvCore.artifacts[`generated/${name}_bg.wasm`])
+    throw new Error(`Non-TV WASM leaked into the TV build: ${matches[0]}`);
+}
 if (platform === 'webos' && assets.some((file) => /^avplay-/.test(file)))
   throw new Error('Samsung AVPlay leaked into the LG build');
 for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {
