@@ -338,6 +338,8 @@
   }
 
   .windowed {
+    width: 100vw;
+    margin-inline: calc(50% - 50vw);
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
   }
 
@@ -349,9 +351,8 @@
      bottom margin included) does not change when it is placed again and shift the page. */
   .windowed:not(.placed),
   .windowed.near {
-    /* The child rail deliberately bleeds to the viewport. Paint containment would clip it to this padded wrapper;
-       layout and style containment are enough to preserve the row's stable skipped-size geometry. */
-    contain: layout style;
+    /* Paint containment is safe because this boundary now spans the viewport with the child rail. */
+    contain: layout style paint;
   }
 
   .slot {

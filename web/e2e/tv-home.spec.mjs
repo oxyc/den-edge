@@ -94,6 +94,8 @@ test(
     const shelf = await shelfTrack.evaluate((track) => {
       const box = track.getBoundingClientRect();
       const style = getComputedStyle(track);
+      const wrapper = track.closest('.row-window');
+      const wrapperBox = wrapper.getBoundingClientRect();
       return {
         width: box.width,
         left: box.left,
@@ -101,7 +103,8 @@ test(
         paddingLeft: style.paddingLeft,
         paddingRight: style.paddingRight,
         firstChildLeft: track.firstElementChild?.getBoundingClientRect().left,
-        wrapperContain: getComputedStyle(track.closest('.row-window')).contain,
+        wrapperLeft: wrapperBox.left,
+        wrapperRight: wrapperBox.right,
       };
     });
     expect(Math.abs(shelf.left)).toBeLessThanOrEqual(1);
@@ -109,7 +112,8 @@ test(
     expect(shelf.paddingLeft).toBe('0px');
     expect(shelf.paddingRight).toBe('0px');
     expect(Math.abs(shelf.firstChildLeft)).toBeLessThanOrEqual(1);
-    expect(shelf.wrapperContain).not.toContain('paint');
+    expect(Math.abs(shelf.wrapperLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(shelf.wrapperRight - page.viewportSize().width)).toBeLessThanOrEqual(1);
     const services = page.getByRole('region', { name: 'Services' });
     if (await services.count()) {
       const [headingBox, firstTileBox] = await Promise.all([
@@ -119,6 +123,12 @@ test(
       expect(headingBox).not.toBeNull();
       expect(firstTileBox).not.toBeNull();
       expect(Math.abs(firstTileBox.x - headingBox.x)).toBeLessThanOrEqual(1);
+      const posterHeadingBox = await page
+        .getByRole('region', { name: 'Mind-Bending' })
+        .getByRole('heading', { name: 'Mind-Bending' })
+        .boundingBox();
+      expect(posterHeadingBox).not.toBeNull();
+      expect(Math.abs(posterHeadingBox.x - headingBox.x)).toBeLessThanOrEqual(1);
     }
     await page.evaluate(() => scrollTo(0, 0));
     // The first enriched recommendation renders before the others. Wait for the real slides before asking

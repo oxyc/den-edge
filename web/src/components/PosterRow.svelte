@@ -91,8 +91,10 @@
   .row {
     /* ~2.3 posters on a phone, so the cut-off one says "scroll"; 6–8 on a desktop. */
     --card-w: clamp(140px, 38vw, 190px);
+    --page-inset: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
 
-    margin-bottom: 32px;
+    width: 100vw;
+    margin: 0 calc(50% - 50vw) 32px;
   }
 
   .head {
@@ -100,6 +102,7 @@
     align-items: baseline;
     gap: 16px;
     margin: 0 0 12px;
+    padding-inline: var(--page-inset);
   }
 
   h2 {
@@ -142,8 +145,8 @@
   .track {
     display: flex;
     gap: 14px;
-    width: 100vw;
-    margin: 0 calc(50% - 50vw);
+    width: 100%;
+    margin: 0;
     padding: 0 0 8px;
     overflow: auto hidden;
 

@@ -326,6 +326,8 @@
      on screen (or a tap forced layout). Chromium delivers that size for a skipped row and keeps the property fixed
      (`placementGate`). */
   .row-window {
+    width: 100vw;
+    margin-inline: calc(50% - 50vw);
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
   }
 
@@ -335,9 +337,9 @@
 
   .row-window:not(.placed),
   .row-window.near {
-    /* Paint containment clips PosterRow's viewport-wide scroller back to this page-column wrapper. Layout and
-       style containment retain the stable row geometry without cutting off the shelf at the page gutter. */
-    contain: layout style;
+    /* This wrapper is itself viewport-wide, so paint containment retains its rendering savings without cutting
+       PosterRow's rail back to the narrower readable page column. */
+    contain: layout style paint;
   }
 
   .gone {
