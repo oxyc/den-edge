@@ -9,8 +9,15 @@
   import { rememberGrant } from '../src/lib/relayFetch';
   import { tabName } from '../src/lib/tabName.svelte';
 
-  const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
   const query = new URLSearchParams(location.search);
+  const originalLanguage = query.get('originalLanguage') ?? undefined;
+  const title: Title = {
+    type: 'movie',
+    id: 42,
+    title: 'The Movie',
+    year: 2001,
+    ...(originalLanguage ? { originalLanguage } : {}),
+  };
   const remux = query.get('remux') ?? `${location.origin}/direct`;
   const playbackQuery = query.get('playback');
   const playback =
