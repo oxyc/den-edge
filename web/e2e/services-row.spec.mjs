@@ -15,12 +15,15 @@ test('service directories are admitted only as their rail approaches the viewpor
   await expect(requests).toHaveText('1');
   await expect(row.getByText('Services unavailable')).toBeVisible();
   const track = row.locator('.track');
-  const trackBox = await track.boundingBox();
-  expect(trackBox).not.toBeNull();
-  expect(Math.abs(trackBox.x)).toBeLessThanOrEqual(1);
-  expect(Math.abs(trackBox.width - page.viewportSize().width)).toBeLessThanOrEqual(1);
   await expect(track).toHaveCSS('padding-left', '0px');
   await expect(track).toHaveCSS('padding-right', '0px');
+  const [headingBox, firstTileBox] = await Promise.all([
+    row.getByRole('heading', { name: 'Services' }).boundingBox(),
+    row.locator('.hold').first().boundingBox(),
+  ]);
+  expect(headingBox).not.toBeNull();
+  expect(firstTileBox).not.toBeNull();
+  expect(Math.abs(firstTileBox.x - headingBox.x)).toBeLessThanOrEqual(1);
   const settled = await row.boundingBox();
   expect(settled?.height).toBe(reserved?.height);
 

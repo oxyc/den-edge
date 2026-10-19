@@ -101,8 +101,6 @@
   .track {
     display: flex;
     gap: 14px;
-    width: 100vw;
-    margin: 0 calc(50% - 50vw);
     padding: 0 0 8px;
     overflow-x: auto;
     scroll-snap-type: x proximity;

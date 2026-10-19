@@ -28,8 +28,33 @@ test(
         },
       }),
     );
-    await page.route('**/atlas/catalog/**', (route) => route.fulfill({ json: { metas: [] } }));
-    await page.route('**/atlas/index/**', (route) => route.fulfill({ status: 404, json: {} }));
+    await page.route('**/atlas/catalog/**', (route) =>
+      route.fulfill({
+        json: {
+          metas: [1002, 1003, 1004].map((id) => ({
+            type: 'movie',
+            moviedb_id: id,
+            name: `Movie ${id}`,
+            posterPath: `/poster-${id}.jpg`,
+            releaseInfo: '2026',
+          })),
+        },
+      }),
+    );
+    await page.route('**/atlas/index/**', (route) =>
+      route.fulfill({
+        json: {
+          titles: [1002, 1003, 1004].map((id) => ({
+            type: 'movie',
+            id,
+            title: `Movie ${id}`,
+            posterPath: `/poster-${id}.jpg`,
+            year: 2026,
+          })),
+          total: 3,
+        },
+      }),
+    );
     await page.route('**/atlas/recommend**', (route) =>
       route.fulfill({
         json: {
@@ -62,30 +87,40 @@ test(
     expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
-    const shelfTracks = page.locator('[data-route-page][data-active="true"] section.row .track');
-    await expect(shelfTracks.first()).toBeVisible();
-    const shelfGeometry = await shelfTracks.evaluateAll((tracks) =>
-      tracks
-        .map((track) => {
-          const box = track.getBoundingClientRect();
-          const style = getComputedStyle(track);
-          return {
-            width: box.width,
-            left: box.left,
-            right: box.right,
-            paddingLeft: style.paddingLeft,
-            paddingRight: style.paddingRight,
-          };
-        })
-        .filter((track) => track.width > 1),
-    );
-    expect(shelfGeometry.length).toBeGreaterThan(0);
-    for (const shelf of shelfGeometry) {
-      expect(Math.abs(shelf.left)).toBeLessThanOrEqual(1);
-      expect(Math.abs(shelf.right - page.viewportSize().width)).toBeLessThanOrEqual(1);
-      expect(shelf.paddingLeft).toBe('0px');
-      expect(shelf.paddingRight).toBe('0px');
+    const shelfTrack = page.getByRole('region', { name: 'Mind-Bending' }).locator('.track');
+    await expect(shelfTrack).toBeAttached({ timeout: 30_000 });
+    await shelfTrack.evaluate((track) => track.scrollIntoView({ block: 'center' }));
+    await expect(shelfTrack).toBeVisible();
+    const shelf = await shelfTrack.evaluate((track) => {
+      const box = track.getBoundingClientRect();
+      const style = getComputedStyle(track);
+      return {
+        width: box.width,
+        left: box.left,
+        right: box.right,
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+        firstChildLeft: track.firstElementChild?.getBoundingClientRect().left,
+        wrapperContain: getComputedStyle(track.closest('.row-window')).contain,
+      };
+    });
+    expect(Math.abs(shelf.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(shelf.right - page.viewportSize().width)).toBeLessThanOrEqual(1);
+    expect(shelf.paddingLeft).toBe('0px');
+    expect(shelf.paddingRight).toBe('0px');
+    expect(Math.abs(shelf.firstChildLeft)).toBeLessThanOrEqual(1);
+    expect(shelf.wrapperContain).not.toContain('paint');
+    const services = page.getByRole('region', { name: 'Services' });
+    if (await services.count()) {
+      const [headingBox, firstTileBox] = await Promise.all([
+        services.getByRole('heading', { name: 'Services' }).boundingBox(),
+        services.locator('.tile, .hold').first().boundingBox(),
+      ]);
+      expect(headingBox).not.toBeNull();
+      expect(firstTileBox).not.toBeNull();
+      expect(Math.abs(firstTileBox.x - headingBox.x)).toBeLessThanOrEqual(1);
     }
+    await page.evaluate(() => scrollTo(0, 0));
     // The first enriched recommendation renders before the others. Wait for the real slides before asking
     // the remote to page; an early ArrowRight correctly has nowhere to go and must not be queued speculatively.
     await expect(hero.locator('.slide')).toHaveCount(3);

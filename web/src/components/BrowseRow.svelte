@@ -335,7 +335,9 @@
 
   .row-window:not(.placed),
   .row-window.near {
-    contain: layout style paint;
+    /* Paint containment clips PosterRow's viewport-wide scroller back to this page-column wrapper. Layout and
+       style containment retain the stable row geometry without cutting off the shelf at the page gutter. */
+    contain: layout style;
   }
 
   .gone {
