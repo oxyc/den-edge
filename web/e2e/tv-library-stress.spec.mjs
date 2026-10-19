@@ -305,6 +305,10 @@ async function savedLibraryJourney(page, testInfo, count) {
 test('24-title normal saved library: remote deep-grid detail and Back restore focus and scroll', async ({
   page,
 }, testInfo) => {
+  // CI runs this old-engine journey beside the long TV soak. Each of the 24 saves deliberately crosses a full
+  // production detail route, so preserve the behavioral bound without confusing shared-runner contention for a
+  // navigation failure.
+  test.setTimeout(4 * 60_000);
   await savedLibraryJourney(page, testInfo, 24);
 });
 

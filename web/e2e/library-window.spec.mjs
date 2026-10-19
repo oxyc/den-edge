@@ -106,11 +106,18 @@ test('Home keeps admitting Watchlist titles as the viewer scrolls', async ({ pag
   await expect(slots).toHaveCount(8);
   // A mounted card is the shelf going live; it listens for scrolls only from then on.
   await expect(row.locator('.card').first()).toBeVisible();
-  for (const count of [16, 24, 32, 40]) {
+  let admitted = 8;
+  for (let attempt = 0; attempt < 4 && admitted < 41; attempt++) {
     await row.locator('.track').evaluate((node) => {
       node.scrollLeft = node.scrollWidth;
       node.dispatchEvent(new Event('scroll'));
     });
-    await expect(slots).toHaveCount(count);
+    const before = admitted;
+    await expect.poll(() => slots.count()).toBeGreaterThan(before);
+    admitted = await slots.count();
+    expect(admitted).toBeLessThanOrEqual(41);
   }
+  // Forty fixture titles plus the older base watchlist title: every one eventually arrives, whether a growing
+  // track's native scroll event admits one or two eight-title tranches after the synthetic jump.
+  await expect(slots).toHaveCount(41);
 });

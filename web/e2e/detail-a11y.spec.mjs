@@ -88,7 +88,7 @@ test('Sources is a keyboard disclosure', async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
     await mock(page);
     await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
-    const disclosure = page.getByRole('button', { name: /^Sources/ });
+    const disclosure = page.locator('.title-sources').getByRole('button', { name: /^Sources/ });
     await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
     await disclosure.focus();
     await disclosure.press('Enter');

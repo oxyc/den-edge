@@ -57,7 +57,10 @@ test('phone poster starts with the title and loaded actions hand directly to the
   await page.setViewportSize({ width: 1280, height: 900 });
   const [actions, sources] = await Promise.all([
     page.locator('.hero-actions').boundingBox(),
-    page.getByRole('button', { name: /^Sources/ }).boundingBox(),
+    page
+      .locator('.title-sources')
+      .getByRole('button', { name: /^Sources/ })
+      .boundingBox(),
   ]);
   expect(actions.y).toBeLessThan(900);
   expect(actions.y + actions.height).toBeGreaterThan(900);
