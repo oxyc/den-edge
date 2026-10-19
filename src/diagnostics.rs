@@ -501,6 +501,29 @@ impl BrowserEngine {
     }
 }
 
+/// How the page was entered: the navigation timing entry's type, or `swap` for a load Den itself made onto a newer
+/// release (`release.ts`, under `den-retry`). A page iOS discarded in the background and loads again on return
+/// is any of the first three, never `swap`, so a "refreshed when I came back" is told apart from Den's own swap.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LoadEntry {
+    Navigate,
+    Reload,
+    BackForward,
+    Swap,
+}
+
+impl LoadEntry {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LoadEntry::Navigate => "navigate",
+            LoadEntry::Reload => "reload",
+            LoadEntry::BackForward => "back_forward",
+            LoadEntry::Swap => "swap",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoadReport {
@@ -519,6 +542,7 @@ struct LoadReport {
     /// The page started hidden (a background tab), which delays everything that waits for a frame.
     #[serde(default)]
     hidden: bool,
+    entry: Option<LoadEntry>,
     release: Option<Release>,
 }
 
@@ -545,6 +569,9 @@ impl LoadReport {
         parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
         if self.hidden {
             parts.push("hidden:1".to_owned());
+        }
+        if let Some(entry) = &self.entry {
+            parts.push(format!("entry:{}", entry.as_str()));
         }
         if let Some(release) = &self.release {
             parts.push(format!("release:{}", release.0));
@@ -1079,6 +1106,24 @@ mod tests {
         );
         let unknown = serde_json::json!({
             "route": "/movie/550", "device": "phone", "engine": "webkit", "workers": 1,
+        });
+        assert!(serde_json::from_value::<LoadReport>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_load_report_says_how_the_page_was_entered() {
+        for entry in ["navigate", "reload", "back_forward", "swap"] {
+            let report: LoadReport = serde_json::from_value(serde_json::json!({
+                "route": "title", "device": "phone", "engine": "webkit", "workers": 2, "entry": entry,
+            }))
+            .unwrap();
+            assert_eq!(
+                report.tag(),
+                format!("route:title,device:phone,engine:webkit,workers:2,entry:{entry}")
+            );
+        }
+        let unknown = serde_json::json!({
+            "route": "title", "device": "phone", "engine": "webkit", "workers": 2, "entry": "https://x/",
         });
         assert!(serde_json::from_value::<LoadReport>(unknown).is_err());
     }
