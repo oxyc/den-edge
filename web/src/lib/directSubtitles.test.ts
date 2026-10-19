@@ -54,13 +54,14 @@ describe('directSubtitles', () => {
     ]);
     expect(found).toMatchObject({
       subtitles: [
-        { language: 'sv', name: 'Swedish' },
-        { language: 'en', name: 'English' },
+        { language: 'sv', name: 'Swedish · OpenSubtitles' },
+        { language: 'en', name: 'English · OpenSubtitles' },
       ],
       tracks: [],
     });
     await expect(found?.load('sv')).resolves.toMatchObject({
       language: 'sv',
+      name: 'Swedish · OpenSubtitles',
       url: 'blob:subtitle-1',
     });
     await found?.load('sv');

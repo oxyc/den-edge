@@ -708,6 +708,19 @@
       title.originalLanguage,
       navigator.languages,
     );
+    // Whether a subtitle will show: the one chosen, or the one `autoSubtitleLanguage` picks below on the title's first
+    // session, for audio — in the title's original language, the most that can be told before a session says — that
+    // this browser doesn't name. A title whose language is unknown is not taken for foreign.
+    const subtitleWanted =
+      subtitleChoice !== null ||
+      (!replacing &&
+        subtitleLanguage === undefined &&
+        title.originalLanguage !== undefined &&
+        autoSubtitleLanguage(
+          title.originalLanguage,
+          navigator.languages,
+          subtitleLanguages.map((language) => ({ language })),
+        ) !== null);
     const claimed = (decodes ??= await playable());
     if (ended) return false;
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
@@ -741,6 +754,7 @@
       scout: scout.install,
       subtitles,
       subtitleLanguages,
+      ...(title.originalLanguage ? { originalLanguage: title.originalLanguage } : {}),
       audio,
       videoCodecs: videoCodecsOf(can),
       playable: can,
@@ -777,9 +791,12 @@
           playback,
           {
             ...fields,
-            // Browser-local subtitle blobs cannot reach a Cast receiver. This direct capability is unsuitable in
-            // exactly the same way as a failed direct load, so Hearth chooses its caption-carrying fallback.
-            ...(delivery === 'fallback' || (castMode && subtitleChoice)
+            // Browser-local subtitle blobs cannot reach a Cast receiver, nor the system player WebKit plays its own
+            // HLS in (`subtitlesNeedPlaylist`). This direct capability is unsuitable in exactly the same way as a
+            // failed direct load, so Hearth chooses its caption-carrying fallback.
+            ...(delivery === 'fallback' ||
+            (castMode && subtitleChoice) ||
+            (delivery !== 'direct' && subtitleWanted && subtitlesNeedPlaylist())
               ? { directFailed: true }
               : {}),
             ...(delivery === 'direct' ? { directOnly: true } : {}),
@@ -945,15 +962,27 @@
     }
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
-    // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand.
-    if (!replacing && subtitleLanguage === undefined && subtitleChoice === null) {
+    // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand. Not on a TorBox
+    // stream whose subtitles the system player could not show (`subtitlesNeedPlaylist`): the menu says Off rather
+    // than name one that never appears, and choosing one there moves to Den Remux.
+    if (
+      !replacing &&
+      subtitleLanguage === undefined &&
+      subtitleChoice === null &&
+      !(result.external && subtitlesNeedPlaylist())
+    ) {
+      // A TorBox stream names no audio track: what it plays is the release's default, the title's original language
+      // as far as can be told. Without it, a title in the viewer's own language came up with subtitles on.
       subtitleChoice = autoSubtitleLanguage(
-        result.audioTracks[result.audioTrack]?.language,
+        result.audioTracks[result.audioTrack]?.language ?? title.originalLanguage,
         navigator.languages,
         result.subtitles ?? [],
       );
     }
-    if (result.external && subtitleChoice) await loadExternalSubtitle(result, subtitleChoice);
+    // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
+    // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
+    // named was never loaded.
+    if (session?.external && subtitleChoice) await loadExternalSubtitle(session, subtitleChoice);
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
     lastSubtitleSource = result.subtitleSource;
@@ -2251,6 +2280,16 @@
       track.mode = choice !== null && track.language === choice ? 'showing' : 'disabled';
   }
 
+  /**
+   * Whether a subtitle here has to come in the HLS playlist itself. Where WebKit plays HLS itself (an iPhone, Safari)
+   * it hands the stream to the system player, which shows and lists only the subtitle renditions the playlist names:
+   * a page's own `<track>` reaches neither an iPhone's fullscreen player nor its captions menu. TorBox's playlist
+   * names none, so a subtitle there is Den Remux's, whose master carries every one it offers.
+   */
+  function subtitlesNeedPlaylist(): boolean {
+    return !castMode && nativeHls(document.createElement('video'));
+  }
+
   async function loadExternalSubtitle(current: Session, language: string): Promise<void> {
     const track = await current.loadExternalSubtitle?.(language);
     if (!track || session !== current) return;
@@ -2427,9 +2466,9 @@
   /**
    * The stamp's switch: the same release from the second it is at, from the other path — TorBox to Den Remux, or Den
    * Remux to TorBox. Always a replacement, so what plays now plays on until the other has started, and for good
-   * where the other path refuses, which the viewer is told.
+   * where the other path refuses, which the viewer is told and `undo` puts back what was set for it.
    */
-  function switchDelivery() {
+  function switchDelivery(undo?: () => void) {
     const current = session;
     if (!current || switching || deliverySwitching) return;
     const to = current.external ? 'Den Remux' : 'TorBox';
@@ -2454,8 +2493,10 @@
         }
         if (session !== current) return;
         startAt = null;
-        if (typeof moved === 'string')
+        if (typeof moved === 'string') {
+          undo?.();
           unchanged = deliveryUnchangedNotice(to, moved, guestGrants.endedText());
+        }
       })
       .finally(() => (deliverySwitching = false));
   }
@@ -2684,7 +2725,7 @@
                 ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
                 : 'Straight from the source, no conversion',
               disabled: deliverySwitching || switching,
-              onselect: switchDelivery,
+              onselect: () => switchDelivery(),
             },
           ]}
         >
@@ -3010,6 +3051,13 @@
                 if (played && next !== subtitleChoice) {
                   if (next === null) subtitleTurnedOffMidPlay = true;
                   else subtitleSwitchedMidPlay = true;
+                }
+                if (next && session?.external && subtitlesNeedPlaylist()) {
+                  // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
+                  const previous = subtitleChoice;
+                  subtitleChoice = next;
+                  switchDelivery(() => (subtitleChoice = previous));
+                  return;
                 }
                 subtitleChoice = next;
                 if (next && session) await loadExternalSubtitle(session, next);

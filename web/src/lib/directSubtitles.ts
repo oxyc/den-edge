@@ -29,16 +29,18 @@ function language(value: unknown): string | null {
   return base && /^[a-z]{2,3}$/.test(base) ? base : null;
 }
 
-function languageName(code: string): string {
+/** A candidate's language and source, named as den-remux names its downloaded renditions. */
+function subtitleName(code: string): string {
+  let language = code;
   try {
-    return (
+    language =
       new Intl.DisplayNames([globalThis.navigator?.language ?? 'en'], { type: 'language' }).of(
         code,
-      ) ?? code
-    );
+      ) ?? code;
   } catch {
-    return code;
+    // An engine without `Intl.DisplayNames` names the code itself.
   }
+  return `${language} · OpenSubtitles`;
 }
 
 function candidateUrl(value: unknown): string | null {
@@ -164,7 +166,7 @@ export async function directSubtitles(
           if (text === null || disposed) return null;
           const track = {
             language: trackLanguage,
-            name: languageName(trackLanguage),
+            name: subtitleName(trackLanguage),
             url: URL.createObjectURL(new Blob([webvtt(text)], { type: 'text/vtt' })),
           };
           if (disposed) {
@@ -183,7 +185,7 @@ export async function directSubtitles(
       return request;
     };
     return {
-      subtitles: [...available].map(([code]) => ({ language: code, name: languageName(code) })),
+      subtitles: [...available].map(([code]) => ({ language: code, name: subtitleName(code) })),
       tracks,
       load,
       dispose: () => {

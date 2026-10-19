@@ -115,6 +115,11 @@ export interface Want {
   /** Install URLs that may be den-subtitles', tried in turn: only den-remux can tell which is. */
   subtitles: string[];
   subtitleLanguages: string[];
+  /**
+   * The title's original language (TMDB's `original_language`): den-remux reads audio in any other language as a
+   * dub, where a forced subtitle track is the right one, and audio in it as original, where the full track is.
+   */
+  originalLanguage?: string;
   /** The player's languages, most wanted first. */
   audio: string[];
   /** What this browser decodes: `h264`, and `hevc` when it can — what a den-remux before `playable` reads. */
