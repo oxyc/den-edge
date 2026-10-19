@@ -29,6 +29,46 @@ describe('routes', () => {
     expect(parseRoute('/service/8-us')).toEqual({ page: 'service', id: 8, country: 'US' });
   });
 
+  it('carries the season a series page shows, so Back, a reload and a shared link keep it', () => {
+    expect(parseRoute('/tv/61859-the-night-manager?season=2')).toEqual({
+      page: 'title',
+      type: 'tv',
+      id: 61859,
+      season: 2,
+    });
+    expect(parseRoute('/tv/61859?season=0')).toEqual({
+      page: 'title',
+      type: 'tv',
+      id: 61859,
+      season: 0,
+    });
+    for (const season of ['abc', '-1', '1.5', '02', '', '1e2', '99999'])
+      expect(parseRoute(`/tv/61859?season=${season}`), season).toEqual({
+        page: 'title',
+        type: 'tv',
+        id: 61859,
+      });
+    // A film has no seasons.
+    expect(parseRoute('/movie/550?season=2')).toEqual({ page: 'title', type: 'movie', id: 550 });
+
+    expect(titleHref({ type: 'tv', id: 61859, title: 'The Night Manager', season: 2 })).toBe(
+      '/tv/61859-the-night-manager?season=2',
+    );
+    expect(titleHref({ type: 'tv', id: 61859, season: 0 })).toBe('/tv/61859?season=0');
+    expect(titleHref({ type: 'tv', id: 61859, season: -1 })).toBe('/tv/61859');
+    expect(titleHref({ type: 'movie', id: 550, season: 2 })).toBe('/movie/550');
+    expect(routePath({ page: 'title', type: 'tv', id: 61859, season: 3 })).toBe(
+      '/tv/61859?season=3',
+    );
+    expect(routePath({ page: 'title', type: 'tv', id: 61859 })).toBe('/tv/61859');
+    expect(parseRoute(routePath({ page: 'title', type: 'tv', id: 1, season: 4 }))).toEqual({
+      page: 'title',
+      type: 'tv',
+      id: 1,
+      season: 4,
+    });
+  });
+
   it('carries a service’s country in its path, since a catalogue is licensed per country', () => {
     expect(parseRoute('/service/8-us-netflix')).toEqual({ page: 'service', id: 8, country: 'US' });
     expect(parseRoute('/service/8-FI')).toEqual({ page: 'service', id: 8, country: 'FI' });

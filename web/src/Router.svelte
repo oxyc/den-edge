@@ -246,8 +246,14 @@
         // Search is one page at many addresses. Opening a chip or switching Movies and Series is somewhere
         // a person went, so it gets its own entry, and Back returns to the chip before it — on the same
         // page, which keeps its scroll and its state as it does while a query is typed. People is browsed the
-        // same way, and so is the year Watched shows.
-        if (key !== 'search' && key !== 'people' && key !== 'watchlist') return;
+        // same way, and so are the year Watched shows and the season a series page shows.
+        if (
+          key !== 'search' &&
+          key !== 'people' &&
+          key !== 'watchlist' &&
+          !key.startsWith('title/')
+        )
+          return;
         if (push) {
           if (address() === path) return;
           position++;

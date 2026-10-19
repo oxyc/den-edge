@@ -33,10 +33,10 @@
   import { sharedInstallOf } from '../lib/grants';
   import { premeasureLink } from '../lib/remux';
   import type { Addon } from '../lib/scout';
-  import { navigateBack } from '../lib/navigation';
+  import { navigate, navigateBack } from '../lib/navigation';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
-  import { titleHref } from '../lib/route';
+  import { titleHref, type TitleSeason } from '../lib/route';
   import { startupMarkOnce } from '../lib/startupTiming';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
@@ -83,8 +83,14 @@
     seed,
     still,
     model,
+    address,
   }: {
     ref: { type: MediaType; id: number };
+    /**
+     * The season the address names (`?season=2`), with the title it is for. Only the page of that title, while it is
+     * the one on screen, reads it: a retained page of another title keeps the season it was showing.
+     */
+    address?: TitleSeason;
     active?: boolean;
     reel?: string | null;
     routes?: Routes;
@@ -280,6 +286,22 @@
     if (detail) blockedTitles.mark(ref, restricted);
   });
   let season = $state<number | null>(null);
+  /**
+   * The season in this page's address (`?season=2`), when the address is for this title; undefined for none, or
+   * for one the address names that this page is not.
+   */
+  const requestedSeason = $derived(
+    ref.type === 'tv' && address?.type === ref.type && address.id === ref.id
+      ? address.season
+      : undefined,
+  );
+  /** The `requestedSeason` already applied to `season`; null until the detail has answered. */
+  let seasonAsked: number | undefined | null = null;
+  /** The season the address names, where the series has it; otherwise the page's own choice. */
+  const openingSeason = (d: TitleDetail, asked: number | undefined) =>
+    asked !== undefined && d.seasons.some((s) => s.number === asked)
+      ? asked
+      : untrack(() => seriesPresentation(d, episodes, row).initialSeason);
   let seasonEpisodes = $state.raw<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
   let seasonLoading = $state(false);
@@ -309,6 +331,7 @@
     detail = undefined;
     withheld = false;
     season = null;
+    seasonAsked = null;
     seasonEpisodes = undefined;
     displayedSeason = null;
     castShown = CAST_PAGE;
@@ -325,7 +348,8 @@
           loaded.provider === 'atlas' &&
           loaded.reason === 'refused';
         detail = loaded.state === 'ready' ? loaded.value : null;
-        season = detail ? seriesPresentation(detail, episodes, row).initialSeason : null;
+        seasonAsked = untrack(() => requestedSeason);
+        season = detail ? openingSeason(detail, seasonAsked) : null;
       })
       .catch(() => {
         if (!controller.signal.aborted) detail = null;
@@ -417,6 +441,26 @@
       });
     return () => controller.abort();
   });
+
+  // Back and Forward between this page's seasons move the address and not the page, so the season follows the
+  // address. Only a change of address does: a page coming back on screen, or episodes changing what the page would
+  // choose itself, leaves the season it was showing.
+  $effect(() => {
+    const [asked, visible, loaded] = [requestedSeason, active, detail];
+    if (!visible || !loaded || seasonAsked === null || asked === seasonAsked) return;
+    seasonAsked = asked;
+    season = openingSeason(loaded, asked);
+  });
+
+  /**
+   * A season picked is somewhere the viewer went: its own history entry, so Back returns to the one before. A tap or
+   * Enter follows the tab's link, which the Router pushes; the arrow keys pick here, the same way.
+   */
+  function pickSeason(d: TitleDetail, picked: number) {
+    season = picked;
+    seasonAsked = picked;
+    navigate(titleHref({ ...d.title, season: picked }));
+  }
 
   $effect(() => {
     const [picked, current] = [season, ref];
@@ -765,7 +809,7 @@
               title: d.title.title,
               // The title's own address, named: what the person sharing it means, and what a preview can
               // describe. Built from the route rather than from wherever this page happens to be open.
-              url: `${location.origin}${titleHref(d.title)}`,
+              url: `${location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
             }}
           />
         </div>
@@ -827,7 +871,8 @@
             value={String(season)}
             label="Seasons"
             {panel}
-            onchange={(value) => (season = Number(value))}
+            href={(value) => titleHref({ ...d.title, season: Number(value) })}
+            onchange={(value) => pickSeason(d, Number(value))}
           />
           <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
              foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->

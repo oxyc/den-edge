@@ -42,7 +42,7 @@
     KeyResetOutcome,
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
-  import type { Explore, PeopleView, Route } from './lib/route';
+  import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
@@ -100,6 +100,7 @@
     explore,
     people,
     watchedYear,
+    titleSeason,
     onchange,
     onprofilecontrol = () => {},
     onprofilehint = () => {},
@@ -110,6 +111,7 @@
     explore: Explore;
     people: PeopleView;
     watchedYear: string | undefined;
+    titleSeason: TitleSeason | undefined;
     onchange: (route: Route) => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
     /** The remembered Owner the bar draws until the profile coordinator takes over; null once it has. */
@@ -1630,6 +1632,7 @@
               {explore}
               {people}
               {watchedYear}
+              {titleSeason}
               profiles={profileCoordinator}
             />
           {/if}

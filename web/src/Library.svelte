@@ -50,7 +50,14 @@
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
-  import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
+  import {
+    titleHref,
+    watchlistHref,
+    type Explore,
+    type PeopleView,
+    type Route,
+    type TitleSeason,
+  } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
@@ -108,6 +115,7 @@
     explore = {},
     people = {},
     watchedYear,
+    titleSeason,
     profiles = null,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
@@ -122,6 +130,8 @@
     people?: PeopleView;
     /** The year Watched shows, from the address as `people` is. */
     watchedYear?: string;
+    /** The season a series page shows, from the address as `watchedYear` is. */
+    titleSeason?: TitleSeason;
     profiles?: ProfileModeCoordinator | null;
   } = $props();
 
@@ -1816,6 +1826,7 @@
     content={session.content}
     active={active && !playing}
     ref={page}
+    address={titleSeason}
     warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
     ratingSources={[...detailPrefs.ratingSources]}

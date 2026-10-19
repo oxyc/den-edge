@@ -12,7 +12,7 @@
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
-  import { parseRoute, type Explore, type PeopleView } from './lib/route';
+  import { parseRoute, type Explore, type PeopleView, type TitleSeason } from './lib/route';
   import {
     ConnectDialogScreen,
     InviteDialogScreen,
@@ -133,6 +133,13 @@
   $effect(() => {
     if (route.page === 'watchlist') watchedYear = route.year;
   });
+  // And the season a series page shows, with the title it is for: a retained page of another title ignores it.
+  const seasonOf = (r: typeof route): TitleSeason | undefined =>
+    r.page === 'title' ? { type: r.type, id: r.id, season: r.season } : undefined;
+  let titleSeason = $state.raw(untrack(() => seasonOf(route)));
+  $effect(() => {
+    if (route.page === 'title') titleSeason = seasonOf(route);
+  });
   // A title's, a person's and a service's page name themselves once they know what they are showing
   // (`tabName`); until then, and on every other page, the tab says what the address can.
   $effect(() => {
@@ -162,6 +169,7 @@
         {explore}
         {people}
         {watchedYear}
+        {titleSeason}
         onchange={(next) => (route = next)}
         onprofilecontrol={(control) => (profiles = control)}
         onprofilehint={(hint) => (profileHint = hint)}
@@ -177,6 +185,7 @@
       {explore}
       {people}
       {watchedYear}
+      {titleSeason}
       onchange={(next) => (route = next)}
       onprofilecontrol={(control) => (profiles = control)}
       onhouseholdadmin={(allowed) => (householdAdmin = allowed)}

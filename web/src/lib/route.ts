@@ -21,10 +21,21 @@ export type Route =
   | { page: 'settings' }
   | ({ page: 'search'; query: string } & Explore)
   | ({ page: 'people' } & PeopleView)
-  | { page: 'title'; type: MediaType; id: number }
+  /**
+   * `season`: the season a series page is showing (`/tv/61859-the-night-manager?season=2`), 0 for Specials; absent
+   * for the page's own choice. Only a series has one. Whether the series has that season is the page's to check.
+   */
+  | { page: 'title'; type: MediaType; id: number; season?: number }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
   | { page: 'service'; id: number; country: string };
+
+/** The season the address names for a title's page, with the title it is for. */
+export interface TitleSeason {
+  type: MediaType;
+  id: number;
+  season?: number;
+}
 
 /**
  * What Search is browsing, beside the query: the type it is showing and the facets picked, in the order they were
@@ -120,6 +131,11 @@ function identifier(segment: string | undefined): number | undefined {
   return digits !== undefined && Number.isInteger(id) && id > 0 ? id : undefined;
 }
 
+/** `2` from `season=2`, `0` for Specials; nothing for anything else (`abc`, `-1`, `1.5`, `02`). */
+function seasonParam(value: string | null): number | undefined {
+  return value !== null && /^(0|[1-9]\d{0,3})$/.test(value) ? Number(value) : undefined;
+}
+
 /** The route at `url` — a path with an optional query, or a whole href. Anything unrecognised is Home. */
 export function parseRoute(url: string): Route {
   let path: string;
@@ -165,8 +181,11 @@ export function parseRoute(url: string): Route {
   }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
-  if ((first === 'movie' || first === 'tv') && id)
-    return { page: 'title', type: first === 'tv' ? 'tv' : 'movie', id };
+  if (first === 'movie' && id) return { page: 'title', type: 'movie', id };
+  if (first === 'tv' && id) {
+    const season = seasonParam(params.get('season'));
+    return { page: 'title', type: 'tv', id, ...(season !== undefined ? { season } : {}) };
+  }
   if (first === 'person' && id) return { page: 'person', id };
   if (first === 'service') {
     const [, provider, country] = /^(\d+)-([A-Za-z]{2})(?:-[^/]*)?$/.exec(second ?? '') ?? [];
@@ -187,7 +206,7 @@ export function routePath(route: Route): string {
     case 'people':
       return peopleHref(route);
     case 'title':
-      return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
+      return titleHref(route);
     case 'person':
       return `/person/${route.id}`;
     case 'service':
@@ -213,10 +232,22 @@ export const serviceHref = (id: number, country: string, name?: string) => {
 /** The Watchlist page, with Watched showing one year: `/watchlist?year=2019`. */
 export const watchlistHref = (year?: string) => (year ? `/watchlist?year=${year}` : '/watchlist');
 
-/** A title's link, named where the name is known: `/movie/550-fight-club`. */
-export const titleHref = (title: { type: MediaType; id: number; title?: string }) => {
+/**
+ * A title's link, named where the name is known: `/movie/550-fight-club`. A series' can name the season to open
+ * on: `/tv/61859-the-night-manager?season=2`.
+ */
+export const titleHref = (title: {
+  type: MediaType;
+  id: number;
+  title?: string;
+  season?: number;
+}) => {
   const name = slug(title.title);
-  return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}`;
+  const season =
+    title.type === 'tv' && seasonParam(String(title.season)) !== undefined
+      ? `?season=${title.season}`
+      : '';
+  return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}${season}`;
 };
 
 export const personHref = (id: number, name?: string) => {
