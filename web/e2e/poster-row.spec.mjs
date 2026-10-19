@@ -50,6 +50,8 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
       overflowX: getComputedStyle(node).overflowX,
       overflowY: getComputedStyle(node).overflowY,
       overflowAnchor: getComputedStyle(node).overflowAnchor,
+      paddingLeft: getComputedStyle(node).paddingLeft,
+      paddingRight: getComputedStyle(node).paddingRight,
       scrollLeft: node.scrollLeft,
       scrollTop: node.scrollTop,
       scrollable: node.scrollWidth > node.clientWidth,
@@ -59,6 +61,8 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
     overflowX: 'auto',
     overflowY: 'hidden',
     overflowAnchor: 'none',
+    paddingLeft: '0px',
+    paddingRight: '0px',
     scrollTop: 0,
     scrollable: true,
   });

@@ -144,14 +144,14 @@
     gap: 14px;
     width: 100vw;
     margin: 0 calc(50% - 50vw);
-    padding: 0 max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter))) 8px;
+    padding: 0 0 8px;
     overflow: auto hidden;
 
     /* Replacing a virtual slot with its equal-sized PosterCard must not make scroll anchoring move
        the shelf by one snap point. Chromium otherwise attributed exactly that movement to two cards. */
     overflow-anchor: none;
     scroll-snap-type: x proximity;
-    scroll-padding-inline: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
+    scroll-padding-inline: 0;
     scrollbar-width: none;
   }
 

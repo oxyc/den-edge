@@ -62,12 +62,30 @@ test(
     expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
-    const shelfTrack = page.locator('section.row .track').first();
-    await expect(shelfTrack).toBeVisible();
-    const shelfBox = await shelfTrack.boundingBox();
-    expect(shelfBox).not.toBeNull();
-    expect(Math.abs(shelfBox.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(shelfBox.width - page.viewportSize().width)).toBeLessThanOrEqual(1);
+    const shelfTracks = page.locator('[data-route-page][data-active="true"] section.row .track');
+    await expect(shelfTracks.first()).toBeVisible();
+    const shelfGeometry = await shelfTracks.evaluateAll((tracks) =>
+      tracks
+        .map((track) => {
+          const box = track.getBoundingClientRect();
+          const style = getComputedStyle(track);
+          return {
+            width: box.width,
+            left: box.left,
+            right: box.right,
+            paddingLeft: style.paddingLeft,
+            paddingRight: style.paddingRight,
+          };
+        })
+        .filter((track) => track.width > 1),
+    );
+    expect(shelfGeometry.length).toBeGreaterThan(0);
+    for (const shelf of shelfGeometry) {
+      expect(Math.abs(shelf.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(shelf.right - page.viewportSize().width)).toBeLessThanOrEqual(1);
+      expect(shelf.paddingLeft).toBe('0px');
+      expect(shelf.paddingRight).toBe('0px');
+    }
     // The first enriched recommendation renders before the others. Wait for the real slides before asking
     // the remote to page; an early ArrowRight correctly has nowhere to go and must not be queued speculatively.
     await expect(hero.locator('.slide')).toHaveCount(3);
