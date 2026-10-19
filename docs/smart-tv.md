@@ -329,10 +329,10 @@ the browser module gate rejects that helper too, preventing an extra browser
 request merely to preserve the browser's existing path behavior. CI retains browser and TV
 failure traces and screenshots for seven days.
 
-After merging current main, the 2026-10-18 final isolation check against a clean
-`3fccf42` build measured **+659 bytes initial gzip and +1,898 bytes total gzip**.
-The one additional browser asset is the 960-byte-gzip optional spatial-navigation
-chunk (81 versus 80 JS/CSS assets); it is not in the initial preload graph. No TV
+After merging current main, the 2026-10-19 final isolation check against a clean
+`f1ca06b` build measured **+1,545 bytes initial gzip and +4,560 bytes total gzip**.
+The branch has 84 browser JS/CSS assets versus main's 82; directional navigation
+remains an optional chunk rather than entering the initial preload graph. No TV
 module is present in the browser output.
 The baseline was rebuilt from that exact main commit using the same toolchain;
 the byte-budget ceilings were not increased.
