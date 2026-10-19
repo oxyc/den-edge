@@ -17,13 +17,15 @@
 //
 // In Chromium each visit also has a memory budget (`MEMORY_MB`): what the page and its library Workers still hold once
 // it has settled. iOS ends a tab's WebContent process under memory pressure, and the tab then reloads when it is
-// returned to; what a phone's tab holds between visits is what decides how soon.
+// returned to; what a phone's tab holds between visits is what decides how soon. In WebKit it is that process's own
+// footprint (`WEBKIT_MB`, `pageFootprint`).
 //
 // A new surface: add an entry to SURFACES with the path and the `markReady` fields that mean it has drawn (adding
 // one to `markReady` if none fits).
 
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
-import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
@@ -64,6 +66,14 @@ const MEMORY_MB = 48;
 const ALLOCATED_MB = 100;
 /** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
 const ROWS_READ = 100;
+
+/**
+ * MB WebKit's WebContent process may hold once a returning visit has settled (`pageFootprint`). What iOS ends a tab's
+ * process by is its footprint, which macOS reads alike: 96-179 MB here across the surfaces, 0.271.68's 264-650 (its
+ * library Worker kept the projection build's 61 MB of wasm, and more besides). CI's WebKit is Linux's WPE port, whose
+ * resident memory reads about 2.5 times as much for the same page: 314-463 MB, 0.271.68's 466-749.
+ */
+const WEBKIT_MB = process.platform === 'linux' ? 520 : 260;
 
 /** Milliseconds from navigation start to a library surface's `shelves ready` milestone (`startupTiming.ts`). */
 const SHELVES_MS = 4_000;
@@ -280,8 +290,95 @@ const heldMB = (held) =>
     ? { memoryMB: Math.round(held.reduce((sum, { heap, wasm }) => sum + heap + wasm, 0)), held }
     : {};
 
+/**
+ * The WebContent processes of Playwright's WebKit on this machine, by pid: on Linux its WPE port's `WPEWebProcess`
+ * (or GTK's `WebKitWebProcess`), on macOS `com.apple.WebKit.WebContent`.
+ */
+function webContentPids() {
+  if (process.platform === 'linux')
+    return readdirSync('/proc').flatMap((name) => {
+      try {
+        return /^\d+$/.test(name) &&
+          /(?:WPE|WebKit)WebProcess/.test(readFileSync(`/proc/${name}/cmdline`, 'utf8'))
+          ? [Number(name)]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  return execFileSync('ps', ['-A', '-o', 'pid=,command='])
+    .toString()
+    .split('\n')
+    .filter((line) => line.includes('ms-playwright') && line.includes('WebKit.WebContent'))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+}
+
+/**
+ * MB of memory `pid` holds of its own: on macOS its physical footprint (`footprint`), what iOS ends a tab's WebContent
+ * process by; on Linux, its resident anonymous and shared memory. Null when it has gone.
+ */
+function footprintMB(pid) {
+  try {
+    if (process.platform === 'linux') {
+      const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+      const kb = (field) =>
+        Number(new RegExp(`^${field}:\\s+(\\d+) kB`, 'm').exec(status)?.[1] ?? 0);
+      return Math.round((kb('RssAnon') + kb('RssShmem')) / 1024);
+    }
+    const out = execFileSync('footprint', ['-p', String(pid)], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString();
+    const [, value, unit] = /Footprint:\s*([\d.]+)\s*(KB|MB|GB)/.exec(out) ?? [];
+    return value ? Math.round(Number(value) * { KB: 1 / 1024, MB: 1, GB: 1024 }[unit]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** MB a page fills to show which WebContent process is its own, and the least growth that shows it. */
+const MARK_MB = 64;
+const MARKED_MB = 48;
+
+/**
+ * What `page`'s WebContent process holds once it has settled, in WebKit, which no protocol of Playwright's reads
+ * (`footprintMB`): read four times over three seconds, keeping the least, what it holds between its collections.
+ * Which process is the page's is not something WebKit says: pages closed earlier keep theirs in WebKit's process
+ * cache, and on macOS no WebContent process is its browser's child. So the page then fills `MARK_MB` of memory, and its
+ * process is the one that grew by it. `processes`: every WebContent process read, MB, its own among them.
+ */
+async function pageFootprint(page) {
+  const pids = webContentPids();
+  const least = new Map();
+  for (let sample = 0; sample < 4; sample += 1) {
+    if (sample) await page.waitForTimeout(1_000);
+    for (const pid of pids) {
+      const mb = footprintMB(pid);
+      if (mb !== null) least.set(pid, Math.min(least.get(pid) ?? Infinity, mb));
+    }
+  }
+  // Another process may grow as much meanwhile, loading a page of its own: each round fills `MARK_MB` more, and only a
+  // process that grew by it every round is the page's.
+  let marked = [...least];
+  for (let round = 0; round < 4 && (round === 0 || marked.length > 1); round += 1) {
+    const before = new Map(marked.map(([pid]) => [pid, footprintMB(pid) ?? 0]));
+    await page.evaluate(
+      (mb) => (globalThis.__denMark ??= []).push(new Uint8Array(mb * 2 ** 20).fill(1)),
+      MARK_MB,
+    );
+    marked = marked.filter(([pid]) => (footprintMB(pid) ?? 0) - before.get(pid) >= MARKED_MB);
+  }
+  await page.evaluate(() => delete globalThis.__denMark);
+  const processes = [...least.values()].sort((a, b) => b - a);
+  // Never a budget met by reading nothing, or another page's process.
+  if (marked.length !== 1)
+    throw new Error(
+      `this page's WebContent process is not known: ${marked.length} of ${JSON.stringify(processes)} grew`,
+    );
+  return { footprintMB: marked[0][1], processes };
+}
+
 /** One returning visit to `surface`: the ms its content took, the Worker transactions, the longest task. */
-async function visit(context, edge, surface, { cpu = 1 } = {}) {
+async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
   const page = await context.newPage();
   // The household's assistant projection costs the library Worker what it costs a phone's (`PHONE_PROJECTION_MS`).
   await routeBigHousehold(page, edge, { projectionMs: PHONE_PROJECTION_MS });
@@ -341,6 +438,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
   const { longest, ...drawnAt } = ready;
   const { transactions, compiles } = await workerWork();
   const held = await memory?.();
+  const processes = await footprint?.(page);
   const result = {
     contentMs,
     ...(surface.shelves ? { shelvesMs } : {}),
@@ -351,6 +449,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
     rowsRead: (await Promise.all(reads)).reduce((sum, count) => sum + count, 0),
     longest,
     ...heldMB(held),
+    ...processes,
     drawnAt,
     marks,
   };
@@ -364,7 +463,7 @@ async function visit(context, edge, surface, { cpu = 1 } = {}) {
  * the library Workers are asked for names, and a series is opened from Continue Watching. How long each
  * took, how long the build took, and whether the publish was still under way when they had all answered.
  */
-async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
+async function openDuringRebuild(context, edge, { cpu = 1, footprint } = {}) {
   await forgetPublication(context, edge);
 
   const page = await context.newPage();
@@ -410,11 +509,12 @@ async function openDuringRebuild(context, edge, { cpu = 1 } = {}) {
   await expect.poll(() => buildMs, { timeout: 30_000 }).toBeDefined();
   // What the tab keeps once it has published: a phone's tab publishes after each change and at the heartbeat.
   const held = await memory?.();
+  const processes = await footprint?.(page);
   await page.close();
   // The records forgotten held the layouts the device knew too: the surfaces after this are returning visits again
   // once Home and the Watchlist find the projection up to date.
   await settleProjection(context, edge);
-  return { namesMs, episodesMs, buildingThroughout, buildMs, ...heldMB(held) };
+  return { namesMs, episodesMs, buildingThroughout, buildMs, ...heldMB(held), ...processes };
 }
 
 const ENGINES = [
@@ -429,6 +529,7 @@ for (const [label, type, device, options] of ENGINES) {
       'needs WebKit: npx playwright install webkit',
     );
     test.setTimeout(300_000);
+    const footprint = type === webkit ? pageFootprint : undefined;
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
     );
@@ -438,7 +539,7 @@ for (const [label, type, device, options] of ENGINES) {
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
-      const rebuild = await openDuringRebuild(context, edge, options);
+      const rebuild = await openDuringRebuild(context, edge, { ...options, footprint });
       console.log(`${label}: during a rebuild ${JSON.stringify(rebuild)}`);
       for (const [name, ms] of [
         ['names for rows', rebuild.namesMs],
@@ -457,6 +558,13 @@ for (const [label, type, device, options] of ENGINES) {
             `MB the page and its Workers hold once the projection is published ${JSON.stringify(rebuild.held)}`,
           )
           .toBeLessThan(MEMORY_MB);
+      if (footprint)
+        expect
+          .soft(
+            rebuild.footprintMB,
+            `MB of WebKit's WebContent process once the projection is published ${JSON.stringify(rebuild.processes)}`,
+          )
+          .toBeLessThan(WEBKIT_MB);
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {
@@ -464,7 +572,7 @@ for (const [label, type, device, options] of ENGINES) {
           // Its first visit, to the same returning state as the Owner's surfaces.
           await visit(context, edge, surface, options);
         }
-        const result = await visit(context, edge, surface, options);
+        const result = await visit(context, edge, surface, { ...options, footprint });
         measured.push({ surface: surface.name, ...result });
         expect.soft(result.contentMs, `${surface.name}: ms to content`).toBeLessThan(READY_MS);
         if (surface.shelves)
@@ -501,6 +609,13 @@ for (const [label, type, device, options] of ENGINES) {
               `${surface.name}: MB held by the page and its Workers ${JSON.stringify(result.held)}`,
             )
             .toBeLessThan(MEMORY_MB);
+        if (footprint)
+          expect
+            .soft(
+              result.footprintMB,
+              `${surface.name}: MB of WebKit's WebContent process ${JSON.stringify(result.processes)}`,
+            )
+            .toBeLessThan(WEBKIT_MB);
       }
       console.log(`${label}\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
     } finally {
