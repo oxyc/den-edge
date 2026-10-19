@@ -499,6 +499,17 @@
   const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);
   const sourceCoord = $derived(sourceTarget ?? target);
+  /**
+   * The episodes of the season Sources is for, to switch between there: named where that season is the one on screen,
+   * numbered from the series' episode count otherwise.
+   */
+  const sourceEpisodes = $derived.by(() => {
+    const coord = sourceCoord;
+    if (!coord || !detail) return undefined;
+    if (displayedSeason === coord.season && seasonEpisodes) return seasonEpisodes;
+    const count = detail.seasons.find((s) => s.number === coord.season)?.episodeCount ?? 0;
+    return Array.from({ length: count }, (_, i) => ({ number: i + 1 }));
+  });
   const fraction = $derived(
     ref.type === 'tv' ? (series?.fraction ?? 0) : row && !row.deleted.value ? row.resume.value : 0,
   );
@@ -840,6 +851,10 @@
           {active}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}
+          episodes={ref.type === 'tv' ? sourceEpisodes : undefined}
+          onepisode={(episode) => {
+            if (sourceCoord) sourceTarget = { season: sourceCoord.season, episode };
+          }}
           title={d.title}
           onplay={onplayhere
             ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)

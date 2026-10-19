@@ -3,6 +3,7 @@
   import Loading from './Loading.svelte';
   import Button from './Button.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
+  import ChipSelect from './ChipSelect.svelte';
   import DownloadStatus from './DownloadStatus.svelte';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type {
@@ -24,10 +25,16 @@
     onplay,
     model,
     allowed = async () => true,
+    episodes,
+    onepisode,
   }: {
     imdb?: string;
     season?: number;
     episode?: number;
+    /** The episodes of `season`, to switch between, with their names where they are known. */
+    episodes?: { number: number; name?: string }[];
+    /** Another episode of `season` chosen here: its sources are shown instead. */
+    onepisode?: (episode: number) => void;
     active: boolean;
     /** The title these are sources of: what a download is written down as, for every device to show. */
     title?: {
@@ -177,7 +184,24 @@
 </div>
 {#if open}
   <div id={panelId} bind:this={panel} class="source-panel">
-    {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
+    {#if season !== undefined}
+      <div class="heading">
+        <p class="note">Sources for S{season} · E{episode}</p>
+        {#if onepisode && episodes && episodes.length > 1}
+          <ChipSelect
+            label="Episode"
+            text={`E${episode}`}
+            value={String(episode)}
+            options={episodes.map((e) => ({
+              value: String(e.number),
+              label: e.name ? `E${e.number} · ${e.name}` : `E${e.number}`,
+            }))}
+            round
+            onchange={(value) => onepisode(Number(value))}
+          />
+        {/if}
+      </div>
+    {/if}
     {#if failure === 'not-configured'}<p class="note">
         Add Den Scout in <a href="/settings">Settings</a> to browse sources.
       </p>
@@ -385,6 +409,25 @@
 
   .note a {
     color: var(--accent);
+  }
+
+  /* The heading on the left and its episode picker on the right, the picker going under it where a phone has no room
+     for both. */
+  .heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin: 14px 0;
+  }
+
+  .heading .note {
+    margin: 0;
+  }
+
+  .heading :global(.pick) {
+    flex: 0 0 auto;
   }
 
   ul {
