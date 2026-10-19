@@ -58,6 +58,7 @@
     onwatchlist,
     onseen,
     watchlistPage = false,
+    loading = false,
   }: {
     /** The billboard's titles, best first. */
     titles: RecommendedTitle[];
@@ -73,6 +74,8 @@
     onseen?: (title: Title, on: boolean) => Promise<boolean | undefined>;
     /** The Watchlist page's own billboard, where a title taken off the watchlist is done with (`leavesBillboard`). */
     watchlistPage?: boolean;
+    /** Keep the billboard's final geometry while its source is still deciding whether it has any titles. */
+    loading?: boolean;
     active?: boolean;
     /** Worker-owned normalized title metadata. */
     content: ContentServiceClientPort;
@@ -969,6 +972,7 @@
   aria-roledescription={shown.length ? 'carousel' : undefined}
   aria-label={shown.length ? 'Featured' : undefined}
   aria-hidden={shown.length ? undefined : 'true'}
+  data-loading={loading || undefined}
   bind:this={frame}
   onpointerenter={() => (held = true)}
   onpointerleave={() => (held = false)}

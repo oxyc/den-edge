@@ -55,8 +55,11 @@ test(
         },
       }),
     );
-    await page.route('**/atlas/recommend**', (route) =>
-      route.fulfill({
+    let releaseRecommendations;
+    const recommendationsHeld = new Promise((resolve) => (releaseRecommendations = resolve));
+    await page.route('**/atlas/recommend**', async (route) => {
+      await recommendationsHeld;
+      await route.fulfill({
         json: {
           version: 1,
           slides: [
@@ -65,12 +68,28 @@ test(
             { type: 'movie', id: 1004 },
           ],
         },
-      }),
-    );
+      });
+    });
     await page.goto(E2E_ORIGIN);
     await page.getByRole('button', { name: 'Look around instead' }).click();
     const hero = page.locator('[data-route-page][data-active="true"] .billboard');
+    await expect(hero).toHaveAttribute('aria-hidden', 'true');
+    await expect(hero).toHaveAttribute('data-loading', 'true');
+    const shelfTrack = page.getByRole('region', { name: 'Mind-Bending' }).locator('.track');
+    await expect(shelfTrack).toBeAttached({ timeout: 30_000 });
+    const beforeRecommendation = await Promise.all([
+      hero.evaluate((node) => node.getBoundingClientRect().height),
+      shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
+    ]);
+    expect(beforeRecommendation[0]).toBeGreaterThan(700);
+    releaseRecommendations();
     await expect(hero).toContainText('Movie 1002', { timeout: 30_000 });
+    await expect(hero).not.toHaveAttribute('data-loading', 'true');
+    const afterRecommendation = await Promise.all([
+      hero.evaluate((node) => node.getBoundingClientRect().height),
+      shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
+    ]);
+    expect(afterRecommendation).toEqual(beforeRecommendation);
     await expect(hero.getByRole('heading', { name: 'Movie 1002' })).toBeVisible();
     await expect(hero.locator('.expand')).toHaveCount(0);
     const pager = hero.locator('.pager');
@@ -87,8 +106,6 @@ test(
     expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
     await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
-    const shelfTrack = page.getByRole('region', { name: 'Mind-Bending' }).locator('.track');
-    await expect(shelfTrack).toBeAttached({ timeout: 30_000 });
     await shelfTrack.evaluate((track) => track.scrollIntoView({ block: 'center' }));
     await expect(shelfTrack).toBeVisible();
     const shelf = await shelfTrack.evaluate((track) => {

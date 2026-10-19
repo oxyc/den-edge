@@ -356,9 +356,10 @@
   margin-bottom: 46px;
 }
 
-/* An empty recommendation fixture left Services unavailable entirely below the TV viewport. Reserve room for
-   the navbar, not a screen of blank artwork; a populated billboard keeps its full viewing-distance layout. */
-.den-tv .billboard[aria-hidden='true'] {
+/* A settled empty recommendation leaves Services in the first TV viewport. While recommendations are still
+   loading, preserve the populated billboard's geometry: collapsing then expanding it pushed every shelf by
+   almost a full screen on slower CPUs. */
+.den-tv .billboard[aria-hidden='true']:not([data-loading='true']) {
   min-height: 140px;
   margin-bottom: 0;
 }
