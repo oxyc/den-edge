@@ -64,6 +64,7 @@
     deliveryUnchangedNotice,
     nothingFits,
     optionLabel,
+    pickLabel,
     releaseAfterMeasure,
     restartAfterMeasure,
     swapNotice,
@@ -126,6 +127,7 @@
     type FailSource,
     type SwitchReason,
   } from '../lib/diagnosticsReport';
+  import ActionMenu from './ActionMenu.svelte';
   import Button from './Button.svelte';
 
   let {
@@ -2381,8 +2383,7 @@
   }
 
   /** Another release of the title, from the same second — also after this one wouldn't play. */
-  function switchRelease(event: Event) {
-    const filename = (event.currentTarget as HTMLSelectElement).value;
+  function switchRelease(filename: string) {
     if (!session || filename === session.release.filename) return;
     // Another file gets this browser's full claims: what one release couldn't decode says nothing about
     // whether the next needs converting. The viewer's pick is theirs to make, switched-away-from or not; the
@@ -2648,8 +2649,15 @@
   });
 </script>
 
+<!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
+     (`defaultPrevented`), or — focus still on its trigger — it is open as the key arrives. -->
 <svelte:window
-  onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && close()}
+  onkeydown={(event) =>
+    event.key === 'Escape' &&
+    !event.defaultPrevented &&
+    !document.fullscreenElement &&
+    !document.querySelector('.player [popover]:popover-open') &&
+    close()}
 />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
 <svelte:document onvisibilitychange={() => document.visibilityState === 'hidden' && report()} />
@@ -2659,19 +2667,29 @@
     <b>{heading}</b>
     {#if session}
       <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
-           Remux session. Where this viewer's Hearth offers both, it switches to the other. -->
+           Remux session. Where this viewer's Hearth offers both, it opens a menu saying so, with the switch to the
+           other in it: a stream restarts only on that choice, never on a press of the stamp itself. -->
       {@const source = session.external ? 'TorBox' : 'Den Remux'}
       {#if !casting && (session.external || torboxOffered)}
-        <Button
-          variant="player"
-          size="compact"
-          class="player-source-switch"
-          label={source}
-          ariaLabel={`Playing from ${source} — switch to ${session.external ? 'Den Remux' : 'TorBox'}`}
-          busy={deliverySwitching || switching}
-          data-testid="playback-source"
-          onclick={switchDelivery}
-        />
+        {@const external = session.external}
+        <ActionMenu
+          label={`Playing from ${source}`}
+          note={external ? 'Playing directly from TorBox' : 'Playing through Den Remux'}
+          triggerClass="den-button den-button-player den-button-compact player-source-switch"
+          items={() => [
+            {
+              kind: 'item',
+              label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
+              description: external
+                ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
+                : 'Straight from the source, no conversion',
+              disabled: deliverySwitching || switching,
+              onselect: switchDelivery,
+            },
+          ]}
+        >
+          {#snippet glyph()}<span data-testid="playback-source">{source}</span>{/snippet}
+        </ActionMenu>
       {:else}
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
@@ -2921,23 +2939,32 @@
       </p>
       <div class="controls">
         {#if releases.length > 1}
-          <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet
-               on a phone — and a screen reader reads a pop-up button, while the pill draws the icon and the short
-               form of what is chosen. -->
-          <div class="pick">
-            {@render plates()}
-            <span class="value" aria-hidden="true"
-              >{session.release.label.split('•')[0]?.trim()}</span
+          <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
+               quality and size over the release's file name — and ticks the one playing. -->
+          {@const playingFile = session.release.filename}
+          {@const short = pickLabel(session.release)}
+          <div class="pick-menu">
+            <ActionMenu
+              label={`Stream: ${short}`}
+              heading="Streams"
+              triggerClass="pick"
+              items={() =>
+                releases.map((release) => ({
+                  kind: 'radio',
+                  group: 'release',
+                  label: optionLabel(release),
+                  description: release.filename,
+                  checked: release.filename === playingFile,
+                  disabled: release.plays === 'no',
+                  onselect: () => switchRelease(release.filename),
+                }))}
             >
-            {@render chevron()}
-            <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
-              <!-- Keyed by place: two releases can share a file name (the same encode under two infohashes). -->
-              {#each releases as release, n (n)}
-                <option value={release.filename} disabled={release.plays === 'no'}
-                  >{optionLabel(release)}</option
-                >
-              {/each}
-            </select>
+              {#snippet glyph()}
+                {@render plates()}
+                <span class="value" aria-hidden="true">{short}</span>
+                {@render chevron()}
+              {/snippet}
+            </ActionMenu>
           </div>
         {/if}
         {#if session.audioTracks.length > 1 && playingTrack}
@@ -3126,11 +3153,29 @@
     white-space: nowrap;
   }
 
-  /* The stamp as a switch sits where the plain stamp does. */
+  /* The stamp as a menu button sits where the plain stamp does. */
   :global(.player-source-switch) {
     flex: none;
     margin-right: auto;
     margin-left: -8px;
+  }
+
+  /* It is ActionMenu's trigger, which starts bare: given back the player button's own box. */
+  header :global(.trigger.player-source-switch) {
+    display: inline-flex;
+    padding: 0 12px;
+    border: 1px solid var(--button-border);
+    background: var(--button-bg);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    header :global(.trigger.player-source-switch:hover) {
+      border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
+      background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+    }
   }
 
   /* The title takes the width; closing is one glyph, as it is on the pickers. No ring around it: it sits beside
@@ -3277,6 +3322,12 @@
     min-width: 0;
     max-width: 70ch;
     margin: 0;
+
+    /* The release's name is there to be copied — to look it up, or to report it — so it selects as text, unlike
+       the rest of the player. It sits in the footer, apart from the video, so selecting it plays or pauses nothing. */
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
   }
 
   /* What playback says as it goes: banners in a row of their own between the title and the video, so they cover
@@ -3355,7 +3406,8 @@
     font-size: 13px;
   }
 
-  .pick {
+  .pick,
+  .pick-menu :global(.trigger.pick) {
     position: relative;
     display: flex;
     flex: 1 1 9rem;
@@ -3372,15 +3424,31 @@
     font: inherit;
   }
 
+  /* The stream picker is ActionMenu's trigger, the pill itself, in a box that sizes as a `.pick` does. */
+  .pick-menu {
+    display: flex;
+    flex: 1 1 9rem;
+    min-width: 0;
+    max-width: 18rem;
+  }
+
+  .pick-menu :global(.trigger.pick) {
+    width: 100%;
+    max-width: none;
+    text-align: left;
+  }
+
   /* One picker on a phone gets the row to itself, filling it: at 18rem it sat just short of the width, pushed
      against the right edge. Wider, the row is shared with the release line and 18rem is the right size again. */
   @media (width <= 40rem) {
-    .controls > .pick:only-child {
+    .controls > .pick:only-child,
+    .controls > .pick-menu:only-child {
       max-width: none;
     }
   }
 
-  .pick .value {
+  .pick .value,
+  .pick-menu .value {
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -3431,7 +3499,8 @@
   }
 
   /* The focused element is the select inside, so the pill lights up with it. */
-  .pick:focus-within {
+  .pick:focus-within,
+  .pick-menu :global(.trigger.pick:focus-visible) {
     border-color: var(--accent);
     outline: 2px solid var(--accent);
     outline-offset: 2px;

@@ -14,6 +14,7 @@
     items,
     label,
     heading,
+    note,
     glyph,
     triggerClass = '',
     onclose,
@@ -26,6 +27,8 @@
     label: string;
     /** Headed with this on the phone bottom sheet; omitted there is no heading. */
     heading?: string;
+    /** A line above the items, on the popover and the sheet alike, saying where things stand: read, not pressed. */
+    note?: string;
     /** The trigger's visible content. */
     glyph: Snippet;
     /** Extra classes on the trigger, so a poster's corner button and an episode's circle can differ. */
@@ -117,7 +120,11 @@
     // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
     // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
     position();
-    if (!menu.matches(':popover-open')) menu.showPopover();
+    if (!menu.matches(':popover-open')) {
+      menu.showPopover();
+      // Measured now that it is laid out, and placed again before it is painted.
+      position();
+    }
   }
 
   function toggleFromTrigger(event: MouseEvent) {
@@ -170,10 +177,11 @@
     }
     const vw = window.innerWidth,
       vh = window.innerHeight;
-    // Not yet laid out at this point, so a representative size stands in for the real one — close enough to
-    // decide which side of the viewport it has to flip away from.
-    const width = 240,
-      height = shownItems.length * 44 + 16;
+    // Before its first showing it is not laid out, so a representative size stands in for the real one — close
+    // enough to decide which side of the viewport it has to flip away from. Once shown, its own size is used:
+    // items with a second line are taller than the estimate.
+    const width = positioned.offsetWidth || 240,
+      height = positioned.offsetHeight || shownItems.length * 44 + 16;
     let x: number, y: number;
     if (coords) {
       x = coords.x;
@@ -269,7 +277,8 @@
   }
 
   function sheetPointerDown(event: PointerEvent) {
-    if (!mobile || event.pointerType === 'mouse') return;
+    // A sheet scrolled down its own list is scrolled back up by the same drag: only one at its top closes.
+    if (!mobile || event.pointerType === 'mouse' || (menu?.scrollTop ?? 0) > 0) return;
     sheetDragStart = { y: event.clientY, pointerId: event.pointerId };
   }
   function sheetPointerMove(event: PointerEvent) {
@@ -351,6 +360,7 @@
     popover="auto"
     role="menu"
     aria-label={label}
+    aria-describedby={note ? `${menuId}-note` : undefined}
     tabindex="-1"
     ontoggle={toggled}
     onkeydown={onMenuKeydown}
@@ -360,6 +370,7 @@
     onpointercancel={sheetPointerUp}
   >
     {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
+    {#if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
     {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}
       <Button
         variant="menu"
@@ -372,9 +383,14 @@
             : 'menuitemradio'}
         aria-checked={item.kind === 'item' ? undefined : item.checked}
         aria-disabled={item.disabled || undefined}
-        class="item"
+        aria-describedby={item.description ? `${menuId}-${i}` : undefined}
+        class={item.description ? 'item described' : 'item'}
         onclick={() => run(item)}
-      />
+      >
+        {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
+            >{item.description}</span
+          >{/if}
+      </Button>
     {/each}
   </div>
 {/if}
@@ -404,6 +420,8 @@
     width: max-content;
     min-width: 220px;
     max-width: min(320px, 90vw);
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     margin: 0;
     padding: 6px;
     border: 1px solid var(--line);
@@ -455,6 +473,52 @@
     color: var(--muted);
     font-size: 13px;
     font-weight: 600;
+  }
+
+  /* An item with a second line: the label over it, both wrapping rather than running off the menu's edge. */
+  .menu :global(.item.described) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding-block: 10px;
+    line-height: 1.3;
+    white-space: normal;
+  }
+
+  /* A choice among described items carries a tick column, so the one chosen is marked by more than weight and
+     the labels line up whichever it is. */
+  .menu :global(.item.described[role='menuitemradio']) {
+    position: relative;
+    padding-left: 36px;
+  }
+
+  .menu :global(.item.described[role='menuitemradio'][aria-checked='true'])::before {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    content: '✓';
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .item-description {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+  }
+
+  /* Plain text in the item's own inset: it says where things stand, so nothing about it looks pressable. */
+  .menu-note {
+    margin: 0;
+    padding: 8px 12px 6px;
+    font-size: 14px;
+    line-height: 1.35;
   }
 
   .sheet :global(.item) {

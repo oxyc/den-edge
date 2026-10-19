@@ -44,7 +44,7 @@ export function titleActionsContext(): TitleActionsContext | undefined {
   return getContext(TITLE_ACTIONS);
 }
 
-export type MenuItem =
+export type MenuItem = (
   | { kind: 'item'; label: string; onselect: () => void; disabled?: boolean }
   | { kind: 'checkbox'; label: string; checked: boolean; onselect: () => void; disabled?: boolean }
   | {
@@ -54,7 +54,11 @@ export type MenuItem =
       checked: boolean;
       onselect: () => void;
       disabled?: boolean;
-    };
+    }
+) & {
+  /** A quieter second line under the label (`ActionMenu`), at most two lines before it is cut short. */
+  description?: string;
+};
 
 const REACTIONS: [Reaction, string][] = [
   ['dislike', 'Not for me'],

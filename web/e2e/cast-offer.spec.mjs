@@ -399,7 +399,8 @@ test('a release picked mid-film names the session it replaces, which the page en
   try {
     await playingPast(page, 3);
     expect(asked.direct[0]).not.toHaveProperty('replaces');
-    await page.getByRole('combobox', { name: 'Release' }).selectOption('other.mkv');
+    await page.getByRole('button', { name: /^Stream: / }).click();
+    await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => asked.direct.length).toBe(2);
     expect(asked.direct[1]).toMatchObject({
       filename: 'other.mkv',

@@ -6,6 +6,7 @@ import {
   deliveryUnchangedNotice,
   nothingFits,
   optionLabel,
+  pickLabel,
   releaseAfterMeasure,
   restartAfterMeasure,
   swapNotice,
@@ -129,6 +130,28 @@ describe('optionLabel', () => {
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'no' })).toBe('a — can’t play here');
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'convert' })).toBe('a — converted');
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'yes' })).toBe('a');
+  });
+  it('reads scout’s bullets as the Sources panel does, the pack it came from included', () => {
+    expect(
+      optionLabel({
+        label: '4K • WEB-DL • Dolby Vision • Atmos • 11 GB · from a 105 GB pack',
+        filename: 'a',
+        plays: 'yes',
+      }),
+    ).toBe('4K · WEB-DL · Dolby Vision · Atmos · 11 GB · from a 105 GB pack');
+  });
+});
+
+describe('pickLabel', () => {
+  it('is the quality and the size, without the pack', () => {
+    expect(pickLabel({ label: '4K • WEB-DL • Dolby Vision • 11 GB · from a 105 GB pack' })).toBe(
+      '4K · 11 GB',
+    );
+    expect(pickLabel({ label: '1080p • WEB-DL • 13.2 GB' })).toBe('1080p · 13.2 GB');
+  });
+  it('is the quality alone where no size is named', () => {
+    expect(pickLabel({ label: '720p • WEB' })).toBe('720p');
+    expect(pickLabel({ label: 'Fixture 1080p' })).toBe('Fixture 1080p');
   });
 });
 

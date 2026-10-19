@@ -208,9 +208,9 @@ test('an old release’s late SkipDB answer does not reopen the new release’s 
     });
     await page.goto(`${ORIGIN}/test/player.html`);
     await expect.poll(() => skipRequests.length).toBe(1);
-    await expect(page.locator('select[aria-label="Release"] option')).toHaveCount(2);
-
-    await page.locator('select[aria-label="Release"]').selectOption('other.mkv');
+    await page.getByRole('button', { name: /^Stream: / }).click();
+    await expect(page.getByRole('menuitemradio')).toHaveCount(2);
+    await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => skipRequests.length).toBe(2);
 
     await skipRequests[0].fulfill({ status: 404, json: {} });

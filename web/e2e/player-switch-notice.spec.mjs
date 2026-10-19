@@ -77,8 +77,8 @@ test('a session that errors mid-play names the switch, then names what it landed
     await routeMedia(page);
     await page.goto(`${ORIGIN}/test/player.html`);
 
-    // The release list loaded enough to count: the picker shows both.
-    await expect(page.locator('select[aria-label="Release"] option')).toHaveCount(2);
+    // The release list loaded enough to count: the picker is there, which it is only for more than one.
+    await expect(page.getByRole('button', { name: /^Stream: / })).toBeVisible();
     await page.waitForFunction(
       () => (document.querySelector('.player video')?.currentTime ?? 0) > 0,
       undefined,

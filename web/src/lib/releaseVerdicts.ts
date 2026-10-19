@@ -94,11 +94,23 @@ export function unplayable(releases: readonly Release[] | null | undefined): Map
   return refused;
 }
 
-/** The option text for a release in the player's picker: a quiet marker where it won't play as it is. */
+/**
+ * A release in the player's stream list: scout's label — quality, then size, then the pack it came from — joined as
+ * the Sources panel reads ("4K · Dolby Vision · Atmos · 11 GB · from a 105 GB pack"), with a quiet marker where it
+ * won't play as it is.
+ */
 export function optionLabel(release: Release): string {
-  if (release.plays === 'no') return `${release.label} — can’t play here`;
-  if (release.plays === 'convert') return `${release.label} — converted`;
-  return release.label;
+  const label = release.label.split(/\s*•\s*/).join(' · ');
+  if (release.plays === 'no') return `${label} — can’t play here`;
+  if (release.plays === 'convert') return `${label} — converted`;
+  return label;
+}
+
+/** The short form of a release on the stream picker's button: its quality and its size ("4K · 11 GB"). */
+export function pickLabel(release: Pick<Release, 'label'>): string {
+  const [first = '', ...rest] = release.label.split(' · ')[0]!.split(/\s*•\s*/);
+  const size = rest.find((part) => /\d\s*[KMGT]B$/.test(part));
+  return size ? `${first.trim()} · ${size}` : first.trim();
 }
 
 /** Whether a refusal says no copy would do — as opposed to den-remux being out of reach, busy, or not letting this in. */
