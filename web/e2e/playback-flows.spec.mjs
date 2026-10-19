@@ -263,6 +263,11 @@ const segmentHosts = () =>
 const stamped = (page, source) => expect(page.getByTestId('playback-source')).toHaveText(source);
 
 const castFrame = (page) => page.locator('iframe[title="Den Cast player"]');
+/** The stamp's menu, opened, and its switch to `to` chosen. */
+async function switchFromStamp(page, from, to) {
+  await page.getByRole('button', { name: `Playing from ${from}` }).click();
+  await page.getByRole('menuitem', { name: `Switch to ${to}` }).click();
+}
 
 test('owner at home plays from the home-network listener in the page itself', async () => {
   const { browser, page, asked } = await open({
@@ -359,7 +364,7 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     // TorBox → Den Remux: Hearth is told the direct path is not wanted, for the same release, from where it is.
     let from = served.length;
     const at = await position(video);
-    await page.getByRole('button', { name: 'Playing from TorBox — switch to Den Remux' }).click();
+    await switchFromStamp(page, 'TorBox', 'Den Remux');
     await stamped(page, 'Den Remux');
     expect(asked.playback).toHaveLength(2);
     expect(asked.playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
@@ -373,7 +378,7 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     // Den Remux → TorBox: TorBox alone, so Hearth can't answer with a Remux session in the playing one's slot.
     from = served.length;
     const back = await position(video);
-    await page.getByRole('button', { name: 'Playing from Den Remux — switch to TorBox' }).click();
+    await switchFromStamp(page, 'Den Remux', 'TorBox');
     await stamped(page, 'TorBox');
     expect(asked.playback).toHaveLength(3);
     expect(asked.playback[2]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
@@ -396,7 +401,7 @@ test('a viewer whose Hearth has only Remux gets a plain stamp, not a switch', as
     await playingPast(pageVideo(page), 3);
     await stamped(page, 'Den Remux');
     await expect(page.getByTestId('playback-source')).not.toHaveRole('button');
-    await expect(page.getByRole('button', { name: /switch to/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^Playing from/ })).toHaveCount(0);
     expect(asked.playback).toHaveLength(1);
   } finally {
     await browser.close();
@@ -415,7 +420,7 @@ test('a switch to TorBox that Hearth refuses keeps Den Remux playing and says so
     await stamped(page, 'Den Remux');
     const from = served.length;
     const at = await position(video);
-    await page.getByRole('button', { name: 'Playing from Den Remux — switch to TorBox' }).click();
+    await switchFromStamp(page, 'Den Remux', 'TorBox');
     await expect(
       page.getByRole('status').filter({ hasText: 'TorBox couldn’t play this release just now' }),
     ).toBeVisible();

@@ -126,6 +126,7 @@
     type FailSource,
     type SwitchReason,
   } from '../lib/diagnosticsReport';
+  import ActionMenu from './ActionMenu.svelte';
   import Button from './Button.svelte';
 
   let {
@@ -2648,8 +2649,15 @@
   });
 </script>
 
+<!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
+     (`defaultPrevented`), or — focus still on its trigger — it is open as the key arrives. -->
 <svelte:window
-  onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && close()}
+  onkeydown={(event) =>
+    event.key === 'Escape' &&
+    !event.defaultPrevented &&
+    !document.fullscreenElement &&
+    !document.querySelector('.player [popover]:popover-open') &&
+    close()}
 />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
 <svelte:document onvisibilitychange={() => document.visibilityState === 'hidden' && report()} />
@@ -2659,19 +2667,29 @@
     <b>{heading}</b>
     {#if session}
       <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
-           Remux session. Where this viewer's Hearth offers both, it switches to the other. -->
+           Remux session. Where this viewer's Hearth offers both, it opens a menu saying so, with the switch to the
+           other in it: a stream restarts only on that choice, never on a press of the stamp itself. -->
       {@const source = session.external ? 'TorBox' : 'Den Remux'}
       {#if !casting && (session.external || torboxOffered)}
-        <Button
-          variant="player"
-          size="compact"
-          class="player-source-switch"
-          label={source}
-          ariaLabel={`Playing from ${source} — switch to ${session.external ? 'Den Remux' : 'TorBox'}`}
-          busy={deliverySwitching || switching}
-          data-testid="playback-source"
-          onclick={switchDelivery}
-        />
+        {@const external = session.external}
+        <ActionMenu
+          label={`Playing from ${source}`}
+          note={external ? 'Playing directly from TorBox' : 'Playing through Den Remux'}
+          triggerClass="den-button den-button-player den-button-compact player-source-switch"
+          items={() => [
+            {
+              kind: 'item',
+              label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
+              description: external
+                ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
+                : 'Straight from the source, no conversion',
+              disabled: deliverySwitching || switching,
+              onselect: switchDelivery,
+            },
+          ]}
+        >
+          {#snippet glyph()}<span data-testid="playback-source">{source}</span>{/snippet}
+        </ActionMenu>
       {:else}
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
@@ -3126,11 +3144,29 @@
     white-space: nowrap;
   }
 
-  /* The stamp as a switch sits where the plain stamp does. */
+  /* The stamp as a menu button sits where the plain stamp does. */
   :global(.player-source-switch) {
     flex: none;
     margin-right: auto;
     margin-left: -8px;
+  }
+
+  /* It is ActionMenu's trigger, which starts bare: given back the player button's own box. */
+  header :global(.trigger.player-source-switch) {
+    display: inline-flex;
+    padding: 0 12px;
+    border: 1px solid var(--button-border);
+    background: var(--button-bg);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    header :global(.trigger.player-source-switch:hover) {
+      border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
+      background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+    }
   }
 
   /* The title takes the width; closing is one glyph, as it is on the pickers. No ring around it: it sits beside
