@@ -46,8 +46,11 @@ const sdk = (hang) => `
       HlsVideoSegmentFormat: { FMP4: 'fmp4', MPEG2_TS: 'mpeg2_ts' },
       MetadataType: { GENERIC: 0 },
       StreamType: { BUFFERED: 'BUFFERED' },
+      TrackType: { TEXT: 'TEXT' },
+      TextTrackType: { SUBTITLES: 'SUBTITLES' },
       GenericMediaMetadata: function () {},
       MediaInfo: function (url, contentType) { this.contentId = url; this.contentType = contentType; },
+      Track: function (id, type) { this.trackId = id; this.type = type; },
       LoadRequest: function (media) { this.media = media; },
       EditTracksInfoRequest: function (ids) { this.activeTrackIds = ids; },
     },
@@ -73,6 +76,8 @@ const sdk = (hang) => `
             segments: request.media.hlsSegmentFormat,
             videoSegments: request.media.hlsVideoSegmentFormat,
             currentTime: request.currentTime,
+            tracks: request.media.tracks,
+            activeTrackIds: request.activeTrackIds,
           });
           return ${hang} ? new Promise(() => {}) : Promise.resolve();
         },
@@ -132,7 +137,7 @@ const remuxAnswer = {
  * The player playing a title through Hearth, TorBox's managed HLS in the page. `castAnswer` is what Hearth answers
  * the request made for a receiver.
  */
-async function open({ castAnswer, hang = false }) {
+async function open({ castAnswer, hang = false, subtitle = false }) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -143,7 +148,7 @@ async function open({ castAnswer, hang = false }) {
   });
   const page = await context.newPage();
   await guardNetwork(page);
-  const asked = { managed: [], castReports: [], lanProbes: [] };
+  const asked = { managed: [], castReports: [], lanProbes: [], subtitles: [] };
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
@@ -155,9 +160,25 @@ async function open({ castAnswer, hang = false }) {
       json: { url: TORBOX, release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 } },
     });
   });
-  await page.route(`${ORIGIN}/den/config/subtitles/**`, (r) =>
-    r.fulfill({ status: 404, json: { error: 'not_found' } }),
-  );
+  await page.route(`${ORIGIN}/den/config/subtitles/**`, (r) => {
+    asked.subtitles.push(r.request().url());
+    return subtitle
+      ? r.fulfill({
+          json: { subtitles: [{ lang: 'en', url: '/den/config/subtitle/1.srt' }] },
+        })
+      : r.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
+  await page.route(`${ORIGIN}/den/config/subtitle/1.srt`, (r) => {
+    asked.subtitles.push(r.request().url());
+    return r.fulfill({ body: '1\n00:00:01,000 --> 00:00:02,000\nHello!\n' });
+  });
+  await page.route(`${ORIGIN}/den/config/cast-subtitle`, (r) => {
+    asked.subtitles.push(r.request().url());
+    return r.fulfill({
+      status: 201,
+      json: { url: `${CAST}/subtitle/${'a'.repeat(64)}.vtt` },
+    });
+  });
   // The release list, on the page's own route and, once casting, on the relay's.
   for (const route of ['direct', 'remux'])
     await page.route(`${ORIGIN}/${route}/releases`, (r) => r.fulfill({ json: { releases: [] } }));
@@ -203,6 +224,7 @@ async function open({ castAnswer, hang = false }) {
     castDiscoveryMs: '5000',
     castPlayMs: '1500',
   });
+  if (subtitle) query.set('subtitleLanguage', 'en');
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
@@ -271,6 +293,36 @@ test('casting keeps TorBox playing until a Chromecast is chosen, then hands that
     // The receiver has it now: the page's own video is gone, the cast page shows where it plays.
     await expect(page.locator('.player video')).toHaveCount(0);
     await expect(castFrame(page).getByText('Living Room TV')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a selected OpenSubtitles track stays on TorBox and is handed to Chromecast as WebVTT', async () => {
+  const castAnswer = {
+    url: TORBOX,
+    release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
+  };
+  const { browser, page, asked } = await open({ castAnswer, subtitle: true });
+  try {
+    await playingPast(page, 2);
+    await chooseReceiver(page, asked);
+    await expect.poll(() => castLoads(page)).toHaveLength(1);
+    expect(asked.managed[1]).not.toHaveProperty('directFailed');
+    const [load] = await castLoads(page);
+    expect(load.url).toBe(TORBOX);
+    expect(load.activeTrackIds).toEqual([1]);
+    expect(load.tracks).toEqual([
+      expect.objectContaining({
+        trackId: 1,
+        type: 'TEXT',
+        subtype: 'SUBTITLES',
+        language: 'en',
+        trackContentType: 'text/vtt',
+        trackContentId: `${CAST}/subtitle/${'a'.repeat(64)}.vtt`,
+      }),
+    ]);
+    expect(asked.subtitles.filter((url) => url.endsWith('/cast-subtitle'))).toHaveLength(2);
   } finally {
     await browser.close();
   }

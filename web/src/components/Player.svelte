@@ -356,6 +356,8 @@
    */
   let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
   let session = $state<Session | null>(null);
+  /** Holds a direct Cast handoff until its selected external subtitle has its receiver URL. */
+  let castSubtitlePreparing = $state(false);
   /**
    * Set across an advance in place (`playEpisode`): the outgoing episode's `<video>` — or the cast page's frame, at
    * `heldFrame` — stays in the document until the next episode's session is in, so the fullscreen it is in survives.
@@ -812,11 +814,9 @@
     } = request;
     const asked: PlaybackWant = {
       ...fields,
-      // Browser-local subtitle blobs cannot reach a Cast receiver, nor the system player WebKit plays its own
-      // HLS in (`subtitlesNeedPlaylist`). This direct capability is unsuitable in exactly the same way as a
-      // failed direct load, so Hearth chooses its caption-carrying fallback.
+      // WebKit's system player needs captions in the HLS playlist itself. Cast does not: a selected external VTT
+      // is staged as a short-lived receiver capability, so choosing captions must never disqualify TorBox.
       ...(delivery === 'fallback' ||
-      (castMode && subtitleChoice) ||
       (delivery !== 'direct' && subtitleWanted && subtitlesNeedPlaylist())
         ? { directFailed: true }
         : {}),
@@ -976,6 +976,7 @@
     // For the startup timing line (den-edge#234's "Findings"), logged once this session's first frame arrives.
     // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
+    castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     session = result;
     directAttempt = result.external
       ? delivery === 'ordinary' || delivery === 'direct'
@@ -993,6 +994,7 @@
     // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
     // page's `den-lan` has it.
     if (lanHere && maxBitrate !== undefined && extra.maxBitrate === undefined) {
+      castSubtitlePreparing = false;
       restart(releaseAfterMeasure(chosenRelease));
       return true;
     }
@@ -1019,6 +1021,7 @@
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
     if (session?.external && subtitleChoice) await loadExternalSubtitle(session, subtitleChoice);
+    castSubtitlePreparing = false;
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
     lastSubtitleSource = result.subtitleSource;
@@ -1745,6 +1748,13 @@
           image: poster,
           currentTime: started ?? resume.seconds ?? 0,
           subtitleLanguage: subtitleChoice,
+          subtitleTrack: current.externalSubtitles
+            ?.filter((track) => track.language === subtitleChoice && track.castUrl)
+            .map((track) => ({
+              language: track.language,
+              name: track.name,
+              url: track.castUrl!,
+            }))[0],
           terminal: degraded || current.video?.transcoded === true || castProfile === 'legacy',
           external: current.external === true,
         },
@@ -1756,8 +1766,8 @@
   // The iframe origin stays the same when Hearth replaces a failed managed URL with Remux, so it does not reload.
   // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
   $effect(() => {
-    const [current, frame] = [session, castFrame];
-    if (!current?.castOrigin || !frame) return;
+    const [current, frame, preparing] = [session, castFrame, castSubtitlePreparing];
+    if (!current?.castOrigin || !frame || preparing) return;
     untrack(sendToCastFrame);
   });
 
@@ -2346,7 +2356,18 @@
     const frame = castFrame?.contentWindow;
     if (!current?.castOrigin || !frame) return;
     frame.postMessage(
-      { type: 'den-subtitle', id: current.playlist, language: subtitleChoice },
+      {
+        type: 'den-subtitle',
+        id: current.playlist,
+        language: subtitleChoice,
+        track: current.externalSubtitles
+          ?.filter((track) => track.language === subtitleChoice && track.castUrl)
+          .map((track) => ({
+            language: track.language,
+            name: track.name,
+            url: track.castUrl!,
+          }))[0],
+      },
       current.castOrigin,
     );
   }

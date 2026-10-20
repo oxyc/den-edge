@@ -67,6 +67,23 @@ function listUrl(
   return `${base}/subtitles/${series ? 'series' : 'movie'}/${id}/${extra}.json`;
 }
 
+function stageUrl(playback: string): string | null {
+  const base = playback.endsWith('/playback') ? playback.slice(0, -'/playback'.length) : null;
+  return base ? `${base}/cast-subtitle` : null;
+}
+
+function stagedUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && /^\/subtitle\/[0-9a-f]{64}\.vtt$/.test(url.pathname)
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function webvtt(srt: string): string {
   const normalized = srt.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   if (/^WEBVTT(?:\s|$)/.test(normalized)) return normalized;
@@ -164,10 +181,32 @@ export async function directSubtitles(
           if (!response.ok) return null;
           const text = await boundedText(response);
           if (text === null || disposed) return null;
+          const vtt = webvtt(text);
+          let castUrl: string | undefined;
+          const staging = stageUrl(playback);
+          if (staging) {
+            try {
+              const staged = await fetchImpl(staging, {
+                method: 'POST',
+                headers: { accept: 'application/json', 'content-type': 'text/vtt; charset=utf-8' },
+                body: vtt,
+                cache: 'no-store',
+                signal: boundedSignal(),
+              });
+              if (staged.ok)
+                castUrl = stagedUrl(
+                  ((await staged.json().catch(() => null)) as { url?: unknown } | null)?.url,
+                );
+            } catch {
+              // The local browser track remains useful when Cast staging is unavailable.
+            }
+          }
+          if (disposed) return null;
           const track = {
             language: trackLanguage,
             name: subtitleName(trackLanguage),
-            url: URL.createObjectURL(new Blob([webvtt(text)], { type: 'text/vtt' })),
+            url: URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' })),
+            ...(castUrl ? { castUrl } : {}),
           };
           if (disposed) {
             URL.revokeObjectURL(track.url);

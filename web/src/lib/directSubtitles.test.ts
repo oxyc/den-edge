@@ -27,7 +27,8 @@ describe('directSubtitles', () => {
         '1\n00:00:01,000 --> 00:00:02,500\nHello!\n',
       ],
     ]);
-    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    let staged = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url.includes('/subtitles/'))
         return new Response(
@@ -39,6 +40,12 @@ describe('directSubtitles', () => {
             ],
           }),
         );
+      if (url.endsWith('/cast-subtitle') && init?.method === 'POST') {
+        staged += 1;
+        return Response.json({
+          url: `https://cast.example/subtitle/${String(staged).padStart(64, 'a')}.vtt`,
+        });
+      }
       return new Response(bodies.get(url) ?? '', { status: bodies.has(url) ? 200 : 404 });
     });
 
@@ -63,16 +70,20 @@ describe('directSubtitles', () => {
       language: 'sv',
       name: 'Swedish · OpenSubtitles',
       url: 'blob:subtitle-1',
+      castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}1.vtt`,
     });
     await found?.load('sv');
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
     await expect(found?.load('en')).resolves.toMatchObject({
       language: 'en',
       url: 'blob:subtitle-2',
+      castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}2.vtt`,
     });
     expect(fetchImpl.mock.calls.map(([input]) => String(input)).slice(1)).toEqual([
       'https://den.example/den/~a1b2c3d4/subtitle/2.srt',
+      '/den/~a1b2c3d4/cast-subtitle',
       'https://den.example/den/~a1b2c3d4/subtitle/1.srt',
+      '/den/~a1b2c3d4/cast-subtitle',
     ]);
     const blobs = vi.mocked(URL.createObjectURL).mock.calls.map(([blob]) => blob as Blob);
     await expect(blobs[0]!.text()).resolves.toContain('00:00:01.000 --> 00:00:02.500');

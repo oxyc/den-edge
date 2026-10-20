@@ -16,12 +16,12 @@ export { nativeHls } from './nativeHls';
 export interface Session {
   /** A URL Hearth returned without a Remux lifecycle. Client-only; never sent by Hearth. */
   external?: boolean;
-  /** Blob-backed WebVTT tracks fetched through Den for an externally managed media playlist. */
-  externalSubtitles?: { language: string; name: string; url: string }[];
+  /** Blob-backed WebVTT tracks fetched through Den, optionally staged for a Cast receiver. */
+  externalSubtitles?: { language: string; name: string; url: string; castUrl?: string }[];
   /** Materializes one selected external subtitle language; repeated calls reuse its blob. */
   loadExternalSubtitle?: (
     language: string,
-  ) => Promise<{ language: string; name: string; url: string } | null>;
+  ) => Promise<{ language: string; name: string; url: string; castUrl?: string } | null>;
   /** Releases client-owned media artifacts such as external subtitle blob URLs. */
   dispose?: () => void;
   /** Explicit Remux lifecycle capabilities returned by Hearth's playback facade. */
