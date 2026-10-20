@@ -1422,7 +1422,7 @@
   }
 
   .continue {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 16px;
     margin-top: 24px;
