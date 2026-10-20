@@ -45,7 +45,7 @@ LG references: [Developer Mode](https://webostv.developer.lge.com/develop/gettin
 [webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide), and
 [LG staff on the 999-hour counter](https://forum.webostv.developer.lge.com/t/topic/4854/2).
 
-## Samsung Tizen 8 (2024-generation TV or newer)
+## Samsung Tizen (2022-generation TV or newer)
 
 The release publishes an unsigned `.wgt`; [Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung) creates the
 Samsung certificate for the destination TV, signs the widget and installs it. The certificate is device-specific,
@@ -54,20 +54,34 @@ so Den's CI cannot publish one universally installable signed package.
 1. Download the appropriate desktop build—or the `-android.apk`—from the
    [latest Apps2Samsung release](https://github.com/Apps2Samsung/Apps2Samsung/releases/latest). The installer device
    and TV must be on the same LAN.
-2. Download [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen.wgt).
+2. Download the widget for the TV's model year:
+
+   - **2024 or newer (Tizen 8+):** [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen.wgt)
+     (the same file is also published explicitly as `den-tv-tizen8.wgt`).
+   - **2022–2023 (Tizen 6.5–7):** [`den-tv-tizen6.5.wgt`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen6.5.wgt).
+
+   The model year matters, not the purchase year. Samsung identifies it in the TV's support/about screen and model
+   number.
+
 3. On the TV open **Apps** and type `12345`, enable Developer Mode, enter the local IP address Apps2Samsung shows for
    the computer or phone, and restart the TV. If it is not discovered afterward, power-cycle it completely.
-4. In Apps2Samsung select the TV, choose the custom `.wgt` option, select `den-tv-tizen.wgt`, and install. Sign in
-   with a free Samsung developer account when asked; Tizen 7 and newer require it when the tool provisions the
-   certificate.
+4. In Apps2Samsung select the TV, choose the custom `.wgt` option, select the downloaded Den widget, and install.
+   Sign in with a free Samsung developer account when asked; Tizen 7 and newer require it when the tool provisions
+   the certificate.
 
 For an update, download the current `.wgt` from the same stable URL and install it again. Preserve Apps2Samsung's
 data so it can reuse the author certificate. If the TV reports an author-certificate mismatch, remove its existing
 Den installation and install again; removal can discard local app data.
 
+Den does not currently publish a widget for 2021 or older models. The 2022 package is the low-risk compatibility
+floor because Samsung's Tizen 6.5 engine is Chromium 85, which is also Den's compiled compatibility target. The 2021
+and 2020 engines are Chromium 76 and 69; supporting them would require additional runtime polyfills and device-level
+playback testing. Pre-2020 Samsung engines also lack the WebAssembly support Den's local database requires.
+
 ### Tizen Studio alternative
 
-The release retains the existing Tizen Studio installer for development and troubleshooting. Install Tizen Studio's
+The release retains the Tizen 8 package's existing Tizen Studio installer for development and troubleshooting.
+For a 2022–2023 TV, prefer Apps2Samsung and the versioned 6.5 widget above. Install Tizen Studio's
 **Web CLI**, current **TV Extensions**, and **Samsung Certificate Extension**; create a Samsung certificate profile
 whose distributor certificate includes the TV, enable Developer Mode as above, then connect the TV in Device Manager.
 Download the unsigned archive and pass the profile name and the serial shown by `sdb devices` to its installer:

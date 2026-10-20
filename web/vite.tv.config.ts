@@ -3,7 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
-import { TV_CSP } from './scripts/tv-csp.mjs';
+import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
 
 const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
@@ -12,6 +12,8 @@ const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.met
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
 const packaged = process.env.DEN_TV_PACKAGED === '1';
+const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
+const tvCspValue = tvCsp(tizenVersion);
 const apiOriginText = process.env.DEN_TV_API_ORIGIN;
 if (packaged && !apiOriginText)
   throw new Error('DEN_TV_API_ORIGIN is required for packaged TV builds');
@@ -105,13 +107,13 @@ const tvEntry: Plugin = {
           return html
             .replace(
               '<html>',
-              `<html>${packaged ? `<head><meta http-equiv="Content-Security-Policy" content="${TV_CSP}"></head>` : ''}`,
+              `<html>${packaged ? `<head><meta http-equiv="Content-Security-Policy" content="${tvCspValue}"></head>` : ''}`,
             )
             .replace('/test/player.ts', '/src/tv/test-entry.ts');
         return html;
       }
       return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-${packaged ? `<meta http-equiv="Content-Security-Policy" content="${TV_CSP}">` : ''}
+${packaged ? `<meta http-equiv="Content-Security-Policy" content="${tvCspValue}">` : ''}
 <meta name="viewport" content="width=1920, initial-scale=1"><meta name="theme-color" content="#0b0b0f">
 <title>Den TV</title></head><body><div id="app"><p>Starting Den…</p></div>
 <script type="module" src="/src/tv/main.ts"></script></body></html>`;
@@ -127,7 +129,7 @@ const packagedMetadata: Plugin = {
         type: 'asset',
         fileName: 'den-tv-package.json',
         source: JSON.stringify(
-          { packaged: true, platform, apiOrigin, serviceOrigin, e2e },
+          { packaged: true, platform, apiOrigin, serviceOrigin, tizenVersion, e2e },
           null,
           2,
         ),

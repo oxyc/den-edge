@@ -4,7 +4,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { TV_CSP } from './tv-csp.mjs';
+import { getTizenVersion, tvCsp } from './tv-csp.mjs';
 
 const webRoot = resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
@@ -65,6 +65,8 @@ function prepareShell() {
 }
 
 if (platform === 'tizen') {
+  const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
+  const csp = tvCsp(tizenVersion);
   const versionParts = version.split('.').map(Number);
   if (versionParts[0] > 255 || versionParts[1] > 255 || versionParts[2] > 65535)
     usage('Tizen --version components must be within 0-255, 0-255, and 0-65535');
@@ -134,6 +136,7 @@ if (platform === 'tizen') {
   if (
     metadata.packaged !== true ||
     metadata.platform !== 'tizen' ||
+    metadata.tizenVersion !== tizenVersion ||
     metadata.apiOrigin !== api.origin ||
     metadata.serviceOrigin !== service.origin ||
     metadata.e2e !== false
@@ -163,12 +166,12 @@ if (platform === 'tizen') {
     join(shell, 'config.xml'),
     `<?xml version="1.0" encoding="UTF-8"?>
 <widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="http://den.app" version="${version}" viewmodes="maximized">
-  <tizen:application id="DenTvApp1X.Den" package="DenTvApp1X" required_version="8.0" />
+  <tizen:application id="DenTvApp1X.Den" package="DenTvApp1X" required_version="${tizenVersion}" />
   <content src="index.html" /><icon src="icon.png" /><name>Den</name>
   <tizen:profile name="tv-samsung" />
-  <tizen:metadata key="http://samsung.com/tv/metadata/devel.api.version" value="8.0" />
+  <tizen:metadata key="http://samsung.com/tv/metadata/devel.api.version" value="${tizenVersion}" />
   <access origin="*" subdomains="true" />
-  <tizen:content-security-policy>${TV_CSP}</tizen:content-security-policy>
+  <tizen:content-security-policy>${csp}</tizen:content-security-policy>
   <tizen:privilege name="http://tizen.org/privilege/internet" />
   <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice" />
   <tizen:setting pointing-device-support="disable" />
