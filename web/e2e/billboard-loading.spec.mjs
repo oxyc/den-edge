@@ -398,6 +398,87 @@ test('the document starts its exact personalized hero before the app module answ
   await expect(page.locator('link[rel="preload"][as="image"]')).toHaveCount(0);
 });
 
+test('the parser-time hero fills every line when the parser stops part-way through the shell', async ({
+  page,
+}) => {
+  const identity = 'fixture-library';
+  const key = `den.hero-lead.v1.${createHash('sha256').update(identity).digest('hex')}.fresh.all`;
+  await page.addInitScript(
+    ({ key, library, at }) => {
+      localStorage.setItem(
+        'den.links',
+        JSON.stringify([
+          { inboxKey: '0123456789abcdef', libraryKey: library, linkKey: 'fixture-link' },
+        ]),
+      );
+      localStorage.setItem('den.billboard.fresh', '1');
+      localStorage.setItem('den.billboard.member-post', '1');
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          at,
+          path: '/parser-split.jpg',
+          copy: {
+            type: 'movie',
+            id: 42,
+            title: 'Split title',
+            year: 2026,
+            reason: 'Fits your viewing taste',
+            genres: ['Drama', 'Mystery'],
+            overview: 'Every line after the break.',
+          },
+        }),
+      );
+      localStorage.setItem(
+        'den.hero-lead.current.v1.fresh.all',
+        JSON.stringify({ identity: library, key }),
+      );
+    },
+    { key, library: identity, at: Date.now() },
+  );
+  await page.route('https://image.tmdb.org/t/p/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    }),
+  );
+  await page.route('**/src/main.ts*', (route) =>
+    route.fulfill({ contentType: 'text/javascript', body: '' }),
+  );
+  // A parser-blocking script between two lines of the shell stops the parser there, as the end of a network chunk
+  // or a parser yield can on a busy machine; the shell's MutationObserver runs on the half-parsed shell meanwhile.
+  let releaseParser;
+  const parserHeld = new Promise((resolve) => (releaseParser = resolve));
+  let holdStarted;
+  const held = new Promise((resolve) => (holdStarted = resolve));
+  await page.route(`${E2E_ORIGIN}/`, async (route) => {
+    const response = await route.fetch();
+    const html = await response.text();
+    const marker = '<p data-den-early-facts>';
+    expect(html, 'the shell still has its facts line').toContain(marker);
+    await route.fulfill({
+      response,
+      body: html.replace(marker, `<script src="/e2e-hold-parser.js"></script>${marker}`),
+    });
+  });
+  await page.route(`${E2E_ORIGIN}/e2e-hold-parser.js`, async (route) => {
+    holdStarted();
+    await parserHeld;
+    await route.fulfill({ contentType: 'text/javascript', body: '' });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/`, { waitUntil: 'commit' });
+  await held;
+  releaseParser();
+  const shellCopy = page.locator('[data-den-early-copy]:not([hidden])');
+  await expect(shellCopy.locator('[data-den-early-title]')).toHaveText('Split title');
+  await expect(shellCopy.locator('[data-den-early-reason]')).toHaveText('Fits your viewing taste');
+  await expect(shellCopy.locator('[data-den-early-facts]')).toHaveText('2026 · Drama · Mystery');
+  await expect(shellCopy.locator('[data-den-early-overview]')).toHaveText(
+    'Every line after the break.',
+  );
+});
+
 // A household that has split into profiles: the Owner's lead is kept under the Owner library's key, the household's
 // own lead is what the library kept before the split.
 const OWNER_ID = 'a'.repeat(32);

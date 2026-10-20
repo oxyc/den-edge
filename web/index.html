@@ -474,25 +474,26 @@
             const backdrop = shell?.querySelector('[data-den-early-backdrop]');
             if (!(shell instanceof HTMLElement) || !(backdrop instanceof HTMLImageElement))
               return false;
+            const words = shell.querySelector('[data-den-early-copy]');
+            const [title, reason, facts, overview] = ['title', 'reason', 'facts', 'overview'].map(
+              (name) => words?.querySelector(`[data-den-early-${name}]`),
+            );
+            // The observer runs whenever the parser inserts a node, which can be part-way through the shell: a
+            // network chunk or a parser yield can end between two of its lines. Wait until every node this fills
+            // has been parsed, or the lines after the break stay empty once the observer disconnects.
+            if (copy && !(words instanceof HTMLElement && title && reason && facts && overview))
+              return false;
             backdrop.dataset.path = kept.path;
             backdrop.fetchPriority = 'high';
             backdrop.sizes = '100vw';
             backdrop.srcset = preload.imageSrcset;
             backdrop.src = preload.href;
-            const words = shell.querySelector('[data-den-early-copy]');
-            if (copy && words instanceof HTMLElement) {
-              const title = words.querySelector('[data-den-early-title]');
-              const reason = words.querySelector('[data-den-early-reason]');
-              const facts = words.querySelector('[data-den-early-facts]');
-              const overview = words.querySelector('[data-den-early-overview]');
-              if (title) title.textContent = copy.title;
-              if (reason) {
-                reason.textContent = copy.reason ?? '';
-                reason.hidden = !copy.reason;
-              }
-              if (facts)
-                facts.textContent = [copy.year, ...copy.genres].filter(Boolean).join(' · ');
-              if (overview) overview.textContent = copy.overview ?? '';
+            if (copy) {
+              title.textContent = copy.title;
+              reason.textContent = copy.reason ?? '';
+              reason.hidden = !copy.reason;
+              facts.textContent = [copy.year, ...copy.genres].filter(Boolean).join(' · ');
+              overview.textContent = copy.overview ?? '';
               words.dataset.path = kept.path;
               words.dataset.detail = copy.overview || copy.genres.length ? 'true' : 'false';
               words.hidden = false;
