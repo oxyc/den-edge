@@ -10,42 +10,40 @@ not install anything and does not prove a TV decoder.
 
 ## LG webOS (C2 and C4)
 
-The unavoidable local pieces are LG Developer Mode, its temporary developer key, and the one `ares-install` command.
 The launcher does not contain Den itself, so later Den UI updates arrive from the hosted URL without reinstalling it.
+You only need to repeat installation if the small launcher itself changes or LG removes it when Developer Mode expires.
 
 1. On the TV install **Developer Mode** from the LG Content Store. Sign in with an LG developer account, enable
-   **Dev Mode Status**, reboot, then enable **Key Server**. The Mac and TV must be on the same LAN.
-2. On the Mac, from this repository's `web/` directory:
+   **Dev Mode Status**, reboot, then enable **Key Server**. Note the TV's IP address and the six-character key-server
+   passphrase. The Mac and TV must be on the same LAN.
+2. On the Mac, install [Node.js 24 LTS](https://nodejs.org/) if `node --version` does not already work. Download and
+   extract [`den-tv-webos.tar.gz`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-webos.tar.gz),
+   then run its installer with the TV's IP:
 
    ```sh
-   npm install -g @webos-tools/cli@3.2.6
-   ares-setup-device
+   cd ~/Downloads
+   tar -xzf den-tv-webos.tar.gz
+   ./den-tv-webos/install.sh TV_IP
    ```
 
-   Choose `add`; name it `den-lg`, enter the TV's LAN address, port `9922`, user `prisoner`, and no password.
-3. Fetch the TV's developer key, entering the six-character passphrase displayed by the Developer Mode app:
+   Enter the six-character passphrase when asked. The script downloads LG's CLI if needed, registers the TV,
+   obtains its developer key, installs Den, and opens it.
 
-   ```sh
-   ares-novacom --device den-lg --getkey
-   ares-device --system-info --device den-lg
-   ```
+### LG updates and Developer Mode expiry
 
-4. Build, install and launch the production launcher:
+- **Ordinary Den updates need no reinstall.** The launcher always opens `https://den-tv.oxy.fi`, so UI fixes and
+  features arrive the next time Den loads. Reinstall only when release notes explicitly mention an LG launcher
+  change, or after the TV has removed the app.
+- The current Developer Mode app commonly starts with **999 hours (about 41 days)**, but the countdown shown on the
+  TV is authoritative; LG documents it as a limited session rather than guaranteeing a fixed duration. The installer
+  cannot renew it. Before it reaches zero, open Developer Mode and press **Extend**. It does not renew itself.
+- If the timer reaches zero, it is too late to extend: LG disables Developer Mode and removes development-installed
+  apps. Enable Developer Mode/Key Server again and rerun the same installer. LG also says ten reboots while the TV is
+  offline disable Developer Mode.
 
-   ```sh
-   npm exec --yes --package=@webos-tools/cli@3.2.6 -- \
-     node scripts/tv-package.mjs webos \
-     --url https://den-tv.oxy.fi/ --version 1.0.0
-   ares-install --device den-lg tv-packages/webos/packages/com.den.edge.tv_1.0.0_all.ipk
-   ares-launch --device den-lg com.den.edge.tv
-   ```
-
-For a launcher metadata change, increment `--version` (for example `1.0.1`) and run the last three commands again.
-For live inspection run `ares-inspect --device den-lg --app com.den.edge.tv`. LG removes development-installed apps
-when Developer Mode expires, so use **Extend** in that app before its timer runs out.
-
-LG references: [Developer Mode](https://webostv.developer.lge.com/develop/getting-started/developer-mode-app) and
-[webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide).
+LG references: [Developer Mode](https://webostv.developer.lge.com/develop/getting-started/developer-mode-app),
+[webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide), and
+[LG staff on the 999-hour counter](https://forum.webostv.developer.lge.com/t/topic/4854/2).
 
 ## Samsung Tizen 8 (2024-generation TV or newer)
 
@@ -57,33 +55,42 @@ cannot safely be generated or stored by Den's CI, so building/signing the `.wgt`
    called `DenSamsung`.
 2. On the TV open **Apps**, open **App Settings**, type `12345`, enable Developer Mode, enter the Mac's LAN address,
    and reboot the TV.
-3. In Tizen Studio Device Manager add the TV on port `26101`, connect it, then choose
-   **Permit to install applications**. Confirm the command-line bridge can see it:
+3. In Tizen Studio Device Manager add the TV on port `26101` and connect it. Confirm the command-line bridge can
+   see it:
 
    ```sh
    sdb devices
    ```
 
-4. From this repository's `web/` directory, build the production widget, sign it and install it. Replace
-   `TV_SERIAL` with the first column printed by `sdb devices` and use the `.wgt` filename actually produced:
+4. Download [`den-tv-tizen-unsigned.tar.gz`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen-unsigned.tar.gz),
+   extract it, and run its installer. Replace
+   `TV_SERIAL` with the first column printed by `sdb devices`; `DenSamsung` is the certificate profile from step 1:
 
    ```sh
-   npm ci --ignore-scripts
-   DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi \
-     DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi npm run build:tv:tizen
-   DEN_TV_API_ORIGIN=https://d-api.oxy.fi DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi \
-     node scripts/tv-package.mjs tizen \
-     --url https://d-api.oxy.fi --profile DenSamsung --version 1.0.0
-   ls tv-packages/tizen/packages/*.wgt
-   tizen install -s TV_SERIAL --name Den.wgt -- tv-packages/tizen/packages
-   tizen run -s TV_SERIAL -p DenTvApp1X.Den
+   cd ~/Downloads
+   tar -xzf den-tv-tizen-unsigned.tar.gz
+   cd den-tv-tizen
+   ./install.sh DenSamsung TV_SERIAL
    ```
 
-Increment `--version` for an update and repeat build, package and install. `sdb dlog` shows device logs. If signing
-or installation is refused, re-open Device Manager and permit installation again, then verify that the active
-Samsung certificate profile contains this TV's DUID. USB widget installation is not supported.
+The release contains the already-built app, but not a universal Samsung signature: Samsung requires the distributor
+certificate to contain your TV's DUID. The installer permits installation, signs the app for that TV, installs it,
+and opens it. For an update, download the current archive and rerun the same command. `sdb dlog` shows device logs.
+If signing is refused, verify that the active Samsung certificate profile contains this TV's DUID. USB widget
+installation is not supported.
 
-Samsung references: [connect a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html)
+### Samsung updates and certificates
+
+- Samsung's app contains the TV bundle rather than loading it from `den-tv.oxy.fi`. Backend/service changes arrive
+  without reinstalling, but **TV UI changes require downloading the current archive and rerunning `install.sh`**.
+- Back up the Samsung author certificate, its password, and the certificate profile. Samsung requires an update to
+  use the same author certificate as the installed app; the distributor certificate must be valid and contain this
+  TV's DUID when an update is signed and installed.
+- There is no LG-style 999-hour app-removal timer documented for this Samsung flow. Developer Mode and a reachable TV
+  are needed when installing an update; the installer runs the installation-permit command each time.
+
+Samsung references: [connect a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html),
+[create and preserve certificates](https://developer.samsung.com/smarttv/develop/getting-started/setting-up-sdk/creating-certificates.html),
 and [Tizen CLI](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html?device=htv).
 
 ## Hosting/operator checks

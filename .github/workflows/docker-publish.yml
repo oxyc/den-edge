@@ -261,9 +261,49 @@ jobs:
     if: ${{ !cancelled() && needs.source.result == 'success' && ((needs.source.outputs.patch == 'false' && needs.candidate.result == 'success') || (needs.source.outputs.patch == 'true' && needs.patch-build.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions:
+      contents: write
       packages: write
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.source.outputs.patch == 'false'
+        with:
+          ref: refs/tags/${{ needs.source.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.source.outputs.patch == 'false'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build installable TV release assets
+        if: needs.source.outputs.patch == 'false'
+        working-directory: web
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          TIZEN_BUILD: ${{ github.run_number }}
+          DEN_TV_API_ORIGIN: https://d-api.oxy.fi
+          DEN_TV_SERVICE_ORIGIN: https://d.oxy.fi
+        run: |
+          set -euo pipefail
+          test "$TIZEN_BUILD" -le 65535 || { echo "::error::Tizen build number exceeds 65535"; exit 1; }
+          npm ci --ignore-scripts
+          npm install --global @webos-tools/cli@3.2.6
+
+          node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$VERSION"
+          mkdir -p tv-release/den-tv-webos
+          mv "tv-packages/webos/packages/com.den.edge.tv_${VERSION}_all.ipk" \
+            tv-release/den-tv-webos/den-tv-webos.ipk
+          cp tv-packaging/install-webos.sh tv-release/den-tv-webos/install.sh
+          tar -C tv-release -czf den-tv-webos.tar.gz den-tv-webos
+
+          DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+            --version "1.0.${TIZEN_BUILD}"
+          mkdir -p tv-release/den-tv-tizen
+          mv tv-packages/tizen/shell tv-release/den-tv-tizen/app
+          cp tv-packaging/install-tizen.sh tv-release/den-tv-tizen/install.sh
+          tar -C tv-release -czf den-tv-tizen-unsigned.tar.gz den-tv-tizen
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -295,3 +335,17 @@ jobs:
           docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$EDGE_DIGEST"
           moved=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
           test "$moved" = "$EDGE_DIGEST" || { echo "::error::latest resolved to $moved, not $EDGE_DIGEST"; exit 1; }
+      - name: Publish TV downloads
+        if: needs.source.outputs.patch == 'false'
+        working-directory: web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.source.outputs.ref }}
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$REPO" --title "Den Edge $VERSION" --generate-notes
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            den-tv-webos.tar.gz den-tv-tizen-unsigned.tar.gz
