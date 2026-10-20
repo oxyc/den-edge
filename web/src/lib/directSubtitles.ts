@@ -10,6 +10,7 @@ const MAX_LIST_BYTES = 256 * 1024;
 const SUBTITLE_DEADLINE_MS = 10_000;
 
 interface Candidate {
+  id?: unknown;
   url?: unknown;
   lang?: unknown;
   release?: unknown;
@@ -29,7 +30,7 @@ type Track = NonNullable<Session['externalSubtitles']>[number];
 export interface DirectSubtitleTracks {
   subtitles: NonNullable<Session['subtitles']>;
   tracks: Track[];
-  load(language: string): Promise<Track | null>;
+  load(value: string): Promise<Track | null>;
   dispose(): void;
 }
 
@@ -188,34 +189,47 @@ export async function directSubtitles(
     if (encoded === null) return null;
     const body = JSON.parse(encoded) as { subtitles?: unknown };
     if (!Array.isArray(body.subtitles)) return null;
-    const available = new Map<string, { href: string; name: string; description: string }>();
+    const available = new Map<
+      string,
+      { href: string; language: string; name: string; description: string }
+    >();
+    const candidates = body.subtitles as Candidate[];
     for (const wantedLanguage of wanted) {
-      const href = (body.subtitles as Candidate[]).find((candidate) => {
-        if (language(candidate.lang) !== wantedLanguage) return false;
-        return candidateUrl(candidate.url) !== null;
-      });
-      const safe = candidateUrl(href?.url);
-      if (safe && href)
-        available.set(wantedLanguage, {
+      for (const [position, candidate] of candidates.entries()) {
+        const candidateLanguage = language(candidate.lang);
+        const safe = candidateUrl(candidate.url);
+        if (candidateLanguage !== wantedLanguage || !safe) continue;
+        const providerId =
+          typeof candidate.id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(candidate.id)
+            ? candidate.id
+            : String(position);
+        let value = `opensubtitles:${providerId}`;
+        while (available.has(value)) value += `:${position}`;
+        available.set(value, {
           href: safe,
-          name: subtitleName(wantedLanguage),
-          description: candidateDescription(href),
+          language: candidateLanguage,
+          name: subtitleName(candidateLanguage),
+          description: candidateDescription(candidate),
         });
+      }
     }
     if (!available.size) return null;
 
     const tracks: Track[] = [];
     const loading = new Map<string, Promise<Track | null>>();
     let disposed = false;
-    const load = (wantedLanguage: string): Promise<Track | null> => {
-      const trackLanguage = language(wantedLanguage);
-      if (!trackLanguage || disposed) return Promise.resolve(null);
-      const loaded = tracks.find((track) => track.language === trackLanguage);
+    const load = (wantedValue: string): Promise<Track | null> => {
+      const candidate =
+        available.get(wantedValue) ??
+        [...available.values()].find((one) => one.language === language(wantedValue));
+      if (!candidate || disposed) return Promise.resolve(null);
+      const value = available.has(wantedValue)
+        ? wantedValue
+        : [...available].find(([, one]) => one === candidate)![0];
+      const loaded = tracks.find((track) => track.value === value);
       if (loaded) return Promise.resolve(loaded);
-      const pending = loading.get(trackLanguage);
+      const pending = loading.get(value);
       if (pending) return pending;
-      const candidate = available.get(trackLanguage);
-      if (!candidate) return Promise.resolve(null);
       const request = (async () => {
         try {
           const response = await fetchImpl(candidate.href, {
@@ -248,7 +262,8 @@ export async function directSubtitles(
           }
           if (disposed) return null;
           const track = {
-            language: trackLanguage,
+            value,
+            language: candidate.language,
             name: candidate.name,
             url: URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' })),
             ...(castUrl ? { castUrl } : {}),
@@ -262,15 +277,16 @@ export async function directSubtitles(
         } catch {
           return null;
         } finally {
-          loading.delete(trackLanguage);
+          loading.delete(value);
         }
       })();
-      loading.set(trackLanguage, request);
+      loading.set(value, request);
       return request;
     };
     return {
-      subtitles: [...available].map(([language, candidate]) => ({
-        language,
+      subtitles: [...available].map(([value, candidate]) => ({
+        value,
+        language: candidate.language,
         name: candidate.name,
         description: candidate.description,
       })),

@@ -112,6 +112,26 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   if (!answer || !playlist || !release) return null;
   const nested = record(answer.session);
   if (!nested) {
+    const subtitles = Array.isArray(answer.subtitles)
+      ? answer.subtitles.flatMap((value): NonNullable<Session['subtitles']> => {
+          const track = record(value);
+          const language = text(track?.language);
+          const name = text(track?.name);
+          const valueName = text(track?.value);
+          const torboxTrack = number(track?.torboxTrack);
+          if (!language || !name || !valueName || torboxTrack === undefined || torboxTrack < 0)
+            return [];
+          return [
+            {
+              value: valueName,
+              language,
+              name,
+              description: text(track?.description),
+              torboxTrack,
+            },
+          ];
+        })
+      : [];
     return {
       external: true,
       playlist,
@@ -119,6 +139,8 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
       release,
       audioTrack: 0,
       audioTracks: [],
+      subtitles,
+      torboxSubtitle: number(answer.torboxSubtitle) ?? null,
       startupTiming: timing ?? undefined,
     };
   }
@@ -293,7 +315,7 @@ export async function startPlayback(
         if (session.external) {
           const external = await directSubtitles(url, want, session.release, fetchImpl, signal);
           if (external) {
-            session.subtitles = external.subtitles;
+            session.subtitles = [...(session.subtitles ?? []), ...external.subtitles];
             session.externalSubtitles = external.tracks;
             session.loadExternalSubtitle = external.load;
             session.subtitleSource = 'den_subtitles';

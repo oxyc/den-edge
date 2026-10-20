@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 describe('directSubtitles', () => {
-  it('lists one candidate per language, then lazily fetches and owns only chosen blobs', async () => {
+  it('lists every ranked candidate by preferred language, then lazily owns only chosen blobs', async () => {
     const bodies = new Map([
       [
         'https://den.example/den/~a1b2c3d4/subtitle/2.srt',
@@ -25,6 +25,10 @@ describe('directSubtitles', () => {
       [
         'https://den.example/den/~a1b2c3d4/subtitle/1.srt',
         '1\n00:00:01,000 --> 00:00:02,500\nHello!\n',
+      ],
+      [
+        'https://den.example/den/~a1b2c3d4/subtitle/3.srt',
+        '1\n00:00:01,000 --> 00:00:02,500\nHello from the second release!\n',
       ],
     ]);
     let staged = 0;
@@ -72,11 +76,19 @@ describe('directSubtitles', () => {
           language: 'sv',
           name: 'Swedish',
           description: 'OpenSubtitles · Swedish',
+          value: 'opensubtitles:2',
         },
         {
           language: 'en',
           name: 'English',
           description: 'OpenSubtitles · English first · ✓ Exact match · Trusted · 12.4K downloads',
+          value: 'opensubtitles:0',
+        },
+        {
+          language: 'en',
+          name: 'English',
+          description: 'OpenSubtitles · English second',
+          value: 'opensubtitles:1',
         },
       ],
       tracks: [],
@@ -84,6 +96,7 @@ describe('directSubtitles', () => {
     await expect(found?.load('sv')).resolves.toMatchObject({
       language: 'sv',
       name: 'Swedish',
+      value: 'opensubtitles:2',
       url: 'blob:subtitle-1',
       castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}1.vtt`,
     });
@@ -94,17 +107,25 @@ describe('directSubtitles', () => {
       url: 'blob:subtitle-2',
       castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}2.vtt`,
     });
+    await expect(found?.load('opensubtitles:1')).resolves.toMatchObject({
+      language: 'en',
+      value: 'opensubtitles:1',
+      url: 'blob:subtitle-3',
+      castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}3.vtt`,
+    });
     expect(fetchImpl.mock.calls.map(([input]) => String(input)).slice(1)).toEqual([
       'https://den.example/den/~a1b2c3d4/subtitle/2.srt',
       '/den/~a1b2c3d4/cast-subtitle',
       'https://den.example/den/~a1b2c3d4/subtitle/1.srt',
+      '/den/~a1b2c3d4/cast-subtitle',
+      'https://den.example/den/~a1b2c3d4/subtitle/3.srt',
       '/den/~a1b2c3d4/cast-subtitle',
     ]);
     const blobs = vi.mocked(URL.createObjectURL).mock.calls.map(([blob]) => blob as Blob);
     await expect(blobs[0]!.text()).resolves.toContain('00:00:01.000 --> 00:00:02.500');
     found?.dispose();
     found?.dispose();
-    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);
   });
 
   it('cancels a subtitle body as soon as streaming crosses the 2 MiB ceiling', async () => {

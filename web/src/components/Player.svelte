@@ -25,6 +25,7 @@
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     autoSubtitleLanguage,
+    canonicalLanguage,
     downmixLabel,
     nativeHls,
     endSession,
@@ -1017,6 +1018,16 @@
         result.subtitles ?? [],
       );
     }
+    // Settings and auto-pick name a language; the picker names a concrete candidate. Prefer the first offered
+    // candidate (TorBox embeds precede OpenSubtitles) and keep that identity across same-language alternatives.
+    if (subtitleChoice) {
+      const picked = result.subtitles?.find(
+        (track) =>
+          subtitleValue(track) === subtitleChoice ||
+          subtitleLanguagesMatch(track.language, subtitleChoice),
+      );
+      if (picked) subtitleChoice = subtitleValue(picked);
+    }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
@@ -1486,7 +1497,9 @@
       if (timing) {
         const firstFrameAt = Date.now();
         const engine = playsNatively ? 'native' : 'hls.js';
-        const subtitleIndex = current.subtitles?.findIndex((s) => s.language === subtitleChoice);
+        const subtitleIndex = current.subtitles?.findIndex(
+          (track) => subtitleValue(track) === subtitleChoice,
+        );
         sendStartupReport({
           sessionMs: Math.round(timing.answeredAt - timing.askedAt),
           ...parseServerTiming(current.startupTiming),
@@ -1509,7 +1522,7 @@
             },
             {
               index: subtitleIndex,
-              language: subtitleChoice ?? undefined,
+              language: selectedSubtitleLanguage(current) ?? undefined,
               source: subtitleSourceOf(
                 current.subtitleSource === 'den_subtitles',
                 subtitleChoice !== null,
@@ -1747,9 +1760,9 @@
           subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
           image: poster,
           currentTime: started ?? resume.seconds ?? 0,
-          subtitleLanguage: subtitleChoice,
+          subtitleLanguage: selectedSubtitleLanguage(current),
           subtitleTrack: current.externalSubtitles
-            ?.filter((track) => track.language === subtitleChoice && track.castUrl)
+            ?.filter((track) => track.value === subtitleChoice && track.castUrl)
             .map((track) => ({
               language: track.language,
               name: track.name,
@@ -2320,14 +2333,22 @@
    */
   function applySubtitles() {
     const choice = subtitleChoice;
+    const language = selectedSubtitleLanguage();
     if (hls && !session?.externalSubtitles?.length) {
       hls.subtitleDisplay = choice !== null;
       hls.subtitleTrack =
-        choice === null ? -1 : hls.subtitleTracks.findIndex((track) => track.lang === choice);
+        language === null
+          ? -1
+          : hls.subtitleTracks.findIndex((track) => subtitleLanguagesMatch(track.lang, language));
       return;
     }
+    const sidecar = session?.externalSubtitles?.some((track) => track.value === choice) ?? false;
     for (const track of Array.from(video?.textTracks ?? []))
-      track.mode = choice !== null && track.language === choice ? 'showing' : 'disabled';
+      track.mode =
+        choice !== null &&
+        (sidecar ? track.label === choice : subtitleLanguagesMatch(track.language, language))
+          ? 'showing'
+          : 'disabled';
   }
 
   /**
@@ -2340,12 +2361,12 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
-  async function loadExternalSubtitle(current: Session, language: string): Promise<void> {
-    const track = await current.loadExternalSubtitle?.(language);
+  async function loadExternalSubtitle(current: Session, value: string): Promise<void> {
+    const track = await current.loadExternalSubtitle?.(value);
     if (!track || session !== current) return;
     // The loader owns and deduplicates blobs; this array is render state for the `<track>` children.
     current.externalSubtitles = [
-      ...(current.externalSubtitles ?? []).filter((one) => one.language !== track.language),
+      ...(current.externalSubtitles ?? []).filter((one) => one.value !== track.value),
       track,
     ];
     await renderTick();
@@ -2359,9 +2380,9 @@
       {
         type: 'den-subtitle',
         id: current.playlist,
-        language: subtitleChoice,
+        language: selectedSubtitleLanguage(current),
         track: current.externalSubtitles
-          ?.filter((track) => track.language === subtitleChoice && track.castUrl)
+          ?.filter((track) => track.value === subtitleChoice && track.castUrl)
           .map((track) => ({
             language: track.language,
             name: track.name,
@@ -2373,6 +2394,32 @@
   }
 
   /** Apple TV deliberately leaves an untagged embedded track as Unknown; a filename is not language evidence. */
+  function subtitleValue(track: NonNullable<Session['subtitles']>[number]): string {
+    return track.value ?? track.language;
+  }
+
+  function subtitleLanguagesMatch(left: string | null | undefined, right: string | null): boolean {
+    if (right === null) return false;
+    const a = canonicalLanguage(left ?? '');
+    const b = canonicalLanguage(right);
+    const unknown = (language: string) => !language || language === 'und' || language === 'unknown';
+    return a === b || (unknown(a) && unknown(b));
+  }
+
+  function selectedSubtitle(
+    current: Session | null = session,
+    choice: string | null = subtitleChoice,
+  ): NonNullable<Session['subtitles']>[number] | undefined {
+    return current?.subtitles?.find(
+      (track) => subtitleValue(track) === choice || subtitleLanguagesMatch(track.language, choice),
+    );
+  }
+
+  function selectedSubtitleLanguage(current: Session | null = session): string | null {
+    if (subtitleChoice === null) return null;
+    return selectedSubtitle(current)?.language ?? subtitleChoice;
+  }
+
   function subtitleLabel(track: NonNullable<Session['subtitles']>[number]): string {
     const code = track.language.trim().toLowerCase();
     return [
@@ -2416,15 +2463,37 @@
       if (next === null) subtitleTurnedOffMidPlay = true;
       else subtitleSwitchedMidPlay = true;
     }
-    if (next && session?.external && subtitlesNeedPlaylist()) {
+    if (
+      next &&
+      session?.external &&
+      selectedSubtitle(session, next)?.torboxTrack === undefined &&
+      subtitlesNeedPlaylist()
+    ) {
       // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
       const previous = subtitleChoice;
       subtitleChoice = next;
       switchDelivery(() => (subtitleChoice = previous));
       return;
     }
+    const current = session;
+    const previous = subtitleChoice;
     subtitleChoice = next;
-    if (next && session) await loadExternalSubtitle(session, next);
+    if (current?.external) {
+      const nextTrack = selectedSubtitle(current);
+      const nextTorBox = nextTrack?.torboxTrack;
+      if ((current.torboxSubtitle ?? undefined) !== nextTorBox) {
+        restart(
+          {
+            filename: current.release.filename,
+            ...(nextTorBox === undefined ? {} : { subtitleTrack: nextTorBox }),
+          },
+          () => (subtitleChoice = previous),
+          'direct',
+        );
+        return;
+      }
+    }
+    if (next && current) await loadExternalSubtitle(current, next);
     applySubtitles();
     sendSubtitleChoice();
   }
@@ -2563,13 +2632,17 @@
    * (`transcode: 'never'`) — where only one would do, the change isn't made, `undo` puts back what was set for it, and
    * the viewer is told.
    */
-  function restart(pick: { audioTrack?: number; filename: string } | undefined, undo?: () => void) {
+  function restart(
+    pick: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
+    undo?: () => void,
+    directOnly?: 'direct',
+  ) {
     const current = session;
     if (!current) return;
     report();
     carryPosition();
     if (played) {
-      void begin(pick, { transcode: 'never' }, current).then((moved) => {
+      void begin(pick, { transcode: 'never' }, current, directOnly).then((moved) => {
         // False is a player closed, or a session replaced, meanwhile: nothing to say.
         if (typeof moved !== 'string' || session !== current) return;
         startAt = null;
@@ -2578,7 +2651,7 @@
       });
       return;
     }
-    void begin(pick);
+    void begin(pick, {}, undefined, directOnly);
   }
 
   /**
@@ -2683,8 +2756,11 @@
    * and, when one was open, the same session.
    */
   function sendReports(stats: ReturnType<Watcher['stats']> | undefined) {
-    const subtitleLanguage = reportableLanguage(subtitleChoice);
-    const subtitleIndex = session?.subtitles?.findIndex((s) => s.language === subtitleChoice);
+    const chosenSubtitleLanguage = selectedSubtitleLanguage();
+    const subtitleLanguage = reportableLanguage(chosenSubtitleLanguage);
+    const subtitleIndex = session?.subtitles?.findIndex(
+      (track) => subtitleValue(track) === subtitleChoice,
+    );
     const identity = identityOf(
       title,
       playingEpisode.season,
@@ -2698,7 +2774,7 @@
         : undefined,
       {
         index: subtitleIndex,
-        language: subtitleChoice ?? undefined,
+        language: chosenSubtitleLanguage ?? undefined,
         source: subtitleSourceOf(
           lastSubtitleSource === 'den_subtitles',
           subtitleLanguage !== undefined,
@@ -3138,8 +3214,8 @@
             else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
         >
-          {#each session?.externalSubtitles ?? [] as track (track.language)}
-            <track kind="subtitles" src={track.url} srclang={track.language} label={track.name} />
+          {#each session?.externalSubtitles ?? [] as track (track.value)}
+            <track kind="subtitles" src={track.url} srclang={track.language} label={track.value} />
           {/each}
         </video>
         {#if reconnecting}
@@ -3249,7 +3325,11 @@
         <!-- Den owns this picker so it can distinguish built-in tracks from OpenSubtitles candidates and show
              match metadata the native video control cannot carry. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
-          {@const chosenSubtitle = session.subtitles.find((one) => one.language === subtitleChoice)}
+          {@const chosenSubtitle = session.subtitles.find(
+            (track) =>
+              subtitleValue(track) === subtitleChoice ||
+              subtitleLanguagesMatch(track.language, subtitleChoice),
+          )}
           {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
           <div class="pick-menu">
             <ActionMenu
@@ -3269,8 +3349,8 @@
                   group: 'subtitle',
                   label: subtitleLabel(track),
                   description: subtitleDescription(session!, track),
-                  checked: track.language === subtitleChoice,
-                  onselect: () => void chooseSubtitle(track.language),
+                  checked: subtitleValue(track) === subtitleChoice,
+                  onselect: () => void chooseSubtitle(subtitleValue(track)),
                 })),
               ]}
             >
