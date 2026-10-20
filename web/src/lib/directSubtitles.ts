@@ -10,8 +10,19 @@ const MAX_LIST_BYTES = 256 * 1024;
 const SUBTITLE_DEADLINE_MS = 10_000;
 
 interface Candidate {
+  id?: unknown;
   url?: unknown;
   lang?: unknown;
+  release?: unknown;
+  hd?: unknown;
+  fps?: unknown;
+  hashMatch?: unknown;
+  trusted?: unknown;
+  downloads?: unknown;
+  machineTranslated?: unknown;
+  aiTranslated?: unknown;
+  foreignPartsOnly?: unknown;
+  looksDubbed?: unknown;
 }
 
 type Track = NonNullable<Session['externalSubtitles']>[number];
@@ -19,7 +30,7 @@ type Track = NonNullable<Session['externalSubtitles']>[number];
 export interface DirectSubtitleTracks {
   subtitles: NonNullable<Session['subtitles']>;
   tracks: Track[];
-  load(language: string): Promise<Track | null>;
+  load(value: string): Promise<Track | null>;
   dispose(): void;
 }
 
@@ -29,7 +40,7 @@ function language(value: unknown): string | null {
   return base && /^[a-z]{2,3}$/.test(base) ? base : null;
 }
 
-/** A candidate's language and source, named as den-remux names its downloaded renditions. */
+/** A candidate's language, named consistently with the rest of Den. */
 function subtitleName(code: string): string {
   let language = code;
   try {
@@ -40,7 +51,37 @@ function subtitleName(code: string): string {
   } catch {
     // An engine without `Intl.DisplayNames` names the code itself.
   }
-  return `${language} · OpenSubtitles`;
+  return language;
+}
+
+function compactCount(value: number): string {
+  try {
+    return new Intl.NumberFormat(globalThis.navigator?.language ?? 'en', {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** The same useful OpenSubtitles signals Apple TV puts beneath a language, plus its full release name. */
+function candidateDescription(candidate: Candidate): string {
+  const facts = ['OpenSubtitles'];
+  if (typeof candidate.release === 'string' && candidate.release.trim())
+    facts.push(candidate.release.trim());
+  if (candidate.hashMatch === true) facts.push('✓ Exact match');
+  if (candidate.hd === true) facts.push('HD');
+  if (candidate.trusted === true) facts.push('Trusted');
+  if (typeof candidate.downloads === 'number' && Number.isFinite(candidate.downloads))
+    facts.push(`${compactCount(candidate.downloads)} downloads`);
+  if (candidate.machineTranslated === true || candidate.aiTranslated === true)
+    facts.push('Auto-translated');
+  if (candidate.foreignPartsOnly === true) facts.push('Foreign parts only');
+  if (candidate.looksDubbed === true) facts.push('Dubbed release');
+  if (typeof candidate.fps === 'number' && Number.isFinite(candidate.fps))
+    facts.push(`${candidate.fps} fps`);
+  return facts.join(' · ');
 }
 
 function candidateUrl(value: unknown): string | null {
@@ -65,6 +106,23 @@ function listUrl(
   const id = series ? `${want.imdb}:${want.season}:${want.episode}` : want.imdb;
   const extra = `filename=${encodeURIComponent(release.filename)}&videoSize=${release.size}`;
   return `${base}/subtitles/${series ? 'series' : 'movie'}/${id}/${extra}.json`;
+}
+
+function stageUrl(playback: string): string | null {
+  const base = playback.endsWith('/playback') ? playback.slice(0, -'/playback'.length) : null;
+  return base ? `${base}/cast-subtitle` : null;
+}
+
+function stagedUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && /^\/subtitle\/[0-9a-f]{64}\.vtt$/.test(url.pathname)
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function webvtt(srt: string): string {
@@ -131,32 +189,50 @@ export async function directSubtitles(
     if (encoded === null) return null;
     const body = JSON.parse(encoded) as { subtitles?: unknown };
     if (!Array.isArray(body.subtitles)) return null;
-    const available = new Map<string, string>();
+    const available = new Map<
+      string,
+      { href: string; language: string; name: string; description: string }
+    >();
+    const candidates = body.subtitles as Candidate[];
     for (const wantedLanguage of wanted) {
-      const href = (body.subtitles as Candidate[]).find((candidate) => {
-        if (language(candidate.lang) !== wantedLanguage) return false;
-        return candidateUrl(candidate.url) !== null;
-      });
-      const safe = candidateUrl(href?.url);
-      if (safe) available.set(wantedLanguage, safe);
+      for (const [position, candidate] of candidates.entries()) {
+        const candidateLanguage = language(candidate.lang);
+        const safe = candidateUrl(candidate.url);
+        if (candidateLanguage !== wantedLanguage || !safe) continue;
+        const providerId =
+          typeof candidate.id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(candidate.id)
+            ? candidate.id
+            : String(position);
+        let value = `opensubtitles:${providerId}`;
+        while (available.has(value)) value += `:${position}`;
+        available.set(value, {
+          href: safe,
+          language: candidateLanguage,
+          name: subtitleName(candidateLanguage),
+          description: candidateDescription(candidate),
+        });
+      }
     }
     if (!available.size) return null;
 
     const tracks: Track[] = [];
     const loading = new Map<string, Promise<Track | null>>();
     let disposed = false;
-    const load = (wantedLanguage: string): Promise<Track | null> => {
-      const trackLanguage = language(wantedLanguage);
-      if (!trackLanguage || disposed) return Promise.resolve(null);
-      const loaded = tracks.find((track) => track.language === trackLanguage);
+    const load = (wantedValue: string): Promise<Track | null> => {
+      const candidate =
+        available.get(wantedValue) ??
+        [...available.values()].find((one) => one.language === language(wantedValue));
+      if (!candidate || disposed) return Promise.resolve(null);
+      const value = available.has(wantedValue)
+        ? wantedValue
+        : [...available].find(([, one]) => one === candidate)![0];
+      const loaded = tracks.find((track) => track.value === value);
       if (loaded) return Promise.resolve(loaded);
-      const pending = loading.get(trackLanguage);
+      const pending = loading.get(value);
       if (pending) return pending;
-      const href = available.get(trackLanguage);
-      if (!href) return Promise.resolve(null);
       const request = (async () => {
         try {
-          const response = await fetchImpl(href, {
+          const response = await fetchImpl(candidate.href, {
             headers: { accept: 'text/vtt, text/plain' },
             cache: 'no-store',
             signal: boundedSignal(),
@@ -164,10 +240,33 @@ export async function directSubtitles(
           if (!response.ok) return null;
           const text = await boundedText(response);
           if (text === null || disposed) return null;
+          const vtt = webvtt(text);
+          let castUrl: string | undefined;
+          const staging = stageUrl(playback);
+          if (staging) {
+            try {
+              const staged = await fetchImpl(staging, {
+                method: 'POST',
+                headers: { accept: 'application/json', 'content-type': 'text/vtt; charset=utf-8' },
+                body: vtt,
+                cache: 'no-store',
+                signal: boundedSignal(),
+              });
+              if (staged.ok)
+                castUrl = stagedUrl(
+                  ((await staged.json().catch(() => null)) as { url?: unknown } | null)?.url,
+                );
+            } catch {
+              // The local browser track remains useful when Cast staging is unavailable.
+            }
+          }
+          if (disposed) return null;
           const track = {
-            language: trackLanguage,
-            name: subtitleName(trackLanguage),
-            url: URL.createObjectURL(new Blob([webvtt(text)], { type: 'text/vtt' })),
+            value,
+            language: candidate.language,
+            name: candidate.name,
+            url: URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' })),
+            ...(castUrl ? { castUrl } : {}),
           };
           if (disposed) {
             URL.revokeObjectURL(track.url);
@@ -178,14 +277,19 @@ export async function directSubtitles(
         } catch {
           return null;
         } finally {
-          loading.delete(trackLanguage);
+          loading.delete(value);
         }
       })();
-      loading.set(trackLanguage, request);
+      loading.set(value, request);
       return request;
     };
     return {
-      subtitles: [...available].map(([code]) => ({ language: code, name: subtitleName(code) })),
+      subtitles: [...available].map(([value, candidate]) => ({
+        value,
+        language: candidate.language,
+        name: candidate.name,
+        description: candidate.description,
+      })),
       tracks,
       load,
       dispose: () => {

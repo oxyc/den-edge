@@ -204,6 +204,9 @@ pub struct AppState {
     pub cast_origin: Option<String>,
     /// The Cast page's built files (env `CAST_DIR`), served on `cast_origin`'s host.
     pub cast_dir: Option<std::path::PathBuf>,
+    /// Short-lived WebVTT capabilities handed to Cast receivers. The browser uploads only a chosen subtitle;
+    /// neither its member/grant proof nor the addon's subtitle URL ever reaches the receiver.
+    pub cast_subtitles: Mutex<cast::Subtitles>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
     pub new_libraries: library::NewLibraries,
     /// The household's TMDB key (env `TMDB_KEY`), lent to devices that have none of their own (`tmdb.rs`).
@@ -406,6 +409,7 @@ impl AppState {
             public_listener_unanswered: std::sync::atomic::AtomicBool::new(false),
             cast_origin: None,
             cast_dir: None,
+            cast_subtitles: Mutex::new(cast::Subtitles::default()),
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,
             tmdb_client: None,

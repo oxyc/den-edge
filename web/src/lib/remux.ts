@@ -16,12 +16,22 @@ export { nativeHls } from './nativeHls';
 export interface Session {
   /** A URL Hearth returned without a Remux lifecycle. Client-only; never sent by Hearth. */
   external?: boolean;
-  /** Blob-backed WebVTT tracks fetched through Den for an externally managed media playlist. */
-  externalSubtitles?: { language: string; name: string; url: string }[];
+  /** Blob-backed WebVTT tracks fetched through Den, optionally staged for a Cast receiver. */
+  externalSubtitles?: {
+    value: string;
+    language: string;
+    name: string;
+    url: string;
+    castUrl?: string;
+  }[];
   /** Materializes one selected external subtitle language; repeated calls reuse its blob. */
-  loadExternalSubtitle?: (
-    language: string,
-  ) => Promise<{ language: string; name: string; url: string } | null>;
+  loadExternalSubtitle?: (value: string) => Promise<{
+    value: string;
+    language: string;
+    name: string;
+    url: string;
+    castUrl?: string;
+  } | null>;
   /** Releases client-owned media artifacts such as external subtitle blob URLs. */
   dispose?: () => void;
   /** Explicit Remux lifecycle capabilities returned by Hearth's playback facade. */
@@ -78,7 +88,18 @@ export interface Session {
    * the player had no picker. One document per language: den-remux exposes the best match it found, which is
    * why `maxSubtitlesPerLanguage` cannot be honoured here however it is set.
    */
-  subtitles?: { language: string; name: string }[];
+  subtitles?: {
+    /** Stable picker identity. Older Remux answers omit it and use the language. */
+    value?: string;
+    language: string;
+    name: string;
+    /** A quiet second line for Den's picker: source, release match and provider quality signals. */
+    description?: string;
+    /** TorBox's embedded stream index; selecting it creates another direct TorBox playlist. */
+    torboxTrack?: number;
+  }[];
+  /** Embedded TorBox stream selected into this managed playlist, or null/absent for none. */
+  torboxSubtitle?: number | null;
   /**
    * `den_subtitles` when this session was opened with a den-subtitles install offered as a candidate
    * (`startSession`) — never which install — for the player's own den-edge outcome report
@@ -128,6 +149,8 @@ export interface Want {
   playable?: Playable;
   /** Another track of an earlier session's release: its index there, and that release's filename. */
   audioTrack?: number;
+  /** TorBox embedded subtitle index. Omitted means no embedded track in its managed playlist. */
+  subtitleTrack?: number;
   filename?: string;
   /** The second playback starts at, which den-remux names in the playlist (`EXT-X-START`) for a native player. */
   startAt?: number;
@@ -772,7 +795,7 @@ const ISO_639_2: Readonly<Record<string, string>> = {
  * subtag itself, lower-cased — already what a subtitle rendition's `language` and a BCP-47 browser tag are, so
  * only an audio track's own tag ever actually needs the mapping.
  */
-function canonicalLanguage(tag: string): string {
+export function canonicalLanguage(tag: string): string {
   const primary = tag.split(/[-_]/)[0]!.toLowerCase();
   return ISO_639_2[primary] ?? primary;
 }

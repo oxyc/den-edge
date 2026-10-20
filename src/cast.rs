@@ -3,9 +3,76 @@
 //! else: no API route, no web app, not even `/health`. Its answers carry the headers the separate den-cast server
 //! sent before this replaced it, and only those.
 
-use axum::body::Body;
+use crate::handler::{error, json_reply};
+use crate::AppState;
+use axum::body::{Body, Bytes};
+use axum::extract::Request;
 use axum::http::{header, HeaderValue, Method, Response, StatusCode};
-use std::path::{Path, PathBuf};
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+pub const MAX_SUBTITLE_BYTES: usize = 2 * 1024 * 1024;
+// Long enough to turn captions on late in a long film; still ephemeral and bounded independently below.
+const SUBTITLE_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+const SUBTITLE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const SUBTITLE_CACHE_ENTRIES: usize = 64;
+
+struct Subtitle {
+    body: Bytes,
+    expires_at: u64,
+}
+
+/// A bounded, process-local capability store. Losing it on restart merely makes the receiver reload its captions.
+#[derive(Default)]
+pub struct Subtitles {
+    entries: HashMap<String, Subtitle>,
+    bytes: usize,
+}
+
+impl Subtitles {
+    fn reap(&mut self, now: u64) {
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, subtitle)| subtitle.expires_at <= now)
+            .map(|(token, _)| token.clone())
+            .collect();
+        for token in expired {
+            if let Some(subtitle) = self.entries.remove(&token) {
+                self.bytes -= subtitle.body.len();
+            }
+        }
+    }
+
+    fn insert(&mut self, now: u64, body: Bytes) -> String {
+        self.reap(now);
+        while self.entries.len() >= SUBTITLE_CACHE_ENTRIES
+            || self.bytes.saturating_add(body.len()) > SUBTITLE_CACHE_BYTES
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, subtitle)| subtitle.expires_at)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            if let Some(subtitle) = self.entries.remove(&oldest) {
+                self.bytes -= subtitle.body.len();
+            }
+        }
+        let token = crate::hex(&crate::random_bytes::<32>());
+        self.bytes += body.len();
+        self.entries.insert(token.clone(), Subtitle { body, expires_at: now + SUBTITLE_TTL_MS });
+        token
+    }
+
+    fn get(&mut self, now: u64, token: &str) -> Option<Bytes> {
+        self.reap(now);
+        self.entries.get(token).map(|subtitle| subtitle.body.clone())
+    }
+}
 
 /// Who may frame the page. The page is built with the same list (`VITE_DEN_PARENT_ORIGINS`) and answers only their
 /// messages.
@@ -24,12 +91,28 @@ pub fn is_host(cast_origin: Option<&str>, host: &str) -> bool {
 
 /// `/` or a file under `dir`. A path that is not a file is the page itself, so its own routes load it, except under
 /// `assets/`, where a missing file is a 404. Without a `dir` every path is a 404: the name still answers nothing else.
-pub async fn serve(dir: Option<&Path>, method: &Method, path: &str) -> Response<Body> {
+pub async fn serve(state: &AppState, method: &Method, path: &str) -> Response<Body> {
     if !matches!(*method, Method::GET | Method::HEAD) {
         let mut out = empty(StatusCode::METHOD_NOT_ALLOWED);
         out.headers_mut().insert(header::ALLOW, HeaderValue::from_static("GET,HEAD"));
         return out;
     }
+    if let Some(token) = path.strip_prefix("/subtitle/").and_then(|path| path.strip_suffix(".vtt")) {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return empty(StatusCode::NOT_FOUND);
+        }
+        let Some(body) = crate::lock(&state.cast_subtitles).get(state.now(), token) else {
+            return empty(StatusCode::NOT_FOUND);
+        };
+        let mut out = Response::new(Body::from(body.clone()));
+        let headers = out.headers_mut();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/vtt; charset=utf-8"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+        return out;
+    }
+    let dir = state.cast_dir.as_deref();
     let Some(dir) = dir else { return empty(StatusCode::NOT_FOUND) };
     let path = path.strip_prefix('/').unwrap_or_default();
     if path.is_empty() {
@@ -57,6 +140,44 @@ pub async fn serve(dir: Option<&Path>, method: &Method, path: &str) -> Response<
     } else {
         empty(StatusCode::NOT_FOUND)
     }
+}
+
+/// A configured Den install's subtitle staging endpoint: `/<den>/<config>/cast-subtitle`. A virtual install is
+/// authenticated by its matching guest grant; every other install requires household membership.
+pub fn is_stage_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/den/") else { return false };
+    let Some((install, operation)) = rest.split_once('/') else { return false };
+    !install.is_empty() && operation == "cast-subtitle"
+}
+
+pub async fn stage(state: &AppState, req: Request) -> Response<Body> {
+    let path = req.uri().path().to_owned();
+    let install =
+        path.strip_prefix("/den/").and_then(|rest| rest.strip_suffix("/cast-subtitle")).unwrap_or_default();
+    let authorized = if let Some(gid) = install.strip_prefix('~') {
+        let claim = req.headers().get(crate::grants::HEADER).and_then(|value| value.to_str().ok());
+        crate::grants::authenticate(state, claim, Some(gid)).await.is_ok()
+    } else {
+        let claim = req.headers().get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
+        crate::library::is_household_member(state, claim).await
+    };
+    if !authorized {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_SUBTITLE_BYTES).await else {
+        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"));
+    };
+    if body.is_empty() || std::str::from_utf8(&body).map_or(true, |text| !text.starts_with("WEBVTT")) {
+        return json_reply(StatusCode::BAD_REQUEST, &error("bad_subtitle"));
+    }
+    let Some(origin) = state.cast_origin.as_deref() else {
+        return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("cast_unavailable"));
+    };
+    let token = crate::lock(&state.cast_subtitles).insert(state.now(), body);
+    json_reply(
+        StatusCode::CREATED,
+        &json!({ "url": format!("{}/subtitle/{token}.vtt", origin.trim_end_matches('/')) }),
+    )
 }
 
 async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
@@ -107,6 +228,7 @@ fn empty(status: StatusCode) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::{body_text, temp_dir, Harness};
+    use axum::body::Bytes;
     use axum::http::{header, StatusCode};
     use std::sync::Arc;
 
@@ -222,6 +344,25 @@ mod tests {
         };
         assert_eq!(directive("style-src"), "style-src 'self' 'unsafe-inline'");
         assert_eq!(directive("script-src"), "script-src 'self' https://www.gstatic.com");
+    }
+
+    #[tokio::test]
+    async fn the_cast_host_serves_only_live_random_subtitle_capabilities() {
+        let h = harness();
+        let body = Bytes::from_static(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHej!\n");
+        let token = crate::lock(&h.state.cast_subtitles).insert(h.state.now(), body.clone());
+        let path = format!("/subtitle/{token}.vtt");
+        let response = h.send("GET", &path, None, &[("host", "cast.example")]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/vtt; charset=utf-8");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body_text(response).await.as_bytes(), body.as_ref());
+
+        let missing = h
+            .send("GET", &format!("/subtitle/{}.vtt", "0".repeat(64)), None, &[("host", "cast.example")])
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_text(missing).await, "");
     }
 
     /// The Cast page's name is public and outside Access: it must not become another way into den-edge. Every route

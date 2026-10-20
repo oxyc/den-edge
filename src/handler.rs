@@ -229,7 +229,7 @@ async fn cast(state: &AppState, req: Request, started: Instant, rid: &str) -> Re
             busy()
         }
         Ok(admission) => {
-            let mut resp = crate::cast::serve(state.cast_dir.as_deref(), &method, req.uri().path()).await;
+            let mut resp = crate::cast::serve(state, &method, req.uri().path()).await;
             if method == Method::HEAD {
                 *resp.body_mut() = Body::empty();
             }
@@ -610,6 +610,11 @@ async fn dispatch(
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
+    // The selected WebVTT is staged here before the addon relay sees its `/den/<install>/` mount. The same member
+    // or matching guest proof that fetched it authorizes the upload; only its random, expiring URL leaves Den.
+    if crate::cast::is_stage_path(&path) {
+        return crate::cast::stage(state, req).await;
+    }
     // A guest's `/<addon>/~<gid>/…` and its `/remux` control calls, on every face: the grant is the gate, and it
     // comes before the member gate below, which a guest never passes.
     let req = match crate::relay::guest(state, req, rid, face).await {
@@ -1086,6 +1091,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/subtitles/") => "/subtitles",
         "/den/migrate" => "/den/migrate",
         p if den_playback_path(p) => "/den/:config/playback",
+        p if crate::cast::is_stage_path(p) => "/den/:config/cast-subtitle",
         p if p == "/den" || p.starts_with("/den/") => "/den",
         p if p.starts_with("/remux/") => "/remux",
         "/mcp" => "/mcp",
@@ -1171,6 +1177,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
         // dispatch and never enter the relay.
         "/den/:config/playback" => Some(POST_OPTIONS),
+        "/den/:config/cast-subtitle" => Some(POST),
         "/den/migrate" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
@@ -1202,6 +1209,7 @@ fn body_cap(route: &str) -> usize {
         | "/playback/outcome"
         | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
+        "/den/:config/cast-subtitle" => crate::cast::MAX_SUBTITLE_BYTES,
         "/den/migrate" => crate::relay::MIGRATION_BODY_BYTES,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
@@ -1544,9 +1552,14 @@ pub mod tests {
             assert!(den_playback_path(path));
             assert_eq!(route_label(path), "/den/:config/playback");
         }
+        for path in ["/den/sealed-config/cast-subtitle", "/den/~deadbeef/cast-subtitle"] {
+            assert_eq!(route_label(path), "/den/:config/cast-subtitle");
+        }
         assert!(!den_playback_path("/den/sealed-config/playback/extra"));
         assert_eq!(allowed_methods("/den/:config/playback"), Some(&[Method::POST, Method::OPTIONS][..]));
         assert_eq!(body_cap("/den/:config/playback"), 16 * 1024);
+        assert_eq!(allowed_methods("/den/:config/cast-subtitle"), Some(&[Method::POST][..]));
+        assert_eq!(body_cap("/den/:config/cast-subtitle"), crate::cast::MAX_SUBTITLE_BYTES);
         assert!(!is_control("/den/:config/playback"));
         assert_eq!(route_label("/den/migrate"), "/den/migrate");
         for (path, at) in [

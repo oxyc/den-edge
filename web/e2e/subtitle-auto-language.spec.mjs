@@ -127,7 +127,8 @@ test.describe('a guest whose browser is Swedish and never set a subtitle languag
         { timeout: 30_000 },
       );
       expect(await page.evaluate(shownLanguage)).toBeNull();
-      await page.getByLabel('Subtitles').selectOption('en');
+      await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+      await page.getByRole('menuitemradio', { name: /English/ }).click();
       await expect.poll(() => page.evaluate(shownLanguage), { timeout: 10_000 }).toBe('en');
     } finally {
       await browser.close();

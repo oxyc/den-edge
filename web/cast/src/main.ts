@@ -34,6 +34,8 @@ interface Media {
   image?: string;
   currentTime?: number;
   subtitleLanguage?: string | null;
+  /** A chosen external WebVTT staged on this page's origin for the receiver. */
+  subtitleTrack?: { language: string; name: string; url: string };
   terminal?: boolean;
   /** Externally managed media has no Den lifecycle endpoint; this URL is the only capability handed to Cast. */
   external?: boolean;
@@ -103,6 +105,8 @@ interface CastGlobals {
         HlsVideoSegmentFormat: { FMP4: unknown; MPEG2_TS: unknown };
         MetadataType: { GENERIC: unknown };
         StreamType: { BUFFERED: unknown };
+        TrackType: { TEXT: unknown };
+        TextTrackType: { SUBTITLES: unknown };
         GenericMediaMetadata: new () => {
           title?: string;
           subtitle?: string;
@@ -116,6 +120,17 @@ interface CastGlobals {
           metadata?: unknown;
           hlsSegmentFormat?: unknown;
           hlsVideoSegmentFormat?: unknown;
+          tracks?: unknown[];
+        };
+        Track: new (
+          id: number,
+          type: unknown,
+        ) => {
+          trackContentId?: string;
+          trackContentType?: string;
+          subtype?: unknown;
+          name?: string;
+          language?: string;
         };
         LoadRequest: new (info: unknown) => { currentTime?: number; activeTrackIds?: number[] };
         EditTracksInfoRequest: new (activeTrackIds?: number[]) => unknown;
@@ -400,6 +415,18 @@ function sameLanguage(track: string | null | undefined, wanted: string): boolean
   return one === two || one.split('-')[0] === two.split('-')[0];
 }
 
+function validSubtitleTrack(
+  value: Media['subtitleTrack'],
+): value is NonNullable<Media['subtitleTrack']> {
+  if (!value || !/^[a-z]{2,3}$/i.test(value.language) || !value.name) return false;
+  try {
+    const url = new URL(value.url);
+    return url.origin === location.origin && /^\/subtitle\/[0-9a-f]{64}\.vtt$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function applyCastSubtitle(language: string | null | undefined): boolean {
   const chrome = window.chrome?.cast;
   const media = castContext?.getCurrentSession()?.getMediaSession();
@@ -452,10 +479,20 @@ async function loadCast(): Promise<void> {
   metadata.subtitle = media.subtitle;
   if (media.image) metadata.images = [{ url: media.image }];
   info.metadata = metadata;
+  if (validSubtitleTrack(media.subtitleTrack)) {
+    const track = new chrome.media.Track(1, chrome.media.TrackType.TEXT);
+    track.trackContentId = media.subtitleTrack.url;
+    track.trackContentType = 'text/vtt';
+    track.subtype = chrome.media.TextTrackType.SUBTITLES;
+    track.name = media.subtitleTrack.name;
+    track.language = media.subtitleTrack.language;
+    info.tracks = [track];
+  }
   const request = new chrome.media.LoadRequest(info);
   request.currentTime = Math.max(0, media.currentTime ?? 0);
-  // Load with captions off, then apply Den's preference after the receiver has parsed the HLS renditions.
-  request.activeTrackIds = [];
+  // An out-of-band VTT is known now; HLS renditions are discovered by the receiver and selected after LOAD.
+  request.activeTrackIds =
+    media.subtitleLanguage && validSubtitleTrack(media.subtitleTrack) ? [1] : [];
   try {
     replacingCast = castStarted;
     await session.loadMedia(request);
@@ -674,7 +711,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         message.media.speed !== undefined ||
         message.media.measure === true)) ||
     (message.media.lanUrl !== undefined && !signedMedia(message.media.lanUrl)) ||
-    !signedSpeed(message.media)
+    !signedSpeed(message.media) ||
+    (message.media.subtitleTrack !== undefined &&
+      (!message.media.external || !validSubtitleTrack(message.media.subtitleTrack)))
   ) {
     event.source?.postMessage(
       { type: 'den-error', id: message.id, message: 'Invalid media URL' },
@@ -686,7 +725,17 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   }
   parentOrigin = event.origin;
   if (current?.id === message.id) {
+    const previousSubtitle = current.media.subtitleTrack?.url;
     current = message as LoadMessage;
+    if (
+      castStarted &&
+      current.media.subtitleLanguage &&
+      current.media.subtitleTrack?.url !== previousSubtitle
+    ) {
+      current.media.currentTime = remotePlayer?.currentTime;
+      void loadCast();
+      return;
+    }
     applySubtitle(current.media.subtitleLanguage);
     castSubtitleAppliedId = undefined;
     if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
@@ -703,9 +752,25 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent || !current) return;
-  const message = event.data as { type?: string; id?: string; language?: unknown };
+  const message = event.data as {
+    type?: string;
+    id?: string;
+    language?: unknown;
+    track?: Media['subtitleTrack'];
+  };
   if (message.type !== 'den-subtitle' || message.id !== current.id) return;
+  const previousSubtitle = current.media.subtitleTrack?.url;
   current.media.subtitleLanguage = typeof message.language === 'string' ? message.language : null;
+  current.media.subtitleTrack = validSubtitleTrack(message.track) ? message.track : undefined;
+  if (
+    castStarted &&
+    current.media.subtitleLanguage &&
+    current.media.subtitleTrack?.url !== previousSubtitle
+  ) {
+    current.media.currentTime = remotePlayer?.currentTime;
+    void loadCast();
+    return;
+  }
   applySubtitle(current.media.subtitleLanguage);
   castSubtitleAppliedId = undefined;
   if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))

@@ -26,9 +26,24 @@ afterEach(() => {
 describe('startPlayback', () => {
   it('returns external HLS without inventing a Remux lifecycle', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({ url: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8', release }, 200, {
-        'server-timing': 'resolve;dur=12',
-      }),
+      json(
+        {
+          url: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
+          release,
+          torboxSubtitle: 4,
+          subtitles: [
+            {
+              value: 'torbox:4',
+              language: 'eng',
+              name: 'English SDH',
+              description: 'Built-in · SUBRIP',
+              torboxTrack: 4,
+            },
+          ],
+        },
+        200,
+        { 'server-timing': 'resolve;dur=12' },
+      ),
     );
     const result = await startPlayback('/den/config/playback', want, fetchImpl);
     expect(result).toMatchObject({
@@ -37,6 +52,16 @@ describe('startPlayback', () => {
       release,
       duration: 0,
       audioTracks: [],
+      torboxSubtitle: 4,
+      subtitles: [
+        {
+          value: 'torbox:4',
+          language: 'eng',
+          name: 'English SDH',
+          description: 'Built-in · SUBRIP',
+          torboxTrack: 4,
+        },
+      ],
       startupTiming: 'resolve;dur=12',
     });
     const init = fetchImpl.mock.calls[0]![1]!;

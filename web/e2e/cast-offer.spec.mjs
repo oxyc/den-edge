@@ -288,8 +288,8 @@ test('a signed LAN HTTP session stays on Hearth and is handed directly to Chrome
   }
 });
 
-test('a selected subtitle makes Hearth choose receiver-safe Remux before Cast', async () => {
-  const { browser, page, asked } = await open('direct-fail', {
+test('a selected subtitle never disqualifies TorBox before Cast', async () => {
+  const { browser, page, asked } = await open('playing', {
     managed: true,
     subtitleLanguage: 'eng',
   });
@@ -297,13 +297,14 @@ test('a selected subtitle makes Hearth choose receiver-safe Remux before Cast', 
     await playingPast(page, 3);
     await page.getByRole('button', { name: 'Cast to a TV' }).click();
     await expect.poll(() => asked.managed.length).toBe(2);
-    expect(asked.managed[1]).toMatchObject({ player: 'cast', directFailed: true });
+    expect(asked.managed[1]).toMatchObject({ player: 'cast' });
+    expect(asked.managed[1]).not.toHaveProperty('directFailed');
     await expect
       .poll(async () => {
         const loads = await castLoads(page);
         return loads.at(-1)?.url ?? '';
       })
-      .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
+      .toBe(`${CDN}/stream/master.m3u8?token=fixture&scrobbling_enabled=false`);
     expect(asked.managed).toHaveLength(2);
     expect(asked.direct).toEqual([]);
     expect(asked.relay).toEqual([]);
