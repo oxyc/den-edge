@@ -86,13 +86,21 @@
   // that gesture started on so the click remains a true close instead of seeing "closed" and reopening it.
   let triggerWasOpenOnPointerDown = false;
   let focusFrame: number | undefined;
+  // `dialog.close()` removes the modal before its queued `close` event runs. A fast remote can therefore press
+  // Select on the refocused trigger while the old close cleanup is still pending; without this boundary that
+  // stale cleanup tears down the newly opened menu. Reopening waits for the native close lifecycle to finish.
+  let closing: Promise<void> | undefined;
+  let finishNativeClose: (() => void) | undefined;
 
   function cancelFocusFrame() {
     if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
     focusFrame = undefined;
   }
 
-  onDestroy(cancelFocusFrame);
+  onDestroy(() => {
+    cancelFocusFrame();
+    finishNativeClose?.();
+  });
 
   // A closed poster contributes a trigger, not a matchMedia subscription and five global listeners. Native auto
   // popovers ensure only one menu is open, so listener work stays constant however many posters a long row retains.
@@ -133,6 +141,7 @@
   });
 
   async function show(at: { x: number; y: number } | null) {
+    await closing;
     coords = at;
     if (!prepared) {
       prepared = true;
@@ -181,6 +190,11 @@
   }
 
   export function close() {
+    if (!showing()) return;
+    if (!closing)
+      closing = new Promise<void>((resolve) => {
+        finishNativeClose = resolve;
+      });
     if (__DEN_TV__) {
       const dialog = menu as HTMLDialogElement | undefined;
       if (dialog?.open) dialog.close();
@@ -263,6 +277,18 @@
     // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
     // calls `finishClose`; every other close can release the menu body and listeners immediately.
     if (!swallowNextClick) finishClose();
+    const resolve = finishNativeClose;
+    finishNativeClose = undefined;
+    closing = undefined;
+    resolve?.();
+  }
+
+  function cancelled(event: Event) {
+    // Keep every TV dismissal on the component's close path. The player remote controller deliberately
+    // dispatches `cancel` before falling back to the native dialog close; preventing that fallback here means
+    // `closing` covers the whole native lifecycle and a rapid Select cannot reopen underneath stale cleanup.
+    event.preventDefault();
+    close();
   }
 
   function toggled(event: ToggleEvent) {
@@ -544,6 +570,7 @@
       aria-label={label}
       aria-describedby={note ? `${menuId}-note` : undefined}
       tabindex="-1"
+      oncancel={cancelled}
       onclose={closed}
       onkeydown={onMenuKeydown}
       onpointermove={sheetPointerMove}
