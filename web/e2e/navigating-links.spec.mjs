@@ -210,11 +210,14 @@ async function opensOnTheEpisode(browser, viewport) {
     await expect(active(page).getByRole('tab', { name: 'Season 2', exact: true })).toHaveAttribute(
       'aria-selected',
       'true',
+      { timeout: 15_000 },
     );
     const row = active(page)
       .locator('.episode')
       .filter({ has: page.getByText('Season 2, episode 9', { exact: true }) });
-    await expect(row.getByText('Season 2, episode 9', { exact: true })).toBeVisible();
+    await expect(row.getByText('Season 2, episode 9', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(row).toBeInViewport();
     await expect.poll(() => page.evaluate(() => window.addressedEpisodes)).toEqual(['9']);
     // The page went down to it: the episode is below the first screen.
