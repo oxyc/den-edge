@@ -13,7 +13,7 @@ const earlyHero = html.match(/<script data-den-early-hero>([\s\S]*?)<\/script>/)
 assert.ok(earlyHero, 'index.html has no early hero script');
 assert.equal(
   `sha256-${createHash('sha256').update(earlyHero).digest('base64')}`,
-  'sha256-90M+iVmuIa5B+kjKZ8jGh9l0Mt8vDnlcSqOLsLIqfZQ=',
+  'sha256-8PruvLOn2A1fYttPM2wjM++zWiFzgyDHfRgRktbYsZg=',
   'Vite changed the early hero script bytes allowed by src/web.rs CSP',
 );
 const empty = '<div id="app"></div>';
