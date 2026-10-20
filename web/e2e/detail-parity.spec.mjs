@@ -338,6 +338,13 @@ for (const width of [390, 834, 1280])
       await expect(active.locator('header.hero .continue')).toHaveAttribute('href', playbackHref);
 
       if (width === 1280) {
+        const [continueBox, heroBox] = await Promise.all([
+          active.locator('header.hero .continue').boundingBox(),
+          active.locator('header.hero').boundingBox(),
+        ]);
+        expect(continueBox).not.toBeNull();
+        expect(heroBox).not.toBeNull();
+        expect(continueBox.width).toBeLessThan(heroBox.width / 2);
         // Continue Watching is its own semantic row above the title actions. Down enters the next section at its
         // primary Resume control rather than choosing a later reaction merely because it is closer horizontally.
         await active.locator('header.hero .continue').focus();

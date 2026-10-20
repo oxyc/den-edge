@@ -322,26 +322,9 @@
   font-size: var(--tv-type-body);
 }
 
-.den-tv header.hero .hero-actions .den-button-large,
-.den-tv header.hero .season-download-trigger {
+:root.den-tv .season-download-trigger,
+.den-tv header.hero .hero-actions .den-button-large {
   min-height: 58px;
-}
-
-/* ActionMenu's neutral trigger is a grid by default. A season picker is a labelled peer of the other hero
-   actions, so keep its glyph and word on one line and do not let the crowded action row shrink the wrapper. */
-.den-tv header.hero .download.picker,
-.den-tv header.hero .season-download-trigger {
-  flex: none;
-}
-
-.den-tv header.hero .season-download-trigger {
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  width: auto;
-  min-width: max-content;
-  white-space: nowrap;
 }
 
 .den-tv .card .meta {
