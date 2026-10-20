@@ -1091,7 +1091,6 @@
       if (moved !== true && session === discovered) {
         subtitleChoice = null;
         castSubtitlePreparing = false;
-        applySubtitles();
       }
       return moved;
     }
