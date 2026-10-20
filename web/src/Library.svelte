@@ -1005,11 +1005,14 @@
         titleKey(title) === titleKey(target.title) &&
         (target.episode === undefined || episode?.episode === target.episode),
     );
+    // Once an episode is finished Continue names the next, while its `seconds` stay the finished one's (`liveEpisode`):
+    // those are no place to start the next one, which an advance would otherwise open at its end.
+    const live = continued?.liveEpisode;
+    const own =
+      continued?.seconds !== undefined &&
+      (!live || (live.season === target.season && live.episode === target.episode));
     return continued
-      ? {
-          fraction: continued.fraction,
-          ...(continued.seconds === undefined ? {} : { seconds: continued.seconds }),
-        }
+      ? { fraction: continued.fraction, ...(own ? { seconds: continued.seconds } : {}) }
       : { fraction: 0 };
   }
 
@@ -2086,7 +2089,9 @@
   {@const after = following}
   <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
   {@const guestSource = !!sharedInstallOf(scout.install)}
-  {#key `${titleKey(target.title)}:${target.season}:${target.episode}`}
+  <!-- Keyed by the title alone: the next episode plays in the same player (`playEpisode`), so the video in fullscreen
+       — and a Chromecast it is cast to — carries on into it. -->
+  {#key titleKey(target.title)}
     <PlayerScreen.current
       title={target.title}
       season={target.season}
@@ -2106,7 +2111,8 @@
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
-      onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
+      onprogress={(fraction, seconds, at) =>
+        void progressed({ title: target.title, ...at }, fraction, seconds)}
       onnext={after ? () => void advance(after) : undefined}
       onclose={() => (playing = null)}
     />
