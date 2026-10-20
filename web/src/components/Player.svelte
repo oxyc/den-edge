@@ -714,7 +714,8 @@
    * otherwise start in its place never takes the playing one's slot.
    */
   async function begin(
-    pick: { audioTrack?: number; filename: string } | undefined = chosenRelease
+    pick:
+      { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined = chosenRelease
       ? { filename: chosenRelease }
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
@@ -1068,6 +1069,31 @@
           ? preferredSubtitleTrack(result.subtitles ?? [], replacingSubtitleLanguage)
           : undefined);
       subtitleChoice = picked ? subtitleValue(picked) : null;
+    }
+    const selectedTorBoxTrack = selectedSubtitle(result)?.torboxTrack;
+    if (
+      result.external &&
+      selectedTorBoxTrack !== undefined &&
+      result.torboxSubtitle !== selectedTorBoxTrack
+    ) {
+      // The first managed request discovers TorBox's embedded tracks; a language preference can only be resolved
+      // after that answer. TorBox burns one chosen track into a newly created stream, so create that stream now
+      // instead of merely naming a track the first, subtitle-free URL does not carry.
+      // Read the assigned state back: Svelte proxies objects stored in `$state`, and replacement identity checks
+      // must compare that proxy with itself rather than with the raw response object assigned above.
+      const discovered = session;
+      const moved = await begin(
+        { filename: result.release.filename, subtitleTrack: selectedTorBoxTrack },
+        extra,
+        discovered,
+        'direct',
+      );
+      if (moved !== true && session === discovered) {
+        subtitleChoice = null;
+        castSubtitlePreparing = false;
+        applySubtitles();
+      }
+      return moved;
     }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
