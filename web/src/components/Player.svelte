@@ -1653,7 +1653,15 @@
       // this browser does decode (`switchAway`).
       let recovered = false;
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.frag?.type === 'subtitle') subtitleLoadFailedFlag = true;
+        if (data.frag?.type === 'subtitle') {
+          subtitleLoadFailedFlag = true;
+          console.warn('[Den subtitles] HLS subtitle error', {
+            details: data.details,
+            fatal: data.fatal,
+            httpStatus: data.response?.code ?? null,
+            track: hls?.subtitleTrack ?? null,
+          });
+        }
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
           recovered = true;
@@ -1764,6 +1772,10 @@
           image: poster,
           currentTime: started ?? resume.seconds ?? 0,
           subtitleLanguage: selectedSubtitleLanguage(current),
+          subtitleIndex:
+            current.external && current.torboxSubtitle !== null
+              ? current.torboxSubtitle
+              : undefined,
           subtitleTrack: current.externalSubtitles
             ?.filter((track) => track.value === subtitleChoice && track.castUrl)
             .map((track) => ({
@@ -2337,21 +2349,85 @@
   function applySubtitles() {
     const choice = subtitleChoice;
     const language = selectedSubtitleLanguage();
-    if (hls && !session?.externalSubtitles?.length) {
-      hls.subtitleDisplay = choice !== null;
-      hls.subtitleTrack =
+    const sidecars = session?.externalSubtitles ?? [];
+    const sidecar = sidecars.some((track) => track.value === choice);
+    const before = Array.from(video?.textTracks ?? []).map((track) => ({
+      kind: track.kind,
+      language: track.language,
+      label: track.label,
+      mode: track.mode,
+    }));
+    if (hls) {
+      const languageMatch =
         language === null
           ? -1
           : hls.subtitleTracks.findIndex((track) => subtitleLanguagesMatch(track.lang, language));
-      return;
+      const torboxTrack = session?.external ? session.torboxSubtitle : null;
+      const selected = sidecar
+        ? -1
+        : torboxTrack !== null &&
+            torboxTrack !== undefined &&
+            torboxTrack >= 0 &&
+            torboxTrack < hls.subtitleTracks.length
+          ? torboxTrack
+          : languageMatch >= 0
+            ? languageMatch
+            : session?.external && hls.subtitleTracks.length === 1
+              ? 0
+              : -1;
+      hls.subtitleDisplay = choice !== null && !sidecar && selected >= 0;
+      hls.subtitleTrack = selected;
     }
-    const sidecar = session?.externalSubtitles?.some((track) => track.value === choice) ?? false;
-    for (const track of Array.from(video?.textTracks ?? []))
+    const sidecarValues = new Set(sidecars.map((track) => track.value));
+    const textTracks = Array.from(video?.textTracks ?? []);
+    const nativeTracks = textTracks.filter((track) => !sidecarValues.has(track.label));
+    const nativeTorboxTrack = session?.external ? session.torboxSubtitle : null;
+    const nativeSelected =
+      !hls && !sidecar && choice !== null
+        ? nativeTorboxTrack !== null &&
+          nativeTorboxTrack !== undefined &&
+          nativeTorboxTrack >= 0 &&
+          nativeTorboxTrack < nativeTracks.length
+          ? nativeTracks[nativeTorboxTrack]
+          : nativeTracks.find((track) => subtitleLanguagesMatch(track.language, language))
+        : undefined;
+    for (const track of textTracks) {
+      if (hls && !sidecarValues.has(track.label)) continue;
       track.mode =
-        choice !== null &&
-        (sidecar ? track.label === choice : subtitleLanguagesMatch(track.language, language))
+        choice !== null && (sidecar ? track.label === choice : track === nativeSelected)
           ? 'showing'
           : 'disabled';
+    }
+    const picked = selectedSubtitle();
+    console.info('[Den subtitles] applied', {
+      choice:
+        choice === null ? 'off' : picked?.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+      language,
+      torboxRequested: picked?.torboxTrack ?? null,
+      torboxSelected: session?.torboxSubtitle ?? null,
+      offered:
+        session?.subtitles?.map((track) => ({
+          source: track.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+          language: track.language,
+          name: track.name,
+          torboxTrack: track.torboxTrack ?? null,
+          selected: subtitleValue(track) === choice,
+        })) ?? [],
+      hlsSelected: hls?.subtitleTrack ?? null,
+      hlsTracks:
+        hls?.subtitleTracks.map((track, index) => ({
+          index,
+          language: track.lang,
+          name: track.name,
+        })) ?? [],
+      textTracksBefore: before,
+      textTracksAfter: textTracks.map((track) => ({
+        kind: track.kind,
+        language: track.language,
+        label: track.label,
+        mode: track.mode,
+      })),
+    });
   }
 
   /**
@@ -2473,6 +2549,23 @@
     }
     const current = session;
     const previous = subtitleChoice;
+    const requested = selectedSubtitle(current, next);
+    console.info('[Den subtitles] choice', {
+      from:
+        previous === null
+          ? 'off'
+          : selectedSubtitle(current, previous)?.torboxTrack === undefined
+            ? 'opensubtitles'
+            : 'built-in',
+      to:
+        next === null ? 'off' : requested?.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+      language: requested?.language ?? null,
+      torboxRequested: requested?.torboxTrack ?? null,
+      torboxSelected: current?.torboxSubtitle ?? null,
+      replacesStream:
+        current?.external === true &&
+        (current.torboxSubtitle ?? undefined) !== requested?.torboxTrack,
+    });
     subtitleChoice = next;
     if (current?.external) {
       const nextTrack = selectedSubtitle(current);

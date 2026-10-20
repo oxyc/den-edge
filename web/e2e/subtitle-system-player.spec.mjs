@@ -70,7 +70,7 @@ const vtt =
   'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:00.000 --> 00:00:30.000\nFrom the file.\n';
 const srt = '1\n00:00:00,000 --> 00:00:30,000\nFrom OpenSubtitles.\n';
 
-async function mockHearth(page) {
+async function mockHearth(page, { builtIn = false } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -97,10 +97,32 @@ async function mockHearth(page) {
   await page.route(`${ORIGIN}/den/config/playback`, (route) => {
     const body = route.request().postDataJSON();
     operations.push(body);
-    return route.fulfill({ json: body.directFailed ? remux : direct });
+    const managed = builtIn
+      ? {
+          ...direct,
+          url: `${ORIGIN}/torbox/t/${body.subtitleTrack === undefined ? 'media' : 'master'}.m3u8`,
+          torboxSubtitle: body.subtitleTrack ?? null,
+          subtitles: [
+            {
+              value: 'torbox:0',
+              language: 'eng',
+              name: 'English (in file)',
+              description: 'Built-in · SUBRIP',
+              torboxTrack: 0,
+            },
+          ],
+        }
+      : direct;
+    return route.fulfill({ json: body.directFailed ? remux : managed });
   });
   await page.route(`${ORIGIN}/torbox/t/**`, async (route) => {
     const name = new URL(route.request().url()).pathname.split('/').pop();
+    const body = { 'master.m3u8': master, 'sub0.m3u8': subMedia, 'sub0.vtt': vtt }[name];
+    if (body)
+      return route.fulfill({
+        contentType: name.endsWith('.vtt') ? 'text/vtt' : 'application/vnd.apple.mpegurl',
+        body,
+      });
     return route.fulfill({
       contentType: name.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
       body: await readFile(new URL(name, hls)),
@@ -241,6 +263,27 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
       .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
     expect(operations).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars are offered', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    const operations = await mockHearth(page, { builtIn: true });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
+    await playing(page);
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English (in file)' }).click();
+    await expect
+      .poll(() => page.evaluate(shown), { timeout: 10_000 })
+      .toMatchObject({ language: 'en', label: 'English (in file)' });
+    await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
+    expect(operations).toHaveLength(2);
+    expect(operations[1]).toMatchObject({ subtitleTrack: 0 });
   } finally {
     await browser.close();
   }

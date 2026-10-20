@@ -34,6 +34,8 @@ interface Media {
   image?: string;
   currentTime?: number;
   subtitleLanguage?: string | null;
+  /** TorBox's selected position, used when its HLS exposes several same-language renditions. */
+  subtitleIndex?: number;
   /** A chosen external WebVTT staged on this page's origin for the receiver. */
   subtitleTrack?: { language: string; name: string; url: string };
   terminal?: boolean;
@@ -316,7 +318,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
       'loadedmetadata',
       () => {
         if (start > 0 && Math.abs(video.currentTime - start) > 2) video.currentTime = start;
-        applySubtitle(media.subtitleLanguage);
+        applySubtitle(media.subtitleLanguage, media.subtitleIndex);
       },
       { once: true },
     );
@@ -332,6 +334,13 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     });
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (data.frag?.type === 'subtitle')
+        console.warn('[Den subtitles] Cast page HLS subtitle error', {
+          details: data.details,
+          fatal: data.fatal,
+          httpStatus: data.response?.code ?? null,
+          track: hls?.subtitleTrack ?? null,
+        });
       if (!data.fatal) return;
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
         // A decoder that lost its place: reset the buffer and carry on, once.
@@ -353,7 +362,9 @@ async function loadLocal(media: Media, url: string): Promise<void> {
       }
       fail(`hls.js ${data.type} ${data.details}`);
     });
-    hls.on(Hls.Events.MANIFEST_PARSED, () => applySubtitle(media.subtitleLanguage));
+    hls.on(Hls.Events.MANIFEST_PARSED, () =>
+      applySubtitle(media.subtitleLanguage, media.subtitleIndex),
+    );
     hls.loadSource(url);
     hls.attachMedia(video);
   } else {
@@ -383,15 +394,54 @@ function describeToSystem(media: Media): void {
   });
 }
 
-function applySubtitle(language: string | null | undefined): void {
+function applySubtitle(language: string | null | undefined, subtitleIndex?: number): void {
   if (hls) {
-    hls.subtitleDisplay = language != null;
-    hls.subtitleTrack =
-      language == null ? -1 : hls.subtitleTracks.findIndex((track) => track.lang === language);
+    const languageMatch = language
+      ? hls.subtitleTracks.findIndex((track) => sameLanguage(track.lang, language))
+      : -1;
+    const selected =
+      language == null
+        ? -1
+        : subtitleIndex !== undefined && subtitleIndex < hls.subtitleTracks.length
+          ? subtitleIndex
+          : languageMatch >= 0
+            ? languageMatch
+            : hls.subtitleTracks.length === 1
+              ? 0
+              : -1;
+    hls.subtitleDisplay = language != null && selected >= 0;
+    hls.subtitleTrack = selected;
+    console.info('[Den subtitles] Cast page applied', {
+      target: 'local-hls',
+      language: language ?? null,
+      torboxSelected: subtitleIndex ?? null,
+      hlsSelected: selected,
+      hlsTracks: hls.subtitleTracks.map((track, index) => ({
+        index,
+        language: track.lang,
+        name: track.name,
+      })),
+    });
     return;
   }
-  for (const track of Array.from(video.textTracks))
-    track.mode = language != null && track.language === language ? 'showing' : 'disabled';
+  const nativeTracks = Array.from(video.textTracks);
+  const selected =
+    language == null
+      ? undefined
+      : ((subtitleIndex !== undefined ? nativeTracks[subtitleIndex] : undefined) ??
+        nativeTracks.find((track) => sameLanguage(track.language, language)));
+  for (const track of nativeTracks) track.mode = track === selected ? 'showing' : 'disabled';
+  console.info('[Den subtitles] Cast page applied', {
+    target: 'local-native',
+    language: language ?? null,
+    torboxSelected: subtitleIndex ?? null,
+    textTracks: Array.from(video.textTracks).map((track) => ({
+      kind: track.kind,
+      language: track.language,
+      label: track.label,
+      mode: track.mode,
+    })),
+  });
 }
 
 async function measure(media: Media, id: string): Promise<boolean> {
@@ -427,19 +477,32 @@ function validSubtitleTrack(
   }
 }
 
-function applyCastSubtitle(language: string | null | undefined): boolean {
+function applyCastSubtitle(language: string | null | undefined, subtitleIndex?: number): boolean {
   const chrome = window.chrome?.cast;
   const media = castContext?.getCurrentSession()?.getMediaSession();
   if (!chrome || !media) return false;
   const tracks = media.media?.tracks;
   if (language && !tracks?.length) return false;
+  const textTracks =
+    tracks?.filter((candidate) => !candidate.type || candidate.type === 'TEXT') ?? [];
   const track = language
-    ? tracks?.find(
+    ? ((subtitleIndex !== undefined ? textTracks[subtitleIndex] : undefined) ??
+      textTracks.find(
         (candidate) =>
           (!candidate.type || candidate.type === 'TEXT') &&
           sameLanguage(candidate.language, language),
-      )
+      ))
     : undefined;
+  console.info('[Den subtitles] Cast receiver applied', {
+    language: language ?? null,
+    torboxSelected: subtitleIndex ?? null,
+    receiverTrack: track?.trackId ?? null,
+    receiverTracks: textTracks.map((candidate, index) => ({
+      index,
+      id: candidate.trackId,
+      language: candidate.language ?? null,
+    })),
+  });
   media.editTracksInfo(
     new chrome.media.EditTracksInfoRequest(track ? [track.trackId] : []),
     () => undefined,
@@ -504,7 +567,9 @@ async function loadCast(): Promise<void> {
       return;
     }
     castStarted = true;
-    castSubtitleAppliedId = applyCastSubtitle(media.subtitleLanguage) ? current?.id : undefined;
+    castSubtitleAppliedId = applyCastSubtitle(media.subtitleLanguage, media.subtitleIndex)
+      ? current?.id
+      : undefined;
     setStatus(castingTo(session.getCastDevice?.().friendlyName));
     video.pause();
     tell('den-cast', { state: 'playing', profile: profile.value });
@@ -567,7 +632,8 @@ async function open(message: LoadMessage): Promise<void> {
   // has the player ask again for what this receiver plays.
   if (message.media.mode === 'cast' || castContext?.getCurrentSession()) await loadCast();
   else await loadLocal(message.media, playUrl(message.id, message.media));
-  if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
+  if (current?.id === message.id)
+    applySubtitle(message.media.subtitleLanguage, message.media.subtitleIndex);
 }
 
 /** Starts the Cast framework; false when the SDK loaded without the framework or the chrome.cast API. */
@@ -596,7 +662,7 @@ function initializeCast(): boolean {
       if (
         current &&
         castSubtitleAppliedId !== current.id &&
-        applyCastSubtitle(current.media.subtitleLanguage)
+        applyCastSubtitle(current.media.subtitleLanguage, current.media.subtitleIndex)
       )
         castSubtitleAppliedId = current.id;
       return;
@@ -706,6 +772,10 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
   if (
     (message.media.external ? !managedMedia(message.media.url) : !signedMedia(message.media.url)) ||
+    (message.media.subtitleIndex !== undefined &&
+      (!message.media.external ||
+        !Number.isSafeInteger(message.media.subtitleIndex) ||
+        message.media.subtitleIndex < 0)) ||
     (message.media.external &&
       (message.media.lanUrl !== undefined ||
         message.media.speed !== undefined ||
@@ -736,9 +806,12 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       void loadCast();
       return;
     }
-    applySubtitle(current.media.subtitleLanguage);
+    applySubtitle(current.media.subtitleLanguage, current.media.subtitleIndex);
     castSubtitleAppliedId = undefined;
-    if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
+    if (
+      castStarted &&
+      applyCastSubtitle(current.media.subtitleLanguage, current.media.subtitleIndex)
+    )
       castSubtitleAppliedId = current.id;
     return;
   }
@@ -771,9 +844,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     void loadCast();
     return;
   }
-  applySubtitle(current.media.subtitleLanguage);
+  applySubtitle(current.media.subtitleLanguage, current.media.subtitleIndex);
   castSubtitleAppliedId = undefined;
-  if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
+  if (castStarted && applyCastSubtitle(current.media.subtitleLanguage, current.media.subtitleIndex))
     castSubtitleAppliedId = current.id;
 });
 
