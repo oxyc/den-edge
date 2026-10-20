@@ -935,13 +935,13 @@
             class="continue"
             href={titleHref({
               ...d.title,
-              season: target?.season,
-              episode: target?.episode,
+              season: coordinate?.season,
+              episode: coordinate?.episode,
               play: true,
             })}
             onclick={(event) =>
               activateLinkInPlace(event, () =>
-                (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode),
+                (onplayhere ?? onplay)?.(d.title, coordinate?.season, coordinate?.episode),
               )}
           >
             <DetailIcon name="play" filled /><span
