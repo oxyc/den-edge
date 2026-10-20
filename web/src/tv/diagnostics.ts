@@ -1,3 +1,5 @@
+import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+
 /** Only a disposable database is touched; never inspect the user's encrypted library. */
 async function storageProbe(): Promise<void> {
   const name = `den-tv-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -77,7 +79,7 @@ export function installDiagnostics(): void {
   const video = document.createElement('video');
   values.textContent = JSON.stringify(
     {
-      target: __DEN_TV_PLATFORM__,
+      target: tvRuntimePlatform(),
       userAgent: navigator.userAgent,
       secureContext: isSecureContext,
       viewport: `${innerWidth}×${innerHeight}`,

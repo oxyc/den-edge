@@ -276,6 +276,13 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        if: needs.source.outputs.patch == 'false'
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        if: needs.source.outputs.patch == 'false'
       - name: Build installable TV release assets
         if: needs.source.outputs.patch == 'false'
         working-directory: web
@@ -284,11 +291,24 @@ jobs:
           TIZEN_BUILD: ${{ github.run_number }}
           DEN_TV_API_ORIGIN: https://d-api.oxy.fi
           DEN_TV_SERVICE_ORIGIN: https://d.oxy.fi
+          DEN_ANDROID_KEYSTORE_BASE64: ${{ secrets.DEN_ANDROID_KEYSTORE_BASE64 }}
+          DEN_ANDROID_KEY_ALIAS: ${{ secrets.DEN_ANDROID_KEY_ALIAS }}
+          DEN_ANDROID_KEY_PASSWORD: ${{ secrets.DEN_ANDROID_KEY_PASSWORD }}
+          DEN_ANDROID_STORE_PASSWORD: ${{ secrets.DEN_ANDROID_STORE_PASSWORD }}
         run: |
           set -euo pipefail
           test "$TIZEN_BUILD" -le 65535 || { echo "::error::Tizen build number exceeds 65535"; exit 1; }
+          for name in DEN_ANDROID_KEYSTORE_BASE64 DEN_ANDROID_KEY_ALIAS DEN_ANDROID_KEY_PASSWORD DEN_ANDROID_STORE_PASSWORD; do
+            test -n "${!name}" || { echo "::error::Android signing secret $name is not configured"; exit 1; }
+          done
           npm ci --ignore-scripts
           npm install --global @webos-tools/cli@3.2.6
+
+          android_keystore="$RUNNER_TEMP/den-tv-android-release.jks"
+          printf '%s' "$DEN_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$android_keystore"
+          DEN_ANDROID_KEYSTORE_FILE="$android_keystore" \
+            ../android-tv/gradlew -p ../android-tv :app:assembleRelease --no-daemon
+          cp ../android-tv/app/build/outputs/apk/release/app-release.apk den-tv-android.apk
 
           node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$VERSION"
           mkdir -p tv-release/den-tv-webos
@@ -355,5 +375,6 @@ jobs:
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$REPO" --title "Den Edge $VERSION" --generate-notes
           gh release upload "$TAG" --repo "$REPO" --clobber \
-            den-tv-webos.ipk den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-android.apk den-tv-webos.ipk den-tv-webos.tar.gz \
+            den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
             den-tv-tizen-unsigned.tar.gz

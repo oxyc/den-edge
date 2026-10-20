@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Den</string>
+    <string name="load_error_title">Den could not start</string>
+    <string name="load_error_body">Check this TV’s internet connection, then try again.</string>
+    <string name="retry">Try again</string>
+    <string name="exit">Exit</string>
+</resources>

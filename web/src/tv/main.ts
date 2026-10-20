@@ -4,8 +4,9 @@ import '../app.css';
 import './tv.css';
 import { installTVNavigation } from './navigation';
 import { registerSamsungKeys } from './platform';
+import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
 
-document.documentElement.dataset.denTv = __DEN_TV_PLATFORM__;
+document.documentElement.dataset.denTv = tvRuntimePlatform();
 
 let remoteInstalled = false;
 function installRemote() {

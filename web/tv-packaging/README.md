@@ -1,5 +1,11 @@
 # TV packaging templates
 
+The Android TV launcher lives in `../../android-tv`: it is a small native WebView shell around the same hosted TV
+bundle as LG. It appends `DenAndroidTV/<version>` to its user agent, which lets the shared bundle label the device
+and route root Back to the native activity without exposing an Android JavaScript interface to third-party frames.
+CI builds and lints the shell; release tags sign its APK with the repository's stable Android signing key and publish
+`den-tv-android.apk` beside the webOS and Tizen downloads.
+
 `scripts/tv-package.mjs webos --url https://your-tv-host/` writes a hosted LG
 launcher into `tv-packages/webos/shell` and invokes LG's `ares-package` to put
 the `.ipk` in its sibling `packages` directory. It never modifies `dist-tv-*`.

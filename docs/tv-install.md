@@ -1,12 +1,76 @@
-# Install Den on an LG or Samsung TV
+# Install Den on an Android, LG, or Samsung TV
 
-Den's production TV endpoint is `https://den-tv.oxy.fi`. The LG app is a very small launcher for that hosted UI.
-Samsung requires its UI inside a locally signed widget, so its package uses the existing
+Den's production TV endpoint is `https://den-tv.oxy.fi`. The Android and LG apps are small launchers for that hosted
+UI. Samsung requires its UI inside a locally signed widget, so its package uses the existing
 `https://d-api.oxy.fi` device API and `https://d.oxy.fi` service routes directly. Video continues over Den's
 signed media route; it is not sent through Cloudflare Tunnel.
 
 Opening `https://den-tv.oxy.fi/?tv-diagnostics=1` in a desktop browser is a useful availability check, but it does
 not install anything and does not prove a TV decoder.
+
+## Android TV and Google TV
+
+The release APK is a native Android TV launcher around Den's existing hosted TV UI. It appears in the TV app
+launcher, accepts the remote's D-pad and Back keys, and supplies native fullscreen video and connection-error
+handling. It does not duplicate the web UI inside the APK, so ordinary Den UI updates arrive the next time it loads.
+
+This one APK targets Android TV and Google TV devices, including Chromecast with Google TV, NVIDIA Shield, and many
+Sony, TCL, Philips, and Hisense models. It can also run on **Android-based Fire OS** devices. It does not run on
+Amazon's newer **Vega OS** devices; check the device OS rather than relying only on the Fire TV product name.
+
+### Option 1: install directly on the TV
+
+1. Install a TV download/file-manager app that can open an APK, such as **Downloader by AFTVnews**. On Google TV,
+   enable installation from that app under **Settings › Apps › Special app access › Install unknown apps**. On Fire
+   TV, enable **Install unknown apps** for Downloader in Developer Options. Menu names vary slightly by release.
+2. In Downloader, enter the stable GitHub URL directly:
+
+   `https://github.com/oxyc/den-edge/releases/latest/download/den-tv-android.apk`
+
+3. Open the completed download, choose **Install**, then launch **Den** from the TV's apps row. Android may offer to
+   delete the downloaded installer afterward; doing so does not remove the installed app.
+
+### Option 2: install from macOS or Linux with ADB
+
+Enable Developer Options on the TV by pressing its Android/Google TV **Build** entry seven times, then enable USB or
+network debugging. The Mac and TV must be on the same LAN. On macOS, install ADB with
+`brew install android-platform-tools`; on Linux, install the distribution's `adb`/`android-tools` package.
+
+For a TV that exposes the traditional network-debugging port:
+
+```sh
+cd ~/Downloads
+curl -fL https://github.com/oxyc/den-edge/releases/latest/download/den-tv-android.apk \
+  -o den-tv-android.apk
+adb connect TV_IP:5555
+adb install -r den-tv-android.apk
+adb shell am start -n com.den.edge.tv/.MainActivity
+```
+
+Accept the debugging prompt shown on the TV. Newer Google TV versions may instead show separate **Wireless
+debugging** pairing and connection addresses; run `adb pair IP:PAIRING_PORT` first, then
+`adb connect IP:CONNECTION_PORT`, using the values displayed by that screen.
+
+### Android updates, compatibility, and expiry
+
+- **Ordinary Den UI updates need no APK update.** Reinstall the APK only when release notes mention the Android
+  launcher, or when replacing a removed installation. Installing the latest APK over Den preserves its local data
+  because every release uses the same signing identity.
+- A sideloaded APK has **no recurring developer-mode expiry**. Android may retain its normal per-source permission
+  for installing unknown apps, but Den itself does not disappear when that permission is later disabled.
+- Keep **Android System WebView** updated through the TV's app store. Den checks Web Crypto, Worker, IndexedDB, and
+  WebAssembly at startup and shows a clear error if an old vendor WebView lacks a required primitive.
+- The launcher permits only HTTPS Den pages as top-level content and refuses cleartext traffic. Addon and video
+  requests continue through the allowlisted routes already used by the hosted LG build.
+- Google's September 2026 developer-verification enforcement does not cover direct sideloads or TV devices in its
+  initial regions, and Google says ADB remains unchanged. Google plans broader enforcement from 2027, so register
+  Den's package and signing certificate before that rollout rather than changing the signing key.
+
+Android references: [create an Android TV app](https://developer.android.com/training/tv/get-started/create),
+[WebView applications](https://developer.android.com/develop/ui/views/layout/webapps/webview), and
+[Amazon's Android-based Fire TV development guide](https://developer.amazon.com/docs/fire-tv/get-started-with-fire-tv.html).
+Google's current rollout details are in the
+[Android developer-verification FAQ](https://developer.android.com/developer-verification/guides/faq).
 
 ## LG webOS (C2 and C4)
 
