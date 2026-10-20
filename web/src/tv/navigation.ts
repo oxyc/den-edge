@@ -236,7 +236,33 @@ export function installTVNavigation(): () => void {
     for (const stop of pendingRestores) stop();
     pendingRestores.clear();
     window.dispatchEvent(new Event('den:tv-input'));
-    const target = event.target instanceof Element ? event.target : null;
+    let target = event.target instanceof Element ? event.target : null;
+    const direction = (
+      { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const
+    )[event.key];
+    // A live shelf publication can replace the focused node between remote presses. The browser then targets the
+    // next key at body; spatialNavigation's generic cold-start fallback is Search, so a following Select appeared
+    // to open Search at random. Recover the route's remembered semantic control first and apply this same direction
+    // to its replacement. This also covers any other progressively replaced control, not one shelf exception.
+    if (direction && document.activeElement === document.body) {
+      const selector = memory.get(locationKey);
+      const root: ParentNode = activeModal() ?? document;
+      let recovered: HTMLElement | undefined;
+      if (selector) {
+        try {
+          recovered = Array.from(root.querySelectorAll<HTMLElement>(selector)).find((element) =>
+            visible(element),
+          );
+        } catch {
+          // A remembered selector is produced by focusIdentity and should be valid. If the DOM implementation
+          // rejects it, retain the ordinary cold-start behavior rather than losing remote navigation entirely.
+        }
+      }
+      if (recovered) {
+        recovered.focus({ preventScroll: true });
+        target = recovered;
+      }
+    }
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
     if (
@@ -268,9 +294,6 @@ export function installTVNavigation(): () => void {
         return;
       }
     }
-    const direction = (
-      { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const
-    )[event.key];
     if (direction) {
       // Arrow keys inside a native editor belong to its caret/list selection. Up/down at a search field is
       // likewise left to that field's own results behavior.

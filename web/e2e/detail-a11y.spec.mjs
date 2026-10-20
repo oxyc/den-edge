@@ -10,7 +10,9 @@ const movie = {
   overview: 'A feature film.',
   genres: [{ name: 'Drama' }],
   videos: { results: [{ site: 'YouTube', type: 'Trailer', key: 'yt1', official: true }] },
-  credits: { cast: [] },
+  credits: {
+    cast: [{ id: 7, name: 'A Person', character: 'Lead', profile_path: '/person.jpg' }],
+  },
 };
 
 async function mock(page) {
@@ -75,6 +77,27 @@ test('Watchlist keeps keyboard focus, and does not run again, while a save is in
     await page.evaluate(() => window.fixture.setBusy(false));
     await watchlist.press('Enter');
     expect(await page.evaluate(() => window.fixture.watchlistCalls())).toBe(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Right at the end of title actions does not leak diagonally into Cast', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
+    const share = page.getByRole('button', { name: 'Share', exact: true });
+    const actor = page
+      .getByRole('region', { name: 'Cast & Crew' })
+      .getByRole('link', { name: /A Person/ });
+    await expect(actor).toBeVisible();
+    await share.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(share).toBeFocused();
   } finally {
     await browser.close();
   }

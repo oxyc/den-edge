@@ -92,3 +92,21 @@ for (const timing of ['next frame', 'first restored focus']) {
     await expect(more).toBeFocused();
   });
 }
+
+test('a direction press recovers a control replaced by a live publication before moving', async ({
+  page,
+}) => {
+  await routeGuestEdge(page, newEdge());
+  await page.goto(E2E_ORIGIN);
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  const nav = page.getByRole('navigation', { name: 'Main navigation' });
+  const home = nav.getByRole('link', { name: 'Home', exact: true });
+  const movies = nav.getByRole('link', { name: 'Movies', exact: true });
+  await home.focus();
+  await expect(home).toBeFocused();
+  await home.evaluate((node) => node.replaceWith(node.cloneNode(true)));
+  await expect(page.locator('body')).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(movies).toBeFocused();
+  await expect(page).not.toHaveURL(/\/search/);
+});

@@ -42,16 +42,29 @@ export function installKeyboardNavigation(): () => void {
     }
     if (event.shiftKey || !/^Arrow(?:Left|Right|Up|Down)$/.test(event.key)) return;
     const target = event.target;
+    const direction = event.key.slice(5).toLowerCase() as Direction;
+    const settingControl = Boolean(
+      target instanceof HTMLElement &&
+      target.matches('select, input[type="checkbox"], input[type="radio"]') &&
+      target.closest('[data-spatial-anchor]'),
+    );
+    const regularControl =
+      target instanceof HTMLElement &&
+      target.matches('a[href],button,summary,[tabindex]') &&
+      !target.matches('input, textarea, select');
+    const nativeHorizontalControl =
+      (direction === 'left' || direction === 'right') &&
+      target instanceof HTMLElement &&
+      target.matches('select, input[type="radio"]');
     if (
       !(target instanceof HTMLElement) ||
       target !== document.activeElement ||
-      !target.matches('a[href],button,summary,[tabindex]') ||
+      (!regularControl && (!settingControl || nativeHorizontalControl)) ||
       target.closest(
-        'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="tablist"], [role="menu"], [role="listbox"], [role="tree"], [role="grid"], [role="slider"], .player, video',
+        '[contenteditable]:not([contenteditable="false"]), [role="tablist"], [role="menu"], [role="listbox"], [role="tree"], [role="grid"], [role="slider"], .player, video',
       )
     )
       return;
-    const direction = event.key.slice(5).toLowerCase() as Direction;
     if (move) {
       if (move(direction)) event.preventDefault();
       return;

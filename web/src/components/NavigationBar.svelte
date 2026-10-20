@@ -334,9 +334,10 @@
           autocomplete="off"
           aria-controls={showRecent ? 'recent-searches' : undefined}
           enterkeyhint="search"
-          onfocus={() => {
-            // On a TV, merely landing on Search with the D-pad is not an activation and must not add a history
-            // entry. Typing still reaches `searchChanged`, and Select enters the navigation layer's edit mode.
+          onclick={() => {
+            // Focus is not activation: Tab and spatial navigation must be able to pass through the field without
+            // changing pages. A pointer press deliberately opens Search; typing reaches the same route through
+            // `searchChanged`, and the TV adapter handles Select before a native click is synthesized.
             if (!__DEN_TV__ && route.page !== 'search' && !onPeople) navigate(searchHref(text));
           }}
           oninput={searchChanged}
@@ -463,6 +464,7 @@
     width: var(--brand-w);
     height: 32px;
     overflow: hidden;
+    border-radius: 8px;
   }
 
   /* The mark fills only the middle of its 400×240 canvas, so the image is drawn 2.2× the box and clipped to it.
@@ -693,6 +695,7 @@
     gap: 6px;
     min-height: 34px;
     padding-inline: 6px;
+    border-radius: 8px;
     color: var(--muted);
     font-weight: 600;
     text-decoration: none;
@@ -706,6 +709,10 @@
   nav a :global(svg) {
     width: 18px;
     height: 18px;
+  }
+
+  .search-toggle {
+    border-radius: 50%;
   }
 
   /* Every other control in this app shows where the keyboard is; this bar showed nothing at all. */

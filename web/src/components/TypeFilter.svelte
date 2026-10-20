@@ -22,7 +22,7 @@
   ];
 </script>
 
-<div class="filter" role="group" aria-label={label}>
+<div class="filter" role="group" aria-label={label} data-spatial-list="horizontal">
   {#each FILTERS as filter (filter.label)}
     <button
       type="button"
@@ -57,5 +57,12 @@
   .filter button[aria-pressed='true'] {
     background: rgb(255 255 255 / 0.14);
     color: var(--fg);
+  }
+
+  /* This control often lives in a narrow scrolling rail. Keep its ring inside the pill so focusing Series cannot
+     shift the entire rail sideways just to reveal pixels painted beyond its right edge. */
+  .filter button:focus-visible {
+    outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
+    outline-offset: calc(-1 * var(--focus-ring-width));
   }
 </style>

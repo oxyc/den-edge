@@ -3,8 +3,10 @@
      library session. -->
 <script lang="ts">
   import Detail from '../src/components/Detail.svelte';
+  import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
   import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
+  import { onMount } from 'svelte';
   import type { TitleRow } from '../src/lib/wire';
 
   let busy = $state(false);
@@ -17,6 +19,8 @@
   const search = new URLSearchParams(location.search);
   const fullActions = search.has('actions');
   const noop = () => {};
+
+  onMount(installKeyboardNavigation);
 
   const fixtureRow = (
     status: TitleRow['status']['value'] = 'none',

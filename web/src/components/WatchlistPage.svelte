@@ -260,7 +260,7 @@
 {/snippet}
 
 {#snippet grid(titles: Title[])}
-  <div class="grid">
+  <div class="grid" data-spatial-grid>
     {#each titles as title (key(title))}
       {#snippet card()}
         <PosterCard {title} href={titleHref(title)} menu={false} />
@@ -356,7 +356,7 @@
     </div>
     {#each months as month (month.key)}
       <h3>{month.label}</h3>
-      <div class="grid">
+      <div class="grid" data-spatial-grid>
         {#each month.entries as entry (key(entry.title))}
           {#snippet card()}
             <PosterCard

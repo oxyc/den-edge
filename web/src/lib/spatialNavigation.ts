@@ -98,6 +98,22 @@ function semanticDestination(
   const root = current.getRootNode();
   if (!(root instanceof Document || root instanceof ShadowRoot)) return undefined;
 
+  // Segmented filters and similar declared horizontal lists own Left/Right. Follow their DOM reading order and
+  // stop at an edge; page geometry must not jump from All into the first search result beside the rail.
+  if (direction === 'left' || direction === 'right') {
+    const list = current.closest<HTMLElement>('[data-spatial-list="horizontal"]');
+    if (list) {
+      const choices = Array.from(list.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((choice) =>
+        candidates.includes(choice),
+      );
+      const here = choices.indexOf(current);
+      if (here >= 0) {
+        const next = choices[here + (direction === 'left' ? -1 : 1)];
+        return next ?? current;
+      }
+    }
+  }
+
   if (direction === 'up') {
     const panel = current.closest<HTMLElement>('[role="tabpanel"][id]');
     const selected = panel
@@ -185,7 +201,7 @@ function semanticDestination(
   return undefined;
 }
 
-/** Prefer the same row/column, while still allowing a diagonal escape at an edge. */
+/** Prefer the same row/column. Horizontal input is row-local: crossing sections is an explicit Up/Down move. */
 function score(from: DOMRect, to: DOMRect, direction: Direction): number | null {
   const dx = to.left + to.width / 2 - from.left - from.width / 2;
   const dy = to.top + to.height / 2 - from.top - from.height / 2;
@@ -197,7 +213,32 @@ function score(from: DOMRect, to: DOMRect, direction: Direction): number | null 
     direction === 'left' || direction === 'right'
       ? Math.max(0, Math.min(from.bottom, to.bottom) - Math.max(from.top, to.top))
       : Math.max(0, Math.min(from.right, to.right) - Math.max(from.left, to.left));
+  // At the end of an action row, a distant card in the next section can still sit slightly to the right. Treating
+  // that diagonal as Right made Share jump into Cast, and caused the same leak between unrelated shelves. Vertical
+  // movement remains deliberately permissive because differently aligned rows still need to connect.
+  if ((direction === 'left' || direction === 'right') && overlap <= 0) return null;
   return primary + secondary * (overlap > 0 ? 2.2 : 4.5);
+}
+
+function geometricDestination(
+  current: HTMLElement,
+  direction: Direction,
+  candidates: HTMLElement[],
+): HTMLElement | undefined {
+  const from = current.getBoundingClientRect();
+  let winner: HTMLElement | undefined;
+  let best = Infinity;
+  for (const candidate of candidates) {
+    // Composite widgets can expose both a focusable child and wrapper. Neither is a spatial neighbor.
+    if (candidate === current || candidate.contains(current) || current.contains(candidate))
+      continue;
+    const value = score(from, candidate.getBoundingClientRect(), direction);
+    if (value !== null && value < best) {
+      best = value;
+      winner = candidate;
+    }
+  }
+  return winner;
 }
 
 export function moveFocus(direction: Direction): boolean {
@@ -222,19 +263,13 @@ export function moveFocus(direction: Direction): boolean {
     semantic.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
     return true;
   }
-  const from = current.getBoundingClientRect();
-  let winner: HTMLElement | undefined;
-  let best = Infinity;
-  for (const candidate of candidates) {
-    // Composite widgets can expose both a focusable child and wrapper. Neither is a spatial neighbor.
-    if (candidate === current || candidate.contains(current) || current.contains(candidate))
-      continue;
-    const value = score(from, candidate.getBoundingClientRect(), direction);
-    if (value !== null && value < best) {
-      best = value;
-      winner = candidate;
-    }
-  }
+  // Cards in a declared grid are one navigation surface. A fixed Back button can be geometrically closer than
+  // the preceding row after scrolling, but it must not win while there is still a card in the requested direction.
+  const grid = current.closest<HTMLElement>('[data-spatial-grid]');
+  const gridCandidates = grid ? candidates.filter((candidate) => grid.contains(candidate)) : [];
+  const winner =
+    geometricDestination(current, direction, gridCandidates) ??
+    geometricDestination(current, direction, candidates);
   if (!winner) return false;
   winner.focus({ preventScroll: true });
   winner.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });

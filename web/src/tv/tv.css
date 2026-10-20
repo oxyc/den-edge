@@ -287,6 +287,13 @@
   outline-offset: calc(-1 * var(--focus-ring-width));
 }
 
+/* PosterRow's heading deliberately clips a long single line. Its linked recommendation subject therefore keeps the
+   broad remote ring inside the text run instead of losing the trailing edge at that clip. */
+:root.den-tv.tv-remote-active .heading-link:focus {
+  outline-offset: calc(-1 * var(--focus-ring-width));
+  box-shadow: none;
+}
+
 /* Composite controls own one ring around the whole surface. Chrome 85 has :focus-within but not :has(), so
    make this explicit here instead of leaving a clipped ring on the invisible select or split-button region. */
 :root.den-tv.tv-remote-active .actions > .pick:focus-within,

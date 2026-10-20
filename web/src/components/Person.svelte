@@ -1,5 +1,6 @@
 <script lang="ts">
   import Loading from './Loading.svelte';
+  import Button from './Button.svelte';
   import PosterCard from './PosterCard.svelte';
   import TypeFilter from './TypeFilter.svelte';
   import { titleHref } from '../lib/route';
@@ -136,9 +137,14 @@
       {#if person.biography}
         <p class="bio" class:expanded>{person.biography}</p>
         {#if person.biography.length > 400}
-          <button class="more" aria-expanded={expanded} onclick={() => (expanded = !expanded)}
-            >{expanded ? 'Less' : 'More'}</button
-          >
+          <Button
+            variant="secondary"
+            size="compact"
+            class="bio-more"
+            label={expanded ? 'Less' : 'More'}
+            aria-expanded={expanded}
+            onclick={() => (expanded = !expanded)}
+          />
         {/if}
       {/if}
     </div>
@@ -166,7 +172,7 @@
         {#each groups as group (group.id)}
           <section class="role" aria-labelledby={`${panel}-${group.id}`}>
             <h3 id={`${panel}-${group.id}`}>{group.label}</h3>
-            <div class="films">
+            <div class="films" data-spatial-grid>
               {#each group.films.slice(0, counts[group.id] ?? 20) as c (`${c.title.type}:${c.title.id}`)}
                 <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
                      which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
@@ -246,6 +252,10 @@
 
   .bio.expanded {
     display: block;
+  }
+
+  :global(.bio-more) {
+    margin-top: 10px;
   }
 
   .more {

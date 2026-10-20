@@ -844,9 +844,17 @@
       max-height: calc(100vh - var(--bar-space) - 16px);
       margin: 0;
       padding: 0 4px 16px 0;
-      overflow-y: auto;
+      overflow: hidden auto;
       overscroll-behavior: contain;
       scrollbar-width: thin;
+    }
+
+    /* Every rail item paints inside its own shape. The rail must clip horizontally to remain a fixed sidebar, so
+       an outer ring would be cut at either edge and focusing a wide item could scroll the column sideways. */
+    .rail :global(a:focus-visible),
+    .rail :global(button:focus-visible) {
+      outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
+      outline-offset: calc(-1 * var(--focus-ring-width));
     }
 
     .feed {

@@ -102,6 +102,12 @@
     font-size: 12px;
   }
 
+  /* The artwork owns this composite card's focus treatment. Suppress the browser's blue link rectangle so web and
+     TV both draw exactly the same single white ring inside the plate. */
+  .tile:focus-visible {
+    outline: none;
+  }
+
   .tile:focus-visible .art {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: calc(-1 * var(--focus-ring-width));
