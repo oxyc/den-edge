@@ -487,6 +487,13 @@ test('TV resumes real HLS in a fresh session after the playing session disappear
 
 test('TV cancels a native expiry probe when playback closes', async ({ page, browserName }) => {
   test.skip(browserName !== 'webkit', 'native HLS lifecycle control');
+  // Playwright's Linux WebKit has no native HLS decoder and correctly takes Den's hls.js path. Exercise this
+  // native-only lifecycle where the engine really provides it (macOS WebKit), instead of making canPlayType lie and
+  // claiming a decoder integration that CI cannot run.
+  const nativeHls = await page.evaluate(
+    () => document.createElement('video').canPlayType('application/vnd.apple.mpegurl') !== '',
+  );
+  test.skip(!nativeHls, 'this WebKit build has no native HLS decoder');
   test.setTimeout(60_000);
   const native = await nativeMediaServer(() => false, { holdProbeMaster: true });
   await routePlayback(page, {
