@@ -1,8 +1,8 @@
 // When to warm the next episode, so advancing to it does not start from cold.
 //
 // The tvOS app prefetches at the HALFWAY mark and holds the resolved route in memory for the rest of the
-// episode (`BingePlan.shouldPrefetch`, `BingeCoordinator`). That does not port here. The web holds nothing
-// across an advance — the player is remounted for the next episode and resolves again — so a warm is only
+// episode (`BingePlan.shouldPrefetch`, `BingeCoordinator`). That does not port here. The web holds no route
+// across an advance — the player keeps its video but starts the next episode's session afresh — so a warm is only
 // worth making while its answer will still be fresh, and den-scout keeps a stream list for five minutes
 // (`defaultListTTL`). Warming twenty minutes early would warm something that has expired before it is used.
 //

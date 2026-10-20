@@ -182,10 +182,13 @@
     /** Timer seams for the browser fixture; the app always uses the production defaults. */
     castDiscoveryMs?: number;
     castPlayMs?: number;
-    onprogress: (fraction: number, seconds: number) => void;
+    /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
+    onprogress: (fraction: number, seconds: number, at: Episode) => void;
     onnext?: () => void;
     onclose: () => void;
   } = $props();
+
+  type Episode = { season?: number; episode?: number };
 
   const REPORT_MS = 60_000;
   /** How often a paused viewer's "still here" goes out — comfortably under den-remux's own UNATTENDED_IDLE
@@ -345,7 +348,7 @@
   /** What this page's own video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
   let watcher: Watcher | undefined;
   /** This title's (or episode's) releases as this tab remembers them across a reload (`releaseMemory`). */
-  const memoryKey = untrack(() => `${title.type}:${title.id}:${season ?? ''}:${episode ?? ''}`);
+  let memoryKey = untrack(() => `${title.type}:${title.id}:${season ?? ''}:${episode ?? ''}`);
   const recalled = recallReleases(memoryKey);
   /**
    * The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick.
@@ -353,8 +356,14 @@
    */
   let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
   let session = $state<Session | null>(null);
+  /**
+   * Set across an advance in place (`playEpisode`): the outgoing episode's `<video>` — or the cast page's frame, at
+   * `heldFrame` — stays in the document until the next episode's session is in, so the fullscreen it is in survives.
+   */
+  let holding = $state(false);
+  let heldFrame = $state<string>();
   /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
-  const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin);
+  const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -391,9 +400,12 @@
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
   let ended = false;
-  const progress = new PlaybackProgressReporter((fraction, seconds) =>
-    onprogress(fraction, seconds),
-  );
+  /** The episode playing, which the props name ahead of it once an advance asks for the next (`playEpisode`). */
+  let playingEpisode: Episode = untrack(() => ({ season, episode }));
+  /** Each episode's positions are written against that episode, whatever the props name by the time they go. */
+  const reporterFor = (at: Episode) =>
+    new PlaybackProgressReporter((fraction, seconds) => onprogress(fraction, seconds, at));
+  let progress = reporterFor(playingEpisode);
   /** Where the next session starts: a language switch picks up where the last one was. */
   let startAt: { fraction: number; seconds?: number } | null = null;
   /** The second den-remux was asked to start the playing session at; undefined when it was asked for none. */
@@ -1034,11 +1046,13 @@
     // The release list remains useful for managed HLS: it contains names, never media URLs, and every filename the
     // viewer picks still comes back through this configured Hearth playback operation.
     if (!releases.length) {
+      const listing = memoryKey;
       void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
         videoCodecs: request.videoCodecs,
         playable: can,
       }).then((list) => {
-        releases = list ?? [];
+        // An episode advanced from meanwhile lists its own.
+        if (memoryKey === listing) releases = list ?? [];
       });
     }
     return true;
@@ -2228,6 +2242,8 @@
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
   function report(slack = 0) {
+    // Between an advance's two sessions the held video still has the outgoing episode's clock, until it is emptied.
+    if (!session) return;
     const at = video?.currentTime ?? remoteTime;
     if (at > 0) progress.report(at, length(), slack);
   }
@@ -2574,17 +2590,27 @@
     const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;
-    // den-edge's own outcome and cast reports (den-edge#262 and its identity fields, #246): once per visit, only
-    // when a session was actually asked for — a player opened and closed before `begin()` got anywhere has
-    // nothing to say. `hls` still names the engine that was playing; read before it is destroyed and nulled,
-    // below. `identity` is shared between the two reports: both describe the same title and, when one was open,
-    // the same session.
+    sendReports(stats);
+    hls?.destroy();
+    hls = undefined;
+    // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
+    if (session && !casting) endSession(session);
+  }
+
+  /**
+   * den-edge's own outcome and cast reports (den-edge#262 and its identity fields, #246): once per visit — a player's,
+   * or one episode's of an advance in place — and only when a session was actually asked for: a player opened and
+   * closed before `begin()` got anywhere has nothing to say. Sent before `hls` is destroyed and nulled, while it still
+   * names the engine that was playing. `identity` is shared between the two reports: both describe the same episode
+   * and, when one was open, the same session.
+   */
+  function sendReports(stats: ReturnType<Watcher['stats']> | undefined) {
     const subtitleLanguage = reportableLanguage(subtitleChoice);
     const subtitleIndex = session?.subtitles?.findIndex((s) => s.language === subtitleChoice);
     const identity = identityOf(
       title,
-      season,
-      episode,
+      playingEpisode.season,
+      playingEpisode.episode,
       session
         ? {
             release: session.release,
@@ -2634,11 +2660,82 @@
         ...identity,
       });
     }
-    hls?.destroy();
-    hls = undefined;
-    // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
-    if (session && !casting) endSession(session);
   }
+
+  /**
+   * The next episode of the same series, started in this player rather than a new one (`Library` keys the player by
+   * title alone). The `<video>` element stays, and with it fullscreen and Chrome's remoting of a fullscreen video to a
+   * Chromecast; a Den Cast receiver keeps its Cast session and is handed the next episode. Everything about the episode
+   * itself starts over as a new player's would: its own progress, reports, release, skip segments and up-next.
+   */
+  function playEpisode(at: Episode) {
+    // The outgoing episode's own last word, while its session and position are still here.
+    report();
+    stay();
+    clearInterval(timer);
+    clearInterval(heartbeat);
+    endCastSession();
+    sendReports(watcher?.stats());
+    playingEpisode = at;
+    progress = reporterFor(at);
+    memoryKey = `${title.type}:${title.id}:${at.season ?? ''}:${at.episode ?? ''}`;
+    const remembered = recallReleases(memoryKey);
+    chosenRelease = filename ?? remembered.chosen;
+    excluded = remembered.left;
+    releases = [];
+    swapped = autoSwitch = struggling = slowPick = unchanged = null;
+    switchCount = 0;
+    lastSwitchReason = undefined;
+    degraded = false;
+    noHint = false;
+    breaking = null;
+    torbox = 'untried';
+    sessionRoute = undefined;
+    lastSubtitleSource = undefined;
+    playedEngine = undefined;
+    lastFatal = undefined;
+    lastFailSource = undefined;
+    subtitleSwitchedMidPlay = subtitleTurnedOffMidPlay = subtitleLoadFailedFlag = false;
+    reachedNaturalEnd = false;
+    castFunnel = undefined;
+    castFailed = false;
+    castFailReason = undefined;
+    castSessionSecs = 0;
+    casting = false;
+    segments = [];
+    active = null;
+    askedFor = 0;
+    segmentsOf = undefined;
+    segmentRequest += 1;
+    for (const kind of Object.keys(skipped) as SkipKind[]) delete skipped[kind];
+    warmedNext = false;
+    hold = null;
+    startsIn = null;
+    // Only what is on screen is held: after a failure there is no video to keep.
+    holding = !!video;
+    heldFrame = session?.castOrigin && !failure ? session.castOrigin : undefined;
+    letGo();
+    // `letGo` carried the outgoing episode's position: the next starts where the library has it.
+    startAt = null;
+    lastPosition = undefined;
+    remoteTime = remoteDuration = 0;
+    remotePaused = true;
+    void begin();
+  }
+
+  // An advance names the next episode; anything else about the title is the same.
+  $effect(() => {
+    const at = { season, episode };
+    if (at.season === playingEpisode.season && at.episode === playingEpisode.episode) return;
+    untrack(() => playEpisode(at));
+  });
+
+  // Held only until the next session is in, or until it fails, which shows instead.
+  $effect(() => {
+    if (!session && !failure) return;
+    holding = false;
+    heldFrame = undefined;
+  });
 
   function close() {
     finish();
@@ -2916,7 +3013,7 @@
       {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
         <Button variant="primary" label="Try again" onclick={() => void begin()} />
       {/if}
-    {:else if !session}
+    {:else if !session && !holding}
       {#if notice}
         <p class="note startup" role="status">
           {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
@@ -2925,7 +3022,7 @@
         </p>
       {/if}
     {:else}
-      {#if !session.castOrigin}
+      {#if !session?.castOrigin}
         <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
         <video
           bind:this={video}
@@ -2963,7 +3060,7 @@
             else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
         >
-          {#each session.externalSubtitles ?? [] as track (track.language)}
+          {#each session?.externalSubtitles ?? [] as track (track.language)}
             <track kind="subtitles" src={track.url} srclang={track.language} label={track.name} />
           {/each}
         </video>
@@ -2980,8 +3077,8 @@
         {/if}
       {/if}
     {/if}
-    {#if frameOrigin && (lookOrigin || chooserOrigin || (session?.castOrigin && !failure))}
-      {@const shown = !!session?.castOrigin && !failure}
+    {#if frameOrigin && (lookOrigin || chooserOrigin || heldFrame || (session?.castOrigin && !failure))}
+      {@const shown = (!!session?.castOrigin || !!heldFrame) && !failure}
       {@const choosing = !shown && castOffer === 'choose'}
       <!-- The cast page: unseen while it looks for a receiver, a "Choose your Chromecast" button while it offers one,
            then the player or the receiver's remote. One frame throughout, so the Cast session chosen in it is kept.

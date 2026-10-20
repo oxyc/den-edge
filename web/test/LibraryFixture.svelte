@@ -184,6 +184,8 @@
           },
         }
       : undefined;
+  /** `plugin=<manifest URL>`: the library lists that addon, as Settings › Plugins installs one. */
+  const plugin = params.get('plugin');
   const log = {
     readOnly: false,
     wireMinimum: 4,
@@ -193,7 +195,9 @@
         ? { values: { tmdb: { value: { string: 'fixture-key' }, at } } }
         : group === 'devices'
           ? devices
-          : undefined,
+          : group === 'plugins' && plugin
+            ? { values: { [plugin]: { value: { bool: true }, at } } }
+            : undefined,
     refresh: async () => false,
     rows: () => stored,
     seqOf: () => 0,
@@ -320,8 +324,11 @@
     };
     (window as unknown as { denTestLivePosition: typeof denTestLivePosition }).denTestLivePosition =
       denTestLivePosition;
+    // What the library holds now, as a spec reads back what playback wrote.
+    (window as unknown as { denTestRows: () => Row[] }).denTestRows = () => $state.snapshot(stored);
     return () => {
       delete (window as { denTestLivePosition?: unknown }).denTestLivePosition;
+      delete (window as { denTestRows?: unknown }).denTestRows;
     };
   });
 </script>
