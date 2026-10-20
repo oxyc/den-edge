@@ -1213,6 +1213,8 @@ mod tests {
         assert_eq!(api.status(), StatusCode::NOT_FOUND, "the API hostname must not serve either shell");
         let api_path = h.send("GET", "/version", None, &[("host", "den-tv.oxy.fi")]).await;
         assert!(body_text(api_path).await.contains("<title>Den TV</title>"), "TV host is static-only");
+        let api_post = h.send("POST", "/pair/start", None, &[("host", "den-tv.oxy.fi")]).await;
+        assert_eq!(api_post.status(), StatusCode::NOT_FOUND, "TV host must not expose API method routing");
     }
 
     #[tokio::test]

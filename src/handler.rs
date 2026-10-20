@@ -590,6 +590,23 @@ async fn dispatch(
     if migration_disabled {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
+    let path = req.uri().path().to_owned();
+    let face = Face::of(state, &req);
+    if !face.serves(&path) {
+        return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
+    }
+    // Select the static TV face before API route/method validation. Otherwise a POST to an API-shaped path on
+    // this hostname receives the API router's 405 and makes the supposedly static origin distinguishable from a
+    // missing file. Hosted LG and packaged Samsung builds call API_HOSTS instead; this name serves GET/HEAD files
+    // and client-side routes only.
+    if face == Face::Tv {
+        return if matches!(*req.method(), Method::GET | Method::HEAD) {
+            let query = req.uri().query().map(str::to_owned);
+            crate::web::serve(state, &path, query.as_deref(), req.headers(), face).await
+        } else {
+            bare_json(StatusCode::NOT_FOUND, &error("not_found"))
+        };
+    }
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
@@ -603,21 +620,6 @@ async fn dispatch(
     // no length.
     if declared_length(&req).is_some_and(|n| n > body_cap(route) as u64) {
         return bare_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"));
-    }
-    let path = req.uri().path().to_owned();
-    let face = Face::of(state, &req);
-    if !face.serves(&path) {
-        return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
-    }
-    // The TV name is a static asset origin, not another spelling of the device API. Hosted LG and packaged
-    // Samsung builds call API_HOSTS instead. Extensionless paths are client-side routes and receive the TV shell.
-    if face == Face::Tv {
-        return if matches!(*req.method(), Method::GET | Method::HEAD) {
-            let query = req.uri().query().map(str::to_owned);
-            crate::web::serve(state, &path, query.as_deref(), req.headers(), face).await
-        } else {
-            bare_json(StatusCode::NOT_FOUND, &error("not_found"))
-        };
     }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
     // The selected WebVTT is staged here before the addon relay sees its `/den/<install>/` mount. The same member
