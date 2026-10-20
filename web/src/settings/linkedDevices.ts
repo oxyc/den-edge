@@ -68,7 +68,7 @@ export function linkedDeviceRows(
       rows.push({
         id: `shared:${entry.inboxKey ?? `${entry.libraryKey ?? 'legacy'}:${entry.deviceId ?? `${entry.at}:${identityName(entry.name)}:${index}`}`}`,
         name: entry.name,
-        kind: /Apple TV/i.test(entry.name) ? 'tv' : 'browser',
+        kind: /\b(?:Apple|LG|Samsung) TV\b/i.test(entry.name) ? 'tv' : 'browser',
         links: [],
         shared: [entry],
       });
@@ -89,7 +89,7 @@ export function deviceStatus(
 ): string {
   if (row.device) {
     const what =
-      row.device.id === selfId ? 'This browser' : row.device.kind === 'tv' ? 'Apple TV' : 'Browser';
+      row.device.id === selfId ? 'This device' : row.device.kind === 'tv' ? 'TV' : 'Browser';
     return row.device.seen ? `${what} · seen ${day(row.device.seen)}` : what;
   }
   return row.shared

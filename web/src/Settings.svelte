@@ -340,15 +340,6 @@
     if (result.kind !== 'history.export') throw new Error('wrong history export response');
     return result;
   }
-
-  // This browser lists itself among the devices with the library, as each device does when it opens it: again when its
-  // name changes, and otherwise at most once a day.
-  $effect(() => {
-    if (!ready) return;
-    const name = thisDevice.name;
-    const timer = setTimeout(() => void run(() => model.heartbeatDevice(name), true), 1000);
-    return () => clearTimeout(timer);
-  });
 </script>
 
 <div class="settings">

@@ -155,7 +155,7 @@ describe('device status line', () => {
         device('tv-1', 'Living Room', 'tv', 7),
         device('phone-1', 'Phone', 'browser', 0),
       ]),
-    ).toEqual(['This browser · seen day 9', 'Apple TV · seen day 7', 'Browser']);
+    ).toEqual(['This device · seen day 9', 'TV · seen day 7', 'Browser']);
   });
 
   it('says nothing of the record of giving it the library once the device lists itself', () => {

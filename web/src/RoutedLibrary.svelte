@@ -49,6 +49,7 @@
   import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
+  import { thisDevice } from './lib/device.svelte';
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
   import { knownProfileHousehold, rememberProfileHousehold } from './lib/profileHouseholdHint';
   import {
@@ -231,6 +232,22 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
+  // Every device belongs in the household's device list as soon as it opens the library, not only after somebody
+  // visits Settings on that device. This also makes a TV paired from localhost visible later on d.oxy.fi, where the
+  // browser-local pairing record does not exist. A rename retriggers this; otherwise selfEntry writes at most daily.
+  $effect(() => {
+    const model = householdSettingsModel;
+    if (!model) return;
+    const name = thisDevice.name;
+    const timer = setTimeout(
+      () =>
+        void model
+          .heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser')
+          .catch((error: unknown) => console.warn('den: this device could not check in', error)),
+      1_000,
+    );
+    return () => clearTimeout(timer);
+  });
   // Linking, invites, assistant consent and the saved search list are the household's. A household without profiles
   // keeps them as ever; once profiles are active they open only for the active Owner session.
   const householdAdmin = $derived(

@@ -244,7 +244,7 @@ export type LibraryCommand =
       server: MediaServerKind;
       value: { url: string; user?: string; credential?: string } | null;
     }
-  | { kind: 'device.heartbeat'; name: string }
+  | { kind: 'device.heartbeat'; name: string; deviceKind?: 'tv' | 'browser' }
   | { kind: 'device.remove'; deviceId: string }
   | { kind: 'simkl.connect'; token: string }
   | { kind: 'simkl.disconnect' }

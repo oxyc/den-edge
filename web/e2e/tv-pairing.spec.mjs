@@ -49,6 +49,11 @@ test('TV joins another device through encrypted pairing and retains its saved li
     await expect(tv.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible({
       timeout: 30_000,
     });
+    const linkedTv = devices
+      .getByRole('listitem')
+      .filter({ hasText: 'Living room LG' })
+      .filter({ hasText: 'TV · seen' });
+    await expect(linkedTv).toHaveCount(1, { timeout: 30_000 });
     await tv.reload();
     await expect(tv.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible({
       timeout: 30_000,
