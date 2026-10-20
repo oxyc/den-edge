@@ -25,7 +25,9 @@
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     autoSubtitleLanguage,
-    canonicalLanguage,
+    preferredSubtitleTrack,
+    subtitleLanguagesMatch,
+    visibleSubtitleTracks,
     downmixLabel,
     nativeHls,
     endSession,
@@ -932,6 +934,10 @@
         retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
       return false;
     }
+    result = {
+      ...result,
+      subtitles: visibleSubtitleTracks(result.subtitles ?? [], shownSubtitleLanguages),
+    };
     // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
     // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
     // A Remux session's own cast page is that same trusted page; naming the one the receiver was chosen in keeps its
@@ -1019,13 +1025,10 @@
       );
     }
     // Settings and auto-pick name a language; the picker names a concrete candidate. Prefer the first offered
-    // candidate (TorBox embeds precede OpenSubtitles) and keep that identity across same-language alternatives.
+    // full candidate (TorBox embeds precede OpenSubtitles), never a forced-only track merely because it came first,
+    // and keep an exact manual identity across same-language alternatives.
     if (subtitleChoice) {
-      const picked = result.subtitles?.find(
-        (track) =>
-          subtitleValue(track) === subtitleChoice ||
-          subtitleLanguagesMatch(track.language, subtitleChoice),
-      );
+      const picked = preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice);
       if (picked) subtitleChoice = subtitleValue(picked);
     }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
@@ -2398,21 +2401,11 @@
     return track.value ?? track.language;
   }
 
-  function subtitleLanguagesMatch(left: string | null | undefined, right: string | null): boolean {
-    if (right === null) return false;
-    const a = canonicalLanguage(left ?? '');
-    const b = canonicalLanguage(right);
-    const unknown = (language: string) => !language || language === 'und' || language === 'unknown';
-    return a === b || (unknown(a) && unknown(b));
-  }
-
   function selectedSubtitle(
     current: Session | null = session,
     choice: string | null = subtitleChoice,
   ): NonNullable<Session['subtitles']>[number] | undefined {
-    return current?.subtitles?.find(
-      (track) => subtitleValue(track) === choice || subtitleLanguagesMatch(track.language, choice),
-    );
+    return preferredSubtitleTrack(current?.subtitles ?? [], choice);
   }
 
   function selectedSubtitleLanguage(current: Session | null = session): string | null {
@@ -3328,11 +3321,7 @@
         <!-- Den owns this picker so it can distinguish built-in tracks from OpenSubtitles candidates and show
              match metadata the native video control cannot carry. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
-          {@const chosenSubtitle = session.subtitles.find(
-            (track) =>
-              subtitleValue(track) === subtitleChoice ||
-              subtitleLanguagesMatch(track.language, subtitleChoice),
-          )}
+          {@const chosenSubtitle = preferredSubtitleTrack(session.subtitles, subtitleChoice)}
           {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
           <div class="pick-menu">
             <ActionMenu

@@ -22,6 +22,7 @@ import {
   lowerLink,
   playedSession,
   premeasureLink,
+  preferredSubtitleTrack,
   relayLimit,
   rememberedLink,
   rememberLink,
@@ -38,6 +39,7 @@ import {
   REMUX_PROBE_TIMEOUT_MS,
   SPEED_PROBE_BYTES,
   startSession,
+  visibleSubtitleTracks,
   wantedLanguages,
   videoCodecsOf,
   type Want,
@@ -143,6 +145,48 @@ describe('autoSubtitleLanguage', () => {
 
   it('treats an unknown audio language as foreign, never as already understood', () => {
     expect(autoSubtitleLanguage(undefined, ['sv-SE', 'sv'], [{ language: 'en' }])).toBe('en');
+  });
+});
+
+describe('subtitle picker policy', () => {
+  const forced = {
+    value: 'torbox:0',
+    language: 'eng',
+    name: 'English Forced',
+    description: 'Built-in · SUBRIP',
+    torboxTrack: 0,
+  };
+  const full = {
+    value: 'torbox:1',
+    language: 'eng',
+    name: 'English',
+    description: 'Built-in · SUBRIP',
+    torboxTrack: 1,
+  };
+
+  it('prefers a full built-in track over an earlier forced-only track', () => {
+    expect(preferredSubtitleTrack([forced, full], 'en')).toBe(full);
+  });
+
+  it('prefers a full OpenSubtitles track when the only built-in match is forced', () => {
+    const opensubtitles = {
+      value: 'opensubtitles:42',
+      language: 'en',
+      name: 'The.Morning.Show.S01E01.srt',
+      description: 'OpenSubtitles · 2,100 downloads',
+    };
+    expect(preferredSubtitleTrack([forced, opensubtitles], 'en')).toBe(opensubtitles);
+  });
+
+  it('preserves an exact forced track selected by hand', () => {
+    expect(preferredSubtitleTrack([forced, full], 'torbox:0')).toBe(forced);
+  });
+
+  it('shows only configured languages plus tracks whose language is genuinely unknown', () => {
+    const arabic = { value: 'torbox:2', language: 'ara', name: 'Arabic', torboxTrack: 2 };
+    const unknown = { value: 'torbox:3', language: 'und', name: 'Signs', torboxTrack: 3 };
+    expect(visibleSubtitleTracks([arabic, forced, unknown], ['en'])).toEqual([forced, unknown]);
+    expect(visibleSubtitleTracks([arabic, forced, unknown], [])).toEqual([arabic, forced, unknown]);
   });
 });
 
