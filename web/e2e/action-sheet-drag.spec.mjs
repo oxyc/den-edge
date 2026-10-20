@@ -138,6 +138,29 @@ const finger = {
         }),
       );
     }, dy),
+  /** A deliberately fast gesture. Keep its moves and release in one browser task so runner load cannot turn the
+   * Playwright round trip between them into more than the product's 100 ms flick window. */
+  flick: (locator, moves) =>
+    locator.evaluate((el, moves) => {
+      const box = el.getBoundingClientRect();
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      const target = document.elementFromPoint(x, y) ?? el;
+      const event = (type, dy) =>
+        target.dispatchEvent(
+          new PointerEvent(type, {
+            pointerType: 'touch',
+            pointerId: 9,
+            isPrimary: true,
+            clientX: x,
+            clientY: y + dy,
+            bubbles: true,
+          }),
+        );
+      event('pointerdown', 0);
+      for (const dy of moves) event('pointermove', dy);
+      event('pointerup', moves.at(-1) ?? 0);
+    }, moves),
 };
 
 /** A slow drag to `to` pixels down, in 10 px steps a frame or more apart: no flick. */
@@ -195,11 +218,9 @@ for (const [engine, browserType] of [
     });
 
     test('a quick flick closes it, however short', async () => {
-      const { browser, page, sheet, heading } = await openSheet(browserType);
+      const { browser, sheet, heading } = await openSheet(browserType);
       try {
-        await finger.down(heading);
-        await finger.move(page, [{ dy: 10 }, { dy: 20 }]);
-        await finger.up(page, 20);
+        await finger.flick(heading, [10, 20]);
         await expect(sheet).toBeHidden();
       } finally {
         await browser.close();
