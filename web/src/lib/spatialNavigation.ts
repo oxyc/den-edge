@@ -284,6 +284,9 @@ function geometricDestination(
 export function moveFocus(
   direction: Direction,
   include: (candidate: HTMLElement) => boolean = () => true,
+  behavior: ScrollBehavior = matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 'auto'
+    : 'smooth',
 ): boolean {
   const current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const allCandidates = focusables();
@@ -305,7 +308,7 @@ export function moveFocus(
   const semantic = semanticDestination(current, direction, candidates);
   if (semantic && candidates.includes(semantic)) {
     semantic.focus({ preventScroll: true });
-    semantic.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    semantic.scrollIntoView({ behavior, block: 'nearest', inline: 'nearest' });
     return true;
   }
   // Cards in a declared grid are one navigation surface. A fixed Back button can be geometrically closer than
@@ -317,6 +320,6 @@ export function moveFocus(
     geometricDestination(current, direction, candidates);
   if (!winner) return false;
   winner.focus({ preventScroll: true });
-  winner.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  winner.scrollIntoView({ behavior, block: 'nearest', inline: 'nearest' });
   return true;
 }
