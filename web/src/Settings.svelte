@@ -13,7 +13,7 @@
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
   import { thisDevice } from './lib/device.svelte';
-  import { onDestroy, tick } from 'svelte';
+  import { flushSync, onDestroy } from 'svelte';
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
@@ -144,12 +144,16 @@
       if (!quiet) failure = 'Couldn’t save that. Check your connection and try again.';
       return false;
     } finally {
-      if (!quiet) saving = false;
+      // Commit the enabled controls and any preference publication in this task. If this waits for `tick`, a TV
+      // remote can observe the newly enabled surface, move to its next control, and then have the continuation below
+      // steal focus back to the setting that just saved.
+      flushSync(() => {
+        if (!quiet) saving = false;
+      });
       // Saving temporarily disables the settings surface. Some engines move focus to the document when the active
       // native control becomes disabled, which strands the next keyboard/remote press. Return keyboard users to that
       // same connected control once the save settles, without reopening a phone keyboard after a pointer save.
       if (restoreFocus) {
-        await tick();
         document.removeEventListener('keydown', noteInput, { capture: true });
         document.removeEventListener('pointerdown', noteInput, { capture: true });
         // TV Settings is intentionally inert during a save; a remote press cannot make a reliable move until it
