@@ -1,8 +1,8 @@
-// A subtitle on a TorBox stream is a page-side `<track>`: TorBox's own playlist names no subtitles. Where WebKit plays
-// HLS itself (an iPhone), it hands the stream to the system player, whose fullscreen view and captions menu show only
-// the renditions a playlist names, so that `<track>` never appeared there (The Morning Show S1E1 on an iPhone: a menu
-// offering English, nothing on screen, and an empty captions menu). There a subtitle the viewer wants is Den Remux's,
-// whose master names it; hls.js, which renders the page's own `<track>`, keeps TorBox.
+// An OpenSubtitles subtitle on a TorBox stream is a page-side `<track>`. Where WebKit plays HLS itself (an iPhone), it
+// hands the stream to the system player, whose fullscreen view and captions menu show only the renditions a playlist
+// names, so that sidecar never appeared there. There an OpenSubtitles track the viewer wants is Den Remux's, whose
+// master names it; hls.js, which renders the page's own `<track>`, keeps TorBox. TorBox embedded tracks take a separate
+// path: Hearth asks TorBox to put the selected stream in its direct playlist.
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -92,6 +92,7 @@ async function mockHearth(page) {
   await page.route(`${ORIGIN}/den/config/subtitle/*.srt`, (route) =>
     route.fulfill({ contentType: 'text/plain', body: srt }),
   );
+  await page.route(`${ORIGIN}/den/config/cast-subtitle`, (route) => route.fulfill({ status: 503 }));
   const operations = [];
   await page.route(`${ORIGIN}/den/config/playback`, (route) => {
     const body = route.request().postDataJSON();
@@ -158,10 +159,11 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       expect(operations[0].originalLanguage).toBe('en');
       // Nothing is named showing that the system player could not show.
       expect(await page.evaluate(shown)).toBeNull();
-      const menu = page.getByLabel('Subtitles');
-      await expect(menu.locator('option', { hasText: 'English · OpenSubtitles' })).toHaveCount(1);
-
-      await menu.selectOption('en');
+      const menu = page.getByRole('button', { name: 'Subtitles: Off' });
+      await menu.click();
+      const english = page.getByRole('menuitemradio', { name: 'English' });
+      await expect(english).toHaveAccessibleDescription(/OpenSubtitles/);
+      await english.click();
       await expect.poll(() => operations.length, { timeout: 10_000 }).toBe(2);
       expect(operations[1].directFailed).toBe(true);
       expect(operations[1].filename).toBe('fixture.mkv');
@@ -169,8 +171,9 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
         .poll(() => page.evaluate(shown), { timeout: 15_000 })
         .toMatchObject({ language: 'en', label: 'English (in file)' });
       await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
-      await expect(menu.locator('option', { hasText: 'English (in file)' })).toHaveCount(1);
-      await expect(menu).toHaveValue('en');
+      const selected = page.getByRole('button', { name: 'Subtitles: English (in file)' });
+      await selected.click();
+      await expect(page.getByRole('menuitemradio', { name: 'English (in file)' })).toBeChecked();
     } finally {
       await browser.close();
     }
@@ -231,11 +234,11 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
     await playing(page);
     // English audio for an English browser: nothing comes up unasked, and the menu says so.
     expect(await page.evaluate(shown)).toBeNull();
-    await expect(page.getByLabel('Subtitles')).toHaveValue('');
-    await page.getByLabel('Subtitles').selectOption('en');
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English' }).click();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
-      .toMatchObject({ language: 'en', label: 'English · OpenSubtitles' });
+      .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
     expect(operations).toHaveLength(1);
   } finally {
@@ -252,10 +255,12 @@ test('hls.js shows the subtitle it picks itself on a TorBox stream, not only nam
     const operations = await mockHearth(page);
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=he`);
     await playing(page);
-    await expect(page.getByLabel('Subtitles')).toHaveValue('sv');
+    const menu = page.getByRole('button', { name: /^Subtitles:/ });
+    await expect(menu).toBeVisible();
+    await expect(menu).not.toHaveAccessibleName('Subtitles: Off');
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
-      .toMatchObject({ language: 'sv', label: expect.stringMatching(/ · OpenSubtitles$/) });
+      .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
     expect(operations).toHaveLength(1);
   } finally {

@@ -2471,7 +2471,10 @@
     ) {
       // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
       const previous = subtitleChoice;
-      subtitleChoice = next;
+      // Candidate identities are local to the direct sidecar list. Remux names its rendition by language, so
+      // carry that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot
+      // expose in its own playlist.
+      subtitleChoice = selectedSubtitle(session, next)?.language ?? next;
       switchDelivery(() => (subtitleChoice = previous));
       return;
     }
