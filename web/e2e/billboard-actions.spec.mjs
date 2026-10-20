@@ -157,11 +157,11 @@ test('billboard keyboard focus stays on actions and treats its pager as one rovi
     const active = () => billboard.locator('.slide:not([inert])');
 
     await expect(slideTitle(billboard)).toHaveText('Movie 1');
-    await expect(slideTitle(billboard)).toHaveAttribute('tabindex', '-1');
-    await expect(active().locator('.slide-link')).toHaveAttribute('tabindex', '-1');
+    await expect(active().locator('.slide-link')).toBeHidden();
 
     const more = active().getByRole('link', { name: 'More' });
-    await more.focus();
+    await page.keyboard.press('Tab');
+    await expect(more).toBeFocused();
     await page.keyboard.press('ArrowRight');
     await expect(slideTitle(billboard)).toHaveText('Movie 2');
     await expect(active().getByRole('link', { name: 'More' })).toBeFocused();
