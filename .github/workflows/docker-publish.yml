@@ -300,6 +300,7 @@ jobs:
           DEN_TV_PACKAGED=1 npm run build:tv:tizen
           node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
             --version "1.0.${TIZEN_BUILD}"
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen.wgt
           mkdir -p tv-release/den-tv-tizen
           mv tv-packages/tizen/shell tv-release/den-tv-tizen/app
           cp tv-packaging/install-tizen.sh tv-release/den-tv-tizen/install.sh
@@ -348,4 +349,4 @@ jobs:
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$REPO" --title "Den Edge $VERSION" --generate-notes
           gh release upload "$TAG" --repo "$REPO" --clobber \
-            den-tv-webos.tar.gz den-tv-tizen-unsigned.tar.gz
+            den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen-unsigned.tar.gz
