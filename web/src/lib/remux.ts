@@ -17,7 +17,12 @@ export interface Session {
   /** A URL Hearth returned without a Remux lifecycle. Client-only; never sent by Hearth. */
   external?: boolean;
   /** Blob-backed WebVTT tracks fetched through Den, optionally staged for a Cast receiver. */
-  externalSubtitles?: { language: string; name: string; url: string; castUrl?: string }[];
+  externalSubtitles?: {
+    language: string;
+    name: string;
+    url: string;
+    castUrl?: string;
+  }[];
   /** Materializes one selected external subtitle language; repeated calls reuse its blob. */
   loadExternalSubtitle?: (
     language: string,
@@ -78,7 +83,12 @@ export interface Session {
    * the player had no picker. One document per language: den-remux exposes the best match it found, which is
    * why `maxSubtitlesPerLanguage` cannot be honoured here however it is set.
    */
-  subtitles?: { language: string; name: string }[];
+  subtitles?: {
+    language: string;
+    name: string;
+    /** A quiet second line for Den's picker: source, release match and provider quality signals. */
+    description?: string;
+  }[];
   /**
    * `den_subtitles` when this session was opened with a den-subtitles install offered as a candidate
    * (`startSession`) — never which install — for the player's own den-edge outcome report

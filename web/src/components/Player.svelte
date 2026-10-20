@@ -2372,6 +2372,63 @@
     );
   }
 
+  /** Apple TV deliberately leaves an untagged embedded track as Unknown; a filename is not language evidence. */
+  function subtitleLabel(track: NonNullable<Session['subtitles']>[number]): string {
+    const code = track.language.trim().toLowerCase();
+    return [
+      'und',
+      'unknown',
+      'srt',
+      'sub',
+      'subrip',
+      'ass',
+      'ssa',
+      'vtt',
+      'pgs',
+      'sup',
+      'idx',
+    ].includes(code)
+      ? 'Unknown'
+      : track.name;
+  }
+
+  function subtitleDescription(
+    current: Session,
+    track: NonNullable<Session['subtitles']>[number],
+  ): string {
+    // A Remux rendition can choose its own track or OpenSubtitles lazily when opened. Older Hearths do not expose
+    // that final source per row, so call the mixed case what it is rather than falsely branding it Built-in.
+    return (
+      track.description ??
+      (current.external
+        ? 'OpenSubtitles'
+        : current.subtitleSource === 'den_subtitles'
+          ? 'Built-in / OpenSubtitles'
+          : 'Built-in')
+    );
+  }
+
+  async function chooseSubtitle(next: string | null): Promise<void> {
+    // A change once playback has already shown a frame is a signal the file first chosen was wrong,
+    // for den-edge's own outcome report (`finish()`) — the very first pick, before anything played, is
+    // just Settings' preference taking effect and says nothing about it.
+    if (played && next !== subtitleChoice) {
+      if (next === null) subtitleTurnedOffMidPlay = true;
+      else subtitleSwitchedMidPlay = true;
+    }
+    if (next && session?.external && subtitlesNeedPlaylist()) {
+      // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
+      const previous = subtitleChoice;
+      subtitleChoice = next;
+      switchDelivery(() => (subtitleChoice = previous));
+      return;
+    }
+    subtitleChoice = next;
+    if (next && session) await loadExternalSubtitle(session, next);
+    applySubtitles();
+    sendSubtitleChoice();
+  }
+
   /** SkipDB's segments for what is playing, and the one under the playhead right now. */
   let segments = $state<SkipSegment[]>([]);
   let active = $state<SkipSegment | null>(null);
@@ -3189,46 +3246,40 @@
             </select>
           </div>
         {/if}
-        <!-- den-remux sends opt-in renditions. Its own names are used verbatim: it knows what it found, and
-             translating them here would invent detail. The same choice is forwarded to Cast. -->
+        <!-- Den owns this picker so it can distinguish built-in tracks from OpenSubtitles candidates and show
+             match metadata the native video control cannot carry. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
-          <div class="pick">
-            {@render globe()}
-            <span class="value" aria-hidden="true"
-              >{session.subtitles.find((one) => one.language === subtitleChoice)?.name ??
-                'Off'}</span
+          {@const chosenSubtitle = session.subtitles.find((one) => one.language === subtitleChoice)}
+          {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
+          <div class="pick-menu">
+            <ActionMenu
+              label={`Subtitles: ${chosenSubtitleLabel}`}
+              heading="Subtitles"
+              triggerClass="pick"
+              items={() => [
+                {
+                  kind: 'radio',
+                  group: 'subtitle',
+                  label: 'Off',
+                  checked: subtitleChoice === null,
+                  onselect: () => void chooseSubtitle(null),
+                },
+                ...session!.subtitles!.map((track) => ({
+                  kind: 'radio' as const,
+                  group: 'subtitle',
+                  label: subtitleLabel(track),
+                  description: subtitleDescription(session!, track),
+                  checked: track.language === subtitleChoice,
+                  onselect: () => void chooseSubtitle(track.language),
+                })),
+              ]}
             >
-            {@render chevron()}
-            <select
-              aria-label="Subtitles"
-              value={subtitleChoice ?? ''}
-              onchange={async (event) => {
-                const next = event.currentTarget.value || null;
-                // A change once playback has already shown a frame is a signal the file first chosen was wrong,
-                // for den-edge's own outcome report (`finish()`) — the very first pick, before anything played, is
-                // just Settings' preference taking effect and says nothing about it.
-                if (played && next !== subtitleChoice) {
-                  if (next === null) subtitleTurnedOffMidPlay = true;
-                  else subtitleSwitchedMidPlay = true;
-                }
-                if (next && session?.external && subtitlesNeedPlaylist()) {
-                  // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
-                  const previous = subtitleChoice;
-                  subtitleChoice = next;
-                  switchDelivery(() => (subtitleChoice = previous));
-                  return;
-                }
-                subtitleChoice = next;
-                if (next && session) await loadExternalSubtitle(session, next);
-                applySubtitles();
-                sendSubtitleChoice();
-              }}
-            >
-              <option value="">Off</option>
-              {#each session.subtitles as track (track.language)}
-                <option value={track.language}>{track.name}</option>
-              {/each}
-            </select>
+              {#snippet glyph()}
+                {@render globe()}
+                <span class="value" aria-hidden="true">{chosenSubtitleLabel}</span>
+                {@render chevron()}
+              {/snippet}
+            </ActionMenu>
           </div>
         {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip

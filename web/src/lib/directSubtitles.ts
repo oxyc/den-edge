@@ -12,6 +12,16 @@ const SUBTITLE_DEADLINE_MS = 10_000;
 interface Candidate {
   url?: unknown;
   lang?: unknown;
+  release?: unknown;
+  hd?: unknown;
+  fps?: unknown;
+  hashMatch?: unknown;
+  trusted?: unknown;
+  downloads?: unknown;
+  machineTranslated?: unknown;
+  aiTranslated?: unknown;
+  foreignPartsOnly?: unknown;
+  looksDubbed?: unknown;
 }
 
 type Track = NonNullable<Session['externalSubtitles']>[number];
@@ -29,7 +39,7 @@ function language(value: unknown): string | null {
   return base && /^[a-z]{2,3}$/.test(base) ? base : null;
 }
 
-/** A candidate's language and source, named as den-remux names its downloaded renditions. */
+/** A candidate's language, named consistently with the rest of Den. */
 function subtitleName(code: string): string {
   let language = code;
   try {
@@ -40,7 +50,37 @@ function subtitleName(code: string): string {
   } catch {
     // An engine without `Intl.DisplayNames` names the code itself.
   }
-  return `${language} · OpenSubtitles`;
+  return language;
+}
+
+function compactCount(value: number): string {
+  try {
+    return new Intl.NumberFormat(globalThis.navigator?.language ?? 'en', {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** The same useful OpenSubtitles signals Apple TV puts beneath a language, plus its full release name. */
+function candidateDescription(candidate: Candidate): string {
+  const facts = ['OpenSubtitles'];
+  if (typeof candidate.release === 'string' && candidate.release.trim())
+    facts.push(candidate.release.trim());
+  if (candidate.hashMatch === true) facts.push('✓ Exact match');
+  if (candidate.hd === true) facts.push('HD');
+  if (candidate.trusted === true) facts.push('Trusted');
+  if (typeof candidate.downloads === 'number' && Number.isFinite(candidate.downloads))
+    facts.push(`${compactCount(candidate.downloads)} downloads`);
+  if (candidate.machineTranslated === true || candidate.aiTranslated === true)
+    facts.push('Auto-translated');
+  if (candidate.foreignPartsOnly === true) facts.push('Foreign parts only');
+  if (candidate.looksDubbed === true) facts.push('Dubbed release');
+  if (typeof candidate.fps === 'number' && Number.isFinite(candidate.fps))
+    facts.push(`${candidate.fps} fps`);
+  return facts.join(' · ');
 }
 
 function candidateUrl(value: unknown): string | null {
@@ -148,14 +188,19 @@ export async function directSubtitles(
     if (encoded === null) return null;
     const body = JSON.parse(encoded) as { subtitles?: unknown };
     if (!Array.isArray(body.subtitles)) return null;
-    const available = new Map<string, string>();
+    const available = new Map<string, { href: string; name: string; description: string }>();
     for (const wantedLanguage of wanted) {
       const href = (body.subtitles as Candidate[]).find((candidate) => {
         if (language(candidate.lang) !== wantedLanguage) return false;
         return candidateUrl(candidate.url) !== null;
       });
       const safe = candidateUrl(href?.url);
-      if (safe) available.set(wantedLanguage, safe);
+      if (safe && href)
+        available.set(wantedLanguage, {
+          href: safe,
+          name: subtitleName(wantedLanguage),
+          description: candidateDescription(href),
+        });
     }
     if (!available.size) return null;
 
@@ -169,11 +214,11 @@ export async function directSubtitles(
       if (loaded) return Promise.resolve(loaded);
       const pending = loading.get(trackLanguage);
       if (pending) return pending;
-      const href = available.get(trackLanguage);
-      if (!href) return Promise.resolve(null);
+      const candidate = available.get(trackLanguage);
+      if (!candidate) return Promise.resolve(null);
       const request = (async () => {
         try {
-          const response = await fetchImpl(href, {
+          const response = await fetchImpl(candidate.href, {
             headers: { accept: 'text/vtt, text/plain' },
             cache: 'no-store',
             signal: boundedSignal(),
@@ -204,7 +249,7 @@ export async function directSubtitles(
           if (disposed) return null;
           const track = {
             language: trackLanguage,
-            name: subtitleName(trackLanguage),
+            name: candidate.name,
             url: URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' })),
             ...(castUrl ? { castUrl } : {}),
           };
@@ -224,7 +269,11 @@ export async function directSubtitles(
       return request;
     };
     return {
-      subtitles: [...available].map(([code]) => ({ language: code, name: subtitleName(code) })),
+      subtitles: [...available].map(([language, candidate]) => ({
+        language,
+        name: candidate.name,
+        description: candidate.description,
+      })),
       tracks,
       load,
       dispose: () => {

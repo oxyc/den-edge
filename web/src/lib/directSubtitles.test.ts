@@ -34,7 +34,14 @@ describe('directSubtitles', () => {
         return new Response(
           JSON.stringify({
             subtitles: [
-              { lang: 'en', release: 'English first', url: '/den/~a1b2c3d4/subtitle/1.srt' },
+              {
+                lang: 'en',
+                release: 'English first',
+                hashMatch: true,
+                trusted: true,
+                downloads: 12_400,
+                url: '/den/~a1b2c3d4/subtitle/1.srt',
+              },
               { lang: 'en', release: 'English second', url: '/den/~a1b2c3d4/subtitle/3.srt' },
               { lang: 'sv-SE', release: 'Swedish', url: '/den/~a1b2c3d4/subtitle/2.srt' },
             ],
@@ -61,14 +68,22 @@ describe('directSubtitles', () => {
     ]);
     expect(found).toMatchObject({
       subtitles: [
-        { language: 'sv', name: 'Swedish · OpenSubtitles' },
-        { language: 'en', name: 'English · OpenSubtitles' },
+        {
+          language: 'sv',
+          name: 'Swedish',
+          description: 'OpenSubtitles · Swedish',
+        },
+        {
+          language: 'en',
+          name: 'English',
+          description: 'OpenSubtitles · English first · ✓ Exact match · Trusted · 12.4K downloads',
+        },
       ],
       tracks: [],
     });
     await expect(found?.load('sv')).resolves.toMatchObject({
       language: 'sv',
-      name: 'Swedish · OpenSubtitles',
+      name: 'Swedish',
       url: 'blob:subtitle-1',
       castUrl: `https://cast.example/subtitle/${'a'.repeat(63)}1.vtt`,
     });
@@ -117,6 +132,35 @@ describe('directSubtitles', () => {
     await expect(found?.load('en')).resolves.toBeNull();
     expect(cancel).toHaveBeenCalledOnce();
     expect(URL.createObjectURL).not.toHaveBeenCalled();
+    found?.dispose();
+  });
+
+  it('keeps dialogue carried by formatting runs instead of dropping the styled cue', async () => {
+    const styled =
+      '1\n00:00:01,000 --> 00:00:02,500\n<i>Off-screen voice</i>\n\n' +
+      '2\n00:00:03,000 --> 00:00:04,500\n<font color="#ffff00">Narration</font>\n';
+    const fetchImpl = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes('/subtitles/')
+        ? Response.json({
+            subtitles: [{ lang: 'en', url: '/den/config/subtitle/styled.srt' }],
+          })
+        : String(input).endsWith('/cast-subtitle')
+          ? new Response(null, { status: 503 })
+          : new Response(styled),
+    );
+    const found = await directSubtitles(
+      '/den/config/playback',
+      { imdb: 'tt0111161', subtitleLanguages: ['en'] },
+      release,
+      fetchImpl,
+    );
+
+    await expect(found?.load('en')).resolves.toMatchObject({ language: 'en' });
+    const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)?.[0] as Blob;
+    const rendered = await blob.text();
+    expect(rendered).toContain('<i>Off-screen voice</i>');
+    expect(rendered).toContain('<font color="#ffff00">Narration</font>');
+    expect(rendered).toContain('00:00:03.000 --> 00:00:04.500');
     found?.dispose();
   });
 
