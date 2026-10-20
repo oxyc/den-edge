@@ -822,6 +822,51 @@ export function autoSubtitleLanguage(
   return own.find((l) => offeredLangs.has(l)) ?? (offeredLangs.has('en') ? 'en' : null);
 }
 
+type SubtitleTrack = NonNullable<Session['subtitles']>[number];
+
+const unknownSubtitleLanguage = (tag: string): boolean => {
+  const language = canonicalLanguage(tag);
+  return !language || language === 'und' || language === 'unknown';
+};
+
+export function subtitleLanguagesMatch(
+  left: string | null | undefined,
+  right: string | null,
+): boolean {
+  if (right === null) return false;
+  const a = canonicalLanguage(left ?? '');
+  const b = canonicalLanguage(right);
+  return a === b || (unknownSubtitleLanguage(a) && unknownSubtitleLanguage(b));
+}
+
+/** Apply Settings' picker visibility without hiding untagged tracks that the viewer may need to identify by name. */
+export function visibleSubtitleTracks(
+  tracks: readonly SubtitleTrack[],
+  shownLanguages: readonly string[] | undefined,
+): SubtitleTrack[] {
+  if (!shownLanguages?.length) return [...tracks];
+  const shown = new Set(shownLanguages.map(canonicalLanguage));
+  return tracks.filter(
+    (track) =>
+      unknownSubtitleLanguage(track.language) || shown.has(canonicalLanguage(track.language)),
+  );
+}
+
+const forcedSubtitle = (track: SubtitleTrack): boolean =>
+  /\b(?:forced|foreign[ -]parts?)\b/i.test(track.name);
+
+/** Resolve a language preference to one row, preferring a full track while preserving an exact manual choice. */
+export function preferredSubtitleTrack(
+  tracks: readonly SubtitleTrack[],
+  choice: string | null,
+): SubtitleTrack | undefined {
+  if (choice === null) return undefined;
+  const exact = tracks.find((track) => (track.value ?? track.language) === choice);
+  if (exact) return exact;
+  const matching = tracks.filter((track) => subtitleLanguagesMatch(track.language, choice));
+  return matching.find((track) => !forcedSubtitle(track)) ?? matching[0];
+}
+
 /**
  * A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. `lookup` finds
  * this browser's IPv4 address when den-edge asks for it.
