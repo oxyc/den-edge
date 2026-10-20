@@ -22,9 +22,15 @@ export function appHistoryUrl(path: string | URL): string {
 /** Only Den API paths move to the configured server. Assets and arbitrary external URLs never do. */
 const API_PATH =
   /^\/(?:pair|inbox|lib|recovery|config|health|routes|scout|tmdb|metadata|grant|oauth|capabilities|playback|den|ratings|warnings|skipdb|subs|subtitles|sync|mcp|link|version|atlas|reel|remux|direct|assistant)(?:\/|$)/;
+const SERVICE_PATH =
+  /^\/(?:capabilities|scout|tmdb|metadata|den|ratings|warnings|skipdb|subs|subtitles|atlas|reel|remux|direct)(?:\/|$)/;
 
 export function apiOrigin(): string {
   return __DEN_TV_API_ORIGIN__ || (globalThis.location?.origin ?? '');
+}
+
+export function serviceOrigin(): string {
+  return __DEN_TV_SERVICE_ORIGIN__ || apiOrigin();
 }
 
 export function apiUrl(href: string): string {
@@ -39,7 +45,8 @@ export function apiUrl(href: string): string {
       !API_PATH.test(url.pathname)
     )
       return href;
-    return `${__DEN_TV_API_ORIGIN__}${url.pathname}${url.search}${url.hash}`;
+    const target = SERVICE_PATH.test(url.pathname) ? serviceOrigin() : apiOrigin();
+    return `${target}${url.pathname}${url.search}${url.hash}`;
   } catch {
     return href;
   }

@@ -23,7 +23,9 @@ RUN npm run build:cast
 
 FROM web-source AS tv-web
 ARG DEN_TV_API_ORIGIN=https://d-api.oxy.fi
+ARG DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi
 ENV DEN_TV_API_ORIGIN=$DEN_TV_API_ORIGIN
+ENV DEN_TV_SERVICE_ORIGIN=$DEN_TV_SERVICE_ORIGIN
 RUN npm run build:tv:webos
 
 FROM rust:1-alpine AS rust-build
@@ -48,6 +50,7 @@ ENV DATA_DIR=/data \
     WEB_DIR=/web \
     TV_WEB_DIR=/tv-web \
     TV_API_ORIGIN=https://d-api.oxy.fi \
+    TV_SERVICE_ORIGIN=https://d.oxy.fi \
     CAST_DIR=/cast \
     PORT=8080 \
     DEN_VERSION=$DEN_VERSION

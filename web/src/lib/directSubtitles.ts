@@ -2,7 +2,7 @@
 // browser asks the same configured combined Den addon for its ordinary candidates and lazily owns chosen blob URLs.
 
 import type { Session } from './remux';
-import { apiOrigin } from './runtimeUrl';
+import { serviceOrigin } from './runtimeUrl';
 
 const MAX_SUBTITLE_BYTES = 2 * 1024 * 1024;
 // A candidate list is a small JSON document. Keep its browser-side allocation bounded independently of Edge's
@@ -91,7 +91,7 @@ function candidateUrl(value: unknown): string | null {
     const url = new URL(value, globalThis.location?.href ?? 'https://den.invalid/');
     const here = new URL(
       __DEN_TV_PACKAGED__
-        ? `${apiOrigin()}/`
+        ? `${serviceOrigin()}/`
         : (globalThis.location?.href ?? 'https://den.invalid/'),
     );
     return url.origin === here.origin && url.pathname.startsWith('/den/') ? url.href : null;

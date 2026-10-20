@@ -129,6 +129,10 @@ pub struct AppState {
     /// HTTPS device API origin compiled into the hosted TV build (env `TV_API_ORIGIN`). It is added to that
     /// shell's connect policy; requests are still authorized by the API's normal member/pairing proofs.
     pub tv_api_origin: Option<String>,
+    /// Existing public web/service origin used by hosted and packaged TV builds for addon, metadata and playback
+    /// discovery routes (env `TV_SERVICE_ORIGIN`). Keeping it separate prevents those routes being sent to the
+    /// deliberately narrower device API hostname.
+    pub tv_service_origin: Option<String>,
     /// Web host names allowed to discover real profiles (env `PROFILES_HOSTS`). Empty keeps real mode off.
     pub profiles_hosts: Vec<String>,
     /// Web host names allowed to use only the synthetic, non-migrating profiles preview
@@ -392,6 +396,7 @@ impl AppState {
             api_hosts: Vec::new(),
             tv_web_hosts: Vec::new(),
             tv_api_origin: None,
+            tv_service_origin: None,
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
@@ -548,6 +553,12 @@ async fn main() {
     state.tv_api_origin = env_opt("TV_API_ORIGIN").and_then(|value| {
         origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
             eprintln!("TV_API_ORIGIN must be a bare https origin — disabling it");
+            None
+        })
+    });
+    state.tv_service_origin = env_opt("TV_SERVICE_ORIGIN").and_then(|value| {
+        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
+            eprintln!("TV_SERVICE_ORIGIN must be a bare https origin — disabling it");
             None
         })
     });

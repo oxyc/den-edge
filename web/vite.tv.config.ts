@@ -36,6 +36,28 @@ if (apiOriginText) {
     );
   apiOrigin = parsed.origin;
 }
+const serviceOriginText = process.env.DEN_TV_SERVICE_ORIGIN;
+let serviceOrigin = apiOrigin;
+if (serviceOriginText) {
+  let parsed: URL;
+  try {
+    parsed = new URL(serviceOriginText);
+  } catch {
+    throw new Error('DEN_TV_SERVICE_ORIGIN must be a valid URL');
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash ||
+    parsed.pathname !== '/' ||
+    parsed.search
+  )
+    throw new Error(
+      'DEN_TV_SERVICE_ORIGIN must be an exact HTTPS origin without credentials, path, query, or fragment',
+    );
+  serviceOrigin = parsed.origin;
+}
 if (packaged && platform !== 'tizen')
   throw new Error('DEN_TV_PACKAGED=1 is only supported for Tizen');
 const outDir =
@@ -104,7 +126,11 @@ const packagedMetadata: Plugin = {
       this.emitFile({
         type: 'asset',
         fileName: 'den-tv-package.json',
-        source: JSON.stringify({ packaged: true, platform, apiOrigin, e2e }, null, 2),
+        source: JSON.stringify(
+          { packaged: true, platform, apiOrigin, serviceOrigin, e2e },
+          null,
+          2,
+        ),
       });
   },
 };
@@ -158,6 +184,7 @@ export default mergeConfig(
       __DEN_TV_PLATFORM__: JSON.stringify(platform),
       __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
+      __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(serviceOrigin),
     },
     // The TV artifact is built without Wasm reference types for one-table engines such as Chromium 87. Keep the
     // browser's vendored den-core untouched; this config and its Worker builds alone resolve the two JS entry points

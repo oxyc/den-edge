@@ -152,6 +152,7 @@ export default defineConfig({
     __DEN_TV_PLATFORM__: JSON.stringify('browser'),
     __DEN_TV_PACKAGED__: 'false',
     __DEN_TV_API_ORIGIN__: JSON.stringify(''),
+    __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
   },
   plugins: [
     {

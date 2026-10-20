@@ -10,7 +10,7 @@
 // else a page happens to call. The allow-list is the security boundary here, not an optimisation.
 
 import type { LibraryKeys } from './wire';
-import { apiOrigin } from './runtimeUrl';
+import { apiOrigin, serviceOrigin } from './runtimeUrl';
 
 /**
  * The least authority a page needs to receive the household relay allowance. This is derived from the library key
@@ -276,7 +276,8 @@ function ours(href: string): URL | null {
   try {
     const url = new URL(href, here);
     return url.origin === new URL(here).origin ||
-      (__DEN_TV_API_ORIGIN__ && url.origin === apiOrigin())
+      (__DEN_TV_API_ORIGIN__ && url.origin === apiOrigin()) ||
+      (__DEN_TV_SERVICE_ORIGIN__ && url.origin === serviceOrigin())
       ? url
       : null;
   } catch {

@@ -5,7 +5,7 @@ import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
 import type { Failure, Session, Want } from './remux';
 import { directSubtitles } from './directSubtitles';
-import { apiOrigin } from './runtimeUrl';
+import { apiUrl, serviceOrigin } from './runtimeUrl';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
 export const PLAYBACK_ANSWER_MS = 150_000;
@@ -78,13 +78,9 @@ function href(value: unknown, base?: string): string | undefined {
   const raw = text(value);
   if (!raw) return undefined;
   try {
-    return new URL(
-      raw,
-      base ??
-        (__DEN_TV_API_ORIGIN__
-          ? `${apiOrigin()}/`
-          : (globalThis.location?.href ?? 'https://den.invalid/')),
-    ).href;
+    if (base) return new URL(raw, base).href;
+    if (__DEN_TV_API_ORIGIN__) return apiUrl(raw);
+    return new URL(raw, globalThis.location?.href ?? 'https://den.invalid/').href;
   } catch {
     return undefined;
   }
@@ -102,7 +98,9 @@ function sidecarHref(value: unknown): string | undefined {
   if (!absolute) return undefined;
   const url = new URL(absolute);
   const here = new URL(
-    __DEN_TV_PACKAGED__ ? `${apiOrigin()}/` : (globalThis.location?.href ?? 'https://den.invalid/'),
+    __DEN_TV_PACKAGED__
+      ? `${serviceOrigin()}/`
+      : (globalThis.location?.href ?? 'https://den.invalid/'),
   );
   return url.origin === here.origin &&
     /^\/den\/(?:~[0-9a-f]{8}\/)?_sidecar\/[A-Za-z0-9_-]{43}\/\d+\.vtt$/.test(url.pathname)
