@@ -284,7 +284,11 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
   await expect(contentSection).toBeFocused();
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(500);
+  // RoutePage performs its retained-focus pass on the next animation frame. Under a loaded CI runner a fixed
+  // timeout can expire before that frame, letting the pass replace the test's deliberately focused row.
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
   await expect(page.getByRole('button', { name: /(?:Expand|Collapse) all/ })).toHaveCount(0);
 
   const subtitleChoices = page.locator('#subtitles-per-language input[type="radio"]');
