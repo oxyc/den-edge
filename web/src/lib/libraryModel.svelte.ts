@@ -604,8 +604,12 @@ export class LibraryModel {
     return this.#command({ kind: 'server.patch', server, value }, operationId);
   }
 
-  heartbeatDevice(name: string, operationId?: string): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'device.heartbeat', name }, operationId);
+  heartbeatDevice(
+    name: string,
+    operationId?: string,
+    deviceKind: 'tv' | 'browser' = 'browser',
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'device.heartbeat', name, deviceKind }, operationId);
   }
 
   removeDevice(deviceId: string, operationId?: string): Promise<LibraryServiceCommandResult> {

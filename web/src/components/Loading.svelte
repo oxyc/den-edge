@@ -33,6 +33,9 @@
     position: fixed;
     inset: 0;
     z-index: 8;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
     pointer-events: none;
   }
 
@@ -68,6 +71,17 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  /* Full-page waits can otherwise look like a frozen app, especially on the first device opening a linked
+     library. Unlike an incidental in-card spinner, this state owns the screen and should say what is happening. */
+  .loading.page .label {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
   }
 
   @keyframes turn {

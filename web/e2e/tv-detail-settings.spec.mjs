@@ -187,6 +187,17 @@ test('season download asks for its target instead of inheriting the focused tab'
   sourceRequests.length = 0;
 
   const download = page.getByRole('button', { name: 'Download a season' });
+  const [downloadIcon, downloadLabel] = await Promise.all([
+    download.locator('svg').boundingBox(),
+    download.getByText('Download', { exact: true }).boundingBox(),
+  ]);
+  expect(downloadIcon).not.toBeNull();
+  expect(downloadLabel).not.toBeNull();
+  expect(
+    Math.abs(
+      downloadIcon.y + downloadIcon.height / 2 - (downloadLabel.y + downloadLabel.height / 2),
+    ),
+  ).toBeLessThan(2);
   await download.focus();
   await page.keyboard.press('Enter');
   const firstSeason = page.getByRole('menuitem', { name: 'Season 1', exact: true });

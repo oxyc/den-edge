@@ -20,6 +20,7 @@
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
+  const fixtureClock = browserClock();
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
@@ -55,6 +56,9 @@
       },
     }),
     row('devices', {
+      [`${fixtureClock.device}.name`]: { string: 'Test Browser' },
+      [`${fixtureClock.device}.kind`]: { string: 'browser' },
+      [`${fixtureClock.device}.seen`]: { int: 10000 },
       'aaaa000000000001.name': { string: 'Living Room TV' },
       'aaaa000000000001.kind': { string: 'tv' },
       'aaaa000000000001.seen': { int: 5000 },
@@ -137,7 +141,7 @@
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
   const library = fixtureLibraryService({
     log,
-    device: browserClock().device,
+    device: fixtureClock.device,
     libraryKey: fixtureLibraryKey,
   });
   const { model, session } = library;

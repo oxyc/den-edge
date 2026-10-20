@@ -70,9 +70,11 @@
   <div class="head">
     <h2>
       <span class="heading-copy">
-        {#if headingLink}
+        {#if headingLink && !__DEN_TV__}
           {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
           >{headingLink.after}
+        {:else if headingLink}
+          {headingLink.before}{headingLink.label}{headingLink.after}
         {:else}
           {heading}
         {/if}

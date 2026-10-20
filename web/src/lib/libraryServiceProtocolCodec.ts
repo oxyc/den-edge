@@ -682,7 +682,14 @@ function command(value: unknown): value is LibraryCommand {
         )
       );
     case 'device.heartbeat':
-      return exact(value, ['kind', 'name']) && boundedText(value.name, 256);
+      return (
+        exact(value, ['kind', 'name', 'deviceKind']) &&
+        boundedText(value.name, 256) &&
+        optional(
+          value.deviceKind,
+          (kind): kind is 'tv' | 'browser' => kind === 'tv' || kind === 'browser',
+        )
+      );
     case 'device.remove':
       return (
         exact(value, ['kind', 'deviceId']) &&

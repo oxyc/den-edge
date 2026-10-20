@@ -338,6 +338,12 @@ for (const width of [390, 834, 1280])
       await expect(active.locator('header.hero .continue')).toHaveAttribute('href', playbackHref);
 
       if (width === 1280) {
+        // Continue Watching is its own semantic row above the title actions. Down enters the next section at its
+        // primary Resume control rather than choosing a later reaction merely because it is closer horizontally.
+        await active.locator('header.hero .continue').focus();
+        await page.keyboard.press('ArrowDown');
+        await expect(active.locator('header.hero .split-main')).toBeFocused();
+
         // Metadata stays natively focusable. Directional navigation treats those links as supporting context and
         // crosses directly to the primary action instead of making the title facts into an obstacle course.
         const imdb = active.getByRole('link', { name: /IMDb rating/ });

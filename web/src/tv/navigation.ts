@@ -364,9 +364,23 @@ export function installTVNavigation(): () => void {
           .dispatchEvent(new CustomEvent('den:tv-page', { detail: { direction }, bubbles: false }));
         return;
       }
-      if (move(direction)) {
+      // The fixed bar remains visible for the LG pointer, but a remote should not jump out of content into it
+      // while the page is scrolled. At the upper content boundary the first Up scrolls home; only a subsequent
+      // Up, now genuinely at the top, can enter navigation.
+      const contentOnly =
+        direction === 'up' && scrollY > 8
+          ? (candidate: HTMLElement) => !candidate.closest('.tv-bar')
+          : undefined;
+      if (move(direction, contentOnly)) {
         event.preventDefault();
         event.stopImmediatePropagation();
+      } else if (direction === 'up' && scrollY > 8) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        // Do not leave focus stranded on the billboard while a smooth scroll is still in flight: repeated remote
+        // Up presses would keep restarting that animation. Land at the content boundary now; the next Up can enter
+        // the fixed navigation bar normally.
+        scrollTo({ top: 0, behavior: 'auto' });
       }
       return;
     }

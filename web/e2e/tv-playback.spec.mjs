@@ -201,6 +201,59 @@ async function remoteKeyBurst(page, key, keyCode, count) {
   );
 }
 
+test('webOS native playback does not wait on its advertised but silent frame callback', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value:
+        'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.270 Safari/537.36 WebAppManager',
+    });
+    HTMLVideoElement.prototype.requestVideoFrameCallback = () => 1;
+    HTMLVideoElement.prototype.cancelVideoFrameCallback = () => undefined;
+    // Hold the browser's naturally fast fixture `loadeddata` delivery until the assertion has observed the startup
+    // state. The production boundary remains the real event; this only makes both sides of that boundary observable.
+    const add = HTMLMediaElement.prototype.addEventListener;
+    const remove = HTMLMediaElement.prototype.removeEventListener;
+    const held = new Map();
+    HTMLMediaElement.prototype.addEventListener = function (type, listener, options) {
+      if (type !== 'loadeddata') return add.call(this, type, listener, options);
+      const listeners = held.get(this) ?? [];
+      listeners.push(listener);
+      held.set(this, listeners);
+    };
+    HTMLMediaElement.prototype.removeEventListener = function (type, listener, options) {
+      if (type !== 'loadeddata') return remove.call(this, type, listener, options);
+      const listeners = held.get(this);
+      if (listeners)
+        held.set(
+          this,
+          listeners.filter((heldListener) => heldListener !== listener),
+        );
+    };
+    window.releaseFixtureLoadedData = (element) => {
+      const event = new Event('loadeddata');
+      for (const listener of held.get(element) ?? []) {
+        if (typeof listener === 'function') listener.call(element, event);
+        else listener.handleEvent(event);
+      }
+      held.delete(element);
+    };
+  });
+  const ended = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+
+  const video = page.locator('.player video');
+  await expect(video).toBeVisible();
+  await expect(page.locator('.startup')).toHaveCount(1);
+  await video.evaluate((element) => window.releaseFixtureLoadedData(element));
+
+  await expect(page.locator('.startup')).toHaveCount(0);
+  await expect(page.getByText('The connection was gone too long')).toHaveCount(0);
+  expect(ended).toEqual([]);
+});
+
 test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Back', async ({
   page,
 }) => {

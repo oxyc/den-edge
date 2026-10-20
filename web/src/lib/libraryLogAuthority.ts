@@ -654,7 +654,7 @@ export class LibraryLogAuthority {
       case 'server.patch':
         return this.#patchServer(command.server, command.value);
       case 'device.heartbeat':
-        return this.#heartbeatDevice(command.name);
+        return this.#heartbeatDevice(command.name, command.deviceKind);
       case 'device.remove':
         return this.#removeDevice(command.deviceId);
       case 'simkl.connect':
@@ -2365,12 +2365,15 @@ export class LibraryLogAuthority {
     return rows.length ? this.#writeRows(rows, [{ kind: 'connections' }]) : this.#unchanged();
   }
 
-  async #heartbeatDevice(name: string): Promise<LibraryAuthorityCommandResult> {
+  async #heartbeatDevice(
+    name: string,
+    kind: 'tv' | 'browser' = 'browser',
+  ): Promise<LibraryAuthorityCommandResult> {
     if (!name.trim() || name.length > 256)
       throw authorityError('invalid-request', 'device name is empty or too long');
     const changes = selfEntry(
       this.#log.settings('devices'),
-      { id: this.#clock.device, name: name.trim(), kind: 'browser' },
+      { id: this.#clock.device, name: name.trim(), kind },
       Date.now(),
     );
     return changes

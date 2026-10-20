@@ -198,7 +198,7 @@ for (const width of [320, 390, 820, 1280]) {
       const listed = devices.getByRole('listitem');
       const tv = listed.filter({ hasText: 'Living Room TV' });
       await expect(tv).toHaveCount(1);
-      await expect(tv).toContainText('Apple TV · seen');
+      await expect(tv).toContainText('TV · seen');
       const removeTv = tv.getByRole('button', { name: 'Remove Living Room TV' });
       await expect(removeTv).toBeVisible();
       const deviceRowGeometry = await tv.evaluate((row) => {
@@ -224,9 +224,9 @@ for (const width of [320, 390, 820, 1280]) {
       const phone = listed.filter({ hasText: 'Phone' });
       await expect(phone).toContainText('added');
       await expect(phone.getByRole('button', { name: 'Remove Phone' })).toBeVisible();
-      // The page lists itself a second after Settings opens, so this waits for that row. A regular expression, so
-      // it's matched with its case.
-      const self = listed.filter({ hasText: /This browser · seen/ });
+      // The production shell records itself when its library opens. This direct Settings fixture seeds that same
+      // record, so this verifies the rendered linked-device behavior without duplicating the shell lifecycle here.
+      const self = listed.filter({ hasText: /This device · seen/ });
       await expect(self).toHaveCount(1);
       await expect(self.getByText('This device', { exact: true })).toBeVisible();
       await expect(self.getByRole('button')).toHaveCount(0);

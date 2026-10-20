@@ -1659,8 +1659,10 @@
     };
     element.addEventListener('timeupdate', firstFrameFromProgress);
     // The type is unconditional (every modern lib.dom.d.ts has it); the browser isn't — an older Safari lacks
-    // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`.
-    if (!samsungAvplay && typeof element.requestVideoFrameCallback === 'function') {
+    // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`. webOS's
+    // Chromium advertises it too, but its native media pipeline never calls it (nor updates playback-quality frame
+    // counters): `loadeddata` is the platform's usable picture-ready boundary, as AVPlay's synthetic element uses.
+    if (!samsungAvplay && !webOsNative && typeof element.requestVideoFrameCallback === 'function') {
       const id = element.requestVideoFrameCallback(firstFrame);
       cancelVideoFrame = () => element.cancelVideoFrameCallback(id);
     } else {
