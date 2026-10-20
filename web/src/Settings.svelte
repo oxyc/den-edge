@@ -117,6 +117,21 @@
       (__DEN_TV__ || keyboardInput() || document.activeElement.matches(':focus-visible'))
         ? document.activeElement
         : undefined;
+    // Disabling a native control during its save can make some WebKit versions choose another focusable element
+    // instead of the document body. Distinguish that engine-driven move from a viewer who deliberately moved on
+    // while the request was pending, so completion never steals focus back from fresh input.
+    let movedOn = false;
+    let watchingNewInput = false;
+    const noteInput = () => {
+      if (watchingNewInput) movedOn = true;
+    };
+    if (restoreFocus) {
+      document.addEventListener('keydown', noteInput, { capture: true });
+      document.addEventListener('pointerdown', noteInput, { capture: true });
+      // A spatial-navigation handler can synchronously click a switch while its initiating keydown is still being
+      // dispatched at document. That key is the edit, not evidence that the viewer moved on after it.
+      queueMicrotask(() => (watchingNewInput = true));
+    }
     if (!quiet) {
       saving = true;
       failure = null;
@@ -135,9 +150,14 @@
       // same connected control once the save settles, without reopening a phone keyboard after a pointer save.
       if (restoreFocus) {
         await tick();
+        document.removeEventListener('keydown', noteInput, { capture: true });
+        document.removeEventListener('pointerdown', noteInput, { capture: true });
+        // TV Settings is intentionally inert during a save; a remote press cannot make a reliable move until it
+        // settles, so always return to its semantic origin. Pointer/keyboard web users may deliberately move on.
         if (
+          (__DEN_TV__ || !movedOn) &&
           restoreFocus.isConnected &&
-          (document.activeElement === document.body || document.activeElement === null)
+          !restoreFocus.matches(':disabled')
         )
           restoreFocus.focus({ preventScroll: true });
       }
