@@ -20,6 +20,22 @@
   overflow-x: hidden;
 }
 
+/* A newly linked TV has no local library projection yet. The shared page loader already spans exactly that real
+   boundary; give its named status ten-foot geometry. Later launches usually pass through too quickly to show it. */
+.den-tv .loading.page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  color: var(--fg);
+  font-size: var(--tv-type-body);
+}
+
+.den-tv .loading.page .spinner {
+  width: 52px;
+  height: 52px;
+  border-width: 5px;
+}
+
 /* Chrome 85 ignores color-mix(), including the complete declaration containing it. */
 .den-tv .den-button-device {
   --button-fg: #d2daf1;
