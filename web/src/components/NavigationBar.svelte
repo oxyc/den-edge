@@ -117,6 +117,10 @@
       expanded = true;
     });
     input?.focus({ preventScroll: true });
+    // The compact Search button is an explicit activation, unlike focus arriving at the field through Tab or
+    // directional navigation. Route here as part of the same gesture while the synchronous focus above preserves
+    // the phone keyboard.
+    if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
   }
   function closeSearch() {
     flushSync(() => {
