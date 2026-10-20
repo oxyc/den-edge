@@ -111,6 +111,59 @@ describe('startPlayback', () => {
     expect(result).not.toHaveProperty('external');
   });
 
+  it('keeps OpenSubtitles alternatives beside a Remux built-in rendition', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes('/subtitles/')
+        ? json({
+            subtitles: [
+              {
+                id: 'os-1',
+                lang: 'en',
+                release: 'Morning.Show.WEB-DL',
+                downloads: 1200,
+                url: '/den/config/subtitle/1.srt',
+              },
+            ],
+          })
+        : json({
+            url: '/remux/s/id/sig/master.m3u8',
+            release,
+            session: {
+              id: 'id',
+              duration: 3600,
+              audioTrack: 0,
+              audioTracks: [],
+              subtitles: [{ language: 'en', name: 'English (in file)' }],
+            },
+          }),
+    );
+
+    const result = await startPlayback(
+      '/den/config/playback',
+      { ...want, subtitleLanguages: ['en'] },
+      fetchImpl,
+    );
+
+    expect(result).toMatchObject({
+      subtitles: [
+        {
+          value: 'remux:built-in:0:en',
+          language: 'en',
+          name: 'English (in file)',
+          source: 'built-in',
+        },
+        {
+          value: 'opensubtitles:os-1',
+          language: 'en',
+          name: 'English',
+          source: 'opensubtitles',
+          description: expect.stringContaining('Morning.Show.WEB-DL'),
+        },
+      ],
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it('reuses one key and byte-identical body after an ambiguous transport failure', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

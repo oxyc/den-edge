@@ -289,6 +289,7 @@ export async function directSubtitles(
         language: candidate.language,
         name: candidate.name,
         description: candidate.description,
+        source: 'opensubtitles' as const,
       })),
       tracks,
       load,

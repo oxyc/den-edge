@@ -794,8 +794,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         message.media.measure === true)) ||
     (message.media.lanUrl !== undefined && !signedMedia(message.media.lanUrl)) ||
     !signedSpeed(message.media) ||
-    (message.media.subtitleTrack !== undefined &&
-      (!message.media.external || !validSubtitleTrack(message.media.subtitleTrack)))
+    (message.media.subtitleTrack !== undefined && !validSubtitleTrack(message.media.subtitleTrack))
   ) {
     event.source?.postMessage(
       { type: 'den-error', id: message.id, message: 'Invalid media URL' },
