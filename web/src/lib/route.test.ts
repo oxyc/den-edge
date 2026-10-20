@@ -69,6 +69,32 @@ describe('routes', () => {
     });
   });
 
+  it('carries an episode of the season, so a link can open on it', () => {
+    expect(parseRoute('/tv/61859-the-night-manager?season=2&episode=3')).toEqual({
+      page: 'title',
+      type: 'tv',
+      id: 61859,
+      season: 2,
+      episode: 3,
+    });
+    // Only within a season, and only a number; anything else is the season alone.
+    expect(parseRoute('/tv/61859?episode=3')).toEqual({ page: 'title', type: 'tv', id: 61859 });
+    for (const episode of ['abc', '-1', '1.5', '03', ''])
+      expect(parseRoute(`/tv/61859?season=2&episode=${episode}`), episode).toEqual({
+        page: 'title',
+        type: 'tv',
+        id: 61859,
+        season: 2,
+      });
+    expect(
+      titleHref({ type: 'tv', id: 61859, title: 'The Night Manager', season: 2, episode: 3 }),
+    ).toBe('/tv/61859-the-night-manager?season=2&episode=3');
+    expect(titleHref({ type: 'tv', id: 61859, episode: 3 })).toBe('/tv/61859');
+    expect(
+      parseRoute(routePath({ page: 'title', type: 'tv', id: 1, season: 4, episode: 7 })),
+    ).toEqual({ page: 'title', type: 'tv', id: 1, season: 4, episode: 7 });
+  });
+
   it('carries a service’s country in its path, since a catalogue is licensed per country', () => {
     expect(parseRoute('/service/8-us-netflix')).toEqual({ page: 'service', id: 8, country: 'US' });
     expect(parseRoute('/service/8-FI')).toEqual({ page: 'service', id: 8, country: 'FI' });
