@@ -299,6 +299,37 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
   }
 });
 
+test('switching a chosen TorBox built-in to Remux keeps that language and lists OpenSubtitles too', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    await mockHearth(page, { builtIn: true });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
+    await playing(page);
+
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English (in file)' }).click();
+    await page.getByRole('button', { name: 'Playing from TorBox' }).click();
+    await page.getByRole('menuitem', { name: 'Switch to Den Remux' }).click();
+
+    const selected = page.getByRole('button', { name: 'Subtitles: English (in file)' });
+    await expect(selected).toBeVisible({ timeout: 30_000 });
+    await selected.click();
+    const menu = page.getByRole('menu', { name: 'Subtitles' });
+    await expect(menu.getByRole('menuitemradio', { name: 'English (in file)' })).toBeChecked();
+    await expect(menu.getByRole('menuitemradio', { name: 'English', exact: true })).toBeVisible();
+    await expect(
+      menu.getByRole('menuitemradio', { name: 'English (in file)' }),
+    ).toHaveAccessibleDescription('Built-in');
+    await expect(
+      menu.getByRole('menuitemradio', { name: 'English', exact: true }),
+    ).toHaveAccessibleDescription(/OpenSubtitles/);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('hls.js shows the subtitle it picks itself on a TorBox stream, not only names it', async () => {
   const browser = await launchChromium();
   try {

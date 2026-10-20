@@ -105,6 +105,31 @@ function releaseOf(value: unknown): Session['release'] | null {
   };
 }
 
+function remuxSubtitles(value: unknown): NonNullable<Session['subtitles']> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate, index) => {
+    const track = record(candidate);
+    const language = text(track?.language);
+    const name = text(track?.name);
+    if (!track || !language || !name) return [];
+    const supplied = text(track.value);
+    const source: 'built-in' | 'opensubtitles' = /(?:\(in file\)|\bbuilt-in\b)/i.test(name)
+      ? 'built-in'
+      : /opensubtitles/i.test(name)
+        ? 'opensubtitles'
+        : 'built-in';
+    return [
+      {
+        value: supplied ?? `remux:${source}:${index}:${language}`,
+        language,
+        name,
+        description: text(track.description),
+        source,
+      },
+    ];
+  });
+}
+
 function sessionOf(body: unknown, timing: string | null): Session | null {
   const answer = record(body);
   const playlist = href(answer?.url);
@@ -127,6 +152,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
               language,
               name,
               description: text(track?.description),
+              source: 'built-in',
               torboxTrack,
             },
           ];
@@ -178,6 +204,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
     audioTracks: Array.isArray(nested.audioTracks)
       ? (nested.audioTracks as Session['audioTracks'])
       : [],
+    subtitles: remuxSubtitles(nested.subtitles),
     control:
       controls.end || controls.heartbeat || controls.report
         ? controls
@@ -312,7 +339,13 @@ export async function startPlayback(
         .then((json) => sessionOf(json, response.headers.get('server-timing')))
         .catch(() => null);
       if (session) {
-        if (session.external) {
+        // hls.js and the Cast receiver can layer a VTT sidecar over either delivery path. Native HLS cannot:
+        // its system UI only sees renditions named by the master playlist.
+        if (
+          session.external ||
+          (want.player !== 'native' &&
+            session.subtitles?.some((track) => track.source === 'built-in'))
+        ) {
           const external = await directSubtitles(url, want, session.release, fetchImpl, signal);
           if (external) {
             session.subtitles = [...(session.subtitles ?? []), ...external.subtitles];

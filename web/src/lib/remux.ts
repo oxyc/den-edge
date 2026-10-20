@@ -95,6 +95,8 @@ export interface Session {
     name: string;
     /** A quiet second line for Den's picker: source, release match and provider quality signals. */
     description?: string;
+    /** Where this concrete picker row gets its cues. */
+    source?: 'built-in' | 'opensubtitles';
     /** TorBox's embedded stream index; selecting it creates another direct TorBox playlist. */
     torboxTrack?: number;
   }[];

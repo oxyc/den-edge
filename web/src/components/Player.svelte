@@ -694,6 +694,9 @@
     replacing?: Session,
     delivery: 'ordinary' | 'refresh' | 'fallback' | 'direct' = 'ordinary',
   ): Promise<boolean | Failure> {
+    const replacingSubtitleLanguage = replacing
+      ? selectedSubtitle(replacing, subtitleChoice)?.language
+      : undefined;
     clearTimeout(retry);
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
     // shown, so a slow identifier query or `playable()` below counts as part of the wait too. Stopped once this
@@ -1028,13 +1031,17 @@
     // full candidate (TorBox embeds precede OpenSubtitles), never a forced-only track merely because it came first,
     // and keep an exact manual identity across same-language alternatives.
     if (subtitleChoice) {
-      const picked = preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice);
-      if (picked) subtitleChoice = subtitleValue(picked);
+      const picked =
+        preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice) ??
+        (replacingSubtitleLanguage
+          ? preferredSubtitleTrack(result.subtitles ?? [], replacingSubtitleLanguage)
+          : undefined);
+      subtitleChoice = picked ? subtitleValue(picked) : null;
     }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
-    if (session?.external && subtitleChoice) await loadExternalSubtitle(session, subtitleChoice);
+    if (session && subtitleChoice) await loadExternalSubtitle(session, subtitleChoice);
     castSubtitlePreparing = false;
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
@@ -2408,15 +2415,15 @@
         choice:
           choice === null
             ? 'off'
-            : picked?.torboxTrack === undefined
-              ? 'opensubtitles'
-              : 'built-in',
+            : (picked?.source ??
+              (picked?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
         language,
         torboxRequested: picked?.torboxTrack ?? null,
         torboxSelected: session?.torboxSubtitle ?? null,
         offered:
           session?.subtitles?.map((track) => ({
-            source: track.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+            source:
+              track.source ?? (track.torboxTrack === undefined ? 'opensubtitles' : 'built-in'),
             language: track.language,
             name: track.name,
             torboxTrack: track.torboxTrack ?? null,
@@ -2526,6 +2533,11 @@
     // that final source per row, so call the mixed case what it is rather than falsely branding it Built-in.
     return (
       track.description ??
+      (track.source === 'built-in'
+        ? 'Built-in'
+        : track.source === 'opensubtitles'
+          ? 'OpenSubtitles'
+          : undefined) ??
       (current.external
         ? 'OpenSubtitles'
         : current.subtitleSource === 'den_subtitles'
@@ -2566,15 +2578,15 @@
         from:
           previous === null
             ? 'off'
-            : selectedSubtitle(current, previous)?.torboxTrack === undefined
-              ? 'opensubtitles'
-              : 'built-in',
+            : (selectedSubtitle(current, previous)?.source ??
+              (selectedSubtitle(current, previous)?.torboxTrack === undefined
+                ? 'opensubtitles'
+                : 'built-in')),
         to:
           next === null
             ? 'off'
-            : requested?.torboxTrack === undefined
-              ? 'opensubtitles'
-              : 'built-in',
+            : (requested?.source ??
+              (requested?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
         language: requested?.language ?? null,
         torboxRequested: requested?.torboxTrack ?? null,
         torboxSelected: current?.torboxSubtitle ?? null,
