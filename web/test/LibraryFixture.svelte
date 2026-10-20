@@ -91,8 +91,14 @@
   // The app's Router answers a page's `navigate`; here the route just follows it, so a pick that lives in the address
   // (Watched's year) is drawn.
   onMount(() => {
-    const follow = (event: Event) =>
-      (route = parseRoute((event as CustomEvent<{ path: string }>).detail.path));
+    const follow = (event: Event) => {
+      const { path, replace = false } = (event as CustomEvent<{ path: string; replace?: boolean }>)
+        .detail;
+      route = parseRoute(path);
+      // Playback-address tests exercise the Router's observable contract while retaining this fixture's controlled
+      // library and media services. Every other fixture keeps its historical URL, as before.
+      if (params.has('address')) history[replace ? 'replaceState' : 'pushState'](null, '', path);
+    };
     document.addEventListener('den:navigate', follow);
     return () => document.removeEventListener('den:navigate', follow);
   });

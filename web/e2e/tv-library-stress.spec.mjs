@@ -258,6 +258,15 @@ async function savedLibraryJourney(page, testInfo, count) {
     .click();
   await expect.poll(() => edge.libraries.size, { timeout: 30_000 }).toBe(1);
 
+  // Creating the relay library is not the end of the handover: the browser still has to migrate its local rows,
+  // switch sessions and reopen them from the relay. Starting another document navigation in that interval races
+  // the handover's own landing route. Wait on the user-visible migrated row, which proves the new library is open
+  // and contains the first real write, before seeding the rest through detail pages.
+  await page.goto(`${E2E_ORIGIN}/watchlist`);
+  await expect(page.getByRole('link', { name: /Catalog Movie 7000/ }).first()).toBeVisible({
+    timeout: 30_000,
+  });
+
   for (let id = 7_001; id < 7_000 + count; id++) {
     await page.goto(`${E2E_ORIGIN}/movie/${id}`);
     const save = page.getByRole('button', { name: 'Watchlist', exact: true });

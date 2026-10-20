@@ -240,6 +240,7 @@ async function open(browserType, { cast, answer = torboxAnswer } = {}) {
   });
   query.set('local', '');
   query.set('services', '');
+  query.set('address', '');
   await page.goto(`${ORIGIN}/test/library.html?${query}`);
   return { browser, page, asked };
 }
@@ -278,6 +279,7 @@ const progressOf = (page, episode) =>
 async function playFirstEpisode(page) {
   await page.getByRole('link', { name: /^Play/ }).first().click();
   await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+  await expect(page).toHaveURL(`${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`);
   await expect(player(page).getByRole('link', { name: 'Next: S1 · E2' })).toHaveAttribute(
     'href',
     `/tv/${SERIES}-series-${SERIES}?season=1&episode=2&play=1`,
@@ -322,6 +324,9 @@ for (const [name, browserType, available] of [
       expect(asked.playback[1]).not.toHaveProperty('replaces');
       expect(asked.playback[1].startAt).toBeUndefined();
       await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E2`);
+      await expect(page).toHaveURL(
+        `${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=2&play=1`,
+      );
 
       // Episode 2's stream, from its start, in the very element that was fullscreen — which still is.
       await expect.poll(() => asked.media.some((path) => path.startsWith('/e2/seg'))).toBe(true);
@@ -370,6 +375,7 @@ test('closing the player and playing another title opens a fresh player', async 
     await expect(page.locator('h1')).toHaveText(`Film ${FILM}`);
     await page.getByRole('link', { name: /^Play/ }).first().click();
     await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
+    await expect(page).toHaveURL(`${ORIGIN}/movie/${FILM}-film-${FILM}?play=1`);
     await playingPast(page, 1);
     expect(asked.playback.map(itemOf)).toEqual(['e1', 'film']);
     expect(
