@@ -241,7 +241,11 @@ test('webOS native playback does not wait on its advertised but silent frame cal
       held.delete(element);
     };
   });
-  const ended = await routePlayback(page);
+  // This case proves Den's webOS readiness boundary, not WebKit's fixture decoder. Keep the playlist request open so
+  // a busy CI runner cannot reject the tiny HLS fixture and independently exercise the release-fallback path while
+  // the synthetic webOS pipeline below is deciding that its first frame is ready. Real native HLS is played by the
+  // following test.
+  const ended = await routePlayback(page, { onMedia: async () => true });
   await page.goto(`${ORIGIN}/test/player.html`);
 
   const video = page.locator('.player video');
