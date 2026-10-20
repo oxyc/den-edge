@@ -1244,6 +1244,27 @@ describe('LibraryLog', () => {
     });
   });
 
+  it('resolves profile discovery after an unchanged return-visit refresh', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1)]);
+    const household: typeof fetch = async (input, init) => {
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '5');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, household, undefined, vault, 5))!;
+    expect(first.profileDirectoryPending).toBe(false);
+    await vi.waitFor(() => expect(data.size).toBe(1));
+
+    const returned = (await LibraryLog.open(LIBRARY_KEY, household, undefined, vault, 5))!;
+    expect(returned.fromCache).toBe(true);
+    expect(returned.profileDirectoryPending).toBe(true);
+
+    expect(await returned.refresh()).toBe(true);
+    expect(returned.profileDirectoryPending).toBe(false);
+  });
+
   it('keeps its own write for the next visit once den-edge has echoed it', async () => {
     const { vault } = memoryVault();
     const server = await edge([row(1)]);

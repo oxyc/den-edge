@@ -3298,6 +3298,9 @@ export class LibraryLog {
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
+          // A retained wire-5 household starts with directory discovery pending until one current-generation page
+          // has been read. Reaching that page resolves the profile view even when its rows and head are unchanged.
+          if (this.profileDirectoryPending) this.unreported = true;
           this.readCurrentGeneration = true;
           this.writeGeneration = undefined;
           for (const entry of page.entries) {
