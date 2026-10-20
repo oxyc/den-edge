@@ -377,7 +377,10 @@ export function installTVNavigation(): () => void {
       } else if (direction === 'up' && scrollY > 8) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        scrollTo({ top: 0, behavior: 'smooth' });
+        // Do not leave focus stranded on the billboard while a smooth scroll is still in flight: repeated remote
+        // Up presses would keep restarting that animation. Land at the content boundary now; the next Up can enter
+        // the fixed navigation bar normally.
+        scrollTo({ top: 0, behavior: 'auto' });
       }
       return;
     }

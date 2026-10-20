@@ -168,6 +168,16 @@ test(
     await page.keyboard.press('ArrowDown');
     await expect(more).toBeFocused();
     await expect(more).toHaveAttribute('data-tv-carousel-action', 'hero');
+    // Returning from a scrolled Home first lands at the billboard content boundary, then lets another Up enter the
+    // always-visible pointer bar. This must be deterministic rather than trapping repeated keys in smooth scroll.
+    await page.evaluate(() => scrollTo(0, 700));
+    await page.keyboard.press('ArrowUp');
+    await expect.poll(() => page.evaluate(() => scrollY)).toBe(0);
+    await page.keyboard.press('ArrowUp');
+    await expect(
+      page.getByRole('navigation', { name: 'Main navigation' }).locator(':focus'),
+    ).toHaveCount(1);
+    await more.focus();
     await page.screenshot({ path: info.outputPath('tv-home.png') });
     const baselineWorkers = page.workers().length;
     const heroPagingMs = [];

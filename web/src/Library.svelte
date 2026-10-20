@@ -2040,7 +2040,7 @@
     {#if !facet && downloading.length && shelfMounted('downloading')}
       <WindowedPosterRow
         heading="Downloading"
-        aside={{ label: 'All downloads', href: '/downloads' }}
+        aside={__DEN_TV__ ? undefined : { label: 'All downloads', href: '/downloads' }}
         items={downloading}
         itemKey={(download) => download.content}
         itemHref={(download) =>
