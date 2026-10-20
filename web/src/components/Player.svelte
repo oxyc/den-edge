@@ -1655,12 +1655,15 @@
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.frag?.type === 'subtitle') {
           subtitleLoadFailedFlag = true;
-          console.warn('[Den subtitles] HLS subtitle error', {
-            details: data.details,
-            fatal: data.fatal,
-            httpStatus: data.response?.code ?? null,
-            track: hls?.subtitleTrack ?? null,
-          });
+          console.warn(
+            `[Den subtitles] ${JSON.stringify({
+              event: 'hls-error',
+              details: data.details,
+              fatal: data.fatal,
+              httpStatus: data.response?.code ?? null,
+              track: hls?.subtitleTrack ?? null,
+            })}`,
+          );
         }
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
@@ -2399,35 +2402,42 @@
           : 'disabled';
     }
     const picked = selectedSubtitle();
-    console.info('[Den subtitles] applied', {
-      choice:
-        choice === null ? 'off' : picked?.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
-      language,
-      torboxRequested: picked?.torboxTrack ?? null,
-      torboxSelected: session?.torboxSubtitle ?? null,
-      offered:
-        session?.subtitles?.map((track) => ({
-          source: track.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+    console.info(
+      `[Den subtitles] ${JSON.stringify({
+        event: 'applied',
+        choice:
+          choice === null
+            ? 'off'
+            : picked?.torboxTrack === undefined
+              ? 'opensubtitles'
+              : 'built-in',
+        language,
+        torboxRequested: picked?.torboxTrack ?? null,
+        torboxSelected: session?.torboxSubtitle ?? null,
+        offered:
+          session?.subtitles?.map((track) => ({
+            source: track.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
+            language: track.language,
+            name: track.name,
+            torboxTrack: track.torboxTrack ?? null,
+            selected: subtitleValue(track) === choice,
+          })) ?? [],
+        hlsSelected: hls?.subtitleTrack ?? null,
+        hlsTracks:
+          hls?.subtitleTracks.map((track, index) => ({
+            index,
+            language: track.lang,
+            name: track.name,
+          })) ?? [],
+        textTracksBefore: before,
+        textTracksAfter: textTracks.map((track) => ({
+          kind: track.kind,
           language: track.language,
-          name: track.name,
-          torboxTrack: track.torboxTrack ?? null,
-          selected: subtitleValue(track) === choice,
-        })) ?? [],
-      hlsSelected: hls?.subtitleTrack ?? null,
-      hlsTracks:
-        hls?.subtitleTracks.map((track, index) => ({
-          index,
-          language: track.lang,
-          name: track.name,
-        })) ?? [],
-      textTracksBefore: before,
-      textTracksAfter: textTracks.map((track) => ({
-        kind: track.kind,
-        language: track.language,
-        label: track.label,
-        mode: track.mode,
-      })),
-    });
+          label: track.label,
+          mode: track.mode,
+        })),
+      })}`,
+    );
   }
 
   /**
@@ -2550,22 +2560,29 @@
     const current = session;
     const previous = subtitleChoice;
     const requested = selectedSubtitle(current, next);
-    console.info('[Den subtitles] choice', {
-      from:
-        previous === null
-          ? 'off'
-          : selectedSubtitle(current, previous)?.torboxTrack === undefined
-            ? 'opensubtitles'
-            : 'built-in',
-      to:
-        next === null ? 'off' : requested?.torboxTrack === undefined ? 'opensubtitles' : 'built-in',
-      language: requested?.language ?? null,
-      torboxRequested: requested?.torboxTrack ?? null,
-      torboxSelected: current?.torboxSubtitle ?? null,
-      replacesStream:
-        current?.external === true &&
-        (current.torboxSubtitle ?? undefined) !== requested?.torboxTrack,
-    });
+    console.info(
+      `[Den subtitles] ${JSON.stringify({
+        event: 'choice',
+        from:
+          previous === null
+            ? 'off'
+            : selectedSubtitle(current, previous)?.torboxTrack === undefined
+              ? 'opensubtitles'
+              : 'built-in',
+        to:
+          next === null
+            ? 'off'
+            : requested?.torboxTrack === undefined
+              ? 'opensubtitles'
+              : 'built-in',
+        language: requested?.language ?? null,
+        torboxRequested: requested?.torboxTrack ?? null,
+        torboxSelected: current?.torboxSubtitle ?? null,
+        replacesStream:
+          current?.external === true &&
+          (current.torboxSubtitle ?? undefined) !== requested?.torboxTrack,
+      })}`,
+    );
     subtitleChoice = next;
     if (current?.external) {
       const nextTrack = selectedSubtitle(current);

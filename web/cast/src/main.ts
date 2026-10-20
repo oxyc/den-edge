@@ -335,12 +335,15 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data.frag?.type === 'subtitle')
-        console.warn('[Den subtitles] Cast page HLS subtitle error', {
-          details: data.details,
-          fatal: data.fatal,
-          httpStatus: data.response?.code ?? null,
-          track: hls?.subtitleTrack ?? null,
-        });
+        console.warn(
+          `[Den subtitles] ${JSON.stringify({
+            event: 'cast-page-hls-error',
+            details: data.details,
+            fatal: data.fatal,
+            httpStatus: data.response?.code ?? null,
+            track: hls?.subtitleTrack ?? null,
+          })}`,
+        );
       if (!data.fatal) return;
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
         // A decoder that lost its place: reset the buffer and carry on, once.
@@ -411,17 +414,20 @@ function applySubtitle(language: string | null | undefined, subtitleIndex?: numb
               : -1;
     hls.subtitleDisplay = language != null && selected >= 0;
     hls.subtitleTrack = selected;
-    console.info('[Den subtitles] Cast page applied', {
-      target: 'local-hls',
-      language: language ?? null,
-      torboxSelected: subtitleIndex ?? null,
-      hlsSelected: selected,
-      hlsTracks: hls.subtitleTracks.map((track, index) => ({
-        index,
-        language: track.lang,
-        name: track.name,
-      })),
-    });
+    console.info(
+      `[Den subtitles] ${JSON.stringify({
+        event: 'cast-page-applied',
+        target: 'local-hls',
+        language: language ?? null,
+        torboxSelected: subtitleIndex ?? null,
+        hlsSelected: selected,
+        hlsTracks: hls.subtitleTracks.map((track, index) => ({
+          index,
+          language: track.lang,
+          name: track.name,
+        })),
+      })}`,
+    );
     return;
   }
   const nativeTracks = Array.from(video.textTracks);
@@ -431,17 +437,20 @@ function applySubtitle(language: string | null | undefined, subtitleIndex?: numb
       : ((subtitleIndex !== undefined ? nativeTracks[subtitleIndex] : undefined) ??
         nativeTracks.find((track) => sameLanguage(track.language, language)));
   for (const track of nativeTracks) track.mode = track === selected ? 'showing' : 'disabled';
-  console.info('[Den subtitles] Cast page applied', {
-    target: 'local-native',
-    language: language ?? null,
-    torboxSelected: subtitleIndex ?? null,
-    textTracks: Array.from(video.textTracks).map((track) => ({
-      kind: track.kind,
-      language: track.language,
-      label: track.label,
-      mode: track.mode,
-    })),
-  });
+  console.info(
+    `[Den subtitles] ${JSON.stringify({
+      event: 'cast-page-applied',
+      target: 'local-native',
+      language: language ?? null,
+      torboxSelected: subtitleIndex ?? null,
+      textTracks: Array.from(video.textTracks).map((track) => ({
+        kind: track.kind,
+        language: track.language,
+        label: track.label,
+        mode: track.mode,
+      })),
+    })}`,
+  );
 }
 
 async function measure(media: Media, id: string): Promise<boolean> {
@@ -493,16 +502,19 @@ function applyCastSubtitle(language: string | null | undefined, subtitleIndex?: 
           sameLanguage(candidate.language, language),
       ))
     : undefined;
-  console.info('[Den subtitles] Cast receiver applied', {
-    language: language ?? null,
-    torboxSelected: subtitleIndex ?? null,
-    receiverTrack: track?.trackId ?? null,
-    receiverTracks: textTracks.map((candidate, index) => ({
-      index,
-      id: candidate.trackId,
-      language: candidate.language ?? null,
-    })),
-  });
+  console.info(
+    `[Den subtitles] ${JSON.stringify({
+      event: 'cast-receiver-applied',
+      language: language ?? null,
+      torboxSelected: subtitleIndex ?? null,
+      receiverTrack: track?.trackId ?? null,
+      receiverTracks: textTracks.map((candidate, index) => ({
+        index,
+        id: candidate.trackId,
+        language: candidate.language ?? null,
+      })),
+    })}`,
+  );
   media.editTracksInfo(
     new chrome.media.EditTracksInfoRequest(track ? [track.trackId] : []),
     () => undefined,
