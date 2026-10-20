@@ -2356,10 +2356,7 @@ pub mod tests {
             "{allowed}"
         );
         let methods = preflight.headers()[header::ACCESS_CONTROL_ALLOW_METHODS].to_str().unwrap();
-        assert!(
-            methods.split(',').any(|method| method.trim() == "OPTIONS"),
-            "{methods}"
-        );
+        assert!(methods.split(',').any(|method| method.trim() == "OPTIONS"), "{methods}");
 
         let get = h.send("GET", "/health", None, &[("origin", "https://pve.example")]).await;
         assert_eq!(get.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://pve.example");
