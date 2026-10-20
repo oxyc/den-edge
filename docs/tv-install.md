@@ -47,45 +47,48 @@ LG references: [Developer Mode](https://webostv.developer.lge.com/develop/gettin
 
 ## Samsung Tizen 8 (2024-generation TV or newer)
 
-Samsung requires a Samsung certificate whose distributor certificate includes that TV. That private certificate
-cannot safely be generated or stored by Den's CI, so building/signing the `.wgt` is intentionally local.
+The release publishes an unsigned `.wgt`; [Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung) creates the
+Samsung certificate for the destination TV, signs the widget and installs it. The certificate is device-specific,
+so Den's CI cannot publish one universally installable signed package.
 
-1. Install Tizen Studio. In Package Manager install **Web CLI**, the current **TV Extensions**, and
-   **Samsung Certificate Extension**. In Certificate Manager create a **Samsung** certificate profile; below it is
-   called `DenSamsung`.
-2. On the TV open **Apps**, open **App Settings**, type `12345`, enable Developer Mode, enter the Mac's LAN address,
-   and reboot the TV.
-3. In Tizen Studio Device Manager add the TV on port `26101` and connect it. Confirm the command-line bridge can
-   see it:
+1. Download the appropriate desktop build—or the `-android.apk`—from the
+   [latest Apps2Samsung release](https://github.com/Apps2Samsung/Apps2Samsung/releases/latest). The installer device
+   and TV must be on the same LAN.
+2. Download [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen.wgt).
+3. On the TV open **Apps** and type `12345`, enable Developer Mode, enter the local IP address Apps2Samsung shows for
+   the computer or phone, and restart the TV. If it is not discovered afterward, power-cycle it completely.
+4. In Apps2Samsung select the TV, choose the custom `.wgt` option, select `den-tv-tizen.wgt`, and install. Sign in
+   with a free Samsung developer account when asked; Tizen 7 and newer require it when the tool provisions the
+   certificate.
 
-   ```sh
-   sdb devices
-   ```
+For an update, download the current `.wgt` from the same stable URL and install it again. Preserve Apps2Samsung's
+data so it can reuse the author certificate. If the TV reports an author-certificate mismatch, remove its existing
+Den installation and install again; removal can discard local app data.
 
-4. Download [`den-tv-tizen-unsigned.tar.gz`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen-unsigned.tar.gz),
-   extract it, and run its installer. Replace
-   `TV_SERIAL` with the first column printed by `sdb devices`; `DenSamsung` is the certificate profile from step 1:
+### Tizen Studio alternative
 
-   ```sh
-   cd ~/Downloads
-   tar -xzf den-tv-tizen-unsigned.tar.gz
-   cd den-tv-tizen
-   ./install.sh DenSamsung TV_SERIAL
-   ```
+The release retains the existing Tizen Studio installer for development and troubleshooting. Install Tizen Studio's
+**Web CLI**, current **TV Extensions**, and **Samsung Certificate Extension**; create a Samsung certificate profile
+whose distributor certificate includes the TV, enable Developer Mode as above, then connect the TV in Device Manager.
+Download the unsigned archive and pass the profile name and the serial shown by `sdb devices` to its installer:
 
-The release contains the already-built app, but not a universal Samsung signature: Samsung requires the distributor
-certificate to contain your TV's DUID. The installer permits installation, signs the app for that TV, installs it,
-and opens it. For an update, download the current archive and rerun the same command. `sdb dlog` shows device logs.
-If signing is refused, verify that the active Samsung certificate profile contains this TV's DUID. USB widget
-installation is not supported.
+```sh
+cd ~/Downloads
+curl -fLO https://github.com/oxyc/den-edge/releases/latest/download/den-tv-tizen-unsigned.tar.gz
+tar -xzf den-tv-tizen-unsigned.tar.gz
+cd den-tv-tizen
+./install.sh DenSamsung TV_SERIAL
+```
+
+The script permits installation, signs the app for that TV, installs it, and opens it. `sdb dlog` shows device logs.
+USB widget installation is not supported.
 
 ### Samsung updates and certificates
 
 - Samsung's app contains the TV bundle rather than loading it from `den-tv.oxy.fi`. Backend/service changes arrive
-  without reinstalling, but **TV UI changes require downloading the current archive and rerunning `install.sh`**.
-- Back up the Samsung author certificate, its password, and the certificate profile. Samsung requires an update to
-  use the same author certificate as the installed app; the distributor certificate must be valid and contain this
-  TV's DUID when an update is signed and installed.
+  without reinstalling, but **TV UI changes require installing the current `.wgt`**.
+- Keep Apps2Samsung's data or export its backup. Samsung requires an update to use the same author certificate as the
+  installed app; the distributor certificate must be valid and include this TV's DUID.
 - There is no LG-style 999-hour app-removal timer documented for this Samsung flow. Developer Mode and a reachable TV
   are needed when installing an update; the installer runs the installation-permit command each time.
 

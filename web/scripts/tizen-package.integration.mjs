@@ -83,6 +83,14 @@ const xmllint = spawnSync('xmllint', ['--noout', join(shell, 'config.xml')], { e
 if (!xmllint.error && xmllint.status !== 0)
   throw new Error(`config.xml is not well-formed: ${xmllint.stderr}`);
 
+const widget = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'packages', 'den-tv-tizen.wgt');
+const packageWidget = spawnSync(
+  process.execPath,
+  ['scripts/tizen-unsigned-wgt.mjs', shell, widget],
+  { cwd: webRoot, encoding: 'utf8', stdio: 'inherit' },
+);
+if (packageWidget.status !== 0) process.exit(packageWidget.status ?? 1);
+
 const rejected = spawnSync(
   process.execPath,
   ['scripts/tv-package.mjs', 'tizen', '--prepare', '--smoke-test', '--url', 'https://den.example'],
@@ -95,5 +103,5 @@ const rejected = spawnSync(
 if (rejected.status === 0 || !rejected.stderr.includes('exact HTTPS origin'))
   throw new Error('Packager accepted an API URL with a path');
 console.log(
-  'Prepared Tizen shell passed metadata, asset-path, icon, and optional XML validation. No .wgt was produced.',
+  'Prepared Tizen shell and unsigned WGT passed metadata, root-layout, asset-path, icon, and optional XML validation.',
 );
