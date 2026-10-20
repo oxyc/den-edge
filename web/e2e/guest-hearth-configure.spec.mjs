@@ -63,15 +63,13 @@ test('guest Configure uses a native new-tab POST and follows the scoped redirect
       },
     });
   });
-  await context.route(new RegExp(`/den/~${GID}/configure$`), (route) => {
+  // Playwright does not pass a follow-up request from a route-fulfilled redirect through routing again. Observe
+  // that real navigation instead: this still proves the browser followed the 303 with only the scoped cookie.
+  context.on('request', (request) => {
+    if (!new RegExp(`/den/~${GID}/configure$`).test(request.url())) return;
     order.push('configure');
-    expect(route.request().headers().cookie).toContain(`den_guest_configure=${GID}.${SECRET}`);
-    expect(route.request().headers()).not.toHaveProperty('x-den-grant');
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: '<!doctype html><html><body><h1>Den Hearth setup</h1><p id="ran"></p><script>document.querySelector("#ran").textContent="setup script ran"</script></body></html>',
-    });
+    expect(request.headers().cookie).toContain(`den_guest_configure=${GID}.${SECRET}`);
+    expect(request.headers()).not.toHaveProperty('x-den-grant');
   });
   await page.route(`**/{atlas,den}/~${GID}/manifest.json`, (route) =>
     route.fulfill({ status: 404, body: 'not available' }),
