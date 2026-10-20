@@ -24,6 +24,71 @@ afterEach(() => {
 });
 
 describe('startPlayback', () => {
+  it('keeps indexed TorBox built-ins as reload-free sidecars with a burn-in fallback', async () => {
+    const token = 'a'.repeat(43);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:indexed-built-in');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes('/_sidecar/'))
+        return new Response('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n');
+      if (url.endsWith('/cast-subtitle')) return new Response(null, { status: 503 });
+      return json({
+        url: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
+        release,
+        torboxSubtitle: null,
+        subtitles: [
+          {
+            value: 'torbox-sidecar:1',
+            language: 'eng',
+            name: 'English',
+            description: 'Built-in · SUBRIP',
+            source: 'built-in',
+            delivery: 'sidecar',
+            url: `/den/_sidecar/${token}/1.vtt`,
+            fallbackTorboxTrack: 1,
+          },
+          {
+            value: 'torbox-sidecar:2',
+            language: 'eng',
+            name: 'English SDH',
+            source: 'built-in',
+            delivery: 'sidecar',
+            url: `/den/~0123abcd/_sidecar/${token}/2.vtt`,
+            fallbackTorboxTrack: 2,
+          },
+        ],
+      });
+    });
+
+    const result = await startPlayback('/den/config/playback', want, fetchImpl);
+    expect(result).toMatchObject({
+      external: true,
+      subtitles: [
+        {
+          value: 'torbox-sidecar:1',
+          source: 'built-in',
+          delivery: 'sidecar',
+          fallbackTorboxTrack: 1,
+        },
+        {
+          value: 'torbox-sidecar:2',
+          source: 'built-in',
+          delivery: 'sidecar',
+          fallbackTorboxTrack: 2,
+        },
+      ],
+    });
+    expect(result && 'loadExternalSubtitle' in result).toBe(true);
+    if (!result || 'failure' in result) throw new Error('expected a session');
+    await expect(result.loadExternalSubtitle?.('torbox-sidecar:1')).resolves.toMatchObject({
+      url: 'blob:indexed-built-in',
+      language: 'eng',
+    });
+    expect(fetchImpl.mock.calls.some(([input]) => String(input).includes('/_sidecar/'))).toBe(true);
+    result.dispose?.();
+  });
+
   it('returns external HLS without inventing a Remux lifecycle', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
       json(

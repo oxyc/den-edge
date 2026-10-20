@@ -1097,7 +1097,21 @@
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
-    if (session && subtitleChoice) await loadExternalSubtitle(session, subtitleChoice);
+    if (session && subtitleChoice) {
+      const loaded = await loadExternalSubtitle(session, subtitleChoice);
+      const fallback = selectedSubtitle(session)?.fallbackTorboxTrack;
+      if (!loaded && fallback !== undefined) {
+        console.warn(
+          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(session), torboxRequested: fallback })}`,
+        );
+        return begin(
+          { filename: session.release.filename, subtitleTrack: fallback },
+          extra,
+          session,
+          'direct',
+        );
+      }
+    }
     castSubtitlePreparing = false;
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
@@ -2584,6 +2598,7 @@
             language: track.language,
             name: track.name,
             torboxTrack: track.torboxTrack ?? null,
+            delivery: track.delivery ?? (track.torboxTrack === undefined ? 'sidecar' : 'torbox'),
             selected: subtitleValue(track) === choice,
           })) ?? [],
         hlsSelected: hls?.subtitleTrack ?? null,
@@ -2614,15 +2629,16 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
-  async function loadExternalSubtitle(current: Session, value: string): Promise<void> {
+  async function loadExternalSubtitle(current: Session, value: string): Promise<boolean> {
     const track = await current.loadExternalSubtitle?.(value);
-    if (!track || session !== current) return;
+    if (!track || session !== current) return false;
     // The loader owns and deduplicates blobs; this array is render state for the `<track>` children.
     current.externalSubtitles = [
       ...(current.externalSubtitles ?? []).filter((one) => one.value !== track.value),
       track,
     ];
     await renderTick();
+    return true;
   }
 
   function sendSubtitleChoice() {
@@ -2768,7 +2784,21 @@
         return;
       }
     }
-    if (next && current) await loadExternalSubtitle(current, next);
+    if (next && current) {
+      const loaded = await loadExternalSubtitle(current, next);
+      const fallback = selectedSubtitle(current)?.fallbackTorboxTrack;
+      if (!loaded && fallback !== undefined) {
+        console.warn(
+          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(current), torboxRequested: fallback })}`,
+        );
+        restart(
+          { filename: current.release.filename, subtitleTrack: fallback },
+          () => (subtitleChoice = previous),
+          'direct',
+        );
+        return;
+      }
+    }
     applySubtitles();
     sendSubtitleChoice();
   }

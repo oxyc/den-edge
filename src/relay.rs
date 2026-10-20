@@ -620,6 +620,9 @@ impl Guest {
             for segment in self.installs.values() {
                 value = value.replace(segment, &replacement);
             }
+            if self.overlay {
+                value = value.replace("/den/_sidecar/", &format!("/den/~{}/_sidecar/", self.gid));
+            }
             value
         });
         if !self.manifest {
@@ -2859,6 +2862,32 @@ mod tests {
         assert_eq!(super::service_name("/atlas/~guest123/recommend"), "atlas");
         assert_eq!(super::service_name("/"), "relay");
         assert_eq!(super::service_name(""), "relay");
+    }
+
+    #[test]
+    fn guest_playback_rewrites_sidecar_capabilities_under_the_grant() {
+        let guest = super::Guest {
+            gid: "0123abcd".into(),
+            segment: None,
+            installs: std::collections::BTreeMap::new(),
+            scrub: true,
+            manifest: false,
+            personal_den: true,
+            overlay: true,
+            configure: false,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let body = axum::body::Bytes::from_static(
+            br#"{"url":"/den/_sidecar/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.vtt"}"#,
+        );
+        let answer = guest.answer(&headers, &body).unwrap();
+        assert_eq!(
+            answer,
+            axum::body::Bytes::from_static(
+                br#"{"url":"/den/~0123abcd/_sidecar/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.vtt"}"#,
+            )
+        );
     }
 
     /// `log_relay_error`'s own line, by construction, can only ever carry the service's bare name — never the

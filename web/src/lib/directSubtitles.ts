@@ -2,6 +2,7 @@
 // browser asks the same configured combined Den addon for its ordinary candidates and lazily owns chosen blob URLs.
 
 import type { Session } from './remux';
+import { apiOrigin } from './runtimeUrl';
 
 const MAX_SUBTITLE_BYTES = 2 * 1024 * 1024;
 // A candidate list is a small JSON document. Keep its browser-side allocation bounded independently of Edge's
@@ -88,7 +89,11 @@ function candidateUrl(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   try {
     const url = new URL(value, globalThis.location?.href ?? 'https://den.invalid/');
-    const here = new URL(globalThis.location?.href ?? 'https://den.invalid/');
+    const here = new URL(
+      __DEN_TV_PACKAGED__
+        ? `${apiOrigin()}/`
+        : (globalThis.location?.href ?? 'https://den.invalid/'),
+    );
     return url.origin === here.origin && url.pathname.startsWith('/den/') ? url.href : null;
   } catch {
     return null;
@@ -170,30 +175,57 @@ export async function directSubtitles(
   release: Session['release'],
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  builtins: NonNullable<Session['subtitles']> = [],
 ): Promise<DirectSubtitleTracks | null> {
   const wanted = [
     ...new Set(want.subtitleLanguages.map(language).filter((one): one is string => !!one)),
   ];
   const url = wanted.length ? listUrl(playback, want, release) : null;
-  if (!url) return null;
   const owned = new AbortController();
   const boundedSignal = () => {
     const signals = [owned.signal, AbortSignal.timeout(SUBTITLE_DEADLINE_MS)];
     if (signal) signals.push(signal);
     return AbortSignal.any(signals);
   };
+  const available = new Map<
+    string,
+    {
+      href: string;
+      language: string;
+      name: string;
+      description: string;
+      source: 'built-in' | 'opensubtitles';
+      fallbackTorboxTrack?: number;
+    }
+  >();
+  for (const track of builtins) {
+    const safe = candidateUrl(track.url);
+    if (track.delivery !== 'sidecar' || !safe) continue;
+    available.set(track.value ?? track.language, {
+      href: safe,
+      language: track.language,
+      name: track.name,
+      description: track.description ?? 'Built-in · Indexed sidecar',
+      source: 'built-in',
+      fallbackTorboxTrack: track.fallbackTorboxTrack,
+    });
+  }
   try {
-    const listed = await fetchImpl(url, { cache: 'no-store', signal: boundedSignal() });
-    if (!listed.ok) return null;
-    const encoded = await boundedText(listed, MAX_LIST_BYTES);
-    if (encoded === null) return null;
-    const body = JSON.parse(encoded) as { subtitles?: unknown };
-    if (!Array.isArray(body.subtitles)) return null;
-    const available = new Map<
-      string,
-      { href: string; language: string; name: string; description: string }
-    >();
-    const candidates = body.subtitles as Candidate[];
+    let candidates: Candidate[] = [];
+    if (url) {
+      try {
+        const listed = await fetchImpl(url, { cache: 'no-store', signal: boundedSignal() });
+        if (listed.ok) {
+          const encoded = await boundedText(listed, MAX_LIST_BYTES);
+          if (encoded !== null) {
+            const body = JSON.parse(encoded) as { subtitles?: unknown };
+            if (Array.isArray(body.subtitles)) candidates = body.subtitles as Candidate[];
+          }
+        }
+      } catch {
+        // Indexed built-ins remain usable when the optional OpenSubtitles listing is unavailable or malformed.
+      }
+    }
     for (const wantedLanguage of wanted) {
       for (const [position, candidate] of candidates.entries()) {
         const candidateLanguage = language(candidate.lang);
@@ -210,6 +242,7 @@ export async function directSubtitles(
           language: candidateLanguage,
           name: subtitleName(candidateLanguage),
           description: candidateDescription(candidate),
+          source: 'opensubtitles',
         });
       }
     }
@@ -289,7 +322,10 @@ export async function directSubtitles(
         language: candidate.language,
         name: candidate.name,
         description: candidate.description,
-        source: 'opensubtitles' as const,
+        source: candidate.source,
+        ...(candidate.fallbackTorboxTrack === undefined
+          ? {}
+          : { fallbackTorboxTrack: candidate.fallbackTorboxTrack, delivery: 'sidecar' as const }),
       })),
       tracks,
       load,
