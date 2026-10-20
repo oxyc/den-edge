@@ -3139,6 +3139,13 @@
     onclose();
   }
 
+  /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
+  function playerMenuOpen(): boolean {
+    return __DEN_TV__
+      ? document.querySelector('.player dialog[role="menu"][open]') !== null
+      : document.querySelector('.player [popover]:popover-open') !== null;
+  }
+
   // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
   // the size the poster cards already loaded, and the detail page's — and the video's own transport.
   $effect(() => {
@@ -3239,7 +3246,7 @@
     event.key === 'Escape' &&
     !event.defaultPrevented &&
     !document.fullscreenElement &&
-    !document.querySelector('.player [popover]:popover-open') &&
+    !playerMenuOpen() &&
     close()}
 />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->

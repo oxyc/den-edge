@@ -22,6 +22,14 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   let hidden = false;
   let editing: HTMLSelectElement | undefined;
   const root = document.querySelector<HTMLElement>('.player');
+  const openMenu = () => root?.querySelector<HTMLDialogElement>('dialog[role="menu"][open]');
+  const closeOpenMenu = (): boolean => {
+    const menu = openMenu();
+    if (!menu) return false;
+    const cancel = new Event('cancel', { cancelable: true });
+    if (menu.dispatchEvent(cancel)) menu.close();
+    return true;
+  };
   const regions = () =>
     root ? [...root.querySelectorAll<HTMLElement>('header, footer, .tv-transport')] : [];
   const setHidden = (next: boolean) => {
@@ -186,10 +194,14 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       code === 461 ||
       code === 10009
     ) {
-      // Back first leaves the select's remote edit mode. Closing the entire film while the viewer is
-      // choosing a track makes a native TV picker impossible to cancel safely.
-      if (editing) editing = undefined;
-      else actions.close();
+      // This capture listener runs before ActionMenu's own handler. Close its TV dialog here so a fast Back cannot
+      // remove the player underneath it; this also works in the standalone player shell without route navigation.
+      if (!closeOpenMenu()) {
+        // Back first leaves the select's remote edit mode. Closing the entire film while the viewer is
+        // choosing a track makes a native TV picker impossible to cancel safely.
+        if (editing) editing = undefined;
+        else actions.close();
+      }
     } else handled = false;
 
     if (!handled) return;
@@ -198,6 +210,12 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   };
 
   const onBack = (event: Event) => {
+    // Global TV navigation sends this before handling its own modal fallback. Consuming it after closing the
+    // player's menu prevents the same Back from reaching the player underneath.
+    if (closeOpenMenu()) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
     if (editing) editing = undefined;
     else actions.close();

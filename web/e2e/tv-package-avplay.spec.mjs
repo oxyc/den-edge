@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { AVPLAY_FIXTURE_SCRIPT, callsNamed, remoteKey } from './avplay-fixture.mjs';
+import { AVPLAY_FIXTURE_SCRIPT, callsNamed, chooseSubtitle, remoteKey } from './avplay-fixture.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const API = 'https://den-tv-api.example.invalid';
@@ -89,7 +89,7 @@ test('packaged Tizen loads the Samsung bridge before the app and plays through A
   expect(await remoteKey(page, 'Unidentified', 417)).toBe(true);
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
-  await page.getByLabel('Subtitles').selectOption('en');
+  await chooseSubtitle(page, 'English');
   await expect
     .poll(() => callsNamed(page, 'setSelectTrack'))
     .toContainEqual(['setSelectTrack', 'TEXT', 21, 'PLAYING']);

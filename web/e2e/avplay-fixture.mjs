@@ -135,6 +135,12 @@ export const installAvplayInitScript = (page) => page.addInitScript(installAvpla
 export const callsNamed = (page, name) =>
   page.evaluate((wanted) => window.__avplayFixture.calls.filter(([call]) => call === wanted), name);
 
+/** Choose the same contextual subtitle menu a Samsung remote opens; `label` is a visible track name or Off. */
+export async function chooseSubtitle(page, label) {
+  await page.getByRole('button', { name: /^Subtitles:/ }).click();
+  await page.getByRole('menuitemradio', { name: label, exact: true }).click();
+}
+
 export async function remoteKey(page, key, keyCode) {
   return page.evaluate(
     ({ key, keyCode }) => {

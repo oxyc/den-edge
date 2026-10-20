@@ -263,32 +263,36 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.closest('footer') !== null))
     .toBe(true);
-  const footerSelects = page.locator('footer select');
-  // The stream chooser is now a button so it can show the full release menu; audio and subtitles remain native
-  // selects. Down lands on the stream chooser, and two horizontal moves still reach the subtitles picker.
-  await expect(footerSelects).toHaveCount(2);
+  const audioPicker = page.getByRole('combobox', { name: 'Audio track' });
+  const subtitlePicker = page.getByRole('button', { name: /^Subtitles:/ });
+  // Stream and subtitle choices need the release/track context carried by menus; audio remains a native select.
+  // Down lands on the stream chooser, and two horizontal moves still reach the subtitles picker.
+  await expect(audioPicker).toBeVisible();
+  await expect(subtitlePicker).toBeVisible();
   for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
-  await expect(footerSelects.last()).toBeFocused();
-  await expect(footerSelects.last()).toHaveCSS('outline-style', 'none');
-  await expect(footerSelects.last()).toHaveCSS('box-shadow', 'none');
-  const focusedPicker = footerSelects.last().locator('..');
-  await expect(focusedPicker).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
-  await expect(focusedPicker).toHaveCSS('outline-width', '4px');
-  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect(subtitlePicker).toBeFocused();
+  await expect(subtitlePicker).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
+  await expect(subtitlePicker).toHaveCSS('outline-width', '4px');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toBeVisible();
   // Escape and hardware Back each cancel track-picker editing without closing playback.
   expect(await remoteKey(page, 'Escape', 27)).toBe(true);
   await expect(video).toHaveCount(1);
   await expect(page.getByTestId('player-close-count')).toHaveText('0');
-  await expect(footerSelects.last()).toBeFocused();
-  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toHaveCount(0);
+  await expect(subtitlePicker).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toBeVisible();
   expect(await remoteKey(page, 'Unidentified', 10009)).toBe(true);
   await expect(video).toHaveCount(1);
   await expect(page.getByTestId('player-close-count')).toHaveText('0');
-  await expect(footerSelects.last()).toBeFocused();
-  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toHaveCount(0);
+  await expect(subtitlePicker).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toBeVisible();
   expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
-  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
-  await expect(footerSelects.last()).toHaveValue('en');
+  await page.keyboard.press('Enter');
+  await expect(subtitlePicker).toHaveAccessibleName('Subtitles: English');
 
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);

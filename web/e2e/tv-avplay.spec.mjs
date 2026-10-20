@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
-import { callsNamed, installAvplayInitScript, remoteKey } from './avplay-fixture.mjs';
+import {
+  callsNamed,
+  chooseSubtitle,
+  installAvplayInitScript,
+  remoteKey,
+} from './avplay-fixture.mjs';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 
 test.skip(process.env.DEN_TV_PLATFORM !== 'tizen', 'Samsung AVPlay is a Tizen-only bridge');
@@ -114,12 +119,11 @@ test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visi
   await expect(page.getByText('This browser couldn’t play this release.')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('PLAYING');
 
-  const subtitles = page.getByLabel('Subtitles');
-  await subtitles.selectOption('en');
+  await chooseSubtitle(page, 'English');
   await expect
     .poll(() => callsNamed(page, 'setSelectTrack'))
     .toContainEqual(['setSelectTrack', 'TEXT', 21, 'PLAYING']);
-  await subtitles.selectOption('');
+  await chooseSubtitle(page, 'Off');
   await expect
     .poll(() => callsNamed(page, 'setSilentSubtitle'))
     .toContainEqual(['setSilentSubtitle', true, 'PLAYING']);
@@ -153,9 +157,9 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   );
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
-  await page.getByLabel('Subtitles').selectOption('en');
+  await chooseSubtitle(page, 'English');
   await expect(page.locator('.den-avplay-captions')).toHaveText('External caption');
-  await page.getByLabel('Subtitles').selectOption('');
+  await chooseSubtitle(page, 'Off');
   await expect(page.locator('.den-avplay-captions')).toBeHidden();
 });
 
