@@ -562,7 +562,13 @@ fn preflight() -> Response {
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = StatusCode::NO_CONTENT;
     let headers = resp.headers_mut();
-    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST, DELETE"));
+    // Hearth exposes its default-off playback capability as a bare OPTIONS request. A browser on the dedicated TV
+    // origin preflights that non-safelisted method before sending it, so OPTIONS must authorize itself here; without
+    // it the healthy capability is indistinguishable from an unavailable player and every source loses its Play link.
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, PUT, POST, DELETE, OPTIONS"),
+    );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
@@ -2348,6 +2354,11 @@ pub mod tests {
                 && allowed.contains("x-den-library-member")
                 && allowed.contains("x-den-link"),
             "{allowed}"
+        );
+        let methods = preflight.headers()[header::ACCESS_CONTROL_ALLOW_METHODS].to_str().unwrap();
+        assert!(
+            methods.split(',').any(|method| method.trim() == "OPTIONS"),
+            "{methods}"
         );
 
         let get = h.send("GET", "/health", None, &[("origin", "https://pve.example")]).await;
