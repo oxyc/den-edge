@@ -1076,7 +1076,7 @@
               href={titleHref(title)}
               aria-label={`Open details for ${title.title}`}
               data-spatial-skip
-              tabindex="-1"
+              tabindex={n === index ? 0 : -1}
               draggable="false"
             ></a>
           {/if}
