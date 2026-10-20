@@ -299,6 +299,31 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
   }
 });
 
+test('a preferred TorBox built-in is created into the initial managed stream', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    const operations = await mockHearth(page, { builtIn: true });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
+    await playing(page);
+
+    expect(operations).toHaveLength(2);
+    expect(operations[0]).not.toHaveProperty('subtitleTrack');
+    expect(operations[1]).toMatchObject({
+      directOnly: true,
+      filename: 'fixture.mkv',
+      subtitleTrack: 0,
+    });
+    await expect
+      .poll(() => page.evaluate(shown), { timeout: 10_000 })
+      .toMatchObject({ language: 'en', label: 'English (in file)' });
+    await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('switching a chosen TorBox built-in to Remux keeps that language and lists OpenSubtitles too', async () => {
   const browser = await launchChromium();
   try {
