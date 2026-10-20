@@ -162,19 +162,27 @@
     margin: 0;
   }
 
-  /* In the TV hero this is one peer in the action row, not the standalone block used below episode tabs. */
+  /* A labelled season picker is one peer in an action row, not the standalone compact control below episode tabs. */
   .picker {
     display: flex;
+    flex: none;
     align-items: center;
     gap: 10px;
     margin: 0;
   }
 
   .download :global(.season-download-trigger) {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    width: auto;
+    min-width: max-content;
     padding: 0 22px;
     border: 1px solid rgb(255 255 255 / 0.14);
     background: rgb(255 255 255 / 0.08);
     font-weight: 600;
+    white-space: nowrap;
   }
 
   /* Beside the tabs it reads as a mark on the row, not a second control competing with them: no plate, no

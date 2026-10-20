@@ -327,23 +327,6 @@
   min-height: 58px;
 }
 
-/* ActionMenu's neutral trigger is a grid by default. A season picker is a labelled peer of the other hero
-   actions, so keep its glyph and word on one line and do not let the crowded action row shrink the wrapper. */
-:root.den-tv .download.picker,
-:root.den-tv .season-download-trigger {
-  flex: none;
-}
-
-:root.den-tv .season-download-trigger {
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  width: auto;
-  min-width: max-content;
-  white-space: nowrap;
-}
-
 .den-tv .card .meta {
   padding-top: 10px;
   font-size: var(--tv-type-small);
