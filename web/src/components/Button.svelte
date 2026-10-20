@@ -32,6 +32,11 @@
     ariaLabel?: string;
     class?: string;
     type?: 'button' | 'submit' | 'reset';
+    /**
+     * Where this control leads, for one that goes to a page rather than acts: drawn as a link with the same look, so it
+     * opens in a new tab like any other. A plain click is the Router's (`Router.svelte`), after `onclick`.
+     */
+    href?: string;
     element?: HTMLButtonElement;
     onclick?: (event: MouseEvent) => void;
   }
@@ -54,6 +59,7 @@
     ariaLabel,
     class: className = '',
     type = 'button',
+    href,
     element = $bindable(),
     onclick,
     ...attributes
@@ -79,16 +85,27 @@
   {#if children}{@render children()}{/if}
 {/snippet}
 
-<button
-  bind:this={element}
-  {...attributes}
-  {type}
-  class="den-button den-button-{variant} den-button-{size} {className}"
-  aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
-  aria-pressed={pressed ?? attributes['aria-pressed']}
-  aria-busy={busy || attributes['aria-busy'] || undefined}
-  data-saving={saving || undefined}
-  aria-disabled={busy || attributes['aria-disabled'] || undefined}
-  {disabled}
-  onclick={activate}>{@render contents()}</button
->
+{#if href !== undefined}
+  <a
+    {href}
+    role={attributes.role}
+    class="den-button den-button-{variant} den-button-{size} {className}"
+    aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
+    aria-describedby={attributes['aria-describedby']}
+    {onclick}>{@render contents()}</a
+  >
+{:else}
+  <button
+    bind:this={element}
+    {...attributes}
+    {type}
+    class="den-button den-button-{variant} den-button-{size} {className}"
+    aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
+    aria-pressed={pressed ?? attributes['aria-pressed']}
+    aria-busy={busy || attributes['aria-busy'] || undefined}
+    data-saving={saving || undefined}
+    aria-disabled={busy || attributes['aria-disabled'] || undefined}
+    {disabled}
+    onclick={activate}>{@render contents()}</button
+  >
+{/if}
