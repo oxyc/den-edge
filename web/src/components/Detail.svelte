@@ -37,6 +37,7 @@
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref, type TitleSeason } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   import { startupMarkOnce } from '../lib/startupTiming';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
@@ -48,6 +49,7 @@
   import type { DownloadsView } from '../lib/libraryServiceProtocol';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Warning } from '../lib/contentWarnings';
+  import type { MenuItem } from '../lib/titleActions';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -84,6 +86,8 @@
     still,
     model,
     address,
+    playRequest,
+    trailerRequested = false,
   }: {
     ref: { type: MediaType; id: number };
     /**
@@ -91,6 +95,10 @@
      * the one on screen, reads it: a retained page of another title keeps the season it was showing.
      */
     address?: TitleSeason;
+    /** Address-bar intent from a player link opened directly or in another tab. */
+    playRequest?: { season?: number; episode?: number; filename?: string };
+    /** Address-bar intent from an exact trailer link opened directly or in another tab. */
+    trailerRequested?: boolean;
     active?: boolean;
     reel?: string | null;
     routes?: Routes;
@@ -140,7 +148,12 @@
      * Mark a whole season at once, in one write rather than one per episode. Optional: a surface that has no
      * way to write a season simply shows no season control, rather than one that half works.
      */
-    onseason?: (title: Title, season: number, episodes: number[], seen: boolean) => void;
+    onseason?: (
+      title: Title,
+      season: number,
+      episodes: number[],
+      seen: boolean,
+    ) => void | Promise<unknown>;
     shown?: (title: Title) => boolean;
     /**
      * What the page that linked here already knew about this title.
@@ -182,9 +195,8 @@
     ].join(', ');
   const panel = $props.id();
 
-  /**
-   * Left and Escape leave the page, as the remote's Back does on the TV — a title you opened with one press
-   * should close with one.
+  /** Escape leaves the page, as the remote's dedicated Back does on a TV. ArrowLeft remains directional input:
+   * at the edge of an action row it must stop there rather than unexpectedly traversing browser history.
    *
    * Only from the page itself. A key pressed while typing is text, not navigation; one another control has
    * already answered is spoken for; and Escape inside full screen belongs to the video, which the browser
@@ -193,7 +205,7 @@
   $effect(() => {
     if (!active) return;
     const back = (event: KeyboardEvent) => {
-      if (event.key !== 'ArrowLeft' && event.key !== 'Escape') return;
+      if (event.key !== 'Escape') return;
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       if (document.fullscreenElement) return;
       const target = event.target;
@@ -217,6 +229,37 @@
    * every such case read as "no trailer here".
    */
   let trailerOpen = $state(false);
+  let handledPlayRequest = $state<string>();
+  let handledTrailerRequest = $state(false);
+
+  $effect(() => {
+    if (!playRequest) {
+      handledPlayRequest = undefined;
+      return;
+    }
+    const d = detail;
+    if (!active || !d || !onplayhere) return;
+    const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
+    if (handledPlayRequest === requestKey) return;
+    handledPlayRequest = requestKey;
+    onplayhere(d.title, playRequest.season, playRequest.episode, playRequest.filename);
+  });
+
+  $effect(() => {
+    if (!trailerRequested) {
+      handledTrailerRequest = false;
+      return;
+    }
+    if (!active || handledTrailerRequest || !detail?.trailer) return;
+    handledTrailerRequest = true;
+    trailerOpen = true;
+  });
+
+  function closeTrailer() {
+    trailerOpen = false;
+    if (trailerRequested && detail)
+      navigate(titleHref({ ...detail.title, season: requestedSeason }), true);
+  }
   /**
    * A scout shared through a grant answers no `/stream` or `/play` (den-edge refuses both on its `~<gid>` base), so
    * the release list and downloads are not offered: a guest plays through den-remux alone.
@@ -703,6 +746,75 @@
     else if (result === 'uncertain')
       notify?.('Couldn’t start that download. Try again in a moment.');
   }
+
+  async function seasonEpisodesForDownload(
+    picked: number,
+    signal: AbortSignal,
+  ): Promise<Episode[] | null> {
+    try {
+      const answer = await content.query(
+        { kind: 'season', title: { type: 'tv', id: ref.id }, season: picked },
+        signal,
+      );
+      return answer.episodes.state === 'ready' ? answer.episodes.value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const seasonEpisodeNumbers = (picked: number) =>
+    series?.aired
+      .filter((episode) => episode.season === picked)
+      .map((episode) => episode.episode) ?? [];
+
+  async function markSeasons(picked: number | undefined, seen: boolean) {
+    const d = untrack(() => detail);
+    if (!d || !onseason) return;
+    const selected = d.seasons.filter(
+      (item) => item.number > 0 && (picked === undefined || item.number === picked),
+    );
+    for (const item of selected) {
+      let numbers = seasonEpisodeNumbers(item.number);
+      try {
+        const answer = await content.query({
+          kind: 'season',
+          title: { type: 'tv', id: ref.id },
+          season: item.number,
+        });
+        if (answer.episodes.state === 'ready')
+          numbers = markableEpisodes(item.number, answer.episodes.value);
+      } catch {
+        // The detail's aired count is still an exact-enough fallback when TMDB is temporarily unavailable.
+      }
+      if (numbers.length) await onseason(d.title, item.number, numbers, seen);
+    }
+  }
+
+  const seriesSeenItems = $derived.by((): MenuItem[] | undefined => {
+    const d = detail;
+    if (d?.title.type !== 'tv' || !onseason) return undefined;
+    const regular = d.seasons.filter((item) => item.number > 0);
+    const item = (season?: (typeof regular)[number]): MenuItem => {
+      const picked = season?.number;
+      const numbers = series?.aired.filter(
+        (episode) => picked === undefined || episode.season === picked,
+      );
+      const checked =
+        !!numbers?.length &&
+        numbers.every(
+          (episode) =>
+            episodeProgress(episodes.get(`${episode.season}:${episode.episode}`), row) >= WATCHED,
+        );
+      return {
+        kind: 'checkbox',
+        label: season?.name ?? 'Whole series',
+        checked,
+        disabled: busy,
+        onselect: () => void markSeasons(picked, !checked),
+      };
+    };
+    return [item(), ...regular.map(item)];
+  });
 </script>
 
 {#if withheld}
@@ -752,11 +864,13 @@
       <div class="hero-content" aria-hidden="true">
         <div class="head">
           {#if seed?.posterPath}
+            <!-- The TV loading shell uses the fixed poster URL: the browsing soak found detached responsive
+                 loading posters retained through Chromium's viewport listeners after this shell was replaced. -->
             <img
               class="poster"
-              src="https://image.tmdb.org/t/p/w500{seed.posterPath}"
-              srcset={detailPosterSrcset(seed.posterPath)}
-              sizes={DETAIL_POSTER_SIZES}
+              src="https://image.tmdb.org/t/p/w{__DEN_TV__ ? 342 : 500}{seed.posterPath}"
+              srcset={__DEN_TV__ ? undefined : detailPosterSrcset(seed.posterPath)}
+              sizes={__DEN_TV__ ? undefined : DETAIL_POSTER_SIZES}
               alt=""
               width="280"
               height="420"
@@ -771,7 +885,14 @@
       </div>
     {:else}
       {@const d = detail}
-      <div class="hero-content">
+      {#if __DEN_TV__ && warnings?.length}
+        <aside class="content-warnings-overlay" aria-label="Content warnings">
+          <strong>Content warnings</strong>
+          {#each warnings as warning (warning.id)}<span>{warning.label}</span>{/each}
+          <small>Powered by DoesTheDogDie.com</small>
+        </aside>
+      {/if}
+      <div class="hero-content" data-spatial-page-entry>
         <div class="head">
           {#if d.title.posterPath}<img
               class="poster"
@@ -810,9 +931,18 @@
             : target && series?.kind === 'resume'
               ? target
               : undefined}
-          <button
+          <a
             class="continue"
-            onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
+            href={titleHref({
+              ...d.title,
+              season: target?.season,
+              episode: target?.episode,
+              play: true,
+            })}
+            onclick={(event) =>
+              activateLinkInPlace(event, () =>
+                (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode),
+              )}
           >
             <DetailIcon name="play" filled /><span
               ><strong
@@ -825,9 +955,21 @@
                   ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
                 >{/if}
             </span>
-          </button>
+          </a>
         {/if}
-        <div class="hero-actions">
+        <div class="hero-actions" data-spatial-section>
+          {#snippet tvSeasonDownload()}
+            <SeasonDownload
+              model={model!}
+              allowed={entitled}
+              title={d.title}
+              imdb={d.imdbId!}
+              season={displayedSeason ?? d.seasons.find((item) => item.number > 0)?.number ?? 1}
+              episodes={seasonEpisodes ?? undefined}
+              choices={d.seasons.filter((item) => item.number > 0)}
+              episodesFor={seasonEpisodesForDownload}
+            />
+          {/snippet}
           <TitleActions
             {row}
             {busy}
@@ -838,24 +980,53 @@
             onwatchlist={(on) => onwatchlist(d.title, on)}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}
+            seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
-            onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
+            onplay={!__DEN_TV__ && onplay
+              ? () => onplay(d.title, target?.season, target?.episode)
+              : undefined}
             onplayhere={onplayhere
               ? () => onplayhere(d.title, target?.season, target?.episode)
+              : undefined}
+            playHref={titleHref({
+              ...d.title,
+              season: target?.season,
+              episode: target?.episode,
+              play: true,
+            })}
+            onsources={!guestScout && !restricted
+              ? () => {
+                  sourceTarget = target;
+                  void sourcesPanel?.show();
+                }
               : undefined}
             {away}
             {blocked}
             {restricted}
+            extraAction={__DEN_TV__ &&
+            model &&
+            scout &&
+            !guestScout &&
+            !restricted &&
+            d.imdbId &&
+            d.seasons.some((item) => item.number > 0)
+              ? tvSeasonDownload
+              : undefined}
             trailerHref={d.trailer
               ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
               : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
             ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
-            share={{
-              title: d.title.title,
-              // The title's own address, named: what the person sharing it means, and what a preview can
-              // describe. Built from the route rather than from wherever this page happens to be open.
-              url: `${location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
-            }}
+            trailerPlayerHref={d.trailer
+              ? titleHref({ ...d.title, season: requestedSeason, trailer: true })
+              : undefined}
+            share={__DEN_TV__
+              ? undefined
+              : {
+                  title: d.title.title,
+                  // The title's own address, named: what the person sharing it means, and what a preview can
+                  // describe. Built from the route rather than from wherever this page happens to be open.
+                  url: `${__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
+                }}
           />
         </div>
       </div>
@@ -866,7 +1037,7 @@
   {:else}
     {@const d = detail}
     {#if trailerOpen && d.trailer}
-      <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailerOpen = false)} />
+      <Trailer key={d.trailer} title={d.title.title} onclose={closeTrailer} />
     {/if}
     <div class="mobile-overview">
       {#if d.overview}<p class="overview">{d.overview}</p>{/if}
@@ -914,7 +1085,7 @@
                 : `${series.watched} of ${series.total} watched`}</span
             >{/if}
         </div>
-        <div class="season-bar">
+        <div class="season-bar" data-spatial-section>
           <DetailTabs
             tabs={d.seasons.map((s) => ({
               value: String(s.number),
@@ -932,7 +1103,7 @@
           />
           <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
              foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
-          {#if model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+          {#if !__DEN_TV__ && model && scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
             <SeasonDownload
               {model}
               allowed={entitled}
@@ -944,7 +1115,7 @@
               compact
             />
           {/if}
-          {#if onseason && seasonMarkable.length}
+          {#if !__DEN_TV__ && onseason && seasonMarkable.length}
             <button
               class="season-seen"
               class:on={seasonSeen}
@@ -1007,6 +1178,7 @@
                     ...d.title,
                     season: displayedSeason ?? undefined,
                     episode: e.number,
+                    play: true,
                   })}
                   addressed={addressedEpisode === e.number}
                   onaddressed={() => (addressedEpisode = null)}
@@ -1016,7 +1188,7 @@
                   onplay={() => playEpisode(e.number)}
                   onseen={(seen) =>
                     displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
-                  onplaytv={onplay && displayedSeason !== null
+                  onplaytv={!__DEN_TV__ && onplay && displayedSeason !== null
                     ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
                     : undefined}
                   onsources={guestScout
@@ -1258,7 +1430,9 @@
     border: 0;
     background: none;
     color: var(--fg);
+    font: inherit;
     text-align: left;
+    text-decoration: none;
     cursor: pointer;
   }
 
@@ -1301,7 +1475,7 @@
   }
 
   .continue:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 6px;
     border-radius: 6px;
   }
@@ -1356,7 +1530,7 @@
   }
 
   .season-seen:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 

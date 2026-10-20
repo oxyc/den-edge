@@ -320,6 +320,42 @@ for (const width of [390, 834, 1280])
         'href',
         'https://www.themoviedb.org/tv/9/watch',
       );
+      const watchedMenu = active.getByRole('button', { name: 'Mark watched', exact: true });
+      await expect(watchedMenu).toBeVisible();
+      await watchedMenu.click();
+      await expect(active.getByRole('menuitemcheckbox', { name: 'Whole series' })).toBeFocused();
+      await expect(active.getByRole('menuitemcheckbox', { name: 'Season 1' })).toBeVisible();
+      await page.keyboard.press('Escape');
+
+      const promotedSources = active
+        .locator('header.hero')
+        .getByRole('button', { name: 'Sources', exact: true });
+      if (width < 760) await expect(promotedSources).toBeHidden();
+      else await expect(promotedSources).toBeVisible();
+
+      const playbackHref = '/tv/9-the-series?season=1&episode=1&play=1';
+      await expect(active.locator('header.hero .split-main')).toHaveAttribute('href', playbackHref);
+      await expect(active.locator('header.hero .continue')).toHaveAttribute('href', playbackHref);
+
+      if (width === 1280) {
+        // Metadata stays natively focusable. Directional navigation treats those links as supporting context and
+        // crosses directly to the primary action instead of making the title facts into an obstacle course.
+        const imdb = active.getByRole('link', { name: /IMDb rating/ });
+        const tmdb = active.getByRole('link', { name: /TMDB rating/ });
+        await tmdb.focus();
+        await expect(tmdb).toBeFocused();
+        await page.keyboard.press('Tab');
+        await imdb.focus();
+        await page.keyboard.press('ArrowDown');
+        await expect
+          .poll(() =>
+            page.evaluate(() => document.activeElement?.closest('.hero-actions') !== null),
+          )
+          .toBe(true);
+        expect(
+          await page.evaluate(() => document.activeElement?.hasAttribute('data-spatial-skip')),
+        ).toBe(false);
+      }
       const row = active.locator('.episode').first();
       await row.scrollIntoViewIfNeeded();
       await expect(row.locator('.still img')).toBeVisible();
@@ -328,9 +364,9 @@ for (const width of [390, 834, 1280])
       expect(Math.abs(still.width / still.height - 16 / 9)).toBeLessThan(0.02);
       await expect(row.getByText(/51 min/)).toBeVisible();
       await expect(row.locator('.progress')).toBeVisible();
-      // The row is a link to the episode's own address, and a plain click on it plays, as it always has.
+      // The row is a link to the episode player, and a plain click uses the already-mounted player.
       const play = row.getByRole('link', { name: /Play episode 1/ });
-      await expect(play).toHaveAttribute('href', '/tv/9-the-series?season=1&episode=1');
+      await expect(play).toHaveAttribute('href', '/tv/9-the-series?season=1&episode=1&play=1');
       const opened = page.url();
       await play.click();
       expect(page.url()).toBe(opened);
@@ -375,6 +411,40 @@ for (const width of [390, 834, 1280])
       await browser.close();
     }
   });
+
+test('season tabs own Left and Right but Up returns to the title actions', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await setup(page);
+  await page.addInitScript(() => history.replaceState(null, '', '/tv/9?season=1'));
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+  const active = page.locator('[data-active="true"]');
+  const season1 = active.getByRole('tab', { name: 'Season 1', exact: true });
+  const season2 = active.getByRole('tab', { name: 'Season 2', exact: true });
+  await expect(season1).toBeVisible();
+
+  await season1.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(season2).toBeFocused();
+
+  await season2.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect
+    .poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('.hero-actions'))))
+    .toBe(true);
+});
+
+test('phone promotes Sources only when it replaces unavailable playback', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await setup(page);
+  await page.addInitScript(() => history.replaceState(null, '', '/tv/9?no-play'));
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?no-play`);
+  const active = page.locator('[data-active="true"]');
+  await expect(active.locator('h1')).toHaveText('The Series');
+  await expect(
+    active.locator('header.hero').getByRole('button', { name: 'Sources', exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test('season requests cannot overwrite a newer selection and retained detail and person filters survive history', async () => {
   const browser = await chromium.launch({
@@ -465,7 +535,12 @@ test('episode Sources target the selected episode and downloads never requeue wh
     await row.getByRole('menuitem', { name: 'Sources', exact: true }).click();
     await expect(active.getByText('Sources for S2 · E1')).toBeVisible();
     const source = active.locator('.source-panel li').first();
-    await source.getByRole('button', { name: 'Play', exact: true }).click();
+    const sourcePlay = source.getByRole('link', { name: 'Play', exact: true });
+    await expect(sourcePlay).toHaveAttribute(
+      'href',
+      '/tv/9-the-series?season=2&episode=1&play=1&source=Episode.1080p.WEB.mkv',
+    );
+    await sourcePlay.click();
     expect(await page.evaluate(() => window.plays.at(-1))).toMatchObject({
       season: 2,
       episode: 1,
@@ -493,6 +568,34 @@ test('episode Sources target the selected episode and downloads never requeue wh
     // The one add is a prefetch: nobody is waiting on a download, so it can't spend the adds kept for Play.
     expect(downloadRequests.filter((q) => q === '?prefetch=1')).toHaveLength(1);
     expect(downloadRequests.slice(1).every((q) => q === '?probe=1')).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a direct episode player URL starts its exact episode and selected release', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    await page.addInitScript(() =>
+      history.replaceState(
+        null,
+        '',
+        '/tv/9-the-series?season=2&episode=1&play=1&source=Episode.1080p.WEB.mkv',
+      ),
+    );
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    await expect
+      .poll(() => page.evaluate(() => window.plays.at(-1)))
+      .toMatchObject({
+        id: 9,
+        season: 2,
+        episode: 1,
+        filename: 'Episode.1080p.WEB.mkv',
+      });
   } finally {
     await browser.close();
   }

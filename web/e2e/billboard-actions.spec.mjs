@@ -106,6 +106,47 @@ test('a billboard slide saves to the watchlist or marks seen, then moves on with
   }
 });
 
+test('billboard Play is a native player link and an ordinary click plays in place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 852 } });
+    await guardNetwork(page);
+    await routeTmdb(page, (route) =>
+      route.fulfill({
+        json: {
+          id: 42,
+          title: 'A short title',
+          release_date: '2026-01-01',
+          backdrop_path: '/early.jpg',
+        },
+      }),
+    );
+    await page.route('https://image.tmdb.org/**', (route) =>
+      route.fulfill({
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"/>',
+      }),
+    );
+    await page.goto(`${E2E_ORIGIN}/test/billboard.html?play`);
+    await page.evaluate(() => {
+      window.billboardPlays = [];
+      document.addEventListener('fixture:play', (event) =>
+        window.billboardPlays.push(event.detail),
+      );
+      window.dispatchEvent(new Event('fixture:titles'));
+    });
+    const play = page.locator('.slide:not([inert])').getByRole('link', { name: 'Play' });
+    await expect(play).toHaveAttribute('href', '/movie/42-a-short-title?play=1');
+    await play.click();
+    await expect.poll(() => page.evaluate(() => window.billboardPlays.length)).toBe(1);
+    await expect(page).toHaveURL(/\/test\/billboard\.html\?play$/);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('the Watchlist billboard offers remove and seen, and moves on from either', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

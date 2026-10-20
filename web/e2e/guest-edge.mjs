@@ -39,8 +39,8 @@ export function newEdge({ devices = 2, host = 'Oskar', profiles = false } = {}) 
 const NAMEPLATE = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /** den-edge's `/pair` relay, in memory: it holds the messages and never sees the secret half of a code. */
-async function routePairs(page, edge) {
-  await page.route(`${E2E_ORIGIN}/pair/**`, async (route) => {
+async function routePairs(page, edge, origin) {
+  await page.route(`${origin}/pair/**`, async (route) => {
     const request = route.request();
     const [, , first, slot] = new URL(request.url()).pathname.split('/');
     const method = request.method();
@@ -88,8 +88,8 @@ function holder(edge, request) {
   return gid === GID && edge.grant.live && edge.grant.devices.has(sha(secret ?? '')) ? gid : null;
 }
 
-async function routeGrants(page, edge) {
-  await page.route(`${E2E_ORIGIN}/grant/**`, async (route) => {
+async function routeGrants(page, edge, origin) {
+  await page.route(`${origin}/grant/**`, async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const body = request.postDataJSON?.() ?? {};
@@ -142,8 +142,8 @@ async function routeGrants(page, edge) {
   });
 }
 
-async function routeLibraries(page, edge) {
-  await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
+async function routeLibraries(page, edge, origin) {
+  await page.route(`${origin}/lib/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const [, , id, action] = url.pathname.split('/');
@@ -216,11 +216,11 @@ async function routeLibraries(page, edge) {
 }
 
 /** A browser of the guest's, pointed at `edge` and with every other request refused. */
-export async function routeGuestEdge(page, edge) {
+export async function routeGuestEdge(page, edge, origin = E2E_ORIGIN) {
   await guardNetwork(page);
   // The app's own pages and assets are the dev server's; any other call this origin could answer is "not here",
   // unless a route below says otherwise (they are registered later, so they win).
-  await page.route(`${E2E_ORIGIN}/**`, (route) => {
+  await page.route(`${origin}/**`, (route) => {
     const path = new URL(route.request().url()).pathname;
     const api =
       /^\/(?:tmdb|atlas|reel|scout|subs|subtitles|inbox|oauth|metadata|ratings|warnings|skipdb|playback|remux|lib|grant|pair|mcp|link|recovery|sync|routes|config|version)(?:\/|$)/.test(
@@ -230,7 +230,7 @@ export async function routeGuestEdge(page, edge) {
   });
   // This page-level catch-all bypasses guardNetwork's context route when it continues to the dev server. Most guest
   // specs preserve the shipped default-off capability response; the profile provisioning regression opts in.
-  await page.route(`${E2E_ORIGIN}/capabilities/profiles`, (route) =>
+  await page.route(`${origin}/capabilities/profiles`, (route) =>
     edge.profiles
       ? route.fulfill({
           status: 200,
@@ -247,13 +247,13 @@ export async function routeGuestEdge(page, edge) {
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'guest-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));
   await page.route('**/oauth/connections', (route) => route.fulfill({ json: { connections: [] } }));
-  await page.route(`${E2E_ORIGIN}/recovery`, (route) => route.fulfill({ json: { entries: [] } }));
-  await page.route(`${E2E_ORIGIN}/scout/**`, (route) =>
+  await page.route(`${origin}/recovery`, (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route(`${origin}/scout/**`, (route) =>
     route.fulfill({
       json: { id: 'com.den.scout', name: 'Scout', version: '1.0.0', resources: [] },
     }),
   );
-  await page.route(`${E2E_ORIGIN}/den/~${GID}/**`, (route) => {
+  await page.route(`${origin}/den/~${GID}/**`, (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === `/den/~${GID}/manifest.json`)
@@ -266,9 +266,9 @@ export async function routeGuestEdge(page, edge) {
     }
     return route.fulfill({ status: 404, json: {} });
   });
-  await routeGrants(page, edge);
-  await routeLibraries(page, edge);
-  await routePairs(page, edge);
+  await routeGrants(page, edge, origin);
+  await routeLibraries(page, edge, origin);
+  await routePairs(page, edge, origin);
   await routeTmdb(page, (route) => {
     const match = new URL(route.request().url()).pathname.match(/\/movie\/(\d+)$/);
     if (!match) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });

@@ -409,21 +409,19 @@ for (const width of [320, 1280])
             r.fulfill({ contentType: 'text/html', body: '<title>YouTube fixture</title>' }),
           );
         await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html?browser-play`);
-        // With a video id known it is a real button, which plays here rather than leaving — announced as
-        // something that acts in place, not a link. With none, it is a real link that leaves for YouTube.
+        // With a video id known it is a real link to Den's trailer player; its ordinary activation uses the
+        // already-mounted dialog. With none, the link leaves for a YouTube search.
         const trailer = exact
-          ? page.getByRole('button', { name: 'Trailer' })
+          ? page.getByRole('link', { name: 'Trailer' })
           : page.getByRole('link', { name: 'Trailer on YouTube' });
         await expect(trailer).toBeVisible();
         expect((await trailer.locator('span').boundingBox()).width).toBeGreaterThan(30);
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+        const youtubeUrl = 'https://www.youtube.com/watch?v=fixture-key';
         const url = exact
-          ? 'https://www.youtube.com/watch?v=fixture-key'
+          ? '/movie/42-the-movie?trailer=1'
           : 'https://www.youtube.com/results?search_query=The%20Movie%20official%20trailer';
-        if (!exact) {
-          // The link itself is unchanged either way, so a middle-click or a long press still opens it.
-          await expect(trailer).toHaveAttribute('href', url);
-        }
+        await expect(trailer).toHaveAttribute('href', url);
         await expect(page.locator('iframe')).toHaveCount(0);
         if (exact) {
           // YouTube's embed, in place. This is what a trailer this page cannot play itself — refused
@@ -441,7 +439,7 @@ for (const width of [320, 1280])
             name: 'Open trailer on YouTube in a new tab',
           });
           const close = page.getByRole('button', { name: 'Close trailer' });
-          await expect(youtube).toHaveAttribute('href', url);
+          await expect(youtube).toHaveAttribute('href', youtubeUrl);
           await expect(close).toBeFocused();
           for (const control of [youtube, close]) {
             const box = await control.boundingBox();
@@ -465,6 +463,36 @@ for (const width of [320, 1280])
         await browser.close();
       }
     });
+
+test('a direct trailer player URL opens Den’s trailer dialog', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await mock(page, (route) => route.fulfill({ json: noTrailerAnswer() }));
+    await routeTmdb(page, (route) =>
+      route.fulfill({
+        json: {
+          ...movie,
+          videos: {
+            results: [{ site: 'YouTube', type: 'Trailer', official: true, key: 'fixture-key' }],
+          },
+        },
+      }),
+    );
+    await page
+      .context()
+      .route(/^https:\/\/www\.youtube-nocookie\.com\//, (route) =>
+        route.fulfill({ contentType: 'text/html', body: '<title>YouTube fixture</title>' }),
+      );
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42-the-movie?trailer=1'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
+    await expect(page.getByRole('dialog', { name: 'The Movie: trailer' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
 
 for (const failed of ['missing', 'portrait'])
   test(`mobile trailer tries the next candidate after a ${failed} first trailer`, async () => {

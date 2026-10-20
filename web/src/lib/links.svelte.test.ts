@@ -28,7 +28,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 it('offers Play on TV only for a real paired receiver', () => {
   const paired = { inboxKey: 'a'.repeat(16), ...KEYS, name: 'Living room' };
-  expect(linkedTv(paired, [])).toBe(paired);
+  expect(linkedTv(paired, [])).toBeUndefined();
   expect(linkedTv({ ...paired, recovered: true }, [])).toBeUndefined();
   expect(linkedTv({ ...paired, recovered: true, guest: true }, [])).toBeUndefined();
   expect(linkedTv({ ...paired, guest: true }, [])).toBeUndefined();

@@ -26,7 +26,18 @@ export type Route =
    * for the page's own choice. Only a series has one. Whether the series has that season is the page's to check.
    * `episode`: one episode of that season to bring into view (`?season=2&episode=3`); only with a season.
    */
-  | { page: 'title'; type: MediaType; id: number; season?: number; episode?: number }
+  | {
+      page: 'title';
+      type: MediaType;
+      id: number;
+      season?: number;
+      episode?: number;
+      /** Open the in-app player directly. `filename` pins a release chosen in Sources. */
+      play?: true;
+      filename?: string;
+      /** Open the title's in-app trailer player directly. */
+      trailer?: true;
+    }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
   | { page: 'service'; id: number; country: string };
@@ -183,7 +194,14 @@ export function parseRoute(url: string): Route {
   }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
-  if (first === 'movie' && id) return { page: 'title', type: 'movie', id };
+  const play = params.get('play') === '1';
+  const source = params.get('source') ?? '';
+  const playback = play
+    ? { play: true as const, ...(source && source.length <= 4_096 ? { filename: source } : {}) }
+    : params.get('trailer') === '1'
+      ? { trailer: true as const }
+      : {};
+  if (first === 'movie' && id) return { page: 'title', type: 'movie', id, ...playback };
   if (first === 'tv' && id) {
     const season = seasonParam(params.get('season'));
     const episode = season !== undefined ? seasonParam(params.get('episode')) : undefined;
@@ -193,6 +211,7 @@ export function parseRoute(url: string): Route {
       id,
       ...(season !== undefined ? { season } : {}),
       ...(episode !== undefined ? { episode } : {}),
+      ...playback,
     };
   }
   if (first === 'person' && id) return { page: 'person', id };
@@ -251,14 +270,24 @@ export const titleHref = (title: {
   title?: string;
   season?: number;
   episode?: number;
+  play?: boolean;
+  filename?: string;
+  trailer?: boolean;
 }) => {
   const name = slug(title.title);
   const named = (n: number | undefined) => seasonParam(String(n)) !== undefined;
-  const season =
-    title.type === 'tv' && named(title.season)
-      ? `?season=${title.season}${named(title.episode) ? `&episode=${title.episode}` : ''}`
-      : '';
-  return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}${season}`;
+  const params: string[] = [];
+  if (title.type === 'tv' && named(title.season)) {
+    params.push(`season=${title.season}`);
+    if (named(title.episode)) params.push(`episode=${title.episode}`);
+  }
+  if (title.trailer) params.push('trailer=1');
+  else if (title.play) {
+    params.push('play=1');
+    if (title.filename) params.push(`source=${encodeURIComponent(title.filename)}`);
+  }
+  const query = params.length ? `?${params.join('&')}` : '';
+  return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}${query}`;
 };
 
 export const personHref = (id: number, name?: string) => {

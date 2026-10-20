@@ -130,7 +130,7 @@
   {#each groups as group (group.title)}
     <section>
       <h2>{group.title}</h2>
-      <ul class="grid">
+      <ul class="grid" data-spatial-grid>
         {#each group.items as row (row.download.content)}
           {@const { download, title } = row}
           {@const state = download.status.state}
@@ -232,7 +232,7 @@
   }
 
   .control:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 </style>

@@ -114,13 +114,17 @@ const address = (page) => {
   const url = new URL(page.url());
   return url.pathname + url.search;
 };
+const episodeVisible = (page, name) =>
+  // The assertion includes a cold real Worker/WASM route. Preserve that journey while allowing loaded CI shards
+  // more than Playwright's five-second assertion default to publish the requested season.
+  expect(active(page).getByText(name, { exact: true })).toBeVisible({ timeout: 15_000 });
 
 async function manySeasonsOnAPhone(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
   try {
     const { errors } = await guest(page, seriesWith(20, { specials: true }));
     await page.goto(`${E2E_ORIGIN}${PAGE}`);
-    await expect(active(page).getByText('Season 1 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 1 premiere');
 
     // One picker naming the season shown, and no row of chips — not even for a frame before it.
     await expect(picker(page)).toBeVisible();
@@ -137,18 +141,18 @@ async function manySeasonsOnAPhone(browser) {
 
     // Choosing one goes where its chip would: the season's episodes, its address, and a step Back undoes.
     await picker(page).selectOption('14');
-    await expect(active(page).getByText('Season 14 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 14 premiere');
     await expect.poll(() => address(page)).toBe(`${PAGE}?season=14`);
     await expect(active(page).locator('.season-picker')).toContainText('Season 14');
 
     await page.goBack();
     await expect.poll(() => address(page)).toBe(PAGE);
-    await expect(active(page).getByText('Season 1 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 1 premiere');
     await expect(picker(page)).toHaveValue('1');
 
     // A shared link to a season opens the picker on it.
     await page.goto(`${E2E_ORIGIN}${PAGE}?season=0`);
-    await expect(active(page).getByText('The special', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'The special');
     await expect(picker(page)).toHaveValue('0');
     await expect(active(page).locator('.season-picker')).toContainText('Specials');
     expect(await forms(page)).toEqual(['select']);
@@ -164,7 +168,7 @@ async function fewSeasonsOnADesktop(browser) {
   try {
     const { errors } = await guest(page, seriesWith(4));
     await page.goto(`${E2E_ORIGIN}${PAGE}`);
-    await expect(active(page).getByText('Season 1 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 1 premiere');
     await expect(chips(page).getByRole('tab')).toHaveCount(4);
     await expect(chips(page).getByRole('tab', { name: 'Season 2' })).toHaveAttribute(
       'href',
@@ -185,7 +189,7 @@ async function resizingAcrossTheEdge(browser) {
   try {
     const { errors } = await guest(page, seriesWith(8));
     await page.goto(`${E2E_ORIGIN}${PAGE}`);
-    await expect(active(page).getByText('Season 1 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 1 premiere');
     await expect(chips(page)).toBeVisible();
 
     // The chips' own width, and the window width that leaves their row `slack` pixels more than that. The page's
@@ -226,7 +230,7 @@ async function resizingAcrossTheEdge(browser) {
     // Opened just wide enough, the chips show.
     await page.setViewportSize({ width: await widthFor(2), height: 900 });
     await page.reload();
-    await expect(active(page).getByText('Season 1 premiere', { exact: true })).toBeVisible();
+    await episodeVisible(page, 'Season 1 premiere');
     await expect(chips(page)).toBeVisible();
     await page.evaluate(() => (window.seasonForms.length = 0));
     await frames(page);

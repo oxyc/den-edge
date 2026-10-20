@@ -6,6 +6,20 @@
   "description": "The Den web app: the Apple TV app's screens in a browser, served by den-edge.",
   "scripts": {
     "dev": "vite",
+    "dev:tv:webos": "DEN_TV_PLATFORM=webos vite --config vite.tv.config.ts",
+    "dev:tv:tizen": "DEN_TV_PLATFORM=tizen vite --config vite.tv.config.ts",
+    "build:tv:webos": "DEN_TV_PLATFORM=webos vite build --config vite.tv.config.ts && node scripts/verify-tv-build.mjs webos",
+    "build:tv:tizen": "DEN_TV_PLATFORM=tizen vite build --config vite.tv.config.ts && node scripts/verify-tv-build.mjs tizen",
+    "preview:tv:webos": "DEN_TV_PLATFORM=webos vite preview --config vite.tv.config.ts",
+    "preview:tv:tizen": "DEN_TV_PLATFORM=tizen vite preview --config vite.tv.config.ts",
+    "package:tv": "node scripts/tv-package.mjs",
+    "preflight:tv": "node scripts/tv-preflight.mjs",
+    "test:tv-preflight": "node scripts/tv-preflight.integration.mjs",
+    "check:tv-isolation": "node scripts/check-tv-isolation.mjs",
+    "test:e2e:tv": "playwright test --config playwright.tv.config.ts",
+    "test:e2e:keyboard": "playwright test --config playwright.keyboard.config.ts",
+    "test:e2e:tv-soak": "DEN_TV_SOAK=1 playwright test --config playwright.tv.config.ts tv-home.spec.mjs --workers=1",
+    "test:e2e:tv-package": "playwright test --config playwright.tv-package.config.ts",
     "build": "vite build && node scripts/verify-worker-build.mjs && vite build --ssr src/shell.ts --outDir dist-shell && node scripts/shell.mjs && node scripts/precompress.mjs",
     "build:cast": "vite build --config vite.cast.config.ts",
     "check:cast": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --types vite/client cast/src/main.ts",
@@ -49,6 +63,7 @@
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
+    "core-js": "^3.50.0",
     "hls.js": "^1.7.3",
     "qrcode-generator": "2.0.4"
   }

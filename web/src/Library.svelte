@@ -875,6 +875,20 @@
       : undefined,
   );
 
+  function closePlayer() {
+    playing = null;
+    if (route.page === 'title' && route.play)
+      navigate(
+        titleHref({
+          type: route.type,
+          id: route.id,
+          season: route.season,
+          episode: route.episode,
+        }),
+        true,
+      );
+  }
+
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `ProfileSession.notify` already shows for other library news.
@@ -1391,6 +1405,15 @@
   const heroReady = $derived(heroReadyKey === heroKey);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
+  /** Loading and genuinely empty are different layouts on TV; only the latter may collapse the hero. */
+  let billboardLoading = $state(true);
+  function beginBillboard(): number {
+    billboardLoading = true;
+    return ++billboardRun;
+  }
+  function finishBillboard(run: number): void {
+    if (run === billboardRun) billboardLoading = false;
+  }
   /** Discovery may settle before this encrypted first-paint answer; a generic fallback must wait for both. */
   let retainedBillboardReady = $state(model === null);
   /**
@@ -1514,6 +1537,7 @@
       const ready = kidHomeReady;
       const available = rankedKidHome.length;
       if (here && ready && available) untrack(buildKidBillboard);
+      else if (here && ready) billboardLoading = false;
       return;
     }
     // A guest can ask for the shared pool immediately. A library waits for its compact overview and the bounded
@@ -1523,7 +1547,7 @@
       // paired library's retained answer outranks that fallback, though: wait until its lookup has either painted
       // or definitively found nothing before admitting trending to the billboard.
       if (model && !retainedBillboardReady) return;
-      untrack(() => buildTrending(++billboardRun));
+      untrack(() => buildTrending(beginBillboard()));
       return;
     }
     if (model === null || (libraryOpen && named)) untrack(buildRecommended);
@@ -1536,7 +1560,7 @@
 
   /** A Kid's hero comes from the same policy-bound worlds that make up the shelves, never shared trending. */
   function buildKidBillboard() {
-    const run = ++billboardRun;
+    const run = beginBillboard();
     const type = facet;
     stagedFeatured = null;
     // Home reads the four leading worlds. Movies and Series lead with their own type only, which may sit past
@@ -1567,7 +1591,9 @@
         LOOKUPS,
       );
       if (run === billboardRun) featured = picked;
-    })().catch(() => undefined);
+    })()
+      .catch(() => undefined)
+      .finally(() => finishBillboard(run));
   }
 
   /**
@@ -1582,7 +1608,7 @@
    */
   function buildRecommended() {
     const type = facet;
-    const run = ++billboardRun;
+    const run = beginBillboard();
     stagedFeatured = null;
     const lookup = lookupTitle;
     const ranked =
@@ -1640,7 +1666,8 @@
           ).catch(warnKeep);
         }
       })
-      .catch(() => buildTrending(run));
+      .catch(() => buildTrending(run))
+      .finally(() => finishBillboard(run));
   }
 
   /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
@@ -1651,7 +1678,7 @@
     )?.filter((slide) => !seeds.owned.has(`${slide.type}:${slide.id}`));
     if (run !== billboardRun) return;
     if (!shared?.length) {
-      buildTrending(run);
+      await buildTrending(run);
       return;
     }
     const lookup = lookupTitle;
@@ -1663,7 +1690,7 @@
     const picked = await nameSlides(shared.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
     if (run !== billboardRun) return;
     if (!picked.length) {
-      buildTrending(run);
+      await buildTrending(run);
       return;
     }
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
@@ -1680,10 +1707,10 @@
    * or popular (Movies, Series) as TMDB orders it, less what the library holds and what the hide rules hide. Only
    * where nothing is showing yet: a kept or ranked billboard stays.
    */
-  function buildTrending(run: number) {
+  function buildTrending(run: number): Promise<void> {
     const type = facet;
     const row = rows.find((r) => r.id === 'trending' || r.id === 'popular');
-    void (row?.load(1) ?? Promise.resolve([]))
+    return (row?.load(1) ?? Promise.resolve([]))
       .catch((): Title[] => [])
       .then((titles) => {
         if (run !== billboardRun || featured.length) return;
@@ -1692,7 +1719,8 @@
             (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) && (!type || t.type === type),
           )
           .slice(0, 20);
-      });
+      })
+      .finally(() => finishBillboard(run));
   }
 
   /** Lazy history is named only while the Watchlist screen owns its lease. */
@@ -1833,6 +1861,8 @@
     active={active && !playing}
     ref={page}
     address={titleSeason}
+    playRequest={route.page === 'title' && route.play ? route : undefined}
+    trailerRequested={route.page === 'title' && route.trailer === true}
     warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
     ratingSources={[...detailPrefs.ratingSources]}
@@ -1960,6 +1990,7 @@
   <Billboard
     active={active && !playing}
     titles={featured.filter(featuredShown)}
+    loading={billboardLoading}
     bind:showing={slideShown}
     onadvance={acceptStagedFeatured}
     content={session.content}
@@ -2082,7 +2113,7 @@
        be had left Play doing nothing, and the page's trailer stopped. -->
   <div class="player-screen" role="dialog" aria-modal="true" aria-label={playing.title.title}>
     <ScreenLoading screen={PlayerScreen} />
-    <button class="close" onclick={() => (playing = null)}>Close</button>
+    <button class="close" onclick={closePlayer}>Close</button>
   </div>
 {:else if playing && scout && (scout.playback || remux !== null) && PlayerScreen.current}
   {@const target = playing}
@@ -2114,7 +2145,7 @@
       onprogress={(fraction, seconds, at) =>
         void progressed({ title: target.title, ...at }, fraction, seconds)}
       onnext={after ? () => void advance(after) : undefined}
-      onclose={() => (playing = null)}
+      onclose={closePlayer}
     />
   {/key}
 {/if}

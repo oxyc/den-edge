@@ -98,7 +98,7 @@
   const content = contentServiceContext();
   const notify = toastContext();
   let actionMenu = $state<ActionMenu>();
-  const hasMenu = $derived(menu && !!href);
+  const hasMenu = $derived(!__DEN_TV__ && menu && !!href);
   // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
   // title TMDB's own path is missing here, so a row is not half placeholder.
   const poster = $derived(
@@ -349,6 +349,7 @@
       class:landscape
       class:faded
       {href}
+      data-tv-focus-key={__DEN_TV__ ? `${title.type}:${title.id}` : undefined}
       onclick={cardClick}
       onkeydown={cardKeydown}
       oncontextmenu={cardContextMenu}
@@ -425,6 +426,13 @@
     background: var(--card);
   }
 
+  /* Reserve the focused artwork's full footprint at rest. The visual lift stays inside rows that deliberately
+     clip or paint-contain poster windows, and is shared by browser keyboard and TV remote focus. */
+  .pick .art {
+    transform: scale(0.97);
+    transition: transform 90ms ease-out;
+  }
+
   .art.landscape {
     aspect-ratio: 16 / 9;
   }
@@ -451,14 +459,16 @@
   }
 
   .pick:focus-visible .art {
-    outline: 3px solid var(--accent);
-    outline-offset: -3px;
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
+    transform: scale(1);
   }
 
   /* Chromium carries a keyboard focus-visible state across an async card replacement. RoutePage marks a focus
      restored after touch until the viewer presses a key, so that replacement does not grow a false ring. */
   :global([data-restored-pointer-focus]) .pick:focus-visible .art {
     outline: none;
+    transform: scale(0.97);
   }
 
   img {
@@ -632,7 +642,7 @@
   }
 
   :global(.holder .action:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
     opacity: 1;
   }

@@ -13,7 +13,7 @@
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
   import { thisDevice } from './lib/device.svelte';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
@@ -34,6 +34,7 @@
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
   import Button from './components/Button.svelte';
+  import { keyboardInput } from './lib/inputModality';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -111,6 +112,26 @@
   let hearthMigrationAttempt = '';
 
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
+    const restoreFocus =
+      document.activeElement instanceof HTMLElement &&
+      (__DEN_TV__ || keyboardInput() || document.activeElement.matches(':focus-visible'))
+        ? document.activeElement
+        : undefined;
+    // Disabling a native control during its save can make some WebKit versions choose another focusable element
+    // instead of the document body. Distinguish that engine-driven move from a viewer who deliberately moved on
+    // while the request was pending, so completion never steals focus back from fresh input.
+    let movedOn = false;
+    let watchingNewInput = false;
+    const noteInput = () => {
+      if (watchingNewInput) movedOn = true;
+    };
+    if (restoreFocus) {
+      document.addEventListener('keydown', noteInput, { capture: true });
+      document.addEventListener('pointerdown', noteInput, { capture: true });
+      // A spatial-navigation handler can synchronously click a switch while its initiating keydown is still being
+      // dispatched at document. That key is the edit, not evidence that the viewer moved on after it.
+      queueMicrotask(() => (watchingNewInput = true));
+    }
     if (!quiet) {
       saving = true;
       failure = null;
@@ -124,6 +145,22 @@
       return false;
     } finally {
       if (!quiet) saving = false;
+      // Saving temporarily disables the settings surface. Some engines move focus to the document when the active
+      // native control becomes disabled, which strands the next keyboard/remote press. Return keyboard users to that
+      // same connected control once the save settles, without reopening a phone keyboard after a pointer save.
+      if (restoreFocus) {
+        await tick();
+        document.removeEventListener('keydown', noteInput, { capture: true });
+        document.removeEventListener('pointerdown', noteInput, { capture: true });
+        // TV Settings is intentionally inert during a save; a remote press cannot make a reliable move until it
+        // settles, so always return to its semantic origin. Pointer/keyboard web users may deliberately move on.
+        if (
+          (__DEN_TV__ || !movedOn) &&
+          restoreFocus.isConnected &&
+          !restoreFocus.matches(':disabled')
+        )
+          restoreFocus.focus({ preventScroll: true });
+      }
     }
   }
 

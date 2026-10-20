@@ -17,6 +17,8 @@ import {
   watchRelease,
 } from './lib/release';
 import { legacyPath } from './lib/route';
+import { currentAppPath } from './lib/runtimeUrl';
+import { isOptionalImportFailure } from './lib/keyboardNavigation';
 
 // Read once, now, rather than lazily when the first error report needs it: a page open across a deploy must
 // report the release it actually loaded, not one den-edge has since moved on to (`diagnosticsReport.ts`).
@@ -70,7 +72,7 @@ setTimeout(() => {
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
 // way. It is answered once, before anything renders, by rewriting the address to the path it meant — the app
 // itself then only ever reads paths. `#pair=…` is not a route and is left alone for the pairing screen to read.
-const legacy = legacyPath(location.hash);
+const legacy = __DEN_TV_PACKAGED__ ? null : legacyPath(location.hash);
 if (legacy) history.replaceState(history.state, '', legacy + location.search);
 
 // How long this load took to reach its milestones, for den-edge's log: a page slow on one device is read there.
@@ -83,7 +85,11 @@ if (invited) {
   guestGrants.invite = invited;
   // A first-time guest has no library to open, and without browsing the app shows only the pairing screen.
   if (!links.current) links.browse();
-  history.replaceState(history.state, '', location.pathname + location.search);
+  history.replaceState(
+    history.state,
+    '',
+    __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+  );
 }
 
 // A "Use Den on your phone" link (`#phone=<ticket>&k=<library key>`) brings a guest's library, and a slot in their
@@ -92,7 +98,11 @@ const phoned = parsePhoneLink(location.hash);
 if (phoned) {
   phoneLanding.begin(phoned);
   if (!links.current) links.browse();
-  history.replaceState(history.state, '', location.pathname + location.search);
+  history.replaceState(
+    history.state,
+    '',
+    __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+  );
 }
 
 const target = document.getElementById('app');
@@ -110,12 +120,17 @@ mount(App, { target });
 // and whatever asked for it then never learns it failed.
 window.addEventListener('beforeunload', pageLeaving);
 window.addEventListener('pageshow', pageStayed);
-window.addEventListener('vite:preloadError', () => {
-  // Not for imports a navigation away cancelled (`pageLeaving`): nothing is missing, and no one should be told so.
-  if (navigator.onLine && !isLeaving()) {
-    sendPageError(pageError('chunk_load', 'app'));
-    recoverChunkFailure();
-  }
+window.addEventListener('vite:preloadError', (event) => {
+  const error = (event as Event & { payload?: unknown }).payload;
+  // Vite dispatches before rejecting the import. Let its catch identify optional enhancement failures before
+  // deciding whether the page needs recovery; a missing screen still follows the existing reload policy. A
+  // navigation-away cancellation (`pageLeaving`) is likewise not a missing chunk and must not be reported.
+  setTimeout(() => {
+    if (navigator.onLine && !isLeaving() && !isOptionalImportFailure(error)) {
+      sendPageError(pageError('chunk_load', 'app'));
+      recoverChunkFailure();
+    }
+  }, 0);
 });
 
 // A tab can sit open across a release: den-edge's image only ever carries the current build's assets, so a

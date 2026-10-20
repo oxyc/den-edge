@@ -189,6 +189,27 @@ test('the service billboard shows a loading state, then its titles with their pi
   expect(pageOwned, 'TMDB provider requests must stay inside the content Worker').toEqual([]);
 });
 
+test('directional navigation treats the billboard heading as copy, not a duplicate stop', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await serveNetflix(page);
+  await page.goto(`${FIXTURE}?page`);
+
+  const hero = page.locator('.hero');
+  const headingLink = hero.getByRole('link', { name: 'Film 102', exact: true });
+  const more = hero.getByRole('link', { name: 'More', exact: true });
+  await expect(headingLink).toBeVisible();
+  await more.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(headingLink).not.toBeFocused();
+
+  // It remains a normal link in the native Tab order for progressive enhancement.
+  await headingLink.focus();
+  await expect(headingLink).toBeFocused();
+});
+
 test('resting on a service tile starts loading its page before the press', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);

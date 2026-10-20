@@ -32,7 +32,7 @@
     </h2>
     <ExpandAll section={id} label={title} />
   </div>
-  <div class="plate">{@render children()}</div>
+  <div class="plate" data-spatial-list="vertical">{@render children()}</div>
   {#if footer}<p class="footer">{footer}</p>{/if}
 </section>
 

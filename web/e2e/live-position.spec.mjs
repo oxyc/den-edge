@@ -268,7 +268,10 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
       .boundingBox();
     const badge = await clock.boundingBox();
     expect(art.x + art.width - (badge.x + badge.width)).toBeCloseTo(8, 0);
-    expect(art.y + art.height - (badge.y + badge.height)).toBeCloseTo(18, 0);
+    const bottomInset = art.y + art.height - (badge.y + badge.height);
+    // Fractional poster sizing can put the nominal 18px inset on either side of a half-pixel rounding boundary.
+    expect(bottomInset).toBeGreaterThanOrEqual(17);
+    expect(bottomInset).toBeLessThanOrEqual(19);
     // Long enough to span the TV's next real 27-second push and several of this page's 5-second pulls.
     await expectTicking(clock, edge, BETWEEN_PUSHES_MS);
 

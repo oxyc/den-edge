@@ -85,7 +85,7 @@ test('accepting an invite starts the guest’s library with the watchlist alread
     // The guest's synthetic library link is not a TV receiver. Browser playback is offered through the host's
     // stable Hearth facade, whose Remux fallback stays behind the grant-authenticated Edge relay.
     await laptop.goto(`${E2E_ORIGIN}/movie/1002`);
-    await expect(laptop.getByRole('button', { name: 'Play', exact: true })).toBeVisible({
+    await expect(laptop.getByRole('link', { name: 'Play', exact: true })).toBeVisible({
       timeout: 30_000,
     });
     await expect(laptop.getByRole('button', { name: 'Play on TV', exact: true })).toHaveCount(0);

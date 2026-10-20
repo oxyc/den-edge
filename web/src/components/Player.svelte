@@ -45,7 +45,6 @@
     routeKind,
     segmentAnswer,
     sendHeartbeat,
-    sourceFailed,
     startSession,
     wantedLanguages,
     type AudioTrack,
@@ -102,6 +101,7 @@
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { SamsungAvplayAdapter } from '../tv/player/avplay';
   import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import {
@@ -132,6 +132,8 @@
   } from '../lib/diagnosticsReport';
   import ActionMenu from './ActionMenu.svelte';
   import Button from './Button.svelte';
+  import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
 
   let {
     title,
@@ -190,6 +192,19 @@
     onnext?: () => void;
     onclose: () => void;
   } = $props();
+  const nextHref = $derived(
+    onnext && nextEpisode?.season !== undefined && nextEpisode.episode !== undefined
+      ? titleHref({ ...title, ...nextEpisode, play: true })
+      : undefined,
+  );
+
+  function advanceLink(event: MouseEvent, stopCountdown = false) {
+    if (!onnext) return;
+    activateLinkInPlace(event, () => {
+      if (stopCountdown) stay();
+      onnext();
+    });
+  }
 
   type Episode = { season?: number; episode?: number };
 
@@ -228,6 +243,16 @@
   const HIDDEN_SLACK_SECS = 5;
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
+  const tv = __DEN_TV__;
+  // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
+  // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
+  const webOsNative =
+    __DEN_TV_PLATFORM__ === 'webos' && /(?:webOS|Web0S)/i.test(navigator.userAgent);
+  // The packaged Samsung shell supplies this bridge. Hosted previews and ordinary browsers do not, and retain the
+  // existing native-HLS/hls.js path even when they use the Tizen-targeted bundle.
+  const samsungAvplay =
+    __DEN_TV_PLATFORM__ === 'tizen' &&
+    !!(globalThis as typeof globalThis & { webapis?: { avplay?: unknown } }).webapis?.avplay;
   const messages: Record<
     | 'none'
     | 'unreachable'
@@ -309,6 +334,7 @@
   };
 
   let video = $state<HTMLVideoElement>();
+  let tvPaused = $state(true);
   let castFrame = $state<HTMLIFrameElement>();
   let remoteTime = 0;
   let remoteDuration = 0;
@@ -398,6 +424,7 @@
   let upNext = $state<number | null>(null);
   let imdb: string | undefined;
   let hls: Hls | undefined;
+  let avplay: SamsungAvplayAdapter | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
@@ -790,7 +817,11 @@
       startAt: at,
       maxBitrate,
       // For den-remux's log only, so a session can be told apart by the player that played it.
-      player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
+      player: castMode
+        ? 'cast'
+        : samsungAvplay || webOsNative || nativeHls(document.createElement('video'))
+          ? 'native'
+          : 'hls.js',
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
       // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
@@ -1248,7 +1279,9 @@
     const current = session;
     if (!current) return;
     const total = length() || current.duration;
-    startAt = total && lostAt >= 1 ? { seconds: lostAt, fraction: lostAt / total } : null;
+    // Zero is a deliberate resume position too. `null` means fall back to the library's original resume, which
+    // would make a "Resume from 0:00" action jump forward again after the viewer had sought back to the start.
+    startAt = { seconds: lostAt, fraction: total ? lostAt / total : 0 };
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
@@ -1271,7 +1304,9 @@
   $effect(() => {
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
-    const playsNatively = nativeHls(element);
+    // LG's webOS media pipeline accepts HLS even when its WebKit canPlayType answer is incomplete.
+    // Keeping it on this element path preserves Den's existing progress, recovery and session ownership.
+    const playsNatively = samsungAvplay || webOsNative || nativeHls(element);
     // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
     // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that — a
     // while with nothing arriving, since a slow link shows no picture either but keeps delivering (`stuckWatch`).
@@ -1386,6 +1421,29 @@
         stalledMs += performance.now() - stallSince;
       if (session === current) stallSince = undefined;
     };
+    let nativeExpiryProbe: AbortController | undefined;
+    const probeNativeExpiry = async () => {
+      if (nativeExpiryProbe || current.publicBase) return;
+      const probe = new AbortController();
+      nativeExpiryProbe = probe;
+      const answer = await segmentAnswer(current, stalledAt(), (input, init) => {
+        const deadline = init?.signal;
+        return fetch(input, {
+          ...init,
+          signal: deadline ? AbortSignal.any([deadline, probe.signal]) : probe.signal,
+        });
+      });
+      if (
+        nativeExpiryProbe !== probe ||
+        session !== current ||
+        failure ||
+        !stalling ||
+        document.visibilityState === 'hidden'
+      )
+        return;
+      if (answer?.status === 410) lose(element.currentTime || lastPosition || 0);
+      else nativeExpiryProbe = undefined;
+    };
     const onStallWaiting = () => {
       // A background tab and a deliberately paused player are waited on by nobody. In particular, do not leave the
       // 500 ms progress clock running after WebKit reports `waiting` while it suspends hidden media.
@@ -1399,8 +1457,13 @@
       updateStallProgress();
       clearInterval(stallTimer);
       stallTimer = setInterval(updateStallProgress, 500);
+      if (__DEN_TV__ && playsNatively) void probeNativeExpiry();
     };
     const onStallResume = () => {
+      if (__DEN_TV__) {
+        nativeExpiryProbe?.abort();
+        nativeExpiryProbe = undefined;
+      }
       endStall();
       stalling = false;
       clearInterval(stallTimer);
@@ -1551,7 +1614,7 @@
     element.addEventListener('timeupdate', firstFrameFromProgress);
     // The type is unconditional (every modern lib.dom.d.ts has it); the browser isn't — an older Safari lacks
     // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`.
-    if (typeof element.requestVideoFrameCallback === 'function') {
+    if (!samsungAvplay && typeof element.requestVideoFrameCallback === 'function') {
       const id = element.requestVideoFrameCallback(firstFrame);
       cancelVideoFrame = () => element.cancelVideoFrameCallback(id);
     } else {
@@ -1562,6 +1625,10 @@
       ? undefined
       : (current.control?.report ?? reportUrlOf(current.playlist));
     const stopWatching = () => {
+      if (__DEN_TV__) {
+        nativeExpiryProbe?.abort();
+        nativeExpiryProbe = undefined;
+      }
       cleanup();
       cancelFirstFrame();
       watcher?.stop();
@@ -1586,6 +1653,34 @@
       reconnecting = false;
     };
     playedEngine = playsNatively ? 'native' : 'hls.js';
+    if (samsungAvplay) {
+      let gone = false;
+      let mounted: SamsungAvplayAdapter | undefined;
+      const starting = import('../tv/player/avplay').then(({ mountSamsungAvplay }) => {
+        if (gone || ended || session !== current) return;
+        mounted = mountSamsungAvplay({
+          element,
+          url: current.playlist,
+          audioTrack: current.audioTrack,
+          subtitleLanguage: subtitleChoice,
+        });
+        avplay = mounted;
+        watcher = watchPlayback({ video: element, reportUrl });
+        return mounted.start();
+      });
+      void starting.catch((error: unknown) => {
+        console.warn('Samsung AVPlay could not be started.', error);
+        if (gone || ended || session !== current || failure || breaking) return;
+        failure = 'engine';
+        letGo();
+      });
+      return () => {
+        gone = true;
+        stopWatching();
+        mounted?.destroy();
+        if (avplay === mounted) avplay = undefined;
+      };
+    }
     if (playsNatively) {
       element.src = current.playlist;
       const mounted = element.src;
@@ -1678,7 +1773,9 @@
           data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
           (code === 410 || (code === 0 && connection.down))
         ) {
-          lose(element.currentTime);
+          // hls.js can clear the media clock before reporting that an expired session returned 410. Keep the
+          // last position this element reported instead of offering to resume the film from zero.
+          lose(element.currentTime || lastPosition || 0);
           return;
         }
         void broke(
@@ -1717,6 +1814,25 @@
   $effect(() => {
     const [current, element, held] = [session, video, hold];
     if (!current || current.castOrigin || !element || !held) return;
+    if (samsungAvplay) {
+      // AVPlay reports percent toward a platform-selected startup buffer, not seconds on the media timeline. Its
+      // buffering-complete/canplay signal is the only faithful readiness boundary available to this page.
+      const ready = () => {
+        if (hold !== held) return;
+        hold = null;
+        startsIn = null;
+        void element
+          .play()
+          .catch((error: unknown) =>
+            console.warn(
+              'The held Samsung start could not play on its own; its controls can.',
+              error,
+            ),
+          );
+      };
+      element.addEventListener('canplay', ready, { once: true });
+      return () => element.removeEventListener('canplay', ready);
+    }
     const tick = setInterval(() => {
       if (hold !== held) return clearInterval(tick);
       const { ready, seconds } = held.update(
@@ -2206,9 +2322,19 @@
     // and it spends the one GPU slot the box has (oxyc/den#43).
     // The signed public origin intentionally cannot be connected to by the d.<domain> page; asking it here
     // would be a CSP violation. The receiver's media error is enough to select the conservative Cast profile.
-    if (!current.publicBase && (await sourceFailed(current, stalledAt()))) {
-      if (session === current && !failure) failure = 'source';
-      return;
+    if (!current.publicBase) {
+      const answer = await segmentAnswer(current, stalledAt());
+      if (session !== current || failure) return;
+      // Native HLS does not expose a failed fragment's HTTP status. Ask den-remux once: 410 means this session
+      // expired and can resume at the last position; 502 means the release itself stopped producing bytes.
+      if (answer?.status === 410) {
+        lose(video?.currentTime || lastPosition || 0);
+        return;
+      }
+      if (answer?.status === 502) {
+        failure = 'source';
+        return;
+      }
     }
     // The session may have been replaced while that was asked.
     if (session !== current || failure) return;
@@ -2216,7 +2342,7 @@
     // the viewer's word; not yet playing, the release stopped answering. Neither is "couldn't play" — a cast page's
     // is, as before: it has no other way of saying it couldn't.
     if (!judging.refused && !current.castOrigin) {
-      if (played) lose(video?.currentTime ?? lastPosition ?? 0);
+      if (played) lose(video?.currentTime || lastPosition || 0);
       else failure = 'source';
       return;
     }
@@ -2290,6 +2416,7 @@
   }
 
   function playing() {
+    if (tv) tvPaused = false;
     progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
@@ -2298,6 +2425,7 @@
   }
 
   function paused() {
+    if (tv) tvPaused = true;
     clearInterval(timer);
     report();
     if (session) {
@@ -2351,6 +2479,10 @@
    */
   function applySubtitles() {
     const choice = subtitleChoice;
+    if (__DEN_TV_PLATFORM__ === 'tizen' && avplay) {
+      avplay.selectSubtitleLanguage(choice);
+      return;
+    }
     const language = selectedSubtitleLanguage();
     const sidecars = session?.externalSubtitles ?? [];
     const sidecar = sidecars.some((track) => track.value === choice);
@@ -2818,6 +2950,10 @@
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
+    if (__DEN_TV_PLATFORM__ === 'tizen') {
+      avplay?.destroy();
+      avplay = undefined;
+    }
     endSession(current);
     session = null;
   }
@@ -2998,8 +3134,16 @@
   });
 
   function close() {
+    if (ended) return;
     finish();
     onclose();
+  }
+
+  /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
+  function playerMenuOpen(): boolean {
+    return __DEN_TV__
+      ? document.querySelector('.player dialog[role="menu"][open]') !== null
+      : document.querySelector('.player [popover]:popover-open') !== null;
   }
 
   // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
@@ -3069,6 +3213,30 @@
       finish();
     };
   });
+
+  $effect(() => {
+    if (!__DEN_TV__) return;
+    let uninstall: (() => void) | undefined;
+    void import('../tv/player/remote').then(({ installTvRemote }) => {
+      if (ended) return;
+      uninstall = installTvRemote({
+        close,
+        next: onnext,
+        pause: () => video?.pause(),
+        play: () => video?.play(),
+        paused: () => video?.paused ?? true,
+        seekBy: (seconds) => {
+          if (!video) return;
+          const total = length();
+          video.currentTime = Math.max(
+            0,
+            total ? Math.min(video.currentTime + seconds, total) : video.currentTime + seconds,
+          );
+        },
+      });
+    });
+    return () => uninstall?.();
+  });
 </script>
 
 <!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
@@ -3078,11 +3246,17 @@
     event.key === 'Escape' &&
     !event.defaultPrevented &&
     !document.fullscreenElement &&
-    !document.querySelector('.player [popover]:popover-open') &&
+    !playerMenuOpen() &&
     close()}
 />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
-<svelte:document onvisibilitychange={() => document.visibilityState === 'hidden' && report()} />
+<svelte:document
+  onvisibilitychange={() => {
+    if (document.visibilityState !== 'hidden') return;
+    if (tv) close();
+    else report();
+  }}
+/>
 
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
@@ -3286,7 +3460,7 @@
         <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
         <video
           bind:this={video}
-          controls
+          controls={!tv}
           autoplay
           playsinline
           use:allowAirPlay
@@ -3316,14 +3490,41 @@
           onerror={() => {
             // An `error` with no MediaError behind it — what iOS fired as a page came back from the background,
             // while its video went on loading — is no failure of the element.
-            if (video?.error) void broke();
-            else console.warn('The video fired an error with no MediaError; it plays on.');
+            if (video?.error) {
+              if (__DEN_TV_PLATFORM__ === 'tizen')
+                void broke(video.error.code, video.error.message, avplay?.failureKind());
+              else void broke();
+            } else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
         >
           {#each session?.externalSubtitles ?? [] as track (track.value)}
             <track kind="subtitles" src={track.url} srclang={track.language} label={track.value} />
           {/each}
         </video>
+        {#if tv}
+          <nav class="tv-transport" aria-label="Playback controls">
+            <button
+              type="button"
+              onclick={() =>
+                video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
+              >−10s</button
+            >
+            <button
+              type="button"
+              onclick={() => (video?.paused ? void video.play() : video?.pause())}
+              >{tvPaused ? 'Play' : 'Pause'}</button
+            >
+            <button
+              type="button"
+              onclick={() =>
+                video &&
+                (video.currentTime = Math.min(length() || Infinity, video.currentTime + SKIP_SECS))}
+              >+10s</button
+            >
+            {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
+            <button type="button" onclick={close}>Close</button>
+          </nav>
+        {/if}
         {#if reconnecting}
           <p class="countdown" role="status">Reconnecting…</p>
         {:else if startsIn}
@@ -3477,14 +3678,13 @@
             <Button
               variant="primary"
               aria-label="Next: {next}"
-              onclick={() => {
-                stay();
-                onnext();
-              }}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
+              href={nextHref}
+              onclick={(event) => advanceLink(event, true)}
+              >Next: {next} <span aria-hidden="true">({upNext})</span></Button
             >
             <Button label="Stay" onclick={stay} />
           {:else}
-            <Button label={`Next: ${next}`} onclick={onnext} />
+            <Button label={`Next: ${next}`} href={nextHref} onclick={advanceLink} />
           {/if}
         {/if}
       </div>
@@ -3664,6 +3864,12 @@
     height: 100%;
     object-fit: contain;
     border: 0;
+  }
+
+  /* Chromium can ring both the video host and the focused native control inside its shadow tree. The native
+     play/timeline control remains visibly focused; remove only the redundant rectangle around the whole picture. */
+  video:focus {
+    outline: none;
   }
 
   /* Out of sight and out of the way of the video's controls, but rendered, so the Cast SDK in it runs as usual. */
@@ -3942,7 +4148,7 @@
   .pick:focus-within,
   .pick-menu :global(.trigger.pick:focus-visible) {
     border-color: var(--accent);
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 

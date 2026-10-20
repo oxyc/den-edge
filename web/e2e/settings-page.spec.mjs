@@ -135,8 +135,15 @@ for (const width of [320, 390, 820, 1280]) {
       // My services: the country's directory, with the pick already ticked.
       await page.getByRole('button', { name: /My services/ }).click();
       const services = page.getByRole('region', { name: 'My services' });
-      await expect(services.getByRole('checkbox', { name: /Netflix/ })).toBeChecked();
+      const netflix = services.getByRole('checkbox', { name: /Netflix/ });
+      await expect(netflix).toBeChecked();
       await expect(services.getByText('(series only)')).toBeVisible();
+      if (width === 1280) {
+        await netflix.focus();
+        await page.keyboard.press('Space');
+        await expect(netflix).not.toBeChecked();
+        await expect(netflix).toBeFocused();
+      }
       await expectViewportWidth();
 
       // Parental controls stay locked behind the PIN.

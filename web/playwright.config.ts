@@ -23,7 +23,7 @@ if (process.platform === 'linux') process.env.WEBKIT_SKIA_ENABLE_CPU_RENDERING ?
 export default defineConfig({
   testDir: './e2e',
   // Time budgets measure the production build on a runner of their own (`playwright.budgets.config.ts`).
-  testIgnore: 'big-library-budgets.spec.mjs',
+  testIgnore: ['tv-*.spec.mjs', 'keyboard-enhancement.spec.mjs', 'big-library-budgets.spec.mjs'],
   timeout: 120_000,
   // Files are isolated by Playwright contexts and do not share mutable server state.
   // Keep local runs deterministic while allowing CI to execute independent files in parallel.
@@ -33,8 +33,11 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',
+  outputDir: './test-results',
   use: {
     baseURL: E2E_ORIGIN,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,

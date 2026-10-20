@@ -1,0 +1,65 @@
+.tv-transport {
+  position: absolute;
+  right: 4vw;
+  bottom: 4vh;
+  left: 4vw;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  background: rgb(0 0 0 / 0.72);
+}
+
+.tv-transport button,
+.tv-transport a {
+  min-width: 8rem;
+  min-height: 3.5rem;
+  padding: 0.75rem 1.25rem;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  background: #292929;
+  border: 2px solid transparent;
+  border-radius: 0.65rem;
+  text-decoration: none;
+}
+
+.den-tv.tv-remote-active .player .tv-transport button:focus,
+.den-tv.tv-remote-active .player .tv-transport a:focus {
+  color: #000;
+  background: #fff;
+  outline: 0;
+  box-shadow: none;
+  transform: scale(1.06);
+}
+
+/* The shared TV ring is for ordinary page controls. Playback already owns its high-contrast transport state,
+   while each transparent select is represented by the visible picker around it. Never draw both surfaces. */
+.den-tv.tv-remote-active .player .pick select:focus,
+.den-tv.tv-remote-active .player video:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.den-tv.tv-remote-active .player .pick:focus-within {
+  border-color: var(--focus-ring);
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-width);
+  box-shadow: none;
+}
+
+.player header,
+.player footer,
+.player .tv-transport {
+  transition: opacity 180ms ease;
+}
+
+.player.tv-controls-hidden header,
+.player.tv-controls-hidden footer,
+.player.tv-controls-hidden .tv-transport {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}

@@ -41,7 +41,7 @@
   });
 </script>
 
-<div class="grid">
+<div class="grid" data-spatial-grid>
   {#each hits as hit (hitKey(hit))}
     {#if hit.kind === 'title'}
       <PosterCard title={hit.title} href={titleHref(hit.title)} {onopen} />

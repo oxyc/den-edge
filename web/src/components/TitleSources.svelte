@@ -15,6 +15,8 @@
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
   import { DownloadSourceLoader } from '../lib/downloadSourceLoader';
+  import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   let {
     imdb,
     season,
@@ -66,6 +68,7 @@
     retry = $state(0);
   let message = $state('');
   let panel = $state<HTMLDivElement>();
+  let disclosure = $state<HTMLDivElement>();
   const panelId = $props.id();
   const descriptor = $derived<DownloadTitleDescriptor | undefined>(
     title
@@ -161,11 +164,15 @@
     open = true;
     await tick();
     panel?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (__DEN_TV__)
+      requestAnimationFrame(() =>
+        disclosure?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true }),
+      );
   }
   const size = (bytes?: number) => (bytes ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : '');
 </script>
 
-<div class="source-accordion" class:open>
+<div class="source-accordion" class:open bind:this={disclosure}>
   <Button
     variant="tertiary"
     class="sources-disclosure"
@@ -272,7 +279,16 @@
                   variant="secondary"
                   icon="play"
                   label="Play"
-                  onclick={() => onplay(source.filename)}
+                  href={title
+                    ? titleHref({
+                        ...title,
+                        season,
+                        episode,
+                        play: true,
+                        filename: source.filename,
+                      })
+                    : undefined}
+                  onclick={(event) => activateLinkInPlace(event, () => onplay(source.filename))}
                 />
               {:else if !ready && title}<Button
                   variant="secondary"
@@ -341,7 +357,6 @@
     justify-content: flex-start;
     padding-inline: 0;
     border: 0;
-    border-radius: 0;
     background: transparent;
     font-size: var(--section-heading-size);
     font-weight: var(--section-heading-weight);

@@ -29,6 +29,7 @@
   } from '../lib/reel';
   import type { PlaybackStep } from '../lib/reel';
   import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   import type { Routes } from '../lib/routes';
   import { startupMarkOnce } from '../lib/startupTiming';
   import {
@@ -58,6 +59,7 @@
     onwatchlist,
     onseen,
     watchlistPage = false,
+    loading = false,
   }: {
     /** The billboard's titles, best first. */
     titles: RecommendedTitle[];
@@ -73,6 +75,8 @@
     onseen?: (title: Title, on: boolean) => Promise<boolean | undefined>;
     /** The Watchlist page's own billboard, where a title taken off the watchlist is done with (`leavesBillboard`). */
     watchlistPage?: boolean;
+    /** Keep the billboard's final geometry while its source is still deciding whether it has any titles. */
+    loading?: boolean;
     active?: boolean;
     /** Worker-owned normalized title metadata. */
     content: ContentServiceClientPort;
@@ -390,7 +394,9 @@
   // Intent still wins immediately: changing `index` makes that slide current and the effect above loads it high.
   $effect(() => {
     const here = current;
-    if (!active || !here || readyKey !== keyOf(here)) return;
+    // A TV changes slides deliberately with the remote. Do not spend its smaller decoder/network budget on
+    // adjacent 4K-room artwork; the newly selected still already starts at high priority above.
+    if (__DEN_TV__ || !active || !here || readyKey !== keyOf(here)) return;
     return whenIdle(() => {
       if (!active) return;
       for (const step of [1, -1]) {
@@ -588,7 +594,7 @@
     const next = shown[index + 1];
     const base = reel;
     const table = routes;
-    if (!active || !playing || !next || !base || !onScreen || still() || saving()) {
+    if (__DEN_TV__ || !active || !playing || !next || !base || !onScreen || still() || saving()) {
       cancelNextWarm();
       return;
     }
@@ -825,6 +831,35 @@
     show(Math.min(Math.max(next, 0), shown.length - 1));
   }
 
+  function remotePaging(node: HTMLElement) {
+    if (!__DEN_TV__) return {};
+    const page = async (event: Event) => {
+      const direction = (event as CustomEvent<{ direction?: 'left' | 'right' }>).detail?.direction;
+      if (!direction || !rail) return;
+      const next = Math.min(
+        Math.max(index + (direction === 'right' ? 1 : -1), 0),
+        shown.length - 1,
+      );
+      if (next === index) return;
+      // A remote press chooses one exact slide and need not wait for touch-scroll settling. Chromium before 114
+      // lacks `scrollend`, so that path would otherwise leave focus behind for its 1s fallback.
+      paging = true;
+      // Move the rail before changing the selected slide. A queued scroll notification from its previous
+      // position otherwise runs during the Svelte flush and changes `index` straight back before focus moves.
+      goTo(next, false);
+      arrive(next);
+      await tick();
+      goTo(index, false);
+      frame
+        // Chromium 87 has no native `inert`: Svelte assigns an expando property there, so an attribute selector
+        // cannot distinguish the active slide. `tabindex` is the carousel's own authoritative focus state.
+        ?.querySelector<HTMLElement>('.slide [data-tv-carousel-action][tabindex="0"]')
+        ?.focus({ preventScroll: true });
+    };
+    node.addEventListener('den:tv-page', page);
+    return { destroy: () => node.removeEventListener('den:tv-page', page) };
+  }
+
   /**
    * The same paging from the page itself, with nothing focused. A carousel you are looking at is one the
    * arrow keys should move; before this they worked only once a dot had been tabbed to, which nobody does.
@@ -834,7 +869,7 @@
    * without that check every press would page twice.
    */
   $effect(() => {
-    if (!active || !onScreen) return;
+    if (__DEN_TV__ || !active || !onScreen) return;
     const fromPage = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
@@ -938,6 +973,7 @@
   aria-roledescription={shown.length ? 'carousel' : undefined}
   aria-label={shown.length ? 'Featured' : undefined}
   aria-hidden={shown.length ? undefined : 'true'}
+  data-loading={loading || undefined}
   bind:this={frame}
   onpointerenter={() => (held = true)}
   onpointerleave={() => (held = false)}
@@ -1003,19 +1039,29 @@
              place in the rail as empty boxes: on Home they were 20 slides of 26 elements, 46% of the page (measured
              on d.oxy.fi), and the first render built every one's controls. -->
         {#if n === index || n === index - 1 || n === nextSlide(index, shown.length)}
-          <a
-            class="slide-link"
-            href={titleHref(title)}
-            aria-label={`Open details for ${title.title}`}
-            tabindex={n === index ? 0 : -1}
-            draggable="false"
-          ></a>
+          {#if !__DEN_TV__}
+            <a
+              class="slide-link"
+              href={titleHref(title)}
+              aria-label={`Open details for ${title.title}`}
+              data-spatial-skip
+              tabindex={n === index ? 0 : -1}
+              draggable="false"
+            ></a>
+          {/if}
           <div class="told">
             <div class="text">
               <h2>
-                <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
-                  >{title.title}</a
-                ><span class="mobile-title">{title.title}</span>
+                {#if __DEN_TV__}
+                  <span class="tv-title">{title.title}</span>
+                {:else}
+                  <a
+                    class="title-link"
+                    href={titleHref(title)}
+                    data-spatial-skip
+                    tabindex={n === index ? 0 : -1}>{title.title}</a
+                  ><span class="mobile-title">{title.title}</span>
+                {/if}
               </h2>
               {#if reason}
                 <p class="reason">{reason}</p>
@@ -1023,22 +1069,26 @@
               <p class="facts">{billboardFacts(title, found)}</p>
               <p class="overview">{found?.overview ?? ''}</p>
               <div class="actions">
-                {#if onplay}
+                {#if !__DEN_TV__ && onplay}
                   <Button
                     variant="primary"
                     size="large"
                     icon="play"
                     label="Play"
+                    href={titleHref({ ...title, play: true })}
                     tabindex={n === index ? 0 : -1}
-                    onclick={() => onplay(title)}
+                    onclick={(event) => activateLinkInPlace(event, () => onplay(title))}
                   />
                 {/if}
                 <a
                   class="den-button den-button-secondary den-button-large more"
                   href={titleHref(title)}
+                  data-tv-carousel-action={__DEN_TV__ ? 'hero' : undefined}
+                  data-spatial-page-entry={n === index ? '' : undefined}
+                  use:remotePaging
                   tabindex={n === index ? 0 : -1}>More</a
                 >
-                {#if rowOf && onwatchlist && onseen}
+                {#if !__DEN_TV__ && rowOf && onwatchlist && onseen}
                   <TitleActions
                     compact
                     row={rowOf(title)}
@@ -1060,7 +1110,7 @@
 
   <!-- Only once a trailer is actually running: a button offering full screen over a still photograph would
        have nothing to show. Desktop only, in CSS — a phone reaches the video's own controls with a tap. -->
-  {#if playing}
+  {#if !__DEN_TV__ && playing}
     <Button
       variant="player"
       size="icon"
@@ -1074,20 +1124,30 @@
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
   {#if shown.length > 1}
     <div class="pager">
-      <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
+      <div
+        class="dots"
+        class:display-only={__DEN_TV__}
+        role={__DEN_TV__ ? undefined : 'group'}
+        aria-label={__DEN_TV__ ? undefined : `Slide ${index + 1} of ${shown.length}`}
+        aria-hidden={__DEN_TV__ ? 'true' : undefined}
+      >
         {#each window9.at as n (n)}
           {@const edge =
             (n === window9.start && window9.start > 0) ||
             (n === window9.end - 1 && window9.end < window9.count)}
-          <button
-            class="dot"
-            class:on={n === index}
-            class:edge
-            aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
-            aria-current={n === index ? 'true' : undefined}
-            onclick={() => show(n)}
-            onkeydown={keyed}
-          ></button>
+          {#if __DEN_TV__}
+            <span class="dot" class:on={n === index} class:edge></span>
+          {:else}
+            <button
+              class="dot"
+              class:on={n === index}
+              class:edge
+              aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
+              aria-current={n === index ? 'true' : undefined}
+              onclick={() => show(n)}
+              onkeydown={keyed}
+            ></button>
+          {/if}
         {/each}
       </div>
     </div>
@@ -1162,7 +1222,7 @@
      itself without waiting for a pointer that may never arrive. */
   .billboard :global(.expand:focus-visible) {
     opacity: 1;
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 
@@ -1314,7 +1374,7 @@
      The room at the bottom is the pager's, which sits over every slide rather than in one. */
   .told {
     width: 100%;
-    max-width: 1400px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) 76px;
   }
@@ -1427,7 +1487,7 @@
     bottom: 32px;
     left: 0;
     display: flex;
-    max-width: 1400px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding-inline: var(--gutter);
     pointer-events: none;
@@ -1438,6 +1498,10 @@
     display: flex;
     gap: 2px;
     pointer-events: auto;
+  }
+
+  .dots.display-only {
+    pointer-events: none;
   }
 
   .dot {
@@ -1477,9 +1541,8 @@
     background: var(--fg);
   }
 
-  .dot:focus-visible,
-  h2 a:focus-visible {
-    outline: 2px solid var(--accent);
+  .dot:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 
@@ -1492,7 +1555,7 @@
     }
 
     .slide-link:focus-visible {
-      outline: 2px solid var(--fg);
+      outline: var(--ring-width) solid var(--focus-ring);
       outline-offset: -4px;
     }
 

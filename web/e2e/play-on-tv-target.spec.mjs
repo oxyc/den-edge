@@ -62,6 +62,21 @@ test('a link made by joining a browser offers no Play on TV and sends nothing', 
   }
 });
 
+test('a legacy browser link named Mac is not mistaken for a TV receiver', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const { appends } = await openTitle(page, 'legacy-browser');
+    await page.waitForTimeout(500);
+    await expect(onTv(page)).toHaveCount(0);
+    expect(appends).toHaveLength(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a link to a TV the device list shows still plays on it', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -69,6 +84,21 @@ test('a link to a TV the device list shows still plays on it', async () => {
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const { appends } = await openTitle(page, 'tv');
+    await onTv(page).click();
+    await expect(page.locator('p.library-status.toast')).toHaveText('Sent to Living Room TV…');
+    expect(appends).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a legacy TV link is accepted only when its name resolves to a TV device', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const { appends } = await openTitle(page, 'legacy-tv');
     await onTv(page).click();
     await expect(page.locator('p.library-status.toast')).toHaveText('Sent to Living Room TV…');
     expect(appends).toHaveLength(1);

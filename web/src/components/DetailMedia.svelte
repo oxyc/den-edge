@@ -836,7 +836,7 @@
      to show itself without waiting for a pointer that may never arrive. */
   .media :global(.control:focus-visible) {
     opacity: 1;
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 

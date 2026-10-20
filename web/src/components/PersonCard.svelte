@@ -79,9 +79,13 @@
     background: var(--card);
   }
 
+  .person:focus-visible {
+    outline: none;
+  }
+
   .person:focus-visible .portrait {
-    outline: 3px solid var(--accent);
-    outline-offset: 3px;
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
   }
 
   img {

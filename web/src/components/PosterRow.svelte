@@ -17,7 +17,6 @@
   let {
     heading,
     ariaLabel,
-    mobileHeadingLines,
     headingLink,
     aside,
     active,
@@ -27,8 +26,6 @@
     heading: string;
     /** The region's full name when the compact visible heading omits its context. */
     ariaLabel?: string;
-    /** Reserve and clamp two heading lines on a narrow screen; desktop remains one line. */
-    mobileHeadingLines?: 2;
     headingLink?: { before: string; label: string; after: string; href: string };
     /** A quiet link beside the heading, to where the row goes on. */
     aside?: { label: string; href: string; ariaLabel?: string };
@@ -71,7 +68,7 @@
 
 <section class="row" aria-label={ariaLabel ?? heading} bind:this={section}>
   <div class="head">
-    <h2 class:mobile-two-lines={mobileHeadingLines === 2}>
+    <h2>
       <span class="heading-copy">
         {#if headingLink}
           {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
@@ -94,8 +91,10 @@
   .row {
     /* ~2.3 posters on a phone, so the cut-off one says "scroll"; 6–8 on a desktop. */
     --card-w: clamp(140px, 38vw, 190px);
+    --page-inset: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
 
-    margin-bottom: 32px;
+    width: 100vw;
+    margin: 0 calc(50% - 50vw) 32px;
   }
 
   .head {
@@ -103,6 +102,7 @@
     align-items: baseline;
     gap: 16px;
     margin: 0 0 12px;
+    padding-inline: var(--page-inset);
   }
 
   h2 {
@@ -142,37 +142,30 @@
     text-underline-offset: 4px;
   }
 
-  @media (width <= 759px) {
-    h2.mobile-two-lines {
-      display: flex;
-      align-items: flex-end;
-      height: 56px;
-      white-space: normal;
-    }
-
-    h2.mobile-two-lines .heading-copy {
-      display: -webkit-box;
-      width: 100%;
-      min-width: 0;
-      overflow: hidden;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
-      line-clamp: 2;
-    }
+  /* A recommendation subject can end exactly where the single-line heading is ellipsized. Keep its keyboard ring
+     inside the link so the heading's overflow boundary cannot cut off the trailing edge. */
+  .heading-link:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
+    border-radius: 4px;
   }
 
   .track {
     display: flex;
     gap: 14px;
-    margin: 0 calc(-1 * var(--gutter));
-    padding: 0 var(--gutter) 8px;
+    width: 100%;
+    margin: 0;
+
+    /* The scroller reaches the viewport, but its resting first card follows the readable column. Later cards can
+       still travel through the leading edge because this is content padding, not an ancestor clip. */
+    padding: 0 0 8px var(--page-inset);
     overflow: auto hidden;
 
     /* Replacing a virtual slot with its equal-sized PosterCard must not make scroll anchoring move
        the shelf by one snap point. Chromium otherwise attributed exactly that movement to two cards. */
     overflow-anchor: none;
     scroll-snap-type: x proximity;
-    scroll-padding-inline: var(--gutter);
+    scroll-padding-inline: var(--page-inset) 0;
     scrollbar-width: none;
   }
 

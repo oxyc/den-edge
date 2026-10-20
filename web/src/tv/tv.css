@@ -1,0 +1,434 @@
+/* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle. */
+:root.den-tv {
+  --gutter: clamp(54px, 5vw, 96px);
+  --bar-space: 124px;
+  --card-w: clamp(190px, 13vw, 260px);
+  --ring-width: 4px;
+  --page-max: 1920px;
+
+  font-size: 19px;
+  overscroll-behavior: none;
+}
+
+.den-tv body {
+  overflow-x: hidden;
+}
+
+/* Chrome 85 ignores color-mix(), including the complete declaration containing it. */
+.den-tv .den-button-device {
+  --button-fg: #d2daf1;
+}
+
+.den-tv .den-button-destructive {
+  --button-bg: rgb(255 107 107 / 0.12);
+  --button-border: rgb(255 107 107 / 0.48);
+}
+
+:root.den-tv .bar.tv-bar {
+  top: 28px;
+  right: var(--gutter);
+  left: var(--gutter);
+  display: flex;
+  justify-content: center;
+  min-height: 72px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  backdrop-filter: none;
+}
+
+:root.den-tv .tv-bar nav {
+  gap: 28px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  background: rgb(10 12 16 / 0.88);
+}
+
+:root.den-tv .tv-bar nav [aria-current='page'] {
+  color: var(--fg);
+  background: rgb(255 255 255 / 0.1);
+}
+
+:root.den-tv.tv-remote-active .tv-bar nav :focus {
+  outline: none;
+  border-radius: 999px;
+  background: #f5f5f7;
+  color: #141418;
+  box-shadow: none;
+}
+
+:root.den-tv .tv-search-button svg {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+:root.den-tv .tv-bar > .profile-trigger {
+  position: absolute;
+  right: 0;
+  margin: 0;
+}
+
+/* Source metadata is 12–14px in the browser. Keep the release and its availability legible at TV distance. */
+.den-tv .source-panel .note,
+.den-tv .source-panel .chip,
+.den-tv .source-panel strong,
+.den-tv .source-panel .languages,
+.den-tv .source-panel .status {
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+/* Search is a ten-foot workspace: a substantial query field, a stable category rail, and a uniform poster grid.
+   The shared Search component remains the data/paging engine; this TV-only sheet changes presentation only. */
+.den-tv section.search > h1 {
+  display: none;
+}
+
+.den-tv section.search .tv-search-editor {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-height: 70px;
+  margin: 14px 0 34px;
+  padding: 0 24px;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 16px;
+  background: rgb(255 255 255 / 0.09);
+  color: var(--muted);
+}
+
+.den-tv section.search .tv-search-editor:focus-within {
+  border-color: transparent;
+  color: var(--fg);
+}
+
+.den-tv section.search .tv-search-editor svg {
+  flex: none;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+}
+
+.den-tv section.search .tv-search-input {
+  width: 100%;
+  min-height: 66px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 28px;
+}
+
+.den-tv section.search .tv-search-input::placeholder {
+  color: var(--muted);
+}
+
+.den-tv section.search .explore {
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 48px;
+}
+
+.den-tv section.search .rail {
+  top: calc(var(--bar-space) + 12px);
+  gap: 20px;
+  max-height: calc(100vh - var(--bar-space) - 44px);
+  padding: 8px 18px 28px 8px;
+}
+
+.den-tv section.search .filter {
+  gap: 8px;
+  padding: 5px;
+}
+
+.den-tv section.search .filter [aria-pressed],
+.den-tv section.search .chip,
+.den-tv section.search .toggle,
+.den-tv section.search .facet,
+.den-tv section.search .picks .pick {
+  min-height: 50px;
+  padding-inline: 18px;
+  font-size: 18px;
+}
+
+.den-tv section.search .heading {
+  margin-bottom: 10px;
+  font-size: 20px;
+}
+
+.den-tv section.search .grid {
+  --card-w: 200px;
+
+  grid-template-columns: repeat(auto-fill, minmax(200px, 200px));
+  gap: 40px;
+  align-items: start;
+}
+
+.den-tv section.search .status,
+.den-tv section.search .note,
+.den-tv section.search .try {
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+/* Watchlist cards have their own direct Seen/Remove actions rather than PosterCard's menu. They are hover-only
+   in a browser; a remote has no hover state, so keep those compact actions visible and in the focus geometry. */
+.den-tv .framed .controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.den-tv .framed .control {
+  min-width: 48px;
+  height: 48px;
+}
+
+/* CheckGrid's browser checkbox is visually hidden. On old TV engines it must still expose a real rectangle to the
+   geometry navigator; the transparent native surface fills its label while the existing mark remains the visual. */
+.den-tv .check input[type='checkbox'] {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 1;
+  appearance: none;
+}
+
+/* LinkTV's summary gains a 44px remote target without affecting the details element's flow height in old
+   Chromium. Reserve that height explicitly so "Look around" does not sit on top of it. */
+.den-tv .recovery {
+  padding-bottom: 48px;
+}
+
+.den-tv.tv-remote-active a:focus,
+.den-tv.tv-remote-active button:focus,
+.den-tv.tv-remote-active input:focus,
+.den-tv.tv-remote-active select:focus,
+.den-tv.tv-remote-active textarea:focus,
+.den-tv.tv-remote-active [tabindex]:focus {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
+  box-shadow:
+    0 0 0 7px rgb(0 0 0 / 0.45),
+    0 10px 34px rgb(0 0 0 / 0.5);
+}
+
+.den-tv .row {
+  margin-bottom: 54px;
+}
+
+.den-tv .row .head {
+  margin-bottom: 18px;
+}
+
+.den-tv .row h2 {
+  font-size: 28px;
+}
+
+.den-tv .row .track {
+  gap: 26px;
+  padding-top: 24px;
+  padding-bottom: 28px;
+  scroll-snap-type: x mandatory;
+}
+
+.den-tv .row .track > * {
+  scroll-snap-align: start;
+}
+
+.den-tv .card .art {
+  height: calc(var(--card-w) * 1.5);
+  border-radius: 10px;
+}
+
+.den-tv .card .art.landscape {
+  height: calc(var(--card-w) * 1.45 * 0.5625);
+}
+
+/* Chrome 87 predates aspect-ratio. These shared cards otherwise collapse when their image is absent or pending.
+   Keep the same dimensions as their component rules: a square person card, a 190–280px 16:9 episode still, and
+   Detail's 110–160px 2:3 poster. PosterCard's portrait and landscape dimensions are already fixed above. */
+.den-tv .person .portrait {
+  height: var(--card-w);
+}
+
+.den-tv .episode .still {
+  height: clamp(106.875px, 13.5vw, 157.5px);
+}
+
+.den-tv header.hero .poster {
+  height: clamp(165px, 16.5vw, 240px);
+}
+
+.den-tv .card .meta {
+  padding-top: 10px;
+  font-size: 18px;
+}
+
+/* Cards already mark their artwork. Suppress the broad TV anchor ring so it never draws a second rectangle
+   around the label, and keep the one surface ring inside each card's paint boundary. */
+:root.den-tv.tv-remote-active .tile:focus,
+:root.den-tv.tv-remote-active .card.pick:focus,
+:root.den-tv.tv-remote-active a.person:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+:root.den-tv.tv-remote-active .tile:focus .art,
+:root.den-tv.tv-remote-active .card.pick:focus .art {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--ring-width));
+}
+
+/* PosterRow's heading deliberately clips a long single line. Its linked recommendation subject therefore keeps the
+   broad remote ring inside the text run instead of losing the trailing edge at that clip. */
+:root.den-tv.tv-remote-active .heading-link:focus {
+  outline-offset: calc(-1 * var(--ring-width));
+  box-shadow: none;
+}
+
+/* Composite controls own one ring around the whole surface. Chrome 85 has :focus-within but not :has(), so
+   make this explicit here instead of leaving a clipped ring on the invisible select or split-button region. */
+:root.den-tv.tv-remote-active .actions > .pick:focus-within,
+:root.den-tv.tv-remote-active .split-surface:focus-within {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
+}
+
+:root.den-tv.tv-remote-active .actions > .pick select:focus,
+:root.den-tv.tv-remote-active .split-surface .split-region:focus,
+:root.den-tv.tv-remote-active .tv-search-editor .tv-search-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+:root.den-tv.tv-remote-active .tv-search-editor:focus-within {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
+  border-radius: 16px;
+  box-shadow:
+    0 0 0 7px rgb(0 0 0 / 0.45),
+    0 10px 34px rgb(0 0 0 / 0.5);
+}
+
+:root.den-tv.tv-remote-active .card.pick:focus .art {
+  box-shadow: none;
+  transform: scale(1);
+}
+
+:root.den-tv.tv-remote-active a.person:focus .portrait {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--ring-width));
+}
+
+/* Apple TV presents warnings as quiet, non-interactive hero context. Keep this in the TV sheet so the web app
+   retains its expandable warning disclosure without carrying TV-only layout CSS in its bundle. */
+.den-tv .content-warnings-overlay {
+  position: absolute;
+  z-index: 2;
+  top: calc(var(--bar-space) + 40px);
+  right: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
+  display: grid;
+  max-width: min(360px, 28vw);
+  justify-items: end;
+  color: rgb(231 231 234 / 0.7);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: right;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.9);
+  pointer-events: none;
+}
+
+.den-tv .content-warnings-overlay strong,
+.den-tv .content-warnings-overlay small {
+  color: rgb(231 231 234 / 0.52);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.den-tv .content-warnings-overlay small {
+  margin-top: 4px;
+  font-weight: 400;
+}
+
+.den-tv .billboard {
+  min-height: min(78vh, 820px);
+  margin-bottom: 46px;
+}
+
+/* A settled empty recommendation leaves Services in the first TV viewport. While recommendations are still
+   loading, preserve the populated billboard's geometry: collapsing then expanding it pushed every shelf by
+   almost a full screen on slower CPUs. */
+.den-tv .billboard[aria-hidden='true']:not([data-loading='true']) {
+  min-height: 140px;
+  margin-bottom: 0;
+}
+
+.den-tv .billboard .told {
+  max-width: none;
+  padding-right: 48%;
+}
+
+.den-tv .billboard .overview {
+  max-width: 66ch;
+  font-size: 20px;
+  line-height: 1.45;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.den-tv .billboard .actions {
+  min-height: 54px;
+}
+
+.den-tv .billboard .actions a {
+  min-height: 54px;
+  padding-inline: 26px;
+  font-size: 20px;
+}
+
+:root.den-tv .tv-bar nav a,
+:root.den-tv .tv-bar .tv-search-button {
+  display: grid;
+  place-items: center;
+  min-width: 60px;
+  min-height: 56px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+/* Shared desktop Detail deliberately peeks its action row below the fold. A D-pad cannot scroll by touch, so the
+   complete primary action row must start on-screen and provide an obvious first destination. */
+.den-tv header.hero {
+  --hero-drop: 0px;
+
+  margin-bottom: 40px;
+}
+
+/* The season strip scrolls horizontally and clips an outer focus ring. Draw this ring inside the tab instead. */
+.den-tv.tv-remote-active [role='tab']:focus {
+  outline-offset: calc(-1 * var(--ring-width));
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .den-tv * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

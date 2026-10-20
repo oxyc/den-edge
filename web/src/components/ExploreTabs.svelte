@@ -62,7 +62,7 @@
 
   a:focus-visible {
     border-radius: 4px;
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 </style>

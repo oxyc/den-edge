@@ -276,8 +276,12 @@ const progressOf = (page, episode) =>
 
 /** Play the series from its page: Season 1's first episode. */
 async function playFirstEpisode(page) {
-  await page.getByRole('button', { name: /^Play/ }).first().click();
+  await page.getByRole('link', { name: /^Play/ }).first().click();
   await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+  await expect(player(page).getByRole('link', { name: 'Next: S1 · E2' })).toHaveAttribute(
+    'href',
+    `/tv/${SERIES}-series-${SERIES}?season=1&episode=2&play=1`,
+  );
 }
 
 /** Put the playing video into element fullscreen, from a key press: the user activation fullscreen needs. */
@@ -364,7 +368,7 @@ test('closing the player and playing another title opens a fresh player', async 
       `/movie/${FILM}`,
     );
     await expect(page.locator('h1')).toHaveText(`Film ${FILM}`);
-    await page.getByRole('button', { name: /^Play/ }).first().click();
+    await page.getByRole('link', { name: /^Play/ }).first().click();
     await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
     await playingPast(page, 1);
     expect(asked.playback.map(itemOf)).toEqual(['e1', 'film']);

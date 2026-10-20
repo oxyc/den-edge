@@ -69,7 +69,8 @@
       {#if groupIndex}<span class="separator" aria-hidden="true">·</span>{/if}
       {#each group as item, itemIndex (item.id)}
         {#if itemIndex}<span aria-hidden="true">, </span>{/if}
-        {#if item.href}<a href={item.href}>{item.name}</a>{:else}<span>{item.name}</span>{/if}
+        {#if item.href && !__DEN_TV__}<a data-spatial-skip href={item.href}>{item.name}</a
+          >{:else}<span>{item.name}</span>{/if}
       {/each}
     {/each}
   </p>

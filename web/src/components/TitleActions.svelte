@@ -5,16 +5,20 @@
      are read out rather than drawn until there is room for them. The opinion is one picker, as the player's are:
      the browser opens its own menu, and "No rating" clears it — which pressing the active button twice never said. -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import Button from './Button.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
+  import ActionMenu from './ActionMenu.svelte';
   import SplitButton from './SplitButton.svelte';
   import type { TitleRow } from '../lib/wire';
   import { shareOrCopy } from '../lib/share';
   import { PressedTitle } from '../lib/pressedTitle.svelte';
   import type { SaveKind } from '../lib/pressedTitleState';
   import type { Reaction } from '../lib/titleState';
+  import type { MenuItem } from '../lib/titleActions';
   import { toastContext } from '../lib/toast';
   import { tick } from 'svelte';
+  import { activateLinkInPlace } from '../lib/linkActivation';
 
   let {
     row,
@@ -25,10 +29,13 @@
     onreact,
     onplay,
     onplayhere,
+    playHref,
+    onsources,
     away = false,
     blocked = false,
     restricted = false,
     trailerHref,
+    trailerPlayerHref,
     ontrailer,
     share,
     notice = null,
@@ -36,6 +43,8 @@
     playLabel = 'Play',
     compact = false,
     seenOverride = undefined,
+    seenItems,
+    extraAction,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -49,6 +58,10 @@
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
+    /** A real address for the same in-app playback, including its episode coordinate. */
+    playHref?: string;
+    /** Open sources for the same movie or episode as the primary Play action. */
+    onsources?: () => void;
     /**
      * This device reaches no route to Den's player — away from home, without Tailscale — so there is no Play here: said
      * plainly under the actions, rather than leaving the button's absence to explain itself.
@@ -63,6 +76,8 @@
     restricted?: boolean;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
+    /** A real address for an exact trailer which opens Den's trailer player. */
+    trailerPlayerHref?: string;
     /**
      * Play the trailer here, in YouTube's embed, instead of leaving the page for it.
      *
@@ -91,6 +106,10 @@
      * can never read Seen over an episode list showing nothing watched.
      */
     seenOverride?: boolean;
+    /** TV series choose the exact season here; moving across episode tabs must never choose it implicitly. */
+    seenItems?: MenuItem[];
+    /** A surface-specific action which belongs beside the title controls (the TV season picker). */
+    extraAction?: Snippet;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
@@ -169,7 +188,8 @@
       <SplitButton
         icon="play"
         label={playLabel}
-        onclick={onplayhere}
+        href={playHref}
+        onclick={(event) => activateLinkInPlace(event, onplayhere)}
         alternateIcon="tv"
         alternateLabel={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
         onalternate={onplay}
@@ -184,7 +204,8 @@
         icon="play"
         label={playLabel}
         busy={externallyBusy()}
-        onclick={onplayhere}
+        href={playHref}
+        onclick={(event) => activateLinkInPlace(event, onplayhere)}
       />
     {/if}
   {:else if onplay}
@@ -199,11 +220,23 @@
     />
   {/if}
 
+  {#if onsources}
+    <Button
+      variant="secondary"
+      size="large"
+      class={`pill sources${onplayhere || onplay ? ' with-primary' : ''}`}
+      icon="sources"
+      label="Sources"
+      busy={externallyBusy()}
+      onclick={onsources}
+    />
+  {/if}
+
   <div class="pills">
     <div class="promoted">
-      {#if trailerHref && !restricted && ontrailer}
-        <!-- A real button: the plain click always opens the in-page dialog, so it must be announced as
-             something that acts in place rather than as a link that leaves the page. -->
+      {#if trailerPlayerHref && !restricted && ontrailer}
+        <!-- A real link to the same trailer player. An ordinary click uses the already-mounted dialog; a modified
+             click, long press, or context menu can open that player in another tab. -->
         <Button
           variant="secondary"
           size="large"
@@ -211,7 +244,8 @@
           icon="trailer"
           label="Trailer"
           ariaLabel="Trailer"
-          onclick={ontrailer}
+          href={trailerPlayerHref}
+          onclick={(event) => activateLinkInPlace(event, ontrailer)}
         />
       {:else if trailerHref && !restricted}
         <!-- No trailer id to play in a dialog: a normal link, which really does leave for YouTube. A normal
@@ -247,22 +281,33 @@
           void save('watchlist', on, () => onwatchlist(on));
         }}
       />
-      <Button
-        variant="stateful"
-        class={seen ? 'pill on' : 'pill'}
-        icon="eye"
-        iconFilled={seen}
-        label={compact ? undefined : 'Seen'}
-        pressed={compact ? undefined : seen}
-        ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
-        busy={pressed.saving('seen')}
-        saving={pressed.saving('seen')}
-        aria-disabled={mutationBlocked() || undefined}
-        onclick={() => {
-          const on = !seen;
-          void save('seen', on, () => onseen(on));
-        }}
-      />
+      {#if seenItems?.length}
+        <ActionMenu
+          items={seenItems}
+          label="Mark watched"
+          heading="Mark watched"
+          triggerClass={`den-button den-button-stateful den-button-large pill season-seen-trigger${seen ? ' on' : ''}`}
+          glyph={seenPicker}
+        />
+      {:else}
+        <Button
+          variant="stateful"
+          class={seen ? 'pill on' : 'pill'}
+          icon="eye"
+          iconFilled={seen}
+          label={compact ? undefined : 'Seen'}
+          pressed={compact ? undefined : seen}
+          ariaLabel={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : 'Seen'}
+          busy={pressed.saving('seen')}
+          saving={pressed.saving('seen')}
+          aria-disabled={mutationBlocked() || undefined}
+          onclick={() => {
+            const on = !seen;
+            void save('seen', on, () => onseen(on));
+          }}
+        />
+      {/if}
+      {#if extraAction}{@render extraAction()}{/if}
       {#if onreact}
         <div class="desktop-reactions" role="group" aria-label="Your opinion">
           {#each reactions as [value, label] (value)}
@@ -326,6 +371,10 @@
     </div>
   </div>
 </div>
+
+{#snippet seenPicker()}
+  <ButtonIcon name="eye" filled={seen} /><span>Seen</span>
+{/snippet}
 {#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
     class="notice"
     role="status"
@@ -390,6 +439,25 @@
     width: 100%;
   }
 
+  .utilities :global(.season-seen-trigger) {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    border: 1px solid var(--button-border);
+    background: var(--button-bg);
+    color: var(--button-fg);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .utilities :global(.season-seen-trigger.on) {
+    --button-bg: var(--fg);
+    --button-border: var(--fg);
+    --button-fg: var(--bg);
+  }
+
   .promoted :global(.den-button-label) {
     min-width: 0;
     overflow: hidden;
@@ -423,6 +491,12 @@
   /* Four quiet, equal tap targets on a phone: state belongs to the glyph and a restrained tint, not a row of
      permanent cards. Focus remains the shared high-contrast ring, while hover/press briefly reveals the target. */
   @media (width < 760px) {
+    /* Source selection already has its full disclosure below the hero. On a phone, promote it only into a vacant
+       Play slot; beside Play it would crowd the action row without adding a capability. */
+    .detail-page :global(.sources.with-primary) {
+      display: none;
+    }
+
     .detail-page .pills {
       display: flex;
       flex-wrap: wrap;
@@ -460,6 +534,15 @@
       padding: 0;
     }
 
+    .detail-page .utilities :global(.season-seen-trigger span) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
     .detail-page .utilities > :global(.pill[aria-pressed='true']),
     .detail-page .utilities > .pick.on {
       --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -473,8 +556,8 @@
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */
   .pick:focus-within {
-    outline: 3px solid color-mix(in srgb, var(--accent) 82%, white);
-    outline-offset: 3px;
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: var(--ring-width);
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */

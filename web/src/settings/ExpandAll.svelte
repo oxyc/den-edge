@@ -9,7 +9,7 @@
   const action = $derived(allOpen ? 'Collapse all' : 'Expand all');
 </script>
 
-{#if rows.any(section)}
+{#if !__DEN_TV__ && rows.any(section)}
   <button
     type="button"
     class="expand-all"
@@ -38,6 +38,6 @@
   }
 
   .expand-all:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 </style>

@@ -2,7 +2,7 @@
      default — one chip open — For You, a genre, a recipe or a mood — and the endless grid it fills. Typing searches
      instead, and clearing the query returns to the chip that was open, since the address still names it. -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
   import ExploreTabs from './ExploreTabs.svelte';
   import FacetSuggestions from './FacetSuggestions.svelte';
@@ -82,6 +82,25 @@
     ]),
   );
   const typing = $derived(query.trim().length >= 2);
+  function changeTVQuery(value: string) {
+    navigate(searchHref(value, explore), true);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+  async function leaveTVSearchField(event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+    if (event.key === 'Escape' && event.currentTarget.value) {
+      event.preventDefault();
+      changeTVQuery('');
+      return;
+    }
+    if (event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    await tick();
+    document
+      .querySelector<HTMLElement>(
+        '[data-route-page][data-active="true"] section.search .browse button, [data-route-page][data-active="true"] section.search .grid a, [data-route-page][data-active="true"] section.search .rail button',
+      )
+      ?.focus({ preventScroll: false });
+  }
   /** The year floor by value: `prefs` is a new object whenever it is re-read, and the feed must not restart for that. */
   const minYear = $derived(prefs.minReleaseYear);
 
@@ -176,6 +195,11 @@
     status = dropped.length ? `${names(dropped)}: nothing like it in ${NOUN[to]}.` : '';
     go({ type: type ?? undefined, chips: set });
   }
+  const typeHref = (type: MediaType | null) => {
+    const to = type ?? 'all';
+    const { set } = remapSet(selection, exploreType, to, chipsFor(to));
+    return searchHref(query, { type: type ?? undefined, chips: set });
+  };
   const NOUN: Record<ExploreType, string> = {
     all: 'films or series',
     movie: 'movies',
@@ -546,11 +570,12 @@
 <!-- The type and the rail. While a query is typed the rail follows the results in the page, so they come first in
      focus order; a wide screen still draws it down the side. -->
 {#snippet rail()}
-  <div class="rail" class:after={typing}>
+  <div class="rail" class:after={typing} data-spatial-rail>
     {#if !typing}
       <TypeFilter
         value={explore.type ?? null}
         onchange={chooseType}
+        href={typeHref}
         label="Browse movies, series or both"
       />
     {/if}
@@ -570,6 +595,36 @@
   aria-label={typing ? 'Search results' : 'Explore'}
   aria-busy={typing ? pending : feed.pager.page === 0 && !feed.pager.done}
 >
+  {#if __DEN_TV__}
+    <form
+      class="tv-search-editor"
+      role="search"
+      onsubmit={(event) => {
+        event.preventDefault();
+        const input = event.currentTarget.elements.namedItem(
+          'tv-search',
+        ) as HTMLInputElement | null;
+        if (input && input.value.trim().length >= 2) rememberSearch(input.value);
+        input?.blur();
+      }}
+    >
+      <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
+        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+      >
+      <input
+        class="tv-search-input"
+        name="tv-search"
+        type="search"
+        value={query}
+        aria-label="Search titles, people, moods, languages…"
+        placeholder="Movies, series, people, moods, languages…"
+        autocomplete="off"
+        enterkeyhint="search"
+        oninput={(event) => changeTVQuery(event.currentTarget.value)}
+        onkeydown={leaveTVSearchField}
+      />
+    </form>
+  {/if}
   {#if typing}
     <h1>Search</h1>
   {:else}
@@ -579,7 +634,7 @@
       people={peopleHref(peopleFromExplore(explore))}
     />
   {/if}
-  <div class="explore">
+  <div class="explore" data-spatial-split>
     {#if !typing}{@render rail()}{/if}
     <div class="feed">
       {#if typing}
@@ -587,6 +642,7 @@
           <TypeFilter
             value={explore.type ?? null}
             onchange={chooseType}
+            href={typeHref}
             label="Show in search results"
           />
         </div>
@@ -686,7 +742,7 @@
   }
 
   .clear:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -772,7 +828,7 @@
 
   /* Inset: on a phone this row scrolls sideways, and would clip a ring drawn outside it. */
   .prompts a:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -795,9 +851,17 @@
       max-height: calc(100vh - var(--bar-space) - 16px);
       margin: 0;
       padding: 0 4px 16px 0;
-      overflow-y: auto;
+      overflow: hidden auto;
       overscroll-behavior: contain;
       scrollbar-width: thin;
+    }
+
+    /* Every rail item paints inside its own shape. The rail must clip horizontally to remain a fixed sidebar, so
+       an outer ring would be cut at either edge and focusing a wide item could scroll the column sideways. */
+    .rail :global(a:focus-visible),
+    .rail :global(button:focus-visible) {
+      outline: var(--ring-width) solid var(--focus-ring);
+      outline-offset: calc(-1 * var(--ring-width));
     }
 
     .feed {

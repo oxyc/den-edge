@@ -24,6 +24,7 @@
       <input
         type="radio"
         {name}
+        data-spatial-visible
         checked={option.value === value}
         {disabled}
         onchange={() => onchange(option.value)}
@@ -75,7 +76,7 @@
   }
 
   input:focus-visible + span {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   input:disabled + span {

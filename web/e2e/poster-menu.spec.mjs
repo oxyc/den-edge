@@ -215,7 +215,11 @@ test('Continue Watching offers "Remove from Continue Watching", with Undo in the
     await trigger.click();
     const menu = page.getByRole('menu', { name: 'Actions for Series 701' });
     // A series with Continue Watching's own episode resumes there, named for it.
-    await expect(menu.getByRole('menuitem', { name: 'Resume S2 · E4' })).toBeVisible();
+    const resume = menu.getByRole('menuitem', { name: 'Resume S2 · E4' });
+    await expect(resume).toHaveAttribute('href', '/tv/701-series-701?season=2&episode=4&play=1');
+    await resume.click();
+    expect(await page.evaluate(() => window.fixture.calls().playHere)).toBe(1);
+    await trigger.click();
     await menu.getByRole('menuitem', { name: 'Remove from Continue Watching' }).click();
     const undo = page.getByRole('button', { name: 'Undo', exact: true });
     await expect(undo).toBeVisible();

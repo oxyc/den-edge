@@ -6,6 +6,7 @@
   const noop = () => {};
   const ref = { type: 'movie' as const, id: 42 };
   const browserPlay = new URLSearchParams(location.search).has('browser-play');
+  const trailerRequested = new URLSearchParams(location.search).has('trailer');
   const content = fixtureContentServiceContext();
   let active = $state(true);
   // What SessionServices.configure() would publish for `reel`/`routes`: a restored `services.v1`
@@ -56,6 +57,7 @@
       autoplay={detailPrefs.autoplay}
       ratingSources={detailPrefs.ratingSources}
       warningCategories={detailPrefs.warningCategories}
+      {trailerRequested}
       row={undefined}
       episodes={new Map()}
       busy={false}

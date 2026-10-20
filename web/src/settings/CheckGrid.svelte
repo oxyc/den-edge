@@ -29,7 +29,12 @@
   <legend>{legend}</legend>
   <div class="grid" class:wide class:stacked>
     {#each options as option (option.value)}
-      <label class="check" class:hide>
+      <label
+        class="check"
+        class:hide
+        class:on={checked(option.value)}
+        class:disabled={disabled || option.disabled}
+      >
         <input
           type="checkbox"
           checked={checked(option.value)}
@@ -125,8 +130,8 @@
     pointer-events: none;
   }
 
-  .check:has(input:focus-visible) {
-    outline: 2px solid var(--accent);
+  .check:focus-within {
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   .mark {
@@ -139,19 +144,19 @@
     stroke-linejoin: round;
   }
 
-  .check:has(input:checked) .mark {
+  .check.on .mark {
     visibility: visible;
   }
 
-  .hide:has(input:checked) .name {
+  .hide.on .name {
     opacity: 0.6;
   }
 
-  .hide:has(input:checked) .mark {
+  .hide.on .mark {
     color: var(--muted);
   }
 
-  .check:has(input:disabled) {
+  .check.disabled {
     opacity: 0.45;
     cursor: default;
   }

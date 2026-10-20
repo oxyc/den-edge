@@ -101,11 +101,10 @@
   .track {
     display: flex;
     gap: 14px;
-    margin: 0 calc(-1 * var(--gutter));
-    padding: 0 var(--gutter) 8px;
+    padding: 0 0 8px;
     overflow-x: auto;
     scroll-snap-type: x proximity;
-    scroll-padding-inline: var(--gutter);
+    scroll-padding-inline: 0;
     scrollbar-width: none;
   }
 

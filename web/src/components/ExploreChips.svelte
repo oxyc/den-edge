@@ -340,7 +340,7 @@
   /* Inset, so no scrolling parent — the rail, the strip, the sheet — clips the ring. */
   button:focus-visible,
   a:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 

@@ -168,18 +168,27 @@
     row.kind !== 'set' && row.title.type === ref.type && row.title.id === ref.id;
 
   /**
-   * `link-host=tv|browser`: the link names its host by device id, as every handover since den-edge#41 does, and the
-   * library's device list says what kind of device that is: a TV, or a browser this one joined.
+   * `link-host=tv|browser|legacy-tv|legacy-browser`: the library's device list says what kind of device hosts the
+   * link. Current handovers name it by id; legacy records can only be correlated by their advertised name.
    */
   const linkHost = params.get('link-host');
   const hostDevice = 'cccc000000000003';
   const at = [1, 0, 'test'];
   const devices =
-    linkHost === 'tv' || linkHost === 'browser'
+    linkHost === 'tv' ||
+    linkHost === 'browser' ||
+    linkHost === 'legacy-tv' ||
+    linkHost === 'legacy-browser'
       ? {
           values: {
-            [`${hostDevice}.name`]: { value: { string: 'Living Room TV' }, at },
-            [`${hostDevice}.kind`]: { value: { string: linkHost }, at },
+            [`${hostDevice}.name`]: {
+              value: { string: linkHost.includes('browser') ? 'Mac · Chrome' : 'Living Room TV' },
+              at,
+            },
+            [`${hostDevice}.kind`]: {
+              value: { string: linkHost.includes('browser') ? 'browser' : 'tv' },
+              at,
+            },
             [`${hostDevice}.seen`]: { value: { int: 5000 }, at },
           },
         }
@@ -302,10 +311,10 @@
   }
   const link = {
     inboxKey: 'fixture',
-    name: 'Living Room TV',
+    name: linkHost?.includes('browser') ? 'Mac · Chrome' : 'Living Room TV',
     libraryKey: 'fixture',
     linkKey: 'fixture',
-    ...(devices ? { deviceId: hostDevice } : {}),
+    ...(devices && !linkHost?.startsWith('legacy-') ? { deviceId: hostDevice } : {}),
   };
   const shownLink = params.has('local') || visitor ? null : link;
 

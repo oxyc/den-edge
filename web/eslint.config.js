@@ -12,7 +12,13 @@ export default defineConfig(
     'dist/**',
     'dist-cast/**',
     'dist-shell/**',
+    'dist-tv-*/**',
+    'dist-keyboard-e2e-*/**',
+    'dist-browser-baseline/**',
+    'tv-packages/**',
     'test-results/**',
+    'test-results-tv/**',
+    'test-results-keyboard*/**',
     'playwright-report/**',
     'coverage/**',
     '.vite/**',
@@ -33,7 +39,15 @@ export default defineConfig(
   },
   {
     files: ['src/**', 'test/**', 'e2e/**'],
-    languageOptions: { globals: globals.browser },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        __DEN_TV__: 'readonly',
+        __DEN_TV_PLATFORM__: 'readonly',
+        __DEN_TV_PACKAGED__: 'readonly',
+        __DEN_TV_API_ORIGIN__: 'readonly',
+      },
+    },
   },
   {
     files: ['public/sw.js'],

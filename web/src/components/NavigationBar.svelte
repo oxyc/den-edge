@@ -7,6 +7,7 @@
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
+  import { currentAppPath } from '../lib/runtimeUrl';
   import {
     exploreFromPeople,
     parseRoute,
@@ -116,6 +117,10 @@
       expanded = true;
     });
     input?.focus({ preventScroll: true });
+    // The compact Search button is an explicit activation, unlike focus arriving at the field through Tab or
+    // directional navigation. Route here as part of the same gesture while the synchronous focus above preserves
+    // the phone keyboard.
+    if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
   }
   function closeSearch() {
     flushSync(() => {
@@ -133,7 +138,9 @@
     if (searching()) navigateOut();
   }
   const searching = () =>
-    route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
+    route.page === 'search' ||
+    parseRoute(__DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search)
+      .page === 'search';
   /** What Explore is browsing: a query is typed over it, and clearing the query returns to it. */
   const explore = (): Explore =>
     route.page === 'search' ? { type: route.type, chips: route.chips } : {};
@@ -161,7 +168,9 @@
     text = value;
     // Focus opens Search before Router's `route` prop necessarily catches up. Read the address it already changed
     // instead, so an immediate tap on a recent item cannot be reset to the empty Search route.
-    const here = parseRoute(location.pathname + location.search);
+    const here = parseRoute(
+      __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
+    );
     const context: Explore = here.page === 'search' ? { type: here.type, chips: here.chips } : {};
     navigate(searchHref(value, context), true);
     window.scrollTo({ top: 0, behavior: 'instant' });
@@ -247,146 +256,178 @@
 </script>
 
 <div class="bar-anchor">
-  <header class="bar glass" class:searching={expanded} class:people={onPeople}>
-    <div class="leading">
-      <a class="brand" href="/" aria-label="Den home"
-        ><img src={icon} width="54" height="32" alt="" /></a
-      >
-      {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
-        <button class="back" type="button" onclick={navigateBack} aria-label="Back">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-            ><path d="m14 5-7 7 7 7" /></svg
+  {#if __DEN_TV__}
+    <header class="bar tv-bar">
+      <nav aria-label="Main navigation">
+        <button
+          class="tv-search-button"
+          type="button"
+          aria-label="Search"
+          aria-current={route.page === 'search' ? 'page' : undefined}
+          onclick={() => navigate(searchHref(''))}
+        >
+          <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
+            ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
           >
-          Back
         </button>
-      {/if}
-    </div>
-    <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
+        {#each tabs as tab (tab.page)}
+          <a
+            href={tab.page === 'library' ? '/' : `/${tab.page}`}
+            aria-current={route.page === tab.page ? 'page' : undefined}
+          >
+            {tab.label}
+          </a>
+        {/each}
+      </nav>
+      {#if profiles}<ProfileSwitcher {profiles} />{:else if profileHint}<ProfileHintTrigger
+          choice={hintChoice(profileHint)}
+        />{/if}
+    </header>
+  {:else}
+    <header class="bar glass" class:searching={expanded} class:people={onPeople}>
+      <div class="leading">
+        <a class="brand" href="/" aria-label="Den home"
+          ><img src={icon} width="54" height="32" alt="" /></a
+        >
+        {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
+          <button class="back" type="button" onclick={navigateBack} aria-label="Back">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+              ><path d="m14 5-7 7 7 7" /></svg
+            >
+            Back
+          </button>
+        {/if}
+      </div>
+      <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
        left a guest on Home with no way to reach Movies, Series or Settings — which is also where pairing is —
        and no way to search, though den-edge lends a keyless browser the key that search needs. -->
-    <form
-      class="search"
-      role="search"
-      id="nav-search"
-      onsubmit={submitted}
-      onfocusin={() => {
-        searchFocused = true;
-      }}
-      onfocusout={(event) => {
-        const next = event.relatedTarget;
-        if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
-          searchFocused = false;
-          recentDismissed = false;
-        }
-      }}
-    >
-      <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
-      >
-      <input
-        name="search"
-        bind:this={input}
-        bind:value={text}
-        type="search"
-        aria-label={onPeople
-          ? 'Search people, nationalities, roles…'
-          : 'Search titles, people, moods, languages…'}
-        placeholder={onPeople
-          ? narrow.current
-            ? 'People, nationalities, roles…'
-            : 'Search people, nationalities, roles…'
-          : narrow.current
-            ? 'Titles, people, moods…'
-            : 'Search titles, people, moods, languages…'}
-        autocomplete="off"
-        aria-controls={showRecent ? 'recent-searches' : undefined}
-        enterkeyhint="search"
-        onfocus={() => {
-          if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
+      <form
+        class="search"
+        role="search"
+        id="nav-search"
+        onsubmit={submitted}
+        onfocusin={() => {
+          searchFocused = true;
         }}
-        oninput={searchChanged}
-        onkeydown={(event) => {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            escaped();
-          } else if (event.key === 'ArrowDown' && (route.page === 'search' || onPeople)) {
-            event.preventDefault();
-            void intoResults();
+        onfocusout={(event) => {
+          const next = event.relatedTarget;
+          if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+            searchFocused = false;
+            recentDismissed = false;
           }
         }}
-      />
-      <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
-      {#if showRecent}
-        <span class="recent-status" role="status"
-          >Recent searches available. Press Down Arrow to review.</span
+      >
+        <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+          ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
         >
-        <!-- Pressing in the list keeps the field focused. iOS Safari doesn't focus a tapped button, so the field's
+        <input
+          name="search"
+          bind:this={input}
+          bind:value={text}
+          type="search"
+          aria-label={onPeople
+            ? 'Search people, nationalities, roles…'
+            : 'Search titles, people, moods, languages…'}
+          placeholder={onPeople
+            ? narrow.current
+              ? 'People, nationalities, roles…'
+              : 'Search people, nationalities, roles…'
+            : narrow.current
+              ? 'Titles, people, moods…'
+              : 'Search titles, people, moods, languages…'}
+          autocomplete="off"
+          aria-controls={showRecent ? 'recent-searches' : undefined}
+          enterkeyhint="search"
+          onclick={() => {
+            // Focus is not activation: Tab and spatial navigation must be able to pass through the field without
+            // changing pages. A pointer press deliberately opens Search; typing reaches the same route through
+            // `searchChanged`, and the TV adapter handles Select before a native click is synthesized.
+            if (!__DEN_TV__ && route.page !== 'search' && !onPeople) navigate(searchHref(text));
+          }}
+          oninput={searchChanged}
+          onkeydown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              escaped();
+            } else if (event.key === 'ArrowDown' && (route.page === 'search' || onPeople)) {
+              event.preventDefault();
+              void intoResults();
+            }
+          }}
+        />
+        <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
+        {#if showRecent}
+          <span class="recent-status" role="status"
+            >Recent searches available. Press Down Arrow to review.</span
+          >
+          <!-- Pressing in the list keeps the field focused. iOS Safari doesn't focus a tapped button, so the field's
              blur had nowhere to go, the bar took search as left, and the list was gone before the tap's click.
              The handler only holds focus; the list's buttons are what is interactive. -->
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <div
-          id="recent-searches"
-          class="recent"
-          role="group"
-          aria-label="Recent searches"
-          onmousedown={(event) => event.preventDefault()}
-        >
-          <div class="recent-heading">
-            <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <div
+            id="recent-searches"
+            class="recent"
+            role="group"
+            aria-label="Recent searches"
+            onmousedown={(event) => event.preventDefault()}
+          >
+            <div class="recent-heading">
+              <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
+            </div>
+            <ul>
+              {#each recent as value, index (value.toLocaleLowerCase())}
+                <li>
+                  <button
+                    class="recent-query"
+                    type="button"
+                    onclick={() => useRecent(value)}
+                    onkeydown={(event) => moveRecent(event, index)}
+                    ><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
+                      ><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg
+                    ><span>{value}</span></button
+                  ><button
+                    class="recent-remove"
+                    type="button"
+                    aria-label={`Remove ${value} from recent searches`}
+                    onclick={() => removeRecent(value)}>×</button
+                  >
+                </li>
+              {/each}
+            </ul>
           </div>
-          <ul>
-            {#each recent as value, index (value.toLocaleLowerCase())}
-              <li>
-                <button
-                  class="recent-query"
-                  type="button"
-                  onclick={() => useRecent(value)}
-                  onkeydown={(event) => moveRecent(event, index)}
-                  ><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
-                    ><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg
-                  ><span>{value}</span></button
-                ><button
-                  class="recent-remove"
-                  type="button"
-                  aria-label={`Remove ${value} from recent searches`}
-                  onclick={() => removeRecent(value)}>×</button
-                >
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-    </form>
-    <nav aria-label="Main navigation">
-      {#each tabs as tab (tab.page)}
-        <a
-          href="/{tab.page}"
-          class:home={tab.page === 'library'}
-          aria-current={route.page === tab.page ? 'page' : undefined}
-        >
-          {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
-          {:else}{tab.label}{/if}
-        </a>
-      {/each}
-    </nav>
-    {#if profiles}<ProfileSwitcher
-        {profiles}
-        hideOnMobile
-      />{:else if profileHint}<ProfileHintTrigger choice={hintChoice(profileHint)} />{/if}
-    <button
-      class="search-toggle"
-      type="button"
-      aria-label="Search"
-      aria-expanded={expanded}
-      aria-controls="nav-search"
-      onclick={openSearch}
-      bind:this={toggle}
-    >
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+        {/if}
+      </form>
+      <nav aria-label="Main navigation">
+        {#each tabs as tab (tab.page)}
+          <a
+            href={tab.page === 'library' ? '/' : `/${tab.page}`}
+            class:home={tab.page === 'library'}
+            aria-current={route.page === tab.page ? 'page' : undefined}
+          >
+            {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
+            {:else}{tab.label}{/if}
+          </a>
+        {/each}
+      </nav>
+      {#if profiles}<ProfileSwitcher
+          {profiles}
+          hideOnMobile
+        />{:else if profileHint}<ProfileHintTrigger choice={hintChoice(profileHint)} />{/if}
+      <button
+        class="search-toggle"
+        type="button"
+        aria-label="Search"
+        aria-expanded={expanded}
+        aria-controls="nav-search"
+        onclick={openSearch}
+        bind:this={toggle}
       >
-    </button>
-  </header>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+          ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+        >
+      </button>
+    </header>
+  {/if}
 </div>
 
 <style>
@@ -427,6 +468,7 @@
     width: var(--brand-w);
     height: 32px;
     overflow: hidden;
+    border-radius: 8px;
   }
 
   /* The mark fills only the middle of its 400×240 canvas, so the image is drawn 2.2× the box and clipped to it.
@@ -487,7 +529,7 @@
   }
 
   .search:focus-within {
-    outline: 1px solid var(--muted);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   /* On search and People, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
@@ -636,7 +678,7 @@
   }
 
   .recent button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -657,6 +699,7 @@
     gap: 6px;
     min-height: 34px;
     padding-inline: 6px;
+    border-radius: 8px;
     color: var(--muted);
     font-weight: 600;
     text-decoration: none;
@@ -672,12 +715,16 @@
     height: 18px;
   }
 
+  .search-toggle {
+    border-radius: 50%;
+  }
+
   /* Every other control in this app shows where the keyboard is; this bar showed nothing at all. */
   nav a:focus-visible,
   .brand:focus-visible,
   .search-toggle:focus-visible,
   .back:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 

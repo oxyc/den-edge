@@ -274,19 +274,29 @@ export function radarRows(
  */
 export function mergeNewRow(arrivals: RowDef, releases: RowDef, title = 'New Releases'): RowDef {
   const key = (t: Title) => `${t.type}:${t.id}`;
+  // A household can have several services, and each Atlas chart can contain dozens of titles. Returning every
+  // chart in page one made one real Home shelf create hundreds of focus proxies before it was touched. Keep the
+  // merged row's initial DOM bounded; later arrival slices still lead TMDB's release-date pages as promised.
+  const arrivalPageSize = 40;
+  let arrivalsPage: Promise<Title[]> | undefined;
+  const loadArrivals = () => (arrivalsPage ??= arrivals.load(1).catch((): Title[] => []));
   return {
     id: `new-merged-${arrivals.id}`,
     title,
     // A chart title says which service it landed on; a TMDB one has no service and keeps the card's year line.
     lead: (t: Title) => arrivals.lead?.(t),
     load: async (page: number) => {
-      // The charts are one page; past the first, the row is TMDB's alone, which is what pages on.
+      const landed = await loadArrivals();
+      if (landed.length > arrivalPageSize) {
+        const arrivalPages = Math.ceil(landed.length / arrivalPageSize);
+        if (page <= arrivalPages)
+          return landed.slice((page - 1) * arrivalPageSize, page * arrivalPageSize);
+        const seen = new Set(landed.map(key));
+        return (await releases.load(page - arrivalPages)).filter((item) => !seen.has(key(item)));
+      }
+      // A normal small arrival set still shares page one with TMDB. Past it, the row is TMDB's alone.
       if (page > 1) return releases.load(page);
-      const [landed, out] = await Promise.all([
-        // atlas failing must not take the row with it: TMDB's half stands on its own, as it did before.
-        arrivals.load(1).catch((): Title[] => []),
-        releases.load(1),
-      ]);
+      const out = await releases.load(1);
       const seen = new Set(landed.map(key));
       return [...landed, ...out.filter((title) => !seen.has(key(title)))];
     },

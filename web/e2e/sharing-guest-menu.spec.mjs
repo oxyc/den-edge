@@ -177,7 +177,10 @@ for (const width of [320, 390, 1280]) {
     await more.click();
     await menu.getByRole('menuitemradio', { name: 'Allow 3 devices' }).click();
     await expect(row).toContainText('1 of 3 devices');
-    expect(calls.some((call) => call.method === 'PUT' && call.body.devices === 3)).toBe(true);
+    // The row updates optimistically; its text can precede the asynchronous membership proof and PUT.
+    await expect
+      .poll(() => calls.some((call) => call.method === 'PUT' && call.body.devices === 3))
+      .toBe(true);
     await expect(more).toBeFocused();
 
     // Revoke asks first; Cancel keeps the guest and returns focus to the trigger.
@@ -199,7 +202,7 @@ for (const width of [320, 390, 1280]) {
       .click();
     await expect(row).toContainText('Revoked');
     await expect(more).toHaveCount(0);
-    expect(calls.filter((call) => call.method === 'DELETE')).toHaveLength(1);
+    await expect.poll(() => calls.filter((call) => call.method === 'DELETE')).toHaveLength(1);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);

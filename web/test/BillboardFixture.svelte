@@ -10,6 +10,9 @@
   // Off unless a test asks for it: the specs that measure layout mock no reel, and handing them one
   // would have them fetching a trailer the network guard refuses.
   const reel = new URLSearchParams(location.search).has('reel') ? '/reel/fixture' : null;
+  const playable = new URLSearchParams(location.search).has('play');
+  const play = (title: RecommendedTitle) =>
+    document.dispatchEvent(new CustomEvent('fixture:play', { detail: title }));
   onMount(() => {
     const load = () => {
       titles = [
@@ -46,7 +49,14 @@
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
-  <Billboard {titles} {active} {content} {reel} routes={{ reel: [{ url: 'http://internal' }] }} />
+  <Billboard
+    {titles}
+    {active}
+    {content}
+    {reel}
+    routes={{ reel: [{ url: 'http://internal' }] }}
+    onplay={playable ? play : undefined}
+  />
   <p data-following-content>Following content</p>
   <div style="height:1800px"></div>
 </main>

@@ -35,6 +35,7 @@ import {
   releaseParts,
   reportFailure,
   sendHeartbeat,
+  segmentAnswer,
   sourceFailed,
   REMUX_PROBE_TIMEOUT_MS,
   SPEED_PROBE_BYTES,
@@ -1538,6 +1539,16 @@ describe('sourceFailed', () => {
 
   it('is no verdict when the segment is served', async () => {
     expect(await sourceFailed(session, 1, serving(200))).toBe(false);
+  });
+
+  it.each(['master.m3u8', 'media.m3u8'])('preserves an expired %s answer', async (expired) => {
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith(expired)) return new Response('', { status: 410 });
+      if (url.endsWith('master.m3u8')) return new Response(master);
+      return new Response(media);
+    }) as unknown as typeof fetch;
+    expect(await segmentAnswer(session, 1, fetchImpl)).toMatchObject({ status: 410 });
   });
 
   it('is no verdict when it cannot ask at all', async () => {

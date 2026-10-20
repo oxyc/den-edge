@@ -92,7 +92,7 @@
   }
 
   a:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   .rail a {
@@ -164,7 +164,7 @@
   }
 
   .jump select:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   @media (760px <= width < 1100px) {

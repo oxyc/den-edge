@@ -180,6 +180,20 @@ for (const [name, engine] of [
       const films = page.getByRole('region', { name: 'Because you watched Movie 1005' });
       await reveal(films);
       await expect(films.locator('.caption')).toHaveText(['2019']);
+      const recommendation = films.locator('h2 .heading-link');
+      await recommendation.focus();
+      const ring = await recommendation.evaluate((node) => {
+        const heading = node.closest('h2').getBoundingClientRect();
+        const link = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return {
+          offset: style.outlineOffset,
+          ringRight: link.right + parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset),
+          clipRight: heading.right,
+        };
+      });
+      expect(ring.offset).toBe('-3px');
+      expect(ring.ringRight).toBeLessThanOrEqual(ring.clipRight + 0.5);
       await reveal(row);
       await expect(row.locator('.caption')).toHaveText(['2019 · Series']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
@@ -201,7 +215,12 @@ for (const [name, engine] of [
       // past on the way down, as a viewer would.
       const services = page.getByRole('region', { name: 'Services', exact: true });
       await services.evaluate((node) => node.scrollIntoView({ block: 'center' }));
-      await expect(services.getByRole('link', { name: 'Netflix' })).toBeVisible();
+      const netflix = services.getByRole('link', { name: 'Netflix' });
+      await expect(netflix).toBeVisible();
+      await netflix.focus();
+      await expect(netflix).toHaveCSS('outline-style', 'none');
+      await expect(netflix.locator('.art')).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
+      await expect(netflix.locator('.art')).toHaveCSS('outline-width', '3px');
       // What just landed on Netflix leads New Releases, each card named by the service in place of its year.
       const row = page.getByRole('region', { name: 'New Releases', exact: true });
       const line = (title) =>

@@ -3,7 +3,7 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network — says where to do it. -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
@@ -435,6 +435,14 @@
   let pairing = $state(false);
   let pairNotice = $state<string | null>(null);
   let answer = $state<((allowed: boolean) => void) | null>(null);
+  let pairSurface = $state<HTMLDivElement>();
+  async function focusPair(selector: string) {
+    if (!__DEN_TV__) return;
+    await tick();
+    requestAnimationFrame(() =>
+      pairSurface?.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true }),
+    );
+  }
   const pairFailures: Record<HostError, string> = {
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
     busy: 'Too many pairings started here just now. Wait a minute and try again.',
@@ -455,11 +463,27 @@
    * arrives later goes in as a promised item started now; a browser that refuses leaves the code on screen.
    */
   function copyCode(text: string | Promise<string>) {
-    const blob = Promise.resolve(text).then((t) => new Blob([t], { type: 'text/plain' }));
-    const write =
-      typeof ClipboardItem === 'function' && navigator.clipboard?.write
-        ? navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })])
-        : Promise.resolve(text).then((t) => navigator.clipboard?.writeText(t));
+    const plain = Promise.resolve(text);
+    const writeText = () =>
+      plain.then((value) => {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+        return navigator.clipboard.writeText(value);
+      });
+    let write: Promise<unknown>;
+    if (typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
+      const blob = plain.then((value) => new Blob([value], { type: 'text/plain' }));
+      try {
+        // Older Chromium exposes ClipboardItem but accepts only a Blob, not the promised Blob Safari requires.
+        // Constructing it throws synchronously there; copying is best-effort and must never stop pairing itself.
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+      } catch {
+        // The rejected no-code promise still owns this derived promise even though the native constructor refused it.
+        void blob.catch(() => {});
+        write = writeText();
+      }
+    } else {
+      write = writeText();
+    }
     void write.then(
       () => (codeCopied = true),
       (error: unknown) => console.warn('link code not copied', error),
@@ -492,11 +516,13 @@
       onCode: (next) => {
         code = next;
         shown(formatCode(next).text);
+        void focusPair('[data-pair-code]');
       },
       allow: (joiner) =>
         new Promise<boolean>((resolve) => {
           code = null;
           asking = joiner;
+          void focusPair('[data-pair-answer]');
           answer = (allowed) => {
             asking = null;
             answer = null;
@@ -517,6 +543,7 @@
     }
     pairNotice =
       'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
+    void focusPair('[data-pair-start]');
   }
 
   // Joining another TV's library: a browser has no library of its own to merge, so it links to that TV as it linked
@@ -1144,7 +1171,7 @@
     <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
     {#if link}
       <h3>Link another device</h3>
-      <div class="pair">
+      <div class="pair" bind:this={pairSurface}>
         {#if code}
           <p>On your phone or computer, open Den and type this code:</p>
           <b
@@ -1152,6 +1179,7 @@
             role="button"
             tabindex="0"
             title="Copy the code"
+            data-pair-code
             data-no-swipe
             onclick={selectCode}
             onkeydown={(event) => {
@@ -1169,7 +1197,12 @@
             and play on your TV.
           </p>
           <span class="actions">
-            <Button variant="primary" label="Allow" onclick={() => answer?.(true)} />
+            <Button
+              variant="primary"
+              label="Allow"
+              data-pair-answer
+              onclick={() => answer?.(true)}
+            />
             <Button variant="secondary" label="Don’t Allow" onclick={() => answer?.(false)} />
           </span>
         {:else}
@@ -1178,6 +1211,7 @@
             variant="primary"
             label={pairing ? 'Waiting…' : 'Get a code'}
             disabled={pairing}
+            data-pair-start
             onclick={linkDevice}
           />
         {/if}
@@ -1431,6 +1465,6 @@
   }
 
   .addon-menu :global(.addon-trigger:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 </style>

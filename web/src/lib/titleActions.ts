@@ -6,7 +6,7 @@
 import { getContext, setContext } from 'svelte';
 import { blockedTitles } from './blockedTitles.svelte';
 import type { Title } from './library';
-import { likeId, searchHref } from './route';
+import { likeId, searchHref, titleHref } from './route';
 import { shareOrCopy } from './share';
 import type { Notify } from './toast';
 import { titleState, type Reaction } from './titleState';
@@ -46,7 +46,14 @@ export function titleActionsContext(): TitleActionsContext | undefined {
 export type MenuItem = (
   | { kind: 'item'; label: string; onselect: () => void; disabled?: boolean }
   /** An item that goes to a page: a link there, so it opens in a new tab like any other. */
-  | { kind: 'link'; label: string; href: string; disabled?: undefined }
+  | {
+      kind: 'link';
+      label: string;
+      href: string;
+      /** Keep an ordinary activation in the mounted app; modified clicks retain native link behaviour. */
+      onselect?: () => void;
+      disabled?: undefined;
+    }
   | { kind: 'checkbox'; label: string; checked: boolean; onselect: () => void; disabled?: boolean }
   | {
       kind: 'radio';
@@ -91,8 +98,9 @@ export function titleMenuItems(
     if (ctx.playHere && !blocked) {
       const target = title.type === 'tv' ? ctx.resumeOf(title) : undefined;
       items.push({
-        kind: 'item',
+        kind: 'link',
         label: target ? `Resume S${target.season} · E${target.episode}` : 'Play',
+        href: titleHref({ ...title, ...target, play: true }),
         onselect: () => ctx.playHere?.(title),
       });
     }
@@ -150,7 +158,10 @@ export function titleMenuItems(
     kind: 'item',
     label: 'Share',
     onselect: () =>
-      void shareOrCopy({ title: title.title, url: `${location.origin}${href}` }).then((result) => {
+      void shareOrCopy({
+        title: title.title,
+        url: `${__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin}${href}`,
+      }).then((result) => {
         if (result === 'copied') notify?.('Link copied');
       }),
   });

@@ -27,6 +27,7 @@
   let activation = 0;
   let focusReplacement: MutationObserver | undefined;
   let clearPointerFocus: (() => void) | undefined;
+  let cancelFrameRestore: (() => void) | undefined;
   function rememberRouteFocus(event: PointerEvent): void {
     const holder = (event.target as Element | null)?.closest<HTMLElement>('[data-route-focus-key]');
     if (!holder || !root.contains(holder)) return;
@@ -57,13 +58,13 @@
     target.focus({ preventScroll: true, focusVisible: keyboard });
   };
   onMount(() => {
-    const stopInput = trackInputModality();
+    trackInputModality();
     root.addEventListener('pointerdown', rememberRouteFocus, { passive: true });
     return () => {
+      if (__DEN_TV__) cancelFrameRestore?.();
       focusReplacement?.disconnect();
       clearPointerFocus?.();
       root.removeEventListener('pointerdown', rememberRouteFocus);
-      stopInput?.();
     };
   });
   $effect.pre(() => {
@@ -71,6 +72,7 @@
     untrack(() => {
       if (!root) return;
       const ticket = ++activation;
+      if (__DEN_TV__) cancelFrameRestore?.();
       focusReplacement?.disconnect();
       focusReplacement = undefined;
       if (!visible) {
@@ -99,8 +101,22 @@
           .filter((element) => element.scrollLeft !== 0 || element.scrollTop !== 0)
           .map((element) => ({ element, x: element.scrollLeft, y: element.scrollTop }));
       } else {
+        let interrupted = false;
+        let stopRestore: (() => void) | undefined;
+        if (__DEN_TV__) {
+          // The navigation observer can focus this page before tick resolves. Input at that boundary
+          // must cancel the initial restoration as well as its later animation-frame pass.
+          const cancel = () => {
+            interrupted = true;
+            window.removeEventListener('den:tv-input', cancel);
+            window.removeEventListener('pointerdown', cancel, true);
+          };
+          stopRestore = cancelFrameRestore = cancel;
+          window.addEventListener('den:tv-input', cancel, { once: true });
+          window.addEventListener('pointerdown', cancel, { capture: true, once: true });
+        }
         void tick().then(() => {
-          if (!active || activation !== ticket) return;
+          if (!active || activation !== ticket || (__DEN_TV__ && interrupted)) return;
           // A persistent shell control (such as navbar search) may have opened this page.
           // Restoring the page's old focus must not take focus or the keyboard away from it.
           const restoreFocus = (allowCurrentPage: boolean) => {
@@ -150,7 +166,14 @@
           };
           restore();
           // Browsers may restore persisted form state after popstate, independently of scrollRestoration.
-          requestAnimationFrame(restore);
+          if (__DEN_TV__) {
+            requestAnimationFrame(() => {
+              const shouldRestore = !interrupted;
+              stopRestore?.();
+              if (cancelFrameRestore === stopRestore) cancelFrameRestore = undefined;
+              if (shouldRestore) restore();
+            });
+          } else requestAnimationFrame(restore);
         });
       }
     });

@@ -221,10 +221,10 @@
 <svelte:window onpointerdown={dismissQuestion} onkeydown={dismissQuestion} />
 
 {#snippet framed(title: Title, controls: Control[], card: Snippet)}
-  <div class="framed">
+  <div class="framed" data-spatial-overlay>
     {@render card()}
     {#if controls.length}
-      <div class="controls">
+      <div class="controls" data-spatial-overlay-actions>
         {#each controls as control (control.icon)}
           {@const asking = confirming?.id === `${control.icon}:${key(title)}`}
           <button
@@ -260,7 +260,7 @@
 {/snippet}
 
 {#snippet grid(titles: Title[])}
-  <div class="grid">
+  <div class="grid" data-spatial-grid>
     {#each titles as title (key(title))}
       {#snippet card()}
         <PosterCard {title} href={titleHref(title)} menu={false} />
@@ -356,7 +356,7 @@
     </div>
     {#each months as month (month.key)}
       <h3>{month.label}</h3>
-      <div class="grid">
+      <div class="grid" data-spatial-grid>
         {#each month.entries as entry (key(entry.title))}
           {#snippet card()}
             <PosterCard

@@ -100,5 +100,8 @@ export function preloadScreens(): void {
   };
   // Detail and Search are the common next taps. Person follows in its own idle slice. Large or uncommon routes
   // (Settings, Player, Service and Watchlist) stay intent-only: their route effects above load them when asked.
-  preloadInIdle(HOME_SCREEN_PRELOADS, idle);
+  // The hero's next action is Details, while Search is a primary TV navigation action and needs to be mounted
+  // synchronously from a touch-preview tap so mobile WebKit can retain its input activation. Person stays
+  // intent-only on TV; the browser keeps its existing batches.
+  preloadInIdle(__DEN_TV__ ? [[DetailScreen, SearchScreen]] : HOME_SCREEN_PRELOADS, idle);
 }

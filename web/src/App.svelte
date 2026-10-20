@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { currentAppPath } from './lib/runtimeUrl';
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
+  import { installKeyboardNavigation } from './lib/keyboardNavigation';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
   import { guestGrants } from './lib/grants.svelte';
@@ -79,12 +81,14 @@
   $effect(() => syncIdentities());
 
   onMount(() => {
+    const stopKeyboard = !__DEN_TV__ ? installKeyboardNavigation() : undefined;
     const visible = () => {
       if (document.visibilityState === 'visible') syncIdentities();
     };
     window.addEventListener('online', syncIdentities);
     document.addEventListener('visibilitychange', visible);
     return () => {
+      stopKeyboard?.();
       window.removeEventListener('online', syncIdentities);
       document.removeEventListener('visibilitychange', visible);
     };
@@ -104,7 +108,9 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
-  let route = $state(parseRoute(location.pathname + location.search));
+  let route = $state(
+    parseRoute(__DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search),
+  );
   // The address holds the search, so a result page can be linked, reloaded or shared and still be the same
   // search. It is read from there rather than derived from the current page: opening a result and coming back
   // would otherwise empty the query and fill it again, which re-runs the search and loses where it was

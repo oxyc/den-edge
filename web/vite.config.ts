@@ -17,11 +17,28 @@ const api = [
   '/lib',
   '/recovery',
   '/config',
+  '/capabilities',
   '/health',
   '/routes',
   '/scout',
   '/tmdb',
   '/metadata',
+  // Runtime routes the installed web app receives from den-edge too. Keeping them same-origin in development lets a
+  // local HTTPS page use the real library's Hearth config, playback and account integrations without CORS or a
+  // second local configuration. The TV config inherits this same proxy table.
+  '/grant',
+  '/oauth',
+  '/playback',
+  '/den',
+  '/ratings',
+  '/warnings',
+  '/skipdb',
+  '/subs',
+  '/subtitles',
+  '/sync',
+  '/mcp',
+  '/link',
+  '/version',
 ];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = upstream('DEN_ATLAS', 'http://192.168.86.193:8081');
@@ -73,7 +90,8 @@ const preloadApplication = () => ({
   enforce: 'post' as const,
   transformIndexHtml: {
     order: 'post' as const,
-    handler(html: string, context: { bundle?: Record<string, unknown> }) {
+    handler(html: string, context: { path?: string; bundle?: Record<string, unknown> }) {
+      if (context.path !== '/index.html') return html;
       const outputs = Object.values(context.bundle ?? {});
       const chunks = outputs.filter(
         (
@@ -105,19 +123,21 @@ const preloadApplication = () => ({
         }
       };
       visit(application);
+      const assetPrefix = process.env.DEN_TV_PACKAGED === '1' ? './' : '/';
       const absentFromHtml = (file: string) =>
-        !html.includes(`href="/${file}"`) && !html.includes(`src="/${file}"`);
+        !html.includes(`href="${assetPrefix}${file}"`) &&
+        !html.includes(`src="${assetPrefix}${file}"`);
       return {
         html,
         tags: [
           ...[...scripts].filter(absentFromHtml).map((file) => ({
             tag: 'link',
-            attrs: { rel: 'modulepreload', crossorigin: '', href: `/${file}` },
+            attrs: { rel: 'modulepreload', crossorigin: '', href: `${assetPrefix}${file}` },
             injectTo: 'head' as const,
           })),
           ...[...styles].filter(absentFromHtml).map((file) => ({
             tag: 'link',
-            attrs: { rel: 'stylesheet', crossorigin: '', href: `/${file}` },
+            attrs: { rel: 'stylesheet', crossorigin: '', href: `${assetPrefix}${file}` },
             injectTo: 'head' as const,
           })),
         ],
@@ -127,7 +147,29 @@ const preloadApplication = () => ({
 });
 
 export default defineConfig({
+  define: {
+    __DEN_TV__: 'false',
+    __DEN_TV_PLATFORM__: JSON.stringify('browser'),
+    __DEN_TV_PACKAGED__: 'false',
+    __DEN_TV_API_ORIGIN__: JSON.stringify(''),
+  },
   plugins: [
+    {
+      name: 'den-browser-platform-isolation',
+      // Inspect every output chunk, not just the initial entry. An accidentally lazy TV import still leaks.
+      generateBundle(_options, bundle) {
+        if (process.env.DEN_TV_PLATFORM) return;
+        for (const output of Object.values(bundle)) {
+          if (output.type !== 'chunk') continue;
+          const leaked = output.moduleIds.find((id) =>
+            /\/src\/tv\/|\/src\/vendor\/den-core-tv\/|\/src\/lib\/runtimeUrl\.ts$|\/node_modules\/core-js\//.test(
+              id,
+            ),
+          );
+          if (leaked) this.error(`TV-only module leaked into browser build: ${leaked}`);
+        }
+      },
+    },
     previewProfiles(),
     previewBuild(),
     ...(watching ? [probe()] : []),

@@ -19,6 +19,14 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
     await page.evaluate(() => scrollTo(0, 900));
     await page.locator('[data-active="true"]').getByText('Details', { exact: true }).click();
     await expect(back).toBeVisible();
+    const brand = page.getByRole('link', { name: 'Den home' });
+    const home = page
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('link', { name: 'Home', exact: true });
+    for (const control of [brand, home, back]) {
+      await control.focus();
+      await expect(control).toHaveCSS('border-radius', '8px');
+    }
     await expect
       .poll(() =>
         page

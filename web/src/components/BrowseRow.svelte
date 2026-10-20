@@ -260,12 +260,10 @@
   class:placed
   class:near={gatesPlacement && rowNear}
   class:gone={done && !pager.failed && visible.length === 0}
-  class:mobile-two-line-heading={row.mobileHeadingLines === 2}
 >
   <PosterRow
     heading={row.title}
     ariaLabel={row.ariaLabel}
-    mobileHeadingLines={row.mobileHeadingLines}
     headingLink={row.headingLink}
     aside={row.aside}
     active={rowNear}
@@ -328,6 +326,8 @@
      on screen (or a tap forced layout). Chromium delivers that size for a skipped row and keeps the property fixed
      (`placementGate`). */
   .row-window {
+    width: 100vw;
+    margin-inline: calc(50% - 50vw);
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
   }
 
@@ -337,13 +337,9 @@
 
   .row-window:not(.placed),
   .row-window.near {
+    /* This wrapper is itself viewport-wide, so paint containment retains its rendering savings without cutting
+       PosterRow's rail back to the narrower readable page column. */
     contain: layout style paint;
-  }
-
-  @media (width <= 759px) {
-    .row-window.mobile-two-line-heading {
-      contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 155.2px);
-    }
   }
 
   .gone {
@@ -401,7 +397,7 @@
   }
 
   .retry:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 </style>
