@@ -106,8 +106,10 @@ const address = (page) => {
 
 /** The season on screen: its tab chosen and its episode listed. */
 async function showing(page, name, episode) {
-  await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true');
-  await expect(active(page).getByText(episode, { exact: true })).toBeVisible();
+  // A cold route compiles and starts the real Worker/WASM before publishing its season. Loaded CI shards can take
+  // longer than Playwright's five-second assertion default without changing the user-visible contract.
+  await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true', { timeout: 15_000 });
+  await expect(active(page).getByText(episode, { exact: true })).toBeVisible({ timeout: 15_000 });
 }
 
 async function backThroughSeasons(browser) {
