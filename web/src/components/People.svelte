@@ -285,17 +285,25 @@
   let status = $state('');
   /** A pick from the rail, a pill or the Browse row; `text` is what the search field keeps. */
   function pick(id: string, text = query) {
+    const { href, note } = picking(id, text);
+    status = note;
+    navigate(href);
+  }
+  /** Where picking `id` leads, and what the status line then says gave way to it. */
+  function picking(id: string, text = query) {
     const label = known.find((c) => c.id === id)?.label ?? '';
+    const note = (removed: string[]) =>
+      removed.length ? `${label} replaced ${names(removed)}.` : '';
+    const here = { query: view.query, type: view.type, chips, traits, order: view.order };
     if (traitItem(id)) {
       const next = pickTrait(traits, id);
-      const removed = traits.filter((x) => x !== id && !next.includes(x));
-      status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-      go({ traits: next, query: text });
-      return;
+      return {
+        href: peopleHref({ ...here, traits: next, query: text }),
+        note: note(traits.filter((x) => x !== id && !next.includes(x))),
+      };
     }
     const { set, removed } = applyPick(chips, id, type, true);
-    status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-    go({ chips: set, query: text });
+    return { href: peopleHref({ ...here, chips: set, query: text }), note: note(removed) };
   }
 
   /**
@@ -421,10 +429,10 @@
         )
       : [],
   );
-  /** A suggestion picked: it joins the picks, and the text it was found by goes. */
+  /** A suggestion picked, followed: it joins the picks, and the text it was found by goes. */
   function pickFound(chip: Chip) {
     named[chip.id] = chip;
-    pick(chip.id, '');
+    status = picking(chip.id, '').note;
   }
 </script>
 
@@ -495,7 +503,8 @@
             place: 5,
             format: 5,
           }}
-          onchange={pick}
+          href={(id) => picking(id).href}
+          onchange={(id) => (status = picking(id).note)}
         />
       </div>
       <div class="feed">
@@ -518,7 +527,12 @@
         <p class="status" role="status">{status}</p>
         {#if typing}
           <!-- Picking one turns the text into it, as on Explore: the text goes, the pick stays. -->
-          <FacetSuggestions chips={suggested} {query} onpick={pickFound} />
+          <FacetSuggestions
+            chips={suggested}
+            {query}
+            href={(chip) => picking(chip.id, '').href}
+            onpick={pickFound}
+          />
           {#if matches.length}
             <section aria-label="People by that name">
               <SearchResults hits={matches} onpersonvisible={loadPhoto} />

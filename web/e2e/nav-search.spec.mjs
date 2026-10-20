@@ -376,10 +376,11 @@ test('Cancel leaves Search in one tap, however many picks were made in it', asyn
     await setup(page);
     await page.goto(FIXTURE);
     await openSearch(page, 390);
-    const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    const chip = (name) => active(page).getByRole('link', { name, exact: true });
+    const type = (name) => active(page).getByRole('button', { name, exact: true });
     await chip('Action').click();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
-    await chip('Series').click();
+    await type('Series').click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page).toHaveURL(HOME);
@@ -409,7 +410,8 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await setup(page);
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
-    const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    const chip = (name) => active(page).getByRole('link', { name, exact: true });
+    const type = (name) => active(page).getByRole('button', { name, exact: true });
     const pill = (name) =>
       active(page)
         .getByRole('group', { name: 'Selected' })
@@ -417,8 +419,8 @@ test('Explore browses before typing, remaps across types, and comes back after a
     // Empty query: All, and For You of both types, filled from the popular films and top series since the fixture
     // library holds nothing. Each card opens its own type's page.
     await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
-    await expect(chip('All')).toHaveAttribute('aria-pressed', 'true');
-    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('All')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('For You')).toHaveAttribute('aria-current', 'page');
     const grid = active(page).locator('.grid');
     await expect(grid.getByRole('link', { name: 'Film 100 2026' })).toHaveAttribute(
       'href',
@@ -441,10 +443,10 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await expect(chip('Action')).toHaveCount(0);
 
     // Series keeps a related genre open rather than one with nothing in it.
-    await chip('Series').click();
+    await type('Series').click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
     await expect(pill('Action & Adventure')).toBeVisible();
-    await expect(chip('Series')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('Series')).toHaveAttribute('aria-pressed', 'true');
 
     // Typing searches over it; Esc clears the query back to the same view, then leaves.
     await input(page).fill('Neon');
@@ -458,9 +460,9 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
     await expect(pill('Action')).toBeVisible();
-    await expect(chip('All')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('All')).toHaveAttribute('aria-pressed', 'true');
     await page.goBack();
-    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('For You')).toHaveAttribute('aria-current', 'page');
   } finally {
     await browser.close();
   }
@@ -479,7 +481,7 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
-    const chip = (name) => rail.getByRole('button', { name, exact: true });
+    const chip = (name) => rail.getByRole('link', { name, exact: true });
     const picks = active(page).getByRole('group', { name: 'Selected' });
     const pill = (name) => picks.getByRole('button', { name: `Remove ${name}`, exact: true });
     const heading = (name) => active(page).getByRole('heading', { name, exact: true });
@@ -488,7 +490,7 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await expect(page).toHaveURL(/\/search\?q=Neon$/);
     await expect(heading('Search')).toBeVisible();
     // The rail stays, and nothing in it is open: the query is what's showing.
-    await expect(rail.getByRole('button', { pressed: true })).toHaveCount(0);
+    await expect(rail.locator('[aria-current="page"]')).toHaveCount(0);
 
     // A genre narrows the typed results and keeps the query; the fixture's films are all dramas.
     await chip('Drama').click();
@@ -521,18 +523,18 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     // The typed text points at categories, offered above the results with their kind.
     await input(page).fill('heist');
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
-    await expect(browse.getByRole('button', { name: 'Heist · recipe' })).toBeVisible();
-    await browse.getByRole('button', { name: 'Heist · recipe' }).click();
+    await expect(browse.getByRole('link', { name: 'Heist · recipe' })).toBeVisible();
+    await browse.getByRole('link', { name: 'Heist · recipe' }).click();
     await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
     await expect(heading('Explore')).toBeVisible();
 
     // Each section shows its first few; "Show all" opens the rest in place.
     const recipes = rail.getByRole('group', { name: 'Recipes' });
-    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+    await expect(recipes.getByRole('link', { name: 'Zombie', exact: true })).toHaveCount(0);
     await recipes.getByRole('button', { name: /^Show all \d+ ›$/ }).click();
-    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toBeVisible();
+    await expect(recipes.getByRole('link', { name: 'Zombie', exact: true })).toBeVisible();
     await recipes.getByRole('button', { name: 'Show fewer' }).click();
-    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+    await expect(recipes.getByRole('link', { name: 'Zombie', exact: true })).toHaveCount(0);
   } finally {
     await browser.close();
   }
@@ -577,7 +579,7 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     await input(page).fill('swe');
     await active(page)
       .getByRole('group', { name: 'Browse', exact: true })
-      .getByRole('button', { name: 'Sweden · country', exact: true })
+      .getByRole('link', { name: 'Sweden · country', exact: true })
       .click();
     await expect(page).toHaveURL(/\/search\?c=country-SE$/);
     await expect(input(page)).toHaveValue('');
@@ -590,7 +592,7 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     // + Action: both apply, in one discover query.
     await rail
       .getByRole('group', { name: 'Genres' })
-      .getByRole('button', { name: 'Action', exact: true })
+      .getByRole('link', { name: 'Action', exact: true })
       .click();
     await expect(page).toHaveURL(/\/search\?c=country-SE,genre-28$/);
     await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
@@ -605,9 +607,9 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     ).toBe(true);
     // Action left its section. The feed is loaded whole, and nothing in it is a comedy: no Comedy on offer.
     const genres = rail.getByRole('group', { name: 'Genres' });
-    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
-    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
-    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('link', { name: 'Action', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('link', { name: 'Comedy', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('link', { name: 'Drama', exact: true })).toBeVisible();
 
     // Back takes the last pick out.
     await page.goBack();
@@ -712,20 +714,20 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
 
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const genres = rail.getByRole('group', { name: 'Genres' });
-    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
-    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('link', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('link', { name: 'Comedy', exact: true })).toHaveCount(0);
     // Languages are listed incompletely: none is judged by its absence.
     await expect(
-      rail.getByRole('group', { name: 'Languages' }).getByRole('button', { name: 'English' }),
+      rail.getByRole('group', { name: 'Languages' }).getByRole('link', { name: 'English' }),
     ).toBeVisible();
     await expect(
-      rail.getByRole('group', { name: 'Runtime' }).getByRole('button', { name: 'Under 90 min' }),
+      rail.getByRole('group', { name: 'Runtime' }).getByRole('link', { name: 'Under 90 min' }),
     ).toBeVisible();
 
     // A person from the People section stacks onto the selection, named by atlas.
     await rail
       .getByRole('group', { name: 'People' })
-      .getByRole('button', { name: 'Bob Actor', exact: true })
+      .getByRole('link', { name: 'Bob Actor', exact: true })
       .click();
     await expect(page).toHaveURL(/\/search\?c=decade-1990,person-Q2$/);
     await expect(
@@ -765,10 +767,10 @@ test('a region is picked from the rail and uses strict TMDB origin countries', a
     // Directly under Countries, and without the regions atlas counts no titles for.
     const headings = await rail.getByRole('heading').allTextContents();
     expect(headings.indexOf('Regions')).toBe(headings.indexOf('Countries') + 1);
-    await expect(regions.getByRole('button', { name: 'Slavic', exact: true })).toHaveCount(0);
-    await expect(regions.getByRole('button', { name: 'East Asian', exact: true })).toBeVisible();
+    await expect(regions.getByRole('link', { name: 'Slavic', exact: true })).toHaveCount(0);
+    await expect(regions.getByRole('link', { name: 'East Asian', exact: true })).toBeVisible();
 
-    await regions.getByRole('button', { name: 'Nordic', exact: true }).click();
+    await regions.getByRole('link', { name: 'Nordic', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?c=region-nordic$/);
     await expect(
       active(page).getByRole('group', { name: 'Selected' }).getByRole('button', {
@@ -822,13 +824,13 @@ test('the search field finds people and characters through atlas, and a person p
     await input(page).fill('nol');
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
     await expect(
-      browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }),
+      browse.getByRole('link', { name: 'Christopher Nolan · director/writer' }),
     ).toBeVisible();
-    await expect(browse.getByRole('button', { name: 'Nolan North · actor' })).toBeVisible();
-    await expect(browse.getByRole('button', { name: 'Nolan Shaw · character' })).toBeVisible();
+    await expect(browse.getByRole('link', { name: 'Nolan North · actor' })).toBeVisible();
+    await expect(browse.getByRole('link', { name: 'Nolan Shaw · character' })).toBeVisible();
     expect(asked).toContain('/index/filter/all/values/made.json?q=nol');
     expect(asked).toContain('/index/filter/all/values/character.json?q=nol');
-    await browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }).click();
+    await browse.getByRole('link', { name: 'Christopher Nolan · director/writer' }).click();
     await expect(page).toHaveURL(/\/search\?c=person-Q25191$/);
     await expect(input(page)).toHaveValue('');
     await expect(
@@ -991,16 +993,14 @@ test('beside a "Like", a genre none of its titles has is not offered, in the rai
     const genres = active(page)
       .getByRole('navigation', { name: 'Browse by category' })
       .getByRole('group', { name: 'Genres' });
-    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
-    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('link', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('link', { name: 'Action', exact: true })).toHaveCount(0);
     // Typed, the Browse row offers it no more than the rail does.
     await input(page).fill('action');
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
-    await expect(browse.getByRole('button', { name: 'Action · genre', exact: true })).toHaveCount(
-      0,
-    );
+    await expect(browse.getByRole('link', { name: 'Action · genre', exact: true })).toHaveCount(0);
     await input(page).fill('drama');
-    await expect(browse.getByRole('button', { name: 'Drama · genre', exact: true })).toBeVisible();
+    await expect(browse.getByRole('link', { name: 'Drama · genre', exact: true })).toBeVisible();
   } finally {
     await browser.close();
   }
@@ -1055,7 +1055,7 @@ test('a rating floor is picked from the Browse row, and asks TMDB for it', async
     await input(page).fill('7+');
     await active(page)
       .getByRole('group', { name: 'Browse', exact: true })
-      .getByRole('button', { name: '★ 7+ · rating', exact: true })
+      .getByRole('link', { name: '★ 7+ · rating', exact: true })
       .click();
     await expect(page).toHaveURL(/\/search\?c=rating-7$/);
     const selected = active(page).getByRole('group', { name: 'Selected' });
@@ -1070,7 +1070,7 @@ test('a rating floor is picked from the Browse row, and asks TMDB for it', async
       .getByRole('group', { name: 'Rating' });
     await expect(ratings).toHaveCount(0);
     await selected.getByRole('button', { name: 'Remove ★ 7+' }).click();
-    await expect(ratings.getByRole('button', { name: '★ 8+', exact: true })).toBeVisible();
+    await expect(ratings.getByRole('link', { name: '★ 8+', exact: true })).toBeVisible();
   } finally {
     await browser.close();
   }
@@ -1154,10 +1154,10 @@ test('a language, country or decade picked offers no other of its kind until it 
     // The Browse row too, though the picks are paused while a query is typed.
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
     await input(page).fill('english');
-    await expect(browse.getByRole('button', { name: 'England · country' })).toHaveCount(0);
-    await expect(browse.getByRole('button', { name: 'English · language' })).toHaveCount(0);
+    await expect(browse.getByRole('link', { name: 'England · country' })).toHaveCount(0);
+    await expect(browse.getByRole('link', { name: 'English · language' })).toHaveCount(0);
     await input(page).fill('british');
-    await expect(browse.getByRole('button', { name: 'United Kingdom · country' })).toBeVisible();
+    await expect(browse.getByRole('link', { name: 'United Kingdom · country' })).toBeVisible();
   } finally {
     await browser.close();
   }
@@ -1395,10 +1395,10 @@ for (const width of [1100, 1440])
       // The one search field finds every kind, in one ranked row, typos forgiven: "sweidsh" is Swedish.
       await input(page).fill('sweidsh');
       const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
-      await expect(browse.getByRole('button').first()).toHaveText('Swedish · language');
+      await expect(browse.getByRole('link').first()).toHaveText('Swedish · language');
       expect(await sideways()).toEqual([0, 0]);
       await input(page).fill('90s');
-      await browse.getByRole('button', { name: '1990s · decade' }).click();
+      await browse.getByRole('link', { name: '1990s · decade' }).click();
       await expect(page).toHaveURL(/\/search\?c=decade-1990$/);
       await expect(
         active(page).getByRole('heading', { name: 'Explore', exact: true }),
@@ -1443,7 +1443,7 @@ test('on a phone, More… opens every category in a sheet', async () => {
     const recipes = sheet.getByRole('group', { name: 'Recipes' });
     await recipes.getByRole('button', { name: 'All Recipes' }).click();
     await expect(recipes.getByRole('button', { name: 'All Recipes' })).toHaveCount(0);
-    await recipes.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
+    await recipes.getByRole('link', { name: 'Nordic Noir', exact: true }).click();
     await expect(sheet).toBeHidden();
     await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
@@ -1473,15 +1473,15 @@ test('the Browse row: the whole query first, fewer for long queries, a pick repl
 
     // A short form counts in full: "uk" is the United Kingdom, first, its name a little heavier.
     await input(page).fill('uk');
-    const first = browse.getByRole('button').first();
+    const first = browse.getByRole('link').first();
     await expect(first).toHaveText('United Kingdom · country');
     await expect(first).toHaveClass(/exact/);
     // Two letters already offer something, more than a handful.
     await input(page).fill('dr');
-    await expect.poll(() => browse.getByRole('button').count()).toBeGreaterThan(6);
+    await expect.poll(() => browse.getByRole('link').count()).toBeGreaterThan(6);
     // Three words or more: likelier a title, so only the closest three.
     await input(page).fill('slow burn bleak thriller');
-    await expect.poll(() => browse.getByRole('button').count()).toBeLessThanOrEqual(3);
+    await expect.poll(() => browse.getByRole('link').count()).toBeLessThanOrEqual(3);
 
     // Enter searches the text; it never turns into a facet.
     await input(page).fill('sweden');
@@ -1490,7 +1490,7 @@ test('the Browse row: the whole query first, fewer for long queries, a pick repl
     await expect(heading('Search')).toBeVisible();
 
     // Picking from the row turns the query into that pill, and Back brings the query back.
-    await browse.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    await browse.getByRole('link', { name: 'Sweden · country', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?c=country-SE$/);
     await expect(input(page)).toHaveValue('');
     await expect(heading('Explore')).toBeVisible();
@@ -1516,10 +1516,10 @@ test('the whole-query match is not drawn as picked: it looks like its siblings u
     await openSearch(page, 1280);
     await input(page).fill('swedish');
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
-    const sweden = browse.getByRole('button', { name: 'Sweden · country', exact: true });
+    const sweden = browse.getByRole('link', { name: 'Sweden · country', exact: true });
     await expect(sweden).toBeVisible();
     // The first chip is the one drawn as the query's whole name.
-    const first = browse.getByRole('button').first();
+    const first = browse.getByRole('link').first();
     await expect(first).toHaveClass(/exact/);
 
     // No picked semantics, and nothing a pick wears: the same border, fill and colour as the chips beside it.
@@ -1532,8 +1532,8 @@ test('the whole-query match is not drawn as picked: it looks like its siblings u
       await expect(chip).not.toHaveAttribute('aria-pressed', /.*/);
       await expect(chip).not.toHaveAttribute('aria-selected', /.*/);
     }
-    expect(await look(first)).toEqual(await look(browse.getByRole('button').nth(1)));
-    expect(await look(sweden)).toEqual(await look(browse.getByRole('button').last()));
+    expect(await look(first)).toEqual(await look(browse.getByRole('link').nth(1)));
+    expect(await look(sweden)).toEqual(await look(browse.getByRole('link').last()));
     const picks = active(page).getByRole('group', { name: 'Selected' });
     await expect(picks).toHaveCount(0);
 
@@ -1545,7 +1545,7 @@ test('the whole-query match is not drawn as picked: it looks like its siblings u
       active(page)
         .getByRole('navigation', { name: 'Browse by category' })
         .getByRole('group', { name: 'Countries' })
-        .getByRole('button', { name: 'Sweden', exact: true }),
+        .getByRole('link', { name: 'Sweden', exact: true }),
     ).toHaveCount(0);
   } finally {
     await browser.close();
@@ -1585,7 +1585,7 @@ test('while typing, picks that can’t apply stay shown, paused; results come be
     await input(page).focus();
     await input(page).press('ArrowDown');
     await expect(
-      active(page).getByRole('group', { name: 'Browse', exact: true }).getByRole('button').first(),
+      active(page).getByRole('group', { name: 'Browse', exact: true }).getByRole('link').first(),
     ).toBeFocused();
   } finally {
     await browser.close();

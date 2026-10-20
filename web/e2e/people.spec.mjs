@@ -134,7 +134,7 @@ test('People lists who atlas credits, a role narrows it in the address, and Back
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     await rail
       .getByRole('group', { name: 'Role' })
-      .getByRole('button', { name: 'Directors', exact: true })
+      .getByRole('link', { name: 'Directors', exact: true })
       .click();
     await expect(page).toHaveURL(/\/people\?t=role-director$/);
     await expect(card('Cid Director')).toBeVisible();
@@ -192,7 +192,7 @@ test('The Explore and People headings link each other, carrying the type and the
     await active(page)
       .getByRole('navigation', { name: 'Browse by category' })
       .getByRole('group', { name: 'Role' })
-      .getByRole('button', { name: 'Directors', exact: true })
+      .getByRole('link', { name: 'Directors', exact: true })
       .click();
     await expect(page).toHaveURL(/\/people\?type=tv&c=genre-18&t=role-director$/);
     await active(page)
@@ -231,11 +231,11 @@ test('On People the bar’s field offers people facets and people by name, and a
     await expect(page).toHaveURL(/\/people\?q=act&type=movie$/);
 
     const browse = view.getByRole('group', { name: 'Browse' });
-    const actors = browse.getByRole('button', { name: 'Actors · role' });
+    const actors = browse.getByRole('link', { name: 'Actors · role' });
     await expect(actors).toBeVisible();
-    await expect(browse.getByRole('button', { name: 'Actor · occupation' })).toBeVisible();
+    await expect(browse.getByRole('link', { name: 'Actor · occupation' })).toBeVisible();
     // Not a title facet atlas counts no titles for (Action, beside the mock's dramas only).
-    await expect(browse.getByRole('button', { name: /^Action · / })).toHaveCount(0);
+    await expect(browse.getByRole('link', { name: /^Action · / })).toHaveCount(0);
     // And the person the text names, opening their page.
     const ann = view.getByRole('region', { name: 'People by that name' }).getByRole('link', {
       name: /^Ann Actor/,
@@ -284,12 +284,12 @@ test('A second value of one kind is either-or, on People and on Explore', async 
       active(page)
         .getByRole('navigation', { name: 'Browse by category' })
         .getByRole('group', { name: 'Role' });
-    await roles().getByRole('button', { name: 'Actors', exact: true }).click();
+    await roles().getByRole('link', { name: 'Actors', exact: true }).click();
     await expect(page).toHaveURL(/\/people\?t=role-cast$/);
     await expect
       .poll(() => asked)
       .toContain('/index/filter/all/people/counts.json?traits=role:cast');
-    await roles().getByRole('button', { name: 'Directors', exact: true }).click();
+    await roles().getByRole('link', { name: 'Directors', exact: true }).click();
     await expect(page).toHaveURL(/\/people\?t=role-cast,role-director$/);
     await expect
       .poll(() => asked)
@@ -303,7 +303,7 @@ test('A second value of one kind is either-or, on People and on Explore', async 
     const genres = active(page)
       .getByRole('navigation', { name: 'Browse by category' })
       .getByRole('group', { name: 'Genres' });
-    await genres.getByRole('button', { name: 'Comedy', exact: true }).click();
+    await genres.getByRole('link', { name: 'Comedy', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-18,genre-35$/);
     await expect.poll(() => asked).toContain('/index/filter/series/titles.json?sel=genre:18|35');
     await expect(active(page).getByRole('group', { name: 'Selected' })).toContainText(

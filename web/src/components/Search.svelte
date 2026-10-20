@@ -317,10 +317,18 @@
    * query's place — a new entry, so Back returns to the search.
    */
   function pick(id: string, keepQuery = typing && slotOf(id) === 'genre') {
+    const { href, note } = picking(id, keepQuery);
+    status = note;
+    navigate(href);
+  }
+  /** Where picking `id` leads, and what the status line then says gave way to it. */
+  function picking(id: string, keepQuery = typing && slotOf(id) === 'genre') {
     const { set, removed } = applyPick(selection, id, exploreType, filtered);
     const label = known.find((c) => c.id === id)?.label ?? '';
-    status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-    go({ type: explore.type, chips: set }, keepQuery ? query : '');
+    return {
+      href: searchHref(keepQuery ? query : '', { type: explore.type, chips: set }),
+      note: removed.length ? `${label} replaced ${names(removed)}.` : '',
+    };
   }
 
   /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
@@ -485,10 +493,10 @@
     };
   });
 
-  /** A typeahead's pick: its name is kept, for its pill, as a "Like"'s is. */
+  /** A typeahead's pick, followed: its name is kept, for its pill, as a "Like"'s is. */
   function pickFound(chip: Chip) {
     if (chip.group === 'people' || chip.group === 'character') named[chip.id] = chip;
-    pick(chip.id, false);
+    status = picking(chip.id, false).note;
   }
   /**
    * Options not worth offering: any that can't stand beside the selection, and any that would show nothing beside
@@ -551,7 +559,8 @@
       selected={shownSelection}
       {hidden}
       {typing}
-      onchange={(id) => pick(id)}
+      href={(id) => picking(id).href}
+      onchange={(id) => (status = picking(id).note)}
     />
   </div>
 {/snippet}
@@ -587,7 +596,12 @@
       <p class="status" role="status">{[status, scope, split].filter(Boolean).join(' ')}</p>
       {#if typing}
         <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->
-        <FacetSuggestions chips={browse} {query} onpick={pickFound} />
+        <FacetSuggestions
+          chips={browse}
+          {query}
+          href={(chip) => picking(chip.id, false).href}
+          onpick={pickFound}
+        />
         {#if hits === null}
           <Loading label="Searching" />
         {:else if typedHits.length}
@@ -604,9 +618,7 @@
           <div class="prompts" role="group" aria-label="Try describing it">
             <span class="try">Try describing it</span>
             {#each PROMPTS as prompt (prompt)}
-              <button type="button" onclick={() => go({ type: explore.type }, prompt)}
-                >“{prompt}”</button
-              >
+              <a href={searchHref(prompt, { type: explore.type })}>“{prompt}”</a>
             {/each}
           </div>
         {/if}
@@ -732,30 +744,34 @@
       display: none;
     }
 
-    .prompts button {
+    .prompts a {
       flex-shrink: 0;
       white-space: nowrap;
     }
   }
 
-  .prompts button {
+  /* Each a link to its search, its line centred by its line height: the pill's height less its border. */
+  .prompts a {
+    display: inline-block;
     min-height: 30px;
     padding: 0 10px;
     border: 1px dashed var(--line);
     border-radius: 999px;
     background: transparent;
     color: var(--fg);
-    font: inherit;
     font-size: 14px;
+    line-height: 28px;
+    text-align: center;
+    text-decoration: none;
     cursor: pointer;
   }
 
-  .prompts button:hover {
+  .prompts a:hover {
     border-color: var(--muted);
   }
 
   /* Inset: on a phone this row scrolls sideways, and would clip a ring drawn outside it. */
-  .prompts button:focus-visible {
+  .prompts a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }

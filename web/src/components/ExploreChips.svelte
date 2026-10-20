@@ -54,11 +54,14 @@
 </script>
 
 <script lang="ts">
+  import { navigate } from '../lib/navigation';
+
   let {
     chips,
     selected,
     hidden = () => false,
     typing = false,
+    href,
     onchange,
     sections: order = SECTIONS,
     strip = STRIP_KINDS,
@@ -71,7 +74,12 @@
     typing?: boolean;
     /** An option that can't be added to the selection, or would show nothing beside it. */
     hidden?: (id: string) => boolean;
-    /** A chip picked or taken out: its id either way. */
+    /**
+     * Where picking a chip leads: the page with it picked, or taken out. Each chip is a link there, so it opens in a new
+     * tab like any other link; a plain click is the Router's, which follows it in place (`Router.svelte`).
+     */
+    href: (id: string) => string;
+    /** A chip followed with a plain click, just before its link is: what the page has to say about the pick. */
     onchange: (id: string) => void;
     /** The sections, in order, with their headings: Explore's by default. */
     sections?: [ChipGroup, string][];
@@ -155,9 +163,23 @@
     if (entry) closeSheet();
   }
 
-  function choose(id: string) {
-    if (sheet?.open) closeSheet(() => onchange(id));
-    else onchange(id);
+  /**
+   * A plain click. Out of the sheet its link is the Router's to follow. In it, the sheet's own history entry has to go
+   * first, or Back would land on it, so the link is followed once that entry is gone.
+   */
+  function choose(event: MouseEvent, id: string) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    if (!sheet?.open) {
+      onchange(id);
+      return;
+    }
+    event.preventDefault();
+    const to = href(id);
+    closeSheet(() => {
+      onchange(id);
+      navigate(to);
+    });
   }
 
   /**
@@ -195,12 +217,12 @@
 </script>
 
 {#snippet chip(item: Chip)}
-  <button
-    type="button"
+  <a
     class="chip"
-    aria-pressed={item.group === 'for-you' && !typing && selected.length === 0}
+    href={href(item.id)}
+    aria-current={item.group === 'for-you' && !typing && selected.length === 0 ? 'page' : undefined}
     data-chip={item.id}
-    onclick={() => choose(item.id)}>{item.label}</button
+    onclick={(event) => choose(event, item.id)}>{item.label}</a
   >
 {/snippet}
 
@@ -280,7 +302,10 @@
 </dialog>
 
 <style>
+  /* A chip is a link, and a link centres its line by its line height, not as a button does: each `line-height` here is
+     the chip's height less its border, so links and the buttons among them (More…, All ›) stand the same. */
   .chip {
+    display: inline-block;
     flex-shrink: 0;
     min-height: 34px;
     padding: 0 14px;
@@ -291,6 +316,8 @@
     font: inherit;
     font-size: 14px;
     font-weight: 600;
+    line-height: 32px;
+    text-decoration: none;
     white-space: nowrap;
     cursor: pointer;
   }
@@ -299,7 +326,7 @@
     color: var(--fg);
   }
 
-  .chip[aria-pressed='true'] {
+  .chip[aria-current='page'] {
     border-color: transparent;
     background: var(--fg);
     color: var(--bg);
@@ -311,7 +338,8 @@
   }
 
   /* Inset, so no scrolling parent — the rail, the strip, the sheet — clips the ring. */
-  button:focus-visible {
+  button:focus-visible,
+  a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
@@ -406,6 +434,7 @@
       border: 0;
       border-radius: 8px;
       background: transparent;
+      line-height: 32px;
       text-align: left;
       text-overflow: ellipsis;
     }
@@ -414,7 +443,7 @@
       background: rgb(255 255 255 / 0.06);
     }
 
-    .rail .chip[aria-pressed='true'] {
+    .rail .chip[aria-current='page'] {
       background: rgb(255 255 255 / 0.14);
       color: var(--fg);
     }
@@ -539,9 +568,10 @@
     border: 0;
     background: rgb(255 255 255 / 0.06);
     font-weight: 500;
+    line-height: 34px;
   }
 
-  .sheet .chip[aria-pressed='true'] {
+  .sheet .chip[aria-current='page'] {
     background: rgb(255 255 255 / 0.16);
     color: var(--fg);
   }
