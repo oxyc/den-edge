@@ -12,7 +12,6 @@
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
-  import { thisDevice } from './lib/device.svelte';
   import { flushSync, onDestroy } from 'svelte';
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
