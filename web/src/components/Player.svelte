@@ -99,7 +99,7 @@
   import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
-  import { startPlayback, type PlaybackCause } from '../lib/playback';
+  import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import {
     activeAt,
@@ -454,10 +454,22 @@
   // $state: a notice of a switch under way stays up until it lands, and only then starts to fade.
   let switching = $state(false);
   /**
-   * Whether this viewer's Hearth delivers TorBox: a TorBox stream played here this visit, or Hearth tried TorBox first
-   * and fell back to Remux for a reason that may pass (`directFailure`). Only then does the stamp offer TorBox.
+   * What the stamp says of TorBox while Den Remux plays. `offered`: a TorBox stream played here this visit, or Hearth
+   * tried TorBox first and fell back for a reason that may pass (`directFailure`). `untried`: nothing says either way
+   * — this page itself asked for Den Remux (a subtitle the system player shows only from a playlist, a track, a
+   * release left out), so Hearth never tried TorBox, and the switch is how to find out. Otherwise, why TorBox can't
+   * play here: the stamp shows its switch disabled, with that reason.
    */
-  let torboxOffered = $state(false);
+  let torbox = $state<'offered' | 'untried' | { unavailable: string }>('untried');
+
+  /** Why TorBox can't play here, for a cause Hearth gave that will not pass by trying again; else undefined. */
+  function torboxRuledOut(cause: string | undefined): string | undefined {
+    if (cause === 'torbox_authentication_failed') return 'TorBox refused this Hearth’s TorBox key';
+    if (cause === 'torbox_managed_streaming_unavailable_for_plan')
+      return 'This TorBox plan doesn’t include streaming';
+    return undefined;
+  }
+  const NO_TORBOX = 'This Hearth has no TorBox to play from';
   /** Set while the stamp's switch to the other path is under way (`switchDelivery`). */
   let deliverySwitching = $state(false);
 
@@ -786,24 +798,28 @@
       noHint: _noHint,
       ...fields
     } = request;
+    const asked: PlaybackWant = {
+      ...fields,
+      // Browser-local subtitle blobs cannot reach a Cast receiver, nor the system player WebKit plays its own
+      // HLS in (`subtitlesNeedPlaylist`). This direct capability is unsuitable in exactly the same way as a
+      // failed direct load, so Hearth chooses its caption-carrying fallback.
+      ...(delivery === 'fallback' ||
+      (castMode && subtitleChoice) ||
+      (delivery !== 'direct' && subtitleWanted && subtitlesNeedPlaylist())
+        ? { directFailed: true }
+        : {}),
+      ...(delivery === 'direct' ? { directOnly: true } : {}),
+    };
+    // Whether Hearth tries TorBox first for this request: one that rules it out goes straight to Remux (den-hearth
+    // `managed_request`), and its Remux answer says nothing of whether TorBox is there.
+    const torboxTried =
+      !!playback &&
+      !asked.directFailed &&
+      asked.audioTrack === undefined &&
+      asked.replaces === undefined &&
+      !asked.exclude?.length;
     let result = playback
-      ? await startPlayback(
-          playback,
-          {
-            ...fields,
-            // Browser-local subtitle blobs cannot reach a Cast receiver, nor the system player WebKit plays its own
-            // HLS in (`subtitlesNeedPlaylist`). This direct capability is unsuitable in exactly the same way as a
-            // failed direct load, so Hearth chooses its caption-carrying fallback.
-            ...(delivery === 'fallback' ||
-            (castMode && subtitleChoice) ||
-            (delivery !== 'direct' && subtitleWanted && subtitlesNeedPlaylist())
-              ? { directFailed: true }
-              : {}),
-            ...(delivery === 'direct' ? { directOnly: true } : {}),
-          },
-          undefined,
-          attempt.signal,
-        )
+      ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
     // Hearth and Edge have independent default-off gates. Preserve legacy playback until both are enabled. Legacy
     // playback is Remux, which a request for TorBox alone never takes.
@@ -862,9 +878,17 @@
       if (replacing) {
         // A failed external session is kept only long enough for `broke` to judge recovery; unlike an ordinary
         // Remux track/release change, it does not carry on. Keep the two log messages truthful and URL-free.
-        if (delivery === 'direct')
+        if (delivery === 'direct') {
           console.warn(`TorBox could not start (${result.failure}); Den Remux carries on.`);
-        else if (replacing.external)
+          // Refused with no TorBox failure behind it: Hearth had no TorBox to try (den-hearth answers
+          // `direct_unavailable` bare then). A cause that won't pass rules it out as well; any other may.
+          const why =
+            torboxRuledOut(cause) ??
+            ('code' in result && result.code === 'direct_unavailable' && !cause
+              ? NO_TORBOX
+              : undefined);
+          if (why) torbox = { unavailable: why };
+        } else if (replacing.external)
           console.warn(`Managed direct media recovery failed (${result.failure}).`);
         else
           console.warn(
@@ -946,13 +970,13 @@
         ? 'initial'
         : 'refreshed'
       : null;
-    if (
-      result.external ||
-      (result.directFailure &&
-        result.directFailure !== 'torbox_authentication_failed' &&
-        result.directFailure !== 'torbox_managed_streaming_unavailable_for_plan')
-    )
-      torboxOffered = true;
+    if (result.external) torbox = 'offered';
+    else if (result.directFailure) {
+      const why = torboxRuledOut(result.directFailure);
+      torbox = why ? { unavailable: why } : 'offered';
+    }
+    // Hearth would have tried TorBox first, and answered Remux without a word of one that failed: it has none.
+    else if (torboxTried && torbox !== 'offered') torbox = { unavailable: NO_TORBOX };
     sessionRoute = on;
     // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
     // page's `den-lan` has it.
@@ -2708,14 +2732,22 @@
     <b>{heading}</b>
     {#if session}
       <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
-           Remux session. Where this viewer's Hearth offers both, it opens a menu saying so, with the switch to the
-           other in it: a stream restarts only on that choice, never on a press of the stamp itself. -->
+           Remux session. Wherever Hearth chooses the path it opens a menu saying so, with the switch to the other in
+           it — disabled, and the note saying why, where TorBox can't play here: a stream restarts only on that choice,
+           never on a press of the stamp itself. -->
       {@const source = session.external ? 'TorBox' : 'Den Remux'}
-      {#if !casting && (session.external || torboxOffered)}
+      {#if !casting && playback}
         {@const external = session.external}
+        {@const ruledOut = !external && typeof torbox === 'object' ? torbox.unavailable : undefined}
+        <!-- The system player shows only a playlist's subtitles, and TorBox's names none: the switch turns one off. -->
+        {@const dropsSubtitle = !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
         <ActionMenu
           label={`Playing from ${source}`}
-          note={external ? 'Playing directly from TorBox' : 'Playing through Den Remux'}
+          note={external
+            ? 'Playing directly from TorBox'
+            : ruledOut
+              ? `Playing through Den Remux. ${ruledOut}.`
+              : 'Playing through Den Remux'}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
           items={() => [
             {
@@ -2723,9 +2755,18 @@
               label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
               description: external
                 ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
-                : 'Straight from the source, no conversion',
-              disabled: deliverySwitching || switching,
-              onselect: () => switchDelivery(),
+                : ruledOut
+                  ? undefined
+                  : dropsSubtitle
+                    ? 'Turns subtitles off: this player shows only Den Remux’s'
+                    : 'Straight from the source, no conversion',
+              disabled: !!ruledOut || deliverySwitching || switching,
+              onselect: () => {
+                if (!dropsSubtitle) return switchDelivery();
+                const previous = subtitleChoice;
+                subtitleChoice = null;
+                switchDelivery(() => (subtitleChoice = previous));
+              },
             },
           ]}
         >

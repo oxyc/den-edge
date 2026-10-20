@@ -395,13 +395,18 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
   }
 });
 
-test('a viewer whose Hearth has only Remux gets a plain stamp, not a switch', async () => {
+test('a viewer whose Hearth has only Remux gets the switch disabled, and the reason', async () => {
   const { browser, page, asked } = await open({ answer: remuxAnswer, home: true });
   try {
     await playingPast(pageVideo(page), 3);
     await stamped(page, 'Den Remux');
-    await expect(page.getByTestId('playback-source')).not.toHaveRole('button');
-    await expect(page.getByRole('button', { name: /^Playing from/ })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Playing from Den Remux' }).click();
+    const menu = page.getByRole('menu', { name: 'Playing from Den Remux' });
+    await expect(menu).toContainText('This Hearth has no TorBox to play from');
+    await expect(menu.getByRole('menuitem', { name: 'Switch to TorBox' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
     expect(asked.playback).toHaveLength(1);
   } finally {
     await browser.close();
