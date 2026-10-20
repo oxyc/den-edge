@@ -16,6 +16,81 @@ afterEach(() => {
 });
 
 describe('directSubtitles', () => {
+  it('loads an indexed built-in sidecar without needing an OpenSubtitles list', async () => {
+    const token = 'a'.repeat(43);
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) =>
+      String(input).endsWith('/cast-subtitle') && init?.method === 'POST'
+        ? new Response(null, { status: 503 })
+        : new Response('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n'),
+    );
+    const found = await directSubtitles(
+      '/den/config/playback',
+      { imdb: 'tt0111161', subtitleLanguages: [] },
+      release,
+      fetchImpl,
+      undefined,
+      [
+        {
+          value: 'torbox-sidecar:1',
+          language: 'eng',
+          name: 'English',
+          description: 'Built-in · SUBRIP',
+          source: 'built-in',
+          delivery: 'sidecar',
+          fallbackTorboxTrack: 1,
+          url: `https://den.example/den/_sidecar/${token}/1.vtt`,
+        },
+      ],
+    );
+
+    expect(found?.subtitles).toEqual([
+      expect.objectContaining({
+        value: 'torbox-sidecar:1',
+        source: 'built-in',
+        fallbackTorboxTrack: 1,
+      }),
+    ]);
+    await expect(found?.load('torbox-sidecar:1')).resolves.toMatchObject({
+      value: 'torbox-sidecar:1',
+      language: 'eng',
+      url: 'blob:subtitle-1',
+    });
+    expect(fetchImpl.mock.calls[0]![0]).toBe(`https://den.example/den/_sidecar/${token}/1.vtt`);
+    found?.dispose();
+  });
+
+  it('keeps indexed built-ins when the optional OpenSubtitles list is malformed', async () => {
+    const token = 'b'.repeat(43);
+    const fetchImpl = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes('/subtitles/')
+        ? new Response('{broken json')
+        : new Response('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n'),
+    );
+    const found = await directSubtitles(
+      '/den/config/playback',
+      { imdb: 'tt0111161', subtitleLanguages: ['en'] },
+      release,
+      fetchImpl,
+      undefined,
+      [
+        {
+          value: 'torbox-sidecar:1',
+          language: 'en',
+          name: 'English',
+          source: 'built-in',
+          delivery: 'sidecar',
+          fallbackTorboxTrack: 1,
+          url: `/den/_sidecar/${token}/1.vtt`,
+        },
+      ],
+    );
+    expect(found?.subtitles).toEqual([
+      expect.objectContaining({ value: 'torbox-sidecar:1', source: 'built-in' }),
+    ]);
+    await expect(found?.load('torbox-sidecar:1')).resolves.toMatchObject({ language: 'en' });
+    found?.dispose();
+  });
+
   it('lists every ranked candidate by preferred language, then lazily owns only chosen blobs', async () => {
     const bodies = new Map([
       [

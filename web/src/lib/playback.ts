@@ -97,6 +97,19 @@ function origin(value: unknown): string | undefined {
   return url.pathname === '/' && !url.search && !url.hash ? url.origin : undefined;
 }
 
+function sidecarHref(value: unknown): string | undefined {
+  const absolute = href(value);
+  if (!absolute) return undefined;
+  const url = new URL(absolute);
+  const here = new URL(
+    __DEN_TV_PACKAGED__ ? `${apiOrigin()}/` : (globalThis.location?.href ?? 'https://den.invalid/'),
+  );
+  return url.origin === here.origin &&
+    /^\/den\/(?:~[0-9a-f]{8}\/)?_sidecar\/[A-Za-z0-9_-]{43}\/\d+\.vtt$/.test(url.pathname)
+    ? url.href
+    : undefined;
+}
+
 function releaseOf(value: unknown): Session['release'] | null {
   const release = record(value);
   const label = text(release?.label);
@@ -151,7 +164,16 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
           const name = text(track?.name);
           const valueName = text(track?.value);
           const torboxTrack = number(track?.torboxTrack);
-          if (!language || !name || !valueName || torboxTrack === undefined || torboxTrack < 0)
+          const url = sidecarHref(track?.url);
+          const delivery = text(track?.delivery);
+          const fallbackTorboxTrack = number(track?.fallbackTorboxTrack);
+          const sidecar = delivery === 'sidecar' && !!url;
+          if (
+            !language ||
+            !name ||
+            !valueName ||
+            (!sidecar && (torboxTrack === undefined || torboxTrack < 0))
+          )
             return [];
           return [
             {
@@ -160,7 +182,15 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
               name,
               description: text(track?.description),
               source: 'built-in',
-              torboxTrack,
+              ...(sidecar
+                ? {
+                    url,
+                    delivery: 'sidecar' as const,
+                    ...(fallbackTorboxTrack !== undefined && fallbackTorboxTrack >= 0
+                      ? { fallbackTorboxTrack }
+                      : {}),
+                  }
+                : { torboxTrack, delivery: 'torbox' as const }),
             },
           ];
         })
@@ -353,9 +383,20 @@ export async function startPlayback(
           (want.player !== 'native' &&
             session.subtitles?.some((track) => track.source === 'built-in'))
         ) {
-          const external = await directSubtitles(url, want, session.release, fetchImpl, signal);
+          const directTracks = session.subtitles ?? [];
+          const external = await directSubtitles(
+            url,
+            want,
+            session.release,
+            fetchImpl,
+            signal,
+            directTracks,
+          );
           if (external) {
-            session.subtitles = [...(session.subtitles ?? []), ...external.subtitles];
+            session.subtitles = [
+              ...directTracks.filter((track) => track.delivery !== 'sidecar'),
+              ...external.subtitles,
+            ];
             session.externalSubtitles = external.tracks;
             session.loadExternalSubtitle = external.load;
             session.subtitleSource = 'den_subtitles';

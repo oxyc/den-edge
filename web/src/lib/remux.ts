@@ -98,6 +98,11 @@ export interface Session {
     description?: string;
     /** Where this concrete picker row gets its cues. */
     source?: 'built-in' | 'opensubtitles';
+    /** A complete VTT capability that can be switched without replacing the video stream. */
+    url?: string;
+    delivery?: 'sidecar' | 'torbox';
+    /** Burn-in fallback when this sidecar cannot be fetched or rendered. */
+    fallbackTorboxTrack?: number;
     /** TorBox's embedded stream index; selecting it creates another direct TorBox playlist. */
     torboxTrack?: number;
   }[];

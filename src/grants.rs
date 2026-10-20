@@ -1611,7 +1611,12 @@ pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
             (read && matches!(rest, "/configure" | "/configure/" | "/config-key" | "/manifest.json"))
                 || (matches!(*method, Method::POST | Method::OPTIONS) && rest == "/playback")
                 || (*method == Method::POST && matches!(rest, "/availability" | "/validate"))
-                || (read && (under("/stream") || under("/subtitle") || under("/subtitles") || under("/meta")))
+                || (read
+                    && (under("/stream")
+                        || under("/subtitle")
+                        || under("/subtitles")
+                        || under("/_sidecar")
+                        || under("/meta")))
         }
         "scout" => *method == Method::POST && rest == "/availability",
         "atlas" => {
