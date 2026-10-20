@@ -162,7 +162,8 @@ async fn serve_file(
                 if let Some(origin) = state.tv_api_origin.as_ref().filter(|origin| !kept.contains(origin)) {
                     kept.push(origin.clone());
                 }
-                if let Some(origin) = state.tv_service_origin.as_ref().filter(|origin| !kept.contains(origin)) {
+                if let Some(origin) = state.tv_service_origin.as_ref().filter(|origin| !kept.contains(origin))
+                {
                     kept.push(origin.clone());
                 }
             }
