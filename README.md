@@ -10,6 +10,8 @@ and the rest is small JSON it validates and bounds.
 See [Architecture](ARCHITECTURE.md) for the current request and storage flows and
 [Performance](PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
 See [TV installation](docs/tv-install.md) to install release builds on LG webOS or Samsung Tizen TVs.
+Samsung sideloaded apps have no recurring expiry and normally survive reboots; a major TV firmware update can
+occasionally require reinstalling them.
 
 ## Routes
 

@@ -154,8 +154,8 @@ USB widget installation is not supported.
   without reinstalling, but **TV UI changes require installing the current `.wgt`**.
 - Keep Apps2Samsung's data or export its backup. Samsung requires an update to use the same author certificate as the
   installed app; the distributor certificate must be valid and include this TV's DUID.
-- There is no LG-style 999-hour app-removal timer documented for this Samsung flow. Developer Mode and a reachable TV
-  are needed when installing an update; the installer runs the installation-permit command each time.
+- Samsung sideloaded apps have no recurring expiry and normally survive reboots. A major TV firmware update can
+  occasionally remove one; enable Developer Mode and install it again if that happens.
 
 Samsung references: [connect a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html),
 [create and preserve certificates](https://developer.samsung.com/smarttv/develop/getting-started/setting-up-sdk/creating-certificates.html),
