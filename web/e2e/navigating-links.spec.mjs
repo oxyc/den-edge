@@ -2,8 +2,8 @@
 // Explore chip, a Browse-row suggestion, a "Try describing it" prompt and a poster menu's More like this. Each carries
 // the address it leads to; a Ctrl/Cmd-click opens that address in a new tab and leaves this page where it is; a plain
 // click stays in the app — the chips, suggestion, prompt and menu item are followed in place by the Router, with no
-// reload, and an episode row does what it always did rather than move the page. An episode's own address opens its
-// season with it scrolled into view and briefly marked. At phone and desktop widths, in Chromium and WebKit.
+// reload, and an episode row starts playback without moving the detail route. A non-playing episode address opens
+// its season with it scrolled into view and briefly marked. At phone and desktop widths, in Chromium and WebKit.
 import { test, expect, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
@@ -103,7 +103,7 @@ const KINDS = [
       await row.scrollIntoViewIfNeeded();
       return row;
     },
-    href: `${PAGE}?season=2&episode=3`,
+    href: `${PAGE}?season=2&episode=3&play=1`,
     // A plain click plays, as it always has (a guest has nothing to play it with): the page does not move.
     after: `${PAGE}?season=2`,
   },
