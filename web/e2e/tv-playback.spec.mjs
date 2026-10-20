@@ -204,6 +204,10 @@ async function remoteKeyBurst(page, key, keyCode, count) {
 test('webOS native playback does not wait on its advertised but silent frame callback', async ({
   page,
 }) => {
+  test.skip(
+    process.env.DEN_TV_PLATFORM === 'tizen',
+    'Tizen uses AVPlay; its readiness boundary is covered by tv-avplay.spec.mjs.',
+  );
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'userAgent', {
       configurable: true,
