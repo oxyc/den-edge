@@ -366,6 +366,36 @@
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
 
+  /**
+   * A mounted player is still a place the browser can restore.
+   *
+   * Playback controls are real links so modified clicks already open the exact title, episode and source in a new
+   * tab. A plain click is enhanced in place, however, and used to leave the address on the detail page. Refreshing
+   * then lost the player entirely. Keep the fast mounted-player path, but commit the link's same address first.
+   */
+  function playerAddress(target: Target, replace = false) {
+    const addressed =
+      route.page === 'title' &&
+      route.type === target.title.type &&
+      route.id === target.title.id &&
+      route.play === true &&
+      route.season === target.season &&
+      route.episode === target.episode &&
+      route.filename === target.filename;
+    if (!addressed)
+      navigate(
+        titleHref({
+          ...target.title,
+          season: target.season,
+          episode: target.episode,
+          filename: target.filename,
+          play: true,
+        }),
+        replace,
+      );
+    playing = target;
+  }
+
   /** Feedback after a "Play on TV" press (den-edge#235): drives `session.notify` on its own; fed live positions
    * below, as the library pull sees them. The parent keys this whole tree by `session`, so it is fixed for this
    * component's life, same as `discovered` above. */
@@ -867,9 +897,9 @@
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
-            playing = { title, ...(up ?? { season: 1, episode: 1 }) };
+            playerAddress({ title, ...(up ?? { season: 1, episode: 1 }) });
           } else {
-            playing = { title, season, episode, filename };
+            playerAddress({ title, season, episode, filename });
           }
         }
       : undefined,
@@ -1009,7 +1039,9 @@
       session.notify(blocked);
       return;
     }
-    playing = next;
+    // Advancing is one continuing player session, not another detail visit. Rewrite its address so Refresh resumes
+    // the episode now on screen without adding one history entry for every automatic advance.
+    playerAddress(next, true);
   }
 
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
