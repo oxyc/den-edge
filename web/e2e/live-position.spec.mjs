@@ -312,6 +312,7 @@ test('a series’ page says which device plays which episode, and moves nothing 
     await expect(clock).toHaveText(/^1\d:\d\d$/, { timeout: 40_000 });
     await expect(label).toHaveText('Playing on Apple TV');
     await expect(block.locator('small')).toHaveText('S1 · E3');
+    await expect(block).toHaveAttribute('href', /season=1&episode=3&play=1$/);
     expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
     const samples = await watch(clock, 15_000);
     expect(samples.filter((text) => text === null)).toEqual([]);
