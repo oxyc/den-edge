@@ -297,14 +297,20 @@ jobs:
           cp tv-packaging/install-webos.sh tv-release/den-tv-webos/install.sh
           tar -C tv-release -czf den-tv-webos.tar.gz den-tv-webos
 
-          DEN_TV_PACKAGED=1 npm run build:tv:tizen
-          node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+          DEN_TIZEN_VERSION=8.0 DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          DEN_TIZEN_VERSION=8.0 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
             --version "1.0.${TIZEN_BUILD}"
-          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen.wgt
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen8.wgt
+          cp den-tv-tizen8.wgt den-tv-tizen.wgt
           mkdir -p tv-release/den-tv-tizen
           mv tv-packages/tizen/shell tv-release/den-tv-tizen/app
           cp tv-packaging/install-tizen.sh tv-release/den-tv-tizen/install.sh
           tar -C tv-release -czf den-tv-tizen-unsigned.tar.gz den-tv-tizen
+
+          DEN_TIZEN_VERSION=6.5 DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          DEN_TIZEN_VERSION=6.5 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+            --version "1.0.${TIZEN_BUILD}"
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen6.5.wgt
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -349,4 +355,5 @@ jobs:
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$REPO" --title "Den Edge $VERSION" --generate-notes
           gh release upload "$TAG" --repo "$REPO" --clobber \
-            den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen-unsigned.tar.gz
+            den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-tizen-unsigned.tar.gz
