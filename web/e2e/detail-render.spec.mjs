@@ -189,7 +189,7 @@ for (const width of [393, 700, 759, 760, 844, 1280])
       deferred = next;
     }
     expect(deferred).toBe(0);
-    await expect(page.getByRole('button', { name: 'Play episode 50: Episode 50' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Play episode 50: Episode 50' })).toBeVisible();
     const completeHeight = await page.evaluate(() => document.documentElement.scrollHeight);
     expect(Math.abs(completeHeight - reservedHeight)).toBeLessThanOrEqual(2);
   });

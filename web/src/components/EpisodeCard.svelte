@@ -16,6 +16,9 @@
   import type { Episode } from '../lib/detail';
   let {
     episode,
+    href,
+    addressed = false,
+    onaddressed,
     progress,
     busy,
     deferred = false,
@@ -28,6 +31,14 @@
     downloadState,
   }: {
     episode: Episode;
+    /**
+     * The episode's own address (`?season=2&episode=3`). The row is a link to it, so a modified or middle click, a
+     * right-click or a long press opens it like any other link; a plain click or Enter plays it, as it always has.
+     */
+    href: string;
+    /** The address just brought this episode into view: it is marked, briefly, and `onaddressed` says when that ends. */
+    addressed?: boolean;
+    onaddressed?: () => void;
     progress: number;
     busy: boolean;
     /** A lightweight, inert card with the same content-dependent geometry; replaced in a later task. */
@@ -76,6 +87,24 @@
       onselect: () => onseen(!seen),
     },
   ]);
+  const inactive = $derived(upcoming || busy);
+
+  /**
+   * A plain click plays here, and the link is the browser's for every other: a modifier or another button opens the
+   * address in a new tab or window. Prevented, the Router leaves a plain one alone (`Router.svelte`).
+   */
+  function press(event: MouseEvent) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    event.preventDefault();
+    if (!inactive) onplay();
+  }
+  /** Space, as on the button this row was: a link answers only Enter, and Space would scroll the page. */
+  function key(event: KeyboardEvent) {
+    if (event.key !== ' ') return;
+    event.preventDefault();
+    if (!inactive) onplay();
+  }
 </script>
 
 {#snippet about(interactive: boolean)}
@@ -97,7 +126,16 @@
   </span>
 {/snippet}
 
-<li class="episode" class:seen class:upcoming class:deferred aria-hidden={deferred || undefined}>
+<li
+  class="episode"
+  class:seen
+  class:upcoming
+  class:deferred
+  aria-hidden={deferred || undefined}
+  data-episode={episode.number}
+  data-addressed={addressed || undefined}
+  onanimationend={(event) => event.target === event.currentTarget && onaddressed?.()}
+>
   {#if deferred}
     <span class="episode-play">
       <span class="still"></span>
@@ -105,11 +143,12 @@
     </span>
     <span class="episode-menu"></span>
   {:else}
-    <button
-      type="button"
+    <a
+      {href}
       class="episode-play"
-      disabled={upcoming || busy}
-      onclick={onplay}
+      aria-disabled={inactive || undefined}
+      onclick={press}
+      onkeydown={key}
       aria-label={upcoming
         ? `Episode ${episode.number}: ${episode.name}. Airs ${date}`
         : `Play episode ${episode.number}: ${episode.name}`}
@@ -137,7 +176,7 @@
           ></span>{/if}
       </span>
       {@render about(true)}
-    </button>
+    </a>
     <div class="episode-menu">
       <ActionMenu
         items={menuItems}
@@ -189,12 +228,29 @@
     background: none;
     color: inherit;
     text-align: left;
+    text-decoration: none;
     cursor: pointer;
     border-radius: 10px;
   }
 
-  .episode-play:disabled {
+  .episode-play[aria-disabled='true'] {
     cursor: default;
+  }
+
+  /* The episode an address named: the row's hover wash, fading out once it has been seen. */
+  .episode[data-addressed] {
+    animation: addressed 2.4s ease-out;
+  }
+
+  @keyframes addressed {
+    0%,
+    40% {
+      background: rgb(255 255 255 / 0.12);
+    }
+
+    100% {
+      background: transparent;
+    }
   }
 
   .episode-play:focus-visible {

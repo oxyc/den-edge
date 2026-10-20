@@ -328,7 +328,12 @@ for (const width of [390, 834, 1280])
       expect(Math.abs(still.width / still.height - 16 / 9)).toBeLessThan(0.02);
       await expect(row.getByText(/51 min/)).toBeVisible();
       await expect(row.locator('.progress')).toBeVisible();
-      await row.getByRole('button', { name: /Play episode 1/ }).click();
+      // The row is a link to the episode's own address, and a plain click on it plays, as it always has.
+      const play = row.getByRole('link', { name: /Play episode 1/ });
+      await expect(play).toHaveAttribute('href', '/tv/9-the-series?season=1&episode=1');
+      const opened = page.url();
+      await play.click();
+      expect(page.url()).toBe(opened);
       expect(await page.evaluate(() => window.plays.at(-1))).toMatchObject({
         season: 1,
         episode: 1,

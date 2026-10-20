@@ -7,25 +7,32 @@
   let {
     chips,
     query,
+    href,
     onpick,
   }: {
     chips: Chip[];
     /** What was typed: a chip it names whole leads the row, a little heavier. */
     query: string;
+    /** Where picking it leads. Each is a link there; a plain click is the Router's to follow (`Router.svelte`). */
+    href: (chip: Chip) => string;
+    /** A chip followed with a plain click, just before its link is. */
     onpick: (chip: Chip) => void;
   } = $props();
+
+  const plain = (event: MouseEvent) =>
+    event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 </script>
 
 {#if chips.length}
   <div class="browse" role="group" aria-label="Browse">
     {#each chips as chip, at (chip.id)}
-      <button
-        type="button"
+      <a
         class="facet"
         class:exact={at === 0 && namesExactly(query, chip)}
+        href={href(chip)}
         data-chip={chip.id}
-        onclick={() => onpick(chip)}
-        >{chip.label}<span class="kind">{` · ${chip.kind ?? KIND[chip.group]}`}</span></button
+        onclick={(event) => plain(event) && onpick(chip)}
+        >{chip.label}<span class="kind">{` · ${chip.kind ?? KIND[chip.group]}`}</span></a
       >
     {/each}
   </div>
@@ -44,7 +51,9 @@
     margin: 0 0 16px;
   }
 
+  /* A link, so its line is centred by its line height: the pill's height less its border. */
   .facet {
+    display: inline-block;
     flex-shrink: 0;
     min-height: 30px;
     padding: 0 10px;
@@ -54,6 +63,8 @@
     color: var(--fg);
     font: inherit;
     font-size: 14px;
+    line-height: 28px;
+    text-decoration: none;
     white-space: nowrap;
     cursor: pointer;
   }

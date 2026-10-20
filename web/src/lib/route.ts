@@ -24,17 +24,19 @@ export type Route =
   /**
    * `season`: the season a series page is showing (`/tv/61859-the-night-manager?season=2`), 0 for Specials; absent
    * for the page's own choice. Only a series has one. Whether the series has that season is the page's to check.
+   * `episode`: one episode of that season to bring into view (`?season=2&episode=3`); only with a season.
    */
-  | { page: 'title'; type: MediaType; id: number; season?: number }
+  | { page: 'title'; type: MediaType; id: number; season?: number; episode?: number }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
   | { page: 'service'; id: number; country: string };
 
-/** The season the address names for a title's page, with the title it is for. */
+/** The season, and the episode in it, the address names for a title's page, with the title it is for. */
 export interface TitleSeason {
   type: MediaType;
   id: number;
   season?: number;
+  episode?: number;
 }
 
 /**
@@ -184,7 +186,14 @@ export function parseRoute(url: string): Route {
   if (first === 'movie' && id) return { page: 'title', type: 'movie', id };
   if (first === 'tv' && id) {
     const season = seasonParam(params.get('season'));
-    return { page: 'title', type: 'tv', id, ...(season !== undefined ? { season } : {}) };
+    const episode = season !== undefined ? seasonParam(params.get('episode')) : undefined;
+    return {
+      page: 'title',
+      type: 'tv',
+      id,
+      ...(season !== undefined ? { season } : {}),
+      ...(episode !== undefined ? { episode } : {}),
+    };
   }
   if (first === 'person' && id) return { page: 'person', id };
   if (first === 'service') {
@@ -234,18 +243,20 @@ export const watchlistHref = (year?: string) => (year ? `/watchlist?year=${year}
 
 /**
  * A title's link, named where the name is known: `/movie/550-fight-club`. A series' can name the season to open
- * on: `/tv/61859-the-night-manager?season=2`.
+ * on, and an episode of it to bring into view: `/tv/61859-the-night-manager?season=2&episode=3`.
  */
 export const titleHref = (title: {
   type: MediaType;
   id: number;
   title?: string;
   season?: number;
+  episode?: number;
 }) => {
   const name = slug(title.title);
+  const named = (n: number | undefined) => seasonParam(String(n)) !== undefined;
   const season =
-    title.type === 'tv' && seasonParam(String(title.season)) !== undefined
-      ? `?season=${title.season}`
+    title.type === 'tv' && named(title.season)
+      ? `?season=${title.season}${named(title.episode) ? `&episode=${title.episode}` : ''}`
       : '';
   return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}${season}`;
 };

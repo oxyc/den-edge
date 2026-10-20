@@ -33,8 +33,8 @@ describe('poster Kid access action', () => {
     const item = titleMenuItems(title, ctx, { href: '/movie/550' }).find(
       ({ label }) => label === 'Allow for Kids',
     );
-    expect(item).toBeDefined();
-    item!.onselect();
+    if (item?.kind !== 'item') throw new Error('Allow for Kids is not an item');
+    item.onselect();
     expect(changeKidAccess).toHaveBeenCalledWith(
       { id: '1'.repeat(32), name: 'Kids', approvals: [] },
       title,
@@ -47,5 +47,18 @@ describe('poster Kid access action', () => {
     expect(titleMenuItems(title, ctx, { href: '/movie/550' }).map(({ label }) => label)).toContain(
       'Remove for Kids',
     );
+  });
+});
+
+describe('poster More like this', () => {
+  it('is a link to Search with the title’s Like, so it opens in a new tab like any other', () => {
+    const item = titleMenuItems(title, undefined, { href: '/movie/550' }).find(
+      ({ label }) => label === 'More like this',
+    );
+    expect(item).toEqual({
+      kind: 'link',
+      label: 'More like this',
+      href: '/search?c=like-movie-550',
+    });
   });
 });

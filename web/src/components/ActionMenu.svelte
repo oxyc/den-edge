@@ -294,7 +294,8 @@
 
   function run(item: MenuItem) {
     if (item.disabled) return;
-    item.onselect();
+    // A link item's page is the Router's to open on a plain click, and the browser's on any other: only the menu goes.
+    if (item.kind !== 'link') item.onselect();
     close();
   }
 
@@ -376,12 +377,13 @@
         variant="menu"
         size="regular"
         label={item.label}
-        role={item.kind === 'item'
+        href={item.kind === 'link' ? item.href : undefined}
+        role={item.kind === 'item' || item.kind === 'link'
           ? 'menuitem'
           : item.kind === 'checkbox'
             ? 'menuitemcheckbox'
             : 'menuitemradio'}
-        aria-checked={item.kind === 'item' ? undefined : item.checked}
+        aria-checked={item.kind === 'item' || item.kind === 'link' ? undefined : item.checked}
         aria-disabled={item.disabled || undefined}
         aria-describedby={item.description ? `${menuId}-${i}` : undefined}
         class={item.description ? 'item described' : 'item'}

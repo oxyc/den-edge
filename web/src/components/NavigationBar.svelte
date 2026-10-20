@@ -202,7 +202,7 @@
     }
     const page = '[data-route-page][data-active="true"]';
     document
-      .querySelector<HTMLElement>(`${page} .browse button, ${page} .grid a`)
+      .querySelector<HTMLElement>(`${page} .browse a, ${page} .grid a`)
       ?.focus({ preventScroll: false });
   }
   /**

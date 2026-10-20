@@ -297,6 +297,13 @@
   );
   /** The `requestedSeason` already applied to `season`; null until the detail has answered. */
   let seasonAsked: number | undefined | null = null;
+  /** The episode in this page's address (`?season=2&episode=3`), when the address is for this title and names one. */
+  const requestedEpisode = $derived(requestedSeason !== undefined ? address?.episode : undefined);
+  /** The `season:episode` of the address already brought into view, so a page shown again is left where it was. */
+  let episodeAsked: string | undefined;
+  /** The episode the address just brought into view, marked until its highlight has faded. */
+  let addressedEpisode = $state<number | null>(null);
+  let episodeList = $state<HTMLOListElement>();
   /** The season the address names, where the series has it; otherwise the page's own choice. */
   const openingSeason = (d: TitleDetail, asked: number | undefined) =>
     asked !== undefined && d.seasons.some((s) => s.number === asked)
@@ -450,6 +457,33 @@
     if (!visible || !loaded || seasonAsked === null || asked === seasonAsked) return;
     seasonAsked = asked;
     season = openingSeason(loaded, asked);
+  });
+
+  // An address naming an episode (a shared link, a new tab, a reload, Back or Forward to it) shows its season with that
+  // episode scrolled into view and briefly marked, once the season's episodes are on the page. Once per address: the
+  // same page shown again keeps its own scroll. An episode the season does not have is passed over, address and all.
+  $effect(() => {
+    const [asked, wanted, visible, shown, loaded, list] = [
+      requestedEpisode,
+      requestedSeason,
+      active,
+      displayedSeason,
+      seasonEpisodes,
+      episodeList,
+    ];
+    const key = asked === undefined ? undefined : `${wanted}:${asked}`;
+    if (key === episodeAsked) return;
+    if (key === undefined) {
+      episodeAsked = undefined;
+      addressedEpisode = null;
+      return;
+    }
+    if (!visible || shown !== wanted || !loaded || !list) return;
+    episodeAsked = key;
+    const row = list.querySelector(`[data-episode="${asked}"]`);
+    if (!row) return;
+    addressedEpisode = asked!;
+    row.scrollIntoView({ block: 'center' });
   });
 
   /**
@@ -941,6 +975,7 @@
             <button class="retry" onclick={() => seasonRetry++}>Try again</button>
           {:else if seasonEpisodes}
             <ol
+              bind:this={episodeList}
               class="episodes"
               class:loading={seasonLoading}
               inert={seasonLoading}
@@ -968,6 +1003,13 @@
                 <EpisodeCard
                   deferred={index >= episodeLimit}
                   episode={e}
+                  href={titleHref({
+                    ...d.title,
+                    season: displayedSeason ?? undefined,
+                    episode: e.number,
+                  })}
+                  addressed={addressedEpisode === e.number}
+                  onaddressed={() => (addressedEpisode = null)}
                   progress={episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row)}
                   {busy}
                   fallback={d.backdropPath}

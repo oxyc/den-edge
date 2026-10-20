@@ -7,7 +7,6 @@ import { getContext, setContext } from 'svelte';
 import { blockedTitles } from './blockedTitles.svelte';
 import type { Title } from './library';
 import { likeId, searchHref } from './route';
-import { navigate } from './navigation';
 import { shareOrCopy } from './share';
 import type { Notify } from './toast';
 import { titleState, type Reaction } from './titleState';
@@ -46,6 +45,8 @@ export function titleActionsContext(): TitleActionsContext | undefined {
 
 export type MenuItem = (
   | { kind: 'item'; label: string; onselect: () => void; disabled?: boolean }
+  /** An item that goes to a page: a link there, so it opens in a new tab like any other. */
+  | { kind: 'link'; label: string; href: string; disabled?: undefined }
   | { kind: 'checkbox'; label: string; checked: boolean; onselect: () => void; disabled?: boolean }
   | {
       kind: 'radio';
@@ -141,9 +142,9 @@ export function titleMenuItems(
     }
   }
   items.push({
-    kind: 'item',
+    kind: 'link',
     label: 'More like this',
-    onselect: () => navigate(searchHref('', { chips: [likeId(title)] })),
+    href: searchHref('', { chips: [likeId(title)] }),
   });
   items.push({
     kind: 'item',

@@ -133,9 +133,12 @@
   $effect(() => {
     if (route.page === 'watchlist') watchedYear = route.year;
   });
-  // And the season a series page shows, with the title it is for: a retained page of another title ignores it.
+  // And the season a series page shows, and the episode its address names, with the title they are for: a retained
+  // page of another title ignores them.
   const seasonOf = (r: typeof route): TitleSeason | undefined =>
-    r.page === 'title' ? { type: r.type, id: r.id, season: r.season } : undefined;
+    r.page === 'title'
+      ? { type: r.type, id: r.id, season: r.season, episode: r.episode }
+      : undefined;
   let titleSeason = $state.raw(untrack(() => seasonOf(route)));
   $effect(() => {
     if (route.page === 'title') titleSeason = seasonOf(route);
