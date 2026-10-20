@@ -176,6 +176,7 @@ async function linkingContexts(browser, { expired = false, write = false, read =
   const rows = new Map();
   let head = 0;
   const steps = [];
+  const stepsAtApproval = [];
   const relay = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -201,6 +202,10 @@ async function linkingContexts(browser, { expired = false, write = false, read =
         member: member !== null,
         ...(request.postData() ? { body: request.postDataJSON() } : {}),
       });
+      // Capture the ordering guarantee at the boundary it describes. Library housekeeping may legitimately publish
+      // another batch after this response redirects the page; that later work says nothing about whether the grant
+      // was durable before den-edge received approval.
+      stepsAtApproval.push(...steps, 'approve');
       steps.push('approve');
       if (!member) return json(403, { error: 'not_a_member' });
       return json(200, { redirect: `${CALLBACK}?code=abc&state=s` });
@@ -269,7 +274,7 @@ async function linkingContexts(browser, { expired = false, write = false, read =
   const joiner = await browser.newContext();
   await host.route('**/*', relay);
   await joiner.route('**/*', relay);
-  return { host, joiner, sent, steps };
+  return { host, joiner, sent, steps, stepsAtApproval };
 }
 
 /** Link the consent page's browser to the host's library through the dialog's link screen. */
@@ -321,7 +326,9 @@ test('a member allows changes to the library, and the grant is in the library be
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
   try {
-    const { host, joiner, sent, steps } = await linkingContexts(browser, { write: true });
+    const { host, joiner, sent, steps, stepsAtApproval } = await linkingContexts(browser, {
+      write: true,
+    });
     const hostPage = await host.newPage();
     const page = await joiner.newPage();
     await page.goto(`${ORIGIN}/connect?request=${ID}`);
@@ -343,7 +350,7 @@ test('a member allows changes to the library, and the grant is in the library be
     expect(approval?.body?.write?.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // The drop-box key's row, then den-edge's copy of its public half, then the grant's row and its play record
     // (§16), then the approval.
-    expect(steps.filter((s) => s !== 'batch:0')).toEqual([
+    expect(stepsAtApproval.filter((s) => s !== 'batch:0')).toEqual([
       'batch:1',
       'dropbox',
       'batch:1',
