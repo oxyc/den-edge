@@ -146,13 +146,10 @@ function semanticDestination(
         }
       }
       if (nextSection) {
-        const sectionCandidates = candidates.filter((candidate) =>
-          nextSection!.contains(candidate),
-        );
-        return (
-          geometricDestination(current, direction, sectionCandidates) ??
-          firstChoice(nextSection, candidates)
-        );
+        // Crossing a declared section boundary enters that section at its representative control. Geometry is
+        // deliberately only section-local: otherwise a left-aligned Continue Watching link can land on a later
+        // reaction merely because that reaction happens to share its x coordinate, skipping the primary Resume.
+        return firstChoice(nextSection, candidates);
       }
     }
   }
@@ -284,12 +281,17 @@ function geometricDestination(
   return winner;
 }
 
-export function moveFocus(direction: Direction): boolean {
+export function moveFocus(
+  direction: Direction,
+  include: (candidate: HTMLElement) => boolean = () => true,
+): boolean {
   const current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const allCandidates = focusables();
   // Progressive enhancement only: low-priority links remain in the document's native Tab order and keep all
   // pointer/screen-reader semantics, but they do not interrupt the short directional path between primary controls.
-  const candidates = allCandidates.filter((element) => !element.hasAttribute('data-spatial-skip'));
+  const candidates = allCandidates.filter(
+    (element) => !element.hasAttribute('data-spatial-skip') && include(element),
+  );
   if (!candidates.length) return false;
   if (!current || !visible(current) || !allCandidates.includes(current)) {
     const first = candidates[0]!;

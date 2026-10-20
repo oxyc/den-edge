@@ -157,6 +157,14 @@ test('TV search opens a poster without action menus and Back restores it', async
   await expect(actor.locator('.portrait')).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
   await expect(actor.locator('.portrait')).toHaveCSS('outline-offset', '-4px');
 
+  // The navigation stays visible for LG's pointer, but Up from scrolled content must continue through the page
+  // rather than teleporting into that fixed overlay before the viewer has returned to the top.
+  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(8);
+  await page.keyboard.press('ArrowUp');
+  await expect(
+    page.getByRole('navigation', { name: 'Main navigation' }).locator(':focus'),
+  ).toHaveCount(0);
+
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/search/);
   await expect(editor).toHaveValue('Movie');

@@ -268,7 +268,64 @@
 }
 
 .den-tv header.hero .poster {
-  height: clamp(165px, 16.5vw, 240px);
+  flex: 0 0 clamp(190px, 14vw, 260px);
+  width: clamp(190px, 14vw, 260px);
+  height: auto;
+}
+
+/* Detail is read from across a room, not from a desk. The shared layout deliberately stays compact for laptops;
+   give its fixed visual anchors TV geometry without changing the browser CSS or adding code to its bundle. */
+.den-tv header.hero .head {
+  min-height: clamp(300px, 24vw, 410px);
+}
+
+.den-tv header.hero h1 {
+  font-size: clamp(44px, 3.4vw, 64px);
+}
+
+.den-tv header.hero .ratings,
+.den-tv header.hero .facts,
+.den-tv header.hero .genres,
+.den-tv header.hero .production {
+  font-size: var(--tv-type-small);
+  line-height: 1.4;
+}
+
+.den-tv header.hero .ratings .primary b {
+  font-size: var(--tv-type-body);
+}
+
+.den-tv header.hero .ratings .source,
+.den-tv header.hero .ratings .votes,
+.den-tv header.hero .providers .attribution {
+  font-size: var(--tv-type-caption);
+}
+
+.den-tv header.hero .hero-actions,
+.den-tv header.hero .continue {
+  font-size: var(--tv-type-body);
+}
+
+.den-tv header.hero .hero-actions .den-button-large,
+.den-tv header.hero .season-download-trigger {
+  min-height: 58px;
+}
+
+/* ActionMenu's neutral trigger is a grid by default. A season picker is a labelled peer of the other hero
+   actions, so keep its glyph and word on one line and do not let the crowded action row shrink the wrapper. */
+.den-tv header.hero .download.picker,
+.den-tv header.hero .season-download-trigger {
+  flex: none;
+}
+
+.den-tv header.hero .season-download-trigger {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  width: auto;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .den-tv .card .meta {

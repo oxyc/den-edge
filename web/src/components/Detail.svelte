@@ -933,6 +933,7 @@
               : undefined}
           <a
             class="continue"
+            data-spatial-section
             href={titleHref({
               ...d.title,
               season: coordinate?.season,
