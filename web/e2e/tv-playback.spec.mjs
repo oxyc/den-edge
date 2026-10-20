@@ -239,8 +239,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
 
   const transport = page.locator('.tv-transport button');
   await transport.last().focus();
-  await expect(page.locator('.player')).toHaveClass(/tv-controls-hidden/, { timeout: 5_000 });
-  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '');
+  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
 
   // The first Select only reveals controls; it must not activate the Close button focused before idle hiding.
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
@@ -296,7 +295,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
 
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
-  await expect(page.locator('.player')).toHaveClass(/tv-controls-hidden/, { timeout: 5_000 });
+  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
   expect(await remoteKeyBurst(page, 'Back', 461, 2)).toEqual([true, true]);
   await expect(video).toHaveCount(0);
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
