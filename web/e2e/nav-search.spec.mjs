@@ -2042,7 +2042,9 @@ for (const width of [320, 393, 1280])
       // Dots remain independent of the full-slide link and select a predictable destination.
       await hero.locator('.dot').nth(1).click();
       await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
-      const slide = hero.locator('.slide-link[tabindex="0"]');
+      // The full-slide mobile link is intentionally outside the tab order; the active article, not tabindex,
+      // identifies which lazy-filled slide is currently tappable.
+      const slide = hero.locator('.slide:not([inert]) .slide-link');
       const href = await slide.getAttribute('href');
       await page.screenshot({ path: test.info().outputPath(`mobile-slide-${width}.png`) });
       await slide.tap({ position: { x: width / 2, y: 180 } });
