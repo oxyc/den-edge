@@ -273,6 +273,11 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
   try {
     const context = await browser.newContext({ locale: 'en-US' });
     const page = await context.newPage();
+    const subtitleLogs = [];
+    page.on('console', (message) => {
+      if (message.text().startsWith('[Den subtitles] '))
+        subtitleLogs.push({ text: message.text(), arguments: message.args().length });
+    });
     const operations = await mockHearth(page, { builtIn: true });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
@@ -284,6 +289,11 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
     expect(operations).toHaveLength(2);
     expect(operations[1]).toMatchObject({ subtitleTrack: 0 });
+    expect(subtitleLogs.length).toBeGreaterThan(0);
+    for (const log of subtitleLogs) {
+      expect(log.arguments).toBe(1);
+      expect(() => JSON.parse(log.text.slice('[Den subtitles] '.length))).not.toThrow();
+    }
   } finally {
     await browser.close();
   }
