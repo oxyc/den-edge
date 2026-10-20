@@ -123,8 +123,8 @@ test('RoutedLibrary runs the legacy path when profiles are enabled but no direct
 });
 
 // The wire-5 household here has no directory, so it ends on "Profiles couldn’t be opened" either way; a real split
-// household reloading is `guest-library.spec.mjs`. This one checks that the hint belongs to one household only.
-test('only a household seen bootstrapped to wire 5 skips the wire-4 open', async ({ page }) => {
+// household reloading is `guest-library.spec.mjs`. This one checks that the hint and rows belong to one household only.
+test('wire-5 bootstrap state stays scoped to the household that earned it', async ({ page }) => {
   const edge = { upgradeRequired: 5 };
   await routeLibraryEdge(page, edge);
   await page.route('**/capabilities/profiles', (route) =>
@@ -142,31 +142,45 @@ test('only a household seen bootstrapped to wire 5 skips the wire-4 open', async
   await page.goto(ROUTED_FIXTURE);
   await expect.poll(() => changes().some(({ wire }) => wire === '5')).toBe(true);
   expect(changes()[0].wire).toBe('4');
+  const rememberedLibraryId = changes().find(({ wire }) => wire === '5').libraryId;
   expect(edge.refused).toBeGreaterThan(0);
   await expect.poll(hint).not.toBeNull();
   // The household's key is never what is kept.
   expect(await hint()).not.toContain(btoa(String.fromCharCode(...new Uint8Array(32).fill(29))));
+  // Finish this household's directory read before navigating away, so the later visit exercises a settled retained
+  // snapshot rather than racing teardown of the first session.
+  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible();
 
   // Another household, with no profiles and never seen bootstrapped here, still opens on wire 4.
   edge.upgradeRequired = undefined;
   reset();
   await page.goto(`${ROUTED_FIXTURE}?household=31`);
   await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
-  await expect.poll(() => changes().length).toBeGreaterThan(0);
-  expect(changes()[0].wire).toBe('4');
+  await expect
+    .poll(() => changes().find(({ libraryId }) => libraryId !== rememberedLibraryId))
+    .toMatchObject({ wire: '4' });
+  const otherLibraryId = changes().find(
+    ({ libraryId }) => libraryId !== rememberedLibraryId,
+  ).libraryId;
+  // Put an opaque row in this household deliberately. The next navigation must not receive it.
+  const foreignRow = 'foreign-household-probe';
+  edge.seedRow(otherLibraryId, foreignRow, 'opaque-row');
 
   // The remembered household opens on wire 5 straight away.
   edge.upgradeRequired = 5;
   reset();
   await page.goto(ROUTED_FIXTURE);
-  await expect.poll(() => changes().length).toBeGreaterThan(0);
-  expect(changes()[0].wire).toBe('5');
-  // Directory discovery follows the already-proven wire-5 open. Under a loaded runner its failure timeout can cross
-  // Playwright's five-second assertion default; wait for the actual user-visible terminal state, not an unrelated
-  // first library request above.
-  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible({
-    timeout: 15_000,
-  });
+  await expect
+    .poll(() => {
+      const request = changes().find(({ libraryId }) => libraryId === rememberedLibraryId);
+      return (
+        request && { wire: request.wire, hasForeignRow: request.entryKeys.includes(foreignRow) }
+      );
+    })
+    .toEqual({ wire: '5', hasForeignRow: false });
+  // Directory discovery follows the already-proven wire-5 open and reaches its terminal state; another household's
+  // preferences cannot be decrypted here and must never be returned for this library.
+  await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toBeVisible();
 });
 
 test('an unpaired browser-local library never waits on the profile directory', async ({ page }) => {
