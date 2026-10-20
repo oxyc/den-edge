@@ -292,8 +292,8 @@ jobs:
 
           node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$VERSION"
           mkdir -p tv-release/den-tv-webos
-          mv "tv-packages/webos/packages/com.den.edge.tv_${VERSION}_all.ipk" \
-            tv-release/den-tv-webos/den-tv-webos.ipk
+          mv "tv-packages/webos/packages/com.den.edge.tv_${VERSION}_all.ipk" den-tv-webos.ipk
+          cp den-tv-webos.ipk tv-release/den-tv-webos/den-tv-webos.ipk
           cp tv-packaging/install-webos.sh tv-release/den-tv-webos/install.sh
           tar -C tv-release -czf den-tv-webos.tar.gz den-tv-webos
 
@@ -355,5 +355,5 @@ jobs:
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$REPO" --title "Den Edge $VERSION" --generate-notes
           gh release upload "$TAG" --repo "$REPO" --clobber \
-            den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-webos.ipk den-tv-webos.tar.gz den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
             den-tv-tizen-unsigned.tar.gz

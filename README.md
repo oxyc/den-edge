@@ -9,6 +9,7 @@ and the rest is small JSON it validates and bounds.
 
 See [Architecture](ARCHITECTURE.md) for the current request and storage flows and
 [Performance](PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
+See [TV installation](docs/tv-install.md) to install release builds on LG webOS or Samsung Tizen TVs.
 
 ## Routes
 
