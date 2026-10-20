@@ -72,6 +72,34 @@ To generate a launcher for the hostname you have configured:
 npm exec --yes --package=@webos-tools/cli@3.2.6 -- node scripts/tv-package.mjs webos --url https://tv.example.com/ --version 0.1.0
 ```
 
+To install that package on either an LG C2 or C4:
+
+1. Install **Developer Mode** from the LG Content Store, sign in with an LG
+   developer account, enable **Dev Mode Status**, and let the TV reboot. The Mac
+   and TV must be on the same LAN.
+2. Install the current webOS CLI (`npm install -g @webos-tools/cli`), run
+   `ares-setup-device`, choose `add`, and use a memorable name such as `den-lg`,
+   the TV's LAN IP, port `9922`, and user `prisoner`. Leave the password empty.
+3. Open Developer Mode again, turn **Key Server** on, and retrieve the key. Enter
+   the six-character passphrase shown by the TV when prompted:
+
+   ```sh
+   ares-novacom --device den-lg --getkey
+   ares-device --system-info --device den-lg
+   ```
+
+4. From `web/`, install and launch Den:
+
+   ```sh
+   ares-install --device den-lg tv-packages/webos/packages/com.den.edge.tv_0.1.0_all.ipk
+   ares-launch --device den-lg com.den.edge.tv
+   ```
+
+The launcher opens the HTTPS URL embedded at packaging time, so that hostname
+must be reachable and trusted by the TV. LG Developer Mode is temporary: use
+**Extend** before its timer expires. If it expires, LG disables Developer Mode
+and removes development-installed apps.
+
 `node scripts/tv-package.integration.mjs` separately runs the real LG SDK with a
 placeholder URL, checks the `.ipk` and icon dimensions, and keeps its artifacts
 under `tv-packages/smoke-test`. That smoke package cannot open a working Den server.
@@ -79,7 +107,8 @@ Neither command installs anything on a TV.
 
 References: [webOS hosted web apps](https://webostv.developer.lge.com/develop/getting-started/web-app-types),
 [appinfo.json](https://webostv.developer.lge.com/develop/references/appinfo-json),
-[CLI packaging](https://webostv.developer.lge.com/develop/tools/webos-tv-cli-dev-guide).
+[CLI packaging](https://webostv.developer.lge.com/develop/tools/webos-tv-cli-dev-guide), and
+[real-TV Developer Mode setup](https://webostv.developer.lge.com/develop/getting-started/developer-mode-app).
 
 The C2 baseline is the Chromium 87 generation and C4 is Chromium 108. Treat
 those as useful compatibility baselines, not proof of every codec/API path.
@@ -123,6 +152,29 @@ The packaged path is explicitly opt-in and requires an HTTPS
 DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den.example npm run build:tv:tizen
 DEN_TV_API_ORIGIN=https://den.example node scripts/tv-package.mjs tizen --url https://den.example --profile MyCertificateProfile
 ```
+
+To install it on a supported Samsung TV:
+
+1. Install Tizen Studio, then use its Package Manager to add the Web CLI, the
+   current TV Extensions, and Samsung Certificate Extension. In Certificate
+   Manager, create a **Samsung** certificate profile and pass that profile's
+   name to the packaging command above.
+2. On the TV, open **Apps**, enter **App Settings**, type `12345`, enable
+   Developer Mode, enter the Mac's LAN IP, and reboot the TV.
+3. In Tizen Studio's Device Manager, add the TV on port `26101`, connect it,
+   right-click it, and select **Permit to install applications**.
+4. Install and run the signed widget. `sdb devices` supplies the TV serial;
+   replace `Den.wgt` if the generated filename differs:
+
+   ```sh
+   sdb devices
+   tizen install -s TV_SERIAL --name Den.wgt -- tv-packages/tizen/packages
+   tizen run -s TV_SERIAL -p DenTvApp1X.Den
+   ```
+
+Samsung no longer supports installing TV widgets by USB. This package currently
+targets Tizen 8 (2024-generation TVs) or newer; an older Samsung is not a
+qualified target for this build.
 
 This copies the actual bundle into a Tizen shell and writes `config.xml`; it
 exits nonzero when the CLI/profile is unavailable. `--prepare` generates and
