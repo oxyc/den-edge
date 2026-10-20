@@ -14,6 +14,12 @@ if (
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = systemChrome;
 }
 
+// Linux WebKit paints through Skia's GPU path. Without a GPU (CI's runners) that path sets itself
+// up on the main thread the first time a page paints a CSS filter: a second or more with no frames,
+// in every freshly launched browser, which no browser Den serves pays. Paint on the CPU, as such a
+// machine would. Set here so the workers, and the browsers specs launch themselves, inherit it.
+if (process.platform === 'linux') process.env.WEBKIT_SKIA_ENABLE_CPU_RENDERING ??= '1';
+
 export default defineConfig({
   testDir: './e2e',
   // Time budgets measure the production build on a runner of their own (`playwright.budgets.config.ts`).
