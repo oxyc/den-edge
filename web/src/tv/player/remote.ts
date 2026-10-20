@@ -79,6 +79,26 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       return;
     }
     reveal();
+    // A modal ActionMenu owns navigation inside itself. In particular, do not run the player's spatial search for
+    // ArrowUp/ArrowDown: that search also sees the controls behind the dialog and could move focus out of the menu
+    // (including onto Close) before the menu's own keyboard handler receives the key.
+    const menu = openMenu();
+    if (menu?.contains(target as Node)) {
+      if (
+        event.key === 'ArrowUp' ||
+        event.key === 'ArrowDown' ||
+        event.key === 'Home' ||
+        event.key === 'End' ||
+        event.key === 'Enter' ||
+        event.key === 'Select'
+      )
+        return;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    }
     const moveControl = (direction: -1 | 1) => {
       if (!(
         target instanceof HTMLButtonElement ||

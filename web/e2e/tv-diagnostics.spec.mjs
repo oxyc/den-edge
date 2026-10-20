@@ -45,8 +45,12 @@ test('device checks stay available after startup failure and redact API errors',
   await page.goto(`${E2E_ORIGIN}/?tv-diagnostics=1`);
   await expect(page.getByRole('alert')).toContainText('trusted HTTPS');
   await expect(page.getByRole('button', { name: 'Try again' })).toBeFocused();
+  // Diagnostics is a deliberately separate lazy chunk so it can still load when the application chunk cannot.
+  // Wait for that recovery destination before sending the single remote press intended to reach it.
+  const diagnostics = page.locator('#den-tv-diagnostics summary');
+  await expect(diagnostics).toBeVisible();
   await page.keyboard.press('ArrowDown');
-  await expect(page.locator('#den-tv-diagnostics summary')).toBeFocused();
+  await expect(diagnostics).toBeFocused();
   await page.keyboard.press('Enter');
   const panel = page.locator('#den-tv-diagnostics');
   await page.keyboard.press('ArrowDown');
