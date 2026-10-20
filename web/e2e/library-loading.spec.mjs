@@ -393,9 +393,10 @@ test('large Home shelves publish and extend in viewport-sized tranches', async (
     track.scrollLeft = track.scrollWidth;
     track.dispatchEvent(new Event('scroll'));
   });
-  await expect(row.locator('[data-card-index]')).toHaveCount(16);
   // The synthetic jump can produce a second native scroll as the track grows. That is another valid intent: one
   // or two look-ahead tranches may be prepared, but the whole shelf must not be fetched at once.
+  await expect.poll(() => row.locator('[data-card-index]').count()).toBeGreaterThanOrEqual(16);
+  expect(await row.locator('[data-card-index]').count()).toBeLessThanOrEqual(24);
   await expect.poll(() => details.size).toBeGreaterThanOrEqual(19);
   expect(details.size).toBeLessThanOrEqual(27);
   const admittedIds = await row
