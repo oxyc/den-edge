@@ -81,7 +81,7 @@ function href(value: unknown, base?: string): string | undefined {
     return new URL(
       raw,
       base ??
-        (__DEN_TV_PACKAGED__
+        (__DEN_TV_API_ORIGIN__
           ? `${apiOrigin()}/`
           : (globalThis.location?.href ?? 'https://den.invalid/')),
     ).href;

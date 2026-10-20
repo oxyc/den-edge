@@ -132,9 +132,12 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `STORE_CAP_BYTES` | `1073741824` (1 GiB) | the most the state may take on disk; the inbox a quarter of it |
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
 | `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
+| `TV_WEB_DIR` | unset (the image sets `/tv-web`) | the separately compiled LG/webOS TV app; served only for `TV_WEB_HOSTS` |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
 | `WEB_HOSTS` | unset | the web app's public names (comma-separated, e.g. `d.oxy.fi`; public, so a shared link opens without an account). A request for one gets the web app, `/health`/`/version`, `/routes`, `/config`, the routes the web app calls (`/pair/…`, `/lib/…`, `/grant/…`, `/inbox/append`, `/inbox/drain`) and the MCP connector (`/mcp`, `/oauth/…`, `/.well-known/oauth-…`) — never what only a TV does (unlinking, `/sync`) or `/metrics` |
 | `API_HOSTS` | unset | the device API's public names (e.g. `d-api.oxy.fi`, Access bypassed). A request for one gets the device routes and never the web app, which would otherwise be served past Access. A name in neither list (the LAN address, the tailnet's) serves both halves |
+| `TV_WEB_HOSTS` | unset | static TV-app public names (e.g. `den-tv.oxy.fi`). These serve only `TV_WEB_DIR`; the build calls the existing `API_HOSTS` origin instead of duplicating backend routes |
+| `TV_API_ORIGIN` | unset (the image sets `https://d-api.oxy.fi`) | bare HTTPS device API origin compiled into the hosted TV build, added to that shell's `connect-src` policy |
 | `PROFILES_HOSTS` | unset | exact web host names allowed to discover real profiles at `GET /capabilities/profiles`. Unset or empty keeps real mode off everywhere. Every entry must also be in `WEB_HOSTS`; API hosts, LAN/tailnet/unknown names, and other web hosts receive `404` |
 | `PROFILES_PREVIEW_HOSTS` | unset | exact web host names allowed to use only the synthetic Owner/Kids/Visitor preview. Preview wins over `PROFILES_HOSTS`; keep real mode unset during this canary. An entry not also in `WEB_HOSTS` enables nothing |
 | `PROFILE_MIGRATION_ENABLED` | off | exposes only the authenticated profiles-v1 §8.1 migration transaction routes. It does not enable profile discovery, start a migration, alter a library, or turn on any client rollout by itself |

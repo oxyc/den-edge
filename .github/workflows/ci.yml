@@ -279,14 +279,15 @@ jobs:
           edge=$(jq -r '.edge["containerimage.digest"] // empty' <<<"$METADATA")
           test -n "$edge"
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
-      - name: Prove the image reports its release version and serves the Cast page
+      - name: Prove the image reports its release version and serves the isolated Cast and TV pages
         env:
           DIGEST: ${{ steps.images.outputs.edge }}
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           set -euo pipefail
           docker pull "$IMAGE@$DIGEST" >/dev/null
-          id=$(docker run --rm -d -e CAST_ORIGIN=https://cast.invalid -p 127.0.0.1:18080:8080 "$IMAGE@$DIGEST")
+          id=$(docker run --rm -d -e CAST_ORIGIN=https://cast.invalid -e TV_WEB_HOSTS=den-tv.invalid \
+            -p 127.0.0.1:18080:8080 "$IMAGE@$DIGEST")
           trap 'docker rm -f "$id" >/dev/null 2>&1 || true' EXIT
           body=""
           for _ in $(seq 1 20); do
@@ -297,6 +298,8 @@ jobs:
           test "$got" = "$VERSION" || { echo "::error::image /version is $got, expected $VERSION"; exit 1; }
           cast=$(curl -fsS -H 'Host: cast.invalid' http://127.0.0.1:18080/)
           grep -q '<title>Den Cast</title>' <<<"$cast" || { echo "::error::the Cast host did not serve the Cast page"; exit 1; }
+          tv=$(curl -fsS -H 'Host: den-tv.invalid' http://127.0.0.1:18080/)
+          grep -q '<title>Den TV</title>' <<<"$tv" || { echo "::error::the TV host did not serve the TV page"; exit 1; }
       - name: Scan edge image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

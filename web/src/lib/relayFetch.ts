@@ -276,7 +276,7 @@ function ours(href: string): URL | null {
   try {
     const url = new URL(href, here);
     return url.origin === new URL(here).origin ||
-      (__DEN_TV_PACKAGED__ && url.origin === apiOrigin())
+      (__DEN_TV_API_ORIGIN__ && url.origin === apiOrigin())
       ? url
       : null;
   } catch {

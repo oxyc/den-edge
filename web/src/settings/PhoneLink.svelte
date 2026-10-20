@@ -94,7 +94,7 @@
       onCode: (code) => {
         if (mine !== attempt) return;
         made = {
-          address: phoneLink(__DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin, {
+          address: phoneLink(__DEN_TV_API_ORIGIN__ || location.origin, {
             ticket,
             code,
           }),

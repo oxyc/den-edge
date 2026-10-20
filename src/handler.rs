@@ -89,7 +89,7 @@ impl PreparedPublicJson {
 
     fn routes(&self, face: Face) -> &PreparedJson {
         match (face, &self.routes_public) {
-            (Face::Web | Face::Api, Some(public)) => public,
+            (Face::Web | Face::Api | Face::Tv, Some(public)) => public,
             _ => &self.routes,
         }
     }
@@ -609,6 +609,16 @@ async fn dispatch(
     if !face.serves(&path) {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
+    // The TV name is a static asset origin, not another spelling of the device API. Hosted LG and packaged
+    // Samsung builds call API_HOSTS instead. Extensionless paths are client-side routes and receive the TV shell.
+    if face == Face::Tv {
+        return if matches!(*req.method(), Method::GET | Method::HEAD) {
+            let query = req.uri().query().map(str::to_owned);
+            crate::web::serve(state, &path, query.as_deref(), req.headers(), face).await
+        } else {
+            bare_json(StatusCode::NOT_FOUND, &error("not_found"))
+        };
+    }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
     // The selected WebVTT is staged here before the addon relay sees its `/den/<install>/` mount. The same member
     // or matching guest proof that fetched it authorizes the upload; only its random, expiring URL leaves Den.
@@ -742,7 +752,7 @@ async fn dispatch(
                 return revalidated_prepared(prepared.routes(face), req.headers());
             }
             let table = match (face, &state.routes_public) {
-                (Face::Web | Face::Api, Some(public)) => public,
+                (Face::Web | Face::Api | Face::Tv, Some(public)) => public,
                 _ => &state.routes,
             };
             revalidated(crate::routes::to_json(table).to_string(), req.headers(), ENV_EDGE)
@@ -796,6 +806,7 @@ fn exclusive_operation_path(path: &str) -> bool {
 pub enum Face {
     Web,
     Api,
+    Tv,
     Both,
     Invalid,
 }
@@ -810,7 +821,9 @@ impl Face {
             host.as_ref()
                 .is_some_and(|h| names.iter().any(|n| n.trim_end_matches('.').eq_ignore_ascii_case(h)))
         };
-        if named(&state.web_hosts) {
+        if named(&state.tv_web_hosts) {
+            Face::Tv
+        } else if named(&state.web_hosts) {
             Face::Web
         } else if named(&state.api_hosts) {
             Face::Api
@@ -870,7 +883,7 @@ impl Face {
             (Face::Invalid, _) => false,
             (Face::Web, "/capabilities/profiles") => true,
             (_, "/capabilities/profiles") => false,
-            (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
+            (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both | Face::Tv, _) => true,
             _ if tmdb => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,

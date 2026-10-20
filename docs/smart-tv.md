@@ -1,8 +1,11 @@
-# Smart TV local testing
+# Smart TV development and qualification
+
+For the production `den-tv.oxy.fi` setup and copy-paste LG/Samsung installation steps, see
+[tv-install.md](tv-install.md). This document covers development, compatibility and qualification details.
 
 The first target is an LG C2/C4. Samsung is a later, separate validation pass.
 These are separate Vite/Svelte outputs from the existing screens and domain code,
-not a fork of the web app. No release or deployment is part of this change.
+not a fork of the web app.
 Build and preview the TV-targeted bundle locally:
 
 ```sh
@@ -149,8 +152,8 @@ The packaged path is explicitly opt-in and requires an HTTPS
 `DEN_TV_API_ORIGIN` plus a named Tizen certificate profile:
 
 ```sh
-DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den.example npm run build:tv:tizen
-DEN_TV_API_ORIGIN=https://den.example node scripts/tv-package.mjs tizen --url https://den.example --profile MyCertificateProfile
+DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi npm run build:tv:tizen
+DEN_TV_API_ORIGIN=https://d-api.oxy.fi node scripts/tv-package.mjs tizen --url https://d-api.oxy.fi --profile MyCertificateProfile
 ```
 
 To install it on a supported Samsung TV:
