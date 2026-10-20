@@ -170,6 +170,50 @@ test('remote changes seasons from the focused season tab', async ({ page }) => {
   await expect(season2).toBeFocused();
 });
 
+test('remote reveals an off-screen episode without animating every intermediate frame', async ({
+  page,
+}) => {
+  await setupSeries(page);
+
+  const firstEpisode = page.getByRole('link', {
+    name: 'Play episode 1: Season 1 episode 1',
+  });
+  const secondEpisode = page.getByRole('link', {
+    name: 'Play episode 2: Season 1 episode 2',
+  });
+  await expect(secondEpisode).toBeVisible();
+  await page.evaluate(() => scrollTo(0, 0));
+  await firstEpisode.evaluate((node) => node.focus({ preventScroll: true }));
+  expect(await page.evaluate(() => scrollY)).toBe(0);
+  await page.evaluate(() => {
+    window.__episodeRevealScrolls = 0;
+    window.__countEpisodeRevealScroll = () => window.__episodeRevealScrolls++;
+    addEventListener('scroll', window.__countEpisodeRevealScroll, { passive: true });
+  });
+
+  await page.keyboard.press('ArrowDown');
+  await expect(secondEpisode).toBeFocused();
+  const result = await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            removeEventListener('scroll', window.__countEpisodeRevealScroll);
+            const box = document.activeElement?.getBoundingClientRect();
+            resolve({
+              events: window.__episodeRevealScrolls,
+              scrollY,
+              fullyVisible: !!box && box.top >= 0 && box.bottom <= innerHeight,
+            });
+          }),
+        ),
+      ),
+  );
+  expect(result.fullyVisible).toBe(true);
+  expect(result.scrollY).toBeGreaterThan(0);
+  expect(result.events).toBeLessThanOrEqual(2);
+});
+
 test('season download asks for its target instead of inheriting the focused tab', async ({
   page,
 }) => {

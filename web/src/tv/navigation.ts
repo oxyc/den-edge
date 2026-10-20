@@ -10,9 +10,17 @@ import {
   focusables,
   FOCUSABLE,
   isEditable,
-  moveFocus as move,
+  moveFocus,
   visible,
 } from '../lib/spatialNavigation';
+
+// A remote press is discrete, and the focused surface is the transition. Long native smooth-scroll animations make
+// every intermediate frame recompute row/card observers and repaint large title pages on TV-class CPUs. Keep the
+// shared browser enhancement smooth, but reveal a remote destination in the same frame as focus.
+const move = (
+  direction: Parameters<typeof moveFocus>[0],
+  include?: Parameters<typeof moveFocus>[1],
+) => moveFocus(direction, include, 'auto');
 
 function focusIdentity(element: HTMLElement): string | undefined {
   if (element.id) return `#${CSS.escape(element.id)}`;
