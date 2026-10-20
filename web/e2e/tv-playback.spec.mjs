@@ -264,7 +264,9 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
     .poll(() => page.evaluate(() => document.activeElement?.closest('footer') !== null))
     .toBe(true);
   const footerSelects = page.locator('footer select');
-  await expect(footerSelects).toHaveCount(3);
+  // The stream chooser is now a button so it can show the full release menu; audio and subtitles remain native
+  // selects. Down lands on the stream chooser, and two horizontal moves still reach the subtitles picker.
+  await expect(footerSelects).toHaveCount(2);
   for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(footerSelects.last()).toBeFocused();
   await expect(footerSelects.last()).toHaveCSS('outline-style', 'none');

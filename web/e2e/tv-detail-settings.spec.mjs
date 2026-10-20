@@ -159,10 +159,10 @@ test('remote changes seasons from the focused season tab', async ({ page }) => {
   await expect(season2).toBeFocused();
   await expect(season2).toHaveAttribute('aria-selected', 'true');
   await expect(
-    page.getByRole('button', { name: 'Play episode 1: Season 2 episode 1' }),
+    page.getByRole('link', { name: 'Play episode 1: Season 2 episode 1' }),
   ).toBeVisible();
 
-  const firstEpisode = page.getByRole('button', {
+  const firstEpisode = page.getByRole('link', {
     name: 'Play episode 1: Season 2 episode 1',
   });
   await firstEpisode.focus();
@@ -182,7 +182,7 @@ test('season download asks for its target instead of inheriting the focused tab'
   await page.keyboard.press('Enter');
   await expect(season2).toHaveAttribute('aria-selected', 'true');
   await expect(
-    page.getByRole('button', { name: 'Play episode 1: Season 2 episode 1' }),
+    page.getByRole('link', { name: 'Play episode 1: Season 2 episode 1' }),
   ).toBeVisible();
   sourceRequests.length = 0;
 
