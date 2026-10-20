@@ -117,10 +117,12 @@ test('Left at the start of title actions does not act as browser Back', async ()
       window.backRequests = 0;
       document.addEventListener('den:back', () => window.backRequests++);
     });
-    const trailer = page.locator('a[aria-label="Trailer"]');
-    await trailer.focus();
+    const firstAction = page
+      .locator('.hero-actions')
+      .getByRole('button', { name: 'Sources', exact: true });
+    await firstAction.focus();
     await page.keyboard.press('ArrowLeft');
-    await expect(trailer).toBeFocused();
+    await expect(firstAction).toBeFocused();
     expect(await page.evaluate(() => window.backRequests)).toBe(0);
   } finally {
     await browser.close();

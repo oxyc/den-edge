@@ -137,11 +137,16 @@ async function backRestoresRow(page, name) {
   }
   await page.goBack();
   await expect.poll(() => new URL(page.url()).pathname).toBe(before);
-  // What a returning page asks for again lands well after the restore, so let it all settle.
-  await page.waitForTimeout(2500);
-  const back = await position(page, row());
-  expect(Math.abs(back.y - left.y), `scrollY ${back.y} vs ${left.y}`).toBeLessThanOrEqual(2);
-  expect(Math.abs(back.x - left.x), `row scrollLeft ${back.x} vs ${left.x}`).toBeLessThanOrEqual(2);
+  // WebKit may defer the retained page's first IntersectionObserver delivery while another busy shard has the
+  // runner. That delivery restores the row's real height after `content-visibility`; observe the actual outcome
+  // instead of assuming a fixed delay is enough for it.
+  await expect(async () => {
+    const back = await position(page, row());
+    expect(Math.abs(back.y - left.y), `scrollY ${back.y} vs ${left.y}`).toBeLessThanOrEqual(2);
+    expect(Math.abs(back.x - left.x), `row scrollLeft ${back.x} vs ${left.x}`).toBeLessThanOrEqual(
+      2,
+    );
+  }).toPass({ timeout: 10_000 });
 
   // The restored row still takes a tap.
   const again = row().locator('a.card:visible').first();
