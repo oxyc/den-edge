@@ -1478,7 +1478,7 @@ test('the Browse row: the whole query first, fewer for long queries, a pick repl
     await input(page).fill('uk');
     const first = browse.getByRole('link').first();
     await expect(first).toHaveText('United Kingdom · country');
-    await expect(first).toHaveClass(/exact/);
+    await expect(first).toHaveCSS('font-weight', '600');
     // Two letters already offer something, more than a handful.
     await input(page).fill('dr');
     await expect.poll(() => browse.getByRole('link').count()).toBeGreaterThan(6);
@@ -1523,7 +1523,7 @@ test('the whole-query match is not drawn as picked: it looks like its siblings u
     await expect(sweden).toBeVisible();
     // The first chip is the one drawn as the query's whole name.
     const first = browse.getByRole('link').first();
-    await expect(first).toHaveClass(/exact/);
+    await expect(first).toHaveCSS('font-weight', '600');
 
     // No picked semantics, and nothing a pick wears: the same border, fill and colour as the chips beside it.
     const look = (chip) =>
@@ -1571,8 +1571,14 @@ test('while typing, picks that can’t apply stay shown, paused; results come be
     await input(page).fill('drama');
     await expect(page).toHaveURL(/\/search\?q=drama&c=country-SE,genre-18$/);
     // Drama still narrows the results; Sweden waits, shown and said so.
-    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toHaveClass(/paused/);
-    await expect(picks.getByRole('button', { name: 'Remove Drama' })).not.toHaveClass(/paused/);
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toHaveCSS(
+      'border-style',
+      'dashed',
+    );
+    await expect(picks.getByRole('button', { name: 'Remove Drama' })).toHaveCSS(
+      'border-style',
+      'solid',
+    );
     await expect(
       picks.getByText('Paused while searching — clear search to apply', { exact: true }),
     ).toBeVisible();

@@ -23,7 +23,34 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/den-edge
 
 jobs:
+  # A release commit changes only VERSION. Its source tree was already checked on the immediately preceding main
+  # commit; the candidate job below still rebuilds that exact version, probes /version and the Cast page, and scans
+  # the resulting image. Do not spend another five browser runners and a Rust runner on byte-identical sources.
+  scope:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      source_changed: ${{ steps.diff.outputs.source_changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify the main change
+        id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+          if [ "$files" = VERSION ]; then
+            echo "source_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: scope
+    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
     runs-on: ubuntu-latest
     steps:
       # The assistant tests read den-spec's vectors from the submodule.
@@ -45,6 +72,8 @@ jobs:
   # Checks which need Node but not a browser run once. Keeping them out of the Playwright shards avoids paying
   # for lint, unit tests, and production builds twice.
   web-checks:
+    needs: scope
+    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
     runs-on: ubuntu-latest
     # GitHub's runner already ships Chrome. The built-worker behavior check uses it directly, without downloading
     # Playwright's browser or OS packages into this once-only job.
@@ -71,7 +100,10 @@ jobs:
       - run: npm run check:tv-isolation
       - run: npm run test:e2e:keyboard
       - run: npm run test:e2e:tv
-      - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv
+      # The full TV journey already ran against the platform-neutral/webOS build above and will run again in
+      # WebKit below. Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
+      # separately covers the real Tizen bundle, file origin, CSP, API routing and playback.
+      - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-platform.spec.mjs
       - run: npm run test:e2e:tv-package
       - run: node scripts/tizen-package.integration.mjs
       - run: npm run test:tv-preflight
@@ -94,6 +126,8 @@ jobs:
   # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards
   # left the first with roughly 200 tests and a six-minute critical path while the second finished near four minutes.
   e2e:
+    needs: scope
+    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -153,6 +187,8 @@ jobs:
   # production build a phone is served, one test at a time on a runner of their own: a budget is time, and beside the
   # shards' dev server and four workers it measured the runner rather than the app.
   e2e-budgets:
+    needs: scope
+    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
     runs-on: ubuntu-latest
     name: e2e budgets
     container:
@@ -177,15 +213,21 @@ jobs:
   # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
   web:
     if: always()
-    needs: [web-checks, e2e, e2e-budgets]
+    needs: [scope, web-checks, e2e, e2e-budgets]
     runs-on: ubuntu-latest
     steps:
       - name: Require every web check
         env:
+          SOURCE_CHANGED: ${{ needs.scope.outputs.source_changed }}
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
           BUDGETS: ${{ needs.e2e-budgets.result }}
-        run: test "$CHECKS" = success && test "$E2E" = success && test "$BUDGETS" = success
+        run: |
+          if [ "$SOURCE_CHANGED" = false ]; then
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$BUDGETS" = skipped
+          else
+            test "$CHECKS" = success && test "$E2E" = success && test "$BUDGETS" = success
+          fi
 
   # A PR proves the same shared build graph that main will publish. It reads main's cache but deliberately does not
   # publish an image or overwrite the durable release cache with an unmerged revision.

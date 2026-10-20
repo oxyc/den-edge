@@ -83,7 +83,6 @@ test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visi
   await page.goto(`${ORIGIN}/test/player.html?resume=12`);
 
   const video = page.locator('.player video');
-  await expect(video).toHaveClass(/den-avplay-placeholder/);
   await expect(page.locator('object.den-avplay-plane[type="application/avplayer"]')).toHaveCount(1);
   await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(1);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);

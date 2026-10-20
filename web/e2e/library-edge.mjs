@@ -12,6 +12,7 @@ export const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
  * - `edge.drop`: batch writes never get through, as with no connection.
  * - `edge.batches`: how many batch writes arrived, answered or not.
  * - `edge.upgradeRequired`: the library's minimum wire; a request on an older one gets a 426 (`edge.refused` counts).
+ * - `edge.seedRow(libraryId, key, value)`: seed one opaque server row for an already-opened library.
  */
 export async function routeLibraryEdge(page, edge = {}) {
   edge.batches = 0;
@@ -19,8 +20,19 @@ export async function routeLibraryEdge(page, edge = {}) {
   edge.libraryRequests = [];
   edge.refused = 0;
   const generation = 'optimistic-actions';
-  const rows = new Map();
-  let head = 0;
+  const libraries = new Map();
+  const libraryFor = (libraryId) => {
+    let library = libraries.get(libraryId);
+    if (!library) {
+      library = { rows: new Map(), head: 0 };
+      libraries.set(libraryId, library);
+    }
+    return library;
+  };
+  edge.seedRow = (libraryId, k, v) => {
+    const library = libraryFor(libraryId);
+    library.rows.set(k, { k, seq: ++library.head, v });
+  };
 
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
@@ -39,14 +51,18 @@ export async function routeLibraryEdge(page, edge = {}) {
   await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    const libraryId = url.pathname.split('/')[2];
+    const library = libraryFor(libraryId);
     const wire = request.headers()['x-den-wire'];
     edge.wires.push(wire);
-    edge.libraryRequests.push({
+    const recorded = {
+      libraryId,
       method: request.method(),
       path: url.pathname,
       body: request.postData() ?? null,
       wire,
-    });
+    };
+    edge.libraryRequests.push(recorded);
     edge.trace?.push(`${Date.now() % 100000} ${request.method()} ${url.pathname.split('/').pop()}`);
     const headers = {
       'x-den-generation': generation,
@@ -60,8 +76,13 @@ export async function routeLibraryEdge(page, edge = {}) {
       return route.fulfill({ status: 200, headers });
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
       const since = Number(url.searchParams.get('since') ?? 0);
-      const entries = [...rows.values()].filter((entry) => entry.seq > since);
-      return route.fulfill({ headers, json: { generation, entries, head, more: false } });
+      const entries = [...library.rows.values()].filter((entry) => entry.seq > since);
+      recorded.entries = entries.length;
+      recorded.entryKeys = entries.map(({ k }) => k);
+      return route.fulfill({
+        headers,
+        json: { generation, entries, head: library.head, more: false },
+      });
     }
     if (url.pathname.endsWith('/batch') && request.method() === 'POST') {
       edge.batches++;
@@ -74,13 +95,13 @@ export async function routeLibraryEdge(page, edge = {}) {
       const applied = [];
       const conflicts = [];
       for (const write of body.writes) {
-        const current = rows.get(write.k);
+        const current = library.rows.get(write.k);
         if ((current?.seq ?? 0) !== write.base) {
           conflicts.push({ k: write.k, seq: current?.seq ?? 0, v: current?.v ?? null });
           continue;
         }
-        const entry = { k: write.k, seq: ++head, v: write.v };
-        rows.set(write.k, entry);
+        const entry = { k: write.k, seq: ++library.head, v: write.v };
+        library.rows.set(write.k, entry);
         applied.push({ k: write.k, seq: entry.seq });
       }
       return route.fulfill({ headers, json: { applied, conflicts } });

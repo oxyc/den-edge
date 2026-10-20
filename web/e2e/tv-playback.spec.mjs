@@ -304,7 +304,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
 
   // The first Select only reveals controls; it must not activate the Close button focused before idle hiding.
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
-  await expect(page.locator('.player')).not.toHaveClass(/tv-controls-hidden/);
+  await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
   await expect(video).toHaveCount(1);
 
   // Freeze the idle clock while checking deterministic focus traversal.
