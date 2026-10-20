@@ -253,6 +253,8 @@ scans it before recording its digest. The one image also carries the Cast page (
 den-edge serves on `CAST_ORIGIN`'s host and only there (`src/cast.rs`). Run
 `scripts/release.sh X.Y.Z` to update the release metadata and create `vX.Y.Z` after that exact main CI
 passes. The tag workflow verifies and promotes those same digests; it does not rebuild or rerun the suite.
+Android/LG launchers and Samsung widgets use intentional, independently versioned release workflows; see
+[TV installation](docs/tv-install.md) and [TV packaging](web/tv-packaging/README.md).
 
 The weekly/manual patch workflow still performs a cache-free rebuild of the newest tag so base-image fixes
 ship even when application source has not changed. It follows the same probe, scan, signature, and `:latest`

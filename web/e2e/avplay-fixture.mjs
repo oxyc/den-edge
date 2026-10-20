@@ -5,6 +5,9 @@ export function installAvplayFixture() {
   let duration = 60_000;
   let listener;
   let timer;
+  let delaySeeks = false;
+  let seekPending = false;
+  const pendingSeeks = [];
   const calls = [];
   const listeners = [];
   const record = (name, ...args) => calls.push([name, ...args]);
@@ -27,8 +30,9 @@ export function installAvplayFixture() {
     { type: 'VIDEO', index: 1, extra_info: '{}' },
     { type: 'AUDIO', index: 11, extra_info: JSON.stringify({ language: 'en' }) },
     { type: 'AUDIO', index: 12, extra_info: JSON.stringify({ language: 'es' }) },
-    { type: 'TEXT', index: 21, extra_info: JSON.stringify({ language: 'en' }) },
-    { type: 'TEXT', index: 22, extra_info: JSON.stringify({ language: 'es' }) },
+    // Real Samsung AVPlay metadata uses `track_lang` and commonly reports ISO 639-2 codes.
+    { type: 'TEXT', index: 21, extra_info: JSON.stringify({ track_lang: 'eng' }) },
+    { type: 'TEXT', index: 22, extra_info: JSON.stringify({ track_lang: 'spa' }) },
   ];
   const avplay = {
     open(url) {
@@ -41,6 +45,8 @@ export function installAvplayFixture() {
     close() {
       record('close', state);
       stopClock();
+      seekPending = false;
+      pendingSeeks.length = 0;
       state = 'NONE';
     },
     prepareAsync(success) {
@@ -81,11 +87,18 @@ export function installAvplayFixture() {
       stopClock();
       state = 'IDLE';
     },
-    seekTo(milliseconds, success) {
+    seekTo(milliseconds, success, error) {
       requireState('seekTo', ['READY', 'PLAYING', 'PAUSED']);
+      if (seekPending) throw new Error('overlapping AVPlay seek');
+      seekPending = true;
       record('seekTo', milliseconds, state);
-      currentTime = milliseconds;
-      queueMicrotask(() => success?.());
+      const complete = () => {
+        currentTime = milliseconds;
+        seekPending = false;
+        success?.();
+      };
+      if (delaySeeks) pendingSeeks.push({ complete, error });
+      else queueMicrotask(complete);
     },
     getState: () => state,
     getDuration: () => duration,
@@ -123,6 +136,11 @@ export function installAvplayFixture() {
     latest: () => listener,
     end: () => listener?.onstreamcompleted(),
     error: (message = 'PLAYER_ERROR_CONNECTION_FAILED') => listener?.onerror(message),
+    delaySeeks: (delay = true) => {
+      delaySeeks = delay;
+    },
+    pendingSeekCount: () => pendingSeeks.length,
+    releaseSeek: () => pendingSeeks.shift()?.complete(),
     staleEnd: (index) => listeners[index]?.onstreamcompleted(),
     staleError: (index) => listeners[index]?.onerror('STALE_PLAYER_ERROR'),
   };

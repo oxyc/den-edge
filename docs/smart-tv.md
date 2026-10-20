@@ -175,9 +175,9 @@ To install it on a supported Samsung TV:
    tizen run -s TV_SERIAL -p DenTvApp1X.Den
    ```
 
-Samsung no longer supports installing TV widgets by USB. This package currently
-targets Tizen 8 (2024-generation TVs) or newer; an older Samsung is not a
-qualified target for this build.
+Samsung no longer supports installing TV widgets by USB. The default package targets Tizen 8 (2024-generation TVs)
+or newer. The release workflow also builds a distinct Tizen 6.5 package for 2022–2023 Apps2Samsung sideloading; that
+compatibility target is not hardware-qualified yet.
 
 This copies the actual bundle into a Tizen shell and writes `config.xml`; it
 exits nonzero when the CLI/profile is unavailable. `--prepare` generates and
@@ -197,13 +197,11 @@ References: [Samsung hosted applications Q&A](https://developer.samsung.com/smar
 [Tizen CLI packaging](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html?device=htv),
 [testing on a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html).
 
-The packaged Samsung target is Tizen 8.0 (2024 generation, Chromium 108) or newer.
-That permits WebAssembly with `wasm-unsafe-eval` while keeping JavaScript eval and
-remote scripts prohibited. Earlier Samsung engines require the broader
-`unsafe-eval` permission, which Samsung's submission guidance disallows. The
-manifest declares this minimum; older Samsung TVs are not qualified. LG's separate
-build still targets Chrome 85 for C2/C4 compatibility. Record the actual Samsung
-model/firmware when testing; a package build or browser E2E run is not hardware proof.
+The default packaged Samsung target is Tizen 8.0 (2024 generation, Chromium 108) or newer. That permits WebAssembly
+with `wasm-unsafe-eval` while keeping JavaScript eval and remote scripts prohibited. The distinct Tizen 6.5 package
+targets the 2022 generation's Chromium 85 and necessarily uses broader `unsafe-eval`; it is for sideloading rather
+than Seller Office submission. Neither a compatibility build nor browser E2E is hardware proof, so record the actual
+Samsung model and firmware when qualifying it. LG's separate build also targets Chrome 85 for C2/C4 compatibility.
 
 The package allows dynamic network destinations for media/addons through WARP,
 but applies a separate CSP restricting executable code to local assets. Production

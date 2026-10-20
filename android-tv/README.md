@@ -21,8 +21,9 @@ Install JDK 17 and Android SDK Platform 36, then point `local.properties` at the
 ./gradlew :app:lintDebug :app:assembleDebug
 ```
 
-The app version comes from the repository's `VERSION`; `X.Y.Z` maps to version code `X000000 + Y000 + Z`, with each
-component restricted to 0–999. Override the hosted endpoint only for a development build with
+The app version comes from `android-tv/VERSION`; `X.Y.Z` maps to version code `X000000 + Y000 + Z`, with each
+component restricted to 0–999. Bump it only when publishing a changed native launcher. Override the hosted endpoint
+only for a development build with
 `-PdenTvUrl=https://tv.example.test/`.
 
 A release build is signed only when all four variables are present:
@@ -35,6 +36,7 @@ DEN_ANDROID_KEY_PASSWORD=... \
 ./gradlew :app:assembleRelease
 ```
 
-The tag workflow reconstructs the keystore from the corresponding `DEN_ANDROID_*` repository secrets and publishes
-`den-tv-android.apk`. Preserve that key: Android accepts an in-place update only when it has the same application ID
-and signing identity as the installed build.
+The manually dispatched `tv-launchers-publish` workflow reconstructs the keystore from the corresponding
+`DEN_ANDROID_*` repository secrets and replaces `den-tv-android.apk` on the permanent `tv-launchers` release.
+Preserve that key: Android accepts an in-place update only when it has the same application ID and signing identity
+as the installed build.

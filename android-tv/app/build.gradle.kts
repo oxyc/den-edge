@@ -4,7 +4,7 @@ plugins {
     id("com.android.application")
 }
 
-val denVersion = rootProject.file("../VERSION").readText().trim()
+val denVersion = rootProject.file("VERSION").readText().trim()
 val versionParts = denVersion.split('.').map(String::toInt)
 require(versionParts.size == 3 && versionParts.all { it in 0..999 }) {
     "VERSION must contain three numeric components between 0 and 999"

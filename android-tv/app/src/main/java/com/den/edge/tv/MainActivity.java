@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -38,8 +39,8 @@ public final class MainActivity extends ComponentActivity {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(
-                WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(11, 11, 15));
@@ -60,7 +61,6 @@ public final class MainActivity extends ComponentActivity {
         webView.setBackgroundColor(Color.rgb(11, 11, 15));
         webView.setFocusable(true);
         webView.setFocusableInTouchMode(true);
-        webView.setKeepScreenOn(true);
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -69,7 +69,8 @@ public final class MainActivity extends ComponentActivity {
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
-        settings.setSupportMultipleWindows(false);
+        // Ignore target=_blank/popups instead of allowing them to replace the trusted top-level page.
+        settings.setSupportMultipleWindows(true);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -105,7 +106,12 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onPause() {
-        if (webView != null) webView.onPause();
+        if (webView != null) {
+            // TV apps must not leave video or unaccompanied audio running after another activity covers them.
+            webView.evaluateJavascript(
+                    "document.querySelectorAll('video,audio').forEach((media)=>media.pause())", null);
+            webView.onPause();
+        }
         super.onPause();
     }
 
@@ -134,7 +140,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void showLoadError() {
         pageReady = false;
-        webView.stopLoading();
+        if (webView != null) webView.stopLoading();
         root.removeAllViews();
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -158,7 +164,8 @@ public final class MainActivity extends ComponentActivity {
         retry.setText(R.string.retry);
         retry.setOnClickListener(view -> {
             root.removeAllViews();
-            root.addView(webView, fillParent());
+            if (webView == null) createWebView();
+            else root.addView(webView, fillParent());
             webView.loadUrl(BuildConfig.DEN_TV_URL);
             webView.requestFocus();
         });
@@ -231,6 +238,23 @@ public final class MainActivity extends ComponentActivity {
                 WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame()) showLoadError();
         }
+
+        @Override
+        public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+            // A renderer killed on a low-memory TV cannot be reused. Keep the activity alive and let the user
+            // explicitly create a fresh renderer rather than immediately reloading a page that may have crashed it.
+            if (customView != null) {
+                root.removeView(customView);
+                customView = null;
+                if (customViewCallback != null) customViewCallback.onCustomViewHidden();
+                customViewCallback = null;
+            }
+            root.removeView(view);
+            view.destroy();
+            if (view == webView) webView = null;
+            showLoadError();
+            return true;
+        }
     }
 
     private final class DenWebChromeClient extends WebChromeClient {
@@ -242,6 +266,7 @@ public final class MainActivity extends ComponentActivity {
             }
             customView = view;
             customViewCallback = callback;
+            customView.setKeepScreenOn(true);
             webView.setVisibility(View.GONE);
             root.addView(view, fillParent());
             immersive();
@@ -255,6 +280,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void hideCustomView() {
         if (customView == null) return;
+        customView.setKeepScreenOn(false);
         root.removeView(customView);
         customView = null;
         webView.setVisibility(View.VISIBLE);

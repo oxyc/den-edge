@@ -1,0 +1,105 @@
+name: tv-samsung-publish
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tv-samsung-publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require successful CI for this main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          conclusion=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+            --limit 1 --json conclusion --jq '.[0].conclusion // ""')
+          test "$conclusion" = success || {
+            echo "::error::exact-main CI is not successful for $GITHUB_SHA"
+            exit 1
+          }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build Samsung widgets
+        working-directory: web
+        env:
+          DEN_TV_API_ORIGIN: https://d-api.oxy.fi
+          DEN_TV_SERVICE_ORIGIN: https://d.oxy.fi
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(cat tv-packaging/tizen/VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          IFS=. read -r major minor patch <<<"$version"
+          test "$major" -le 255 && test "$minor" -le 255 && test "$patch" -le 65535
+          if gh release view tv-samsung --repo "$REPO" >/dev/null 2>&1; then
+            current="$RUNNER_TEMP/current-samsung-version"
+            mkdir -p "$current"
+            gh release download tv-samsung --repo "$REPO" --pattern den-tv-samsung.version --dir "$current"
+            current_version=$(sed -n 's/^tizen=//p' "$current/den-tv-samsung.version")
+            [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$version" != "$current_version" \
+              && test "$(printf '%s\n%s\n' "$version" "$current_version" | sort -V | tail -n1)" = "$version" || {
+                echo "::error::Tizen version $version must exceed published $current_version"
+                exit 1
+              }
+          fi
+          npm ci --ignore-scripts
+
+          DEN_TIZEN_VERSION=8.0 DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          DEN_TIZEN_VERSION=8.0 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+            --version "$version"
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen8.wgt
+          cp den-tv-tizen8.wgt den-tv-tizen.wgt
+          mkdir -p tv-release/den-tv-tizen
+          mv tv-packages/tizen/shell tv-release/den-tv-tizen/app
+          cp tv-packaging/install-tizen.sh tv-release/den-tv-tizen/install.sh
+          tar -C tv-release -czf den-tv-tizen-unsigned.tar.gz den-tv-tizen
+
+          DEN_TIZEN_VERSION=6.5 DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          DEN_TIZEN_VERSION=6.5 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+            --version "$version"
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen6.5.wgt
+          sha256sum den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-tizen-unsigned.tar.gz > den-tv-samsung.sha256
+          printf 'tizen=%s\nsource=%s\n' "$version" "$GITHUB_SHA" > den-tv-samsung.version
+          echo "TIZEN_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Publish stable Samsung downloads
+        working-directory: web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: tv-samsung
+        run: |
+          set -euo pipefail
+          notes=$(printf 'Stable Den Samsung widgets with bundled TV UI.\n\n- Tizen: `%s`\n- Source: `%s`\n' \
+            "$TIZEN_VERSION" "$GITHUB_SHA")
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/$REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Den for Samsung TV" --notes "$notes" --latest=false
+          fi
+          gh release edit "$TAG" --repo "$REPO" --title "Den for Samsung TV" \
+            --notes "$notes" --latest=false
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-tizen-unsigned.tar.gz den-tv-samsung.sha256 den-tv-samsung.version

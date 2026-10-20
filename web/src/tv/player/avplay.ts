@@ -1,4 +1,5 @@
 import './avplay.css';
+import { subtitleLanguagesMatch } from '../../lib/remux';
 import { apiUrl } from '../../lib/runtimeUrl';
 
 type AvplayState = 'NONE' | 'IDLE' | 'READY' | 'PLAYING' | 'PAUSED';
@@ -91,7 +92,9 @@ function languageOf(track: AvplayTrack): string | undefined {
     }
   }
   if (!info) return undefined;
-  for (const key of ['language', 'lang', 'Language']) {
+  // Samsung documents `track_lang` for AVPlay stream metadata. A few firmware/stream combinations expose one of
+  // the other spellings, so retain them as fallbacks rather than teaching the player one device's shape.
+  for (const key of ['track_lang', 'language', 'lang', 'Language']) {
     const value = info[key];
     if (typeof value === 'string' && value) return value;
   }
@@ -144,6 +147,9 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   const played: [number, number][] = [];
   let lastPlayingTime: number | undefined;
   let pendingSeek = Promise.resolve();
+  let queuedSeek: number | undefined;
+  let requestedTime: number | undefined;
+  let finishPendingSeek: (() => void) | undefined;
 
   const plane = document.createElement('object');
   plane.type = 'application/avplayer';
@@ -285,9 +291,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     try {
       api.setSilentSubtitle(subtitleLanguage === null || !!captionTrack);
       if (subtitleLanguage === null || captionTrack) return;
-      const wanted = subtitleLanguage.toLowerCase();
       const text = tracks('TEXT');
-      const track = text.find((candidate) => languageOf(candidate)?.toLowerCase() === wanted);
+      const track = text.find((candidate) =>
+        subtitleLanguagesMatch(languageOf(candidate), subtitleLanguage),
+      );
       if (track) api.setSelectTrack('TEXT', track.index);
     } catch {
       console.warn('Samsung AVPlay subtitle track could not be selected.');
@@ -337,46 +344,76 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     }
   };
 
+  const finishSeek = (successful: boolean) => {
+    if (!seeking) return;
+    seeking = false;
+    requestedTime = undefined;
+    if (active) {
+      if (successful) event(element, 'timeupdate');
+      event(element, 'seeked');
+    }
+    const finish = finishPendingSeek;
+    finishPendingSeek = undefined;
+    finish?.();
+  };
+
+  const runQueuedSeek = () => {
+    if (!active) {
+      finishSeek(false);
+      return;
+    }
+    const to = queuedSeek;
+    if (to === undefined) {
+      finishSeek(true);
+      return;
+    }
+    queuedSeek = undefined;
+    try {
+      // Samsung rejects any other AVPlay operation while an asynchronous seek is outstanding. Keep at most one
+      // follow-up target: rapid remote presses accumulate through the facade's optimistic currentTime getter, then
+      // coalesce into the latest requested position once this operation completes.
+      api.seekTo(
+        Math.round(to * 1000),
+        () => {
+          if (!active) {
+            finishSeek(false);
+            return;
+          }
+          currentTime = to;
+          renderCaptions();
+          lastPlayingTime = undefined;
+          if (queuedSeek !== undefined) runQueuedSeek();
+          else finishSeek(true);
+        },
+        (error) => {
+          queuedSeek = undefined;
+          if (active) fail(error);
+          finishSeek(false);
+        },
+      );
+    } catch (error) {
+      queuedSeek = undefined;
+      if (active) fail(error);
+      finishSeek(false);
+    }
+  };
+
   const seek = (seconds: number) => {
     if (!active || !ready || !Number.isFinite(seconds)) return;
     const to = Math.max(0, duration ? Math.min(seconds, duration - 0.001) : seconds);
+    requestedTime = to;
+    queuedSeek = to;
+    if (seeking) return;
     seeking = true;
     event(element, 'seeking');
     pendingSeek = new Promise<void>((resolve) => {
-      try {
-        api.seekTo(
-          Math.round(to * 1000),
-          () => {
-            if (active) {
-              currentTime = to;
-              renderCaptions();
-              lastPlayingTime = undefined;
-              seeking = false;
-              event(element, 'timeupdate');
-              event(element, 'seeked');
-            }
-            resolve();
-          },
-          (error) => {
-            if (active) {
-              seeking = false;
-              event(element, 'seeked');
-              fail(error);
-            }
-            resolve();
-          },
-        );
-      } catch (error) {
-        seeking = false;
-        event(element, 'seeked');
-        fail(error);
-        resolve();
-      }
+      finishPendingSeek = resolve;
     });
+    runQueuedSeek();
   };
 
   Object.defineProperties(element, {
-    currentTime: { configurable: true, get: () => currentTime, set: seek },
+    currentTime: { configurable: true, get: () => requestedTime ?? currentTime, set: seek },
     duration: { configurable: true, get: () => duration || Number.NaN },
     paused: { configurable: true, get: () => paused },
     ended: { configurable: true, get: () => ended },
@@ -506,6 +543,8 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     destroy() {
       if (!active) return;
       active = false;
+      queuedSeek = undefined;
+      finishSeek(false);
       trackChanges.disconnect();
       element.removeEventListener('load', renderCaptions, true);
       captions.remove();

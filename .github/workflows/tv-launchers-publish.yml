@@ -1,0 +1,120 @@
+name: tv-launchers-publish
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tv-launchers-publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require successful CI for this main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          conclusion=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+            --limit 1 --json conclusion --jq '.[0].conclusion // ""')
+          test "$conclusion" = success || {
+            echo "::error::exact-main CI is not successful for $GITHUB_SHA"
+            exit 1
+          }
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Build signed Android and LG launchers
+        working-directory: web
+        env:
+          DEN_ANDROID_KEYSTORE_BASE64: ${{ secrets.DEN_ANDROID_KEYSTORE_BASE64 }}
+          DEN_ANDROID_KEY_ALIAS: ${{ secrets.DEN_ANDROID_KEY_ALIAS }}
+          DEN_ANDROID_KEY_PASSWORD: ${{ secrets.DEN_ANDROID_KEY_PASSWORD }}
+          DEN_ANDROID_STORE_PASSWORD: ${{ secrets.DEN_ANDROID_STORE_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          android_version=$(cat ../android-tv/VERSION)
+          webos_version=$(cat tv-packaging/webos/VERSION)
+          [[ "$android_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$webos_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version_gt() {
+            test "$1" != "$2" && test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
+          }
+          if gh release view tv-launchers --repo "$REPO" >/dev/null 2>&1; then
+            current="$RUNNER_TEMP/current-launcher-versions"
+            mkdir -p "$current"
+            gh release download tv-launchers --repo "$REPO" --pattern den-tv-launchers.versions --dir "$current"
+            current_android=$(sed -n 's/^android=//p' "$current/den-tv-launchers.versions")
+            current_webos=$(sed -n 's/^webos=//p' "$current/den-tv-launchers.versions")
+            [[ "$current_android" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            [[ "$current_webos" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            version_gt "$android_version" "$current_android" || {
+              echo "::error::Android launcher version $android_version must exceed published $current_android"
+              exit 1
+            }
+            version_gt "$webos_version" "$current_webos" || {
+              echo "::error::webOS launcher version $webos_version must exceed published $current_webos"
+              exit 1
+            }
+          fi
+          for name in DEN_ANDROID_KEYSTORE_BASE64 DEN_ANDROID_KEY_ALIAS DEN_ANDROID_KEY_PASSWORD DEN_ANDROID_STORE_PASSWORD; do
+            test -n "${!name}" || { echo "::error::Android signing secret $name is not configured"; exit 1; }
+          done
+
+          npm install --global @webos-tools/cli@3.2.6
+          android_keystore="$RUNNER_TEMP/den-tv-android-release.jks"
+          printf '%s' "$DEN_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$android_keystore"
+          DEN_ANDROID_KEYSTORE_FILE="$android_keystore" \
+            ../android-tv/gradlew -p ../android-tv :app:lintRelease :app:assembleRelease --no-daemon
+          cp ../android-tv/app/build/outputs/apk/release/app-release.apk den-tv-android.apk
+
+          node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$webos_version"
+          mkdir -p tv-release/den-tv-webos
+          mv "tv-packages/webos/packages/com.den.edge.tv_${webos_version}_all.ipk" den-tv-webos.ipk
+          cp den-tv-webos.ipk tv-release/den-tv-webos/den-tv-webos.ipk
+          cp tv-packaging/install-webos.sh tv-release/den-tv-webos/install.sh
+          tar -C tv-release -czf den-tv-webos.tar.gz den-tv-webos
+          sha256sum den-tv-android.apk den-tv-webos.ipk den-tv-webos.tar.gz > den-tv-launchers.sha256
+          printf 'android=%s\nwebos=%s\nsource=%s\n' \
+            "$android_version" "$webos_version" "$GITHUB_SHA" > den-tv-launchers.versions
+
+          {
+            echo "ANDROID_VERSION=$android_version"
+            echo "WEBOS_VERSION=$webos_version"
+          } >> "$GITHUB_ENV"
+      - name: Publish stable launcher downloads
+        working-directory: web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: tv-launchers
+        run: |
+          set -euo pipefail
+          notes=$(printf 'Stable Den launchers for hosted TV UI.\n\n- Android: `%s`\n- LG webOS: `%s`\n- Source: `%s`\n' \
+            "$ANDROID_VERSION" "$WEBOS_VERSION" "$GITHUB_SHA")
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/$REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Den TV launchers" --notes "$notes" --latest=false
+          fi
+          gh release edit "$TAG" --repo "$REPO" --title "Den TV launchers" \
+            --notes "$notes" --latest=false
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            den-tv-android.apk den-tv-webos.ipk den-tv-webos.tar.gz \
+            den-tv-launchers.sha256 den-tv-launchers.versions
