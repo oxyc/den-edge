@@ -35,16 +35,16 @@ Build the actual local bundle with an API origin, then package it with a named
 Tizen Certificate Profile:
 
 ```sh
-DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den.example npm run build:tv:tizen
-DEN_TV_API_ORIGIN=https://den.example node scripts/tv-package.mjs tizen \
-  --url https://den.example --profile MyCertificateProfile
+DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.example DEN_TV_SERVICE_ORIGIN=https://d.example npm run build:tv:tizen
+DEN_TV_API_ORIGIN=https://d-api.example DEN_TV_SERVICE_ORIGIN=https://d.example node scripts/tv-package.mjs tizen \
+  --url https://d-api.example --profile MyCertificateProfile
 ```
 
 Without a Tizen SDK/profile, inspect the unsigned shell instead:
 
 ```sh
-DEN_TV_API_ORIGIN=https://den.example node scripts/tv-package.mjs tizen \
-  --url https://den.example --prepare
+DEN_TV_API_ORIGIN=https://d-api.example DEN_TV_SERVICE_ORIGIN=https://d.example node scripts/tv-package.mjs tizen \
+  --url https://d-api.example --prepare
 ```
 
 `node scripts/tizen-package.integration.mjs` builds the packaged bundle and

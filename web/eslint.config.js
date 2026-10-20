@@ -46,6 +46,7 @@ export default defineConfig(
         __DEN_TV_PLATFORM__: 'readonly',
         __DEN_TV_PACKAGED__: 'readonly',
         __DEN_TV_API_ORIGIN__: 'readonly',
+        __DEN_TV_SERVICE_ORIGIN__: 'readonly',
       },
     },
   },

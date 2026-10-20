@@ -824,11 +824,42 @@
     goTo(index, false);
   }
 
-  function keyed(event: KeyboardEvent) {
+  function slideControls(slide: HTMLElement): HTMLElement[] {
+    return Array.from(slide.querySelectorAll<HTMLElement>('a[href], button, [tabindex]')).filter(
+      (control) => control.tabIndex >= 0 && !control.hasAttribute('disabled'),
+    );
+  }
+
+  async function keyed(event: KeyboardEvent) {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
     const next = index + (event.key === 'ArrowRight' ? 1 : -1);
-    show(Math.min(Math.max(next, 0), shown.length - 1));
+    const destination = Math.min(Math.max(next, 0), shown.length - 1);
+    if (destination === index || !rail) return;
+
+    // A dot is one roving tab stop, and a slide's controls are stable semantic slots (Play, More, personal
+    // actions). Keep whichever kind of control received the arrow instead of leaving focus on a node that becomes
+    // inert when the rail moves. The immediate move also avoids making keyboard focus wait for smooth-scroll and
+    // `scrollend`, which older TV/browser engines do not reliably send.
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const fromDot = !!target?.closest('.dot');
+    const oldSlide = target?.closest<HTMLElement>('.slide');
+    const slot = oldSlide && target ? slideControls(oldSlide).indexOf(target) : -1;
+    paging = true;
+    goTo(destination, false);
+    arrive(destination);
+    await tick();
+    goTo(index, false);
+
+    if (fromDot) {
+      frame?.querySelector<HTMLElement>('.dot.on')?.focus({ preventScroll: true });
+      return;
+    }
+    if (slot >= 0) {
+      const current = frame?.querySelector<HTMLElement>('.slide:not([inert])');
+      const controls = current ? slideControls(current) : [];
+      controls[Math.min(slot, controls.length - 1)]?.focus({ preventScroll: true });
+    }
   }
 
   function remotePaging(node: HTMLElement) {
@@ -1045,7 +1076,7 @@
               href={titleHref(title)}
               aria-label={`Open details for ${title.title}`}
               data-spatial-skip
-              tabindex={n === index ? 0 : -1}
+              tabindex="-1"
               draggable="false"
             ></a>
           {/if}
@@ -1055,11 +1086,8 @@
                 {#if __DEN_TV__}
                   <span class="tv-title">{title.title}</span>
                 {:else}
-                  <a
-                    class="title-link"
-                    href={titleHref(title)}
-                    data-spatial-skip
-                    tabindex={n === index ? 0 : -1}>{title.title}</a
+                  <a class="title-link" href={titleHref(title)} data-spatial-skip tabindex="-1"
+                    >{title.title}</a
                   ><span class="mobile-title">{title.title}</span>
                 {/if}
               </h2>
@@ -1144,6 +1172,7 @@
               class:edge
               aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
               aria-current={n === index ? 'true' : undefined}
+              tabindex={n === index ? 0 : -1}
               onclick={() => show(n)}
               onkeydown={keyed}
             ></button>

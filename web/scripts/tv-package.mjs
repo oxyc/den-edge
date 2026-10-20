@@ -69,6 +69,7 @@ if (platform === 'tizen') {
   if (versionParts[0] > 255 || versionParts[1] > 255 || versionParts[2] > 65535)
     usage('Tizen --version components must be within 0-255, 0-255, and 0-65535');
   const apiText = process.env.DEN_TV_API_ORIGIN;
+  const serviceText = process.env.DEN_TV_SERVICE_ORIGIN ?? apiText;
   const profile = option('--profile');
   const prepare = args.includes('--prepare');
   if (!apiText) usage('DEN_TV_API_ORIGIN is required for a bundled Tizen package');
@@ -93,6 +94,23 @@ if (platform === 'tizen') {
     );
   if (remote.origin !== api.origin)
     usage('--url and DEN_TV_API_ORIGIN must name the same origin for a Tizen package');
+  let service;
+  try {
+    service = new URL(serviceText);
+  } catch {
+    usage('DEN_TV_SERVICE_ORIGIN must be a valid URL');
+  }
+  if (
+    service.protocol !== 'https:' ||
+    service.username ||
+    service.password ||
+    service.hash ||
+    service.pathname !== '/' ||
+    service.search
+  )
+    usage(
+      'DEN_TV_SERVICE_ORIGIN must be an exact HTTPS origin without credentials, path, query, or fragment',
+    );
   const outDir = process.env.DEN_TV_OUT_DIR ?? 'dist-tv-tizen-package';
   if (!/^dist-tv-tizen-package(?:-e2e-\d+)?$/.test(outDir))
     usage('DEN_TV_OUT_DIR must name an isolated Tizen package output directory');
@@ -117,9 +135,12 @@ if (platform === 'tizen') {
     metadata.packaged !== true ||
     metadata.platform !== 'tizen' ||
     metadata.apiOrigin !== api.origin ||
+    metadata.serviceOrigin !== service.origin ||
     metadata.e2e !== false
   )
-    throw new Error('Bundled artifact metadata does not match packaged Tizen/API origin settings');
+    throw new Error(
+      'Bundled artifact metadata does not match packaged Tizen API/service origin settings',
+    );
   if (/\b(?:src|href)="\/(?:assets|manifest)/.test(builtIndex))
     throw new Error(
       'Bundled Tizen index still contains root-absolute asset URLs; rebuild with packaged base ./',

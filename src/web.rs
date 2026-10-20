@@ -162,6 +162,9 @@ async fn serve_file(
                 if let Some(origin) = state.tv_api_origin.as_ref().filter(|origin| !kept.contains(origin)) {
                     kept.push(origin.clone());
                 }
+                if let Some(origin) = state.tv_service_origin.as_ref().filter(|origin| !kept.contains(origin)) {
+                    kept.push(origin.clone());
+                }
             }
             &kept
         }
@@ -1192,6 +1195,7 @@ mod tests {
         state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.oxy.fi");
         state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.oxy.fi");
         state.tv_api_origin = Some("https://d-api.oxy.fi".into());
+        state.tv_service_origin = Some("https://d.oxy.fi".into());
         state.tv_web_dir = Some(tv.clone());
         state.tv_web_files.prepare(&tv).await.unwrap();
 
@@ -1204,6 +1208,10 @@ mod tests {
         assert!(
             connect.contains("https://d-api.oxy.fi"),
             "the hosted build may reach the existing device API"
+        );
+        assert!(
+            connect.contains("https://d.oxy.fi"),
+            "the hosted build may reuse existing web/service routes"
         );
         assert!(body_text(tv).await.contains("<title>Den TV</title>"));
         let tv_asset = h.send("GET", "/assets/tv-abc123.js", None, &[("host", "den-tv.oxy.fi")]).await;

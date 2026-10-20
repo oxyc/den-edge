@@ -2,8 +2,8 @@
 
 Den's production TV endpoint is `https://den-tv.oxy.fi`. The LG app is a very small launcher for that hosted UI.
 Samsung requires its UI inside a locally signed widget, so its package uses the existing
-`https://d-api.oxy.fi` backend directly. Video continues over Den's signed media route; it is not sent through
-Cloudflare Tunnel.
+`https://d-api.oxy.fi` device API and `https://d.oxy.fi` service routes directly. Video continues over Den's
+signed media route; it is not sent through Cloudflare Tunnel.
 
 Opening `https://den-tv.oxy.fi/?tv-diagnostics=1` in a desktop browser is a useful availability check, but it does
 not install anything and does not prove a TV decoder.
@@ -69,8 +69,10 @@ cannot safely be generated or stored by Den's CI, so building/signing the `.wgt`
 
    ```sh
    npm ci --ignore-scripts
-   DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi npm run build:tv:tizen
-   DEN_TV_API_ORIGIN=https://d-api.oxy.fi node scripts/tv-package.mjs tizen \
+   DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi \
+     DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi npm run build:tv:tizen
+   DEN_TV_API_ORIGIN=https://d-api.oxy.fi DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi \
+     node scripts/tv-package.mjs tizen \
      --url https://d-api.oxy.fi --profile DenSamsung --version 1.0.0
    ls tv-packages/tizen/packages/*.wgt
    tizen install -s TV_SERIAL --name Den.wgt -- tv-packages/tizen/packages
@@ -89,9 +91,11 @@ and [Tizen CLI](https://developer.samsung.com/smarttv/develop/getting-started/us
 After a den-edge update and tunnel configuration change:
 
 ```sh
-curl -fsS https://den-tv.oxy.fi/ | grep -F '<title>Den</title>'
+curl -fsS https://den-tv.oxy.fi/ | grep -F '<title>Den TV</title>'
 curl -fsS https://d-api.oxy.fi/version
 curl -sS -D- -o /dev/null -H 'Origin: https://den-tv.oxy.fi' https://d-api.oxy.fi/config \
+  | tr -d '\r' | grep -Fi 'access-control-allow-origin: https://den-tv.oxy.fi'
+curl -sS -D- -o /dev/null -H 'Origin: https://den-tv.oxy.fi' https://d.oxy.fi/reel/health \
   | tr -d '\r' | grep -Fi 'access-control-allow-origin: https://den-tv.oxy.fi'
 ```
 

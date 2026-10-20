@@ -147,6 +147,41 @@ test('billboard Play is a native player link and an ordinary click plays in plac
   }
 });
 
+test('billboard keyboard focus stays on actions and treats its pager as one roving stop', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await open(browser, '', { reducedMotion: 'reduce' });
+    const billboard = page.locator('.billboard');
+    const active = () => billboard.locator('.slide:not([inert])');
+
+    await expect(slideTitle(billboard)).toHaveText('Movie 1');
+    await expect(slideTitle(billboard)).toHaveAttribute('tabindex', '-1');
+    await expect(active().locator('.slide-link')).toHaveAttribute('tabindex', '-1');
+
+    const more = active().getByRole('link', { name: 'More' });
+    await more.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(slideTitle(billboard)).toHaveText('Movie 2');
+    await expect(active().getByRole('link', { name: 'More' })).toBeFocused();
+
+    const dots = billboard.locator('.dot');
+    await expect(dots).toHaveCount(9);
+    expect(
+      await dots.evaluateAll((nodes) => nodes.filter((node) => node.tabIndex === 0).length),
+    ).toBe(1);
+    await billboard.locator('.dot.on').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(slideTitle(billboard)).toHaveText('Movie 3');
+    await expect(billboard.locator('.dot.on')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(billboard.locator('.dot:focus')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('the Watchlist billboard offers remove and seen, and moves on from either', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
