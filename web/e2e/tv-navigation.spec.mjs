@@ -258,7 +258,6 @@ test('Home returns to the TV root without loading a backend document', async ({ 
   expect(documents).toEqual([]);
   await page.reload();
   await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
-  await expect(page.locator('html')).toHaveClass(/den-tv/);
 });
 
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({

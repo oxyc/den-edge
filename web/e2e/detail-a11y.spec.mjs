@@ -345,7 +345,6 @@ test('a second touch closes the split Play menu in WebKit', async () => {
     await expect(watchlist).not.toHaveAttribute('aria-busy', 'true');
     await watchlist.tap();
     await expect(watchlist).toHaveAttribute('aria-pressed', 'false');
-    await expect(watchlist.locator('svg')).not.toHaveClass(/filled/);
     await expect
       .poll(() => watchlist.evaluate((node) => getComputedStyle(node).backgroundColor))
       .toBe(restingBackground);

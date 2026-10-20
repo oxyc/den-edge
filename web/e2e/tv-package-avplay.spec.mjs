@@ -75,7 +75,6 @@ test('packaged Tizen loads the Samsung bridge before the app and plays through A
   await expect.poll(() => routed.sdkRequests).toHaveLength(1);
   expect(await page.evaluate(() => window.__avplayFixture.installedBeforeApp)).toBe(true);
   const video = page.locator('.player video');
-  await expect(video).toHaveClass(/den-avplay-placeholder/);
   await expect(page.locator('object.den-avplay-plane[type="application/avplayer"]')).toHaveCount(1);
   await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(1);
   await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(12);

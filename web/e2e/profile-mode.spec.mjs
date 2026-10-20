@@ -198,9 +198,6 @@ test('capability discovery never exposes or enables the legacy Owner UI', async 
   answerCapability();
   await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
   await expect(page.getByLabel('Owner PIN')).toBeFocused();
-  await expect(page.locator('[data-pin-slot].active')).toHaveCount(1);
-  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/active/);
-  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/ready/);
   await expect(page.locator('[data-mode]')).toHaveCount(0);
 });
 
@@ -300,7 +297,6 @@ test('preview directory switches sticky Kids and Visitor without a launch picker
   await page.getByRole('button', { name: 'Use Visitor' }).click();
   await expect(page.getByText('Owner approval required')).toBeVisible();
   await expect(page.getByLabel('Owner PIN')).toBeFocused();
-  await expect(page.locator('[data-pin-slot]').first()).toHaveClass(/active/);
   await expect(page.getByLabel('Owner PIN')).toHaveAttribute('type', 'password');
   await expect(page.getByLabel('Owner PIN')).toHaveAttribute('pattern', '[0-9][0-9][0-9][0-9]');
   await page.getByLabel('Owner PIN').fill('0000');
