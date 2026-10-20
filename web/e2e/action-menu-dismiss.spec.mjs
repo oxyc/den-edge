@@ -72,8 +72,9 @@ for (const [name, engine] of [
       const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
       await expect(menu).toBeVisible();
 
-      const box = await menu.boundingBox();
-      const point = { x: box.x + box.width / 2, y: box.y + 10 };
+      // On its list, at the list's top: the head's own drag is `action-sheet-drag.spec.mjs`'s.
+      const box = await menu.getByRole('menuitem').first().boundingBox();
+      const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
       // A finger down on the sheet, dragged well past the close threshold — the bottom-sheet "drag down to
       // dismiss" gesture, never a light-dismiss case since it starts inside the popover itself.
       await page.evaluate(({ x, y }) => {
