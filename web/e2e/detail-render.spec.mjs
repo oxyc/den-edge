@@ -150,7 +150,9 @@ for (const width of [393, 700, 759, 760, 844, 1280])
       '(max-width: 759px) clamp(96px, 29vw, 180px), clamp(190px, 24vw, 280px)',
     );
     await expect
-      .poll(() => firstStill.evaluate((node) => new URL(node.currentSrc).pathname))
+      .poll(() =>
+        firstStill.evaluate((node) => (node.currentSrc ? new URL(node.currentSrc).pathname : '')),
+      )
       .toBe('/t/p/w300/still-1.jpg');
     expect(stills.every((url) => new URL(url).pathname.includes('/t/p/w300/'))).toBe(true);
     const reservedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
