@@ -9,6 +9,7 @@
   import { onDestroy, tick } from 'svelte';
   import Button from './Button.svelte';
   import type { MenuItem } from '../lib/titleActions';
+  import { activateLinkInPlace } from '../lib/linkActivation';
 
   let {
     items,
@@ -427,10 +428,12 @@
     if (sheetDragStart?.pointerId === event.pointerId) sheetDragStart = null;
   }
 
-  function run(item: MenuItem) {
+  function run(item: MenuItem, event: MouseEvent) {
     if (item.disabled) return;
     // A link item's page is the Router's to open on a plain click, and the browser's on any other: only the menu goes.
-    if (item.kind !== 'link') item.onselect();
+    if (item.kind === 'link') {
+      if (item.onselect) activateLinkInPlace(event, item.onselect);
+    } else item.onselect();
     close();
   }
 
@@ -522,7 +525,7 @@
           aria-disabled={item.disabled || undefined}
           aria-describedby={item.description ? `${menuId}-${i}` : undefined}
           class={item.description ? 'item described' : 'item'}
-          onclick={() => run(item)}
+          onclick={(event) => run(item, event)}
         >
           {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
               >{item.description}</span
@@ -618,7 +621,7 @@
   }
 
   .menu :global(.item:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 

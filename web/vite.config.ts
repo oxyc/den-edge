@@ -23,6 +23,22 @@ const api = [
   '/scout',
   '/tmdb',
   '/metadata',
+  // Runtime routes the installed web app receives from den-edge too. Keeping them same-origin in development lets a
+  // local HTTPS page use the real library's Hearth config, playback and account integrations without CORS or a
+  // second local configuration. The TV config inherits this same proxy table.
+  '/grant',
+  '/oauth',
+  '/playback',
+  '/den',
+  '/ratings',
+  '/warnings',
+  '/skipdb',
+  '/subs',
+  '/subtitles',
+  '/sync',
+  '/mcp',
+  '/link',
+  '/version',
 ];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = upstream('DEN_ATLAS', 'http://192.168.86.193:8081');

@@ -6,7 +6,8 @@
   import { primeServicePage } from '../src/lib/services';
   import { setContentServiceContext } from '../src/lib/contentContext';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
   import '../src/app.css';
 
   const page = new URLSearchParams(location.search).has('page');
@@ -16,6 +17,7 @@
   // Production resolves this through SessionServices before service pages ask Atlas questions. Keep the standalone
   // fixture on that same semantic configuration boundary instead of relying on a Worker-private default URL.
   void content.query({ kind: 'sources.configure', atlas: '/atlas' });
+  onMount(installKeyboardNavigation);
   onDestroy(() => services.close());
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());

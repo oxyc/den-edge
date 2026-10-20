@@ -38,6 +38,6 @@
   }
 
   .expand-all:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 </style>

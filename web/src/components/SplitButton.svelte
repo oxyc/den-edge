@@ -8,6 +8,7 @@
   let {
     label,
     icon,
+    href,
     onclick,
     alternateLabel,
     alternateIcon,
@@ -17,7 +18,8 @@
   }: {
     label: string;
     icon?: ButtonIconName;
-    onclick: () => void;
+    href?: string;
+    onclick: (event: MouseEvent) => void;
     alternateLabel: string;
     alternateIcon?: ButtonIconName;
     onalternate: () => void;
@@ -112,6 +114,7 @@
       {icon}
       {label}
       {busy}
+      {href}
       {onclick}
       onkeydown={() => (pointerOpen = false)}
     />
@@ -199,8 +202,8 @@
   /* The shell stays visually stable. Focus identifies the single control, and the light region fill says which
      of its two semantic buttons owns keyboard focus without turning either region into a second pill. */
   .split-button:not(.pointer-open) .split-surface:has(:global(.split-region:focus-visible)) {
-    outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-    outline-offset: var(--focus-ring-width);
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: var(--ring-width);
   }
 
   .split-surface.busy {

@@ -3,8 +3,7 @@
   --gutter: clamp(54px, 5vw, 96px);
   --bar-space: 124px;
   --card-w: clamp(190px, 13vw, 260px);
-  --control-focus-ring-color: var(--focus-ring);
-  --focus-ring-width: 4px;
+  --ring-width: 4px;
   --page-max: 1920px;
 
   font-size: 19px;
@@ -212,9 +211,8 @@
 .den-tv.tv-remote-active select:focus,
 .den-tv.tv-remote-active textarea:focus,
 .den-tv.tv-remote-active [tabindex]:focus {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-width);
-  border-radius: 8px;
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
   box-shadow:
     0 0 0 7px rgb(0 0 0 / 0.45),
     0 10px 34px rgb(0 0 0 / 0.5);
@@ -283,14 +281,14 @@
 
 :root.den-tv.tv-remote-active .tile:focus .art,
 :root.den-tv.tv-remote-active .card.pick:focus .art {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: calc(-1 * var(--focus-ring-width));
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--ring-width));
 }
 
 /* PosterRow's heading deliberately clips a long single line. Its linked recommendation subject therefore keeps the
    broad remote ring inside the text run instead of losing the trailing edge at that clip. */
 :root.den-tv.tv-remote-active .heading-link:focus {
-  outline-offset: calc(-1 * var(--focus-ring-width));
+  outline-offset: calc(-1 * var(--ring-width));
   box-shadow: none;
 }
 
@@ -298,8 +296,8 @@
    make this explicit here instead of leaving a clipped ring on the invisible select or split-button region. */
 :root.den-tv.tv-remote-active .actions > .pick:focus-within,
 :root.den-tv.tv-remote-active .split-surface:focus-within {
-  outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-  outline-offset: var(--focus-ring-width);
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
 }
 
 :root.den-tv.tv-remote-active .actions > .pick select:focus,
@@ -310,8 +308,8 @@
 }
 
 :root.den-tv.tv-remote-active .tv-search-editor:focus-within {
-  outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-  outline-offset: var(--focus-ring-width);
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
   border-radius: 16px;
   box-shadow:
     0 0 0 7px rgb(0 0 0 / 0.45),
@@ -324,8 +322,8 @@
 }
 
 :root.den-tv.tv-remote-active a.person:focus .portrait {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: calc(-1 * var(--focus-ring-width));
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--ring-width));
 }
 
 /* Apple TV presents warnings as quiet, non-interactive hero context. Keep this in the TV sheet so the web app
@@ -424,7 +422,7 @@
 
 /* The season strip scrolls horizontally and clips an outer focus ring. Draw this ring inside the tab instead. */
 .den-tv.tv-remote-active [role='tab']:focus {
-  outline-offset: calc(-1 * var(--focus-ring-width));
+  outline-offset: calc(-1 * var(--ring-width));
   box-shadow: none;
 }
 

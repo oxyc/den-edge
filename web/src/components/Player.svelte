@@ -132,6 +132,8 @@
   } from '../lib/diagnosticsReport';
   import ActionMenu from './ActionMenu.svelte';
   import Button from './Button.svelte';
+  import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
 
   let {
     title,
@@ -190,6 +192,19 @@
     onnext?: () => void;
     onclose: () => void;
   } = $props();
+  const nextHref = $derived(
+    onnext && nextEpisode?.season !== undefined && nextEpisode.episode !== undefined
+      ? titleHref({ ...title, ...nextEpisode, play: true })
+      : undefined,
+  );
+
+  function advanceLink(event: MouseEvent, stopCountdown = false) {
+    if (!onnext) return;
+    activateLinkInPlace(event, () => {
+      if (stopCountdown) stay();
+      onnext();
+    });
+  }
 
   type Episode = { season?: number; episode?: number };
 
@@ -3499,7 +3514,7 @@
                 (video.currentTime = Math.min(length() || Infinity, video.currentTime + SKIP_SECS))}
               >+10s</button
             >
-            {#if onnext}<button type="button" onclick={onnext}>Next</button>{/if}
+            {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
             <button type="button" onclick={close}>Close</button>
           </nav>
         {/if}
@@ -3656,14 +3671,13 @@
             <Button
               variant="primary"
               aria-label="Next: {next}"
-              onclick={() => {
-                stay();
-                onnext();
-              }}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
+              href={nextHref}
+              onclick={(event) => advanceLink(event, true)}
+              >Next: {next} <span aria-hidden="true">({upNext})</span></Button
             >
             <Button label="Stay" onclick={stay} />
           {:else}
-            <Button label={`Next: ${next}`} onclick={onnext} />
+            <Button label={`Next: ${next}`} href={nextHref} onclick={advanceLink} />
           {/if}
         {/if}
       </div>
@@ -4127,7 +4141,7 @@
   .pick:focus-within,
   .pick-menu :global(.trigger.pick:focus-visible) {
     border-color: var(--accent);
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 

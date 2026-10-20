@@ -18,6 +18,7 @@
   import type { MenuItem } from '../lib/titleActions';
   import { toastContext } from '../lib/toast';
   import { tick } from 'svelte';
+  import { activateLinkInPlace } from '../lib/linkActivation';
 
   let {
     row,
@@ -28,11 +29,13 @@
     onreact,
     onplay,
     onplayhere,
+    playHref,
     onsources,
     away = false,
     blocked = false,
     restricted = false,
     trailerHref,
+    trailerPlayerHref,
     ontrailer,
     share,
     notice = null,
@@ -55,6 +58,8 @@
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
+    /** A real address for the same in-app playback, including its episode coordinate. */
+    playHref?: string;
     /** Open sources for the same movie or episode as the primary Play action. */
     onsources?: () => void;
     /**
@@ -71,6 +76,8 @@
     restricted?: boolean;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
+    /** A real address for an exact trailer which opens Den's trailer player. */
+    trailerPlayerHref?: string;
     /**
      * Play the trailer here, in YouTube's embed, instead of leaving the page for it.
      *
@@ -181,7 +188,8 @@
       <SplitButton
         icon="play"
         label={playLabel}
-        onclick={onplayhere}
+        href={playHref}
+        onclick={(event) => activateLinkInPlace(event, onplayhere)}
         alternateIcon="tv"
         alternateLabel={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
         onalternate={onplay}
@@ -196,7 +204,8 @@
         icon="play"
         label={playLabel}
         busy={externallyBusy()}
-        onclick={onplayhere}
+        href={playHref}
+        onclick={(event) => activateLinkInPlace(event, onplayhere)}
       />
     {/if}
   {:else if onplay}
@@ -225,9 +234,9 @@
 
   <div class="pills">
     <div class="promoted">
-      {#if trailerHref && !restricted && ontrailer}
-        <!-- A real button: the plain click always opens the in-page dialog, so it must be announced as
-             something that acts in place rather than as a link that leaves the page. -->
+      {#if trailerPlayerHref && !restricted && ontrailer}
+        <!-- A real link to the same trailer player. An ordinary click uses the already-mounted dialog; a modified
+             click, long press, or context menu can open that player in another tab. -->
         <Button
           variant="secondary"
           size="large"
@@ -235,7 +244,8 @@
           icon="trailer"
           label="Trailer"
           ariaLabel="Trailer"
-          onclick={ontrailer}
+          href={trailerPlayerHref}
+          onclick={(event) => activateLinkInPlace(event, ontrailer)}
         />
       {:else if trailerHref && !restricted}
         <!-- No trailer id to play in a dialog: a normal link, which really does leave for YouTube. A normal
@@ -546,8 +556,8 @@
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */
   .pick:focus-within {
-    outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-    outline-offset: var(--focus-ring-width);
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: var(--ring-width);
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */

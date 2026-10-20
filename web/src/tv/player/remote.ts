@@ -112,7 +112,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
         target instanceof HTMLElement && controls.includes(target) ? target : undefined;
       if (!current) {
         const fallback = root.querySelector<HTMLElement>(
-          '.tv-transport button, header button, footer select, footer button',
+          '.tv-transport button, .tv-transport a, header button, footer select, footer button, footer a',
         );
         fallback?.focus({ preventScroll: true });
         return !!fallback;

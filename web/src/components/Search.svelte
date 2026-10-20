@@ -195,6 +195,11 @@
     status = dropped.length ? `${names(dropped)}: nothing like it in ${NOUN[to]}.` : '';
     go({ type: type ?? undefined, chips: set });
   }
+  const typeHref = (type: MediaType | null) => {
+    const to = type ?? 'all';
+    const { set } = remapSet(selection, exploreType, to, chipsFor(to));
+    return searchHref(query, { type: type ?? undefined, chips: set });
+  };
   const NOUN: Record<ExploreType, string> = {
     all: 'films or series',
     movie: 'movies',
@@ -570,6 +575,7 @@
       <TypeFilter
         value={explore.type ?? null}
         onchange={chooseType}
+        href={typeHref}
         label="Browse movies, series or both"
       />
     {/if}
@@ -636,6 +642,7 @@
           <TypeFilter
             value={explore.type ?? null}
             onchange={chooseType}
+            href={typeHref}
             label="Show in search results"
           />
         </div>
@@ -735,7 +742,7 @@
   }
 
   .clear:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -821,7 +828,7 @@
 
   /* Inset: on a phone this row scrolls sideways, and would clip a ring drawn outside it. */
   .prompts a:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -853,8 +860,8 @@
        an outer ring would be cut at either edge and focusing a wide item could scroll the column sideways. */
     .rail :global(a:focus-visible),
     .rail :global(button:focus-visible) {
-      outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-      outline-offset: calc(-1 * var(--focus-ring-width));
+      outline: var(--ring-width) solid var(--focus-ring);
+      outline-offset: calc(-1 * var(--ring-width));
     }
 
     .feed {

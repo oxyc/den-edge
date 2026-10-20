@@ -8,6 +8,8 @@ const movie = {
   poster_path: '/poster.jpg',
   backdrop_path: '/backdrop.jpg',
   overview: 'A feature film.',
+  vote_average: 7.8,
+  vote_count: 1234,
   genres: [{ name: 'Drama' }],
   videos: { results: [{ site: 'YouTube', type: 'Trailer', key: 'yt1', official: true }] },
   credits: {
@@ -31,7 +33,7 @@ async function mock(page) {
     );
 }
 
-test('Trailer opens as a button, moves focus to Close, and Escape returns it', async () => {
+test('Trailer opens from its player link, moves focus to Close, and Escape returns it', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -39,7 +41,7 @@ test('Trailer opens as a button, moves focus to Close, and Escape returns it', a
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await mock(page);
     await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
-    const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
+    const trailer = page.getByRole('link', { name: 'Trailer', exact: true });
     await expect(trailer).toBeVisible();
     await trailer.focus();
     await trailer.press('Enter');
@@ -103,6 +105,28 @@ test('Right at the end of title actions does not leak diagonally into Cast', asy
   }
 });
 
+test('Left at the start of title actions does not act as browser Back', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
+    await page.evaluate(() => {
+      window.backRequests = 0;
+      document.addEventListener('den:back', () => window.backRequests++);
+    });
+    const trailer = page.locator('a[aria-label="Trailer"]');
+    await trailer.focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect(trailer).toBeFocused();
+    expect(await page.evaluate(() => window.backRequests)).toBe(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Sources is a keyboard disclosure', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -122,6 +146,45 @@ test('Sources is a keyboard disclosure', async () => {
     await disclosure.press('Space');
     await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
     await expect(panel).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('shared focus styling gives controls one rounded ring and metadata one unclipped cue', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
+
+    const sources = page.locator('.title-sources').getByRole('button', { name: /^Sources/ });
+    await sources.focus();
+    const sourceFocus = await sources.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return {
+        radius: Number.parseFloat(style.borderRadius),
+        outline: style.outlineStyle,
+        color: style.outlineColor,
+      };
+    });
+    expect(sourceFocus.radius).toBeGreaterThanOrEqual(8);
+    expect(sourceFocus.outline).toBe('solid');
+    expect(sourceFocus.color).toBe('rgb(255, 255, 255)');
+
+    const rating = page.getByRole('link', { name: /TMDB rating/ });
+    await rating.focus();
+    const ratingFocus = await rating.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return {
+        decoration: style.textDecorationLine,
+        outline: style.outlineStyle,
+        offset: style.outlineOffset,
+      };
+    });
+    expect(ratingFocus).toEqual({ decoration: 'none', outline: 'solid', offset: '-3px' });
   } finally {
     await browser.close();
   }
@@ -215,9 +278,9 @@ test('phone Detail keeps playback and personal actions usable at narrow widths',
       const actions = page.locator('.hero-actions .actions');
       const disclosure = page.getByRole('button', { name: 'More ways to play' });
       const controls = [
-        page.getByRole('button', { name: 'Play', exact: true }),
+        page.getByRole('link', { name: 'Play', exact: true }),
         disclosure,
-        page.getByRole('button', { name: 'Trailer', exact: true }),
+        page.getByRole('link', { name: 'Trailer', exact: true }),
         page.getByRole('button', { name: 'Watchlist', exact: true }),
         page.getByRole('button', { name: 'Seen', exact: true }),
         page.getByRole('button', { name: 'Share', exact: true }),
@@ -297,7 +360,7 @@ test('desktop split destination preserves pointer-to-keyboard focus and menu beh
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await mock(page);
     await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions`);
-    const play = page.getByRole('button', { name: 'Play', exact: true });
+    const play = page.getByRole('link', { name: 'Play', exact: true });
     const disclosure = page.getByRole('button', { name: 'More ways to play' });
     const surface = page.locator('.split-surface');
 
@@ -336,7 +399,7 @@ test('phone Detail without playback keeps the remaining action group intact', as
       await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
 
       const actions = page.locator('.hero-actions .actions');
-      const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
+      const trailer = page.getByRole('link', { name: 'Trailer', exact: true });
       const utilitiesGroup = actions.locator('.utilities');
       const utilities = [
         page.getByRole('button', { name: 'Watchlist', exact: true }),

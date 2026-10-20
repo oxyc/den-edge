@@ -15,6 +15,8 @@
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
   import { DownloadSourceLoader } from '../lib/downloadSourceLoader';
+  import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   let {
     imdb,
     season,
@@ -277,7 +279,16 @@
                   variant="secondary"
                   icon="play"
                   label="Play"
-                  onclick={() => onplay(source.filename)}
+                  href={title
+                    ? titleHref({
+                        ...title,
+                        season,
+                        episode,
+                        play: true,
+                        filename: source.filename,
+                      })
+                    : undefined}
+                  onclick={(event) => activateLinkInPlace(event, () => onplay(source.filename))}
                 />
               {:else if !ready && title}<Button
                   variant="secondary"
@@ -346,7 +357,6 @@
     justify-content: flex-start;
     padding-inline: 0;
     border: 0;
-    border-radius: 0;
     background: transparent;
     font-size: var(--section-heading-size);
     font-weight: var(--section-heading-weight);

@@ -146,7 +146,7 @@ async function guestPlayer(page, { hearth, originalLanguage }) {
   await page.goto(`${ORIGIN}/movie/${TITLE}`);
   const play = page
     .locator('[data-active="true"]')
-    .getByRole('button', { name: 'Play', exact: true });
+    .getByRole('link', { name: 'Play', exact: true });
   await expect(play).toBeVisible({ timeout: 30_000 });
   await play.tap();
   await expect

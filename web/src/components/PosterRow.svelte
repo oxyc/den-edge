@@ -145,8 +145,8 @@
   /* A recommendation subject can end exactly where the single-line heading is ellipsized. Keep its keyboard ring
      inside the link so the heading's overflow boundary cannot cut off the trailing edge. */
   .heading-link:focus-visible {
-    outline: var(--focus-ring-width) solid var(--focus-ring);
-    outline-offset: calc(-1 * var(--focus-ring-width));
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
     border-radius: 4px;
   }
 

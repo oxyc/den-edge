@@ -89,10 +89,15 @@
   <a
     {href}
     role={attributes.role}
+    tabindex={attributes.tabindex}
+    id={attributes.id}
+    title={attributes.title}
     class="den-button den-button-{variant} den-button-{size} {className}"
     aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
     aria-describedby={attributes['aria-describedby']}
-    {onclick}>{@render contents()}</a
+    aria-busy={busy || attributes['aria-busy'] || undefined}
+    aria-disabled={busy || attributes['aria-disabled'] || undefined}
+    onclick={activate}>{@render contents()}</a
   >
 {:else}
   <button

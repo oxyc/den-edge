@@ -363,7 +363,7 @@ test('LG Back closes a real ARIA trailer dialog without leaving its detail route
     );
   await page.goto(`${E2E_ORIGIN}/movie/1002`);
 
-  const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
+  const trailer = page.getByRole('link', { name: 'Trailer', exact: true });
   const sources = page.locator('header.hero').getByRole('button', { name: 'Sources', exact: true });
   const search = page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', {
     name: 'Search',

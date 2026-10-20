@@ -61,7 +61,7 @@ export function installKeyboardNavigation(): () => void {
       target !== document.activeElement ||
       (!regularControl && (!settingControl || nativeHorizontalControl)) ||
       target.closest(
-        '[contenteditable]:not([contenteditable="false"]), [role="tablist"], [role="menu"], [role="listbox"], [role="tree"], [role="grid"], [role="slider"], .player, video',
+        '[contenteditable]:not([contenteditable="false"]), [role="menu"], [role="listbox"], [role="tree"], [role="grid"], [role="slider"], .player, video',
       )
     )
       return;

@@ -11,8 +11,8 @@
   --line: #26262f;
   --accent: #5b8cff;
   --focus-ring: #fff;
-  --focus-ring-width: 3px;
-  --control-focus-ring-color: color-mix(in srgb, var(--accent) 82%, white);
+  --ring-width: 3px;
+  --ring-offset: 3px;
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
@@ -172,8 +172,19 @@ input {
 }
 
 .den-button:focus-visible {
-  outline: var(--focus-ring-width) solid var(--control-focus-ring-color);
-  outline-offset: var(--focus-ring-width);
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-offset);
+}
+
+/* Secondary inline links stay available to Tab and assistive technology while directional navigation skips them.
+   Their ring belongs inside the text box: metadata strips intentionally scroll/clip at their edge, so an outer
+   browser outline disappears there. Focus is the sole cue while focused; hover retains the ordinary underline. */
+a[data-spatial-skip]:not(.slide-link):focus-visible {
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--ring-width));
+  border-radius: 4px;
+  color: var(--fg);
+  text-decoration: none;
 }
 
 .den-button:disabled,

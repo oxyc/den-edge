@@ -37,6 +37,7 @@
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref, type TitleSeason } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   import { startupMarkOnce } from '../lib/startupTiming';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
@@ -85,6 +86,8 @@
     still,
     model,
     address,
+    playRequest,
+    trailerRequested = false,
   }: {
     ref: { type: MediaType; id: number };
     /**
@@ -92,6 +95,10 @@
      * the one on screen, reads it: a retained page of another title keeps the season it was showing.
      */
     address?: TitleSeason;
+    /** Address-bar intent from a player link opened directly or in another tab. */
+    playRequest?: { season?: number; episode?: number; filename?: string };
+    /** Address-bar intent from an exact trailer link opened directly or in another tab. */
+    trailerRequested?: boolean;
     active?: boolean;
     reel?: string | null;
     routes?: Routes;
@@ -188,9 +195,8 @@
     ].join(', ');
   const panel = $props.id();
 
-  /**
-   * Left and Escape leave the page, as the remote's Back does on the TV — a title you opened with one press
-   * should close with one.
+  /** Escape leaves the page, as the remote's dedicated Back does on a TV. ArrowLeft remains directional input:
+   * at the edge of an action row it must stop there rather than unexpectedly traversing browser history.
    *
    * Only from the page itself. A key pressed while typing is text, not navigation; one another control has
    * already answered is spoken for; and Escape inside full screen belongs to the video, which the browser
@@ -199,7 +205,7 @@
   $effect(() => {
     if (!active) return;
     const back = (event: KeyboardEvent) => {
-      if (event.key !== 'ArrowLeft' && event.key !== 'Escape') return;
+      if (event.key !== 'Escape') return;
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       if (document.fullscreenElement) return;
       const target = event.target;
@@ -223,6 +229,37 @@
    * every such case read as "no trailer here".
    */
   let trailerOpen = $state(false);
+  let handledPlayRequest = $state<string>();
+  let handledTrailerRequest = $state(false);
+
+  $effect(() => {
+    if (!playRequest) {
+      handledPlayRequest = undefined;
+      return;
+    }
+    const d = detail;
+    if (!active || !d || !onplayhere) return;
+    const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
+    if (handledPlayRequest === requestKey) return;
+    handledPlayRequest = requestKey;
+    onplayhere(d.title, playRequest.season, playRequest.episode, playRequest.filename);
+  });
+
+  $effect(() => {
+    if (!trailerRequested) {
+      handledTrailerRequest = false;
+      return;
+    }
+    if (!active || handledTrailerRequest || !detail?.trailer) return;
+    handledTrailerRequest = true;
+    trailerOpen = true;
+  });
+
+  function closeTrailer() {
+    trailerOpen = false;
+    if (trailerRequested && detail)
+      navigate(titleHref({ ...detail.title, season: requestedSeason }), true);
+  }
   /**
    * A scout shared through a grant answers no `/stream` or `/play` (den-edge refuses both on its `~<gid>` base), so
    * the release list and downloads are not offered: a guest plays through den-remux alone.
@@ -894,9 +931,18 @@
             : target && series?.kind === 'resume'
               ? target
               : undefined}
-          <button
+          <a
             class="continue"
-            onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
+            href={titleHref({
+              ...d.title,
+              season: target?.season,
+              episode: target?.episode,
+              play: true,
+            })}
+            onclick={(event) =>
+              activateLinkInPlace(event, () =>
+                (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode),
+              )}
           >
             <DetailIcon name="play" filled /><span
               ><strong
@@ -909,9 +955,9 @@
                   ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
                 >{/if}
             </span>
-          </button>
+          </a>
         {/if}
-        <div class="hero-actions">
+        <div class="hero-actions" data-spatial-section>
           {#snippet tvSeasonDownload()}
             <SeasonDownload
               model={model!}
@@ -942,6 +988,12 @@
             onplayhere={onplayhere
               ? () => onplayhere(d.title, target?.season, target?.episode)
               : undefined}
+            playHref={titleHref({
+              ...d.title,
+              season: target?.season,
+              episode: target?.episode,
+              play: true,
+            })}
             onsources={!guestScout && !restricted
               ? () => {
                   sourceTarget = target;
@@ -964,6 +1016,9 @@
               ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
               : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
             ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
+            trailerPlayerHref={d.trailer
+              ? titleHref({ ...d.title, season: requestedSeason, trailer: true })
+              : undefined}
             share={__DEN_TV__
               ? undefined
               : {
@@ -982,7 +1037,7 @@
   {:else}
     {@const d = detail}
     {#if trailerOpen && d.trailer}
-      <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailerOpen = false)} />
+      <Trailer key={d.trailer} title={d.title.title} onclose={closeTrailer} />
     {/if}
     <div class="mobile-overview">
       {#if d.overview}<p class="overview">{d.overview}</p>{/if}
@@ -1030,7 +1085,7 @@
                 : `${series.watched} of ${series.total} watched`}</span
             >{/if}
         </div>
-        <div class="season-bar">
+        <div class="season-bar" data-spatial-section>
           <DetailTabs
             tabs={d.seasons.map((s) => ({
               value: String(s.number),
@@ -1123,6 +1178,7 @@
                     ...d.title,
                     season: displayedSeason ?? undefined,
                     episode: e.number,
+                    play: true,
                   })}
                   addressed={addressedEpisode === e.number}
                   onaddressed={() => (addressedEpisode = null)}
@@ -1374,7 +1430,9 @@
     border: 0;
     background: none;
     color: var(--fg);
+    font: inherit;
     text-align: left;
+    text-decoration: none;
     cursor: pointer;
   }
 
@@ -1417,7 +1475,7 @@
   }
 
   .continue:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 6px;
     border-radius: 6px;
   }
@@ -1472,7 +1530,7 @@
   }
 
   .season-seen:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 

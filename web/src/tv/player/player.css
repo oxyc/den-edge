@@ -12,7 +12,8 @@
   background: rgb(0 0 0 / 0.72);
 }
 
-.tv-transport button {
+.tv-transport button,
+.tv-transport a {
   min-width: 8rem;
   min-height: 3.5rem;
   padding: 0.75rem 1.25rem;
@@ -22,9 +23,11 @@
   background: #292929;
   border: 2px solid transparent;
   border-radius: 0.65rem;
+  text-decoration: none;
 }
 
-.den-tv.tv-remote-active .player .tv-transport button:focus {
+.den-tv.tv-remote-active .player .tv-transport button:focus,
+.den-tv.tv-remote-active .player .tv-transport a:focus {
   color: #000;
   background: #fff;
   outline: 0;
@@ -42,8 +45,8 @@
 
 .den-tv.tv-remote-active .player .pick:focus-within {
   border-color: var(--focus-ring);
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-width);
+  outline: var(--ring-width) solid var(--focus-ring);
+  outline-offset: var(--ring-width);
   box-shadow: none;
 }
 

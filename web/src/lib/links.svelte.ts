@@ -39,18 +39,21 @@ export interface Link {
  * A link is also made by joining another browser (Settings › "Use Den on your phone"): its inbox is that browser's,
  * which never plays what is sent to it, so a "Play on TV" through it reached no TV. The handover names its host by
  * stamp device id, and the library's device list says whether that device is a TV; a host the list does not show as
- * one (or a list not read yet) is not a receiver. A link with no host id predates the id in the handover: those
- * came from TVs, the only hosts until browsers could host, a week before the id was added.
+ * one (or a list not read yet) is not a receiver. Older links have no host id, so resolve those by their advertised
+ * name instead. Failing closed matters here: a stale browser link must never turn "on TV" into "send to Mac".
  */
 export function linkedTv(
   link: Link | null | undefined,
-  devices: readonly { id: string; kind: 'tv' | 'browser' }[] | undefined,
+  devices: readonly { id: string; name?: string; kind: 'tv' | 'browser' }[] | undefined,
 ): Link | undefined {
   if (!link || link.recovered || link.guest) return undefined;
-  if (!link.deviceId) return link;
-  return devices?.some((device) => device.id === link.deviceId && device.kind === 'tv')
-    ? link
-    : undefined;
+  if (link.deviceId)
+    return devices?.find((device) => device.id === link.deviceId)?.kind === 'tv' ? link : undefined;
+  if (link.name === undefined) return undefined;
+  const name = link.name.trim().toLowerCase();
+  const hosts = devices?.filter((device) => device.name?.trim().toLowerCase() === name) ?? [];
+  // A legacy name is not an identity. If both a browser and a TV have it, sending would be ambiguous, so fail closed.
+  return hosts.length > 0 && hosts.every((host) => host.kind === 'tv') ? link : undefined;
 }
 
 /**

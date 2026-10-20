@@ -192,9 +192,9 @@ test('search type arrows stay in the segmented filter without scrolling its rail
   await browse(page);
   await page.goto(`${E2E_ORIGIN}/search`);
   const filter = page.getByRole('group', { name: 'Browse movies, series or both' });
-  const all = filter.getByRole('button', { name: 'All', exact: true });
-  const movies = filter.getByRole('button', { name: 'Movies', exact: true });
-  const series = filter.getByRole('button', { name: 'Series', exact: true });
+  const all = filter.getByRole('link', { name: 'All', exact: true });
+  const movies = filter.getByRole('link', { name: 'Movies', exact: true });
+  const series = filter.getByRole('link', { name: 'Series', exact: true });
   await all.focus();
   await page.keyboard.press('ArrowRight');
   await expect(movies).toBeFocused();

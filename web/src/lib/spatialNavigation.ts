@@ -97,6 +97,7 @@ function semanticDestination(
 ): HTMLElement | undefined {
   const root = current.getRootNode();
   if (!(root instanceof Document || root instanceof ShadowRoot)) return undefined;
+  const section = current.closest<HTMLElement>('[data-spatial-section]');
 
   // Segmented filters and similar declared horizontal lists own Left/Right. Follow their DOM reading order and
   // stop at an edge; page geometry must not jump from All into the first search result beside the rail.
@@ -110,6 +111,48 @@ function semanticDestination(
       if (here >= 0) {
         const next = choices[here + (direction === 'left' ? -1 : 1)];
         return next ?? current;
+      }
+    }
+    // A declared section is also a horizontal boundary. Geometry still chooses among controls within it, but an
+    // edge press stays put instead of escaping to Back, a card, or another visually overlapping section.
+    if (section) {
+      const withinSection = candidates.filter((candidate) => section.contains(candidate));
+      return geometricDestination(current, direction, withinSection) ?? current;
+    }
+  }
+
+  // Components can declare whole navigation sections without hard-coding one section's controls into another.
+  // Vertical movement first stays inside the current section; at its edge it enters the nearest declared section
+  // in that direction. This is the reusable boundary between title actions and season controls, settings groups,
+  // and any later toolbar/list pair whose visually nearest element is not its semantic parent.
+  if (direction === 'up' || direction === 'down') {
+    if (section) {
+      const withinSection = candidates.filter((candidate) => section.contains(candidate));
+      const inside = geometricDestination(current, direction, withinSection);
+      if (inside) return inside;
+
+      const from = current.getBoundingClientRect();
+      let nextSection: HTMLElement | undefined;
+      let nextScore = Infinity;
+      for (const candidate of root.querySelectorAll<HTMLElement>('[data-spatial-section]')) {
+        if (candidate === section || candidate.contains(section) || section.contains(candidate))
+          continue;
+        const sectionCandidates = candidates.filter((choice) => candidate.contains(choice));
+        if (!sectionCandidates.length) continue;
+        const value = score(from, candidate.getBoundingClientRect(), direction);
+        if (value !== null && value < nextScore) {
+          nextScore = value;
+          nextSection = candidate;
+        }
+      }
+      if (nextSection) {
+        const sectionCandidates = candidates.filter((candidate) =>
+          nextSection!.contains(candidate),
+        );
+        return (
+          geometricDestination(current, direction, sectionCandidates) ??
+          firstChoice(nextSection, candidates)
+        );
       }
     }
   }

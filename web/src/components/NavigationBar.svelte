@@ -529,7 +529,7 @@
   }
 
   .search:focus-within {
-    outline: 1px solid var(--muted);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   /* On search and People, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
@@ -678,7 +678,7 @@
   }
 
   .recent button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: -2px;
   }
 
@@ -724,7 +724,7 @@
   .brand:focus-visible,
   .search-toggle:focus-visible,
   .back:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 

@@ -355,7 +355,7 @@ test('episode Sources hands remote focus to the ranked source choices', async ({
     name: 'Search',
     exact: true,
   });
-  const titlePlay = page.locator('header.hero').getByRole('button', { name: 'Play', exact: true });
+  const titlePlay = page.locator('header.hero').getByRole('link', { name: 'Play', exact: true });
   await search.focus();
   await page.keyboard.press('ArrowDown');
   await expect(titlePlay).toBeFocused();
@@ -374,7 +374,7 @@ test('episode Sources hands remote focus to the ranked source choices', async ({
   const play = page
     .getByRole('listitem')
     .filter({ hasText: 'Remote.Series.1080p.WEB.mkv' })
-    .getByRole('button', { name: 'Play', exact: true });
+    .getByRole('link', { name: 'Play', exact: true });
   await expect(play).toBeVisible();
   await page.keyboard.press('ArrowDown');
   await expect(play).toBeFocused();

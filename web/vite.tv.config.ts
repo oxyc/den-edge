@@ -147,30 +147,7 @@ const https =
   process.env.DEN_TLS_CERT && process.env.DEN_TLS_KEY
     ? { cert: readFileSync(process.env.DEN_TLS_CERT), key: readFileSync(process.env.DEN_TLS_KEY) }
     : undefined;
-const tvProxy = {
-  ...browser.server?.proxy,
-  ...Object.fromEntries(
-    [
-      '/grant',
-      '/oauth',
-      '/capabilities',
-      '/playback',
-      '/den',
-      '/ratings',
-      '/warnings',
-      '/skipdb',
-      '/subs',
-      '/subtitles',
-      '/sync',
-      '/mcp',
-      '/link',
-      '/version',
-    ].map((path) => [
-      path,
-      { target: process.env.DEN_EDGE ?? 'http://192.168.86.193:8094', changeOrigin: true },
-    ]),
-  ),
-};
+const tvProxy = browser.server?.proxy;
 
 export default mergeConfig(
   browser,

@@ -459,8 +459,8 @@
   }
 
   .pick:focus-visible .art {
-    outline: var(--focus-ring-width) solid var(--focus-ring);
-    outline-offset: calc(-1 * var(--focus-ring-width));
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
     transform: scale(1);
   }
 
@@ -642,7 +642,7 @@
   }
 
   :global(.holder .action:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
     opacity: 1;
   }

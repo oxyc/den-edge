@@ -875,6 +875,20 @@
       : undefined,
   );
 
+  function closePlayer() {
+    playing = null;
+    if (route.page === 'title' && route.play)
+      navigate(
+        titleHref({
+          type: route.type,
+          id: route.id,
+          season: route.season,
+          episode: route.episode,
+        }),
+        true,
+      );
+  }
+
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `ProfileSession.notify` already shows for other library news.
@@ -1847,6 +1861,8 @@
     active={active && !playing}
     ref={page}
     address={titleSeason}
+    playRequest={route.page === 'title' && route.play ? route : undefined}
+    trailerRequested={route.page === 'title' && route.trailer === true}
     warningCategories={[...detailPrefs.warningCategories]}
     region={detailPrefs.region}
     ratingSources={[...detailPrefs.ratingSources]}
@@ -2097,7 +2113,7 @@
        be had left Play doing nothing, and the page's trailer stopped. -->
   <div class="player-screen" role="dialog" aria-modal="true" aria-label={playing.title.title}>
     <ScreenLoading screen={PlayerScreen} />
-    <button class="close" onclick={() => (playing = null)}>Close</button>
+    <button class="close" onclick={closePlayer}>Close</button>
   </div>
 {:else if playing && scout && (scout.playback || remux !== null) && PlayerScreen.current}
   {@const target = playing}
@@ -2129,7 +2145,7 @@
       onprogress={(fraction, seconds, at) =>
         void progressed({ title: target.title, ...at }, fraction, seconds)}
       onnext={after ? () => void advance(after) : undefined}
-      onclose={() => (playing = null)}
+      onclose={closePlayer}
     />
   {/key}
 {/if}

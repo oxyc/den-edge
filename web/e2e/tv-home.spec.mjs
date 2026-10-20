@@ -108,7 +108,7 @@ test(
     expect(dotsBox).not.toBeNull();
     expect(Math.abs(dotsBox.x - copyBox.x)).toBeLessThanOrEqual(1);
     await expect(hero.getByRole('button', { name: /Watchlist|Seen/ })).toHaveCount(0);
-    await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
+    await expect(hero.getByRole('link', { name: 'Play', exact: true })).toHaveCount(0);
     await shelfTrack.evaluate((track) => track.scrollIntoView({ block: 'center' }));
     await expect(shelfTrack).toBeVisible();
     const shelf = await shelfTrack.evaluate((track) => {

@@ -14,6 +14,7 @@
   import { airDate, cleanedOverview, futureDate } from '../lib/detailPresentation';
   import type { MenuItem } from '../lib/titleActions';
   import type { Episode } from '../lib/detail';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   let {
     episode,
     href,
@@ -96,10 +97,9 @@
    * address in a new tab or window. Prevented, the Router leaves a plain one alone (`Router.svelte`).
    */
   function press(event: MouseEvent) {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-      return;
-    event.preventDefault();
-    if (!inactive) onplay();
+    activateLinkInPlace(event, () => {
+      if (!inactive) onplay();
+    });
   }
   /** Space, as on the button this row was: a link answers only Enter, and Space would scroll the page. */
   function key(event: KeyboardEvent) {
@@ -256,7 +256,7 @@
   }
 
   .episode-play:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 6px;
   }
 
@@ -411,7 +411,7 @@
   }
 
   :global(.episode-trigger:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
   }
 
   @media (width <= 759px) {

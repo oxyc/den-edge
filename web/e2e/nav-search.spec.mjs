@@ -377,7 +377,7 @@ test('Cancel leaves Search in one tap, however many picks were made in it', asyn
     await page.goto(FIXTURE);
     await openSearch(page, 390);
     const chip = (name) => active(page).getByRole('link', { name, exact: true });
-    const type = (name) => active(page).getByRole('button', { name, exact: true });
+    const type = (name) => active(page).getByRole('link', { name, exact: true });
     await chip('Action').click();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
     await type('Series').click();
@@ -411,7 +411,7 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
     const chip = (name) => active(page).getByRole('link', { name, exact: true });
-    const type = (name) => active(page).getByRole('button', { name, exact: true });
+    const type = (name) => active(page).getByRole('link', { name, exact: true });
     const pill = (name) =>
       active(page)
         .getByRole('group', { name: 'Selected' })
@@ -419,7 +419,10 @@ test('Explore browses before typing, remaps across types, and comes back after a
     // Empty query: All, and For You of both types, filled from the popular films and top series since the fixture
     // library holds nothing. Each card opens its own type's page.
     await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
-    await expect(type('All')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('All')).toHaveAttribute('aria-current', 'page');
+    await expect(type('All')).toHaveAttribute('href', '/search');
+    await expect(type('Movies')).toHaveAttribute('href', '/search?type=movie');
+    await expect(type('Series')).toHaveAttribute('href', '/search?type=tv');
     await expect(chip('For You')).toHaveAttribute('aria-current', 'page');
     const grid = active(page).locator('.grid');
     await expect(grid.getByRole('link', { name: 'Film 100 2026' })).toHaveAttribute(
@@ -446,7 +449,7 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await type('Series').click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
     await expect(pill('Action & Adventure')).toBeVisible();
-    await expect(type('Series')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('Series')).toHaveAttribute('aria-current', 'page');
 
     // Typing searches over it; Esc clears the query back to the same view, then leaves.
     await input(page).fill('Neon');
@@ -460,7 +463,7 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
     await expect(pill('Action')).toBeVisible();
-    await expect(type('All')).toHaveAttribute('aria-pressed', 'true');
+    await expect(type('All')).toHaveAttribute('aria-current', 'page');
     await page.goBack();
     await expect(chip('For You')).toHaveAttribute('aria-current', 'page');
   } finally {
@@ -1127,7 +1130,7 @@ test('under All, a pick series have no form of shows films alone and says so', a
     await expect.poll(() => discovered).toContain('/tmdb/3/discover/movie');
     expect(discovered).not.toContain('/tmdb/3/discover/tv');
     // Under Movies there is nothing to say.
-    await active(page).getByRole('button', { name: 'Movies', exact: true }).click();
+    await active(page).getByRole('link', { name: 'Movies', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?type=movie&c=recipe-romantic-comedy$/);
     await expect(active(page).getByText('Romantic Comedy: movies only.')).toHaveCount(0);
   } finally {
@@ -2018,7 +2021,7 @@ for (const width of [320, 393, 1280])
         return;
       }
       await expect(hero.getByRole('link', { name: 'More', exact: true })).toHaveCount(0);
-      await expect(hero.getByRole('button', { name: 'Play', exact: true })).toHaveCount(0);
+      await expect(hero.getByRole('link', { name: 'Play', exact: true })).toHaveCount(0);
       await expect(hero.locator('.actions').first()).toBeHidden();
       const cdp = await page.context().newCDPSession(page);
       const start = width - 50;

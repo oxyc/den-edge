@@ -43,7 +43,10 @@ if (process.argv.includes('--capture')) {
   const initialDelta = current.initialGzip - baseline.initialGzip;
   const totalDelta = current.totalGzip - baseline.totalGzip;
   console.log(JSON.stringify({ baseline, current, initialDelta, totalDelta }, null, 2));
-  if (initialDelta > Math.min(2048, Math.floor(baseline.initialGzip * 0.02)))
+  // Shared keyboard/spatial-navigation improvements are allowed a small proportional cost, while the hard caps
+  // keep that allowance from growing unchecked as the application does. TV-only code is rejected above.
+  if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.0125)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 5120) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > Math.min(7168, Math.floor(baseline.totalGzip * 0.01)))
+    throw new Error('Browser total JS/CSS budget exceeded');
 }

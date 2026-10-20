@@ -112,6 +112,8 @@
         <Detail
           ref={{ type: route.type, id: route.id }}
           {address}
+          playRequest={route.play ? route : undefined}
+          trailerRequested={route.trailer === true}
           {active}
           {content}
           atlas="/atlas"

@@ -29,6 +29,7 @@
   } from '../lib/reel';
   import type { PlaybackStep } from '../lib/reel';
   import { titleHref } from '../lib/route';
+  import { activateLinkInPlace } from '../lib/linkActivation';
   import type { Routes } from '../lib/routes';
   import { startupMarkOnce } from '../lib/startupTiming';
   import {
@@ -1043,6 +1044,7 @@
               class="slide-link"
               href={titleHref(title)}
               aria-label={`Open details for ${title.title}`}
+              data-spatial-skip
               tabindex={n === index ? 0 : -1}
               draggable="false"
             ></a>
@@ -1053,8 +1055,11 @@
                 {#if __DEN_TV__}
                   <span class="tv-title">{title.title}</span>
                 {:else}
-                  <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
-                    >{title.title}</a
+                  <a
+                    class="title-link"
+                    href={titleHref(title)}
+                    data-spatial-skip
+                    tabindex={n === index ? 0 : -1}>{title.title}</a
                   ><span class="mobile-title">{title.title}</span>
                 {/if}
               </h2>
@@ -1070,8 +1075,9 @@
                     size="large"
                     icon="play"
                     label="Play"
+                    href={titleHref({ ...title, play: true })}
                     tabindex={n === index ? 0 : -1}
-                    onclick={() => onplay(title)}
+                    onclick={(event) => activateLinkInPlace(event, () => onplay(title))}
                   />
                 {/if}
                 <a
@@ -1216,7 +1222,7 @@
      itself without waiting for a pointer that may never arrive. */
   .billboard :global(.expand:focus-visible) {
     opacity: 1;
-    outline: 2px solid var(--accent);
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 3px;
   }
 
@@ -1535,9 +1541,8 @@
     background: var(--fg);
   }
 
-  .dot:focus-visible,
-  h2 a:focus-visible {
-    outline: 2px solid var(--accent);
+  .dot:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 
@@ -1550,7 +1555,7 @@
     }
 
     .slide-link:focus-visible {
-      outline: 2px solid var(--fg);
+      outline: var(--ring-width) solid var(--focus-ring);
       outline-offset: -4px;
     }
 
