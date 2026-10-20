@@ -13,6 +13,8 @@ not install anything and does not prove a TV decoder.
 The launcher does not contain Den itself, so later Den UI updates arrive from the hosted URL without reinstalling it.
 You only need to repeat installation if the small launcher itself changes or LG removes it when Developer Mode expires.
 
+### Option 1: webOS Dev Manager
+
 1. On the TV install **Developer Mode** from the LG Content Store. Sign in with an LG developer account, enable
    **Dev Mode Status**, reboot, then enable **Key Server**. Note the TV's IP address and the six-character key-server
    passphrase. The installer device and TV must be on the same LAN.
@@ -24,6 +26,24 @@ You only need to repeat installation if the small launcher itself changes or LG 
 4. In webOS Dev Manager, add a Developer Mode device using the TV's IP and passphrase. Open its **Apps** view, choose
    **Install**, select `den-tv-webos.ipk`, and launch Den when installation finishes.
 
+#### macOS walkthrough
+
+1. From the [latest webOS Dev Manager release](https://github.com/webosbrew/dev-manager-desktop/releases/latest),
+   download `webOS.Dev.Manager_VERSION_universal.dmg`. The universal build works on both Apple silicon and Intel
+   Macs.
+2. Open the `.dmg`, drag **webOS Dev Manager** to **Applications**, and launch it. If macOS blocks the first launch,
+   Control-click the app in Finder, choose **Open**, and confirm. Allow Local Network access when macOS asks; if the
+   TV cannot be found, check **System Settings › Privacy & Security › Local Network**.
+3. Download [`den-tv-webos.ipk`](https://github.com/oxyc/den-edge/releases/latest/download/den-tv-webos.ipk); it will
+   normally be in the Mac's **Downloads** folder.
+4. With **Developer Mode** and **Key Server** enabled on the TV, open webOS Dev Manager and choose **Add Device**.
+   Select the Developer Mode setup, enter any friendly name plus the TV's IP address and six-character passphrase,
+   then finish the connection.
+5. Select the connected TV, open **Apps**, click **Install**, and choose `Downloads/den-tv-webos.ipk`. When Den appears
+   in the installed-app list, launch it there or from the TV's app launcher.
+6. Before the Developer Mode countdown reaches zero, reconnect to the TV and use **Renew session** in its information
+   view. This extends the session but does not turn renewal into an automatic background task.
+
 ### LG installation methods compared
 
 | Method                              | Best for                                                      | What it requires                                                  | Developer Mode expiry                                                            |
@@ -33,7 +53,11 @@ You only need to repeat installation if the small launcher itself changes or LG 
 | **LG webOS CLI/Studio**             | App development, logs and debugging                           | LG tooling plus manual device setup                               | Can extend the session, but adds substantial setup                               |
 | **Root plus Homebrew Channel**      | A supported TV already intentionally rooted                   | Firmware-specific rooting and its recovery risk                   | Avoids Developer Mode expiry, but is not a supported Den installation path       |
 
-The bundled terminal installer remains available as a fallback. Install
+### Option 2: Den bundled installer
+
+The original terminal installer remains supported and continues to ship in every release. An existing Den
+installation does not need to be replaced with the Dev Manager version; both methods install the same launcher.
+Install
 [Node.js 24 LTS](https://nodejs.org/) if `node --version` does not work, then:
 
 ```sh
