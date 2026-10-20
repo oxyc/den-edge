@@ -622,7 +622,7 @@ export class PlaybackCursor {
       attemptType: attempt.type,
       // A packaged app's relative relay attempt is a media-element URL, so the fetch adapter never sees it.
       // Resolve only allowlisted Den paths to the configured API; external/LAN/public attempts stay untouched.
-      url: __DEN_TV_PACKAGED__ ? apiUrl(attempt.url) : attempt.url,
+      url: __DEN_TV_API_ORIGIN__ ? apiUrl(attempt.url) : attempt.url,
       kind: source.kind,
       audio: source.audio,
       width: source.width,

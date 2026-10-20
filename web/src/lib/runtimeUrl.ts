@@ -24,11 +24,11 @@ const API_PATH =
   /^\/(?:pair|inbox|lib|recovery|config|health|routes|scout|tmdb|metadata|grant|oauth|capabilities|playback|den|ratings|warnings|skipdb|subs|subtitles|sync|mcp|link|version|atlas|reel|remux|direct|assistant)(?:\/|$)/;
 
 export function apiOrigin(): string {
-  return __DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : (globalThis.location?.origin ?? '');
+  return __DEN_TV_API_ORIGIN__ || (globalThis.location?.origin ?? '');
 }
 
 export function apiUrl(href: string): string {
-  if (!__DEN_TV_PACKAGED__) return href;
+  if (!__DEN_TV_API_ORIGIN__) return href;
   const here = globalThis.location;
   if (!here) return href;
   try {

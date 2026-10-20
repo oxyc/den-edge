@@ -107,6 +107,11 @@ pub struct AppState {
     pub web_dir: Option<std::path::PathBuf>,
     /// The web app's ETags and its shell, kept so a request neither hashes nor reads a whole file (`web.rs`).
     pub web_files: web::Files,
+    /// The separately built TV app's files (env `TV_WEB_DIR`), served only on `TV_WEB_HOSTS`. Keeping a second
+    /// directory means TV compatibility code never enters the ordinary browser bundle.
+    pub tv_web_dir: Option<std::path::PathBuf>,
+    /// The TV app's startup-indexed immutable files, independent from the browser app's index.
+    pub tv_web_files: web::Files,
     /// Proxies whose report of the visitor's address counts (env `TRUSTED_PROXIES`, comma-separated IPs):
     /// `cloudflared` and `tailscale serve` connect from their own address (`handler::client_ip`).
     pub trusted_proxies: Vec<std::net::IpAddr>,
@@ -118,6 +123,12 @@ pub struct AppState {
     /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
     /// device routes and never the web app — which would otherwise be handed out past Access.
     pub api_hosts: Vec<String>,
+    /// Public names which serve only the TV bundle (env `TV_WEB_HOSTS`). The bundle calls `API_HOSTS` for the
+    /// authenticated device API, so backend routes do not silently acquire a second public address.
+    pub tv_web_hosts: Vec<String>,
+    /// HTTPS device API origin compiled into the hosted TV build (env `TV_API_ORIGIN`). It is added to that
+    /// shell's connect policy; requests are still authorized by the API's normal member/pairing proofs.
+    pub tv_api_origin: Option<String>,
     /// Web host names allowed to discover real profiles (env `PROFILES_HOSTS`). Empty keeps real mode off.
     pub profiles_hosts: Vec<String>,
     /// Web host names allowed to use only the synthetic, non-migrating profiles preview
@@ -373,10 +384,14 @@ impl AppState {
             web_origins: Vec::new(),
             web_dir: None,
             web_files: web::Files::default(),
+            tv_web_dir: None,
+            tv_web_files: web::Files::default(),
             trusted_proxies: Vec::new(),
             cloudflare_proxies: Vec::new(),
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),
+            tv_web_hosts: Vec::new(),
+            tv_api_origin: None,
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
             profile_migration_enabled: false,
@@ -516,10 +531,26 @@ async fn main() {
             Err(e) => eprintln!("could not prepare immutable web assets: {e}; using per-request file checks"),
         }
     }
+    state.tv_web_dir = env_opt("TV_WEB_DIR").map(std::path::PathBuf::from);
+    if let Some(web) = state.tv_web_dir.as_deref() {
+        match state.tv_web_files.prepare(web).await {
+            Ok(count) => eprintln!("prepared {count} immutable TV web assets"),
+            Err(e) => {
+                eprintln!("could not prepare immutable TV web assets: {e}; using per-request file checks")
+            }
+        }
+    }
     (state.trusted_proxies, state.cloudflare_proxies) =
         env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
     state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
+    state.tv_web_hosts = env_opt("TV_WEB_HOSTS").map(|v| parse_hosts("TV_WEB_HOSTS", &v)).unwrap_or_default();
+    state.tv_api_origin = env_opt("TV_API_ORIGIN").and_then(|value| {
+        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
+            eprintln!("TV_API_ORIGIN must be a bare https origin — disabling it");
+            None
+        })
+    });
     state.profiles_hosts =
         env_opt("PROFILES_HOSTS").map(|v| parse_hosts("PROFILES_HOSTS", &v)).unwrap_or_default();
     state.profiles_preview_hosts = env_opt("PROFILES_PREVIEW_HOSTS")
@@ -644,11 +675,12 @@ async fn main() {
     let port = listeners.last().and_then(|l| l.local_addr().ok()).map_or(port, |a| a.port());
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
-        "den-edge {} listening on :{port} — data={dir} web={} cast={} metrics={} log_requests={} log_identity={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
+        "den-edge {} listening on :{port} — data={dir} web={} tv_web={} cast={} metrics={} log_requests={} log_identity={} web_origins={} \
+         web_hosts={} api_hosts={} tv_web_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
          den_playback={} oauth={} assistant_writes={}",
         release_version(),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
+        state.tv_web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         match (&state.cast_origin, &state.cast_dir) {
             (Some(origin), Some(dir)) => format!("{origin}({})", dir.display()),
             (Some(origin), None) => format!("{origin}(no files)"),
@@ -660,6 +692,7 @@ async fn main() {
         if state.web_origins.is_empty() { "none".to_owned() } else { state.web_origins.join(",") },
         if state.web_hosts.is_empty() { "none".to_owned() } else { state.web_hosts.join(",") },
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
+        if state.tv_web_hosts.is_empty() { "none".to_owned() } else { state.tv_web_hosts.join(",") },
         state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
         state.routes.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
         state.routes_public.as_ref().map_or_else(

@@ -342,10 +342,7 @@
     const items: MenuItem[] = [];
     const code = grant.status === 'invited' ? codes[grant.gid] : undefined;
     if (code) {
-      const address = inviteLink(
-        __DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin,
-        code,
-      );
+      const address = inviteLink(__DEN_TV_API_ORIGIN__ || location.origin, code);
       items.push({
         kind: 'item',
         label: copied === address ? 'Copied' : 'Copy invite link',
@@ -455,10 +452,7 @@
       </p>
     {:else}
       {#if created}
-        {@const address = inviteLink(
-          __DEN_TV_PACKAGED__ ? __DEN_TV_API_ORIGIN__ : location.origin,
-          created.code,
-        )}
+        {@const address = inviteLink(__DEN_TV_API_ORIGIN__ || location.origin, created.code)}
         {@const code = created.code}
         <div class="made" role="status" bind:this={madePanel}>
           <p>

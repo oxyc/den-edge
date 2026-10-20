@@ -142,10 +142,14 @@ async fn serve_file(
     headers: &HeaderMap,
     face: crate::handler::Face,
 ) -> (&'static str, Response) {
-    let Some(dir) = state.web_dir.as_deref() else { return ("404", not_found()) };
+    let (dir, files) = match face {
+        crate::handler::Face::Tv => (state.tv_web_dir.as_deref(), &state.tv_web_files),
+        _ => (state.web_dir.as_deref(), &state.web_files),
+    };
+    let Some(dir) = dir else { return ("404", not_found()) };
     let mut kept: Vec<String>;
     let media: &[String] = match face {
-        crate::handler::Face::Web => {
+        crate::handler::Face::Web | crate::handler::Face::Tv => {
             kept = public_media(&state.media_origins);
             // The DNS-only direct-media origin is configured separately from ROUTES on purpose: Reel metadata and
             // fallback stay on the public edge while only signed bulk bytes use this origin. It is already validated
@@ -153,6 +157,11 @@ async fn serve_file(
             // native MP4/HLS request is browser-blocked and silently falls back through the edge relay.
             if let Some(origin) = state.public_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
                 kept.push(origin.clone());
+            }
+            if face == crate::handler::Face::Tv {
+                if let Some(origin) = state.tv_api_origin.as_ref().filter(|origin| !kept.contains(origin)) {
+                    kept.push(origin.clone());
+                }
             }
             &kept
         }
@@ -163,8 +172,7 @@ async fn serve_file(
     let immutable = path.starts_with("/assets/");
     if immutable {
         if let Some(resp) =
-            prepared(&state.web_files, &state.mmaps, &asked, media, state.cast_origin.as_deref(), headers)
-                .await
+            prepared(files, &state.mmaps, &asked, media, state.cast_origin.as_deref(), headers).await
         {
             return ("asset", resp);
         }
@@ -186,7 +194,7 @@ async fn serve_file(
     let shell = file.file_name().is_some_and(|name| name == "index.html");
     let mut build = None;
     let identity = if shell {
-        let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else {
+        let Ok((bytes, etag)) = files.shell(&file, &mut opened).await else {
             return ("404", not_found());
         };
         let release = release(&etag);
@@ -208,8 +216,7 @@ async fn serve_file(
     } else {
         Identity::Disk(opened)
     };
-    let mut resp =
-        encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await;
+    let mut resp = encoded(files, identity, modified, &file, immutable, media, cast_origin, headers).await;
     if let Some(release) = build {
         stamp_release(resp.headers_mut(), release);
     }
@@ -1171,6 +1178,41 @@ mod tests {
         let missing = h.send("GET", "/assets/missing.js", None, &[]).await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(missing.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[tokio::test]
+    async fn tv_hostname_serves_only_the_separate_tv_build_and_keeps_its_api_same_origin() {
+        let mut h = with_app();
+        let tv = h.dir.join("tv-web");
+        std::fs::create_dir_all(tv.join("assets")).unwrap();
+        std::fs::write(tv.join("index.html"), "<!doctype html><title>Den TV</title>").unwrap();
+        std::fs::write(tv.join("assets/tv-abc123.js"), "console.log('tv')").unwrap();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.oxy.fi");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.oxy.fi");
+        state.tv_api_origin = Some("https://d-api.oxy.fi".into());
+        state.tv_web_dir = Some(tv.clone());
+        state.tv_web_files.prepare(&tv).await.unwrap();
+
+        let browser = h.send("GET", "/movies", None, &[("host", "d.oxy.fi")]).await;
+        assert!(body_text(browser).await.contains("<title>Den</title>"));
+
+        let tv = h.send("GET", "/movies", None, &[("host", "den-tv.oxy.fi")]).await;
+        let policy = tv.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        let connect = policy.split("connect-src").nth(1).unwrap().split(';').next().unwrap();
+        assert!(
+            connect.contains("https://d-api.oxy.fi"),
+            "the hosted build may reach the existing device API"
+        );
+        assert!(body_text(tv).await.contains("<title>Den TV</title>"));
+        let tv_asset = h.send("GET", "/assets/tv-abc123.js", None, &[("host", "den-tv.oxy.fi")]).await;
+        assert_eq!(body_text(tv_asset).await, "console.log('tv')");
+
+        let api = h.send("GET", "/", None, &[("host", "d-api.oxy.fi")]).await;
+        assert_eq!(api.status(), StatusCode::NOT_FOUND, "the API hostname must not serve either shell");
+        let api_path = h.send("GET", "/version", None, &[("host", "den-tv.oxy.fi")]).await;
+        assert!(body_text(api_path).await.contains("<title>Den TV</title>"), "TV host is static-only");
     }
 
     #[tokio::test]

@@ -91,6 +91,8 @@ if (platform === 'tizen') {
     usage(
       'DEN_TV_API_ORIGIN must be an exact HTTPS origin without credentials, path, query, or fragment',
     );
+  if (remote.origin !== api.origin)
+    usage('--url and DEN_TV_API_ORIGIN must name the same origin for a Tizen package');
   const outDir = process.env.DEN_TV_OUT_DIR ?? 'dist-tv-tizen-package';
   if (!/^dist-tv-tizen-package(?:-e2e-\d+)?$/.test(outDir))
     usage('DEN_TV_OUT_DIR must name an isolated Tizen package output directory');

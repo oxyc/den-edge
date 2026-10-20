@@ -1,5 +1,5 @@
-# One image: den-edge, the web app it serves, and the Cast page it serves on CAST_ORIGIN's host. Both pages share
-# one npm install.
+# One image: den-edge, the browser app, the separately compiled webOS TV app, and the Cast page. All three builds
+# share one npm install, while their output graphs and runtime host names remain isolated.
 ARG PREVIOUS_IMAGE=scratch
 FROM ${PREVIOUS_IMAGE} AS previous
 
@@ -21,6 +21,11 @@ ARG DEN_PARENT_ORIGINS=https://d.oxy.fi
 ENV VITE_DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
 RUN npm run build:cast
 
+FROM web-source AS tv-web
+ARG DEN_TV_API_ORIGIN=https://d-api.oxy.fi
+ENV DEN_TV_API_ORIGIN=$DEN_TV_API_ORIGIN
+RUN npm run build:tv:webos
+
 FROM rust:1-alpine AS rust-build
 RUN apk add --no-cache musl-dev
 WORKDIR /app
@@ -41,6 +46,8 @@ ARG DEN_VERSION
 ARG GIT_REVISION
 ENV DATA_DIR=/data \
     WEB_DIR=/web \
+    TV_WEB_DIR=/tv-web \
+    TV_API_ORIGIN=https://d-api.oxy.fi \
     CAST_DIR=/cast \
     PORT=8080 \
     DEN_VERSION=$DEN_VERSION
@@ -49,6 +56,7 @@ LABEL org.opencontainers.image.version=$DEN_VERSION \
 COPY --from=release-metadata /den-version /den-version
 COPY --from=rust-build /app/target/release/den-edge /den-edge
 COPY --from=edge-web /web/dist /web
+COPY --from=tv-web /web/dist-tv-webos /tv-web
 COPY --from=cast-web /web/dist-cast /cast
 # The state directory. The box mounts /var/lib/den/edge-data over it; this empty one, owned by the service
 # uid, is what a container without the mount (den-update's probe) writes to and then throws away.

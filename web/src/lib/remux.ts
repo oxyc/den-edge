@@ -922,7 +922,7 @@ export async function startSession(
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const mediaBase =
         session.publicBase ??
-        (/^https?:/.test(base) ? base : __DEN_TV_PACKAGED__ ? apiOrigin() : undefined);
+        (/^https?:/.test(base) ? base : __DEN_TV_API_ORIGIN__ ? apiOrigin() : undefined);
       return mediaBase
         ? {
             ...session,

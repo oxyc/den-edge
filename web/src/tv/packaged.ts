@@ -1,8 +1,9 @@
 import { apiUrl, appHistoryUrl } from '../lib/runtimeUrl';
 
 // Installed before the shared application evaluates, independently in the page and each dedicated Worker.
-// This is a URL transport adapter, not an auth adapter: it neither creates nor copies credentials to new hosts.
-if (__DEN_TV_PACKAGED__) {
+// Hosted LG and packaged Samsung builds can share the existing device API origin. This is a URL transport
+// adapter, not an auth adapter: it moves only allowlisted Den paths and never credentials for arbitrary hosts.
+if (__DEN_TV_API_ORIGIN__) {
   const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = (input, init) => {
     if (input instanceof Request) {
