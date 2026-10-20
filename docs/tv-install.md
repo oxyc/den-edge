@@ -29,11 +29,21 @@ You only need to repeat installation if the small launcher itself changes or LG 
    Enter the six-character passphrase when asked. The script downloads LG's CLI if needed, registers the TV,
    obtains its developer key, installs Den, and opens it.
 
-For an update, download/extract the current archive and run the same command. LG removes development-installed apps
-when Developer Mode expires, so use **Extend** in the Developer Mode app before its timer runs out.
+### LG updates and Developer Mode expiry
 
-LG references: [Developer Mode](https://webostv.developer.lge.com/develop/getting-started/developer-mode-app) and
-[webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide).
+- **Ordinary Den updates need no reinstall.** The launcher always opens `https://den-tv.oxy.fi`, so UI fixes and
+  features arrive the next time Den loads. Reinstall only when release notes explicitly mention an LG launcher
+  change, or after the TV has removed the app.
+- The current Developer Mode app commonly starts with **999 hours (about 41 days)**, but the countdown shown on the
+  TV is authoritative; LG documents it as a limited session rather than guaranteeing a fixed duration. The installer
+  cannot renew it. Before it reaches zero, open Developer Mode and press **Extend**. It does not renew itself.
+- If the timer reaches zero, it is too late to extend: LG disables Developer Mode and removes development-installed
+  apps. Enable Developer Mode/Key Server again and rerun the same installer. LG also says ten reboots while the TV is
+  offline disable Developer Mode.
+
+LG references: [Developer Mode](https://webostv.developer.lge.com/develop/getting-started/developer-mode-app),
+[webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide), and
+[LG staff on the 999-hour counter](https://forum.webostv.developer.lge.com/t/topic/4854/2).
 
 ## Samsung Tizen 8 (2024-generation TV or newer)
 
@@ -69,7 +79,18 @@ and opens it. For an update, download the current archive and rerun the same com
 If signing is refused, verify that the active Samsung certificate profile contains this TV's DUID. USB widget
 installation is not supported.
 
-Samsung references: [connect a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html)
+### Samsung updates and certificates
+
+- Samsung's app contains the TV bundle rather than loading it from `den-tv.oxy.fi`. Backend/service changes arrive
+  without reinstalling, but **TV UI changes require downloading the current archive and rerunning `install.sh`**.
+- Back up the Samsung author certificate, its password, and the certificate profile. Samsung requires an update to
+  use the same author certificate as the installed app; the distributor certificate must be valid and contain this
+  TV's DUID when an update is signed and installed.
+- There is no LG-style 999-hour app-removal timer documented for this Samsung flow. Developer Mode and a reachable TV
+  are needed when installing an update; the installer runs the installation-permit command each time.
+
+Samsung references: [connect a TV](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html),
+[create and preserve certificates](https://developer.samsung.com/smarttv/develop/getting-started/setting-up-sdk/creating-certificates.html),
 and [Tizen CLI](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html?device=htv).
 
 ## Hosting/operator checks
