@@ -1,0 +1,125 @@
+name: tv-android-publish
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tv-android-publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require successful CI for this main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          conclusion=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+            --limit 1 --json conclusion --jq '.[0].conclusion // ""')
+          test "$conclusion" = success || {
+            echo "::error::exact-main CI is not successful for $GITHUB_SHA"
+            exit 1
+          }
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Build and verify signed Android launcher
+        env:
+          DEN_ANDROID_KEYSTORE_BASE64: ${{ secrets.DEN_ANDROID_KEYSTORE_BASE64 }}
+          DEN_ANDROID_KEY_ALIAS: ${{ secrets.DEN_ANDROID_KEY_ALIAS }}
+          DEN_ANDROID_KEY_PASSWORD: ${{ secrets.DEN_ANDROID_KEY_PASSWORD }}
+          DEN_ANDROID_STORE_PASSWORD: ${{ secrets.DEN_ANDROID_STORE_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(cat android-tv/VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version_gt() {
+            test "$1" != "$2" && test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
+          }
+          current=0.0.0
+          if gh release view tv-launchers --repo "$REPO" >/dev/null 2>&1; then
+            legacy="$RUNNER_TEMP/legacy-launchers"
+            mkdir -p "$legacy"
+            gh release download tv-launchers --repo "$REPO" --pattern den-tv-launchers.versions --dir "$legacy"
+            current=$(sed -n 's/^android=//p' "$legacy/den-tv-launchers.versions")
+          fi
+          while read -r tag; do
+            candidate=${tag#tv-android-v}
+            if version_gt "$candidate" "$current"; then current=$candidate; fi
+          done < <(gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .tag_name' \
+            | grep -E '^tv-android-v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          version_gt "$version" "$current" || {
+            echo "::error::Android launcher version $version must exceed published $current"
+            exit 1
+          }
+          for name in DEN_ANDROID_KEYSTORE_BASE64 DEN_ANDROID_KEY_ALIAS DEN_ANDROID_KEY_PASSWORD DEN_ANDROID_STORE_PASSWORD; do
+            test -n "${!name}" || { echo "::error::Android signing secret $name is not configured"; exit 1; }
+          done
+
+          keystore="$RUNNER_TEMP/den-tv-android-release.jks"
+          printf '%s' "$DEN_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          DEN_ANDROID_KEYSTORE_FILE="$keystore" \
+            ./android-tv/gradlew -p android-tv :app:lintRelease :app:testDebugUnitTest :app:assembleRelease --no-daemon
+          cp android-tv/app/build/outputs/apk/release/app-release.apk den-tv-android.apk
+
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n1)
+          test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs den-tv-android.apk > android-signing.txt
+          expected=$(tr -d ':[:space:]' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')
+          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' android-signing.txt \
+            | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          test "$actual" = "$expected" || {
+            echo "::error::Android signer is $actual, expected $expected"
+            exit 1
+          }
+
+          sha256sum den-tv-android.apk > den-tv-android.sha256
+          printf 'android=%s\nsource=%s\nsigner_sha256=%s\n' \
+            "$version" "$GITHUB_SHA" "$expected" > den-tv-android.version
+          {
+            echo "VERSION=$version"
+            echo "TAG=tv-android-v$version"
+          } >> "$GITHUB_ENV"
+      - name: Publish immutable Android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes=$(printf 'Den Android/Google TV launcher `%s`.\n\n- Source: `%s`\n- Signer fingerprint is recorded in `den-tv-android.version`.\n' \
+            "$VERSION" "$GITHUB_SHA")
+          existing=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null || true)
+          test "$existing" != false || {
+            echo "::error::release $TAG already exists"
+            exit 1
+          }
+          # A failed verification leaves only a private draft. Recreate that exact
+          # draft so a transient failure can be retried without manual cleanup.
+          if test "$existing" = true; then
+            gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" --title "Den Android TV $VERSION" \
+            --notes "$notes" --draft --latest=false \
+            den-tv-android.apk den-tv-android.sha256 den-tv-android.version
+          verify="$RUNNER_TEMP/android-release"
+          mkdir -p "$verify"
+          gh release download "$TAG" --repo "$REPO" --dir "$verify"
+          (cd "$verify" && sha256sum -c den-tv-android.sha256)
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=false

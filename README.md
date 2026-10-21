@@ -12,8 +12,8 @@ See [Architecture](ARCHITECTURE.md) for the current request and storage flows an
 See [TV installation](docs/tv-install.md) to install release builds on Android/Google TV, LG webOS, or Samsung
 Tizen TVs. Android and LG load Den's hosted TV UI, so ordinary UI updates do not require reinstalling their small
 launcher packages.
-Android and Samsung sideloaded apps have no recurring expiry and normally survive reboots; a major TV firmware
-update can occasionally require reinstalling them.
+Android sideloads have no recurring developer expiry. Samsung documents no LG-style countdown; both normally
+survive reboots, though a major firmware update can occasionally require reinstalling them.
 
 ## Routes
 

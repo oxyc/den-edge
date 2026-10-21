@@ -195,6 +195,49 @@ test('Samsung serializes rapid seeks and coalesces them to the latest remote tar
   await expect(page.getByText('This release stopped responding.')).toHaveCount(0);
 });
 
+test('Samsung defers pause, track changes and teardown until an asynchronous seek finishes', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page);
+  await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+
+  await page.evaluate(() => window.__avplayFixture.delaySeeks());
+  video.evaluate((element) => {
+    element.currentTime += 10;
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+
+  const pauseCalls = (await callsNamed(page, 'pause')).length;
+  const subtitleCalls = (await callsNamed(page, 'setSilentSubtitle')).length;
+  await video.evaluate((element) => element.pause());
+  await chooseSubtitle(page, 'Spanish');
+  expect(await callsNamed(page, 'pause')).toHaveLength(pauseCalls);
+  expect(await callsNamed(page, 'setSilentSubtitle')).toHaveLength(subtitleCalls);
+  await expect(page.getByText('This release stopped responding.')).toHaveCount(0);
+
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'pause')).toHaveLength(pauseCalls + 1);
+  await expect.poll(() => callsNamed(page, 'setSilentSubtitle')).toHaveLength(subtitleCalls + 1);
+
+  await page.evaluate(() => {
+    window.__avplayFixture.delaySeeks();
+    const element = document.querySelector('.player video');
+    element.currentTime += 10;
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+  const closeCalls = (await callsNamed(page, 'close')).length;
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  expect(await callsNamed(page, 'close')).toHaveLength(closeCalls);
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(closeCalls + 1);
+});
+
 test('Samsung error reports retain the error enum without signed media details', async ({
   page,
 }) => {

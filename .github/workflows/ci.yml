@@ -57,7 +57,7 @@ jobs:
           else
             echo "source_changed=true" >> "$GITHUB_OUTPUT"
           fi
-          if grep -Eq '^(android-tv/|\.github/workflows/(ci|tv-launchers-publish)\.yml$)' <<<"$files"; then
+          if grep -Eq '^(android-tv/|\.github/workflows/(ci|tv-android-publish)\.yml$)' <<<"$files"; then
             echo "android_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "android_changed=false" >> "$GITHUB_OUTPUT"
@@ -151,8 +151,8 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-      - name: Build and lint the Android TV shell
-        run: ./gradlew :app:lintDebug :app:assembleDebug --no-daemon
+      - name: Test, build and lint the Android TV shell
+        run: ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug --no-daemon
 
   # Playwright already uses all four CPUs on one hosted runner. File sharding supplies three runners without changing
   # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards

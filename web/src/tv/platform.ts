@@ -94,3 +94,10 @@ export function exitTvApp(): boolean {
   }
   return false;
 }
+
+/** Keep the Android TV display awake only while media is actually playing. Other TV platforms own this natively. */
+export function setTvPlaybackActive(active: boolean): boolean {
+  if (tvRuntimePlatform() !== 'android') return false;
+  location.href = `den://playback/${active ? 'start' : 'stop'}`;
+  return true;
+}

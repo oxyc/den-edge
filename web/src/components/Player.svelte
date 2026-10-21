@@ -102,6 +102,7 @@
   import type { Addon } from '../lib/scout';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { SamsungAvplayAdapter } from '../tv/player/avplay';
+  import { setTvPlaybackActive } from '../tv/platform';
   import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import {
@@ -2471,6 +2472,7 @@
 
   function playing() {
     if (tv) tvPaused = false;
+    if (tv) setTvPlaybackActive(true);
     progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
@@ -2480,6 +2482,7 @@
 
   function paused() {
     if (tv) tvPaused = true;
+    if (tv) setTvPlaybackActive(false);
     clearInterval(timer);
     report();
     if (session) {
@@ -2491,6 +2494,7 @@
 
   /** The end: count down to the next episode, when there is one. */
   function finished() {
+    if (tv) setTvPlaybackActive(false);
     progress.complete(video?.currentTime ?? remoteTime);
     // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
     // a next episode to count down to.
@@ -3051,6 +3055,7 @@
   function finish() {
     if (ended) return;
     ended = true;
+    if (tv) setTvPlaybackActive(false);
     clearInterval(timer);
     clearInterval(heartbeat);
     clearInterval(countdown);

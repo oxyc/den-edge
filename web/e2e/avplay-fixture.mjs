@@ -14,6 +14,9 @@ export function installAvplayFixture() {
   const requireState = (name, valid) => {
     if (!valid.includes(state)) throw new Error(`${name} is invalid in ${state}`);
   };
+  const requireIdle = (name) => {
+    if (seekPending) throw new Error(`${name} is invalid while an AVPlay seek is pending`);
+  };
   const stopClock = () => {
     clearInterval(timer);
     timer = undefined;
@@ -36,6 +39,7 @@ export function installAvplayFixture() {
   ];
   const avplay = {
     open(url) {
+      requireIdle('open');
       requireState('open', ['NONE', 'IDLE']);
       record('open', url);
       currentTime = 0;
@@ -43,6 +47,7 @@ export function installAvplayFixture() {
       state = 'IDLE';
     },
     close() {
+      requireIdle('close');
       record('close', state);
       stopClock();
       seekPending = false;
@@ -50,6 +55,7 @@ export function installAvplayFixture() {
       state = 'NONE';
     },
     prepareAsync(success) {
+      requireIdle('prepareAsync');
       requireState('prepareAsync', ['IDLE', 'READY']);
       record('prepareAsync');
       state = 'READY';
@@ -63,26 +69,31 @@ export function installAvplayFixture() {
       });
     },
     setDisplayRect(...rect) {
+      requireIdle('setDisplayRect');
       requireState('setDisplayRect', ['IDLE', 'READY', 'PLAYING', 'PAUSED']);
       record('setDisplayRect', ...rect);
     },
     setDisplayMethod(method) {
+      requireIdle('setDisplayMethod');
       requireState('setDisplayMethod', ['IDLE', 'READY', 'PLAYING', 'PAUSED']);
       record('setDisplayMethod', method);
     },
     play() {
+      requireIdle('play');
       requireState('play', ['READY', 'PLAYING', 'PAUSED']);
       record('play', state);
       state = 'PLAYING';
       startClock();
     },
     pause() {
+      requireIdle('pause');
       requireState('pause', ['PLAYING', 'PAUSED']);
       record('pause', state);
       state = 'PAUSED';
       stopClock();
     },
     stop() {
+      requireIdle('stop');
       record('stop', state);
       stopClock();
       state = 'IDLE';
@@ -100,24 +111,37 @@ export function installAvplayFixture() {
       if (delaySeeks) pendingSeeks.push({ complete, error });
       else queueMicrotask(complete);
     },
-    getState: () => state,
-    getDuration: () => duration,
-    getCurrentTime: () => currentTime,
+    getState() {
+      requireIdle('getState');
+      return state;
+    },
+    getDuration() {
+      requireIdle('getDuration');
+      return duration;
+    },
+    getCurrentTime() {
+      requireIdle('getCurrentTime');
+      return currentTime;
+    },
     setListener(next) {
+      requireIdle('setListener');
       record('setListener');
       listener = next;
       listeners.push(next);
     },
     setSilentSubtitle(silent) {
+      requireIdle('setSilentSubtitle');
       requireState('setSilentSubtitle', ['IDLE', 'READY', 'PLAYING', 'PAUSED']);
       record('setSilentSubtitle', silent, state);
     },
     setSelectTrack(type, index) {
+      requireIdle('setSelectTrack');
       // Samsung documents HLS track changes for PLAYING and PAUSED, not READY.
       requireState('setSelectTrack', ['PLAYING', 'PAUSED']);
       record('setSelectTrack', type, index, state);
     },
     getTotalTrackInfo() {
+      requireIdle('getTotalTrackInfo');
       requireState('getTotalTrackInfo', ['READY', 'PLAYING', 'PAUSED']);
       record('getTotalTrackInfo', state);
       return tracks;

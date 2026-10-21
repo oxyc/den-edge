@@ -150,6 +150,32 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   let queuedSeek: number | undefined;
   let requestedTime: number | undefined;
   let finishPendingSeek: (() => void) | undefined;
+  let platformBusy = false;
+  let platformIdle = Promise.resolve();
+  let finishPlatformOperation: (() => void) | undefined;
+
+  const beginPlatformOperation = () => {
+    platformBusy = true;
+    platformIdle = new Promise<void>((resolve) => {
+      finishPlatformOperation = resolve;
+    });
+  };
+  const endPlatformOperation = () => {
+    platformBusy = false;
+    const finish = finishPlatformOperation;
+    finishPlatformOperation = undefined;
+    finish?.();
+  };
+  const afterPlatformOperation = (operation: () => void, evenIfDestroyed = false) => {
+    if (!platformBusy) {
+      if (active || evenIfDestroyed) operation();
+      return;
+    }
+    const idle = platformIdle;
+    void idle.then(() => {
+      if (active || evenIfDestroyed) operation();
+    });
+  };
 
   const plane = document.createElement('object');
   plane.type = 'application/avplayer';
@@ -183,6 +209,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
 
   const updateRect = () => {
     if (!active) return;
+    if (platformBusy) {
+      afterPlatformOperation(updateRect);
+      return;
+    }
     const rect = element.getBoundingClientRect();
     const scaleX = 1920 / Math.max(1, document.documentElement.clientWidth);
     const scaleY = 1080 / Math.max(1, document.documentElement.clientHeight);
@@ -270,6 +300,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
 
   const applyAudioTrack = () => {
     if (!ready) return;
+    if (platformBusy) {
+      afterPlatformOperation(applyAudioTrack);
+      return;
+    }
     const track = tracks('AUDIO')[audioTrack];
     if (!track) return;
     try {
@@ -281,6 +315,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
 
   const applySubtitle = () => {
     if (!ready) return;
+    if (platformBusy) {
+      afterPlatformOperation(applySubtitle);
+      return;
+    }
     captionTrack = undefined;
     for (const track of element.querySelectorAll('track')) {
       const selected = subtitleLanguage !== null && track.srclang === subtitleLanguage;
@@ -334,6 +372,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
 
   const pause = () => {
     if (!active || !ready || paused || ended) return;
+    if (platformBusy) {
+      afterPlatformOperation(pause);
+      return;
+    }
     try {
       api.pause();
       paused = true;
@@ -355,6 +397,7 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     const finish = finishPendingSeek;
     finishPendingSeek = undefined;
     finish?.();
+    endPlatformOperation();
   };
 
   const runQueuedSeek = () => {
@@ -409,6 +452,7 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     pendingSeek = new Promise<void>((resolve) => {
       finishPendingSeek = resolve;
     });
+    beginPlatformOperation();
     runQueuedSeek();
   };
 
@@ -479,11 +523,13 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       paused = true;
       lastPlayingTime = undefined;
       event(element, 'timeupdate');
-      try {
-        api.stop();
-      } catch {
-        console.warn('Samsung AVPlay could not stop after completion.');
-      }
+      afterPlatformOperation(() => {
+        try {
+          api.stop();
+        } catch {
+          console.warn('Samsung AVPlay could not stop after completion.');
+        }
+      });
       event(element, 'ended');
     },
     onevent() {},
@@ -503,25 +549,29 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       api.setListener(listener);
       api.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX');
       updateRect();
+      beginPlatformOperation();
       api.prepareAsync(
         () => {
-          if (!active) return;
+          endPlatformOperation();
           ready = true;
           duration = Math.max(0, api.getDuration() / 1000);
           preparedResolve?.();
+          if (!active) return;
           event(element, 'durationchange');
           event(element, 'loadedmetadata');
           event(element, 'canplay');
           void play();
         },
         (error) => {
-          if (!active) return;
+          endPlatformOperation();
           preparedReject?.(new Error(errorName(error) || 'Samsung AVPlay preparation failed'));
+          if (!active) return;
           fail(error);
         },
       );
       await prepared;
     } catch (error) {
+      if (platformBusy) endPlatformOperation();
       const safeError = new Error(errorName(error) || 'Samsung AVPlay could not start');
       preparedReject?.(safeError);
       fail(error);
@@ -544,18 +594,19 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       if (!active) return;
       active = false;
       queuedSeek = undefined;
-      finishSeek(false);
       trackChanges.disconnect();
       element.removeEventListener('load', renderCaptions, true);
       captions.remove();
       removeEventListener('resize', updateRect);
-      try {
-        const state = api.getState();
-        if (state !== 'NONE' && state !== 'IDLE') api.stop();
-        if (api.getState() !== 'NONE') api.close();
-      } catch {
-        console.warn('Samsung AVPlay cleanup failed.');
-      }
+      afterPlatformOperation(() => {
+        try {
+          const state = api.getState();
+          if (state !== 'NONE' && state !== 'IDLE') api.stop();
+          if (api.getState() !== 'NONE') api.close();
+        } catch {
+          console.warn('Samsung AVPlay cleanup failed.');
+        }
+      }, true);
       preparedReject?.(new DOMException('Samsung AVPlay was closed', 'AbortError'));
       restoreFacade();
       element.classList.remove('den-avplay-placeholder');

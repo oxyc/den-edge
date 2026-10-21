@@ -106,8 +106,8 @@ const tvEntry: Plugin = {
         if (e2e && context.filename.endsWith('/test/player.html'))
           return html
             .replace(
-              '<html>',
-              `<html>${packaged ? `<head><meta http-equiv="Content-Security-Policy" content="${tvCspValue}"></head>` : ''}`,
+              '<head>',
+              `<head>${packaged ? `<meta http-equiv="Content-Security-Policy" content="${tvCspValue}">` : ''}`,
             )
             .replace('/test/player.ts', '/src/tv/test-entry.ts');
         return html;
