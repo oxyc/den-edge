@@ -227,14 +227,19 @@ fn empty(status: StatusCode) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
+    use super::PARENT_ORIGINS;
     use crate::handler::tests::{body_text, temp_dir, Harness};
     use axum::body::Bytes;
     use axum::http::{header, StatusCode};
     use std::sync::Arc;
 
-    const CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
-                       img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
-                       base-uri 'none'; form-action 'none'; frame-ancestors https://d.oxy.fi";
+    fn expected_csp() -> String {
+        format!(
+            "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
+             base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
+        )
+    }
 
     /// A den-edge serving the web app on `d.oxy.fi` and the Cast page on `cast.example`.
     fn harness() -> Harness {
@@ -264,18 +269,15 @@ mod tests {
     }
 
     fn page(content_type: &str, length: &str, cache: &str) -> Vec<(String, String)> {
-        [
-            ("content-type", content_type),
-            ("content-length", length),
-            ("cache-control", cache),
-            ("content-security-policy", CSP),
-            ("referrer-policy", "no-referrer"),
-            ("x-content-type-options", "nosniff"),
-            ("x-robots-tag", "noindex, nofollow, noarchive"),
+        vec![
+            ("content-type".to_owned(), content_type.to_owned()),
+            ("content-length".to_owned(), length.to_owned()),
+            ("cache-control".to_owned(), cache.to_owned()),
+            ("content-security-policy".to_owned(), expected_csp()),
+            ("referrer-policy".to_owned(), "no-referrer".to_owned()),
+            ("x-content-type-options".to_owned(), "nosniff".to_owned()),
+            ("x-robots-tag".to_owned(), "noindex, nofollow, noarchive".to_owned()),
         ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect()
     }
 
     /// The headers den-cast sent, exactly: no den-edge hardening, CORS, `vary` or request id on top, even for an

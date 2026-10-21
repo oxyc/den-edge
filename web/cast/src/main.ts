@@ -163,7 +163,7 @@ function setStatus(text: string): void {
 }
 const parents = new Set(
   (import.meta.env.VITE_DEN_PARENT_ORIGINS ?? 'https://d.oxy.fi')
-    .split(',')
+    .split(/[\s,]+/)
     .map((origin: string) => origin.trim())
     .filter(Boolean),
 );

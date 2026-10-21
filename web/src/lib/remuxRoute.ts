@@ -19,6 +19,24 @@ export async function findRemux(
   fetchImpl: typeof fetch = relayFetch,
   secure = globalThis.location?.protocol !== 'http:',
 ): Promise<string | null> {
+  const sameOrigin = async (): Promise<string | null> => {
+    try {
+      const res = await fetchImpl('/remux/health');
+      return res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string'
+        ? '/remux'
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  // The HTTPS development face already proxies Remux at this origin. Prefer it before probing the routes table:
+  // Safari logs a hard CORS error for the homelab's tailnet URL even though this working same-origin route is next.
+  // Production web hosts retain direct-route-first behavior; a self-hosted tailnet face also gets the safer path.
+  const tailnetPage = globalThis.location?.hostname.toLowerCase().endsWith('.ts.net') === true;
+  if (tailnetPage) {
+    const relayed = await sameOrigin();
+    if (relayed) return relayed;
+  }
   for (const entry of entries) {
     let parsed: URL;
     try {
@@ -51,14 +69,7 @@ export async function findRemux(
   }
   // The public web name exposes only member-gated control JSON at this same-origin mount. Its session answer
   // supplies the IP-literal media origin; no video byte follows this relay.
-  try {
-    const res = await fetchImpl('/remux/health');
-    if (res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string')
-      return '/remux';
-  } catch {
-    // No control relay here either.
-  }
-  return null;
+  return tailnetPage ? null : sameOrigin();
 }
 
 /**

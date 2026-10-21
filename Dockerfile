@@ -17,7 +17,9 @@ COPY --from=previous / /previous
 RUN node scripts/keep-previous-assets.mjs
 
 FROM web-source AS cast-web
-ARG DEN_PARENT_ORIGINS=https://d.oxy.fi
+# The production browser and Cindy's stable Tailscale HTTPS development face may frame the isolated sender. CSP uses
+# a space-separated source list; the sender accepts the same list (and commas for test/build compatibility).
+ARG DEN_PARENT_ORIGINS="https://d.oxy.fi https://oskars-macbook-pro.tailce93d3.ts.net:8443"
 ENV VITE_DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
 RUN npm run build:cast
 

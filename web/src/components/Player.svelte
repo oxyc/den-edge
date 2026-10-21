@@ -5414,7 +5414,14 @@
     margin: 0;
   }
 
-  .terminal-message.error > p,
+  /* A terminal decision needs calm hierarchy, not a danger-red sentence competing with a solid white action. The
+     role still announces the failure; red remains for a concrete field error such as a rejected browser key. */
+  .terminal-message :global(.den-button-primary) {
+    --button-bg: rgb(255 255 255 / 0.12);
+    --button-border: rgb(255 255 255 / 0.18);
+    --button-fg: rgb(255 255 255 / 0.92);
+  }
+
   .terminal-message .error {
     color: var(--danger);
   }
