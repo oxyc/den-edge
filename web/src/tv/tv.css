@@ -39,6 +39,10 @@
   --settings-row-min-height: 68px;
   --settings-row-padding: 12px 20px;
   --settings-field-min-height: 58px;
+  --tv-menu-width: min(720px, 82vw);
+  --tv-menu-row-min-height: 76px;
+  --tv-menu-gap: 8px;
+  --tv-menu-padding: 18px;
 
   font-size: var(--tv-type-body);
   overscroll-behavior: none;
@@ -46,6 +50,57 @@
 
 .den-tv body {
   overflow-x: hidden;
+}
+
+/* TV action pickers are read from metres away and navigated one row at a time. ActionMenu stays compact on the
+   browser face; only the TV bundle promotes its stream/audio/subtitle dialogs to ten-foot geometry. */
+.den-tv dialog[role='menu'] {
+  inset: 0;
+  width: var(--tv-menu-width);
+  min-width: var(--tv-menu-width);
+  max-width: var(--tv-menu-width);
+  max-height: min(76vh, 820px);
+  margin: auto;
+  padding: var(--tv-menu-padding);
+  border-color: rgb(255 255 255 / 0.16);
+  border-radius: 26px;
+  background: rgb(28 28 32 / 0.97);
+  box-shadow: 0 28px 100px rgb(0 0 0 / 0.72);
+  font-size: var(--tv-type-small);
+}
+
+.den-tv dialog[role='menu']::backdrop {
+  background: rgb(0 0 0 / 0.58);
+}
+
+.den-tv dialog[role='menu'] .items {
+  display: grid;
+  gap: var(--tv-menu-gap);
+}
+
+.den-tv dialog[role='menu'] .tv-menu-heading {
+  margin: 4px 12px 14px;
+  color: #fff;
+  font-size: var(--tv-type-heading);
+  font-weight: 700;
+}
+
+.den-tv dialog[role='menu'] .item {
+  min-height: var(--tv-menu-row-min-height);
+  padding: 14px 20px;
+  border-radius: 16px;
+  line-height: 1.25;
+}
+
+.den-tv dialog[role='menu'] .item.described {
+  gap: 8px;
+  min-height: 104px;
+  padding-block: 16px;
+}
+
+.den-tv dialog[role='menu'] .item-description {
+  font-size: var(--tv-type-caption);
+  line-height: 1.3;
 }
 
 /* A newly linked TV has no local library projection yet. The shared page loader already spans exactly that real
