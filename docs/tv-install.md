@@ -216,7 +216,7 @@ Download the unsigned archive and pass the profile name and the serial shown by 
 
 ```sh
 cd ~/Downloads
-curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.0.1/den-tv-tizen-unsigned.tar.gz
+curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen-unsigned.tar.gz
 tar -xzf den-tv-tizen-unsigned.tar.gz
 cd den-tv-tizen
 ./install.sh DenSamsung TV_SERIAL
