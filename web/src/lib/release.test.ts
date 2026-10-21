@@ -90,18 +90,11 @@ describe('watching the shell release', () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'new' } }));
-    const watcher = release.watchRelease(
-      Promise.resolve('old'),
-      fetchImpl,
-      () => '/tv/6066-verano-azul',
-    );
+    const watcher = release.watchRelease(Promise.resolve('old'), fetchImpl);
     const at = place();
 
     await expect(watcher.check()).resolves.toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith('/tv/6066-verano-azul', {
-      method: 'HEAD',
-      cache: 'no-cache',
-    });
+    expect(fetchImpl).toHaveBeenCalledWith('/__den/release', { cache: 'no-store' });
     expect(at.went).toEqual([]);
     expect(release.swapOnNavigation('/tv/6066-verano-azul', at)).toBe(true);
     expect(at.went).toEqual([
@@ -117,7 +110,7 @@ describe('watching the shell release', () => {
       .mockReturnValueOnce(first)
       .mockRejectedValueOnce(new Error('offline'))
       .mockResolvedValueOnce(new Response(null, { headers: { 'x-den-release': 'new' } }));
-    const watcher = release.watchRelease(Promise.resolve('old'), fetchImpl, () => '/');
+    const watcher = release.watchRelease(Promise.resolve('old'), fetchImpl);
 
     const one = watcher.check();
     const two = watcher.check();

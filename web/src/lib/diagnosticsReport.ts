@@ -12,12 +12,12 @@ let release: string | undefined;
 
 /**
  * Read the release of the navigation this page is actually running from its Server-Timing entry. Older servers
- * and browsers fall back to one early HEAD of this page's own path and its `x-den-release`; doing that here,
+ * and browsers fall back to one early GET of the shell release endpoint; doing that here,
  * rather than lazily when the first report needs it, keeps that fallback's deployment race as small as possible.
  */
 export async function loadRelease(
   fetchImpl: typeof fetch = fetch,
-  path: string = typeof location === 'undefined' ? '/' : location.pathname,
+  _path: string = typeof location === 'undefined' ? '/' : location.pathname,
   performanceImpl: Pick<Performance, 'getEntriesByType'> | undefined = globalThis.performance,
 ): Promise<string | undefined> {
   const navigation = performanceImpl?.getEntriesByType('navigation')[0] as
@@ -29,8 +29,12 @@ export async function loadRelease(
     release = navigated;
     return release;
   }
+  // A packaged TV's shell and hashed chunks live inside the installed app, not in den-edge's current web build.
+  // Its document intentionally has no release marker, and comparing it with the server shell would manufacture a
+  // replacement that cannot replace those local files. Preserve that boundary and make no package-host request.
+  if (__DEN_TV_PACKAGED__) return undefined;
   try {
-    const res = await fetchImpl(path, { method: 'HEAD', cache: 'no-store' });
+    const res = await fetchImpl('/__den/release', { cache: 'no-store' });
     release = res.headers.get('x-den-release') ?? undefined;
     return release;
   } catch {
