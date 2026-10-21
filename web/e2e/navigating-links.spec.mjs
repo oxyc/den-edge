@@ -146,7 +146,9 @@ async function opensInPlace(browser, kind, viewport) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${kind.from}`);
     const link = await kind.open(page);
-    await expect(link).toHaveAttribute('href', kind.href);
+    // Every kind is discovered through the freshly booted app. Under a fully occupied CI runner the Browse row can
+    // legitimately arrive after Playwright's five-second assertion default, so use the suite's app-ready budget.
+    await expect(link).toHaveAttribute('href', kind.href, { timeout: 15_000 });
     await page.evaluate(() => (window.sameDocument = true));
     const entries = await page.evaluate(() => history.length);
     await link.click({ timeout: 10_000 });
@@ -173,7 +175,7 @@ async function opensInANewTab(browser, kind, viewport) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${kind.from}`);
     const link = await kind.open(page);
-    await expect(link).toHaveAttribute('href', kind.href);
+    await expect(link).toHaveAttribute('href', kind.href, { timeout: 15_000 });
     await page.evaluate(() => (window.sameDocument = true));
     // The new tab is the browser's own, and only where it opened matters: its document is a stub.
     const opening = `${E2E_ORIGIN}${kind.href}`;
