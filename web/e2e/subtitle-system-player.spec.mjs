@@ -70,7 +70,7 @@ const vtt =
   'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:00.000 --> 00:00:30.000\nFrom the file.\n';
 const srt = '1\n00:00:00,000 --> 00:00:30,000\nFrom OpenSubtitles.\n';
 
-async function mockHearth(page, { builtIn = false } = {}) {
+async function mockHearth(page, { builtIn = false, beforePlayback, beforeSubtitle } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -89,14 +89,16 @@ async function mockHearth(page, { builtIn = false } = {}) {
       },
     }),
   );
-  await page.route(`${ORIGIN}/den/config/subtitle/*.srt`, (route) =>
-    route.fulfill({ contentType: 'text/plain', body: srt }),
-  );
+  await page.route(`${ORIGIN}/den/config/subtitle/*.srt`, async (route) => {
+    await beforeSubtitle?.();
+    return route.fulfill({ contentType: 'text/plain', body: srt });
+  });
   await page.route(`${ORIGIN}/den/config/cast-subtitle`, (route) => route.fulfill({ status: 503 }));
   const operations = [];
-  await page.route(`${ORIGIN}/den/config/playback`, (route) => {
+  await page.route(`${ORIGIN}/den/config/playback`, async (route) => {
     const body = route.request().postDataJSON();
     operations.push(body);
+    await beforePlayback?.(body, operations.length);
     const managed = builtIn
       ? {
           ...direct,
@@ -251,17 +253,22 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
   try {
     const context = await browser.newContext({ locale: 'en-US' });
     const page = await context.newPage();
-    const operations = await mockHearth(page);
+    let releaseSubtitle;
+    const subtitleGate = new Promise((resolve) => (releaseSubtitle = resolve));
+    const operations = await mockHearth(page, { beforeSubtitle: () => subtitleGate });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
     // English audio for an English browser: nothing comes up unasked, and the menu says so.
     expect(await page.evaluate(shown)).toBeNull();
     await page.getByRole('button', { name: 'Subtitles: Off' }).click();
     await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
+    releaseSubtitle();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
+    await expect(page.getByText('Loading subtitles…')).toHaveCount(0);
     expect(operations).toHaveLength(1);
 
     // Desktop keeps subtitle selection and timing inside the player rather than sending either below the video.
@@ -290,15 +297,24 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
       if (message.text().startsWith('[Den subtitles] '))
         subtitleLogs.push({ text: message.text(), arguments: message.args().length });
     });
-    const operations = await mockHearth(page, { builtIn: true });
+    let releaseSubtitle;
+    const subtitleGate = new Promise((resolve) => (releaseSubtitle = resolve));
+    const operations = await mockHearth(page, {
+      builtIn: true,
+      beforePlayback: (_body, attempt) => (attempt === 2 ? subtitleGate : undefined),
+    });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
     await page.getByRole('button', { name: 'Subtitles: Off' }).click();
     await page.getByRole('menuitemradio', { name: 'English (in file)' }).click();
+    await expect.poll(() => operations.length).toBe(2);
+    await expect(page.getByRole('status')).toHaveText('Switching subtitles…');
+    releaseSubtitle();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'en', label: 'English (in file)' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
+    await expect(page.getByText('Switching subtitles…')).toHaveCount(0);
     expect(operations).toHaveLength(2);
     expect(operations[1]).toMatchObject({ subtitleTrack: 0 });
     expect(subtitleLogs.length).toBeGreaterThan(0);

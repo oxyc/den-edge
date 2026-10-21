@@ -14,7 +14,7 @@ const release = { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 };
 const SESSION = '/direct/s/switch1/sig';
 
 /** Hearth with TorBox and Remux: TorBox first, Remux where the request rules TorBox out (`directFailed`). */
-async function mockHearth(page) {
+async function mockHearth(page, { beforePlayback } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -30,23 +30,25 @@ async function mockHearth(page) {
   await page.route(`${ORIGIN}/den/config/playback`, (route) => {
     const body = route.request().postDataJSON();
     playback.push(body);
-    if (body.directFailed !== true)
-      return route.fulfill({ json: { url: `${CDN}/master.m3u8`, release } });
-    return route.fulfill({
-      json: {
-        url: `${ORIGIN}${SESSION}/master.m3u8`,
-        release,
-        session: {
-          id: 'switch1',
-          duration: 60,
-          video: { codec: 'h264', transcoded: false },
-          audioTrack: 0,
-          audioTracks: [],
-          endUrl: SESSION,
-          heartbeatUrl: `${SESSION}/heartbeat`,
-          reportUrl: `${SESSION}/report`,
+    return Promise.resolve(beforePlayback?.(body, playback.length)).then(() => {
+      if (body.directFailed !== true)
+        return route.fulfill({ json: { url: `${CDN}/master.m3u8`, release } });
+      return route.fulfill({
+        json: {
+          url: `${ORIGIN}${SESSION}/master.m3u8`,
+          release,
+          session: {
+            id: 'switch1',
+            duration: 60,
+            video: { codec: 'h264', transcoded: false },
+            audioTrack: 0,
+            audioTracks: [],
+            endUrl: SESSION,
+            heartbeatUrl: `${SESSION}/heartbeat`,
+            reportUrl: `${SESSION}/report`,
+          },
         },
-      },
+      });
     });
   });
   const media = async (route) => {
@@ -66,6 +68,49 @@ async function mockHearth(page) {
   await page.route(`${ORIGIN}/direct/s/**`, media);
   return playback;
 }
+
+test('delivery changes explain the wait immediately and until the replacement paints', async () => {
+  test.skip(!existsSync(chromium.executablePath()), 'Chromium is not installed here');
+  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    const releases = [];
+    const playback = await mockHearth(page, {
+      beforePlayback: (_body, attempt) =>
+        attempt === 1 ? undefined : new Promise((resolve) => releases.push(resolve)),
+    });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    const video = page.locator('.player video');
+    await expect
+      .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+      .toBeGreaterThan(2);
+
+    const torbox = page.getByRole('button', { name: 'Playing from TorBox' });
+    await torbox.click();
+    await page.getByRole('menuitem', { name: 'Switch to Den Remux' }).click();
+    await expect.poll(() => playback.length).toBe(2);
+    await expect(page.getByRole('status')).toHaveText('Switching to Den Remux…');
+    const stillPlayingAt = await video.evaluate((element) => element.currentTime);
+    await expect
+      .poll(() => video.evaluate((element) => element.currentTime))
+      .toBeGreaterThan(stillPlayingAt);
+    releases.shift()();
+    const remux = page.getByRole('button', { name: 'Playing from Den Remux' });
+    await expect(remux).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Switching to Den Remux…')).toHaveCount(0);
+
+    await remux.click();
+    await page.getByRole('menuitem', { name: 'Switch to TorBox' }).click();
+    await expect.poll(() => playback.length).toBe(3);
+    await expect(page.getByRole('status')).toHaveText('Switching to TorBox…');
+    releases.shift()();
+    await expect(torbox).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Switching to TorBox…')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
 
 const layouts = [
   ['phone', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],

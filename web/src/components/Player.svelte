@@ -575,9 +575,40 @@
    * is made; keep one visible acknowledgement from that press until the replacement paints its first frame. Its id
    * separates a superseded request from the newer one it must not clear (objects stored in `$state` are proxied).
    */
-  type ManualSwitch = { id: number; label: 'Switching stream…' | 'Switching audio…' };
+  type ManualSwitch = {
+    id: number;
+    label:
+      | 'Switching stream…'
+      | 'Switching audio…'
+      | 'Switching subtitles…'
+      | 'Loading subtitles…'
+      | 'Re-syncing audio & video…'
+      | 'Starting Chromecast…'
+      | 'Returning to this device…'
+      | `Switching to ${'TorBox' | 'Den Remux'}…`;
+  };
   let manualSwitchId = 0;
   let manualSwitch = $state<ManualSwitch | null>(null);
+
+  function showManualSwitch(label: ManualSwitch['label']): ManualSwitch {
+    const pending = { id: ++manualSwitchId, label };
+    manualSwitch = pending;
+    return pending;
+  }
+
+  function clearManualSwitch(pending: ManualSwitch | undefined) {
+    if (manualSwitch?.id === pending?.id) manualSwitch = null;
+  }
+
+  function continueManualSwitch(
+    pending: ManualSwitch | undefined,
+    label: ManualSwitch['label'],
+  ): ManualSwitch {
+    if (!pending || manualSwitch?.id !== pending.id) return showManualSwitch(label);
+    const continued = { id: pending.id, label };
+    manualSwitch = continued;
+    return continued;
+  }
   /**
    * What the stamp says of TorBox while Den Remux plays. `offered`: a TorBox stream played here this visit, or Hearth
    * tried TorBox first and fell back for a reason that may pass (`directFailure`). `untried`: nothing says either way
@@ -701,6 +732,16 @@
    */
   let startupAskedAt = $state(Date.now());
   let now = $state(Date.now());
+  /** Why an automatic startup attempt after the first one is under way, so it never looks like time reset. */
+  let startupRetryNotice = $state<string | null>(null);
+  function automaticRetryNotice(failure: Failure, cause?: PlaybackCause): string {
+    if (cause === 'torbox_rate_limited') return 'TorBox asked Den to wait—trying again…';
+    if (failure === 'busy') return 'The player is busy—trying again…';
+    if (failure === 'starting') return 'The release is still being prepared—trying again…';
+    if (failure === 'transcode') return 'The release is still being converted—trying again…';
+    if (failure === 'timedOut') return 'The playback server took too long to answer—trying again…';
+    return 'The playback service was temporarily unavailable—trying again…';
+  }
   let noticeTimer: ReturnType<typeof setInterval> | undefined;
   /**
    * When each session was asked for and when it answered, by the session object — never confused with a later
@@ -729,7 +770,9 @@
     manualSwitch
       ? null
       : !session
-        ? startupNotice(elapsedMs, 'session')
+        ? startupRetryNotice
+          ? { text: startupRetryNotice }
+          : startupNotice(elapsedMs, 'session')
         : !played && !awaitingPress && !startsIn && !reconnecting
           ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
           : null,
@@ -864,6 +907,7 @@
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
     delivery: 'ordinary' | 'refresh' | 'fallback' | 'direct' = 'ordinary',
+    retryNotice: string | null = null,
   ): Promise<boolean | Failure> {
     const replacingSubtitleLanguage = replacing
       ? selectedSubtitle(replacing, subtitleChoice)?.language
@@ -876,6 +920,7 @@
     // one is replacing.
     now = Date.now();
     startupAskedAt = now;
+    startupRetryNotice = retryNotice;
     bufferProgress = undefined;
     clearInterval(noticeTimer);
     noticeTimer = setInterval(() => (now = Date.now()), 250);
@@ -1100,7 +1145,13 @@
       if ((result.failure === 'none' || result.failure === 'noCopy') && excluded.length) {
         excluded = [];
         keepReleases();
-        return begin(pick, extra);
+        return begin(
+          pick,
+          extra,
+          undefined,
+          'ordinary',
+          'The remaining releases did not work—trying the full list…',
+        );
       }
       failure = result.failure;
       if (
@@ -1110,10 +1161,15 @@
         result.failure === 'timedOut' ||
         result.failure === 'temporarilyUnavailable' ||
         cause === 'torbox_rate_limited'
-      )
+      ) {
         // What the server asked for, when it said: a converting GPU can mean minutes, and knocking every
         // twenty seconds until then is work for a box that is already the reason we are waiting.
-        retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
+        const retryMessage = automaticRetryNotice(result.failure, cause);
+        retry = setTimeout(
+          () => void begin(pick, extra, undefined, 'ordinary', retryMessage),
+          result.retryMs ?? RETRY_MS,
+        );
+      }
       return false;
     }
     result = {
@@ -2144,7 +2200,11 @@
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
       // A length is known only once the playlist came through the media listener.
-      if (remoteDuration > 0) played = true;
+      if (remoteDuration > 0) {
+        played = true;
+        manualSwitch = null;
+        clearInterval(noticeTimer);
+      }
       // The iframe has no `video` here to fire loadedmetadata and timeupdate, so its progress is what starts the
       // skip segments and drives the skip button, auto-skip and the next-episode warm-up.
       if (remoteDuration > 0) void loadSegments();
@@ -2359,13 +2419,19 @@
     castMode = playback !== undefined || directLanCast;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
-    restart({ filename: session.release.filename }, () => {
-      castOffered = false;
-      directCastOrigin = undefined;
-      chooserOrigin = undefined;
-      route = routeBeforeCast;
-      castMode = false;
-    });
+    const pending = showManualSwitch('Starting Chromecast…');
+    restart(
+      { filename: session.release.filename },
+      () => {
+        castOffered = false;
+        directCastOrigin = undefined;
+        chooserOrigin = undefined;
+        route = routeBeforeCast;
+        castMode = false;
+      },
+      undefined,
+      pending,
+    );
   }
 
   // The offer, once shown, has the keyboard: its frame is focused, and the cast page focuses its button.
@@ -2381,7 +2447,10 @@
     casting = false;
     route = routeBeforeCast;
     castMode = false;
-    if (session) restart({ filename: session.release.filename });
+    if (session) {
+      const pending = showManualSwitch('Returning to this device…');
+      restart({ filename: session.release.filename }, undefined, undefined, pending);
+    }
   }
 
   /**
@@ -2996,7 +3065,7 @@
       // carry that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot
       // expose in its own playlist.
       subtitleChoice = selectedSubtitle(session, next)?.language ?? next;
-      switchDelivery(() => (subtitleChoice = previous));
+      switchDelivery(() => (subtitleChoice = previous), 'Switching subtitles…');
       return;
     }
     const current = session;
@@ -3030,6 +3099,7 @@
       const nextTrack = selectedSubtitle(current);
       const nextTorBox = nextTrack?.torboxTrack;
       if ((current.torboxSubtitle ?? undefined) !== nextTorBox) {
+        const pending = showManualSwitch('Switching subtitles…');
         restart(
           {
             filename: current.release.filename,
@@ -3037,12 +3107,22 @@
           },
           () => (subtitleChoice = previous),
           'direct',
+          pending,
         );
         return;
       }
     }
     if (next && current) {
-      const loaded = await loadExternalSubtitle(current, next);
+      const pending =
+        requested && requested.torboxTrack === undefined && current.loadExternalSubtitle
+          ? showManualSwitch('Loading subtitles…')
+          : undefined;
+      let loaded = false;
+      try {
+        loaded = await loadExternalSubtitle(current, next);
+      } catch (error) {
+        console.warn('A subtitle track could not be loaded.', error);
+      }
       const fallback = selectedSubtitle(current)?.fallbackTorboxTrack;
       if (!loaded && fallback !== undefined) {
         console.warn(
@@ -3052,9 +3132,11 @@
           { filename: current.release.filename, subtitleTrack: fallback },
           () => (subtitleChoice = previous),
           'direct',
+          continueManualSwitch(pending, 'Switching subtitles…'),
         );
         return;
       }
+      clearManualSwitch(pending);
     }
     applySubtitles();
     sendSubtitleChoice();
@@ -3263,14 +3345,19 @@
 
   function switchAudioIndex(n: number) {
     if (!session || n === session.audioTrack) return;
-    const pending: ManualSwitch = { id: ++manualSwitchId, label: 'Switching audio…' };
-    manualSwitch = pending;
+    const pending = showManualSwitch('Switching audio…');
     restart({ audioTrack: n, filename: session.release.filename }, undefined, undefined, pending);
   }
 
   function resyncAudioVideo() {
     if (!session) return;
-    restart({ audioTrack: session.audioTrack, filename: session.release.filename });
+    const pending = showManualSwitch('Re-syncing audio & video…');
+    restart(
+      { audioTrack: session.audioTrack, filename: session.release.filename },
+      undefined,
+      undefined,
+      pending,
+    );
   }
 
   /** Another release of the title, from the same second — also after this one wouldn't play. */
@@ -3285,8 +3372,7 @@
     keepReleases();
     switchCount += 1;
     lastSwitchReason = 'user';
-    const pending: ManualSwitch = { id: ++manualSwitchId, label: 'Switching stream…' };
-    manualSwitch = pending;
+    const pending = showManualSwitch('Switching stream…');
     restart({ filename }, undefined, undefined, pending);
   }
 
@@ -3310,19 +3396,29 @@
     report();
     carryPosition();
     if (played) {
-      void begin(pick, { transcode: 'never' }, current, directOnly).then((moved) => {
-        if (moved !== true && manualSwitch?.id === pending?.id) manualSwitch = null;
-        // False is a player closed, or a session replaced, meanwhile: nothing to say.
-        if (typeof moved !== 'string' || session !== current) return;
-        startAt = null;
-        undo?.();
-        unchanged = unchangedNotice(moved, guestGrants.endedText());
-      });
+      void begin(pick, { transcode: 'never' }, current, directOnly)
+        .catch((error: unknown): Failure => {
+          console.warn('A requested player change got no answer; this stream carries on.', error);
+          return 'unreachable';
+        })
+        .then((moved) => {
+          if (moved !== true) clearManualSwitch(pending);
+          // False is a player closed, or a session replaced, meanwhile: nothing to say.
+          if (typeof moved !== 'string' || session !== current) return;
+          startAt = null;
+          undo?.();
+          unchanged = unchangedNotice(moved, guestGrants.endedText());
+        });
       return;
     }
-    void begin(pick, {}, undefined, directOnly).then((moved) => {
-      if (moved !== true && manualSwitch?.id === pending?.id) manualSwitch = null;
-    });
+    void begin(pick, {}, undefined, directOnly)
+      .catch((error: unknown): Failure => {
+        console.warn('A requested player change got no answer.', error);
+        return 'unreachable';
+      })
+      .then((moved) => {
+        if (moved !== true) clearManualSwitch(pending);
+      });
   }
 
   /**
@@ -3330,10 +3426,11 @@
    * Remux to TorBox. Always a replacement, so what plays now plays on until the other has started, and for good
    * where the other path refuses, which the viewer is told and `undo` puts back what was set for it.
    */
-  function switchDelivery(undo?: () => void) {
+  function switchDelivery(undo?: () => void, label?: ManualSwitch['label']) {
     const current = session;
     if (!current || switching || deliverySwitching) return;
     const to = current.external ? 'Den Remux' : 'TorBox';
+    const pending = showManualSwitch(label ?? `Switching to ${to}…`);
     report();
     carryPosition();
     deliverySwitching = true;
@@ -3353,6 +3450,7 @@
           lastSwitchReason = 'user';
           return;
         }
+        clearManualSwitch(pending);
         if (session !== current) return;
         startAt = null;
         if (typeof moved === 'string') {
