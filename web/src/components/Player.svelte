@@ -4853,7 +4853,9 @@
     display: flex;
     gap: 4px 12px;
     align-items: center;
-    width: min(100%, 36rem);
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(100%, 36rem);
     margin: 0;
     padding: 8px 8px 8px 14px;
     border: 0;
