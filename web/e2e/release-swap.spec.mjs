@@ -37,10 +37,6 @@ test('a newer shell puts a Continue Watching destination on the new release', as
   await guardNetwork(page);
   let releaseChecks = 0;
   await page.route(`${E2E_ORIGIN}/test/router.html`, async (route) => {
-    if (route.request().method() === 'HEAD') {
-      releaseChecks += 1;
-      return route.fulfill({ headers: { 'x-den-release': 'new-shell' } });
-    }
     const response = await route.fetch();
     return route.fulfill({
       response,
@@ -50,9 +46,13 @@ test('a newer shell puts a Continue Watching destination on the new release', as
       },
     });
   });
-  // Cloudflare keeps the shell until a deploy purges it, and the probe's HEAD is never kept, so after a failed purge
-  // a plain load still gets the old shell while the probe keeps finding the new one. Only an address Cloudflare
-  // has never seen (`den-retry`) reaches den-edge's current shell.
+  await page.route(`${E2E_ORIGIN}/__den/release`, (route) => {
+    releaseChecks += 1;
+    return route.fulfill({ headers: { 'x-den-release': 'new-shell' }, body: 'new-shell' });
+  });
+  // Cloudflare keeps the shell until a deploy purges it, while the release endpoint is never kept, so after a
+  // failed purge a plain load still gets the old shell while the probe keeps finding the new one. Only an address
+  // Cloudflare has never seen (`den-retry`) reaches den-edge's current shell.
   const destinations = [];
   await page.route(`${E2E_ORIGIN}/tv/6066-verano-azul*`, (route) => {
     const url = new URL(route.request().url());
