@@ -213,7 +213,12 @@ async function open(
     castDiscoveryMs: String(TEST_CAST_DISCOVERY_MS),
     castPlayMs: String(TEST_CAST_PLAY_MS),
   });
-  if (managed) query.set('playback', '/den/config/playback');
+  if (managed) {
+    // The complete app always reaches Hearth through the ordinary `/remux` face. A managed answer may still be a
+    // direct TorBox capability, which must retain Chromecast even though an old Remux-only gate sees this route.
+    query.set('playback', '/den/config/playback');
+    query.set('remux', '/remux');
+  }
   if (subtitleLanguage) query.set('subtitleLanguage', subtitleLanguage);
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };

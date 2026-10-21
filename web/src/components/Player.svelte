@@ -730,6 +730,23 @@
   const bufferLine = $derived(
     stalling && !autoSwitch ? bufferingWhilePlaying(stallProgress, deliveryGaveUp) : null,
   );
+  /** A normal session often crosses these states between two painted frames. Do not flash UI for work that finished
+   * before a viewer could read it; once a wait is perceptible, keep its truthful live detail and activity indicator. */
+  const STATUS_REVEAL_MS = 500;
+  const visibleStartupNotice = $derived(elapsedMs >= STATUS_REVEAL_MS ? notice : null);
+  let stallNoticeVisible = $state(false);
+  $effect(() => {
+    const waiting = stalling && !autoSwitch;
+    if (!waiting) {
+      stallNoticeVisible = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (stalling && !autoSwitch) stallNoticeVisible = true;
+    }, STATUS_REVEAL_MS);
+    return () => clearTimeout(timer);
+  });
+  const visibleBufferLine = $derived(stallNoticeVisible ? bufferLine : null);
 
   /** How long a notice that asks nothing of the viewer stays up. */
   const NOTICE_MS = 6_000;
@@ -2283,7 +2300,7 @@
   // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
   // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.castOrigin && (route !== RELAY || playsHome(session)))
+    if (castable && session && !session.castOrigin && canOfferCurrentCast(session))
       reachCast('offered');
   });
 
@@ -2374,6 +2391,15 @@
   /** A session this page plays from the home-network address, though it came for the cast page (`begin`). */
   const playsHome = (current: Session) =>
     current.lanPlaylist !== undefined && current.playlist === current.lanPlaylist;
+
+  /**
+   * A relay-owned Remux session without a Cast page cannot be moved to a receiver. Managed direct media is different:
+   * its signed CDN capability is deliberately handed to the Cast page only after a receiver is chosen, even though
+   * the browser reached Hearth through the ordinary `/remux` facade.
+   */
+  function canOfferCurrentCast(current: Session): boolean {
+    return current.external === true || route !== RELAY || playsHome(current);
+  }
 
   // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
   $effect(() => {
@@ -3807,7 +3833,7 @@
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
     {/if}
-    {#if !customTransport && castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
+    {#if !customTransport && castable && session && !session.castOrigin && canOfferCurrentCast(session)}
       <Button
         variant="player"
         size="icon"
@@ -3834,28 +3860,33 @@
   <div class="notices">
     {#if session}
       {#if swapped}
-        {@render banner(swapped, () => (swapped = null))}
+        {@render banner(swapped, { dismiss: () => (swapped = null) })}
       {/if}
       {#if autoSwitch}
-        {@render banner(autoSwitch, () => (autoSwitch = null))}
-      {:else if bufferLine}
-        {@render banner(bufferLine, undefined, undefined, true)}
+        {@render banner(autoSwitch, {
+          dismiss: () => (autoSwitch = null),
+          busy: switching,
+        })}
+      {:else if visibleBufferLine}
+        {@render banner(visibleBufferLine, { quiet: true, busy: true })}
       {/if}
       {#if slowPick}
         {@render banner(
           `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
-          () => (slowPick = null),
-          { label: 'Try another release', run: tryAnother },
+          {
+            dismiss: () => (slowPick = null),
+            action: { label: 'Try another release', run: tryAnother },
+          },
         )}
       {/if}
       {#if struggling}
         {@render banner(
           `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
-          () => (struggling = null),
+          { dismiss: () => (struggling = null) },
         )}
       {/if}
       {#if unchanged}
-        {@render banner(unchanged, () => (unchanged = null))}
+        {@render banner(unchanged, { dismiss: () => (unchanged = null) })}
       {/if}
     {/if}
   </div>
@@ -3865,22 +3896,21 @@
            picture means neither its arrival nor its longer empty-state copy moves or resizes what is playing. -->
       <div class="cast-status">
         {#if castOffer === 'looking'}
-          {@render banner('Looking for a Chromecast…')}
+          {@render banner('Looking for a Chromecast…', { busy: true, quiet: true })}
         {:else if castOffer === 'choose'}
-          {@render banner(
-            'A Chromecast is on your network. Choose it below to cast this to it.',
-            () => look({ kind: 'dismissed' }),
-          )}
+          {@render banner('A Chromecast is on your network. Choose it below to cast this to it.', {
+            dismiss: () => look({ kind: 'dismissed' }),
+          })}
         {:else}
           {@render banner(
             'No Chromecast found. Check that it is awake and on the same network as this device.',
-            () => (castOffer = 'idle'),
+            { dismiss: () => (castOffer = 'idle') },
           )}
         {/if}
       </div>
     {/if}
     {#if failure === 'login'}
-      <form onsubmit={letIn}>
+      <form class="terminal-message" onsubmit={letIn}>
         <p>
           Your library’s scout install can only check what’s available, so playing it here needs a
           browser key from the homelab (<code>remux-browser-key.txt</code>) — once; the browser
@@ -3903,57 +3933,67 @@
           </p>{/if}
       </form>
     {:else if failure === 'sourceUnavailable' && managedCause === 'torbox_rate_limited'}
-      <p class="note" role="status">{managedCauseMessages[managedCause]}</p>
+      {@render banner(managedCauseMessages[managedCause], { busy: true, startup: true })}
     {:else if failure === 'sourceUnavailable' && managedCause}
-      <p class="error" role="alert">{managedCauseMessages[managedCause]}</p>
-      {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
-        <Button variant="primary" label="Try again" onclick={() => void begin()} />
-      {/if}
+      <div class="terminal-message error" role="alert">
+        <p>{managedCauseMessages[managedCause]}</p>
+        {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
+          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+        {/if}
+      </div>
     {:else if failure === 'none' && skippedFormats.length}
-      <p class="error" role="alert">
-        The releases of this that are ready are {skippedFormats
-          .map((ext) => ext.slice(1).toUpperCase())
-          .join(' and ')} files, which Den can’t play in a browser yet. Try again once another release
-        is out, or play it on your TV.
-      </p>
+      <div class="terminal-message error" role="alert">
+        <p>
+          The releases of this that are ready are {skippedFormats
+            .map((ext) => ext.slice(1).toUpperCase())
+            .join(' and ')} files, which Den can’t play in a browser yet. Try again once another release
+          is out, or play it on your TV.
+        </p>
+      </div>
     {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode' || failure === 'timedOut' || failure === 'temporarilyUnavailable'}
-      <p class="note" role="status">{waits[failure]}</p>
+      {@render banner(waits[failure], { busy: true, startup: true })}
     {:else if failure === 'lost'}
-      <div class="lost" role="alert">
+      <div class="terminal-message" role="alert">
         <p>The connection was gone too long for this to carry on.</p>
         <Button variant="primary" label={`Resume from ${clockTime(lostAt)}`} onclick={resumeLost} />
       </div>
     {:else if failure === 'ended'}
-      <p class="error" role="alert">
-        {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with you.
-      </p>
-    {:else if failure}
-      <p class="error" role="alert">{messages[failure]}</p>
-      {#if failure === 'playback' && session}
-        <Button
-          variant="primary"
-          label="Try another release"
-          disabled={switching}
-          onclick={tryAfterRefusal}
-        />
-      {/if}
-      {#if failure === 'engine'}
-        <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
-             with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
-        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
-      {/if}
-      {#if failure === 'request' || failure === 'protocol'}
-        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
-      {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
-        <Button variant="primary" label="Try again" onclick={() => void begin()} />
-      {/if}
-    {:else if !session && !holding}
-      {#if notice}
-        <p class="note startup" role="status">
-          {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
-              >&nbsp;· {notice.clock}</span
-            >{/if}
+      <div class="terminal-message error" role="alert">
+        <p>
+          {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with
+          you.
         </p>
+      </div>
+    {:else if failure}
+      <div class="terminal-message error" role="alert">
+        <p>{messages[failure]}</p>
+        {#if failure === 'playback' && session}
+          <Button
+            variant="primary"
+            label="Try another release"
+            disabled={switching}
+            onclick={tryAfterRefusal}
+          />
+        {/if}
+        {#if failure === 'engine'}
+          <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
+               with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
+          <Button variant="primary" label="Reload" onclick={() => location.reload()} />
+        {/if}
+        {#if failure === 'request' || failure === 'protocol'}
+          <Button variant="primary" label="Reload" onclick={() => location.reload()} />
+        {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
+          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+        {/if}
+      </div>
+    {:else if !session && !holding}
+      {#if visibleStartupNotice}
+        {@render banner(visibleStartupNotice.text, {
+          busy: true,
+          quiet: true,
+          startup: true,
+          clock: visibleStartupNotice.clock,
+        })}
       {/if}
     {:else}
       {#if !session?.castOrigin}
@@ -4166,15 +4206,16 @@
           </section>
         {/if}
         {#if reconnecting}
-          <p class="countdown" role="status">Reconnecting…</p>
+          {@render banner('Reconnecting…', { busy: true, quiet: true, countdown: true })}
         {:else if startsIn}
-          <p class="countdown" role="status">{startsIn}</p>
-        {:else if notice}
-          <p class="note startup" role="status">
-            {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
-                >&nbsp;· {notice.clock}</span
-              >{/if}
-          </p>
+          {@render banner(startsIn, { busy: true, quiet: true, countdown: true })}
+        {:else if visibleStartupNotice}
+          {@render banner(visibleStartupNotice.text, {
+            busy: true,
+            quiet: true,
+            startup: true,
+            clock: visibleStartupNotice.clock,
+          })}
         {/if}
       {/if}
     {/if}
@@ -4388,7 +4429,7 @@
               aria-label={next ? `Next episode: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
-          {#if desktopTransport && castable && !session.castOrigin && (route !== RELAY || playsHome(session))}
+          {#if desktopTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
             <Button
               variant="player"
               size="icon"
@@ -4499,27 +4540,44 @@
 
 {#snippet banner(
   text: string,
-  dismiss?: () => void,
-  action?: { label: string; run: () => void },
-  quiet = false,
+  options: {
+    dismiss?: () => void;
+    action?: { label: string; run: () => void };
+    quiet?: boolean;
+    busy?: boolean;
+    startup?: boolean;
+    countdown?: boolean;
+    clock?: string;
+  } = {},
 )}
-  <p class="notice" class:quiet role="status">
-    <span>{text}</span>
-    {#if action}<Button
+  <p
+    class="notice"
+    class:quiet={options.quiet}
+    class:busy={options.busy}
+    class:startup={options.startup}
+    class:countdown={options.countdown}
+    role="status"
+  >
+    {#if options.busy}<span class="status-spinner" aria-hidden="true"></span>{/if}
+    <span class="notice-copy"
+      >{text}{#if options.clock}<span class="clock" aria-hidden="true">&nbsp;· {options.clock}</span
+        >{/if}</span
+    >
+    {#if options.action}<Button
         variant="tertiary"
         size="compact"
         class="notice-action"
-        label={action.label}
-        onclick={action.run}
+        label={options.action.label}
+        onclick={options.action.run}
       />{/if}
-    {#if dismiss}
+    {#if options.dismiss}
       <Button
         variant="tertiary"
         size="icon"
         class="notice-dismiss"
         icon="close"
         ariaLabel="Dismiss"
-        onclick={dismiss}
+        onclick={options.dismiss}
       />
     {/if}
   </p>
@@ -4717,29 +4775,17 @@
     justify-content: flex-end;
   }
 
-  .note {
-    max-width: 50ch;
-    color: rgb(255 255 255 / 0.6);
-    text-align: center;
-  }
-
-  /* Over the held picture, clear of the video's own controls along the bottom. */
+  /* Over the held picture, clear of the video's own controls along the bottom. The same surface and activity glyph
+     serve startup, prebuffer, reconnecting, Cast discovery and a mid-play stall; only the copy changes. */
   .countdown {
-    position: relative;
-    padding: 8px 16px;
-    border-radius: 999px;
-    background: rgb(0 0 0 / 0.6);
+    width: auto;
     font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 
-  /* The startup notice (den-edge#234): a line rather than `.countdown`'s pill, since it says more than a number. */
+  /* The startup status stays centred over an empty/held stage and never intercepts the player. */
   .startup {
-    position: relative;
-    padding: 10px 20px;
-    border-radius: 16px;
-    background: rgb(0 0 0 / 0.6);
-    color: rgb(255 255 255 / 0.85);
+    width: min(calc(100% - 24px), 42rem);
     pointer-events: none;
   }
 
@@ -4776,22 +4822,28 @@
     justify-items: center;
   }
 
-  /* Glass, as every control over media is (`app.css`), with LibraryStatus's accent edge: a passing note. */
+  /* One quiet media toast for every non-terminal player message. A shadow separates it from the picture without
+     adding the bordered alert-box look that made buffering and Cast messages feel unrelated to the player. */
   .notice {
     display: flex;
     gap: 4px 12px;
     align-items: center;
     width: min(100%, 36rem);
     margin: 0;
-    padding: 6px 6px 6px 14px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--glass-edge));
-    border-radius: 12px;
-    background: var(--glass-bg);
+    padding: 8px 8px 8px 14px;
+    border: 0;
+    border-radius: 14px;
+    background: rgb(18 18 20 / 0.88);
     color: rgb(255 255 255 / 0.9);
     font-size: 14px;
     line-height: 1.35;
+    box-shadow: 0 10px 32px rgb(0 0 0 / 0.34);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  .notice.quiet {
+    color: rgb(255 255 255 / 0.78);
   }
 
   .notice:last-of-type {
@@ -4810,10 +4862,26 @@
   }
 
   /* A notice with nothing to dismiss still sits the same height as one with. */
-  .notice > span {
+  .notice-copy {
     flex: 1 1 auto;
     min-width: 0;
     padding: 6px 0;
+  }
+
+  .status-spinner {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgb(255 255 255 / 0.22);
+    border-top-color: rgb(255 255 255 / 0.88);
+    border-radius: 50%;
+    animation: status-spin 800ms linear infinite;
+  }
+
+  @keyframes status-spin {
+    to {
+      transform: rotate(1turn);
+    }
   }
 
   /* The offer a notice makes: the accent's text, as LibraryStatus's Undo. */
@@ -4970,8 +5038,10 @@
     position: absolute;
     top: 72px;
     right: var(--player-side);
-    left: var(--player-side);
+    left: auto;
     z-index: 6;
+    width: min(36rem, calc(100% - 2 * var(--player-side)));
+    justify-items: end;
   }
 
   .web-custom-player > .stage {
@@ -5310,6 +5380,10 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .status-spinner {
+      animation: none;
+    }
+
     .web-custom-player > header,
     .web-custom-player > footer,
     .web-custom-player .full-tv-transport,
@@ -5321,17 +5395,31 @@
     }
   }
 
-  .error {
-    max-width: 50ch;
-    color: var(--danger);
+  /* A wait remains a toast over the media; a state that cannot continue becomes one calm, centred decision card.
+     Keeping its action inside the same surface avoids the former mix of loose text and apparently unrelated buttons. */
+  .terminal-message {
+    display: grid;
+    gap: 16px;
+    justify-items: center;
+    width: min(calc(100% - 24px), 32rem);
+    max-width: none;
+    margin: 0;
+    padding: 24px;
+    border-radius: 18px;
+    background: rgb(18 18 20 / 0.9);
+    color: rgb(255 255 255 / 0.86);
     text-align: center;
+    box-shadow: 0 16px 48px rgb(0 0 0 / 0.4);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
   }
 
-  .lost {
-    display: grid;
-    gap: 12px;
-    justify-items: center;
-    max-width: 50ch;
-    text-align: center;
+  .terminal-message p {
+    margin: 0;
+  }
+
+  .terminal-message.error > p,
+  .terminal-message .error {
+    color: var(--danger);
   }
 </style>
