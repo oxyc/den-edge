@@ -747,6 +747,7 @@ function selection(value: unknown): value is LibrarySelection {
     case 'continue':
     case 'history':
     case 'settings':
+    case 'devices':
     case 'connections':
     case 'simkl':
     case 'recovery':
@@ -1437,6 +1438,15 @@ function preferencesView(value: unknown): boolean {
   );
 }
 
+const libraryDevice = (candidate: unknown): candidate is ConnectionsView['devices'][number] =>
+  record(candidate) &&
+  exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat']) &&
+  boundedText(candidate.id, 128) &&
+  boundedText(candidate.name, 256) &&
+  (candidate.kind === 'tv' || candidate.kind === 'browser') &&
+  optional(candidate.lastSeenAt, integer) &&
+  optional(candidate.libraryFormat, integer);
+
 function connectionsView(value: unknown): value is ConnectionsView {
   if (
     !record(value) ||
@@ -1505,18 +1515,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
       2,
     ) &&
     unique(servers, (server) => server.kind) &&
-    list(
-      devices,
-      (candidate): candidate is ConnectionsView['devices'][number] =>
-        record(candidate) &&
-        exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat']) &&
-        boundedText(candidate.id, 128) &&
-        boundedText(candidate.name, 256) &&
-        (candidate.kind === 'tv' || candidate.kind === 'browser') &&
-        optional(candidate.lastSeenAt, integer) &&
-        optional(candidate.libraryFormat, integer),
-      512,
-    ) &&
+    list(devices, libraryDevice, 512) &&
     unique(devices, (device) => device.id) &&
     record(diagnostics) &&
     exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId', 'profileTopology']) &&
@@ -1524,6 +1523,16 @@ function connectionsView(value: unknown): value is ConnectionsView {
     integer(diagnostics.libraryFormat) &&
     integer(diagnostics.pendingChanges) &&
     boundedText(diagnostics.selfDeviceId, 128)
+  );
+}
+
+function devicesView(value: unknown): boolean {
+  return (
+    record(value) &&
+    exact(value, ['kind', 'devices']) &&
+    value.kind === 'devices' &&
+    list(value.devices, libraryDevice, 512) &&
+    unique(value.devices, (device) => device.id)
   );
 }
 
@@ -1672,6 +1681,8 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         bool(value.assistant.write) &&
         bool(value.assistant.read)
       );
+    case 'devices':
+      return devicesView(value);
     case 'profiles':
       return profileDirectoryView(value);
     case 'connections':

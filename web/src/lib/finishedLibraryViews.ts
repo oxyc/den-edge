@@ -7,6 +7,7 @@ import {
 import type { Vault } from './localVault';
 import type {
   ContinueView,
+  DevicesView,
   LibraryOverviewView,
   RuntimeDiscoveryView,
   SettingsView,
@@ -24,6 +25,7 @@ const CAPABILITIES: readonly FinishedLibraryViewCapability[] = [
   'recommendations',
   'settings',
   'runtime',
+  'devices',
 ];
 
 /** Independently retained pieces. A client need not accept the full Home/history surface to use one of them. */
@@ -33,6 +35,7 @@ export interface FinishedLibraryViewPieces {
   recommendations: Omit<LibraryOverviewView, 'kind' | 'watchlist'>;
   settings: SettingsView;
   runtime: RuntimeDiscoveryView;
+  devices: DevicesView;
 }
 
 export type FinishedLibraryViewCapability = keyof FinishedLibraryViewPieces;

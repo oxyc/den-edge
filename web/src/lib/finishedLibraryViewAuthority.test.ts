@@ -93,6 +93,10 @@ async function cached(vault: Vault): Promise<FinishedLibraryViews> {
         assistant: { read: false, write: false },
       },
       runtime: { kind: 'runtime', pluginManifestUrls: [], privateRemuxUrl: null },
+      devices: {
+        kind: 'devices',
+        devices: [{ id: 'living-room', name: 'Living Room', kind: 'tv' }],
+      },
     },
   } as unknown as FinishedLibraryViews;
   await writeFinishedLibraryViews(libraryKey, vault, value);
@@ -145,11 +149,15 @@ it('serves capability-selected startup views without opening the document author
   expect(vault.reads.some((key) => key.endsWith(':continue'))).toBe(false);
   expect(vault.reads.some((key) => key.endsWith(':settings'))).toBe(false);
   expect(vault.reads.some((key) => key.endsWith(':runtime'))).toBe(false);
+  expect(vault.reads.some((key) => key.endsWith(':devices'))).toBe(false);
   await expect(opened!.authority.select({ kind: 'continue' })).resolves.toEqual(
     value.pieces.continue!.view,
   );
   await expect(opened!.authority.select({ kind: 'settings' })).resolves.toEqual(
     value.pieces.settings,
+  );
+  await expect(opened!.authority.select({ kind: 'devices' })).resolves.toEqual(
+    value.pieces.devices,
   );
   await expect(opened!.authority.query({ kind: 'relay.membership' })).resolves.toMatchObject({
     kind: 'relay.membership',

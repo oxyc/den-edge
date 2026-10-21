@@ -3,6 +3,7 @@ import type {
   AssistantConnection,
   ConnectionsView,
   ContinueView,
+  DevicesView,
   DownloadReleaseDescriptor,
   DownloadTarget,
   DownloadTitleDescriptor,
@@ -117,6 +118,7 @@ type LeasedView =
 export class LibraryModel {
   #overview = $state.raw<LibraryModelSnapshot<LibraryOverviewView>>(connectingSnapshot());
   #continue = $state.raw<LibraryModelSnapshot<ContinueView>>(connectingSnapshot());
+  #devices = $state.raw<LibraryModelSnapshot<DevicesView>>(connectingSnapshot());
   #settings = $state.raw<LibraryModelSnapshot<SettingsView>>(connectingSnapshot());
   #runtime = $state.raw<LibraryModelSnapshot<RuntimeDiscoveryView>>(connectingSnapshot());
   #connection = $state<LibraryModelConnection>('connecting');
@@ -135,7 +137,7 @@ export class LibraryModel {
   readonly #readyWaiters = new Set<() => void>();
   #closed = false;
 
-  /** Settles only after the service and all four Home-critical root replacements are ready. */
+  /** Settles only after the service and its Home-critical root replacements are ready. */
   readonly ready: Promise<LibraryVersion>;
 
   constructor(
@@ -148,6 +150,9 @@ export class LibraryModel {
       }),
       service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
         this.#continue = modelSnapshot<ContinueView>(snapshot);
+      }),
+      service.subscribeSnapshot({ kind: 'devices' }, (snapshot) => {
+        this.#devices = modelSnapshot<DevicesView>(snapshot);
       }),
       service.subscribeSnapshot({ kind: 'settings' }, (snapshot) => {
         this.#settings = modelSnapshot<SettingsView>(snapshot);
@@ -174,6 +179,11 @@ export class LibraryModel {
 
   get continueWatching(): LibraryModelSnapshot<ContinueView> {
     return this.#continue;
+  }
+
+  /** Small playback capability; credentials and the rest of Settings' connection state stay lazy. */
+  get devices(): LibraryModelSnapshot<DevicesView> {
+    return this.#devices;
   }
 
   /** Watched history is intentionally lazy: Home must not transfer a potentially large Watchlist-only view. */
@@ -1042,6 +1052,7 @@ export class LibraryModel {
     this.#presences.clear();
     this.#overview = closedSnapshot(this.#overview);
     this.#continue = closedSnapshot(this.#continue);
+    this.#devices = closedSnapshot(this.#devices);
     this.#history?.close();
     this.#history = undefined;
     this.#downloads?.close();
