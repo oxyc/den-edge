@@ -81,6 +81,31 @@ Office submission. The 5.5 build additionally targets Chromium 69, converts owne
 and includes TV-only standard-library fallbacks. CI verifies all package variants, but old-generation hardware
 remains unqualified until it is tested on a real TV. The same per-version policy is embedded in packaged HTML so
 production package E2E exercises it rather than testing a more permissive page.
+
+An additional **experimental, unpublished** Tizen 3 build tier prepares the application as SystemJS rather than
+native modules and targets Chromium 47 without changing the browser bundle or the supported Samsung widgets. CI
+builds and validates its manifest, CSP, post-minify legacy Worker syntax, classic Workers, Samsung bridge, relative
+assets, and absence of module scripts. It is deliberately not added to `tv-samsung-publish` until all of these
+release gates are closed:
+
+- replace the library and assistant Wasm cores (tracked separately) and retain both lazy core assets;
+- remove or transform native `BigInt` from pairing/crypto and provide a Proxy-free Svelte state path;
+- provide Chromium 47 browser primitives, notably `AbortController`, `URLSearchParams`, `IntersectionObserver`, and
+  `ResizeObserver`, in both the page and Workers;
+- produce a Tizen 3 CSS tier without unsupported custom properties or Grid, with fallbacks for flex gaps,
+  `min()`/`max()`/`clamp()`, and newer selectors used by the TV UI; and
+- qualify pairing, persistence, remote navigation, AVPlay, codecs, suspend/resume, memory, and startup performance on
+  a 2017 TV or its matching emulator.
+
+To inspect the unsigned shell locally:
+
+```sh
+DEN_TIZEN_VERSION=3.0 DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.example \
+  DEN_TV_SERVICE_ORIGIN=https://d.example npm run build:tv:tizen
+DEN_TIZEN_VERSION=3.0 DEN_TV_API_ORIGIN=https://d-api.example DEN_TV_SERVICE_ORIGIN=https://d.example \
+  node scripts/tv-package.mjs tizen --url https://d-api.example --prepare
+```
+
 The packaged Vite build includes Samsung's required
 `$WEBAPIS/webapis/webapis.js` bridge in the entry HTML before the app module;
 the packager validates that exact bridge instead of injecting a divergent copy.

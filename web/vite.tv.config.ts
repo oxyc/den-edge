@@ -1,5 +1,8 @@
 import { defineConfig, mergeConfig, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import legacy from '@vitejs/plugin-legacy';
+import { transformAsync } from '@babel/core';
+import presetEnv from '@babel/preset-env';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
@@ -14,7 +17,8 @@ const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url
 const e2e = process.env.DEN_TV_E2E === '1';
 const packaged = process.env.DEN_TV_PACKAGED === '1';
 const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
-const legacyTizen = platform === 'tizen' && tizenVersion === '5.5';
+const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
+const legacyTizen = platform === 'tizen' && (tizen3 || tizenVersion === '5.5');
 const compat = legacyTizen ? legacyCompat : standardCompat;
 const tvCspValue = tvCsp(tizenVersion);
 const apiOriginText = process.env.DEN_TV_API_ORIGIN;
@@ -111,13 +115,13 @@ function workerCompatibility(): Plugin {
   };
 }
 
-// Chromium 69 (Tizen 5.5) predates module Workers. Vite emits each owned Worker entry as an IIFE, but normalizes
+// Chromium 47 (Tizen 3) and Chromium 69 (Tizen 5.5) predate module Workers. Vite emits each owned Worker entry as an IIFE, but normalizes
 // its constructor to `{ type: "module" }` after source transforms have run. Lower that generated option at the
 // output boundary, in the page and nested Worker builds, while retaining the useful startup Worker name.
-function legacyWorkerOutput(): Plugin {
+function legacyWorkerOutput(workerBundle = false): Plugin {
   return {
-    name: 'den-tv-legacy-worker-output',
-    generateBundle(_options, bundle) {
+    name: `den-tv-legacy-worker-output${workerBundle ? '-bundle' : ''}`,
+    async generateBundle(_options, bundle) {
       if (!legacyTizen) return;
       for (const output of Object.values(bundle)) {
         if (output.type !== 'chunk') continue;
@@ -125,8 +129,82 @@ function legacyWorkerOutput(): Plugin {
           .replace(/\{type:`module`\}/g, '{}')
           .replace(/\{type:`module`,name:/g, '{name:');
         if (/type:[`'"]module[`'"]/.test(output.code))
-          this.error(`Tizen 5.5 output still contains a module Worker option: ${output.fileName}`);
+          this.error(
+            `Legacy Tizen output still contains a module Worker option: ${output.fileName}`,
+          );
+        if (tizen3 && workerBundle)
+          output.code = (await lowerTizen3Syntax(output.code, output.fileName, true)).code;
       }
+    },
+  };
+}
+
+// Vite 8's legacy plugin converts Rolldown output to SystemJS before Babel lowers syntax. Several
+// Babel 7.29 transforms depend on the original module scopes and ordering for Den's larger chunks.
+// Lower syntax first while those scopes are intact; plugin-legacy still owns SystemJS conversion,
+// its loader, and polyfill selection.
+async function lowerTizen3Syntax(code: string, fileName: string, compact = false) {
+  // Lower classes/spread/iteration before async functions. Babel's combined pass can otherwise
+  // hand regenerator syntax it does not understand inside generated Rolldown expressions.
+  const structuralResult = await transformAsync(code, {
+    babelrc: false,
+    configFile: false,
+    filename: fileName,
+    sourceMaps: !compact,
+    compact,
+    minified: compact,
+    presets: [
+      [
+        presetEnv,
+        {
+          // Force every expression form that regenerator does not understand through this
+          // structural pass. The final output still targets Chromium 47, not IE.
+          targets: { ie: '11' },
+          bugfixes: true,
+          modules: false,
+          exclude: [
+            '@babel/plugin-transform-async-generator-functions',
+            '@babel/plugin-transform-async-to-generator',
+            '@babel/plugin-transform-regenerator',
+          ],
+        },
+      ],
+    ],
+  });
+  const result = await transformAsync(structuralResult?.code ?? code, {
+    babelrc: false,
+    configFile: false,
+    filename: fileName,
+    sourceMaps: !compact,
+    compact,
+    minified: compact,
+    inputSourceMap: compact ? undefined : (structuralResult?.map ?? undefined),
+    presets: [[presetEnv, { targets: { chrome: '47' }, bugfixes: true, modules: false }]],
+  });
+  if (!result?.code) throw new Error(`Babel produced no Tizen 3 output for ${fileName}`);
+  return { code: result.code, map: result.map ?? null };
+}
+
+function tizen3SyntaxCompatibility(): Plugin {
+  return {
+    name: 'den:tizen3-syntax-compatibility',
+    async renderChunk(code, chunk) {
+      if (!tizen3 || !chunk.fileName.includes('-legacy')) return null;
+      return lowerTizen3Syntax(code, chunk.fileName);
+    },
+  };
+}
+
+function tizen3LegacyHtml(): Plugin {
+  return {
+    name: 'den:tizen3-legacy-html',
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      if (!tizen3) return;
+      const index = bundle['index.html'];
+      if (index?.type !== 'asset' || typeof index.source !== 'string')
+        this.error('Tizen 3 build is missing index.html');
+      index.source = index.source.replace(/\s*<link rel="modulepreload"[^>]*>/g, '');
     },
   };
 }
@@ -164,7 +242,15 @@ const packagedMetadata: Plugin = {
         type: 'asset',
         fileName: 'den-tv-package.json',
         source: JSON.stringify(
-          { packaged: true, platform, apiOrigin, serviceOrigin, tizenVersion, e2e },
+          {
+            packaged: true,
+            platform,
+            apiOrigin,
+            serviceOrigin,
+            tizenVersion,
+            legacyNonModule: tizen3,
+            e2e,
+          },
           null,
           2,
         ),
@@ -199,7 +285,7 @@ const samsungBridge: Plugin = {
       // A platform-owned local script, not remote executable code. Keep it after the CSP meta and before
       // the app module; ordinary browser and hosted preview builds do not request Samsung device files.
       return html.replace(
-        /(?=<script type="module")/,
+        /(?=<script(?:\s|>))|(?=<\/body>)/,
         '<script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>\n',
       );
     },
@@ -240,12 +326,25 @@ export default mergeConfig(
       legacyWorkerOutput(),
       packagedMetadata,
       samsungBridge,
+      tizen3SyntaxCompatibility(),
+      ...(tizen3
+        ? [
+            legacy({
+              targets: ['chrome 47'],
+              renderModernChunks: false,
+              additionalLegacyPolyfills: ['core-js/proposals/global-this'],
+            }),
+          ]
+        : []),
+      tizen3LegacyHtml(),
     ],
-    worker: { plugins: () => [workerCompatibility(), legacyWorkerOutput(), svelte()] },
+    worker: {
+      plugins: () => [workerCompatibility(), legacyWorkerOutput(true), svelte()],
+    },
     css: { postcss: { plugins: [legacyScopedCss] } },
     build: {
-      target: legacyTizen ? 'chrome69' : 'chrome85',
-      cssTarget: legacyTizen ? 'chrome69' : 'chrome85',
+      ...(!tizen3 ? { target: legacyTizen ? 'chrome69' : 'chrome85' } : {}),
+      cssTarget: tizen3 ? 'chrome47' : legacyTizen ? 'chrome69' : 'chrome85',
       outDir,
       manifest: true,
       ...(e2e ? { rolldownOptions: { input: ['index.html', 'test/player.html'] } } : {}),

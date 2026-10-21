@@ -1,5 +1,7 @@
+import { cspHashes as legacyLoaderHashes } from '@vitejs/plugin-legacy';
+
 export const DEFAULT_TIZEN_VERSION = '8.0';
-export const SUPPORTED_TIZEN_VERSIONS = ['5.5', '6.5', DEFAULT_TIZEN_VERSION];
+export const SUPPORTED_TIZEN_VERSIONS = ['3.0', '5.5', '6.5', DEFAULT_TIZEN_VERSION];
 
 export function getTizenVersion(value = DEFAULT_TIZEN_VERSION) {
   if (!SUPPORTED_TIZEN_VERSIONS.includes(value))
@@ -13,9 +15,13 @@ export function tvCsp(tizenVersion = DEFAULT_TIZEN_VERSION) {
   // without permitting JavaScript eval. Tizen 5.5/6.5's older engines conflate the two permissions, so their
   // separately labelled widgets need `unsafe-eval` for Wasm while executable sources remain self-only.
   const wasmSource = version === '8.0' ? "'wasm-unsafe-eval'" : "'unsafe-eval'";
+  // The official Vite legacy loader is inline by design. Permit only its version-pinned snippets in the
+  // experimental Tizen 3 package; newer widgets retain their smaller CSP and native module loader.
+  const legacySources =
+    version === '3.0' ? legacyLoaderHashes.map((hash) => `'sha256-${hash}'`).join(' ') : '';
   return [
     "default-src 'self'",
-    `script-src 'self' ${wasmSource}`,
+    `script-src 'self' ${wasmSource}${legacySources ? ` ${legacySources}` : ''}`,
     "style-src 'self'",
     "style-src-attr 'unsafe-inline'",
     "worker-src 'self' blob:",
