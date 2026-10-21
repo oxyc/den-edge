@@ -6,7 +6,8 @@
 //!   PUT    /lib/{id}/grants/{gid}    any of the fields above → { grant }
 //!   DELETE /lib/{id}/grants/{gid}    revokes → 204
 //!   POST   /lib/{id}/grants/{gid}/code  { codeExpiresAt? } → { code, devicesRaised, grant }: a new invite code for the
-//!                                    same guest; the old one stops working, a full device list gains one slot (max 5)
+//!                                    same guest; the old one stops working, a full finite device list gains one slot
+//!                                    (max 5), and an unlimited list remains unlimited
 //!   POST   /grant/redeem             { code, secretHash } → { gid, name, addons, expiresAt }
 //!   GET    /grant/addons             (x-den-grant) → { gid, name, expiresAt, addons: { <addon>: "/<addon>/~<gid>" } }
 //!   POST   /grant/den-configure      (grant or member proof) → a short-lived, HttpOnly setup cookie; native
@@ -187,7 +188,10 @@ struct Record {
     code_hash: String,
     /// Hex SHA-256 of each redeemed device's secret.
     devices: Vec<String>,
-    max_devices: u32,
+    /// A finite guest-device limit, or no product limit. Missing values in records written by an
+    /// older edge keep the original one-device default; an explicit JSON null means unlimited.
+    #[serde(default = "default_device_limit")]
+    max_devices: Option<u32>,
     addons: Vec<String>,
     /// The escrow: addon → the host's real config segment.
     installs: BTreeMap<String, String>,
@@ -214,6 +218,14 @@ struct Record {
     /// only once the sweep reaps the whole record.
     #[serde(default)]
     usage: Usage,
+}
+
+fn default_device_limit() -> Option<u32> {
+    Some(1)
+}
+
+fn devices_full(record: &Record) -> bool {
+    record.max_devices.is_some_and(|limit| record.devices.len() >= limit as usize)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -700,7 +712,8 @@ fn apply(r: &mut Record, body: &Map<String, Value>, now: u64, creating: bool) ->
         };
     }
     if let Some(v) = body.get("devices") {
-        r.max_devices = v.as_u64().filter(|n| (1..=5).contains(n))? as u32;
+        r.max_devices =
+            if v.is_null() { None } else { Some(v.as_u64().filter(|n| (1..=5).contains(n))? as u32) };
     }
     r.installs.retain(|addon, _| r.addons.contains(addon));
     let whole = !r.name.is_empty()
@@ -732,7 +745,7 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
         host: host.to_owned(),
         code_hash: String::new(),
         devices: Vec::new(),
-        max_devices: 1,
+        max_devices: default_device_limit(),
         addons: Vec::new(),
         installs: BTreeMap::new(),
         den_install: None,
@@ -883,12 +896,13 @@ async fn new_code(state: &AppState, host: &str, gid: &str, req: Request) -> Resp
     if end(&record).is_some_and(|at| now >= at) {
         return json_reply(StatusCode::CONFLICT, &error("access_ended"));
     }
-    let raised = record.devices.len() >= record.max_devices as usize;
+    let raised = devices_full(&record);
     if raised {
-        if record.max_devices >= 5 {
+        let Some(limit) = record.max_devices else { unreachable!("an unlimited grant is never full") };
+        if limit >= 5 {
             return json_reply(StatusCode::CONFLICT, &error("devices_full"));
         }
-        record.max_devices += 1;
+        record.max_devices = Some(limit + 1);
     }
     let code = mint_code(&record.gid);
     record.code_hash = sha(code.as_bytes());
@@ -1190,7 +1204,7 @@ async fn redeem(state: &AppState, req: Request) -> Response {
         .fold(false, |found, d| constant_time_eq(d.as_bytes(), device.as_bytes()) | found);
     if !known {
         // The redeem-by date binds every new device, not only the first: it is what the host was told the code lasts.
-        if now >= record.code_expires_at || record.devices.len() >= record.max_devices as usize {
+        if now >= record.code_expires_at || devices_full(&record) {
             return invalid_code();
         }
         record.devices.push(device);
@@ -1502,7 +1516,7 @@ async fn redeem_ticket(state: &AppState, req: Request) -> Response {
         .iter()
         .fold(false, |found, d| constant_time_eq(d.as_bytes(), device.as_bytes()) | found);
     if !known {
-        if record.devices.len() >= record.max_devices as usize {
+        if devices_full(&record) {
             return json_reply(
                 StatusCode::CONFLICT,
                 &json!({ "error": "devices_full", "name": record.name }),
@@ -2265,6 +2279,31 @@ mod tests {
         assert!(!stored.contains(code) && !stored.contains(SECRET), "a secret was written down");
         assert!(stored.contains(&sha(SECRET.as_bytes())) && stored.contains(&sha(code.as_bytes())));
         assert!(stored.contains(SCOUT), "the escrow is the one thing kept in the clear");
+    }
+
+    #[tokio::test]
+    async fn an_unlimited_grant_admits_more_than_five_devices_and_stays_unlimited() {
+        let h = harness().await;
+        let (gid, code) = invited(&h, json!({})).await;
+        assert_eq!(redeem_with(&h, &code, SECRET).await.0, StatusCode::OK);
+        let (status, updated) =
+            host_call(&h, "PUT", &format!("/{gid}"), Some(json!({ "devices": null }))).await;
+        assert_eq!((status, updated["grant"]["devices"].clone()), (StatusCode::OK, Value::Null));
+
+        for index in 1..6 {
+            let secret = format!("unlimited-device-secret-{index}");
+            assert_eq!(redeem_with(&h, &code, &secret).await.0, StatusCode::OK, "device {index}");
+        }
+
+        let listed = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        assert_eq!((listed["devices"].clone(), listed["deviceCount"].clone()), (Value::Null, json!(6)));
+
+        let (_, made) = host_call(&h, "POST", &format!("/{gid}/code"), None).await;
+        assert_eq!(
+            (made["devicesRaised"].clone(), made["grant"]["devices"].clone()),
+            (json!(false), Value::Null),
+            "a new link does not turn unlimited back into a finite limit"
+        );
     }
 
     #[cfg(unix)]

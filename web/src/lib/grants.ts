@@ -29,7 +29,8 @@ export interface Grant {
   redeemedAt: number | null;
   /** The effective end of access, ms; null for none. */
   expiresAt: number | null;
-  devices: number;
+  /** A finite device limit, or null when the host allows unlimited devices. */
+  devices: number | null;
   deviceCount: number;
   lastUsedAt: number | null;
   /** Plays and hours watched (den-edge counts these; never a title). */
@@ -49,7 +50,8 @@ export interface GrantChange {
   codeExpiresAt?: number;
   accessDays?: number;
   accessUntil?: number;
-  devices?: number;
+  /** Null removes the guest-device limit. */
+  devices?: number | null;
 }
 
 export type Reply<T> =
@@ -249,7 +251,9 @@ function readGrant(raw: unknown): Grant | null {
     accessUntil: number(g.accessUntil),
     redeemedAt: number(g.redeemedAt),
     expiresAt: number(g.expiresAt),
-    devices: number(g.devices) ?? 1,
+    // Older edges always sent a number. A missing value keeps their one-device default, while an
+    // explicit null from a current edge means unlimited.
+    devices: g.devices === null ? null : (number(g.devices) ?? 1),
     deviceCount: number(g.deviceCount) ?? 0,
     lastUsedAt: number(g.lastUsedAt),
     playsTotal: number(g.playsTotal) ?? 0,

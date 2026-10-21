@@ -292,6 +292,18 @@ test('listing, changing and revoking use the grant’s route and read the answer
   expect(gone.mock.calls[0]![1]?.method).toBe('DELETE');
 });
 
+test('an explicit null device limit is unlimited, while an older missing limit stays at one', async () => {
+  const unlimited = { ...GRANT, devices: null };
+  const withoutLimit = { ...GRANT } as Partial<Grant>;
+  delete withoutLimit.devices;
+  const spy = answering(200, { grants: [unlimited, withoutLimit] });
+  const reply = await listGrants('abc123', spy);
+  expect(reply).toEqual({
+    ok: true,
+    value: [unlimited, { ...GRANT, devices: 1 }],
+  });
+});
+
 test('a new link posts to the grant’s code route and says whether a device slot was added', async () => {
   const spy = answering(200, { code: CODE, devicesRaised: true, grant: { ...GRANT, devices: 2 } });
   vi.stubGlobal('fetch', spy);
