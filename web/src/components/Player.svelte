@@ -132,6 +132,7 @@
   } from '../lib/diagnosticsReport';
   import ActionMenu from './ActionMenu.svelte';
   import Button from './Button.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
 
@@ -335,6 +336,8 @@
 
   let video = $state<HTMLVideoElement>();
   let tvPaused = $state(true);
+  let tvPosition = $state(0);
+  let tvDuration = $state(0);
   let castFrame = $state<HTMLIFrameElement>();
   let remoteTime = 0;
   let remoteDuration = 0;
@@ -2854,6 +2857,10 @@
    */
   function tick() {
     const at = video?.currentTime ?? remoteTime;
+    if (tv) {
+      tvPosition = at;
+      tvDuration = length();
+    }
     // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
     // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
@@ -3327,7 +3334,13 @@
   }}
 />
 
-<div class="player" role="dialog" aria-modal="true" aria-label={heading}>
+<div
+  class="player"
+  class:webos-player={__DEN_TV_PLATFORM__ === 'webos'}
+  role="dialog"
+  aria-modal="true"
+  aria-label={heading}
+>
   <header>
     <b>{heading}</b>
     {#if session}
@@ -3535,6 +3548,10 @@
           use:allowAirPlay
           onloadedmetadata={() => {
             seekToStart();
+            if (tv) {
+              tvPosition = video?.currentTime ?? 0;
+              tvDuration = length();
+            }
             void loadSegments();
             // Every rendition is DEFAULT=NO, so showing one — `subtitleChoice`, explicit or
             // `autoSubtitleLanguage`'s own pick — is this call's doing, never the engine auto-selecting by
@@ -3571,28 +3588,96 @@
           {/each}
         </video>
         {#if tv}
-          <nav class="tv-transport" aria-label="Playback controls">
-            <button
-              type="button"
-              onclick={() =>
-                video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
-              >−10s</button
-            >
-            <button
-              type="button"
-              onclick={() => (video?.paused ? void video.play() : video?.pause())}
-              >{tvPaused ? 'Play' : 'Pause'}</button
-            >
-            <button
-              type="button"
-              onclick={() =>
-                video &&
-                (video.currentTime = Math.min(length() || Infinity, video.currentTime + SKIP_SECS))}
-              >+10s</button
-            >
-            {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
-            <button type="button" onclick={close}>Close</button>
-          </nav>
+          {#if __DEN_TV_PLATFORM__ === 'webos'}
+            <nav class="tv-transport webos-transport" aria-label="Playback controls">
+              <div class="tv-timeline">
+                <span aria-hidden="true">{clockTime(tvPosition)}</span>
+                <input
+                  type="range"
+                  aria-label="Playback position"
+                  aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
+                  min="0"
+                  max={Math.max(tvDuration, 1)}
+                  step="10"
+                  value={Math.min(tvPosition, Math.max(tvDuration, 1))}
+                  disabled={!tvDuration}
+                  style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+                  oninput={(event) => {
+                    if (!video) return;
+                    const to = Number(event.currentTarget.value);
+                    video.currentTime = to;
+                    tvPosition = to;
+                  }}
+                />
+                <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
+              </div>
+              <div class="tv-transport-actions">
+                <button
+                  class="tv-skip"
+                  type="button"
+                  aria-label="Rewind 10 seconds"
+                  onclick={() => {
+                    if (!video) return;
+                    video.currentTime = Math.max(0, video.currentTime - SKIP_SECS);
+                    tvPosition = video.currentTime;
+                  }}
+                >
+                  {@render skipIcon('back')}
+                </button>
+                <button
+                  class="tv-play-pause"
+                  type="button"
+                  aria-label={tvPaused ? 'Play' : 'Pause'}
+                  onclick={() => (video?.paused ? void video.play() : video?.pause())}
+                >
+                  <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled={tvPaused} />
+                </button>
+                <button
+                  class="tv-skip"
+                  type="button"
+                  aria-label="Forward 10 seconds"
+                  onclick={() => {
+                    if (!video) return;
+                    video.currentTime = Math.min(
+                      length() || Infinity,
+                      video.currentTime + SKIP_SECS,
+                    );
+                    tvPosition = video.currentTime;
+                  }}
+                >
+                  {@render skipIcon('forward')}
+                </button>
+                {#if onnext && nextHref}<a class="tv-next" href={nextHref} onclick={advanceLink}
+                    >Next <span aria-hidden="true">›</span></a
+                  >{/if}
+              </div>
+            </nav>
+          {:else}
+            <nav class="tv-transport legacy-transport" aria-label="Playback controls">
+              <button
+                type="button"
+                onclick={() =>
+                  video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
+                >−10s</button
+              >
+              <button
+                type="button"
+                onclick={() => (video?.paused ? void video.play() : video?.pause())}
+                >{tvPaused ? 'Play' : 'Pause'}</button
+              >
+              <button
+                type="button"
+                onclick={() =>
+                  video &&
+                  (video.currentTime = Math.min(
+                    length() || Infinity,
+                    video.currentTime + SKIP_SECS,
+                  ))}>+10s</button
+              >
+              {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
+              <button type="button" onclick={close}>Close</button>
+            </nav>
+          {/if}
         {/if}
         {#if reconnecting}
           <p class="countdown" role="status">Reconnecting…</p>
@@ -3760,6 +3845,17 @@
     </footer>
   {/if}
 </div>
+
+{#snippet skipIcon(direction: 'back' | 'forward')}
+  <svg class="skip-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+    <path
+      d={direction === 'back'
+        ? 'M17 13H9v-8M10 13a17 17 0 1 1-2 17'
+        : 'M31 13h8v-8M38 13a17 17 0 1 0 2 17'}
+    />
+    <text x="24" y="29">10</text>
+  </svg>
+{/snippet}
 
 <!-- The Apple TV's own menus mark these with rectangle.stack and globe; the same two, drawn as lines. -->
 {#snippet plates()}

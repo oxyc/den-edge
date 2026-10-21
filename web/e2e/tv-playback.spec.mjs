@@ -315,6 +315,15 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(transport.first()).toHaveCSS('outline-style', 'none');
   await expect(transport.first()).toHaveCSS('box-shadow', 'none');
   await expect(transport.first()).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  expect(await remoteKey(page, 'ArrowUp', 38)).toBe(true);
+  const timeline = page.getByRole('slider', { name: 'Playback position' });
+  await expect(timeline).toBeFocused();
+  const beforeTimelineSeek = await video.evaluate((element) => element.currentTime);
+  await page.keyboard.press('ArrowRight');
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime))
+    .toBeGreaterThan(beforeTimelineSeek + 8);
+  await transport.first().focus();
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(transport.nth(1)).toBeFocused();
 

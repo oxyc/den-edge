@@ -25,7 +25,7 @@
   setContext(SECTION, id);
 </script>
 
-<section {id} aria-labelledby="{id}-heading">
+<section {id} aria-labelledby="{id}-heading" data-spatial-section="vertical">
   <div class="heading">
     <h2 id="{id}-heading">
       {title}{#if subtitle}<small>{subtitle}</small>{/if}
