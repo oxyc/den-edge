@@ -24,6 +24,8 @@
   const playback =
     playbackQuery === 'managed' ? '/den/config/playback' : (playbackQuery ?? undefined);
   const subtitleLanguage = query.get('subtitleLanguage') ?? undefined;
+  const shownSubtitleLanguages = query.get('shownSubtitles')?.split(',').filter(Boolean);
+  const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const resumeSeconds = Number(query.get('resume')) || undefined;
@@ -83,6 +85,8 @@
     {remux}
     {playback}
     {subtitleLanguage}
+    {shownSubtitleLanguages}
+    {maxSubtitlesPerLanguage}
     subtitles={[]}
     resume={{ fraction: resumeSeconds ? resumeSeconds / 60 : 0, seconds: resumeSeconds }}
     next={hasNext ? 'S1 · E2' : undefined}

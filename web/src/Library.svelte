@@ -1180,6 +1180,7 @@
       audioLanguage: value?.audioLanguage,
       subtitleLanguage: value?.subtitleLanguage,
       shownSubtitleLanguages: value?.shownSubtitleLanguages ?? [],
+      maxSubtitlesPerLanguage: value?.subtitlesPerLanguage ?? 3,
       autoSkipSegments: value?.autoSkipSegments ?? false,
     };
   });
@@ -2170,6 +2171,7 @@
       audioLanguage={playbackPrefs.audioLanguage}
       subtitleLanguage={playbackPrefs.subtitleLanguage}
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
+      maxSubtitlesPerLanguage={playbackPrefs.maxSubtitlesPerLanguage}
       autoSkip={playbackPrefs.autoSkipSegments}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}

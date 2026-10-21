@@ -21,6 +21,7 @@
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
+  import type { Episode as EpisodeDetail } from '../lib/detail';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
@@ -150,6 +151,7 @@
     audioLanguage,
     subtitleLanguage,
     shownSubtitleLanguages,
+    maxSubtitlesPerLanguage = 3,
     autoSkip = false,
     resume,
     next,
@@ -178,6 +180,8 @@
     subtitleLanguage?: string;
     /** Settings › Content's visible subtitle languages, offered in the picker beside the chosen one. */
     shownSubtitleLanguages?: readonly string[];
+    /** Settings › Content's OpenSubtitles rows per language. Zero means all; built-in tracks are never capped. */
+    maxSubtitlesPerLanguage?: number;
     /** Settings › Playback's "Auto-skip intros & credits". A Skip button shows either way. */
     autoSkip?: boolean;
     /** Where the library says this was left. */
@@ -343,6 +347,9 @@
   let tvPaused = $state(true);
   let tvPosition = $state(0);
   let tvDuration = $state(0);
+  let tvDetailsOpen = $state(false);
+  let tvSubtitleTimingOpen = $state(false);
+  let tvEpisode = $state.raw<EpisodeDetail | null>();
   let castFrame = $state<HTMLIFrameElement>();
   let remoteTime = 0;
   let remoteDuration = 0;
@@ -700,9 +707,52 @@
     () => (castOffer = 'idle'),
   );
 
-  const heading = $derived(
+  const episodeHeading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
   );
+  const heading = $derived(fullTvTransport && tvEpisode?.name ? tvEpisode.name : episodeHeading);
+  const tvInfoLine = $derived(
+    [
+      tvEpisode ? title.title : undefined,
+      tvEpisode?.airDate
+        ? new Intl.DateTimeFormat(navigator.language, { dateStyle: 'medium' }).format(
+            new Date(`${tvEpisode.airDate}T00:00:00`),
+          )
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  );
+  // tvOS resolves episode metadata after playback has begun. Do the same through the already-open content service:
+  // it enriches the transport and Down panel without joining the source/session critical path.
+  $effect(() => {
+    const [pickedSeason, pickedEpisode] = [season, episode];
+    tvEpisode = undefined;
+    if (
+      !fullTvTransport ||
+      title.type !== 'tv' ||
+      pickedSeason === undefined ||
+      pickedEpisode === undefined
+    )
+      return;
+    const controller = new AbortController();
+    void content
+      .query(
+        { kind: 'season', title: { type: 'tv', id: title.id }, season: pickedSeason },
+        controller.signal,
+      )
+      .then(({ episodes }) => {
+        if (controller.signal.aborted) return;
+        tvEpisode =
+          episodes.state === 'ready'
+            ? (episodes.value.find((item) => item.number === pickedEpisode) ?? null)
+            : null;
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) tvEpisode = null;
+      });
+    return () => controller.abort();
+  });
   // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
   // the player does, as the title's page would.
   nameTab(() => named(heading, season === undefined ? title.year : undefined));
@@ -982,7 +1032,7 @@
     }
     result = {
       ...result,
-      subtitles: visibleSubtitleTracks(result.subtitles ?? [], shownSubtitleLanguages),
+      subtitles: displayedSubtitleTracks(result.subtitles ?? []),
     };
     // A managed direct result is already a signed media capability. Keep Hearth as the delivery selector, then hand
     // only that URL to the trusted Cast page that found the receiver; no Den grant, cookie, or API credential follows.
@@ -2528,6 +2578,31 @@
    * path starts consistently, then this player applies the explicit choice on its local or away-browser path.
    */
   let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
+  let subtitleOffset = $state(0);
+  const originalCueTimes = new WeakMap<TextTrackCue, { start: number; end: number }>();
+  const timedTracks = new WeakSet<TextTrack>();
+  let retiming = false;
+
+  function retimeSubtitles() {
+    if (avplay || retiming) return;
+    retiming = true;
+    try {
+      for (const track of Array.from(video?.textTracks ?? [])) {
+        if (!timedTracks.has(track)) {
+          timedTracks.add(track);
+          track.addEventListener('cuechange', retimeSubtitles);
+        }
+        for (const cue of Array.from(track.cues ?? [])) {
+          const original = originalCueTimes.get(cue) ?? { start: cue.startTime, end: cue.endTime };
+          originalCueTimes.set(cue, original);
+          cue.startTime = Math.max(0, original.start + subtitleOffset);
+          cue.endTime = Math.max(cue.startTime, original.end + subtitleOffset);
+        }
+      }
+    } finally {
+      retiming = false;
+    }
+  }
 
   /**
    * Show the chosen rendition and hide the rest.
@@ -2543,6 +2618,7 @@
     const choice = subtitleChoice;
     if (__DEN_TV_PLATFORM__ === 'tizen' && avplay) {
       avplay.selectSubtitleLanguage(choice);
+      avplay.setSubtitleOffset(subtitleOffset);
       return;
     }
     const language = selectedSubtitleLanguage();
@@ -2577,6 +2653,7 @@
     }
     const sidecarValues = new Set(sidecars.map((track) => track.value));
     const textTracks = Array.from(video?.textTracks ?? []);
+    retimeSubtitles();
     const nativeTracks = textTracks.filter((track) => !sidecarValues.has(track.label));
     const nativeTorboxTrack = session?.external ? session.torboxSubtitle : null;
     const nativeSelected =
@@ -2633,6 +2710,26 @@
         })),
       })}`,
     );
+  }
+
+  function adjustSubtitleOffset(change: number) {
+    subtitleOffset = Math.max(-30, Math.min(30, Math.round((subtitleOffset + change) * 2) / 2));
+    avplay?.setSubtitleOffset(subtitleOffset);
+    retimeSubtitles();
+  }
+
+  function displayedSubtitleTracks(tracks: NonNullable<Session['subtitles']>) {
+    const visible = visibleSubtitleTracks(tracks, shownSubtitleLanguages);
+    if (maxSubtitlesPerLanguage <= 0) return visible;
+    const counts: Record<string, number> = {};
+    return visible.filter((track) => {
+      if (track.source !== 'opensubtitles') return true;
+      const language = track.language.toLowerCase().split('-')[0] ?? track.language;
+      const count = counts[language] ?? 0;
+      if (count >= maxSubtitlesPerLanguage) return false;
+      counts[language] = count + 1;
+      return true;
+    });
   }
 
   /**
@@ -2937,9 +3034,17 @@
 
   /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
   function switchAudio(event: Event) {
-    const n = Number((event.currentTarget as HTMLSelectElement).value);
+    switchAudioIndex(Number((event.currentTarget as HTMLSelectElement).value));
+  }
+
+  function switchAudioIndex(n: number) {
     if (!session || n === session.audioTrack) return;
     restart({ audioTrack: n, filename: session.release.filename });
+  }
+
+  function resyncAudioVideo() {
+    if (!session) return;
+    restart({ audioTrack: session.audioTrack, filename: session.release.filename });
   }
 
   /** Another release of the title, from the same second — also after this one wouldn't play. */
@@ -3322,6 +3427,16 @@
         pause: () => video?.pause(),
         play: () => video?.play(),
         paused: () => video?.paused ?? true,
+        adjustSubtitleTiming: (seconds) => {
+          if (!tvSubtitleTimingOpen) return false;
+          adjustSubtitleOffset(seconds);
+          return true;
+        },
+        closeSubtitleTiming: () => {
+          if (!tvSubtitleTimingOpen) return false;
+          tvSubtitleTimingOpen = false;
+          return true;
+        },
         seekBy: (seconds) => {
           if (!video) return;
           const total = length();
@@ -3329,6 +3444,18 @@
             0,
             total ? Math.min(video.currentTime + seconds, total) : video.currentTime + seconds,
           );
+        },
+        showDetails: () => {
+          if (!fullTvTransport) return;
+          tvDetailsOpen = true;
+          void renderTick().then(() =>
+            document.querySelector<HTMLElement>('.tv-details a')?.focus({ preventScroll: true }),
+          );
+        },
+        closeDetails: () => {
+          if (!tvDetailsOpen) return false;
+          tvDetailsOpen = false;
+          return true;
         },
       });
     });
@@ -3633,9 +3760,6 @@
                 <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
               </div>
               <div class="tv-transport-actions">
-                <button type="button" aria-label="Play from beginning" onclick={playFromBeginning}>
-                  {@render beginningIcon()}
-                </button>
                 <button
                   class="tv-skip"
                   type="button"
@@ -3671,12 +3795,6 @@
                 >
                   {@render skipIcon('forward')}
                 </button>
-                {#if onnext && nextHref}<a
-                    class="tv-next"
-                    href={nextHref}
-                    aria-label={next ? `Next episode: ${next}` : 'Next episode'}
-                    onclick={advanceLink}>{@render nextIcon()}</a
-                  >{/if}
               </div>
             </nav>
           {:else}
@@ -3705,6 +3823,22 @@
               <button type="button" onclick={close}>Close</button>
             </nav>
           {/if}
+        {/if}
+        {#if fullTvTransport && active}
+          <Button
+            variant="primary"
+            class="tv-skip-overlay"
+            label={SKIP_LABEL[active.kind]}
+            onclick={skipActive}
+          />
+        {/if}
+        {#if fullTvTransport && tvSubtitleTimingOpen}
+          <section class="tv-subtitle-timing" aria-label="Subtitle timing" role="status">
+            <span>‹ Earlier</span>
+            <strong>{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong>
+            <span>Later ›</span>
+            <small>Left or right to adjust · Select to finish</small>
+          </section>
         {/if}
         {#if reconnecting}
           <p class="countdown" role="status">Reconnecting…</p>
@@ -3743,6 +3877,14 @@
       ></iframe>
     {/if}
   </div>
+  {#if fullTvTransport && tvDetailsOpen && session}
+    <section class="tv-details" aria-label="Playback details">
+      <h2>{heading}</h2>
+      {#if tvInfoLine}<p class="tv-details-meta">{tvInfoLine}</p>{/if}
+      <p class="tv-details-release">{releaseParts(session).release}</p>
+      <a href={titleHref(title)}>{title.type === 'tv' ? 'Series details' : 'Movie details'}</a>
+    </section>
+  {/if}
   {#if session}
     {@const parts = releaseParts(session)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
@@ -3764,7 +3906,7 @@
                quality and size over the release's file name — and ticks the one playing. -->
           {@const playingFile = session.release.filename}
           {@const short = pickLabel(session.release)}
-          <div class="pick-menu">
+          <div class="pick-menu stream-pick">
             <ActionMenu
               label={`Stream: ${short}`}
               heading="Streams"
@@ -3790,36 +3932,60 @@
             </ActionMenu>
           </div>
         {/if}
-        {#if session.audioTracks.length > 1 && playingTrack}
-          <div class="pick">
-            {#if fullTvTransport}{@render audioIcon()}{:else}{@render globe()}{/if}
-            <!-- A track this browser gets with fewer channels says what it gets beside its name, quietly: a known
-                 limit of the conversion, not a fault. -->
-            {#if !fullTvTransport}
+        {#if (fullTvTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
+          {#if fullTvTransport}
+            <div class="pick-menu audio-pick">
+              <ActionMenu
+                label={`Audio track: ${trackLabel(playingTrack, session.audioTrack)}`}
+                heading="Audio Track"
+                triggerClass="pick"
+                items={() => [
+                  ...session!.audioTracks.map((track, n) => ({
+                    kind: 'radio' as const,
+                    group: 'audio',
+                    label: trackLabel(track, n),
+                    checked: n === session!.audioTrack,
+                    onselect: () => switchAudioIndex(n),
+                  })),
+                  {
+                    kind: 'item' as const,
+                    label: 'Re-sync audio & video',
+                    onselect: resyncAudioVideo,
+                  },
+                ]}
+              >
+                {#snippet glyph()}{@render globe()}{/snippet}
+              </ActionMenu>
+            </div>
+          {:else}
+            <div class="pick audio-pick">
+              {@render globe()}
+              <!-- A track this browser gets with fewer channels says what it gets beside its name, quietly: a known
+                   limit of the conversion, not a fault. -->
               <span class="value" aria-hidden="true"
                 >{trackLabel(playingTrack, session.audioTrack)}{#if downmix}<span class="downmix"
                     >{downmix}</span
                   >{/if}</span
               >
               {@render chevron()}
-            {/if}
-            <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
-              {#each session.audioTracks as track, n (n)}
-                <option value={n}
-                  >{trackLabel(track, n)}{downmix && n === session.audioTrack
-                    ? ` · ${downmix}`
-                    : ''}</option
-                >
-              {/each}
-            </select>
-          </div>
+              <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
+                {#each session.audioTracks as track, n (n)}
+                  <option value={n}
+                    >{trackLabel(track, n)}{downmix && n === session.audioTrack
+                      ? ` · ${downmix}`
+                      : ''}</option
+                  >
+                {/each}
+              </select>
+            </div>
+          {/if}
         {/if}
         <!-- Den owns this picker so it can distinguish built-in tracks from OpenSubtitles candidates and show
              match metadata the native video control cannot carry. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
           {@const chosenSubtitle = preferredSubtitleTrack(session.subtitles, subtitleChoice)}
           {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
-          <div class="pick-menu">
+          <div class="pick-menu subtitle-pick">
             <ActionMenu
               label={`Subtitles: ${chosenSubtitleLabel}`}
               heading="Subtitles"
@@ -3840,6 +4006,25 @@
                   checked: subtitleValue(track) === subtitleChoice,
                   onselect: () => void chooseSubtitle(subtitleValue(track)),
                 })),
+                ...(fullTvTransport && subtitleChoice !== null
+                  ? [
+                      {
+                        kind: 'item' as const,
+                        label: `Adjust subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
+                        onselect: () => (tvSubtitleTimingOpen = true),
+                      },
+                      {
+                        kind: 'item' as const,
+                        label: `Reset subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
+                        disabled: subtitleOffset === 0,
+                        onselect: () => {
+                          subtitleOffset = 0;
+                          avplay?.setSubtitleOffset(0);
+                          retimeSubtitles();
+                        },
+                      },
+                    ]
+                  : []),
               ]}
             >
               {#snippet glyph()}
@@ -3854,11 +4039,25 @@
             </ActionMenu>
           </div>
         {/if}
+        {#if fullTvTransport}
+          <button
+            class="player-tv-action beginning-action"
+            type="button"
+            aria-label="Play from beginning"
+            onclick={playFromBeginning}>{@render beginningIcon()}</button
+          >
+          {#if onnext && nextHref}<a
+              class="player-tv-action next-action"
+              href={nextHref}
+              aria-label={next ? `Next episode: ${next}` : 'Next episode'}
+              onclick={advanceLink}>{@render nextIcon()}</a
+            >{/if}
+        {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
-        {#if active}
+        {#if !fullTvTransport && active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
         {#if !fullTvTransport && onnext && next}
@@ -3895,7 +4094,6 @@
 {#snippet beginningIcon()}
   <svg class="transport-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
     <path d="M17 14H9V6M10 14a17 17 0 1 1-2 17" />
-    <path class="filled" d="m20 17 13 8-13 8Z" />
   </svg>
 {/snippet}
 
@@ -3909,9 +4107,9 @@
 <!-- The Apple TV's own menus mark these with rectangle.stack and globe; the same two, drawn as lines. -->
 {#snippet plates()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M8 4.5h8" />
-    <path d="M6 7.5h12" />
-    <rect x="4" y="10.5" width="16" height="9.5" rx="2.5" />
+    <rect x="7" y="4" width="13" height="9" rx="2" />
+    <rect x="4" y="8" width="13" height="9" rx="2" />
+    <path d="M4 12H3a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-1" />
   </svg>
 {/snippet}
 
@@ -3925,16 +4123,9 @@
   </svg>
 {/snippet}
 
-{#snippet audioIcon()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
-    <path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" />
-  </svg>
-{/snippet}
-
 {#snippet subtitlesIcon()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <rect x="3" y="5" width="18" height="14" rx="3" />
+    <path d="M6 5h12a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3h-5l-4 3v-3H6a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3Z" />
     <path d="M6.5 10h4M13.5 10h4M6.5 14h6M15.5 14h2" />
   </svg>
 {/snippet}

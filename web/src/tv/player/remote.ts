@@ -5,6 +5,10 @@ export interface TvRemoteActions {
   play(): void | Promise<void>;
   seekBy(seconds: number): void;
   paused(): boolean;
+  adjustSubtitleTiming?(seconds: number): boolean;
+  closeSubtitleTiming?(): boolean;
+  showDetails?(): void;
+  closeDetails?(): boolean;
 }
 
 const PLAY_KEYS = new Set(['MediaPlay', 'MediaPlayPause', 'Play']);
@@ -21,6 +25,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let hidden = false;
   let editing: HTMLSelectElement | undefined;
+  let detailsOrigin: HTMLElement | undefined;
   const root = document.querySelector<HTMLElement>('.player');
   const openMenu = () => root?.querySelector<HTMLDialogElement>('dialog[role="menu"][open]');
   const closeOpenMenu = (): boolean => {
@@ -28,6 +33,13 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     if (!menu) return false;
     const cancel = new Event('cancel', { cancelable: true });
     if (menu.dispatchEvent(cancel)) menu.close();
+    return true;
+  };
+  const closeDetails = (): boolean => {
+    if (!actions.closeDetails?.()) return false;
+    const origin = detailsOrigin;
+    detailsOrigin = undefined;
+    queueMicrotask(() => origin?.focus({ preventScroll: true }));
     return true;
   };
   const regions = () =>
@@ -61,6 +73,28 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     // Global TV navigation turns a Back key outside focused player controls into `den:tv-back`.
     // Its canceled dispatch already called `close`; do not handle that same original key a second time.
     if (event.defaultPrevented) return;
+    const timingStep = event.key === 'ArrowLeft' ? -0.5 : event.key === 'ArrowRight' ? 0.5 : 0;
+    if (timingStep && actions.adjustSubtitleTiming?.(timingStep)) {
+      reveal();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (
+      (event.key === 'Enter' ||
+        event.key === 'Select' ||
+        event.key === 'Escape' ||
+        event.key === 'Back' ||
+        event.key === 'BrowserBack' ||
+        event.key === 'ArrowUp' ||
+        event.key === 'ArrowDown') &&
+      actions.closeSubtitleTiming?.()
+    ) {
+      reveal();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const target = event.target;
     const interactive =
       target instanceof HTMLSelectElement ||
@@ -112,7 +146,9 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
         ...group.querySelectorAll<HTMLElement>(
           'button:not([disabled]), a[href], select:not([disabled])',
         ),
-      ];
+      ].sort(
+        (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left,
+      );
       const index = controls.indexOf(target);
       const next = controls[index + direction];
       if (!next) return false;
@@ -197,9 +233,20 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       stepSelect(target, -1);
     else if (target instanceof HTMLSelectElement && editing && event.key === 'ArrowDown')
       stepSelect(target, 1);
+    else if (
+      event.key === 'ArrowUp' &&
+      target instanceof HTMLElement &&
+      target.closest('.tv-details') &&
+      closeDetails()
+    )
+      void 0;
     else if (event.key === 'ArrowUp' && moveSpatial('up')) void 0;
     else if (event.key === 'ArrowDown' && moveSpatial('down')) void 0;
-    else if (!interactive && event.key === 'ArrowLeft') actions.seekBy(-10);
+    else if (event.key === 'ArrowDown' && interactive && actions.showDetails) {
+      detailsOrigin = target instanceof HTMLElement ? target : undefined;
+      actions.showDetails();
+      clearTimeout(hideTimer);
+    } else if (!interactive && event.key === 'ArrowLeft') actions.seekBy(-10);
     else if (!interactive && event.key === 'ArrowRight') actions.seekBy(10);
     else if (event.key === 'MediaTrackNext' && actions.next) actions.next();
     else if (
@@ -216,7 +263,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     ) {
       // This capture listener runs before ActionMenu's own handler. Close its TV dialog here so a fast Back cannot
       // remove the player underneath it; this also works in the standalone player shell without route navigation.
-      if (!closeOpenMenu()) {
+      if (!closeOpenMenu() && !closeDetails()) {
         // Back first leaves the select's remote edit mode. Closing the entire film while the viewer is
         // choosing a track makes a native TV picker impossible to cancel safely.
         if (editing) editing = undefined;
@@ -232,7 +279,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   const onBack = (event: Event) => {
     // Global TV navigation sends this before handling its own modal fallback. Consuming it after closing the
     // player's menu prevents the same Back from reaching the player underneath.
-    if (closeOpenMenu()) {
+    if (closeOpenMenu() || actions.closeSubtitleTiming?.() || closeDetails()) {
       event.preventDefault();
       return;
     }

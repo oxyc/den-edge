@@ -49,6 +49,7 @@ export interface SamsungAvplayAdapter {
   start(): Promise<void>;
   selectAudioTrack(ordinal: number): void;
   selectSubtitleLanguage(language: string | null): void;
+  setSubtitleOffset(seconds: number): void;
   failureKind(): 'decode' | 'format' | 'other' | undefined;
   destroy(): void;
 }
@@ -189,10 +190,12 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   captions.hidden = true;
   element.after(captions);
   let captionTrack: TextTrack | undefined;
+  let subtitleOffset = 0;
   let shownCues: TextTrackCue[] = [];
   const renderCaptions = () => {
     const cues = Array.from(captionTrack?.cues ?? []).filter(
-      (cue) => cue.startTime <= currentTime && currentTime < cue.endTime,
+      (cue) =>
+        cue.startTime + subtitleOffset <= currentTime && currentTime < cue.endTime + subtitleOffset,
     );
     if (cues.length === shownCues.length && cues.every((cue, index) => cue === shownCues[index]))
       return;
@@ -588,6 +591,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     selectSubtitleLanguage(language) {
       subtitleLanguage = language;
       applySubtitle();
+    },
+    setSubtitleOffset(seconds) {
+      subtitleOffset = seconds;
+      renderCaptions();
     },
     failureKind: () => failureKind,
     destroy() {
