@@ -64,6 +64,8 @@ export type MenuItem = (
       disabled?: boolean;
     }
 ) & {
+  /** Stable identity while a live menu grows or reorders; absent, the item's position disambiguates equal labels. */
+  key?: string;
   /** A quieter second line under the label (`ActionMenu`), at most two lines before it is cut short. */
   description?: string;
 };

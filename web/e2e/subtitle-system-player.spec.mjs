@@ -267,12 +267,14 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
     // Desktop keeps subtitle selection and timing inside the player rather than sending either below the video.
     await page.getByRole('button', { name: 'Subtitles: English' }).click();
     await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
-    const timing = page.getByRole('status', { name: 'Subtitle timing' });
+    const timing = page.getByRole('group', { name: 'Subtitle timing' });
     await expect(timing).toBeVisible();
+    await expect(timing.getByRole('button', { name: 'Earlier' })).toBeFocused();
     await timing.getByRole('button', { name: 'Later' }).click();
     await expect(timing.getByText('+0.5s')).toBeVisible();
     await timing.getByRole('button', { name: 'Done' }).click();
     await expect(timing).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeFocused();
   } finally {
     await browser.close();
   }

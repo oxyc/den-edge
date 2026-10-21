@@ -357,10 +357,14 @@
   let playerVolume = $state(1);
   let playerMuted = $state(false);
   let playerFullscreen = $state(false);
+  let airPlayCapable = $state(false);
+  let airPlayActive = $state(false);
+  let airPlayAvailability = $state<'unknown' | 'available' | 'unavailable'>('unknown');
   let webControlsVisible = $state(true);
   let webControlsTimer: ReturnType<typeof setTimeout> | undefined;
   let tvDetailsOpen = $state(false);
   let tvSubtitleTimingOpen = $state(false);
+  let subtitleTimingPanel = $state<HTMLElement>();
   let tvEpisode = $state.raw<EpisodeDetail | null>();
   let castFrame = $state<HTMLIFrameElement>();
   let remoteTime = 0;
@@ -474,6 +478,11 @@
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
   /**
+   * Discovery is separate from session creation. The session itself is a valid first choice, but presenting that
+   * one row as a finished list while Scout is still collecting releases makes a slow answer look like "one stream".
+   */
+  let releaseListing = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  /**
    * The playing release is already a valid stream choice before (or even when) the background listing answers.
    * TV always exposes the stream control, like the native Apple TV player; ordinary web keeps hiding a picker
    * that would contain only one choice. De-duplicate because the completed listing normally includes this release.
@@ -483,6 +492,22 @@
     return releases.some((release) => release.filename === session?.release.filename)
       ? releases
       : [{ ...session.release, plays: session.video?.transcoded ? 'convert' : 'yes' }, ...releases];
+  }
+
+  /** Start the independent release listing as soon as this browser's claims are known, alongside session startup. */
+  function discoverReleases(can: Playable) {
+    if (!imdb || releaseListing === 'loading' || releaseListing === 'ready') return;
+    releaseListing = 'loading';
+    const listing = memoryKey;
+    void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
+      videoCodecs: videoCodecsOf(can),
+      playable: can,
+    }).then((list) => {
+      // An episode advanced from meanwhile lists its own.
+      if (memoryKey !== listing) return;
+      releases = list ?? [];
+      releaseListing = list === null ? 'failed' : 'ready';
+    });
   }
   /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
   let swapped = $state<string | null>(null);
@@ -944,6 +969,10 @@
         : {}),
       ...(delivery === 'direct' ? { directOnly: true } : {}),
     };
+    // This used to wait until the playback session had completely opened, so the stream menu could show one
+    // apparently-final choice for several seconds. Source discovery does not depend on that answer and belongs in
+    // parallel with it.
+    discoverReleases(can);
     // Whether Hearth tries TorBox first for this request: one that rules it out goes straight to Remux (den-hearth
     // `managed_request`), and its Remux answer says nothing of whether TorBox is there.
     const torboxTried =
@@ -1221,18 +1250,6 @@
         result,
         (name) => releases.find((r) => r.filename === name)?.label ?? name,
       );
-    // The release list remains useful for managed HLS: it contains names, never media URLs, and every filename the
-    // viewer picks still comes back through this configured Hearth playback operation.
-    if (!releases.length) {
-      const listing = memoryKey;
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
-        videoCodecs: request.videoCodecs,
-        playable: can,
-      }).then((list) => {
-        // An episode advanced from meanwhile lists its own.
-        if (memoryKey === listing) releases = list ?? [];
-      });
-    }
     return true;
   }
 
@@ -2188,9 +2205,44 @@
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
   const castable = canOfferCast();
 
-  /** WebKit's non-standard opt-in keeps native HLS available to the system AirPlay picker. */
+  type AirPlayVideo = HTMLVideoElement & {
+    webkitCurrentPlaybackTargetIsWireless?: boolean;
+    webkitShowPlaybackTargetPicker?: () => void;
+  };
+  type AirPlayAvailabilityEvent = Event & { availability?: string };
+
+  /**
+   * WebKit's non-standard opt-in keeps native HLS available to AirPlay. Desktop Safari loses the native media
+   * control when Den draws its own transport, so capability and availability are retained for Den's equivalent
+   * output button. The picker itself still has to be opened synchronously from that button's user gesture.
+   */
   function allowAirPlay(element: HTMLVideoElement) {
     element.setAttribute('x-webkit-airplay', 'allow');
+    const airplay = element as AirPlayVideo;
+    airPlayCapable = typeof airplay.webkitShowPlaybackTargetPicker === 'function';
+    airPlayActive = !!airplay.webkitCurrentPlaybackTargetIsWireless;
+    const availability = (event: Event) => {
+      const answer = (event as AirPlayAvailabilityEvent).availability;
+      airPlayAvailability = answer === 'available' ? 'available' : 'unavailable';
+    };
+    const targetChanged = () => {
+      airPlayActive = !!airplay.webkitCurrentPlaybackTargetIsWireless;
+    };
+    element.addEventListener('webkitplaybacktargetavailabilitychanged', availability);
+    element.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', targetChanged);
+    return {
+      destroy() {
+        element.removeEventListener('webkitplaybacktargetavailabilitychanged', availability);
+        element.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', targetChanged);
+        airPlayCapable = false;
+        airPlayActive = false;
+        airPlayAvailability = 'unknown';
+      },
+    };
+  }
+
+  function offerAirPlay() {
+    (video as AirPlayVideo | undefined)?.webkitShowPlaybackTargetPicker?.();
   }
 
   const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
@@ -2741,6 +2793,27 @@
     subtitleOffset = Math.max(-30, Math.min(30, Math.round((subtitleOffset + change) * 2) / 2));
     avplay?.setSubtitleOffset(subtitleOffset);
     retimeSubtitles();
+  }
+
+  async function openSubtitleTiming() {
+    tvSubtitleTimingOpen = true;
+    if (!desktopTransport) return;
+    await renderTick();
+    // ActionMenu restores its trigger as its native popover closes. Move into the newly opened editor after that
+    // lifecycle, so keyboard users do not have to reverse-tab past every player action to find it.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() =>
+        subtitleTimingPanel?.querySelector<HTMLElement>('button')?.focus(),
+      ),
+    );
+  }
+
+  async function closeSubtitleTiming(focusTrigger = desktopTransport) {
+    tvSubtitleTimingOpen = false;
+    scheduleWebControls();
+    if (!focusTrigger) return;
+    await renderTick();
+    playerRoot?.querySelector<HTMLElement>('button[aria-label^="Subtitles:"]')?.focus();
   }
 
   function displayedSubtitleTracks(tracks: NonNullable<Session['subtitles']>) {
@@ -3386,6 +3459,7 @@
     chosenRelease = filename ?? remembered.chosen;
     excluded = remembered.left;
     releases = [];
+    releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
     switchCount = 0;
     lastSwitchReason = undefined;
@@ -3453,7 +3527,27 @@
       : document.querySelector('.player [popover]:popover-open') !== null;
   }
 
+  /** Tabbable controls in the modal player, in DOM order. Hidden and unavailable controls do not hold the loop. */
+  function playerTabStops(): HTMLElement[] {
+    if (!playerRoot) return [];
+    return Array.from(
+      playerRoot.querySelectorAll<HTMLElement>(
+        'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter(
+      (element) =>
+        element.getAttribute('aria-disabled') !== 'true' &&
+        element.getAttribute('aria-hidden') !== 'true' &&
+        element.getClientRects().length > 0,
+    );
+  }
+
   function playerKey(event: KeyboardEvent) {
+    if (event.key === 'Escape' && tvSubtitleTimingOpen) {
+      event.preventDefault();
+      void closeSubtitleTiming();
+      return;
+    }
     if (
       event.key === 'Escape' &&
       !event.defaultPrevented &&
@@ -3461,6 +3555,24 @@
       !playerMenuOpen()
     ) {
       close();
+      return;
+    }
+    // This is a modal surface rather than an overlay people can tab through. ActionMenu owns Tab while it is open;
+    // otherwise loop at the two boundaries and leave every intermediate browser-native movement alone.
+    if (event.key === 'Tab' && !tv && !playerMenuOpen()) {
+      const stops = playerTabStops();
+      const first = stops[0];
+      const last = stops.at(-1);
+      if (
+        first &&
+        last &&
+        ((event.shiftKey &&
+          (document.activeElement === first || document.activeElement === playerRoot)) ||
+          (!event.shiftKey && document.activeElement === last))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
       return;
     }
     if (
@@ -3538,6 +3650,13 @@
 
   $effect(() => {
     untrack(() => void begin());
+    const focusBeforePlayer = document.activeElement as HTMLElement | null;
+    const root = untrack(() => playerRoot);
+    let initialFocusFrame: number | undefined;
+    if (!tv)
+      initialFocusFrame = requestAnimationFrame(() => {
+        if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+      });
     // The page behind stays put: it would otherwise scroll under a player that covers it.
     const scrolls = [document.documentElement, document.body].map(
       (el) => [el, el.style.overflow] as const,
@@ -3546,11 +3665,13 @@
     addEventListener('pagehide', finish);
     addEventListener('message', castMessage);
     return () => {
+      if (initialFocusFrame !== undefined) cancelAnimationFrame(initialFocusFrame);
       clearTimeout(webControlsTimer);
       for (const [el, overflow] of scrolls) el.style.overflow = overflow;
       removeEventListener('pagehide', finish);
       removeEventListener('message', castMessage);
       finish();
+      if (focusBeforePlayer?.isConnected) focusBeforePlayer.focus({ preventScroll: true });
     };
   });
 
@@ -3678,7 +3799,7 @@
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
     {/if}
-    {#if castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
+    {#if !customTransport && castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
       <Button
         variant="player"
         size="icon"
@@ -4007,11 +4128,18 @@
           />
         {/if}
         {#if customTransport && tvSubtitleTimingOpen}
-          <section class="tv-subtitle-timing" aria-label="Subtitle timing" role="status">
+          <section
+            bind:this={subtitleTimingPanel}
+            class="tv-subtitle-timing"
+            aria-label="Subtitle timing"
+            role="group"
+          >
             {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
                 >Earlier</button
               >{:else}<span>‹ Earlier</span>{/if}
-            <strong>{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong>
+            <strong aria-live="polite"
+              >{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong
+            >
             {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
                 >Later</button
               >{:else}<span>Later ›</span>{/if}
@@ -4022,13 +4150,7 @@
                   disabled={subtitleOffset === 0}
                   onclick={() => adjustSubtitleOffset(-subtitleOffset)}>Reset</button
                 >
-                <button
-                  type="button"
-                  onclick={() => {
-                    tvSubtitleTimingOpen = false;
-                    scheduleWebControls();
-                  }}>Done</button
-                >
+                <button type="button" onclick={() => void closeSubtitleTiming()}>Done</button>
               </div>
             {:else}
               <small>Left or right to adjust · Select to finish</small>
@@ -4105,11 +4227,19 @@
             <ActionMenu
               label={`Stream: ${short}`}
               heading="Streams"
+              note={releaseListing === 'loading'
+                ? 'Finding the other available streams…'
+                : releaseListing === 'failed'
+                  ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
+                  : releaseListing === 'ready' && releaseChoices().length === 1
+                    ? 'One stream is available.'
+                    : undefined}
               triggerClass="pick"
               onclose={scheduleWebControls}
               items={() =>
                 releaseChoices().map((release) => ({
                   kind: 'radio',
+                  key: release.filename,
                   group: 'release',
                   label: optionLabel(release),
                   description: release.filename,
@@ -4209,7 +4339,7 @@
                       {
                         kind: 'item' as const,
                         label: `Adjust subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
-                        onselect: () => (tvSubtitleTimingOpen = true),
+                        onselect: openSubtitleTiming,
                       },
                       {
                         kind: 'item' as const,
@@ -4250,6 +4380,37 @@
               aria-label={next ? `Next episode: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
+          {#if desktopTransport && castable && !session.castOrigin && (route !== RELAY || playsHome(session))}
+            <Button
+              variant="player"
+              size="icon"
+              class="player-tv-action output-action"
+              icon="cast"
+              ariaLabel="Cast to a TV"
+              title="Chromecast"
+              disabled={castOffer === 'looking' || castOffer === 'choose'}
+              onclick={offerCast}
+            />
+          {/if}
+          {#if desktopTransport && airPlayCapable}
+            <Button
+              variant="player"
+              size="icon"
+              class="player-tv-action output-action"
+              icon="airplay"
+              ariaLabel={airPlayAvailability === 'unavailable'
+                ? 'AirPlay, no devices available'
+                : airPlayActive
+                  ? 'Change AirPlay device'
+                  : 'AirPlay'}
+              title={airPlayAvailability === 'unavailable'
+                ? 'No AirPlay devices available'
+                : 'AirPlay'}
+              pressed={airPlayActive}
+              disabled={airPlayAvailability === 'unavailable'}
+              onclick={offerAirPlay}
+            />
+          {/if}
         {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
@@ -4472,7 +4633,8 @@
     position: absolute;
     top: 12px;
     left: 50%;
-    z-index: 2;
+    /* Above the custom player's header gradient: its Dismiss action must remain pressable while controls show. */
+    z-index: 7;
     width: min(36rem, calc(100% - 24px));
     pointer-events: none;
     transform: translateX(-50%);
@@ -4929,6 +5091,20 @@
 
   .web-custom-player .tv-timeline input[type='range']:focus-visible::-webkit-slider-thumb {
     transform: scale(1.15);
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
 
   .web-custom-player .tv-transport-actions {
@@ -5103,6 +5279,16 @@
   .web-custom-player.web-controls-hidden > footer,
   .web-custom-player.web-controls-hidden .full-tv-transport {
     opacity: 0;
+  }
+
+  /* Invisible controls cannot intercept a pointer meant for a notice or the picture. Footer children normally opt
+     back into pointer events, so name them here too. Keyboard focus still reveals the controls before it acts. */
+  .web-custom-player.web-controls-hidden > header,
+  .web-custom-player.web-controls-hidden > footer,
+  .web-custom-player.web-controls-hidden > footer .controls,
+  .web-custom-player.web-controls-hidden > footer .release,
+  .web-custom-player.web-controls-hidden .full-tv-transport {
+    pointer-events: none;
   }
 
   @media (height <= 600px) {

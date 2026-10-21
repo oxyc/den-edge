@@ -225,14 +225,19 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     await playingPast(page, 3);
     const video = page.locator('.player video');
     await expect(video).toHaveAttribute('x-webkit-airplay', 'allow');
-    await expect(page.getByRole('button', { name: 'Cast to a TV' })).toBeVisible();
+    const castButton = page.getByRole('button', { name: 'Cast to a TV' });
+    await expect(castButton).toBeVisible();
+    // Desktop's owned transport keeps output routing with the other circular playback actions, rather than leaving
+    // Chromecast as unrelated header chrome. Pointer semantics are covered with the complete app stylesheet by the
+    // cross-engine player test; this fixture intentionally mounts only the component's scoped CSS.
+    await expect(castButton.locator('xpath=ancestor::footer')).toBeVisible();
     expect(asked.managed).toHaveLength(1);
     expect(asked.direct, 'direct TorBox-style HLS did not create a legacy Remux session').toEqual(
       [],
     );
     expect(asked.relay).toEqual([]);
 
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await castButton.click();
     await expect.poll(() => asked.managed.length).toBeGreaterThanOrEqual(2);
     expect(asked.managed[1].player).toBe('cast');
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
@@ -423,7 +428,13 @@ for (const [mode, what] of [
     const { browser, page, asked } = await open(mode);
     try {
       const before = await playingPast(page, 7);
-      await page.getByRole('button', { name: 'Cast to a TV' }).click();
+      // The integrated output action lives in the auto-hiding transport. A viewer reveals it by moving toward the
+      // controls; Playwright otherwise teleports its synthetic click to a control that correctly no longer receives
+      // pointer input underneath the video.
+      await page.mouse.move(20, 20);
+      const castButton = page.getByRole('button', { name: 'Cast to a TV' });
+      await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+      await castButton.click();
       // A receiver was seen, so playback moved to the relay, starting where the video was.
       await expect.poll(() => asked.relay.length).toBe(1);
       expect(asked.relay[0].startAt).toBeGreaterThanOrEqual(Math.floor(before));

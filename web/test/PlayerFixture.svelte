@@ -11,6 +11,7 @@
   import { PlaybackCursor } from '../src/lib/reel';
 
   const query = new URLSearchParams(location.search);
+  const startsClosed = query.has('startClosed');
   const originalLanguage = query.get('originalLanguage') ?? undefined;
   const title: Title = {
     type: 'movie',
@@ -38,7 +39,7 @@
   if (grant?.length === 2) rememberGrant(grant[0]!, grant[1]!);
   const services = createWorkerServiceSession();
   const content = services.content;
-  let open = $state(true);
+  let open = $state(!startsClosed);
   let progress = $state<{ fraction: number; seconds: number }>();
   let closeCount = $state(0);
   let nextCount = $state(0);
@@ -99,6 +100,9 @@
     }}
     onnext={hasNext ? () => (nextCount += 1) : undefined}
   />
+{/if}
+{#if startsClosed}
+  <button type="button" onclick={() => (open = true)}>Open fixture player</button>
 {/if}
 <output data-testid="player-close-count" hidden>{closeCount}</output>
 <output data-testid="player-next-count" hidden>{nextCount}</output>

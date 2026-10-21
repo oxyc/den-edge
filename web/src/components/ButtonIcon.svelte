@@ -1,5 +1,6 @@
 <script lang="ts" module>
   export type ButtonIconName =
+    | 'airplay'
     | 'back'
     | 'bookmark'
     | 'cast'
@@ -41,6 +42,9 @@
     <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
   {:else if name === 'pause'}
     <path d="M8 6v12M16 6v12" />
+  {:else if name === 'airplay'}
+    <path d="M4 16.5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3" />
+    <path d="m12 13-5 7h10l-5-7Z" />
   {:else if name === 'tv'}
     <rect x="2.8" y="4.5" width="18.4" height="12.5" rx="2.5" />
     <path d="M8.5 20.5h7M10.6 9.4l4.2 2.4-4.2 2.4V9.4Z" />

@@ -62,8 +62,22 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
+}
+
+/* A native control should advertise that it can be pressed even when a feature uses a purpose-built surface
+   instead of `Button`. This notably covers the shared player transport. Keep unavailable controls truthful too;
+   `.den-button` repeats the rule only to carry its component-specific busy cursor. */
+button:not(:disabled, [aria-disabled='true']) {
+  cursor: pointer;
+}
+
+button:disabled,
+button[aria-disabled='true'] {
+  cursor: default;
 }
 
 /* One action language for ordinary controls. Surfaces which are controls in their own right — tabs, chips,
@@ -214,8 +228,16 @@ a[data-spatial-skip]:not(.slide-link):focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .den-button {
+    transition: none;
+  }
+
   .den-button[data-saving] {
     animation: den-saving 1ms linear 150ms 1 forwards;
+  }
+
+  .den-button:active:not(:disabled, [aria-disabled='true']) {
+    transform: none;
   }
 }
 

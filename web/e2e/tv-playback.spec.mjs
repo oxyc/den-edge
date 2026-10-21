@@ -322,6 +322,14 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
 
+  // The remote's centre button over the picture behaves like a native TV player: it pauses and resumes even when
+  // no visible control owns focus. When controls are hidden, the first press still only reveals them (below).
+  await page.locator('.player').focus();
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
+
   const transport = page.locator('.tv-transport button');
   await transport.last().focus();
   await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
