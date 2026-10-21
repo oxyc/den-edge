@@ -571,6 +571,14 @@
   // $state: a notice of a switch under way stays up until it lands, and only then starts to fade.
   let switching = $state(false);
   /**
+   * A change the viewer explicitly asked for. Unlike an automatic recovery, the picker closes as soon as its choice
+   * is made; keep one visible acknowledgement from that press until the replacement paints its first frame. Its id
+   * separates a superseded request from the newer one it must not clear (objects stored in `$state` are proxied).
+   */
+  type ManualSwitch = { id: number; label: 'Switching stream…' | 'Switching audio…' };
+  let manualSwitchId = 0;
+  let manualSwitch = $state<ManualSwitch | null>(null);
+  /**
    * What the stamp says of TorBox while Den Remux plays. `offered`: a TorBox stream played here this visit, or Hearth
    * tried TorBox first and fell back for a reason that may pass (`directFailure`). `untried`: nothing says either way
    * — this page itself asked for Den Remux (a subtitle the system player shows only from a playlist, a track, a
@@ -718,11 +726,13 @@
    * this only covers finding a release and, once one is open, waiting on its first frame.
    */
   const notice = $derived(
-    !session
-      ? startupNotice(elapsedMs, 'session')
-      : !played && !awaitingPress && !startsIn && !reconnecting
-        ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
-        : null,
+    manualSwitch
+      ? null
+      : !session
+        ? startupNotice(elapsedMs, 'session')
+        : !played && !awaitingPress && !startsIn && !reconnecting
+          ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
+          : null,
   );
   /**
    * The live line over a mid-play stall (den-edge#275): `autoSwitch` already says its own piece once a switch
@@ -1725,6 +1735,7 @@
       cancelFirstFrame();
       if (session !== current || played) return;
       played = true;
+      manualSwitch = null;
       cleanup();
       bufferProgress = undefined;
       clearInterval(noticeTimer);
@@ -3252,7 +3263,9 @@
 
   function switchAudioIndex(n: number) {
     if (!session || n === session.audioTrack) return;
-    restart({ audioTrack: n, filename: session.release.filename });
+    const pending: ManualSwitch = { id: ++manualSwitchId, label: 'Switching audio…' };
+    manualSwitch = pending;
+    restart({ audioTrack: n, filename: session.release.filename }, undefined, undefined, pending);
   }
 
   function resyncAudioVideo() {
@@ -3272,7 +3285,9 @@
     keepReleases();
     switchCount += 1;
     lastSwitchReason = 'user';
-    restart({ filename });
+    const pending: ManualSwitch = { id: ++manualSwitchId, label: 'Switching stream…' };
+    manualSwitch = pending;
+    restart({ filename }, undefined, undefined, pending);
   }
 
   /**
@@ -3288,6 +3303,7 @@
     pick: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
     undo?: () => void,
     directOnly?: 'direct',
+    pending?: ManualSwitch,
   ) {
     const current = session;
     if (!current) return;
@@ -3295,6 +3311,7 @@
     carryPosition();
     if (played) {
       void begin(pick, { transcode: 'never' }, current, directOnly).then((moved) => {
+        if (moved !== true && manualSwitch?.id === pending?.id) manualSwitch = null;
         // False is a player closed, or a session replaced, meanwhile: nothing to say.
         if (typeof moved !== 'string' || session !== current) return;
         startAt = null;
@@ -3303,7 +3320,9 @@
       });
       return;
     }
-    void begin(pick, {}, undefined, directOnly);
+    void begin(pick, {}, undefined, directOnly).then((moved) => {
+      if (moved !== true && manualSwitch?.id === pending?.id) manualSwitch = null;
+    });
   }
 
   /**
@@ -3496,6 +3515,7 @@
     releases = [];
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
+    manualSwitch = null;
     switchCount = 0;
     lastSwitchReason = undefined;
     degraded = false;
@@ -3860,6 +3880,9 @@
        moment playback resumes. -->
   <div class="notices">
     {#if session}
+      {#if manualSwitch}
+        {@render banner(manualSwitch.label, { quiet: true, busy: true })}
+      {/if}
       {#if swapped}
         {@render banner(swapped, { dismiss: () => (swapped = null) })}
       {/if}

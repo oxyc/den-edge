@@ -38,7 +38,7 @@ const releases = [
   },
 ];
 
-async function mockPlayer(page, { releaseGate } = {}) {
+async function mockPlayer(page, { releaseGate, replacementGate, audioTracks = [] } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -49,9 +49,10 @@ async function mockPlayer(page, { releaseGate } = {}) {
     return route.fulfill({ json: { releases } });
   });
   const asked = [];
-  await page.route(`${ORIGIN}/direct/session`, (route) => {
+  await page.route(`${ORIGIN}/direct/session`, async (route) => {
     const body = route.request().postDataJSON();
     asked.push(body);
+    if (asked.length > 1) await replacementGate?.promise;
     const release = releases.find((one) => one.filename === body.filename) ?? releases[0];
     const sid = `s${asked.length}`;
     return route.fulfill({
@@ -62,8 +63,8 @@ async function mockPlayer(page, { releaseGate } = {}) {
         duration: 60,
         release,
         video: { codec: 'h264', transcoded: false },
-        audioTrack: 0,
-        audioTracks: [],
+        audioTrack: body.audioTrack ?? 0,
+        audioTracks,
       },
     });
   });
@@ -79,6 +80,68 @@ async function mockPlayer(page, { releaseGate } = {}) {
   });
   return asked;
 }
+
+test('a chosen stream is acknowledged while its replacement is opening', async ({ page }) => {
+  let openReplacement;
+  const replacementGate = {
+    promise: new Promise((resolve) => (openReplacement = resolve)),
+  };
+  const asked = await mockPlayer(page, { replacementGate });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await expect
+    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime))
+    .toBeGreaterThan(1);
+
+  await page.getByRole('button', { name: 'Stream: 4K · 11 GB' }).click();
+  await page
+    .getByRole('menuitemradio', { name: '4K · WEB-DL · HDR · 9 GB · from a 105 GB pack' })
+    .click();
+
+  await expect.poll(() => asked.length).toBe(2);
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  const status = page.getByRole('status').filter({ hasText: 'Switching stream…' });
+  await expect(status).toBeVisible();
+  await expect(status.locator('.status-spinner')).toBeVisible();
+
+  openReplacement();
+  await expect(page.getByRole('button', { name: 'Stream: 4K · 9 GB' })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(status).toHaveCount(0);
+});
+
+test('an audio choice requests that exact track and stays acknowledged until it opens', async ({
+  page,
+}) => {
+  let openReplacement;
+  const replacementGate = {
+    promise: new Promise((resolve) => (openReplacement = resolve)),
+  };
+  const audioTracks = [
+    { language: 'en', name: null, channels: 6, commentary: false },
+    { language: 'ru', name: null, channels: 6, commentary: false },
+  ];
+  const asked = await mockPlayer(page, { replacementGate, audioTracks });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await expect
+    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime))
+    .toBeGreaterThan(1);
+
+  await page.getByRole('button', { name: 'Audio track: English 5.1' }).click();
+  await page.getByRole('menuitemradio', { name: 'Russian 5.1' }).click();
+
+  await expect.poll(() => asked.length).toBe(2);
+  expect(asked[1]).toMatchObject({ audioTrack: 1, filename: releases[0].filename });
+  const status = page.getByRole('status').filter({ hasText: 'Switching audio…' });
+  await expect(status).toBeVisible();
+  await expect(status.locator('.status-spinner')).toBeVisible();
+
+  openReplacement();
+  await expect(page.getByRole('button', { name: 'Audio track: Russian 5.1' })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(status).toHaveCount(0);
+});
 
 test('the modal player contains keyboard focus and returns it to its opener', async ({ page }) => {
   await mockPlayer(page);
