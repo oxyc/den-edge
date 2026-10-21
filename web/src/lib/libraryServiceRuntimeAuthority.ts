@@ -14,6 +14,8 @@ import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { readApiKey } from './prefs';
 import { useLibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
+import { resetLibraryStartupMetrics } from './libraryStartupMetrics';
+import { openFinishedLibraryViewAuthority } from './finishedLibraryViewAuthority';
 import {
   libraryLogMaintenance,
   librarySimklDelivery,
@@ -74,64 +76,82 @@ export async function openLibraryServiceAuthority(
 
   // Seed the durable clock before opening the log so a failed clock cannot leave an opened log behind. Durable
   // clock state wins inside openClockStore; the page-provided value is migration input only.
+  resetLibraryStartupMetrics();
   startupMark('log open requested', `${request.mode}, wire ${request.wire}`);
   const clock = await openClockStore(vault, { legacy: request.legacyClock });
-  const openingAt = performance.now();
-  let log: LibraryLog | null;
-  try {
-    log =
-      request.mode === 'local'
-        ? await LibraryLog.openLocal(request.libraryKey, vault, undefined, request.wire)
-        : await LibraryLog.open(request.libraryKey, undefined, undefined, vault, request.wire);
-  } catch (error) {
-    if (error instanceof LibraryUpdateRequiredError)
-      throw new LibraryServiceAuthorityError({
-        code: 'update-required',
-        message: error.message,
-        retryable: false,
-        requiredWire: error.requiredWire,
-      });
-    throw error;
-  }
-  startupMark(
-    'log opened',
-    `${!log ? 'unavailable' : request.mode === 'local' ? 'local' : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
-  );
-  if (!log) return null;
-  // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
-  // before the authority can answer `ready`: a source query that already carries an IMDb id goes straight from
-  // DownloadServiceRuntime to Scout and must not depend on an unrelated TMDB/Atlas request having initialized it.
-  let releaseMembership = () => {};
-  const membershipReady = log.relayMembership().then((membership) => {
-    if (membership) releaseMembership = useLibraryRelayMembership(membership);
-  });
-  const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
-  const logAuthority = new LibraryLogAuthority(log, clock, {
-    mode: request.mode,
-    downloads: downloads.coordinator,
-    content,
-    libraryKey: request.libraryKey,
-    vault,
-    refreshDownloads: (target) => downloads.refresh(target),
-    downloadArtwork: (target) => downloads.artwork(target),
-  });
-  const authority = new ScheduledLibraryServiceAuthority(
-    new DurableOperationAuthority(logAuthority, log),
-    libraryLogMaintenance(log, clock, request.mode),
-    { background: downloads },
-    librarySimklDelivery(log, clock),
-  );
-  let releaseCredentials = () => {};
-  if (contentCredentials)
-    releaseCredentials = contentCredentials.bind({
-      ready: () => membershipReady,
-      tmdb: () => tmdbKeyOf(log.settings('keys')),
-      omdb: () => readApiKey(log.settings('keys'), 'omdb'),
-      contentWarnings: () => readApiKey(log.settings('keys'), 'doesthedogdie'),
+  const openFull = async (): Promise<LibraryServiceAuthority | null> => {
+    const openingAt = performance.now();
+    let log: LibraryLog | null;
+    try {
+      log =
+        request.mode === 'local'
+          ? await LibraryLog.openLocal(request.libraryKey, vault, undefined, request.wire)
+          : await LibraryLog.open(request.libraryKey, undefined, undefined, vault, request.wire);
+    } catch (error) {
+      if (error instanceof LibraryUpdateRequiredError)
+        throw new LibraryServiceAuthorityError({
+          code: 'update-required',
+          message: error.message,
+          retryable: false,
+          requiredWire: error.requiredWire,
+        });
+      throw error;
+    }
+    startupMark(
+      'log opened',
+      `${!log ? 'unavailable' : request.mode === 'local' ? 'local' : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
+    );
+    if (!log) return null;
+    // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
+    // before the authority can answer `ready`: a source query that already carries an IMDb id goes straight from
+    // DownloadServiceRuntime to Scout and must not depend on an unrelated TMDB/Atlas request having initialized it.
+    let releaseMembership = () => {};
+    const membershipReady = log.relayMembership().then((membership) => {
+      if (membership) releaseMembership = useLibraryRelayMembership(membership);
     });
-  await membershipReady;
-  return new CredentialBoundLibraryAuthority(authority, () => {
-    releaseCredentials();
+    const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
+    const logAuthority = new LibraryLogAuthority(log, clock, {
+      mode: request.mode,
+      downloads: downloads.coordinator,
+      content,
+      libraryKey: request.libraryKey,
+      vault,
+      refreshDownloads: (target) => downloads.refresh(target),
+      downloadArtwork: (target) => downloads.artwork(target),
+    });
+    const authority = new ScheduledLibraryServiceAuthority(
+      new DurableOperationAuthority(logAuthority, log),
+      libraryLogMaintenance(log, clock, request.mode),
+      { background: downloads },
+      librarySimklDelivery(log, clock),
+    );
+    let releaseCredentials = () => {};
+    if (contentCredentials)
+      releaseCredentials = contentCredentials.bind({
+        ready: () => membershipReady,
+        tmdb: () => tmdbKeyOf(log.settings('keys')),
+        omdb: () => readApiKey(log.settings('keys'), 'omdb'),
+        contentWarnings: () => readApiKey(log.settings('keys'), 'doesthedogdie'),
+      });
+    await membershipReady;
+    return new CredentialBoundLibraryAuthority(authority, () => {
+      releaseCredentials();
+      releaseMembership();
+    });
+  };
+
+  const cached = await openFinishedLibraryViewAuthority(request, vault, openFull, content);
+  if (!cached) return openFull();
+  const releaseMembership = useLibraryRelayMembership(cached.membership);
+  const releaseCredentials = contentCredentials?.bind({
+    ready: () => Promise.resolve(),
+    tmdb: () => undefined,
+    omdb: () => undefined,
+    contentWarnings: () => undefined,
+  });
+  startupMark('log opened', 'from finished views; document log remains lazy');
+  return new CredentialBoundLibraryAuthority(cached.authority, () => {
+    releaseCredentials?.();
     releaseMembership();
   });
 }

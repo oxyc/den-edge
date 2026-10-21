@@ -3,12 +3,13 @@
 // in this browser (`localVault.ts`), so a return visit starts from it and asks only for what changed since.
 
 import { blankEpisode, blankTitle } from './actions';
-import { hex, hkdf } from './crypto';
+import { hex } from './crypto';
 import { exclusive } from './exclusive';
 import { householdScoped } from './householdScope';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
+import { libraryLocalKey } from './libraryLocalKey';
 import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
@@ -44,6 +45,7 @@ import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profil
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
+import { noteLibraryDecrypt } from './libraryStartupMetrics';
 import {
   believe,
   compareStamps,
@@ -888,7 +890,7 @@ export class LibraryLog {
       keys,
       fetchImpl,
       undefined,
-      { vault, key: await localKey(raw) },
+      { vault, key: await libraryLocalKey(raw) },
       true,
       vault,
       wire,
@@ -2868,7 +2870,7 @@ export class LibraryLog {
       keys,
       fetchImpl,
       storage,
-      vault && { vault, key: await localKey(raw) },
+      vault && { vault, key: await libraryLocalKey(raw) },
       false,
       vault,
       wire,
@@ -2878,8 +2880,10 @@ export class LibraryLog {
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
+    const decryptAt = performance.now();
     const savedV4 = await log.kept<Snapshot>(SNAPSHOT_V4, true);
     const saved = savedV4 ?? (await log.kept<Snapshot>(SNAPSHOT, true));
+    if (saved) noteLibraryDecrypt(saved.entries.length, performance.now() - decryptAt);
     if (saved) {
       await policy;
       log.memberRegistered = saved.memberRegistered ?? false;
@@ -4999,12 +5003,6 @@ async function errorCode(res: Response): Promise<string | undefined> {
   } catch {
     return undefined;
   }
-}
-
-/** The key what this browser keeps is sealed under: the library key's, and good for nothing else. */
-async function localKey(libraryKey: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
-  const bytes = await hkdf(libraryKey, 'den/web/local/v1', 'enc', 32);
-  return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
 /** `value` as JSON with every object's keys in order, so two equal rows read the same whatever built them. */

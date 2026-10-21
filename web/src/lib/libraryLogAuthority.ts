@@ -34,6 +34,16 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { noteLibraryFold } from './libraryStartupMetrics';
+import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
+import {
+  FINISHED_LIBRARY_POLICY,
+  FINISHED_LIBRARY_RECOMMENDATIONS,
+  FINISHED_LIBRARY_VIEWS_SCHEMA,
+  writeFinishedLibraryViews,
+  type FinishedLibraryViewPieces,
+  type FinishedLibraryViews,
+} from './finishedLibraryViews';
 import {
   applyLog,
   ContinueProjector,
@@ -59,7 +69,6 @@ import {
   type LibraryQuery,
   type LibraryQueryResult,
   type LibraryTask,
-  type RetainedBillboard,
   type RatingSource,
   type LibrarySelection,
   type LibrarySelectionValue,
@@ -118,11 +127,15 @@ import {
   type HeldRemovals,
 } from './simklDelivery';
 import { fetchSimklClientId, simklAccountID } from '../settings/simkl';
+import { isRetainedServices } from './libraryServiceProtocolCodec';
 import {
-  isLibraryMetadataTitle,
-  isRetainedBillboard,
-  isRetainedServices,
-} from './libraryServiceProtocolCodec';
+  RETAINED_HOME_SHELVES,
+  RETAINED_PREFERENCE_SEED,
+  RETAINED_SERVICES,
+  retainedBillboardName,
+  retainedBillboardValue,
+  storedBillboardValue,
+} from './libraryRetainedViews';
 import {
   change as preferenceChange,
   forgetDevice,
@@ -149,8 +162,6 @@ import {
 
 type Delivery = 'synced' | 'queued' | 'local';
 
-const RETAINED_SERVICES = 'services.v1';
-const RETAINED_HOME_SHELVES = 'home.shelves.v1';
 /** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
 const DEFAULT_KID_OPERATION = 'default-kid';
 /**
@@ -159,30 +170,6 @@ const DEFAULT_KID_OPERATION = 'default-kid';
  * over one multiplexed connection. Six at a time made Home's first shelves wait on a round trip per six series.
  */
 const METADATA_LOOKUPS = 16;
-const retainedBillboardName = (
-  scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
-) =>
-  scope.kind === 'personal'
-    ? `billboard.personal.v1.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`
-    : `billboard.v4.${scope.fresh ? 'fresh.' : ''}${scope.facet ?? 'all'}`;
-const retainedBillboardValue = (
-  scope: Extract<LibraryQuery, { kind: 'retained.billboard.get' }>['scope'],
-  stored: unknown,
-): RetainedBillboard | null => {
-  const candidate =
-    scope.kind === 'shared'
-      ? { kind: 'shared' as const, titles: stored }
-      : stored && typeof stored === 'object' && !Array.isArray(stored)
-        ? {
-            kind: 'personal' as const,
-            at: (stored as { at?: unknown }).at,
-            titles: (stored as { titles?: unknown }).titles,
-          }
-        : null;
-  return isRetainedBillboard(candidate) && candidate.kind === scope.kind ? candidate : null;
-};
-const storedBillboardValue = (value: RetainedBillboard): unknown =>
-  value.kind === 'shared' ? value.titles : { at: value.at, titles: value.titles };
 
 export type LibraryAffectedSelection = LibrarySelectionScope;
 
@@ -399,6 +386,11 @@ export class LibraryLogAuthority {
    */
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
+  #finishedRevision?: string;
+  #finishedPieces: Partial<FinishedLibraryViewPieces> = {};
+  #finishedSaving: Promise<void> = Promise.resolve();
+  #finishedPending?: FinishedLibraryViews;
+  #finishedTimer?: ReturnType<typeof setTimeout>;
   #ownerSplit?: OwnerSplitWorkerController;
   #kidCreate?: ProfileKidCreateCoordinator;
   #keyReset?: ProfileKeyResetService;
@@ -553,10 +545,14 @@ export class LibraryLogAuthority {
     return this.#log.currentGeneration ?? null;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.#listeners.clear();
     this.#log.onDeferred = null;
     this.#admin?.close();
+    if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
+    this.#finishedTimer = undefined;
+    this.#flushFinished();
+    await this.#finishedSaving;
     this.#log.close();
   }
 
@@ -568,9 +564,9 @@ export class LibraryLogAuthority {
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
     switch (selection.kind) {
       case 'overview':
-        return this.#overview();
+        return this.#rememberFinished('overview', this.#overview());
       case 'continue':
-        return this.#continue();
+        return this.#rememberFinished('continue', this.#continue());
       case 'history':
         return this.#history();
       case 'title':
@@ -578,7 +574,7 @@ export class LibraryLogAuthority {
       case 'presence':
         return this.#presence(selection.titles);
       case 'settings':
-        return this.#settings();
+        return this.#rememberFinished('settings', await this.#settings());
       case 'connections':
         return this.#connections();
       case 'simkl':
@@ -586,7 +582,7 @@ export class LibraryLogAuthority {
       case 'recovery':
         return this.#administration().recoveryView();
       case 'runtime':
-        return this.#runtime();
+        return this.#rememberFinished('runtime', this.#runtime());
       case 'profiles':
         return this.#profiles();
       case 'downloads':
@@ -1355,7 +1351,9 @@ export class LibraryLogAuthority {
       counts.set(season, episodes);
     }
     const digest = JSON.stringify({
-      seasons: [...counts].sort(([a], [b]) => a - b),
+      seasons: [...counts]
+        .sort(([a], [b]) => a - b)
+        .map(([season, episodes]) => ({ season, episodes })),
       lastAired: observation.lastAired ?? null,
     });
     const key = titleKey(observation.title);
@@ -1443,9 +1441,9 @@ export class LibraryLogAuthority {
             : {}),
         };
       if (result.kind === 'missing') return null;
-      const title = this.#metadataTitle(result.value.title);
+      const title = libraryMetadataTitle(result.value.title);
       if (!title) return null;
-      const shape = result.value.shape && this.#metadataShape(ref, result.value.shape);
+      const shape = result.value.shape && libraryMetadataShape(ref, result.value.shape);
       return { kind: 'found' as const, title, ...(shape ? { shape } : {}) };
     })();
     this.#metadataFlights.set(flightKey, flight);
@@ -1453,50 +1451,6 @@ export class LibraryLogAuthority {
       if (this.#metadataFlights.get(flightKey) === flight) this.#metadataFlights.delete(flightKey);
     });
     return flight;
-  }
-
-  #metadataTitle(title: Title): LibraryMetadataTitle | undefined {
-    const candidate = { ...title };
-    // TMDB uses empty strings for unknown optional text on otherwise valid records. They mean absence on this wire,
-    // not a reason to lose the title's name and poster altogether.
-    if (!candidate.posterPath) delete candidate.posterPath;
-    if (!candidate.backdropPath) delete candidate.backdropPath;
-    if (!candidate.releaseDate) delete candidate.releaseDate;
-    if (!candidate.originalLanguage) delete candidate.originalLanguage;
-    return isLibraryMetadataTitle(candidate) ? candidate : undefined;
-  }
-
-  #metadataShape(ref: TitleRef, shape: Shape): LibraryMetadataShape | undefined {
-    if (ref.type !== 'tv' || shape.counts.size > LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons)
-      return undefined;
-    const seasons = [...shape.counts].map(([season, episodes]) => ({ season, episodes }));
-    if (
-      seasons.some(
-        ({ season, episodes }) =>
-          !Number.isSafeInteger(season) ||
-          season < 0 ||
-          !Number.isSafeInteger(episodes) ||
-          episodes < 0,
-      )
-    )
-      return undefined;
-    if (shape.lastAired) {
-      const episodes = shape.counts.get(shape.lastAired.season);
-      if (
-        !Number.isSafeInteger(shape.lastAired.season) ||
-        shape.lastAired.season <= 0 ||
-        !Number.isSafeInteger(shape.lastAired.episode) ||
-        shape.lastAired.episode <= 0 ||
-        episodes === undefined ||
-        shape.lastAired.episode > episodes
-      )
-        return undefined;
-    }
-    return {
-      title: { type: 'tv', id: ref.id },
-      seasons,
-      ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
-    };
   }
 
   #title(ref: TitleRef): TitleView {
@@ -1921,9 +1875,91 @@ export class LibraryLogAuthority {
   #projected(): { rows: Row[]; home: HomeLibraryView } {
     const rows = this.#log.rows();
     if (this.#projection?.rows === rows) return this.#projection;
+    const foldedAt = performance.now();
     const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+    noteLibraryFold(rows.length, performance.now() - foldedAt);
     this.#projection = { rows, home };
     return this.#projection;
+  }
+
+  #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime'>(
+    kind: T,
+    value: Extract<LibrarySelectionValue, { kind: T }>,
+  ): Extract<LibrarySelectionValue, { kind: T }> {
+    if (!this.#options.libraryKey || !this.#options.vault) return value;
+    const summary = this.#log.currentSummary();
+    const revision = JSON.stringify([this.#log.logHead, this.#log.rowsVersion, summary.stamp]);
+    if (this.#finishedRevision !== revision) {
+      this.#finishedRevision = revision;
+      this.#finishedPieces = {};
+    }
+    if (kind === 'overview') {
+      const overview = value as Extract<LibrarySelectionValue, { kind: 'overview' }>;
+      this.#finishedPieces.watchlist = { titles: overview.watchlist };
+      const { kind: _kind, watchlist: _watchlist, ...recommendations } = overview;
+      this.#finishedPieces.recommendations = recommendations;
+    } else if (kind === 'continue') {
+      const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
+      const required = new Set(this.#projected().home.requiredShapeRefs);
+      this.#finishedPieces.continue = {
+        view,
+        layouts: Object.fromEntries(
+          [...this.#shapes]
+            .filter(([key]) => required.has(key))
+            .map(([key, stored]) => [key, stored.digest]),
+        ),
+      };
+    } else if (kind === 'settings')
+      this.#finishedPieces.settings = value as FinishedLibraryViewPieces['settings'];
+    else this.#finishedPieces.runtime = value as FinishedLibraryViewPieces['runtime'];
+
+    const generation =
+      this.#log.currentGeneration ?? (this.#options.mode === 'local' ? 'local' : undefined);
+    if (
+      generation &&
+      this.#finishedPieces.watchlist &&
+      this.#finishedPieces.continue &&
+      this.#finishedPieces.recommendations &&
+      this.#finishedPieces.settings &&
+      this.#finishedPieces.runtime
+    ) {
+      const reconsiderAt = Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null;
+      const pieces = structuredClone(this.#finishedPieces);
+      this.#finishedPending = {
+        schema: FINISHED_LIBRARY_VIEWS_SCHEMA,
+        identity: {
+          libraryId: this.#log.libraryId,
+          generation,
+          head: this.#log.logHead,
+          authorityRevision: revision,
+          policyVersion: FINISHED_LIBRARY_POLICY,
+          profileVersion: String(this.#log.rowsVersion),
+          layoutVersion: String(this.#shapesVersion),
+          recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
+          reconsiderAt,
+        },
+        pieces,
+      };
+      if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
+      this.#finishedTimer = setTimeout(() => {
+        this.#finishedTimer = undefined;
+        this.#flushFinished();
+      }, 250);
+    }
+    return value;
+  }
+
+  #flushFinished(): void {
+    const pending = this.#finishedPending;
+    if (!pending || !this.#options.libraryKey || !this.#options.vault) return;
+    this.#finishedPending = undefined;
+    this.#finishedSaving = this.#finishedSaving
+      .then(async () => {
+        await writeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!, pending);
+      })
+      .catch((error: unknown) =>
+        console.warn('den: the finished library views could not be kept', error),
+      );
   }
 
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {
@@ -2184,10 +2220,17 @@ export class LibraryLogAuthority {
       op: 'profiles_seed_preferences',
       input: { household, profile: base.values },
     });
-    if (!Object.keys(values).length) return this.#unchanged();
-    return this.#writeRow({ ...base, values: { ...base.values, ...values } }, [
-      { kind: 'settings' },
-    ]);
+    const result = !Object.keys(values).length
+      ? this.#unchanged()
+      : await this.#writeRow({ ...base, values: { ...base.values, ...values } }, [
+          { kind: 'settings' },
+        ]);
+    try {
+      await this.#log.keep(RETAINED_PREFERENCE_SEED, household);
+    } catch (error) {
+      console.warn('den: the completed preference seed could not be retained', error);
+    }
+    return result;
   }
 
   #keyName(service: 'tmdb' | 'omdb' | 'content-warnings'): string {

@@ -184,15 +184,20 @@ function countWorkerWork(page) {
   return async () => {
     let transactions = 0;
     let compiles = 0;
+    const libraryStartup = [];
     for (const worker of await Promise.all(workers)) {
       transactions += (await worker?.evaluate(() => globalThis.__transactions).catch(() => 0)) ?? 0;
       compiles += (await worker?.evaluate(() => globalThis.__compiles).catch(() => 0)) ?? 0;
+      const metrics = await worker
+        ?.evaluate(() => globalThis.__denLibraryStartupMetrics)
+        .catch(() => undefined);
+      if (metrics) libraryStartup.push(metrics);
       if (process.env.BIG_LIBRARY_DEBUG)
         console.log(
           JSON.stringify(await worker?.evaluate(() => globalThis.__stores).catch(() => null)),
         );
     }
-    return { transactions, compiles };
+    return { transactions, compiles, libraryStartup };
   };
 }
 
@@ -436,7 +441,7 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
   // Let the Worker finish what the surface set off, then count.
   await page.waitForTimeout(2_000);
   const { longest, ...drawnAt } = ready;
-  const { transactions, compiles } = await workerWork();
+  const { transactions, compiles, libraryStartup } = await workerWork();
   const held = await memory?.();
   const processes = await footprint?.(page);
   const result = {
@@ -444,6 +449,7 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
     ...(surface.shelves ? { shelvesMs } : {}),
     transactions,
     compiles,
+    libraryStartup,
     projections: (edge.assistant?.projections.length ?? 0) - projectionsBefore,
     builds: Math.max(built.page, built.worker),
     rowsRead: (await Promise.all(reads)).reduce((sum, count) => sum + count, 0),
@@ -585,6 +591,13 @@ for (const [label, type, device, options] of ENGINES) {
         // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
         // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
         expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
+        for (const startup of result.libraryStartup ?? []) {
+          if (startup.viewSource !== 'cache') continue;
+          expect
+            .soft(startup.documentsDecrypted, `${surface.name}: cached documents decrypted`)
+            .toBe(0);
+          expect.soft(startup.documentsFolded, `${surface.name}: cached documents folded`).toBe(0);
+        }
         // The household's lists are as the last visit published them: nothing is built or sent again.
         expect.soft(result.builds, `${surface.name}: assistant projections built`).toBe(0);
         expect.soft(result.projections, `${surface.name}: assistant projections uploaded`).toBe(0);
