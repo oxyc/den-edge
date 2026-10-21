@@ -666,12 +666,12 @@
 
   .menu :global(.item[aria-checked='true']) {
     font-weight: 600;
-    background: rgb(91 141 239 / 16%);
+    background: rgb(91 141 239 / 0.16);
   }
 
   .menu :global(.item[aria-checked='true']:hover),
   .menu :global(.item[aria-checked='true']:focus-visible) {
-    background: rgb(91 141 239 / 24%);
+    background: rgb(91 141 239 / 0.24);
   }
 
   .menu :global(.item[aria-disabled='true']) {

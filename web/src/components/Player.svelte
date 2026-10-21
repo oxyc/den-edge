@@ -6,6 +6,7 @@
 <script lang="ts">
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
@@ -491,7 +492,7 @@
    */
   function releaseChoices(): Release[] {
     if (!session) return releases;
-    const seen = new Set<string>();
+    const seen = new SvelteSet<string>();
     const playing: Release = {
       ...session.release,
       plays: session.video?.transcoded ? 'convert' : 'yes',
@@ -4695,6 +4696,7 @@
     position: absolute;
     top: 12px;
     left: 50%;
+
     /* Above the custom player's header gradient: its Dismiss action must remain pressable while controls show. */
     z-index: 7;
     width: min(36rem, calc(100% - 24px));
