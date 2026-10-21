@@ -29,6 +29,10 @@ export async function loadRelease(
     release = navigated;
     return release;
   }
+  // A packaged TV's shell and hashed chunks live inside the installed app, not in den-edge's current web build.
+  // Its document intentionally has no release marker, and comparing it with the server shell would manufacture a
+  // replacement that cannot replace those local files. Preserve that boundary and make no package-host request.
+  if (__DEN_TV_PACKAGED__) return undefined;
   try {
     const res = await fetchImpl('/__den/release', { cache: 'no-store' });
     release = res.headers.get('x-den-release') ?? undefined;
