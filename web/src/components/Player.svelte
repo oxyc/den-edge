@@ -573,41 +573,24 @@
   /**
    * A change the viewer explicitly asked for. Unlike an automatic recovery, the picker closes as soon as its choice
    * is made; keep one visible acknowledgement from that press until the replacement paints its first frame. Its id
-   * separates a superseded request from the newer one it must not clear (objects stored in `$state` are proxied).
+   * separates a superseded request from the newer one it must not clear.
    */
-  type ManualSwitch = {
-    id: number;
-    label:
-      | 'Switching stream…'
-      | 'Switching audio…'
-      | 'Switching subtitles…'
-      | 'Loading subtitles…'
-      | 'Re-syncing audio & video…'
-      | 'Starting Chromecast…'
-      | 'Returning to this device…'
-      | `Switching to ${'TorBox' | 'Den Remux'}…`;
-  };
-  let manualSwitchId = 0;
-  let manualSwitch = $state<ManualSwitch | null>(null);
+  let transitionNoticeId = 0;
+  let transitionNotice = $state<string | null>(null);
 
-  function showManualSwitch(label: ManualSwitch['label']): ManualSwitch {
-    const pending = { id: ++manualSwitchId, label };
-    manualSwitch = pending;
+  function showTransition(label: string): number {
+    transitionNotice = label;
+    return ++transitionNoticeId;
+  }
+
+  function continueManualSwitch(pending: number | undefined, label: string): number {
+    if (!pending || transitionNoticeId !== pending) return showTransition(label);
+    transitionNotice = label;
     return pending;
   }
 
-  function clearManualSwitch(pending: ManualSwitch | undefined) {
-    if (manualSwitch?.id === pending?.id) manualSwitch = null;
-  }
-
-  function continueManualSwitch(
-    pending: ManualSwitch | undefined,
-    label: ManualSwitch['label'],
-  ): ManualSwitch {
-    if (!pending || manualSwitch?.id !== pending.id) return showManualSwitch(label);
-    const continued = { id: pending.id, label };
-    manualSwitch = continued;
-    return continued;
+  function clearTransition(pending?: number) {
+    if (!pending || transitionNoticeId === pending) transitionNotice = null;
   }
   /**
    * What the stamp says of TorBox while Den Remux plays. `offered`: a TorBox stream played here this visit, or Hearth
@@ -767,7 +750,7 @@
    * this only covers finding a release and, once one is open, waiting on its first frame.
    */
   const notice = $derived(
-    manualSwitch
+    transitionNotice
       ? null
       : !session
         ? startupRetryNotice
@@ -830,6 +813,12 @@
     () => unchanged,
     () => (unchanged = null),
   );
+  // A terminal result replaces progress feedback. In particular, a direct URL can be accepted and then fail before
+  // its first frame; no stale "Switching…" line should survive beside the error that ended that attempt.
+  $effect(() => {
+    if (!failure) return;
+    clearTransition();
+  });
   fades(
     () => castOffer === 'none',
     () => (castOffer = 'idle'),
@@ -1240,7 +1229,7 @@
     // page's `den-lan` has it.
     if (lanHere && maxBitrate !== undefined && extra.maxBitrate === undefined) {
       castSubtitlePreparing = false;
-      restart(releaseAfterMeasure(chosenRelease));
+      restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
       return true;
     }
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
@@ -1285,6 +1274,7 @@
       // Read the assigned state back: Svelte proxies objects stored in `$state`, and replacement identity checks
       // must compare that proxy with itself rather than with the raw response object assigned above.
       const discovered = session;
+      const preparing = showTransition('Preparing subtitles…');
       const moved = await begin(
         { filename: result.release.filename, subtitleTrack: selectedTorBoxTrack },
         extra,
@@ -1292,6 +1282,7 @@
         'direct',
       );
       if (moved !== true && session === discovered) {
+        clearTransition(preparing);
         subtitleChoice = null;
         castSubtitlePreparing = false;
       }
@@ -1307,12 +1298,15 @@
         console.warn(
           `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(session), torboxRequested: fallback })}`,
         );
-        return begin(
+        const preparing = showTransition('Subtitles failed—trying built-in…');
+        const moved = await begin(
           { filename: session.release.filename, subtitleTrack: fallback },
           extra,
           session,
           'direct',
         );
+        if (moved !== true) clearTransition(preparing);
+        return moved;
       }
     }
     castSubtitlePreparing = false;
@@ -1525,16 +1519,28 @@
     hls = undefined;
     endSession(current);
     session = null;
+    showTransition('Resuming…');
     void begin({ filename: current.release.filename });
   }
 
   async function letIn(event: SubmitEvent) {
     event.preventDefault();
+    const pending = showTransition('Checking key…');
+    failure = null;
     const ok = await login(key.trim(), undefined, route);
     badKey = ok === false;
-    if (ok === null) failure = 'unreachable';
-    if (!ok) return;
+    if (!ok) {
+      clearTransition(pending);
+      failure = ok === null ? 'unreachable' : 'login';
+      return;
+    }
     key = '';
+    continueManualSwitch(pending, 'Opening playback…');
+    void begin();
+  }
+
+  function tryAgain() {
+    showTransition('Retrying playback…');
     void begin();
   }
 
@@ -1791,7 +1797,7 @@
       cancelFirstFrame();
       if (session !== current || played) return;
       played = true;
-      manualSwitch = null;
+      clearTransition();
       cleanup();
       bufferProgress = undefined;
       clearInterval(noticeTimer);
@@ -2202,7 +2208,7 @@
       // A length is known only once the playlist came through the media listener.
       if (remoteDuration > 0) {
         played = true;
-        manualSwitch = null;
+        clearTransition();
         clearInterval(noticeTimer);
       }
       // The iframe has no `video` here to fire loadedmetadata and timeupdate, so its progress is what starts the
@@ -2227,9 +2233,10 @@
         rememberLink(route, publicMaxBitrate);
         // The cast page holds playback until told: started again only when what den-remux chose needs more than
         // the link carries, so a release it can't open is not probed a second time for nothing.
-        if (restartAfterMeasure(current, publicMaxBitrate))
-          restart(releaseAfterMeasure(chosenRelease));
-        else frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
+        if (restartAfterMeasure(current, publicMaxBitrate)) {
+          restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
+        } else
+          frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -2241,14 +2248,20 @@
       // does not apply here, and a session asked under one is asked again without it.
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
-      if (askedMaxBitrate !== undefined) restart(releaseAfterMeasure(chosenRelease));
+      if (askedMaxBitrate !== undefined) {
+        restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
+      }
     } else if (message.type === 'den-cast-request') {
       const profile = message.profile ?? 'legacy';
       if (!castMode || castProfile !== profile) {
         const was = { castMode, castProfile };
         castProfile = profile;
         castMode = true;
-        restart({ filename: current.release.filename }, () => ({ castMode, castProfile } = was));
+        restartForRecovery(
+          'Preparing Chromecast…',
+          { filename: current.release.filename },
+          () => ({ castMode, castProfile } = was),
+        );
       }
     } else if (message.type === 'den-cast' && message.state === 'playing') {
       casting = true;
@@ -2260,7 +2273,11 @@
       endCastSession();
       // Moved here to cast: casting over, the viewer is back in the player they left, where it had got to.
       if (castOffered) leaveCast();
-      else restart({ filename: current.release.filename });
+      else {
+        restartForRecovery('Chromecast stopped—returning…', {
+          filename: current.release.filename,
+        });
+      }
     } else if (message.type === 'den-ended') {
       casting = false;
       endCastSession();
@@ -2419,7 +2436,7 @@
     castMode = playback !== undefined || directLanCast;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
-    const pending = showManualSwitch('Starting Chromecast…');
+    const pending = showTransition('Starting Chromecast…');
     restart(
       { filename: session.release.filename },
       () => {
@@ -2448,7 +2465,7 @@
     route = routeBeforeCast;
     castMode = false;
     if (session) {
-      const pending = showManualSwitch('Returning to this device…');
+      const pending = showTransition('Returning here…');
       restart({ filename: session.release.filename }, undefined, undefined, pending);
     }
   }
@@ -2598,12 +2615,18 @@
         action: recovery,
       });
       carryPosition();
+      const recovering = showTransition(
+        recovery === 'refresh'
+          ? `TorBox ${played ? 'stopped' : 'did not start'}—refreshing…`
+          : `TorBox ${played ? 'stopped' : 'did not start'}—trying Den Remux…`,
+      );
       const moved = await begin(
         undefined,
         {},
         current,
         recovery === 'refresh' ? 'refresh' : 'fallback',
       );
+      if (moved !== true) clearTransition(recovering);
       if (session === current && moved !== true)
         failure = typeof moved === 'string' && moved !== 'busy' ? moved : 'source';
       return;
@@ -2612,7 +2635,9 @@
     // carrier NAT with an address per destination, or a middlebox answering the lookup). Asked again once without it.
     if (retryWithoutHint(current, played, noHint)) {
       noHint = true;
-      restart({ filename: current.release.filename });
+      restartForRecovery('Address failed—retrying without it…', {
+        filename: current.release.filename,
+      });
       return;
     }
     // A dead release looks exactly like this too — `MediaError 3`, and on the native path this page never
@@ -3099,7 +3124,7 @@
       const nextTrack = selectedSubtitle(current);
       const nextTorBox = nextTrack?.torboxTrack;
       if ((current.torboxSubtitle ?? undefined) !== nextTorBox) {
-        const pending = showManualSwitch('Switching subtitles…');
+        const pending = showTransition('Switching subtitles…');
         restart(
           {
             filename: current.release.filename,
@@ -3115,7 +3140,7 @@
     if (next && current) {
       const pending =
         requested && requested.torboxTrack === undefined && current.loadExternalSubtitle
-          ? showManualSwitch('Loading subtitles…')
+          ? showTransition('Loading subtitles…')
           : undefined;
       let loaded = false;
       try {
@@ -3136,7 +3161,7 @@
         );
         return;
       }
-      clearManualSwitch(pending);
+      clearTransition(pending);
     }
     applySubtitles();
     sendSubtitleChoice();
@@ -3345,13 +3370,13 @@
 
   function switchAudioIndex(n: number) {
     if (!session || n === session.audioTrack) return;
-    const pending = showManualSwitch('Switching audio…');
+    const pending = showTransition('Switching audio…');
     restart({ audioTrack: n, filename: session.release.filename }, undefined, undefined, pending);
   }
 
   function resyncAudioVideo() {
     if (!session) return;
-    const pending = showManualSwitch('Re-syncing audio & video…');
+    const pending = showTransition('Re-syncing audio & video…');
     restart(
       { audioTrack: session.audioTrack, filename: session.release.filename },
       undefined,
@@ -3372,7 +3397,7 @@
     keepReleases();
     switchCount += 1;
     lastSwitchReason = 'user';
-    const pending = showManualSwitch('Switching stream…');
+    const pending = showTransition('Switching stream…');
     restart({ filename }, undefined, undefined, pending);
   }
 
@@ -3389,10 +3414,13 @@
     pick: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
     undo?: () => void,
     directOnly?: 'direct',
-    pending?: ManualSwitch,
+    pending?: number,
   ) {
     const current = session;
-    if (!current) return;
+    if (!current) {
+      clearTransition(pending);
+      return;
+    }
     report();
     carryPosition();
     if (played) {
@@ -3402,7 +3430,7 @@
           return 'unreachable';
         })
         .then((moved) => {
-          if (moved !== true) clearManualSwitch(pending);
+          if (moved !== true) clearTransition(pending);
           // False is a player closed, or a session replaced, meanwhile: nothing to say.
           if (typeof moved !== 'string' || session !== current) return;
           startAt = null;
@@ -3417,8 +3445,17 @@
         return 'unreachable';
       })
       .then((moved) => {
-        if (moved !== true) clearManualSwitch(pending);
+        if (moved !== true) clearTransition(pending);
       });
+  }
+
+  function restartForRecovery(
+    label: string,
+    pick: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
+    undo?: () => void,
+  ) {
+    const pending = showTransition(label);
+    restart(pick, undo, undefined, pending);
   }
 
   /**
@@ -3426,11 +3463,11 @@
    * Remux to TorBox. Always a replacement, so what plays now plays on until the other has started, and for good
    * where the other path refuses, which the viewer is told and `undo` puts back what was set for it.
    */
-  function switchDelivery(undo?: () => void, label?: ManualSwitch['label']) {
+  function switchDelivery(undo?: () => void, label?: string) {
     const current = session;
     if (!current || switching || deliverySwitching) return;
     const to = current.external ? 'Den Remux' : 'TorBox';
-    const pending = showManualSwitch(label ?? `Switching to ${to}…`);
+    const pending = showTransition(label ?? `Switching to ${to}…`);
     report();
     carryPosition();
     deliverySwitching = true;
@@ -3450,7 +3487,7 @@
           lastSwitchReason = 'user';
           return;
         }
-        clearManualSwitch(pending);
+        clearTransition(pending);
         if (session !== current) return;
         startAt = null;
         if (typeof moved === 'string') {
@@ -3613,7 +3650,8 @@
     releases = [];
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
-    manualSwitch = null;
+    clearTransition();
+    showTransition('Starting next…');
     switchCount = 0;
     lastSwitchReason = undefined;
     degraded = false;
@@ -3977,10 +4015,10 @@
        on their own (`fades`) unless they offer something to do, and the buffering line, which clears itself the
        moment playback resumes. -->
   <div class="notices">
+    {#if transitionNotice}
+      {@render banner(transitionNotice, { quiet: true, busy: true })}
+    {/if}
     {#if session}
-      {#if manualSwitch}
-        {@render banner(manualSwitch.label, { quiet: true, busy: true })}
-      {/if}
       {#if swapped}
         {@render banner(swapped, { dismiss: () => (swapped = null) })}
       {/if}
@@ -4060,7 +4098,7 @@
       <div class="terminal-message error" role="alert">
         <p>{managedCauseMessages[managedCause]}</p>
         {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
-          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+          <Button variant="primary" label="Try again" onclick={tryAgain} />
         {/if}
       </div>
     {:else if failure === 'none' && skippedFormats.length}
@@ -4105,7 +4143,7 @@
         {#if failure === 'request' || failure === 'protocol'}
           <Button variant="primary" label="Reload" onclick={() => location.reload()} />
         {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
-          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+          <Button variant="primary" label="Try again" onclick={tryAgain} />
         {/if}
       </div>
     {:else if !session && !holding}
