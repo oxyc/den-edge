@@ -27,12 +27,14 @@ public final class MainActivity extends ComponentActivity {
     private static final String ANDROID_EXIT_SCHEME = "den";
     private static final String ANDROID_EXIT_HOST = "exit";
     private static final String ANDROID_RETRY_HOST = "retry";
+    private static final String ANDROID_PLAYBACK_HOST = "playback";
 
     private FrameLayout root;
     private WebView webView;
     private View customView;
     private WebChromeClient.CustomViewCallback customViewCallback;
     private boolean pageReady;
+    private final PlaybackWakeState playbackWakeState = new PlaybackWakeState();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -106,6 +108,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onPause() {
+        setPlaybackActive(false);
         if (webView != null) {
             // TV apps must not leave video or unaccompanied audio running after another activity covers them.
             webView.evaluateJavascript(
@@ -116,7 +119,32 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        if (webView == null) {
+            root.removeAllViews();
+            createWebView();
+            webView.loadUrl(BuildConfig.DEN_TV_URL);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        // WebView does not reliably release its hardware decoder when HTML media is merely paused. Recreate the
+        // renderer when the activity returns so backgrounding Den releases scarce TV playback resources now.
+        releaseWebView();
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
+        releaseWebView();
+        super.onDestroy();
+    }
+
+    private void releaseWebView() {
+        setPlaybackActive(false);
+        if (customView != null) hideCustomView();
         if (webView != null) {
             root.removeView(webView);
             webView.stopLoading();
@@ -125,7 +153,13 @@ public final class MainActivity extends ComponentActivity {
             webView.destroy();
             webView = null;
         }
-        super.onDestroy();
+        pageReady = false;
+    }
+
+    private void setPlaybackActive(boolean active) {
+        if (!playbackWakeState.setActive(active)) return;
+        if (active) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     private void immersive() {
@@ -201,6 +235,9 @@ public final class MainActivity extends ComponentActivity {
         if (!mainFrame) return true;
         if (ANDROID_EXIT_HOST.equals(uri.getHost())) finish();
         else if (ANDROID_RETRY_HOST.equals(uri.getHost())) webView.loadUrl(BuildConfig.DEN_TV_URL);
+        else if (ANDROID_PLAYBACK_HOST.equals(uri.getHost())) {
+            setPlaybackActive("/start".equals(uri.getPath()));
+        }
         return true;
     }
 

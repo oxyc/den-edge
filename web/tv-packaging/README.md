@@ -3,9 +3,9 @@
 The Android TV launcher lives in `../../android-tv`: it is a small native WebView shell around the same hosted TV
 bundle as LG. It appends `DenAndroidTV/<version>` to its user agent, which lets the shared bundle label the device
 and route root Back to the native activity without exposing an Android JavaScript interface to third-party frames.
-CI builds and lints the shell. The intentional `tv-launchers-publish` workflow signs its APK with the repository's
-stable Android signing key and publishes it beside the webOS launcher; ordinary Den Edge releases do not rebuild
-either hosted-UI shell.
+CI tests, builds and lints the shell. The intentional `tv-android-publish` workflow signs its APK with the
+repository's stable Android signing key, verifies the pinned certificate fingerprint, and publishes a versioned
+release; ordinary Den Edge releases do not rebuild the hosted-UI shell.
 
 `scripts/tv-package.mjs webos --url https://your-tv-host/` writes a hosted LG
 launcher into `tv-packages/webos/shell` and invokes LG's `ares-package` to put
@@ -38,12 +38,13 @@ appear in output. It does not start a backend, tunnel, preview server, or SDK.
 
 ## Bundled Tizen package (explicitly opt-in)
 
-Samsung is released intentionally as well, but separately because its widget contains the TV UI. Bump
-`tv-packaging/tizen/VERSION` and dispatch `tv-samsung-publish` when a tested TV UI change should reach Samsung. The
-workflow replaces the assets on the permanent `tv-samsung` release. For Android or LG launcher changes, bump the
-versions in `android-tv/VERSION` and `tv-packaging/webos/VERSION`, then dispatch `tv-launchers-publish` instead. Each
-workflow rejects a version that does not exceed the versions recorded on its current stable release and moves its
-permanent channel tag to the exact source commit.
+All three platforms are released intentionally and independently. Bump `tv-packaging/tizen/VERSION` and dispatch
+`tv-samsung-publish` when a tested TV UI change should reach Samsung. For a native Android change, bump
+`android-tv/VERSION` and dispatch `tv-android-publish`; for an LG launcher change, bump
+`tv-packaging/webos/VERSION` and dispatch `tv-webos-publish`. Each workflow rejects a version that does not exceed
+the newest published version, creates a draft with every artifact and checksum, verifies the uploaded copies, and
+only then publishes its immutable `tv-<platform>-vX.Y.Z` release. No workflow force-moves a release tag or replaces
+assets in place.
 
 Build the actual local bundle with an API origin, then package it with a named
 Tizen Certificate Profile:

@@ -50,18 +50,27 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           IFS=. read -r major minor patch <<<"$version"
           test "$major" -le 255 && test "$minor" -le 255 && test "$patch" -le 65535
+          current_version=0.0.0
           if gh release view tv-samsung --repo "$REPO" >/dev/null 2>&1; then
             current="$RUNNER_TEMP/current-samsung-version"
             mkdir -p "$current"
             gh release download tv-samsung --repo "$REPO" --pattern den-tv-samsung.version --dir "$current"
             current_version=$(sed -n 's/^tizen=//p' "$current/den-tv-samsung.version")
             [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-            test "$version" != "$current_version" \
-              && test "$(printf '%s\n%s\n' "$version" "$current_version" | sort -V | tail -n1)" = "$version" || {
-                echo "::error::Tizen version $version must exceed published $current_version"
-                exit 1
-              }
           fi
+          while read -r tag; do
+            candidate=${tag#tv-samsung-v}
+            if test "$candidate" != "$current_version" \
+              && test "$(printf '%s\n%s\n' "$candidate" "$current_version" | sort -V | tail -n1)" = "$candidate"; then
+              current_version=$candidate
+            fi
+          done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep -E '^tv-samsung-v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          test "$version" != "$current_version" \
+            && test "$(printf '%s\n%s\n' "$version" "$current_version" | sort -V | tail -n1)" = "$version" || {
+              echo "::error::Tizen version $version must exceed published $current_version"
+              exit 1
+            }
           npm ci --ignore-scripts
 
           DEN_TIZEN_VERSION=8.0 DEN_TV_PACKAGED=1 npm run build:tv:tizen
@@ -81,25 +90,29 @@ jobs:
           sha256sum den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
             den-tv-tizen-unsigned.tar.gz > den-tv-samsung.sha256
           printf 'tizen=%s\nsource=%s\n' "$version" "$GITHUB_SHA" > den-tv-samsung.version
-          echo "TIZEN_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Publish stable Samsung downloads
+          {
+            echo "TIZEN_VERSION=$version"
+            echo "TAG=tv-samsung-v$version"
+          } >> "$GITHUB_ENV"
+      - name: Publish immutable Samsung release
         working-directory: web
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: tv-samsung
         run: |
           set -euo pipefail
-          notes=$(printf 'Stable Den Samsung widgets with bundled TV UI.\n\n- Tizen: `%s`\n- Source: `%s`\n' \
+          notes=$(printf 'Den Samsung widgets with bundled TV UI.\n\n- Tizen: `%s`\n- Source: `%s`\n' \
             "$TIZEN_VERSION" "$GITHUB_SHA")
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh api --method PATCH "repos/$REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          else
-            gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Den for Samsung TV" --notes "$notes" --latest=false
-          fi
-          gh release edit "$TAG" --repo "$REPO" --title "Den for Samsung TV" \
-            --notes "$notes" --latest=false
-          gh release upload "$TAG" --repo "$REPO" --clobber \
+          test -z "$(gh release view "$TAG" --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)" || {
+            echo "::error::release $TAG already exists"
+            exit 1
+          }
+          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "Den for Samsung TV $TIZEN_VERSION" --notes "$notes" --draft --latest=false \
             den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
             den-tv-tizen-unsigned.tar.gz den-tv-samsung.sha256 den-tv-samsung.version
+          verify="$RUNNER_TEMP/samsung-release"
+          mkdir -p "$verify"
+          gh release download "$TAG" --repo "$REPO" --dir "$verify"
+          (cd "$verify" && sha256sum -c den-tv-samsung.sha256)
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=false

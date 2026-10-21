@@ -1,0 +1,99 @@
+name: tv-webos-publish
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tv-webos-publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require successful CI for this main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          conclusion=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+            --limit 1 --json conclusion --jq '.[0].conclusion // ""')
+          test "$conclusion" = success || {
+            echo "::error::exact-main CI is not successful for $GITHUB_SHA"
+            exit 1
+          }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Build LG webOS launcher
+        working-directory: web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(cat tv-packaging/webos/VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version_gt() {
+            test "$1" != "$2" && test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
+          }
+          current=0.0.0
+          if gh release view tv-launchers --repo "$REPO" >/dev/null 2>&1; then
+            legacy="$RUNNER_TEMP/legacy-launchers"
+            mkdir -p "$legacy"
+            gh release download tv-launchers --repo "$REPO" --pattern den-tv-launchers.versions --dir "$legacy"
+            current=$(sed -n 's/^webos=//p' "$legacy/den-tv-launchers.versions")
+          fi
+          while read -r tag; do
+            candidate=${tag#tv-webos-v}
+            if version_gt "$candidate" "$current"; then current=$candidate; fi
+          done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep -E '^tv-webos-v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          version_gt "$version" "$current" || {
+            echo "::error::webOS launcher version $version must exceed published $current"
+            exit 1
+          }
+
+          npm install --global @webos-tools/cli@3.2.6
+          node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$version"
+          mkdir -p tv-release/den-tv-webos
+          mv "tv-packages/webos/packages/com.den.edge.tv_${version}_all.ipk" den-tv-webos.ipk
+          cp den-tv-webos.ipk tv-release/den-tv-webos/den-tv-webos.ipk
+          cp tv-packaging/install-webos.sh tv-release/den-tv-webos/install.sh
+          tar -C tv-release -czf den-tv-webos.tar.gz den-tv-webos
+          sha256sum den-tv-webos.ipk den-tv-webos.tar.gz > den-tv-webos.sha256
+          printf 'webos=%s\nsource=%s\n' "$version" "$GITHUB_SHA" > den-tv-webos.version
+          {
+            echo "VERSION=$version"
+            echo "TAG=tv-webos-v$version"
+          } >> "$GITHUB_ENV"
+      - name: Publish immutable LG webOS release
+        working-directory: web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes=$(printf 'Den LG webOS launcher `%s`.\n\n- Source: `%s`\n' "$VERSION" "$GITHUB_SHA")
+          test -z "$(gh release view "$TAG" --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)" || {
+            echo "::error::release $TAG already exists"
+            exit 1
+          }
+          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" --title "Den LG webOS $VERSION" \
+            --notes "$notes" --draft --latest=false \
+            den-tv-webos.ipk den-tv-webos.tar.gz den-tv-webos.sha256 den-tv-webos.version
+          verify="$RUNNER_TEMP/webos-release"
+          mkdir -p "$verify"
+          gh release download "$TAG" --repo "$REPO" --dir "$verify"
+          (cd "$verify" && sha256sum -c den-tv-webos.sha256)
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=false
