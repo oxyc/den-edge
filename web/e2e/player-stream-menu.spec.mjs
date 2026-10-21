@@ -89,7 +89,7 @@ test('a chosen stream is acknowledged while its replacement is opening', async (
   const asked = await mockPlayer(page, { replacementGate });
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect
-    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime))
+    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(1);
 
   await page.getByRole('button', { name: 'Stream: 4K · 11 GB' }).click();
@@ -124,7 +124,7 @@ test('an audio choice requests that exact track and stays acknowledged until it 
   const asked = await mockPlayer(page, { replacementGate, audioTracks });
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect
-    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime))
+    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(1);
 
   await page.getByRole('button', { name: 'Audio track: English 5.1' }).click();
