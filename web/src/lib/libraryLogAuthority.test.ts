@@ -18,6 +18,7 @@ import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
+import { readFinishedLibraryViews } from './finishedLibraryViews';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -136,6 +137,65 @@ async function pinDeliveryServer() {
 }
 
 describe('LibraryLogAuthority', () => {
+  const cacheSelections = async (opened: LibraryLogAuthority) => {
+    await opened.select({ kind: 'overview' });
+    await opened.select({ kind: 'continue' });
+    await opened.select({ kind: 'settings' });
+    await opened.select({ kind: 'runtime' });
+  };
+
+  const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
+
+  it('invalidates a published finished view as soon as a new revision is only partly selected', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-invalidation-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+
+      await opened.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+      await opened.close();
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a debounced finished view when its authority revision changes', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-debounce-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await cacheSelections(opened);
+      await opened.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+      await vi.advanceTimersByTimeAsync(250);
+      await opened.close();
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {
     await ensureSyncPolicy();
     const vault = memoryVault();

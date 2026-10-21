@@ -55,7 +55,13 @@ it('a Worker offered the page’s compiled den-core waits for it and loads nothi
   const core = await loader();
   const { port1, port2 } = new MessageChannel();
   core.acceptSyncPolicy(port2);
+  const requested = new Promise((resolve) => {
+    port1.onmessage = (event) => resolve(event.data);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(core.initialize, 'an unused offer loads nothing').not.toHaveBeenCalled();
   const opening = core.ensureSyncPolicy();
+  await expect(requested).resolves.toBe('den-core-module-request');
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(core.initialize, 'nothing loads before the page answers').not.toHaveBeenCalled();
   // The smallest valid wasm module: magic and version.
@@ -70,7 +76,11 @@ it('a Worker whose page could not compile den-core loads its own', async () => {
   const core = await loader();
   const { port1, port2 } = new MessageChannel();
   core.acceptSyncPolicy(port2);
+  const requested = new Promise((resolve) => {
+    port1.onmessage = (event) => resolve(event.data);
+  });
   const opening = core.ensureSyncPolicy();
+  await requested;
   port1.postMessage(null);
   await opening;
   expect(core.initialize).toHaveBeenCalledWith(undefined);

@@ -1,10 +1,12 @@
 import { initialize } from '../vendor/den-core/index.js';
+import { SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
 let ready = false;
 let pending: Promise<void> | undefined;
 let startPending: (() => void) | undefined;
 /** The page's compiled den-core, when it offered one (`offerSyncPolicy`); null once it said it has none. */
 let offered: Promise<WebAssembly.Module | null> | undefined;
+let requestOffered: (() => void) | undefined;
 
 /** A library Worker takes the module the page compiled instead of downloading and compiling its own. */
 export function acceptSyncPolicy(port: MessagePort): void {
@@ -14,6 +16,10 @@ export function acceptSyncPolicy(port: MessagePort): void {
       resolve(event.data instanceof WebAssembly.Module ? event.data : null);
     };
   });
+  requestOffered = () => {
+    requestOffered = undefined;
+    port.postMessage(SYNC_POLICY_REQUEST);
+  };
 }
 
 /** One idle warm-up, promoted immediately when an action needs it. Rejections permit a fresh retry. */
@@ -28,6 +34,7 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
     const start = () => {
       cancel?.();
       startPending = undefined;
+      requestOffered?.();
       void Promise.resolve()
         .then(async () => initialize((await offered) ?? undefined))
         .then(
