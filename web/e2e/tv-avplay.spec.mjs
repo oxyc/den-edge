@@ -89,6 +89,26 @@ test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visi
   await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(12);
   expect((await callsNamed(page, 'seekTo')).some((call) => call[1] === 12_000)).toBe(true);
 
+  // Samsung exposes the same useful transport as LG, not a decoder-specific row of text buttons. Prove the
+  // timeline controls AVPlay itself: this is the behavior a viewer needs, rather than an assertion about CSS.
+  const timeline = page.getByRole('slider', { name: 'Playback position' });
+  await expect(timeline).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Rewind 10 seconds' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Forward 10 seconds' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Play from beginning' })).toBeVisible();
+  const beforeTimelineSeek = await video.evaluate((element) => element.currentTime);
+  await timeline.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime))
+    .toBeGreaterThan(beforeTimelineSeek + 5);
+  await expect
+    .poll(async () => (await callsNamed(page, 'seekTo')).at(-1)?.[1] ?? 0)
+    // A range step snaps to its next ten-second boundary (for example 12s -> 20s), rather than adding ten.
+    .toBeGreaterThan((beforeTimelineSeek + 5) * 1000);
+  await page.getByRole('button', { name: 'Play from beginning' }).click();
+  await expect.poll(async () => (await callsNamed(page, 'seekTo')).at(-1)?.[1]).toBe(0);
+
   expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
   await expect.poll(() => callsNamed(page, 'pause')).toHaveLength(1);

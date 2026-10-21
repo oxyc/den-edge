@@ -354,8 +354,9 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(subtitlePicker).toBeVisible();
   for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(subtitlePicker).toBeFocused();
-  await expect(subtitlePicker).toHaveCSS('outline-color', 'rgb(255, 255, 255)');
-  await expect(subtitlePicker).toHaveCSS('outline-width', '4px');
+  await expect(subtitlePicker).toHaveCSS('outline-style', 'none');
+  await expect(subtitlePicker).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(subtitlePicker).toHaveCSS('color', 'rgb(0, 0, 0)');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toBeVisible();
   // Escape and hardware Back each cancel track-picker editing without closing playback.

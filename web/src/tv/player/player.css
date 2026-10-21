@@ -26,14 +26,14 @@
   text-decoration: none;
 }
 
-/* webOS gets one ten-foot control surface over the picture: scrub first, transport second. The wide gradient
-   preserves the image while keeping every label readable on bright HDR frames. */
-.webos-player {
+/* Hosted TV shells get one Apple-TV-shaped ten-foot control surface over the picture: scrub first, transport
+   second. The wide gradient preserves the image while keeping every label readable on bright HDR frames. */
+.full-tv-player {
   grid-template-rows: minmax(0, 1fr);
   padding: 0;
 }
 
-.webos-player > header {
+.full-tv-player > header {
   position: absolute;
   top: 0;
   right: 0;
@@ -43,12 +43,12 @@
   background: linear-gradient(to bottom, rgb(0 0 0 / 0.78), transparent);
 }
 
-.webos-player > header b {
+.full-tv-player > header b {
   flex: none;
   max-width: 50vw;
 }
 
-.webos-player > .notices {
+.full-tv-player > .notices {
   position: absolute;
   top: clamp(78px, 9vh, 110px);
   right: 5vw;
@@ -56,12 +56,12 @@
   z-index: 5;
 }
 
-.webos-player > .stage {
+.full-tv-player > .stage {
   position: absolute;
   inset: 0;
 }
 
-.webos-player > footer {
+.full-tv-player > footer {
   position: absolute;
   right: 5vw;
   bottom: clamp(22px, 3vh, 38px);
@@ -70,7 +70,7 @@
   padding: 0;
 }
 
-.webos-transport {
+.full-tv-transport {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -151,8 +151,8 @@
   justify-content: center;
 }
 
-.webos-transport button,
-.webos-transport a {
+.full-tv-transport button,
+.full-tv-transport a {
   display: grid;
   place-items: center;
   min-width: 68px;
@@ -174,7 +174,7 @@
     transform 120ms ease;
 }
 
-.webos-transport .tv-play-pause {
+.full-tv-transport .tv-play-pause {
   --button-icon-size: 38px;
 
   width: 86px;
@@ -183,20 +183,9 @@
   color: #fff;
 }
 
-.webos-transport .tv-next {
-  display: flex;
-  width: auto;
-  min-width: 142px;
-  padding: 0 27px;
-  gap: 13px;
-  font-size: 22px;
-}
-
-.webos-transport .tv-next span {
-  margin-top: -2px;
-  font-size: 34px;
-  font-weight: 400;
-  line-height: 1;
+.full-tv-transport .tv-next {
+  width: 68px;
+  min-width: 68px;
 }
 
 .skip-icon {
@@ -208,6 +197,46 @@
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2.7;
+}
+
+.transport-icon {
+  width: 43px;
+  height: 43px;
+  overflow: visible;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.7;
+}
+
+.transport-icon .filled {
+  fill: currentcolor;
+  stroke: none;
+}
+
+/* AVKit renders Den's stream, audio and subtitle actions as circled symbols. Keep their existing accessible names
+   and menu implementations, but present the hosted-TV triggers as that same compact action family. */
+.full-tv-player footer .controls > .pick,
+.full-tv-player footer .controls > .pick-menu,
+.full-tv-player footer .pick-menu .trigger.pick {
+  flex: 0 0 68px;
+  width: 68px;
+  min-width: 68px;
+  max-width: 68px;
+  min-height: 68px;
+  padding: 0;
+  justify-content: center;
+  border-color: rgb(255 255 255 / 0.08);
+  background: rgb(255 255 255 / 0.16);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+}
+
+.full-tv-player footer .pick .icon,
+.full-tv-player footer .pick-menu .icon {
+  width: 31px;
+  height: 31px;
+  opacity: 1;
 }
 
 .skip-icon text {
@@ -228,7 +257,7 @@
   transform: scale(1.1);
 }
 
-.den-tv.tv-remote-active .player .webos-transport .tv-play-pause:focus {
+.den-tv.tv-remote-active .player .full-tv-transport .tv-play-pause:focus {
   transform: scale(1.13);
 }
 
@@ -245,6 +274,16 @@
   outline: var(--ring-width) solid var(--focus-ring);
   outline-offset: var(--ring-width);
   box-shadow: none;
+}
+
+.den-tv.tv-remote-active .full-tv-player footer .pick:focus-within,
+.den-tv.tv-remote-active .full-tv-player footer .pick-menu .trigger.pick:focus {
+  border-color: transparent;
+  outline: 0;
+  background: #fff;
+  color: #000;
+  box-shadow: none;
+  transform: scale(1.1);
 }
 
 .player header,
@@ -265,8 +304,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .webos-transport button,
-  .webos-transport a,
+  .full-tv-transport button,
+  .full-tv-transport a,
   .tv-timeline input[type='range']::-webkit-slider-thumb,
   .player header,
   .player footer,
