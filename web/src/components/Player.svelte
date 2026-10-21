@@ -461,6 +461,17 @@
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
+  /**
+   * The playing release is already a valid stream choice before (or even when) the background listing answers.
+   * TV always exposes the stream control, like the native Apple TV player; ordinary web keeps hiding a picker
+   * that would contain only one choice. De-duplicate because the completed listing normally includes this release.
+   */
+  function releaseChoices(): Release[] {
+    if (!session) return releases;
+    return releases.some((release) => release.filename === session?.release.filename)
+      ? releases
+      : [{ ...session.release, plays: session.video?.transcoded ? 'convert' : 'yes' }, ...releases];
+  }
   /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
   let swapped = $state<string | null>(null);
   /**
@@ -3569,7 +3580,7 @@
       {#if autoSwitch}
         {@render banner(autoSwitch, () => (autoSwitch = null))}
       {:else if bufferLine}
-        {@render banner(bufferLine)}
+        {@render banner(bufferLine, undefined, undefined, true)}
       {/if}
       {#if slowPick}
         {@render banner(
@@ -3901,7 +3912,7 @@
         {/if}
       </p>
       <div class="controls" data-tv-horizontal-group={fullTvTransport ? 'actions' : undefined}>
-        {#if releases.length > 1}
+        {#if fullTvTransport || releases.length > 1}
           <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
                quality and size over the release's file name — and ticks the one playing. -->
           {@const playingFile = session.release.filename}
@@ -3912,7 +3923,7 @@
               heading="Streams"
               triggerClass="pick"
               items={() =>
-                releases.map((release) => ({
+                releaseChoices().map((release) => ({
                   kind: 'radio',
                   group: 'release',
                   label: optionLabel(release),
@@ -4130,8 +4141,13 @@
   </svg>
 {/snippet}
 
-{#snippet banner(text: string, dismiss?: () => void, action?: { label: string; run: () => void })}
-  <p class="notice" role="status">
+{#snippet banner(
+  text: string,
+  dismiss?: () => void,
+  action?: { label: string; run: () => void },
+  quiet = false,
+)}
+  <p class="notice" class:quiet role="status">
     <span>{text}</span>
     {#if action}<Button
         variant="tertiary"
