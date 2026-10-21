@@ -3,6 +3,7 @@
 // what the device on the other side asks to allow, and what its list of linked devices keeps.
 
 import { cleanLabel, deviceLabel } from './edge';
+import { tvRuntimePlatform } from './tvRuntimePlatform';
 
 const STORAGE_KEY = 'den.deviceName';
 
@@ -26,7 +27,11 @@ class ThisDevice {
 
   /** The guess, whether or not a name has been chosen: the placeholder, and what clearing the field falls back to. */
   get guess(): string {
-    if (__DEN_TV__) return __DEN_TV_PLATFORM__ === 'webos' ? 'LG TV' : 'Samsung TV';
+    if (__DEN_TV__) {
+      const platform = tvRuntimePlatform();
+      if (platform === 'android') return 'Android TV';
+      return platform === 'webos' ? 'LG TV' : 'Samsung TV';
+    }
     return deviceLabel();
   }
 

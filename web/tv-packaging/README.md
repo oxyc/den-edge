@@ -1,5 +1,12 @@
 # TV packaging templates
 
+The Android TV launcher lives in `../../android-tv`: it is a small native WebView shell around the same hosted TV
+bundle as LG. It appends `DenAndroidTV/<version>` to its user agent, which lets the shared bundle label the device
+and route root Back to the native activity without exposing an Android JavaScript interface to third-party frames.
+CI builds and lints the shell. The intentional `tv-launchers-publish` workflow signs its APK with the repository's
+stable Android signing key and publishes it beside the webOS launcher; ordinary Den Edge releases do not rebuild
+either hosted-UI shell.
+
 `scripts/tv-package.mjs webos --url https://your-tv-host/` writes a hosted LG
 launcher into `tv-packages/webos/shell` and invokes LG's `ares-package` to put
 the `.ipk` in its sibling `packages` directory. It never modifies `dist-tv-*`.
@@ -31,6 +38,13 @@ appear in output. It does not start a backend, tunnel, preview server, or SDK.
 
 ## Bundled Tizen package (explicitly opt-in)
 
+Samsung is released intentionally as well, but separately because its widget contains the TV UI. Bump
+`tv-packaging/tizen/VERSION` and dispatch `tv-samsung-publish` when a tested TV UI change should reach Samsung. The
+workflow replaces the assets on the permanent `tv-samsung` release. For Android or LG launcher changes, bump the
+versions in `android-tv/VERSION` and `tv-packaging/webos/VERSION`, then dispatch `tv-launchers-publish` instead. Each
+workflow rejects a version that does not exceed the versions recorded on its current stable release and moves its
+permanent channel tag to the exact source commit.
+
 Build the actual local bundle with an API origin, then package it with a named
 Tizen Certificate Profile:
 
@@ -53,18 +67,17 @@ runs this shell-only validation (including optional `xmllint` XML validation).
 The build writes `web/dist-tv-tizen-package`; packaging copies that bundle into
 `web/tv-packages/tizen/shell`. The API setting must be an exact HTTPS origin—no
 path, query, fragment, or embedded credentials—and test-fixture builds are refused.
-The generated `config.xml` requires Tizen 8.0 (Chromium 108), declares the Samsung TV profile/API level, Internet and
-TV input-device privileges, and wildcard WARP network access because media CDNs and
+The publisher generates separate manifests requiring Tizen 8.0 (Chromium 108) and Tizen 6.5 (Chromium 85). Both
+declare the Samsung TV profile/API level, Internet and TV input-device privileges, and wildcard WARP access because media CDNs and
 user-installed addons are not known when the widget is signed. A CSP separately
 keeps executable scripts, styles, and workers inside the signed widget while allowing
 HTTPS media, images, frames, and connections. API credentials remain governed by the
 runtime's Den-path allowlist; WARP does not grant credentials to external origins.
-This packaged Samsung client therefore supports 2024-and-newer Tizen 8 TVs; older
-Samsung models are not qualified. Tizen 8 is the minimum because earlier Samsung Chromium engines require the broader
-`unsafe-eval` permission to compile WebAssembly; Tizen 8 supports the narrower
-`wasm-unsafe-eval` source used by Den, while Samsung submission guidance rejects
-`unsafe-eval`. The same policy is embedded in packaged HTML so production package
-E2E exercises it rather than testing a more permissive page.
+The Tizen 8 package uses the narrower `wasm-unsafe-eval` source. The separate Tizen 6.5 package uses the broader
+`unsafe-eval` required by that older engine and is intended for Apps2Samsung sideloading, not Seller Office
+submission. CI verifies both package variants, but 2022–2023 hardware remains unqualified until it is tested on a
+real TV. The same per-version policy is embedded in packaged HTML so production package E2E exercises it rather than
+testing a more permissive page.
 The packaged Vite build includes Samsung's required
 `$WEBAPIS/webapis/webapis.js` bridge in the entry HTML before the app module;
 the packager validates that exact bridge instead of injecting a divergent copy.

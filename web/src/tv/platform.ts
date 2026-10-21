@@ -1,3 +1,5 @@
+import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+
 /** Optional TV platform bridges. Every call is guarded so browser/E2E runs stay platform-neutral. */
 type TizenKey = { name: string; code: number };
 type TizenInput = {
@@ -64,6 +66,12 @@ export function exitTvApp(): boolean {
     tizen?: { application?: TizenApplication };
     webOS?: { platformBack?: () => void };
   };
+  // Android accepts this private top-level navigation. Unlike addJavascriptInterface, it exposes no native object
+  // to third-party trailer frames; the hosted bundle recognizes the shell by the user-agent suffix it owns.
+  if (tvRuntimePlatform() === 'android') {
+    location.href = 'den://exit';
+    return true;
+  }
   if (g.tizen?.application?.getCurrentApplication) {
     try {
       const application = g.tizen.application.getCurrentApplication();

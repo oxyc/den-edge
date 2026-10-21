@@ -4,6 +4,7 @@ import './packaged';
 import '../app.css';
 import './tv.css';
 import { installTVNavigation } from './navigation';
-document.documentElement.dataset.denTv = __DEN_TV_PLATFORM__;
+import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+document.documentElement.dataset.denTv = tvRuntimePlatform();
 installTVNavigation();
 void import('../../test/player');

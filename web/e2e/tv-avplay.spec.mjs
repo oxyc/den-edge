@@ -162,6 +162,39 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   await expect(page.locator('.den-avplay-captions')).toBeHidden();
 });
 
+test('Samsung serializes rapid seeks and coalesces them to the latest remote target', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page);
+  await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+
+  const before = await video.evaluate((element) => element.currentTime);
+  const existing = (await callsNamed(page, 'seekTo')).length;
+  await page.evaluate(() => window.__avplayFixture.delaySeeks());
+  expect(await remoteKey(page, 'Unidentified', 417)).toBe(true);
+  expect(await remoteKey(page, 'Unidentified', 417)).toBe(true);
+  expect(await remoteKey(page, 'Unidentified', 417)).toBe(true);
+
+  await expect.poll(() => callsNamed(page, 'seekTo')).toHaveLength(existing + 1);
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+  expect(await video.evaluate((element) => element.currentTime)).toBeCloseTo(before + 30, 3);
+
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'seekTo')).toHaveLength(existing + 2);
+  expect((await callsNamed(page, 'seekTo')).at(-1)?.[1]).toBeCloseTo((before + 30) * 1000, 0);
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(0);
+  await expect.poll(() => video.evaluate((element) => element.seeking)).toBe(false);
+  expect(await video.evaluate((element) => element.currentTime)).toBeCloseTo(before + 30, 3);
+  await expect(page.getByText('This release stopped responding.')).toHaveCount(0);
+});
+
 test('Samsung error reports retain the error enum without signed media details', async ({
   page,
 }) => {

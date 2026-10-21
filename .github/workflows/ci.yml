@@ -27,10 +27,10 @@ jobs:
   # commit; the candidate job below still rebuilds that exact version, probes /version and the Cast page, and scans
   # the resulting image. Do not spend another five browser runners and a Rust runner on byte-identical sources.
   scope:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       source_changed: ${{ steps.diff.outputs.source_changed }}
+      android_changed: ${{ steps.diff.outputs.android_changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,19 +38,34 @@ jobs:
       - name: Classify the main change
         id: diff
         env:
+          EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+          case "$EVENT" in
+            push) files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA") ;;
+            pull_request) files=$(git diff --name-only "$BASE" "$GITHUB_SHA") ;;
+            *)
+              echo "source_changed=true" >> "$GITHUB_OUTPUT"
+              echo "android_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
           if [ "$files" = VERSION ]; then
             echo "source_changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "source_changed=true" >> "$GITHUB_OUTPUT"
           fi
+          if grep -Eq '^(android-tv/|\.github/workflows/(ci|tv-launchers-publish)\.yml$)' <<<"$files"; then
+            echo "android_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "android_changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
   test:
     needs: scope
-    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
+    if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       # The assistant tests read den-spec's vectors from the submodule.
@@ -73,7 +88,7 @@ jobs:
   # for lint, unit tests, and production builds twice.
   web-checks:
     needs: scope
-    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
+    if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     # GitHub's runner already ships Chrome. The built-worker behavior check uses it directly, without downloading
     # Playwright's browser or OS packages into this once-only job.
@@ -122,12 +137,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  android-tv:
+    needs: scope
+    if: always() && needs.scope.outputs.android_changed == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-tv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Build and lint the Android TV shell
+        run: ./gradlew :app:lintDebug :app:assembleDebug --no-daemon
+
   # Playwright already uses all four CPUs on one hosted runner. File sharding supplies three runners without changing
   # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards
   # left the first with roughly 200 tests and a six-minute critical path while the second finished near four minutes.
   e2e:
     needs: scope
-    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
+    if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -188,7 +220,7 @@ jobs:
   # shards' dev server and four workers it measured the runner rather than the app.
   e2e-budgets:
     needs: scope
-    if: always() && (github.event_name != 'push' || needs.scope.outputs.source_changed == 'true')
+    if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     name: e2e budgets
     container:
@@ -213,7 +245,7 @@ jobs:
   # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
   web:
     if: always()
-    needs: [scope, web-checks, e2e, e2e-budgets]
+    needs: [scope, web-checks, e2e, e2e-budgets, android-tv]
     runs-on: ubuntu-latest
     steps:
       - name: Require every web check
@@ -222,11 +254,18 @@ jobs:
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
           BUDGETS: ${{ needs.e2e-budgets.result }}
+          ANDROID_TV: ${{ needs.android-tv.result }}
+          ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
-            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$BUDGETS" = skipped
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$BUDGETS" = skipped && test "$ANDROID_TV" = skipped
           else
             test "$CHECKS" = success && test "$E2E" = success && test "$BUDGETS" = success
+            if [ "$ANDROID_CHANGED" = true ]; then
+              test "$ANDROID_TV" = success
+            else
+              test "$ANDROID_TV" = skipped
+            fi
           fi
 
   # A PR proves the same shared build graph that main will publish. It reads main's cache but deliberately does not
