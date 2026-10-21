@@ -66,6 +66,8 @@ test('a final managed-source failure is redacted, actionable, and accessible', a
 
 test('a TorBox rate limit waits out Retry-After before a new operation', async () => {
   const askedAt = [];
+  let releaseRetry;
+  const retryGate = new Promise((resolve) => (releaseRetry = resolve));
   const { browser, page } = await playerPage(async (route) => {
     askedAt.push(Date.now());
     if (askedAt.length === 1) {
@@ -75,6 +77,7 @@ test('a TorBox rate limit waits out Retry-After before a new operation', async (
         body: JSON.stringify({ error: 'source_unavailable', cause: 'torbox_rate_limited' }),
       });
     } else {
+      await retryGate;
       await route.fulfill({
         status: 502,
         contentType: 'application/json',
@@ -86,6 +89,10 @@ test('a TorBox rate limit waits out Retry-After before a new operation', async (
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
 
     await expect(page.getByRole('status')).toContainText('waiting as requested');
+    await expect(page.getByRole('status')).toHaveText('TorBox asked Den to wait—trying again…', {
+      timeout: 5_000,
+    });
+    releaseRetry();
     await expect(page.getByRole('alert')).toContainText('available playback paths', {
       timeout: 5_000,
     });
