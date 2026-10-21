@@ -36,6 +36,10 @@ export default defineConfig({
   outputDir: './test-results',
   use: {
     baseURL: E2E_ORIGIN,
+    // Apply bounded steps to fixture pages and browsers launched directly by a spec. Without these, a missed
+    // readiness state consumes the entire test timeout and reports no useful action or navigation call log.
+    actionTimeout: 30_000,
+    navigationTimeout: 30_000,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
