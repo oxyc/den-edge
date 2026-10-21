@@ -263,6 +263,16 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
       .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
     expect(operations).toHaveLength(1);
+
+    // Desktop keeps subtitle selection and timing inside the player rather than sending either below the video.
+    await page.getByRole('button', { name: 'Subtitles: English' }).click();
+    await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
+    const timing = page.getByRole('status', { name: 'Subtitle timing' });
+    await expect(timing).toBeVisible();
+    await timing.getByRole('button', { name: 'Later' }).click();
+    await expect(timing.getByText('+0.5s')).toBeVisible();
+    await timing.getByRole('button', { name: 'Done' }).click();
+    await expect(timing).toHaveCount(0);
   } finally {
     await browser.close();
   }

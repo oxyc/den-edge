@@ -97,8 +97,22 @@ for (const [engine, browserType] of [
           })
           .toBeGreaterThan(1);
 
+        const video = page.locator('.player video');
+        if (layout === 'desktop') {
+          await expect(video).not.toHaveAttribute('controls', '');
+          await page.mouse.move(options.viewport.width / 2, options.viewport.height / 2);
+          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+          await page.getByRole('button', { name: 'Pause' }).click();
+          await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+          await page.getByRole('button', { name: 'Play', exact: true }).click();
+          await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
+        } else {
+          await expect(video).toHaveAttribute('controls', '');
+          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toHaveCount(0);
+        }
+
         const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });
-        await expect(picker).toHaveText('4K · 11 GB');
+        await expect(picker).toBeVisible();
         await expect(picker).toHaveAttribute('aria-haspopup', 'menu');
         await picker.click();
         const menu = page.getByRole('menu', { name: 'Stream: 4K · 11 GB' });
@@ -142,7 +156,7 @@ for (const [engine, browserType] of [
         await expect.poll(() => asked.length).toBe(2);
         expect(asked[1]).toMatchObject({ filename: releases[1].filename, transcode: 'never' });
         const next = page.getByRole('button', { name: 'Stream: 4K · 9 GB' });
-        await expect(next).toHaveText('4K · 9 GB', { timeout: 30_000 });
+        await expect(next).toBeVisible({ timeout: 30_000 });
         await next.click();
         await expect(
           page.getByRole('menuitemradio', {

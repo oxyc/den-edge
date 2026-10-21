@@ -22,7 +22,9 @@ async function measure(directory) {
     totalGzip += size;
     if (initial.has(`assets/${name}`)) initialGzip += size;
     if (
-      /den:tv-back|den-tv-diagnostics|tv-remote-active|tv-transport|den-avplay|Samsung AVPlay/.test(
+      // The owned player transport is deliberately shared with desktop browsers. Remote navigation, diagnostics
+      // and decoder bridges remain package-only and must never enter the ordinary browser graph.
+      /den:tv-back|den-tv-diagnostics|tv-remote-active|den-avplay|Samsung AVPlay/.test(
         bytes.toString(),
       )
     )

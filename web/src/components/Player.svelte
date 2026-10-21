@@ -254,6 +254,12 @@
   // on LG, AVPlay on Samsung), but exposing that implementation detail in the controls made Samsung needlessly
   // second-class. Android retains its launcher-era strip until its native playback surface adopts this contract.
   const fullTvTransport = __DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen';
+  // A desktop browser has enough room and a precise pointer for Den's complete transport. Phones and tablets keep
+  // their native controls: on iOS those are also the only route to the system fullscreen player, AirPlay and PiP.
+  // The query is intentionally capability-based, so a desktop Safari gets the same surface as desktop Chrome while
+  // a browser merely resized to phone width does not lose useful controls.
+  const desktopTransport = !tv && matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const customTransport = fullTvTransport || desktopTransport;
   // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
@@ -343,10 +349,16 @@
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
   };
 
+  let playerRoot = $state<HTMLDivElement>();
   let video = $state<HTMLVideoElement>();
   let tvPaused = $state(true);
   let tvPosition = $state(0);
   let tvDuration = $state(0);
+  let playerVolume = $state(1);
+  let playerMuted = $state(false);
+  let playerFullscreen = $state(false);
+  let webControlsVisible = $state(true);
+  let webControlsTimer: ReturnType<typeof setTimeout> | undefined;
   let tvDetailsOpen = $state(false);
   let tvSubtitleTimingOpen = $state(false);
   let tvEpisode = $state.raw<EpisodeDetail | null>();
@@ -2536,8 +2548,9 @@
   }
 
   function playing() {
-    if (tv) tvPaused = false;
+    if (customTransport) tvPaused = false;
     if (tv) setTvPlaybackActive(true);
+    scheduleWebControls();
     progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
@@ -2546,8 +2559,9 @@
   }
 
   function paused() {
-    if (tv) tvPaused = true;
+    if (customTransport) tvPaused = true;
     if (tv) setTvPlaybackActive(false);
+    revealWebControls(false);
     clearInterval(timer);
     report();
     if (session) {
@@ -2976,7 +2990,7 @@
    */
   function tick() {
     const at = video?.currentTime ?? remoteTime;
-    if (tv) {
+    if (customTransport) {
       tvPosition = at;
       tvDuration = length();
     }
@@ -3032,6 +3046,86 @@
     video.currentTime = 0;
     tvPosition = 0;
     void video.play();
+  }
+
+  function seekBy(seconds: number) {
+    if (!video) return;
+    const total = length();
+    video.currentTime = Math.max(
+      0,
+      total ? Math.min(video.currentTime + seconds, total) : video.currentTime + seconds,
+    );
+    tvPosition = video.currentTime;
+  }
+
+  function togglePlaying() {
+    if (!video) return;
+    if (video.paused) void video.play();
+    else video.pause();
+  }
+
+  function setVolume(event: Event) {
+    if (!video) return;
+    const volume = Number((event.currentTarget as HTMLInputElement).value);
+    video.volume = volume;
+    video.muted = volume === 0;
+    playerVolume = volume;
+    playerMuted = video.muted;
+  }
+
+  function toggleMuted() {
+    if (!video) return;
+    video.muted = !video.muted;
+    playerMuted = video.muted;
+  }
+
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await playerRoot?.requestFullscreen();
+  }
+
+  type PictureInPictureVideo = HTMLVideoElement & {
+    webkitPresentationMode?: string;
+    webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
+  };
+
+  function canPictureInPicture(): boolean {
+    const element = video as PictureInPictureVideo | undefined;
+    return !!(
+      element &&
+      (('pictureInPictureEnabled' in document && document.pictureInPictureEnabled) ||
+        element.webkitSetPresentationMode)
+    );
+  }
+
+  async function togglePictureInPicture() {
+    const element = video as PictureInPictureVideo | undefined;
+    if (!element) return;
+    if ('pictureInPictureElement' in document && document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else if (element.requestPictureInPicture) {
+      await element.requestPictureInPicture();
+    } else if (element.webkitSetPresentationMode) {
+      element.webkitSetPresentationMode(
+        element.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture',
+      );
+    }
+  }
+
+  function scheduleWebControls() {
+    if (!desktopTransport) return;
+    clearTimeout(webControlsTimer);
+    if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen)
+      webControlsTimer = setTimeout(() => {
+        if (!playerMenuOpen() && !tvSubtitleTimingOpen) webControlsVisible = false;
+      }, 3_500);
+  }
+
+  function revealWebControls(schedule = true) {
+    if (!desktopTransport) return;
+    webControlsVisible = true;
+    clearTimeout(webControlsTimer);
+    if (schedule) scheduleWebControls();
   }
 
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
@@ -3359,6 +3453,38 @@
       : document.querySelector('.player [popover]:popover-open') !== null;
   }
 
+  function playerKey(event: KeyboardEvent) {
+    if (
+      event.key === 'Escape' &&
+      !event.defaultPrevented &&
+      !document.fullscreenElement &&
+      !playerMenuOpen()
+    ) {
+      close();
+      return;
+    }
+    if (
+      !desktopTransport ||
+      event.defaultPrevented ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    )
+      return;
+    const target = event.target as HTMLElement | null;
+    if (target?.matches('button, a, input, select, textarea, [role="menuitem"], [contenteditable]'))
+      return;
+    const key = event.key.toLowerCase();
+    if (key === ' ' || key === 'k') togglePlaying();
+    else if (event.key === 'ArrowLeft') seekBy(-SKIP_SECS);
+    else if (event.key === 'ArrowRight') seekBy(SKIP_SECS);
+    else if (key === 'm') toggleMuted();
+    else if (key === 'f') void toggleFullscreen();
+    else return;
+    revealWebControls();
+    event.preventDefault();
+  }
+
   // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
   // the size the poster cards already loaded, and the detail page's — and the video's own transport.
   $effect(() => {
@@ -3420,6 +3546,7 @@
     addEventListener('pagehide', finish);
     addEventListener('message', castMessage);
     return () => {
+      clearTimeout(webControlsTimer);
       for (const [el, overflow] of scrolls) el.style.overflow = overflow;
       removeEventListener('pagehide', finish);
       removeEventListener('message', castMessage);
@@ -3476,16 +3603,10 @@
 
 <!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
      (`defaultPrevented`), or — focus still on its trigger — it is open as the key arrives. -->
-<svelte:window
-  onkeydown={(event) =>
-    event.key === 'Escape' &&
-    !event.defaultPrevented &&
-    !document.fullscreenElement &&
-    !playerMenuOpen() &&
-    close()}
-/>
+<svelte:window onkeydown={playerKey} />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
 <svelte:document
+  onfullscreenchange={() => (playerFullscreen = !!document.fullscreenElement)}
   onvisibilitychange={() => {
     if (document.visibilityState !== 'hidden') return;
     if (tv) close();
@@ -3494,11 +3615,19 @@
 />
 
 <div
+  bind:this={playerRoot}
   class="player"
   class:full-tv-player={fullTvTransport}
+  class:web-custom-player={desktopTransport}
+  class:web-controls-hidden={desktopTransport && !webControlsVisible}
   role="dialog"
+  tabindex="-1"
   aria-modal="true"
   aria-label={heading}
+  onpointermove={() => revealWebControls()}
+  onpointerleave={scheduleWebControls}
+  onfocusin={() => revealWebControls(false)}
+  onfocusout={scheduleWebControls}
 >
   <header>
     <b>{heading}</b>
@@ -3521,6 +3650,7 @@
               ? `Playing through Den Remux. ${ruledOut}.`
               : 'Playing through Den Remux'}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
+          onclose={scheduleWebControls}
           items={() => [
             {
               kind: 'item',
@@ -3701,13 +3831,22 @@
         <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
         <video
           bind:this={video}
-          controls={!tv}
+          controls={!customTransport}
           autoplay
           playsinline
           use:allowAirPlay
+          onclick={() => {
+            if (!desktopTransport) return;
+            if (!webControlsVisible) revealWebControls();
+            else togglePlaying();
+          }}
+          onvolumechange={() => {
+            playerVolume = video?.volume ?? playerVolume;
+            playerMuted = video?.muted ?? playerMuted;
+          }}
           onloadedmetadata={() => {
             seekToStart();
-            if (tv) {
+            if (customTransport) {
               tvPosition = video?.currentTime ?? 0;
               tvDuration = length();
             }
@@ -3746,96 +3885,120 @@
             <track kind="subtitles" src={track.url} srclang={track.language} label={track.value} />
           {/each}
         </video>
-        {#if tv}
-          {#if fullTvTransport}
-            <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
-              <div class="tv-timeline">
-                <span aria-hidden="true">{clockTime(tvPosition)}</span>
-                <input
-                  type="range"
-                  aria-label="Playback position"
-                  aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
-                  min="0"
-                  max={Math.max(tvDuration, 1)}
-                  step="10"
-                  value={Math.min(tvPosition, Math.max(tvDuration, 1))}
-                  disabled={!tvDuration}
-                  style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
-                  oninput={(event) => {
-                    if (!video) return;
-                    const to = Number(event.currentTarget.value);
-                    video.currentTime = to;
-                    tvPosition = to;
-                  }}
-                />
-                <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
-              </div>
-              <div class="tv-transport-actions" data-tv-horizontal-group="transport">
-                <button
-                  class="tv-skip"
-                  type="button"
-                  aria-label="Rewind 10 seconds"
-                  onclick={() => {
-                    if (!video) return;
-                    video.currentTime = Math.max(0, video.currentTime - SKIP_SECS);
-                    tvPosition = video.currentTime;
-                  }}
-                >
-                  {@render skipIcon('back')}
-                </button>
-                <button
-                  class="tv-play-pause"
-                  type="button"
-                  aria-label={tvPaused ? 'Play' : 'Pause'}
-                  onclick={() => (video?.paused ? void video.play() : video?.pause())}
-                >
-                  <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled={tvPaused} />
-                </button>
-                <button
-                  class="tv-skip"
-                  type="button"
-                  aria-label="Forward 10 seconds"
-                  onclick={() => {
-                    if (!video) return;
-                    video.currentTime = Math.min(
-                      length() || Infinity,
-                      video.currentTime + SKIP_SECS,
-                    );
-                    tvPosition = video.currentTime;
-                  }}
-                >
-                  {@render skipIcon('forward')}
-                </button>
-              </div>
-            </nav>
-          {:else}
-            <nav class="tv-transport legacy-transport" aria-label="Playback controls">
+        {#if customTransport}
+          <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
+            <div class="tv-timeline">
+              <span aria-hidden="true">{clockTime(tvPosition)}</span>
+              <input
+                type="range"
+                aria-label="Playback position"
+                aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
+                min="0"
+                max={Math.max(tvDuration, 1)}
+                step="10"
+                value={Math.min(tvPosition, Math.max(tvDuration, 1))}
+                disabled={!tvDuration}
+                style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+                oninput={(event) => {
+                  if (!video) return;
+                  const to = Number(event.currentTarget.value);
+                  video.currentTime = to;
+                  tvPosition = to;
+                }}
+              />
+              <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
+            </div>
+            <div class="tv-transport-actions" data-tv-horizontal-group="transport">
               <button
+                class="tv-skip"
                 type="button"
-                onclick={() =>
-                  video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
-                >−10s</button
+                aria-label="Rewind 10 seconds"
+                onclick={() => seekBy(-SKIP_SECS)}
               >
+                {@render skipIcon('back')}
+              </button>
               <button
+                class="tv-play-pause"
                 type="button"
-                onclick={() => (video?.paused ? void video.play() : video?.pause())}
-                >{tvPaused ? 'Play' : 'Pause'}</button
+                aria-label={tvPaused ? 'Play' : 'Pause'}
+                onclick={togglePlaying}
               >
+                <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled={tvPaused} />
+              </button>
               <button
+                class="tv-skip"
                 type="button"
-                onclick={() =>
-                  video &&
-                  (video.currentTime = Math.min(
-                    length() || Infinity,
-                    video.currentTime + SKIP_SECS,
-                  ))}>+10s</button
+                aria-label="Forward 10 seconds"
+                onclick={() => seekBy(SKIP_SECS)}
               >
-              {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
-              <button type="button" onclick={close}>Close</button>
-            </nav>
-          {/if}
+                {@render skipIcon('forward')}
+              </button>
+              {#if desktopTransport}
+                <div class="web-transport-extras">
+                  <button
+                    class="web-volume-button"
+                    type="button"
+                    aria-label={playerMuted ? 'Unmute' : 'Mute'}
+                    onclick={toggleMuted}
+                  >
+                    <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
+                  </button>
+                  <input
+                    class="web-volume"
+                    type="range"
+                    aria-label="Volume"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={playerMuted ? 0 : playerVolume}
+                    oninput={setVolume}
+                  />
+                  {#if canPictureInPicture()}
+                    <button
+                      class="web-pip"
+                      type="button"
+                      aria-label="Picture in picture"
+                      title="Picture in picture"
+                      onclick={() => void togglePictureInPicture()}>PiP</button
+                    >
+                  {/if}
+                  <button
+                    type="button"
+                    aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                    title="Fullscreen"
+                    onclick={() => void toggleFullscreen()}
+                  >
+                    <ButtonIcon name="fullscreen" />
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </nav>
+        {:else if tv}
+          <nav class="tv-transport legacy-transport" aria-label="Playback controls">
+            <button
+              type="button"
+              onclick={() =>
+                video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
+              >−10s</button
+            >
+            <button
+              type="button"
+              onclick={() => (video?.paused ? void video.play() : video?.pause())}
+              >{tvPaused ? 'Play' : 'Pause'}</button
+            >
+            <button
+              type="button"
+              onclick={() =>
+                video &&
+                (video.currentTime = Math.min(length() || Infinity, video.currentTime + SKIP_SECS))}
+              >+10s</button
+            >
+            {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
+            <button type="button" onclick={close}>Close</button>
+          </nav>
         {/if}
-        {#if fullTvTransport && active}
+        {#if customTransport && active}
           <Button
             variant="primary"
             class="tv-skip-overlay"
@@ -3843,12 +4006,33 @@
             onclick={skipActive}
           />
         {/if}
-        {#if fullTvTransport && tvSubtitleTimingOpen}
+        {#if customTransport && tvSubtitleTimingOpen}
           <section class="tv-subtitle-timing" aria-label="Subtitle timing" role="status">
-            <span>‹ Earlier</span>
+            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
+                >Earlier</button
+              >{:else}<span>‹ Earlier</span>{/if}
             <strong>{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong>
-            <span>Later ›</span>
-            <small>Left or right to adjust · Select to finish</small>
+            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
+                >Later</button
+              >{:else}<span>Later ›</span>{/if}
+            {#if desktopTransport}
+              <div class="web-timing-actions">
+                <button
+                  type="button"
+                  disabled={subtitleOffset === 0}
+                  onclick={() => adjustSubtitleOffset(-subtitleOffset)}>Reset</button
+                >
+                <button
+                  type="button"
+                  onclick={() => {
+                    tvSubtitleTimingOpen = false;
+                    scheduleWebControls();
+                  }}>Done</button
+                >
+              </div>
+            {:else}
+              <small>Left or right to adjust · Select to finish</small>
+            {/if}
           </section>
         {/if}
         {#if reconnecting}
@@ -3912,7 +4096,7 @@
         {/if}
       </p>
       <div class="controls" data-tv-horizontal-group={fullTvTransport ? 'actions' : undefined}>
-        {#if fullTvTransport || releases.length > 1}
+        {#if customTransport || releases.length > 1}
           <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
                quality and size over the release's file name — and ticks the one playing. -->
           {@const playingFile = session.release.filename}
@@ -3922,6 +4106,7 @@
               label={`Stream: ${short}`}
               heading="Streams"
               triggerClass="pick"
+              onclose={scheduleWebControls}
               items={() =>
                 releaseChoices().map((release) => ({
                   kind: 'radio',
@@ -3935,7 +4120,7 @@
             >
               {#snippet glyph()}
                 {@render plates()}
-                {#if !fullTvTransport}
+                {#if !customTransport}
                   <span class="value" aria-hidden="true">{short}</span>
                   {@render chevron()}
                 {/if}
@@ -3943,13 +4128,14 @@
             </ActionMenu>
           </div>
         {/if}
-        {#if (fullTvTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
-          {#if fullTvTransport}
+        {#if (customTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
+          {#if customTransport}
             <div class="pick-menu audio-pick">
               <ActionMenu
                 label={`Audio track: ${trackLabel(playingTrack, session.audioTrack)}`}
                 heading="Audio Track"
                 triggerClass="pick"
+                onclose={scheduleWebControls}
                 items={() => [
                   ...session!.audioTracks.map((track, n) => ({
                     kind: 'radio' as const,
@@ -4001,6 +4187,7 @@
               label={`Subtitles: ${chosenSubtitleLabel}`}
               heading="Subtitles"
               triggerClass="pick"
+              onclose={scheduleWebControls}
               items={() => [
                 {
                   kind: 'radio',
@@ -4017,7 +4204,7 @@
                   checked: subtitleValue(track) === subtitleChoice,
                   onselect: () => void chooseSubtitle(subtitleValue(track)),
                 })),
-                ...(fullTvTransport && subtitleChoice !== null
+                ...(customTransport && subtitleChoice !== null
                   ? [
                       {
                         kind: 'item' as const,
@@ -4039,7 +4226,7 @@
               ]}
             >
               {#snippet glyph()}
-                {#if fullTvTransport}
+                {#if customTransport}
                   {@render subtitlesIcon()}
                 {:else}
                   {@render globe()}
@@ -4050,7 +4237,7 @@
             </ActionMenu>
           </div>
         {/if}
-        {#if fullTvTransport}
+        {#if customTransport}
           <button
             class="player-tv-action beginning-action"
             type="button"
@@ -4068,10 +4255,10 @@
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
-        {#if !fullTvTransport && active}
+        {#if !customTransport && active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
-        {#if !fullTvTransport && onnext && next}
+        {#if !customTransport && onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <Button
@@ -4585,6 +4772,359 @@
     border-color: var(--accent);
     outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
+  }
+
+  /* Desktop gets the same owned transport as the TV shells, scaled down through variables instead of maintaining a
+     second player. Touch browsers keep the ordinary grid and their system controls above. */
+  .web-custom-player {
+    --player-control-size: 44px;
+    --player-primary-size: 56px;
+    --player-control-gap: 12px;
+    --player-side: clamp(20px, 3vw, 48px);
+
+    grid-template-rows: minmax(0, 1fr);
+    padding: 0;
+  }
+
+  .web-custom-player > header {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 5;
+    padding: 22px var(--player-side) 72px;
+    background: linear-gradient(to bottom, rgb(0 0 0 / 0.8), transparent);
+  }
+
+  .web-custom-player > .notices {
+    position: absolute;
+    top: 72px;
+    right: var(--player-side);
+    left: var(--player-side);
+    z-index: 6;
+  }
+
+  .web-custom-player > .stage {
+    position: absolute;
+    inset: 0;
+  }
+
+  .web-custom-player video {
+    cursor: pointer;
+  }
+
+  .web-custom-player > footer {
+    position: absolute;
+    right: var(--player-side);
+    bottom: 24px;
+    left: var(--player-side);
+    z-index: 5;
+    display: block;
+    padding: 0;
+    pointer-events: none;
+  }
+
+  .web-custom-player > footer .release {
+    position: absolute;
+    bottom: 92px;
+    left: 0;
+    width: min(55vw, 64ch);
+    color: rgb(255 255 255 / 0.86);
+    font-size: 13px;
+    text-shadow: 0 1px 5px #000;
+    pointer-events: auto;
+  }
+
+  .web-custom-player > footer .controls {
+    justify-content: flex-start;
+    width: fit-content;
+    max-width: calc(50% - 100px);
+    pointer-events: auto;
+  }
+
+  .web-custom-player .full-tv-transport {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
+    display: grid;
+    gap: 12px;
+    padding: 105px var(--player-side) 18px;
+    background: linear-gradient(to top, rgb(0 0 0 / 0.92), rgb(0 0 0 / 0.52) 52%, transparent);
+  }
+
+  .web-custom-player .tv-timeline {
+    display: grid;
+    grid-template-columns: 6ch minmax(0, 1fr) 6ch;
+    gap: 14px;
+    align-items: center;
+    color: rgb(255 255 255 / 0.9);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .web-custom-player .tv-timeline span:last-child {
+    text-align: right;
+  }
+
+  .web-custom-player .tv-timeline input[type='range'] {
+    width: 100%;
+    height: 24px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(
+      to right,
+      #fff 0 var(--tv-progress),
+      rgb(255 255 255 / 0.32) var(--tv-progress) 100%
+    );
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: 0;
+    border-radius: 50%;
+    appearance: none;
+    background: #fff;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.5);
+    transform: scale(0.72);
+    transition: transform 120ms ease;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.32);
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-progress {
+    height: 4px;
+    border-radius: 999px;
+    background: #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible {
+    outline: 0;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+
+  .web-custom-player .tv-transport-actions {
+    position: relative;
+    display: flex;
+    gap: var(--player-control-gap);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .web-custom-player .full-tv-transport button,
+  .web-custom-player footer .player-tv-action,
+  .web-custom-player footer .pick-menu :global(.trigger.pick) {
+    display: grid;
+    place-items: center;
+    width: var(--player-control-size);
+    min-width: var(--player-control-size);
+    max-width: var(--player-control-size);
+    height: var(--player-control-size);
+    min-height: var(--player-control-size);
+    padding: 0;
+    border: 1px solid rgb(255 255 255 / 0.12);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.14);
+    color: #fff;
+    font: inherit;
+    text-decoration: none;
+    box-shadow: 0 5px 18px rgb(0 0 0 / 0.28);
+    transition:
+      background 120ms ease,
+      transform 120ms ease;
+  }
+
+  .web-custom-player .tv-subtitle-timing button {
+    min-height: 40px;
+    padding: 0 14px;
+    border: 1px solid rgb(255 255 255 / 0.18);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.12);
+    color: #fff;
+    font: inherit;
+  }
+
+  .web-custom-player .full-tv-transport button:hover,
+  .web-custom-player footer .player-tv-action:hover,
+  .web-custom-player footer .pick-menu :global(.trigger.pick:hover) {
+    background: rgb(255 255 255 / 0.26);
+  }
+
+  .web-custom-player .full-tv-transport button:focus-visible,
+  .web-custom-player footer .player-tv-action:focus-visible,
+  .web-custom-player footer .pick-menu :global(.trigger.pick:focus-visible) {
+    border-color: transparent;
+    outline: var(--ring-width) solid #fff;
+    outline-offset: 3px;
+    transform: scale(1.06);
+  }
+
+  .web-custom-player .full-tv-transport .tv-play-pause {
+    --button-icon-size: 27px;
+
+    width: var(--player-primary-size);
+    min-width: var(--player-primary-size);
+    height: var(--player-primary-size);
+    background: rgb(255 255 255 / 0.92);
+    color: #111;
+  }
+
+  .web-custom-player .skip-icon,
+  .web-custom-player .transport-icon {
+    width: 28px;
+    height: 28px;
+    overflow: visible;
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.5;
+  }
+
+  .web-custom-player .skip-icon text {
+    fill: currentcolor;
+    stroke: none;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 750;
+    text-anchor: middle;
+  }
+
+  .web-custom-player .transport-icon .filled {
+    fill: currentcolor;
+    stroke: none;
+  }
+
+  .web-custom-player .web-transport-extras {
+    position: absolute;
+    right: 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .web-custom-player .web-volume {
+    width: 84px;
+    accent-color: #fff;
+  }
+
+  .web-custom-player .web-pip {
+    font-size: 11px;
+    font-weight: 750;
+  }
+
+  .web-custom-player footer .pick-menu {
+    flex: 0 0 var(--player-control-size);
+    width: var(--player-control-size);
+    min-width: var(--player-control-size);
+    max-width: var(--player-control-size);
+  }
+
+  .web-custom-player footer .pick-menu .icon {
+    width: 22px;
+    height: 22px;
+    opacity: 1;
+  }
+
+  .web-custom-player :global(.tv-skip-overlay) {
+    position: absolute;
+    right: var(--player-side);
+    bottom: 160px;
+    z-index: 7;
+    border-radius: 999px;
+  }
+
+  .web-custom-player .tv-subtitle-timing {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 8;
+    display: grid;
+    grid-template-columns: auto minmax(90px, auto) auto;
+    gap: 18px;
+    align-items: center;
+    padding: 22px;
+    border: 1px solid rgb(255 255 255 / 0.15);
+    border-radius: 20px;
+    background: rgb(25 25 25 / 0.9);
+    box-shadow: 0 18px 70px rgb(0 0 0 / 0.55);
+    transform: translate(-50%, -50%);
+    backdrop-filter: blur(20px);
+  }
+
+  .web-custom-player .tv-subtitle-timing strong {
+    font-size: 30px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+
+  .web-custom-player .web-timing-actions {
+    display: flex;
+    grid-column: 1 / -1;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  .web-custom-player > header,
+  .web-custom-player > footer,
+  .web-custom-player .full-tv-transport {
+    transition: opacity 180ms ease;
+  }
+
+  .web-custom-player.web-controls-hidden > header,
+  .web-custom-player.web-controls-hidden > footer,
+  .web-custom-player.web-controls-hidden .full-tv-transport {
+    opacity: 0;
+  }
+
+  @media (height <= 600px) {
+    .web-custom-player > footer .release {
+      display: none;
+    }
+
+    .web-custom-player .full-tv-transport {
+      padding-top: 72px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .web-custom-player > header,
+    .web-custom-player > footer,
+    .web-custom-player .full-tv-transport,
+    .web-custom-player .full-tv-transport button,
+    .web-custom-player footer .player-tv-action,
+    .web-custom-player footer .pick-menu :global(.trigger.pick),
+    .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
+      transition: none;
+    }
   }
 
   .error {
