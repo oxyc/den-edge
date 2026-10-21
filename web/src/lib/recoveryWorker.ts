@@ -1,7 +1,7 @@
 // Runs recovery_derive (den-spec wire/recovery-code.md §3) off the page's thread: one Argon2id at 64 MiB. The code's
 // data characters come in, `{locator, wrapKey}` or `{error}` goes out; nothing here is kept or logged.
 
-import { evaluate, initialize } from '../vendor/den-core/index.js';
+import { evaluateRecovery, initializeRecovery } from '../vendor/den-core/recovery.js';
 
 /**
  * `memory` when the wasm memory could not grow to the 64 MiB Argon2id needs — a RangeError from `Memory.grow`, or the
@@ -17,9 +17,9 @@ function failure(error: unknown): string {
 
 self.onmessage = async (event: MessageEvent<string>) => {
   try {
-    await initialize();
+    await initializeRecovery();
     const envelope = JSON.parse(
-      evaluate(JSON.stringify({ op: 'recovery_derive', data: event.data })),
+      evaluateRecovery(JSON.stringify({ op: 'recovery_derive', data: event.data })),
     ) as { ok?: { locator: string; wrapKey: string }; error?: string };
     self.postMessage(envelope.ok ?? { error: envelope.error ?? 'protocol_mismatch' });
   } catch (error) {
