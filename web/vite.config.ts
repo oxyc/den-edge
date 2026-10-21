@@ -47,6 +47,11 @@ const api = [
   '/grant',
   '/oauth',
   '/playback',
+  // Reel's carried-source control plane belongs to Edge. Keep these more-specific entries before the raw `/reel`
+  // media proxy below; otherwise local development strips the prefix and asks Reel itself for POST `/transport`,
+  // which correctly answers 405 and forces every carried source onto its relay fallback.
+  '/reel/transport',
+  '/reel/activate',
   '/den',
   '/ratings',
   '/warnings',
