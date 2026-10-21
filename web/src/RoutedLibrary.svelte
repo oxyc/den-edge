@@ -139,6 +139,20 @@
   let keptPending = 0;
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
 
+  let confirmedProfileHousehold = $state<string | null>(
+    untrack(() =>
+      libraryIdentity && knownProfileHousehold(libraryIdentity) ? libraryIdentity : null,
+    ),
+  );
+  let discoverProfiles: () => void = () => {};
+
+  const confirmProfileHousehold = (libraryKey: string) => {
+    rememberProfileHousehold(libraryKey);
+    confirmedProfileHousehold = libraryKey;
+    // Capability discovery controls creating a profile household. This authenticated household has already made the
+    // one-way transition, so its own wire-5 requirement is the authority for reading its profile directory.
+    discoverProfiles();
+  };
   const realProfilesHost = async () => (await profilesCapability()) === 'enabled';
 
   /** Startup breadcrumbs for a library that is opening: when it was asked for, and when (or how) it answered. */
@@ -162,9 +176,8 @@
     // claims the same already-running Worker, so provider caches and in-flight reads still have one owner.
     const services = createWorkerServiceSession({
       supervisor: {
-        profileHouseholdEnabled: realProfilesHost,
         knownProfileHousehold,
-        onProfileHouseholdBootstrapped: (libraryKey) => rememberProfileHousehold(libraryKey),
+        onProfileHouseholdConfirmed: confirmProfileHousehold,
       },
     });
     if (!key)
@@ -288,9 +301,7 @@
   });
 
   const openProfileActivity: ProfileActivityModelFactory = (libraryKey) => {
-    const services = createWorkerServiceSession({
-      supervisor: { profileHouseholdEnabled: realProfilesHost },
-    });
+    const services = createWorkerServiceSession();
     const model = new LibraryModel(services.library, {
       libraryKey,
       mode: 'online',
@@ -375,7 +386,6 @@
 
   // Discovery is fail-closed and asynchronous. A library stays behind a neutral gate until discovery completes,
   // so an enabled host can restore Visitor without ever exposing the Owner UI underneath it.
-  let discoverProfiles: () => void = () => {};
   onMount(() => {
     let current = true;
     let discovering = false;
@@ -383,8 +393,11 @@
       if (discovering || !libraryIdentity || !usesProfileDirectory(session)) return;
       discovering = true;
       profileCapability = 'checking';
-      void profilesCapability().then((capability) => {
+      void profilesCapability().then((hostCapability) => {
+        discovering = false;
         if (!current) return;
+        const capability =
+          confirmedProfileHousehold === libraryIdentity ? 'enabled' : hostCapability;
         if (
           (capability !== 'enabled' && capability !== 'preview') ||
           profileCoordinator ||

@@ -173,6 +173,25 @@ describe('ProfileSession presentation state', () => {
       content(),
     );
     expect(retryableImposter.updateRequired).toBe(false);
+
+    const supportedProfileHousehold = legacyProfileSession(
+      'profile-household',
+      false,
+      {
+        status: {
+          kind: 'failed',
+          error: {
+            code: 'update-required',
+            message: 'wire 5 required',
+            retryable: false,
+            requiredWire: 5,
+          },
+        },
+      } as unknown as LibraryModel,
+      content(),
+    );
+    expect(supportedProfileHousehold.updateRequired).toBe(false);
+    expect(supportedProfileHousehold.alert).toBeNull();
   });
 
   it('keeps a household wire fence visible through a distinct active profile model', () => {
