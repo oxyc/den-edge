@@ -81,13 +81,29 @@ jobs:
 
           apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n1)
           test -x "$apksigner"
-          "$apksigner" verify --verbose --print-certs den-tv-android.apk > android-signing.txt
+          "$apksigner" verify --verbose --print-certs-pem den-tv-android.apk > android-signing.txt
           expected=$(tr -d ':[:space:]' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')
-          # Build Tools can identify a v3.1 signer by its SDK range instead of "Signer #1". Accept the pinned
-          # certificate in any signer slot so key-rotation metadata remains verifiable across tool versions.
-          mapfile -t actuals < <(sed -nE \
-            's/^Signer .* certificate SHA-256 digest:[[:space:]]*//p' android-signing.txt \
-            | sed 's/://g; s/[[:space:]]//g' | tr '[:upper:]' '[:lower:]')
+          cert_dir="$RUNNER_TEMP/android-signers"
+          mkdir -p "$cert_dir"
+          awk -v dir="$cert_dir" '
+            /^-----BEGIN CERTIFICATE-----$/ {
+              count += 1
+              file = sprintf("%s/signer-%d.pem", dir, count)
+              capture = 1
+            }
+            capture { print > file }
+            /^-----END CERTIFICATE-----$/ { close(file); capture = 0 }
+          ' android-signing.txt
+          shopt -s nullglob
+          certificates=("$cert_dir"/*.pem)
+          test "${#certificates[@]}" -gt 0 || {
+            echo "::error::apksigner returned no signing certificates"
+            exit 1
+          }
+          actuals=()
+          for certificate in "${certificates[@]}"; do
+            actuals+=("$(openssl x509 -in "$certificate" -outform DER | sha256sum | awk '{print $1}')")
+          done
           printf '%s\n' "${actuals[@]}" | grep -Fxq "$expected" || {
             echo "::error::Android signer(s) ${actuals[*]:-<none>} do not include expected $expected"
             exit 1
