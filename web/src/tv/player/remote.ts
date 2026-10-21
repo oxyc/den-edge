@@ -56,7 +56,12 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   };
   const scheduleHide = () => {
     clearTimeout(hideTimer);
-    if (!actions.paused()) hideTimer = setTimeout(() => setHidden(true), HIDE_MS);
+    if (!actions.paused() && !openMenu())
+      hideTimer = setTimeout(() => {
+        // A menu may have opened since this idle period began. It lives inside the footer, so hiding/inerting the
+        // footer would also blur and disable the menu while the viewer is still choosing from it.
+        if (!openMenu()) setHidden(true);
+      }, HIDE_MS);
   };
   const reveal = () => {
     setHidden(false);
@@ -313,6 +318,10 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   // under its cursor. Motion should behave like motion over a native player and keep the overlay around while the
   // viewer is aiming; `reveal` also restarts the same idle timer, so it disappears normally once they stop.
   const onPointer = () => reveal();
+  const onMenuClose = (event: Event) => {
+    if (event.target instanceof HTMLDialogElement && event.target.matches('[role="menu"]'))
+      scheduleHide();
+  };
 
   addEventListener('keydown', onKey, { capture: true });
   addEventListener('den:tv-back', onBack);
@@ -320,6 +329,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   document.addEventListener('pause', onPause, { capture: true });
   document.addEventListener('pointerdown', onPointer, { capture: true });
   document.addEventListener('pointermove', onPointer, { capture: true });
+  document.addEventListener('close', onMenuClose, { capture: true });
   scheduleHide();
   return () => {
     clearTimeout(hideTimer);
@@ -330,6 +340,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     document.removeEventListener('pause', onPause, { capture: true });
     document.removeEventListener('pointerdown', onPointer, { capture: true });
     document.removeEventListener('pointermove', onPointer, { capture: true });
+    document.removeEventListener('close', onMenuClose, { capture: true });
   };
 }
 import './player.css';

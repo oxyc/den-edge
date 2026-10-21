@@ -258,6 +258,15 @@ test('webOS native playback does not wait on its advertised but silent frame cal
 
   const video = page.locator('.player video');
   await expect(video).toBeVisible();
+  // The current stream is a useful, stable entry point while its background alternatives are still loading (and
+  // remains one if listing is unavailable). TV must never silently lose this Apple-TV-style player control.
+  const streamPicker = page.getByRole('button', { name: 'Stream: TV fixture 1080p' });
+  await expect(streamPicker).toBeVisible();
+  await streamPicker.click();
+  await expect(
+    page.getByRole('menu', { name: 'Stream: TV fixture 1080p' }).getByRole('menuitemradio'),
+  ).toHaveCount(1);
+  await page.keyboard.press('Escape');
   await expect(page.locator('.startup')).toHaveCount(1);
   await video.evaluate((element) => window.releaseFixtureLoadedData(element));
 
@@ -282,6 +291,8 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   const video = page.locator('.player video');
   await expect(video).toBeVisible();
   await expect(page.locator('.tv-transport')).toBeVisible();
+  await expect(page.locator('footer .release')).toHaveCSS('font-size', '27.84px');
+  await expect(page.getByRole('button', { name: 'Stream: TV fixture 1080p' })).toBeVisible();
   await expect
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(12);
@@ -373,7 +384,16 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(subtitlePicker).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(subtitlePicker).toHaveCSS('color', 'rgb(0, 0, 0)');
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('menu', { name: /^Subtitles:/ })).toBeVisible();
+  const subtitleMenu = page.getByRole('menu', { name: /^Subtitles:/ });
+  await expect(subtitleMenu).toBeVisible();
+  const focusedSubtitle = subtitleMenu.getByRole('menuitemradio').first();
+  await expect(focusedSubtitle).toBeFocused();
+  // An open picker is active interaction, not player idleness: its footer must remain visible and its exact choice
+  // focused beyond the ordinary four-second transport timeout.
+  await page.waitForTimeout(4_250);
+  await expect(subtitleMenu).toBeVisible();
+  await expect(focusedSubtitle).toBeFocused();
+  await expect(page.locator('.player')).not.toHaveClass(/tv-controls-hidden/);
   // Escape and hardware Back each cancel track-picker editing without closing playback.
   expect(await remoteKey(page, 'Escape', 27)).toBe(true);
   await expect(video).toHaveCount(1);

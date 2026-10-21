@@ -1,3 +1,30 @@
+/* Keep the consistent TV face small: Latin covers the UI and most title data, Latin Extended covers Finnish and
+   European names. Other scripts fall back per glyph instead of making every first TV launch fetch every Inter subset. */
+@font-face {
+  font-family: 'Inter TV';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/inter/files/inter-latin-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Inter TV';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
 /* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle. */
 :root.den-tv {
   --gutter: clamp(54px, 5vw, 96px);
@@ -44,6 +71,10 @@
   --tv-menu-gap: 8px;
   --tv-menu-padding: 18px;
 
+  /* LG and Samsung do not have Apple's fonts from the browser stack, and their generic sans faces differ visibly.
+     The TV entry bundles Inter so both packages use one readable ten-foot type system; the normal web entry does not
+     import this face and keeps the platform-native stack. */
+  font-family: 'Inter TV', Inter, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: var(--tv-type-body);
   overscroll-behavior: none;
 }
@@ -67,6 +98,26 @@
   background: rgb(28 28 32 / 0.97);
   box-shadow: 0 28px 100px rgb(0 0 0 / 0.72);
   font-size: var(--tv-type-small);
+  overflow-y: scroll;
+  scrollbar-color: rgb(255 255 255 / 0.48) rgb(255 255 255 / 0.08);
+  scrollbar-width: auto;
+}
+
+/* webOS's Chromium predates the standard scrollbar colour properties. Keep a persistent position indicator on
+   long streams, subtitle and source lists there as well; the thumb's size communicates how much remains. */
+.den-tv dialog[role='menu']::-webkit-scrollbar {
+  width: 14px;
+}
+
+.den-tv dialog[role='menu']::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+}
+
+.den-tv dialog[role='menu']::-webkit-scrollbar-thumb {
+  border: 3px solid rgb(28 28 32 / 0.97);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.5);
 }
 
 .den-tv dialog[role='menu']::backdrop {
@@ -106,9 +157,14 @@
 /* A newly linked TV has no local library projection yet. The shared page loader already spans exactly that real
    boundary; give its named status ten-foot geometry. Later launches usually pass through too quickly to show it. */
 .den-tv .loading.page {
+  /* The fixed page loader is outside `main`, so reserve the navigation's real vertical region here. `place-items`
+     in the shared loader only centers its default grid layout; this TV variant is flex and needs both axes set. */
+  inset: var(--bar-space) 0 0;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  align-items: center;
+  justify-content: center;
   color: var(--fg);
   font-size: var(--tv-type-body);
 }

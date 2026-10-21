@@ -56,6 +56,22 @@
   z-index: 5;
 }
 
+/* A transient stall is status, not an alert or a control. Keep it quietly legible over the picture in the same
+   upper-right territory as native TV players, without the bordered glass card used by actionable notices. */
+.full-tv-player > .notices .notice.quiet {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 0.58);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.22);
+  font-size: clamp(18px, 1.2vw, 23px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
 .full-tv-player > .stage {
   position: absolute;
   inset: 0;
@@ -68,6 +84,24 @@
   left: 5vw;
   z-index: 4;
   padding: 0;
+}
+
+/* The shared browser player intentionally keeps this incidental metadata compact. At ten-foot distance it is the
+   only persistent identification of the selected file, so give both lines readable TV typography. */
+.full-tv-player > footer .release {
+  gap: 5px 0.65ch;
+  max-width: min(72vw, 64ch);
+  font-size: clamp(21px, 1.45vw, 29px);
+  line-height: 1.3;
+}
+
+.full-tv-player > footer .playing {
+  font-size: inherit;
+  font-weight: 650;
+}
+
+.full-tv-player > footer .source {
+  color: rgb(255 255 255 / 0.68);
 }
 
 .full-tv-transport {
