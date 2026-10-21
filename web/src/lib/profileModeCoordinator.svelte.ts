@@ -1097,7 +1097,8 @@ export const previewProfileDirectory = (): PreviewProfileDirectory => {
   };
 };
 
-/** The page's question in flight. A profile household's two library sessions both ask as the page opens. */
+/** The page's host answer and question in flight. A profile household can open several sessions in sequence. */
+let knownCapability: Exclude<ProfilesCapability, 'indeterminate'> | undefined;
 let askingCapability: Promise<ProfilesCapability> | undefined;
 
 export function profilesCapability(
@@ -1106,7 +1107,15 @@ export function profilesCapability(
 ): Promise<ProfilesCapability> {
   // Only the page's own question is shared; an injected fetch or lock asks its own.
   if (fetchImpl || visitorLock) return askProfilesCapability(fetchImpl, visitorLock);
-  askingCapability ??= askProfilesCapability().finally(() => (askingCapability = undefined));
+  if (knownCapability) return Promise.resolve(knownCapability);
+  askingCapability ??= askProfilesCapability()
+    .then((answer) => {
+      // Enabled, preview and the exact disabled response are stable properties of this deployed host. Keep them for
+      // the page lifetime; an uncertain network/protocol answer is deliberately retried by the next caller.
+      if (answer !== 'indeterminate') knownCapability = answer;
+      return answer;
+    })
+    .finally(() => (askingCapability = undefined));
   return askingCapability;
 }
 
