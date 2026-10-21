@@ -208,3 +208,28 @@ for (const width of [320, 390, 1280]) {
     ).toBe(true);
   });
 }
+
+test('a guest can be changed to unlimited devices', async ({ page }) => {
+  const calls = await open(page);
+  const row = page.locator('li.guest-line');
+  const more = page.getByRole('button', { name: 'More actions for Alex' });
+
+  await more.click();
+  await page
+    .getByRole('menu', { name: 'More actions for Alex' })
+    .getByRole('menuitemradio', { name: 'Allow unlimited devices' })
+    .click();
+
+  await expect(row).toContainText('1 device · unlimited');
+  await expect
+    .poll(() => calls.find((call) => call.method === 'PUT' && 'devices' in call.body)?.body)
+    .toEqual({
+      devices: null,
+    });
+  await more.click();
+  await expect(
+    page
+      .getByRole('menu', { name: 'More actions for Alex' })
+      .getByRole('menuitemradio', { name: 'Allow unlimited devices' }),
+  ).toHaveAttribute('aria-checked', 'true');
+});

@@ -77,10 +77,14 @@
     reel: { label: 'Den Reel', role: 'Trailers' },
     subtitles: { label: 'Den Subtitles', role: 'Subtitles' },
   };
-  const DEVICE_LIMITS = Array.from({ length: 5 }, (_, index) => {
-    const devices = index + 1;
-    return { value: String(devices), label: `${devices} device${devices === 1 ? '' : 's'}` };
-  });
+  const DEVICE_LIMITS: { value: number | null; label: string }[] = Array.from(
+    { length: 5 },
+    (_, index) => {
+      const devices = index + 1;
+      return { value: devices, label: `${devices} device${devices === 1 ? '' : 's'}` };
+    },
+  );
+  DEVICE_LIMITS.push({ value: null, label: 'unlimited devices' });
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 
@@ -93,7 +97,7 @@
   let trial = $state<'none' | '7' | '30' | 'custom'>('none');
   let customDays = $state(14);
   let redeemBy = $state(DEFAULT_REDEEM_DAYS);
-  let devices = $state(1);
+  let devices = $state<number | null>(1);
   /** The invite just made, or a guest's new link: `title` heads the panel, `notes` say what changed. */
   let created = $state<{ name: string; code: string; title: string; notes: string[] } | null>(null);
   let madePanel = $state<HTMLDivElement>();
@@ -110,7 +114,7 @@
   let revokeNext: string | null = null;
   let menus = $state<Record<string, ActionMenu | undefined>>({});
   /** A native picker shows its choice immediately. Keep that optimistic value explicit so a refused edit rolls back. */
-  let deviceLimits = $state<Record<string, number>>({});
+  let deviceLimits = $state<Record<string, number | null>>({});
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
   let codes = $state<Record<string, string>>({});
 
@@ -202,7 +206,7 @@
         ...(redeemBy === DEFAULT_REDEEM_DAYS
           ? {}
           : { codeExpiresAt: cappedCodeExpiry(Date.now(), clamp(redeemBy, 1, 89) * DAY) }),
-        devices: clamp(devices, 1, 5),
+        devices: devices === null ? null : clamp(devices, 1, 5),
         ...(trial === 'none'
           ? {}
           : { accessDays: trial === 'custom' ? clamp(customDays, 1, 365) : Number(trial) }),
@@ -304,10 +308,11 @@
     madePanel?.scrollIntoView({ block: 'nearest' });
   }
 
-  const deviceLimit = (grant: Grant) => deviceLimits[grant.gid] ?? grant.devices;
+  const deviceLimit = (grant: Grant): number | null =>
+    grant.gid in deviceLimits ? deviceLimits[grant.gid]! : grant.devices;
 
-  async function changeDeviceLimit(grant: Grant, devices: number): Promise<void> {
-    if (devices === grant.devices || devices < 1 || devices > 5) return;
+  async function changeDeviceLimit(grant: Grant, devices: number | null): Promise<void> {
+    if (devices === grant.devices || (devices !== null && (devices < 1 || devices > 5))) return;
     deviceLimits = { ...deviceLimits, [grant.gid]: devices };
     await change(grant, { devices });
     const next = { ...deviceLimits };
@@ -369,9 +374,9 @@
         kind: 'radio',
         group: 'devices',
         label: `Allow ${label}`,
-        checked: Number(value) === deviceLimit(grant),
+        checked: value === deviceLimit(grant),
         disabled: working,
-        onselect: () => void changeDeviceLimit(grant, Number(value)),
+        onselect: () => void changeDeviceLimit(grant, value),
       });
     items.push({
       kind: 'item',
@@ -539,7 +544,14 @@
         </label>
         <label class="labelled"
           >Devices
-          <input class="field" type="number" min="1" max="5" bind:value={devices} />
+          <Select
+            value={devices === null ? 'unlimited' : String(devices)}
+            options={DEVICE_LIMITS.map(({ value, label }) => ({
+              value: value === null ? 'unlimited' : String(value),
+              label,
+            }))}
+            onchange={(value) => (devices = value === 'unlimited' ? null : Number(value))}
+          />
         </label>
         <Button
           type="submit"
@@ -569,8 +581,10 @@
               <span class="label"
                 >{grant.name}<small>{standing(grant)}</small><small
                   >{grant.addons.map((addon) => NAMES[addon].label).join(', ')}
-                  · {grant.deviceCount} of {deviceLimit(grant)}
-                  {deviceLimit(grant) === 1 ? 'device' : 'devices'}</small
+                  · {#if deviceLimit(grant) === null}{grant.deviceCount}
+                    {grant.deviceCount === 1 ? 'device' : 'devices'} · unlimited{:else}{grant.deviceCount}
+                    of {deviceLimit(grant)}
+                    {deviceLimit(grant) === 1 ? 'device' : 'devices'}{/if}</small
                 >{#if usage(grant)}<small>{usage(grant)}</small>{/if}</span
               >
               {#if grant.status !== 'revoked'}
