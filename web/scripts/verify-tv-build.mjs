@@ -13,6 +13,13 @@ const directory = resolve(
     (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
+if (platform === 'tizen' && process.env.DEN_TIZEN_VERSION === '5.5') {
+  for (const file of assets.filter((name) => name.endsWith('.js'))) {
+    const code = await readFile(resolve(directory, 'assets', file), 'utf8');
+    if (/type:[`'"]module[`'"]/.test(code))
+      throw new Error(`Module Worker option remains in the Tizen 5.5 build: ${file}`);
+  }
+}
 for (const name of ['den_core', 'den_core_assistant']) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
   if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);

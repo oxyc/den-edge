@@ -68,17 +68,19 @@ runs this shell-only validation (including optional `xmllint` XML validation).
 The build writes `web/dist-tv-tizen-package`; packaging copies that bundle into
 `web/tv-packages/tizen/shell`. The API setting must be an exact HTTPS origin—no
 path, query, fragment, or embedded credentials—and test-fixture builds are refused.
-The publisher generates separate manifests requiring Tizen 8.0 (Chromium 108) and Tizen 6.5 (Chromium 85). Both
+The publisher generates separate manifests requiring Tizen 8.0 (Chromium 108), Tizen 6.5 (Chromium 85), and Tizen
+5.5 (Chromium 69). All
 declare the Samsung TV profile/API level, Internet and TV input-device privileges, and wildcard WARP access because media CDNs and
 user-installed addons are not known when the widget is signed. A CSP separately
 keeps executable scripts, styles, and workers inside the signed widget while allowing
 HTTPS media, images, frames, and connections. API credentials remain governed by the
 runtime's Den-path allowlist; WARP does not grant credentials to external origins.
-The Tizen 8 package uses the narrower `wasm-unsafe-eval` source. The separate Tizen 6.5 package uses the broader
-`unsafe-eval` required by that older engine and is intended for Apps2Samsung sideloading, not Seller Office
-submission. CI verifies both package variants, but 2022–2023 hardware remains unqualified until it is tested on a
-real TV. The same per-version policy is embedded in packaged HTML so production package E2E exercises it rather than
-testing a more permissive page.
+The Tizen 8 package uses the narrower `wasm-unsafe-eval` source. The separate Tizen 6.5 and 5.5 packages use the
+broader `unsafe-eval` required by those older engines and are intended for Apps2Samsung sideloading, not Seller
+Office submission. The 5.5 build additionally targets Chromium 69, converts owned module Workers to classic Workers,
+and includes TV-only standard-library fallbacks. CI verifies all package variants, but old-generation hardware
+remains unqualified until it is tested on a real TV. The same per-version policy is embedded in packaged HTML so
+production package E2E exercises it rather than testing a more permissive page.
 The packaged Vite build includes Samsung's required
 `$WEBAPIS/webapis/webapis.js` bridge in the entry HTML before the app module;
 the packager validates that exact bridge instead of injecting a divergent copy.

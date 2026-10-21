@@ -168,7 +168,7 @@ LG references: [Developer Mode](https://webostv.developer.lge.com/develop/gettin
 [webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-dev-guide), and
 [LG staff on the 999-hour counter](https://forum.webostv.developer.lge.com/t/topic/4854/2).
 
-## Samsung Tizen (2022-generation TV or newer)
+## Samsung Tizen (2020-generation TV or newer)
 
 The release publishes an unsigned `.wgt`; [Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung) creates an
 author certificate that must be preserved for later updates and a distributor certificate containing the destination
@@ -180,9 +180,10 @@ package.
    and TV must be on the same LAN.
 2. Download the widget for the TV's model year:
 
-   - **2024 or newer (Tizen 8+):** [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.0.1/den-tv-tizen.wgt)
+   - **2024 or newer (Tizen 8+):** [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen.wgt)
      (the same file is also published explicitly as `den-tv-tizen8.wgt`).
-   - **2022–2023 (Tizen 6.5–7):** [`den-tv-tizen6.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.0.1/den-tv-tizen6.5.wgt).
+   - **2022–2023 (Tizen 6.5–7):** [`den-tv-tizen6.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen6.5.wgt).
+   - **2020–2021 (Tizen 5.5–6.0):** [`den-tv-tizen5.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen5.5.wgt).
 
    The model year matters, not the purchase year. Samsung identifies it in the TV's support/about screen and model
    number.
@@ -198,11 +199,12 @@ For an update, download the `.wgt` from the newest
 Apps2Samsung's data so it can reuse the author certificate. If the TV reports an author-certificate mismatch, remove its existing
 Den installation and install again; removal can discard local app data.
 
-Den does not currently publish a widget for 2021 or older models. The 2022 package is the low-risk build-compatibility
-floor because Samsung's Tizen 6.5 engine is Chromium 85, which is also Den's compiled compatibility target; it still
-needs real 2022–2023 hardware validation before being called qualified. The 2021 and 2020 engines are Chromium 76 and
-69; supporting them would require additional runtime polyfills and device-level playback testing. Pre-2020 Samsung
-engines also lack the WebAssembly support Den's local database requires.
+The 2020–2021 widget is compiled separately for Chromium 69, uses classic rather than module Workers, and carries
+TV-only runtime polyfills. It does not add legacy code to Den Web or the newer TV packages. It remains unqualified
+until its pairing, library persistence, navigation and AVPlay journeys pass on real 2020/2021 hardware. Den does not
+publish a widget for 2019 or older models: Samsung documents WebAssembly support only from Tizen 5.5, while Den's
+encrypted local library/database requires it. A reported working Tizen 3 installation is being investigated against
+its exact firmware and build rather than represented as supported prematurely.
 
 ### Tizen Studio alternative
 

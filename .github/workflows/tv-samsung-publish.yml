@@ -88,7 +88,12 @@ jobs:
           DEN_TIZEN_VERSION=6.5 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
             --version "$version"
           node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen6.5.wgt
-          sha256sum den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+
+          DEN_TIZEN_VERSION=5.5 DEN_TV_PACKAGED=1 npm run build:tv:tizen
+          DEN_TIZEN_VERSION=5.5 node scripts/tv-package.mjs tizen --url "$DEN_TV_API_ORIGIN" --prepare \
+            --version "$version"
+          node scripts/tizen-unsigned-wgt.mjs tv-packages/tizen/shell den-tv-tizen5.5.wgt
+          sha256sum den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt den-tv-tizen5.5.wgt \
             den-tv-tizen-unsigned.tar.gz > den-tv-samsung.sha256
           printf 'tizen=%s\nsource=%s\n' "$version" "$GITHUB_SHA" > den-tv-samsung.version
           {
@@ -102,7 +107,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          notes=$(printf 'Den Samsung widgets with bundled TV UI.\n\n- Tizen: `%s`\n- Source: `%s`\n' \
+          notes=$(printf 'Den Samsung widgets with bundled TV UI.\n\n- Tizen package: `%s`\n- Targets: Tizen 8.0+, 6.5–7.x, and 5.5–6.0\n- Source: `%s`\n' \
             "$TIZEN_VERSION" "$GITHUB_SHA")
           existing=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null || true)
           test "$existing" != false || {
@@ -116,7 +121,7 @@ jobs:
           fi
           gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
             --title "Den for Samsung TV $TIZEN_VERSION" --notes "$notes" --draft --latest=false \
-            den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt \
+            den-tv-tizen.wgt den-tv-tizen8.wgt den-tv-tizen6.5.wgt den-tv-tizen5.5.wgt \
             den-tv-tizen-unsigned.tar.gz den-tv-samsung.sha256 den-tv-samsung.version
           verify="$RUNNER_TEMP/samsung-release"
           mkdir -p "$verify"

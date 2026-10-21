@@ -7,12 +7,15 @@ import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
 
 const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
-const compat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
+const standardCompat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
+const legacyCompat = fileURLToPath(new URL('./src/tv/compat-legacy.ts', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
 const packaged = process.env.DEN_TV_PACKAGED === '1';
 const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
+const legacyTizen = platform === 'tizen' && tizenVersion === '5.5';
+const compat = legacyTizen ? legacyCompat : standardCompat;
 const tvCspValue = tvCsp(tizenVersion);
 const apiOriginText = process.env.DEN_TV_API_ORIGIN;
 if (packaged && !apiOriginText)
@@ -78,6 +81,12 @@ function workerCompatibility(): Plugin {
     name: 'den-tv-worker-compatibility',
     enforce: 'pre',
     transform(code, id) {
+      if (legacyTizen && /\/src\/tv\/main\.ts$/.test(id)) {
+        const ordinary = "import './compat';";
+        if (!code.includes(ordinary))
+          throw new Error('Tizen 5.5 compatibility entry no longer matches TV main');
+        return { code: code.replace(ordinary, "import './compat-legacy';"), map: null };
+      }
       if (/\/src\/lib\/syncPolicyModule\.ts$/.test(id)) {
         const original = '../vendor/den-core/generated/den_core_bg.wasm';
         if (!code.includes(original))
@@ -92,6 +101,26 @@ function workerCompatibility(): Plugin {
           code: `import ${JSON.stringify(compat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
           map: null,
         };
+    },
+  };
+}
+
+// Chromium 69 (Tizen 5.5) predates module Workers. Vite emits each owned Worker entry as an IIFE, but normalizes
+// its constructor to `{ type: "module" }` after source transforms have run. Lower that generated option at the
+// output boundary, in the page and nested Worker builds, while retaining the useful startup Worker name.
+function legacyWorkerOutput(): Plugin {
+  return {
+    name: 'den-tv-legacy-worker-output',
+    generateBundle(_options, bundle) {
+      if (!legacyTizen) return;
+      for (const output of Object.values(bundle)) {
+        if (output.type !== 'chunk') continue;
+        output.code = output.code
+          .replace(/\{type:`module`\}/g, '{}')
+          .replace(/\{type:`module`,name:/g, '{name:');
+        if (/type:[`'"]module[`'"]/.test(output.code))
+          this.error(`Tizen 5.5 output still contains a module Worker option: ${output.fileName}`);
+      }
     },
   };
 }
@@ -199,12 +228,18 @@ export default mergeConfig(
         },
       ],
     },
-    plugins: [tvEntry, workerCompatibility(), packagedMetadata, samsungBridge],
-    worker: { plugins: () => [workerCompatibility(), svelte()] },
+    plugins: [
+      tvEntry,
+      workerCompatibility(),
+      legacyWorkerOutput(),
+      packagedMetadata,
+      samsungBridge,
+    ],
+    worker: { plugins: () => [workerCompatibility(), legacyWorkerOutput(), svelte()] },
     css: { postcss: { plugins: [legacyScopedCss] } },
     build: {
-      target: 'chrome85',
-      cssTarget: 'chrome85',
+      target: legacyTizen ? 'chrome69' : 'chrome85',
+      cssTarget: legacyTizen ? 'chrome69' : 'chrome85',
       outDir,
       manifest: true,
       ...(e2e ? { rolldownOptions: { input: ['index.html', 'test/player.html'] } } : {}),
