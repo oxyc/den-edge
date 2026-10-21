@@ -466,9 +466,10 @@
 <style>
   .settings {
     display: grid;
-    grid-template-columns: 220px minmax(0, 760px);
+    grid-template-columns: var(--settings-columns, 220px minmax(0, 760px));
     justify-content: center;
-    gap: 56px;
+    gap: var(--settings-column-gap, 56px);
+    font-size: var(--settings-font-size, inherit);
   }
 
   .page {
@@ -485,7 +486,7 @@
 
   h1 {
     margin: 0;
-    font-size: 28px;
+    font-size: var(--settings-title-size, 28px);
   }
 
   .banner {
@@ -525,7 +526,7 @@
   .settings :global(.panel h3) {
     margin: 18px 0 8px;
     color: var(--muted);
-    font-size: 14px;
+    font-size: var(--settings-font-size, 14px);
     font-weight: 600;
   }
 
@@ -541,14 +542,14 @@
     flex: 1 1 240px;
     width: 100%;
     min-width: 0;
-    min-height: 44px;
+    min-height: var(--settings-field-min-height, 44px);
     padding: 10px 14px;
     border: 1px solid transparent;
     border-radius: 10px;
     background: rgb(255 255 255 / 0.06);
     color: var(--fg);
     font: inherit;
-    font-size: 16px;
+    font-size: var(--settings-font-size, 16px);
   }
 
   .settings :global(.field::placeholder) {
@@ -571,7 +572,7 @@
     background: none;
     color: var(--accent);
     font: inherit;
-    font-size: 14px;
+    font-size: var(--settings-font-size, 14px);
     font-weight: 600;
     cursor: pointer;
   }
@@ -583,13 +584,13 @@
     gap: 4px 12px;
     margin: 14px 0 4px;
     color: var(--muted);
-    font-size: 14px;
+    font-size: var(--settings-font-size, 14px);
   }
 
   .settings :global(.status) {
     margin: 10px 0 0;
     color: var(--muted);
-    font-size: 14px;
+    font-size: var(--settings-font-size, 14px);
   }
 
   .settings :global(.status.bad) {
@@ -599,7 +600,7 @@
   .settings :global(.foot) {
     margin: 10px 0 0;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--settings-caption-size, 13px);
   }
 
   .settings :global(.list) {
@@ -631,7 +632,7 @@
   .settings :global(.line .label small) {
     display: block;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--settings-caption-size, 13px);
   }
 
   .settings :global(.actions) {

@@ -1,4 +1,4 @@
-.tv-transport {
+.legacy-transport {
   position: absolute;
   right: 4vw;
   bottom: 4vh;
@@ -12,8 +12,8 @@
   background: rgb(0 0 0 / 0.72);
 }
 
-.tv-transport button,
-.tv-transport a {
+.legacy-transport button,
+.legacy-transport a {
   min-width: 8rem;
   min-height: 3.5rem;
   padding: 0.75rem 1.25rem;
@@ -26,13 +26,210 @@
   text-decoration: none;
 }
 
+/* webOS gets one ten-foot control surface over the picture: scrub first, transport second. The wide gradient
+   preserves the image while keeping every label readable on bright HDR frames. */
+.webos-player {
+  grid-template-rows: minmax(0, 1fr);
+  padding: 0;
+}
+
+.webos-player > header {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 4;
+  padding: clamp(24px, 3.2vh, 42px) 5vw clamp(70px, 9vh, 110px);
+  background: linear-gradient(to bottom, rgb(0 0 0 / 0.78), transparent);
+}
+
+.webos-player > header b {
+  flex: none;
+  max-width: 50vw;
+}
+
+.webos-player > .notices {
+  position: absolute;
+  top: clamp(78px, 9vh, 110px);
+  right: 5vw;
+  left: 5vw;
+  z-index: 5;
+}
+
+.webos-player > .stage {
+  position: absolute;
+  inset: 0;
+}
+
+.webos-player > footer {
+  position: absolute;
+  right: 5vw;
+  bottom: clamp(22px, 3vh, 38px);
+  left: 5vw;
+  z-index: 4;
+  padding: 0;
+}
+
+.webos-transport {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  display: grid;
+  gap: clamp(22px, 2.2vh, 34px);
+  padding: clamp(150px, 19vh, 220px) 5vw clamp(105px, 12vh, 138px);
+  background: linear-gradient(to top, rgb(0 0 0 / 0.94) 0, rgb(0 0 0 / 0.66) 48%, transparent 100%);
+}
+
+.tv-timeline {
+  display: grid;
+  grid-template-columns: 7ch minmax(0, 1fr) 7ch;
+  gap: clamp(18px, 1.5vw, 30px);
+  align-items: center;
+  color: rgb(255 255 255 / 0.9);
+  font-size: clamp(20px, 1.35vw, 27px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.tv-timeline span:last-child {
+  text-align: right;
+}
+
+.tv-timeline input[type='range'] {
+  width: 100%;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tv-timeline input[type='range']::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #fff 0 var(--tv-progress),
+    rgb(255 255 255 / 0.32) var(--tv-progress) 100%
+  );
+}
+
+.tv-timeline input[type='range']::-webkit-slider-thumb {
+  width: 22px;
+  height: 22px;
+  margin-top: -7px;
+  border: 0;
+  border-radius: 50%;
+  appearance: none;
+  background: #fff;
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.45);
+  transform: scale(0.72);
+  transition: transform 120ms ease;
+}
+
+.tv-timeline input[type='range']:focus {
+  outline: 0;
+}
+
+.tv-timeline input[type='range']:focus::-webkit-slider-runnable-track {
+  height: 12px;
+}
+
+.tv-timeline input[type='range']:focus::-webkit-slider-thumb {
+  margin-top: -5px;
+  transform: scale(1.18);
+}
+
+.tv-transport-actions {
+  display: flex;
+  gap: clamp(18px, 1.4vw, 28px);
+  align-items: center;
+  justify-content: center;
+}
+
+.webos-transport button,
+.webos-transport a {
+  display: grid;
+  place-items: center;
+  min-width: 68px;
+  height: 68px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.16);
+  color: #fff;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: none;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.08),
+    0 6px 24px rgb(0 0 0 / 0.25);
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.webos-transport .tv-play-pause {
+  --button-icon-size: 38px;
+
+  width: 86px;
+  height: 86px;
+  background: rgb(255 255 255 / 0.16);
+  color: #fff;
+}
+
+.webos-transport .tv-next {
+  display: flex;
+  width: auto;
+  min-width: 142px;
+  padding: 0 27px;
+  gap: 13px;
+  font-size: 22px;
+}
+
+.webos-transport .tv-next span {
+  margin-top: -2px;
+  font-size: 34px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.skip-icon {
+  width: 43px;
+  height: 43px;
+  overflow: visible;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.7;
+}
+
+.skip-icon text {
+  fill: currentcolor;
+  stroke: none;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 750;
+  text-anchor: middle;
+}
+
 .den-tv.tv-remote-active .player .tv-transport button:focus,
 .den-tv.tv-remote-active .player .tv-transport a:focus {
   color: #000;
   background: #fff;
   outline: 0;
   box-shadow: none;
-  transform: scale(1.06);
+  transform: scale(1.1);
+}
+
+.den-tv.tv-remote-active .player .webos-transport .tv-play-pause:focus {
+  transform: scale(1.13);
 }
 
 /* The shared TV ring is for ordinary page controls. Playback already owns its high-contrast transport state,
@@ -53,7 +250,9 @@
 .player header,
 .player footer,
 .player .tv-transport {
-  transition: opacity 180ms ease;
+  transition:
+    visibility 0s linear,
+    opacity 180ms ease;
 }
 
 .player.tv-controls-hidden header,
@@ -62,4 +261,16 @@
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
+  transition-delay: 180ms, 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .webos-transport button,
+  .webos-transport a,
+  .tv-timeline input[type='range']::-webkit-slider-thumb,
+  .player header,
+  .player footer,
+  .player .tv-transport {
+    transition: none;
+  }
 }

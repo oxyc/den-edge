@@ -25,7 +25,7 @@
   setContext(SECTION, id);
 </script>
 
-<section {id} aria-labelledby="{id}-heading">
+<section {id} aria-labelledby="{id}-heading" data-spatial-section="vertical">
   <div class="heading">
     <h2 id="{id}-heading">
       {title}{#if subtitle}<small>{subtitle}</small>{/if}
@@ -52,13 +52,13 @@
 
   h2 {
     margin: 0;
-    font-size: 20px;
+    font-size: var(--settings-section-title-size, 20px);
   }
 
   h2 small {
     display: block;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--settings-caption-size, 13px);
     font-weight: 400;
   }
 
@@ -74,6 +74,6 @@
   .footer {
     margin: 8px 16px 0;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--settings-caption-size, 13px);
   }
 </style>

@@ -17,14 +17,18 @@
   /* Keep this identical to WindowedPosterRow's portrait wrapper so replacing it needs no shelf layout. */
   .windowed {
     content-visibility: auto;
-    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+    contain-intrinsic-block-size: auto
+      calc(
+        var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)
+      );
   }
 
   .skeleton {
     contain: strict;
     width: var(--card-w);
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     border-radius: 12px;
-    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
+    background: linear-gradient(var(--card), var(--card)) top / 100%
+      calc(100% - var(--poster-meta-block-size)) no-repeat;
   }
 </style>

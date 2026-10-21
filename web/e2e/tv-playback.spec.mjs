@@ -302,6 +302,11 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await transport.last().focus();
   await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
 
+  // The LG Magic Remote reveals controls by aiming, without requiring a click on an invisible target.
+  await page.mouse.move(320, 240);
+  await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
+
   // The first Select only reveals controls; it must not activate the Close button focused before idle hiding.
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
@@ -315,6 +320,15 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect(transport.first()).toHaveCSS('outline-style', 'none');
   await expect(transport.first()).toHaveCSS('box-shadow', 'none');
   await expect(transport.first()).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  expect(await remoteKey(page, 'ArrowUp', 38)).toBe(true);
+  const timeline = page.getByRole('slider', { name: 'Playback position' });
+  await expect(timeline).toBeFocused();
+  const beforeTimelineSeek = await video.evaluate((element) => element.currentTime);
+  await page.keyboard.press('ArrowRight');
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime))
+    .toBeGreaterThan(beforeTimelineSeek + 8);
+  await transport.first().focus();
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(transport.nth(1)).toBeFocused();
 

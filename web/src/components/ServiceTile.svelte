@@ -91,7 +91,7 @@
   .name {
     max-width: 100%;
     overflow: hidden;
-    font-size: 14px;
+    font-size: var(--service-name-size, 14px);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -99,7 +99,7 @@
   .country {
     margin-top: -6px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: var(--service-country-size, 12px);
   }
 
   /* The artwork owns this composite card's focus treatment. Suppress the browser's blue link rectangle so web and

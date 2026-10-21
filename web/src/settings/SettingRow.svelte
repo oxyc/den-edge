@@ -93,8 +93,8 @@
     align-items: center;
     gap: 12px;
     width: 100%;
-    min-height: 54px;
-    padding: 8px 16px;
+    min-height: var(--settings-row-min-height, 54px);
+    padding: var(--settings-row-padding, 8px 16px);
     border: 0;
     border-radius: var(--radius);
     background: none;
@@ -124,7 +124,7 @@
   .label small {
     display: block;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--settings-caption-size, 13px);
   }
 
   .value {

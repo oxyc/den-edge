@@ -338,7 +338,7 @@
 
 <style>
   .source-accordion {
-    max-width: 1100px;
+    max-width: var(--detail-content-max);
     margin-bottom: 20px;
   }
 
@@ -407,7 +407,7 @@
   }
 
   .source-panel {
-    max-width: 1100px;
+    max-width: var(--detail-content-max);
     margin: 4px 0 24px;
     padding: 16px;
     border: 1px solid var(--line);

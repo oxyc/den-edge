@@ -338,13 +338,20 @@ for (const width of [390, 834, 1280])
       await expect(active.locator('header.hero .continue')).toHaveAttribute('href', playbackHref);
 
       if (width === 1280) {
-        const [continueBox, heroBox] = await Promise.all([
+        const watchlist = active.getByRole('button', { name: 'Watchlist', exact: true });
+        const [continueBox, heroBox, watchlistBox, watchedMenuBox] = await Promise.all([
           active.locator('header.hero .continue').boundingBox(),
           active.locator('header.hero').boundingBox(),
+          watchlist.boundingBox(),
+          watchedMenu.boundingBox(),
         ]);
         expect(continueBox).not.toBeNull();
         expect(heroBox).not.toBeNull();
+        expect(watchlistBox).not.toBeNull();
+        expect(watchedMenuBox).not.toBeNull();
         expect(continueBox.width).toBeLessThan(heroBox.width / 2);
+        expect(watchlistBox.height).toBe(48);
+        expect(watchlistBox.height).toBe(watchedMenuBox.height);
         // Continue Watching is its own semantic row above the title actions. Down enters the next section at its
         // primary Resume control rather than choosing a later reaction merely because it is closer horizontally.
         await active.locator('header.hero .continue').focus();

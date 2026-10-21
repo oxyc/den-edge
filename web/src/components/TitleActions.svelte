@@ -772,6 +772,13 @@
       margin-left: auto;
     }
 
+    /* Detail utilities are peers of Play, Sources and Trailer even when their shared Button component uses the
+       regular size elsewhere. One height token keeps the browser row aligned and lets the TV presentation enlarge
+       the complete row for viewing distance. Opinion links remain the deliberately quieter 44px exception below. */
+    .detail-page .utilities > :global(.pill) {
+      min-height: var(--button-large-min-height);
+    }
+
     /* Opinions stay in the action row without becoming three more button boxes. The group may wrap as one
        object when copy or localization needs room; its individual choices never split across lines. */
     .detail-page .desktop-reactions {
@@ -790,7 +797,7 @@
       padding-inline: 8px;
       border: 0;
       background: transparent;
-      font-size: 14px;
+      font-size: var(--detail-reaction-font-size, 14px);
       font-weight: 600;
     }
 

@@ -102,6 +102,20 @@ function semanticDestination(
   // Segmented filters and similar declared horizontal lists own Left/Right. Follow their DOM reading order and
   // stop at an edge; page geometry must not jump from All into the first search result beside the rail.
   if (direction === 'left' || direction === 'right') {
+    // A vertical content section and the same-page rail link that names it are one horizontal pair. This remains
+    // reliable when larger TV rows leave no literal y-axis overlap between a field and its short rail label.
+    if (section?.dataset.spatialSection === 'vertical' && direction === 'left' && section.id) {
+      const owner = Array.from(
+        root.querySelectorAll<HTMLElement>(`nav a[href="#${CSS.escape(section.id)}"]`),
+      ).find((link) => candidates.includes(link));
+      if (owner) return owner;
+    }
+    if (direction === 'right' && current.matches('nav a[href^="#"]')) {
+      const href = current.getAttribute('href');
+      const owned = href?.startsWith('#') ? controlledRegion(root, href.slice(1)) : null;
+      const first = owned ? firstChoice(owned, candidates) : undefined;
+      if (first) return first;
+    }
     const list = current.closest<HTMLElement>('[data-spatial-list="horizontal"]');
     if (list) {
       const choices = Array.from(list.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((choice) =>
@@ -115,9 +129,50 @@ function semanticDestination(
     }
     // A declared section is also a horizontal boundary. Geometry still chooses among controls within it, but an
     // edge press stays put instead of escaping to Back, a card, or another visually overlapping section.
-    if (section) {
+    if (section && section.dataset.spatialSection !== 'vertical') {
       const withinSection = candidates.filter((candidate) => section.contains(candidate));
       return geometricDestination(current, direction, withinSection) ?? current;
+    }
+  }
+
+  // An expanded controller and its region form one vertical unit. This ownership outranks the enclosing page
+  // section: Down must enter the disclosed controls, not pick another geometrically nearby row in that section.
+  if (direction === 'down' && current.getAttribute('aria-expanded') === 'true') {
+    const id = current.getAttribute('aria-controls');
+    const region = id ? controlledRegion(root, id) : null;
+    const first = region ? firstChoice(region, candidates) : undefined;
+    if (first) return first;
+  }
+  if (direction === 'up') {
+    for (let region = current.parentElement; region; region = region.parentElement) {
+      if (!region.id) continue;
+      const controller = root.querySelector<HTMLElement>(
+        `[aria-expanded="true"][aria-controls="${CSS.escape(region.id)}"]`,
+      );
+      if (
+        controller &&
+        candidates.includes(controller) &&
+        firstChoice(region, candidates) === current
+      )
+        return controller;
+    }
+  }
+
+  // Some visual rows contain differently sized controls. Their declared DOM order outranks the geometry of an
+  // enclosing page section; the checked radio is the representative focus stop for a segmented control.
+  if (direction === 'up' || direction === 'down') {
+    const anchor = current.closest<HTMLElement>('[data-spatial-anchor]');
+    const item = anchor?.closest<HTMLElement>('[data-spatial-item]');
+    const list = item?.parentElement;
+    if (item && list?.matches('[data-spatial-list="vertical"]')) {
+      let sibling = direction === 'down' ? item.nextElementSibling : item.previousElementSibling;
+      while (sibling && !sibling.matches('[data-spatial-item]'))
+        sibling =
+          direction === 'down' ? sibling.nextElementSibling : sibling.previousElementSibling;
+      if (sibling) {
+        const next = firstChoice(sibling, candidates);
+        if (next) return next;
+      }
     }
   }
 
@@ -152,8 +207,30 @@ function semanticDestination(
         return firstChoice(nextSection, candidates);
       }
     }
+    // A page-level navigation bar sits outside the content sections it opens. Enter the nearest declared section
+    // at that section's representative control instead of letting one shared x-coordinate skip an earlier group
+    // (for example Settings -> Content while the visible Playback group is first). The page declares its groups;
+    // the navigation engine remains independent of their names and controls.
+    if (!section && direction === 'down' && current.closest('nav[aria-label="Main navigation"]')) {
+      const from = current.getBoundingClientRect();
+      let entry: HTMLElement | undefined;
+      let entryScore = Infinity;
+      for (const candidate of root.querySelectorAll<HTMLElement>('[data-spatial-section]')) {
+        const sectionCandidates = candidates.filter((choice) => candidate.contains(choice));
+        if (!sectionCandidates.length) continue;
+        const value = score(from, candidate.getBoundingClientRect(), direction);
+        if (value !== null && value < entryScore) {
+          entryScore = value;
+          entry = candidate;
+        }
+      }
+      if (entry) return firstChoice(entry, candidates);
+    }
   }
 
+  // A tab owns its panel only at the panel's leading edge. Semantic rows inside that panel get the first chance
+  // above, so Up walks episode 3 -> 2 -> 1 before episode 1 exits to the selected season. This applies equally to
+  // any later tab panel containing a declared vertical list; it is not an episode-number exception.
   if (direction === 'up') {
     const panel = current.closest<HTMLElement>('[role="tabpanel"][id]');
     const selected = panel
@@ -162,47 +239,6 @@ function semanticDestination(
         )
       : null;
     if (selected && candidates.includes(selected)) return selected;
-  }
-
-  // An expanded controller and its region form one vertical unit. Down enters the first usable control; Up from
-  // that first control returns to the controller. Sources, disclosure rows and menus all get the same behavior.
-  if (direction === 'down' && current.getAttribute('aria-expanded') === 'true') {
-    const id = current.getAttribute('aria-controls');
-    const region = id ? controlledRegion(root, id) : null;
-    const first = region ? firstChoice(region, candidates) : undefined;
-    if (first) return first;
-  }
-  if (direction === 'up') {
-    for (let region = current.parentElement; region; region = region.parentElement) {
-      if (!region.id) continue;
-      const controller = root.querySelector<HTMLElement>(
-        `[aria-expanded="true"][aria-controls="${CSS.escape(region.id)}"]`,
-      );
-      if (
-        controller &&
-        candidates.includes(controller) &&
-        firstChoice(region, candidates) === current
-      )
-        return controller;
-    }
-  }
-
-  // Some visual rows contain differently sized controls. Their DOM order is the reliable reading order; the
-  // checked radio is the representative focus stop for a segmented control.
-  if (direction === 'up' || direction === 'down') {
-    const anchor = current.closest<HTMLElement>('[data-spatial-anchor]');
-    const item = anchor?.closest<HTMLElement>('[data-spatial-item]');
-    const list = item?.parentElement;
-    if (item && list?.matches('[data-spatial-list="vertical"]')) {
-      let sibling = direction === 'down' ? item.nextElementSibling : item.previousElementSibling;
-      while (sibling && !sibling.matches('[data-spatial-item]'))
-        sibling =
-          direction === 'down' ? sibling.nextElementSibling : sibling.previousElementSibling;
-      if (sibling) {
-        const next = firstChoice(sibling, candidates);
-        if (next) return next;
-      }
-    }
   }
 
   // An action painted over a primary surface is spatially above it even when both occupy the same rectangle.

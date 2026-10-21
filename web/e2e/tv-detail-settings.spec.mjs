@@ -165,9 +165,47 @@ test('remote changes seasons from the focused season tab', async ({ page }) => {
   const firstEpisode = page.getByRole('link', {
     name: 'Play episode 1: Season 2 episode 1',
   });
+  const secondEpisode = page.getByRole('link', {
+    name: 'Play episode 2: Season 2 episode 2',
+  });
+  await secondEpisode.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(firstEpisode).toBeFocused();
+
   await firstEpisode.focus();
   await page.keyboard.press('ArrowUp');
   await expect(season2).toBeFocused();
+});
+
+test('TV detail utility buttons share the large action height', async ({ page }) => {
+  await setupSeries(page, { playback: true });
+
+  const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+  const seen = page.getByRole('button', { name: 'Mark watched', exact: true });
+  await expect(watchlist).toBeVisible();
+  await expect(seen).toBeVisible();
+  const [watchlistBox, seenBox] = await Promise.all([watchlist.boundingBox(), seen.boundingBox()]);
+  expect(watchlistBox).not.toBeNull();
+  expect(seenBox).not.toBeNull();
+  expect(watchlistBox.height).toBe(58);
+  expect(watchlistBox.height).toBe(seenBox.height);
+
+  const seasons = page.getByRole('region', { name: 'Episodes' });
+  const firstEpisode = page.getByRole('link', {
+    name: 'Play episode 1: Season 1 episode 1',
+  });
+  const episodeMenu = page.getByRole('button', { name: 'Options for episode 1' });
+  const [seasonsBox, menuBox] = await Promise.all([
+    seasons.boundingBox(),
+    episodeMenu.boundingBox(),
+  ]);
+  expect(seasonsBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  expect(seasonsBox.width).toBe(1280);
+  expect(seasonsBox.x + seasonsBox.width - (menuBox.x + menuBox.width)).toBe(12);
+  await expect(firstEpisode.locator('strong')).toHaveCSS('font-size', '28px');
+  await expect(firstEpisode.locator('.facts')).toHaveCSS('font-size', '24px');
+  await expect(page.getByRole('button', { name: 'Not for me' })).toHaveCSS('font-size', '24px');
 });
 
 test('remote reveals an off-screen episode without animating every intermediate frame', async ({

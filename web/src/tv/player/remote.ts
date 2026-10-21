@@ -243,6 +243,9 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
 
   const onPlay = () => scheduleHide();
   const onPause = () => revealPaused();
+  // LG's Magic Remote is primarily a pointer: revealing only after a click leaves an invisible control surface
+  // under its cursor. Motion should behave like motion over a native player and keep the overlay around while the
+  // viewer is aiming; `reveal` also restarts the same idle timer, so it disappears normally once they stop.
   const onPointer = () => reveal();
 
   addEventListener('keydown', onKey, { capture: true });
@@ -250,6 +253,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   document.addEventListener('play', onPlay, { capture: true });
   document.addEventListener('pause', onPause, { capture: true });
   document.addEventListener('pointerdown', onPointer, { capture: true });
+  document.addEventListener('pointermove', onPointer, { capture: true });
   scheduleHide();
   return () => {
     clearTimeout(hideTimer);
@@ -259,6 +263,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     document.removeEventListener('play', onPlay, { capture: true });
     document.removeEventListener('pause', onPause, { capture: true });
     document.removeEventListener('pointerdown', onPointer, { capture: true });
+    document.removeEventListener('pointermove', onPointer, { capture: true });
   };
 }
 import './player.css';

@@ -1,5 +1,7 @@
 <script module lang="ts">
-  const STILL_SIZES = '(max-width: 759px) clamp(96px, 29vw, 180px), clamp(190px, 24vw, 280px)';
+  const STILL_SIZES = __DEN_TV__
+    ? 'clamp(320px, 18vw, 360px)'
+    : '(max-width: 759px) clamp(96px, 29vw, 180px), clamp(190px, 24vw, 280px)';
   const stillSrcset = (path: string) =>
     [
       `https://image.tmdb.org/t/p/w300${path} 300w`,
@@ -130,6 +132,8 @@
 
 <li
   class="episode"
+  data-spatial-item
+  data-spatial-anchor
   class:seen
   class:upcoming
   class:deferred
@@ -198,7 +202,7 @@
   .episode {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-columns: minmax(0, 1fr) var(--episode-menu-target, 44px);
     gap: 8px;
     align-items: center;
     padding: 12px;
@@ -221,7 +225,7 @@
 
   .episode-play {
     display: grid;
-    grid-template-columns: clamp(190px, 24vw, 280px) minmax(0, 1fr);
+    grid-template-columns: var(--episode-art-w, clamp(190px, 24vw, 280px)) minmax(0, 1fr);
     gap: 36px;
     align-items: start;
     width: 100%;
@@ -233,6 +237,7 @@
     text-decoration: none;
     cursor: pointer;
     border-radius: 10px;
+    scroll-margin-block: calc(var(--bar-space) + 16px) 16px;
   }
 
   .episode-play[aria-disabled='true'] {
@@ -398,8 +403,8 @@
   :global(.episode-trigger) {
     display: grid;
     place-items: center;
-    width: 44px;
-    height: 44px;
+    width: var(--episode-menu-target, 44px);
+    height: var(--episode-menu-target, 44px);
     border-radius: 50%;
     color: var(--muted);
   }

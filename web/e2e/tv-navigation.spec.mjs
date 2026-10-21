@@ -137,11 +137,11 @@ test('remote can pass onboarding, enter search, open a title, and restore its re
   expect(resultBox?.width).toBeGreaterThanOrEqual(190);
   const editor = page.locator('section.search .tv-search-editor');
   expect((await editor.boundingBox())?.width).toBeGreaterThan(1_600);
-  await expect(editor.getByRole('searchbox')).toHaveCSS('font-size', '28px');
+  await expect(editor.getByRole('searchbox')).toHaveCSS('font-size', '32px');
   await page.screenshot({ path: testInfo.outputPath('tv-search-1920.png'), fullPage: false });
   await page.evaluate(() => (window.__tvFocusLatencies = []));
   await page.keyboard.press('ArrowDown');
-  await remoteTo(page, result, ['ArrowDown'], 20);
+  await expect(result).toBeFocused();
   const focusRing = await result.evaluate((card) => {
     const cardStyle = getComputedStyle(card);
     const artStyle = getComputedStyle(card.querySelector('.art'));
@@ -275,13 +275,13 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   const audioLanguage = page.getByRole('combobox', { name: 'Audio language', exact: true });
   await expect(audioLanguage).toBeVisible({ timeout: 30_000 });
   await expect(audioLanguage).toBeEnabled();
-  // Follow intentional routes through the rendered geometry. The wide TV navbar can place different tabs
-  // over the first settings control, so descend from the selected Settings tab itself.
+  // The selected page-level navigation item enters the first declared Settings section at its representative
+  // control, regardless of row height or which later row happens to share its x coordinate.
   await expect(settings).toBeFocused();
-  await remoteTo(page, audioLanguage, ['ArrowDown'], 4);
+  await remoteTo(page, audioLanguage, ['ArrowDown'], 2);
   await page.keyboard.press('ArrowLeft');
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
-  await expect(contentSection).toBeFocused();
+  await remoteTo(page, contentSection, ['ArrowDown'], 2);
   await page.keyboard.press('Enter');
   // RoutePage performs its retained-focus pass on the next animation frame. Under a loaded CI runner a fixed
   // timeout can expire before that frame, letting the pass replace the test's deliberately focused row.
