@@ -230,10 +230,12 @@ async function opensOnTheEpisode(browser, viewport) {
     // page stays at its top and the address is left as it is.
     for (const wrong of ['99', 'abc', '-1']) {
       await page.goto(`${E2E_ORIGIN}${PAGE}?season=2&episode=${wrong}`);
+      // Each goto boots a fresh app and season query. Give every one the same loaded-detail budget as the valid
+      // address above; the default assertion timeout was shorter and failed only under a fully occupied CI runner.
       await expect(
         active(page).getByText('Season 2, episode 1', { exact: true }),
         wrong,
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 15_000 });
       await page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
       expect(await page.evaluate(() => window.addressedEpisodes), wrong).toEqual([]);
       expect(await page.evaluate(() => window.scrollY), wrong).toBe(0);
