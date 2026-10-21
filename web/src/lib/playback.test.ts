@@ -95,6 +95,11 @@ describe('startPlayback', () => {
         {
           url: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
           release,
+          audioTrack: 1,
+          audioTracks: [
+            { language: 'rus', name: null, channels: 0, commentary: false },
+            { language: 'eng', name: null, channels: 0, commentary: false },
+          ],
           torboxSubtitle: 4,
           subtitles: [
             {
@@ -116,7 +121,11 @@ describe('startPlayback', () => {
       playlist: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
       release,
       duration: 0,
-      audioTracks: [],
+      audioTrack: 1,
+      audioTracks: [
+        { language: 'rus', channels: 0, commentary: false },
+        { language: 'eng', channels: 0, commentary: false },
+      ],
       torboxSubtitle: 4,
       subtitles: [
         {

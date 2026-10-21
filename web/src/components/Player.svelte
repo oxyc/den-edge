@@ -484,9 +484,10 @@
   let releaseListing = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   /**
    * The playing release is already a valid stream choice before (or even when) the background listing answers.
-   * TV always exposes the stream control, like the native Apple TV player; ordinary web keeps hiding a picker
-   * that would contain only one choice. Filename is also the identity sent back when switching: providers can return
-   * the same file independently, so one filename must render as one choice (and therefore one stable menu key).
+   * The player always exposes the stream control. That makes a slow or failed guest listing visible instead of
+   * silently looking like the host withheld the picker, and still gives a one-stream session an honest explanation.
+   * Filename is also the identity sent back when switching: providers can return the same file independently, so
+   * one filename must render as one choice (and therefore one stable menu key).
    */
   function releaseChoices(): Release[] {
     if (!session) return releases;
@@ -999,13 +1000,10 @@
     // parallel with it.
     discoverReleases(can);
     // Whether Hearth tries TorBox first for this request: one that rules it out goes straight to Remux (den-hearth
-    // `managed_request`), and its Remux answer says nothing of whether TorBox is there.
+    // `managed_request`), and its Remux answer says nothing of whether TorBox is there. A selected audio track no
+    // longer rules it out: Scout asks TorBox to create that exact track's stream.
     const torboxTried =
-      !!playback &&
-      !asked.directFailed &&
-      asked.audioTrack === undefined &&
-      asked.replaces === undefined &&
-      !asked.exclude?.length;
+      !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
@@ -4253,6 +4251,8 @@
   {/if}
   {#if session}
     {@const parts = releaseParts(session)}
+    {@const playingFile = session.release.filename}
+    {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
@@ -4267,46 +4267,42 @@
         {/if}
       </p>
       <div class="controls" data-tv-horizontal-group={fullTvTransport ? 'actions' : undefined}>
-        {#if customTransport || releases.length > 1}
-          <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
-               quality and size over the release's file name — and ticks the one playing. -->
-          {@const playingFile = session.release.filename}
-          {@const short = pickLabel(session.release)}
-          <div class="pick-menu stream-pick">
-            <ActionMenu
-              label={`Stream: ${short}`}
-              heading="Streams"
-              note={releaseListing === 'loading'
-                ? 'Finding the other available streams…'
-                : releaseListing === 'failed'
-                  ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
-                  : releaseListing === 'ready' && releaseChoices().length === 1
-                    ? 'One stream is available.'
-                    : undefined}
-              triggerClass="pick"
-              onclose={scheduleWebControls}
-              items={() =>
-                releaseChoices().map((release) => ({
-                  kind: 'radio',
-                  key: release.filename,
-                  group: 'release',
-                  label: optionLabel(release),
-                  description: release.filename,
-                  checked: release.filename === playingFile,
-                  disabled: release.plays === 'no',
-                  onselect: () => switchRelease(release.filename),
-                }))}
-            >
-              {#snippet glyph()}
-                {@render plates()}
-                {#if !customTransport}
-                  <span class="value" aria-hidden="true">{short}</span>
-                  {@render chevron()}
-                {/if}
-              {/snippet}
-            </ActionMenu>
-          </div>
-        {/if}
+        <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
+             quality and size over the release's file name — and ticks the one playing. -->
+        <div class="pick-menu stream-pick">
+          <ActionMenu
+            label={`Stream: ${short}`}
+            heading="Streams"
+            note={releaseListing === 'loading'
+              ? 'Finding the other available streams…'
+              : releaseListing === 'failed'
+                ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
+                : releaseListing === 'ready' && releaseChoices().length === 1
+                  ? 'One stream is available.'
+                  : undefined}
+            triggerClass="pick"
+            onclose={scheduleWebControls}
+            items={() =>
+              releaseChoices().map((release) => ({
+                kind: 'radio',
+                key: release.filename,
+                group: 'release',
+                label: optionLabel(release),
+                description: release.filename,
+                checked: release.filename === playingFile,
+                disabled: release.plays === 'no',
+                onselect: () => switchRelease(release.filename),
+              }))}
+          >
+            {#snippet glyph()}
+              {@render plates()}
+              {#if !customTransport}
+                <span class="value" aria-hidden="true">{short}</span>
+                {@render chevron()}
+              {/if}
+            {/snippet}
+          </ActionMenu>
+        </div>
         {#if (customTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
           {#if customTransport}
             <div class="pick-menu audio-pick">
