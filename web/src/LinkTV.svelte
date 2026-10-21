@@ -149,6 +149,13 @@
     await keep(result);
   }
 
+  function browse() {
+    links.browse();
+    // The TV QR makes onboarding taller than one screen. A click scrolls its button into view; reset that scroll
+    // before remote navigation starts, or the spatial navigator cannot see the app's top navigation.
+    scrollTo(0, 0);
+  }
+
   // A scanned code starts at once: the next step is on the TV.
   if (scanned && parseCode(scanned)) void link();
 </script>
@@ -251,12 +258,7 @@
   <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
        remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
   {#if !embedded}
-    <Button
-      class="browse"
-      variant="tertiary"
-      label="Look around instead"
-      onclick={() => links.browse()}
-    />
+    <Button class="browse" variant="tertiary" label="Look around instead" onclick={browse} />
   {/if}
 </section>
 

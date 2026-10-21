@@ -1271,7 +1271,7 @@
         <p>
           {scannedTV
             ? 'This TV is waiting. Confirm what it should receive.'
-            : 'Scan the QR shown by an unlinked TV, or type its code here.'}
+            : 'Scan the QR shown by a TV without a library, or type its code here.'}
         </p>
         <input
           class="field tv-code"
