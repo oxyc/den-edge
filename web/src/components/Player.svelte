@@ -3759,7 +3759,7 @@
                 />
                 <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
               </div>
-              <div class="tv-transport-actions">
+              <div class="tv-transport-actions" data-tv-horizontal-group="transport">
                 <button
                   class="tv-skip"
                   type="button"
@@ -3900,7 +3900,7 @@
           <span class="playing">{parts.release}</span>
         {/if}
       </p>
-      <div class="controls">
+      <div class="controls" data-tv-horizontal-group={fullTvTransport ? 'actions' : undefined}>
         {#if releases.length > 1}
           <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
                quality and size over the release's file name — and ticks the one playing. -->

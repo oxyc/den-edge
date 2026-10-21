@@ -110,8 +110,10 @@
       typeof matchMedia === 'undefined'
         ? undefined
         : matchMedia('(max-width: 759px), (pointer: coarse)');
-    const update = () => (mobile = query!.matches);
-    if (query) mobile = query.matches;
+    // A TV may expose its remote as a coarse pointer. That does not make a ten-foot modal a phone bottom sheet:
+    // TV packages always use the centred remote-navigable menu, while the browser keeps its responsive sheet.
+    const update = () => (mobile = !__DEN_TV__ && query!.matches);
+    if (query) mobile = !__DEN_TV__ && query.matches;
     query?.addEventListener('change', update);
     // A `pointerdown` outside both the menu and its trigger closes the menu — the native popover does that too,
     // but only sometimes stops there (see `outsideClick`) — and a `click` is swallowed only when the same
@@ -533,7 +535,10 @@
         {#if heading}<p class="sheet-heading">{heading}</p>{/if}
         {#if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
       </div>
-    {:else if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
+    {:else}
+      {#if __DEN_TV__ && heading}<p class="tv-menu-heading">{heading}</p>{/if}
+      {#if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
+    {/if}
     <!-- Only a wrapper, so the menu still owns its items; on the sheet, what scrolls under the head. -->
     <div class="items" role="presentation" bind:this={list} onpointerdown={sheetPointerDown}>
       {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}

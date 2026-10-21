@@ -108,6 +108,10 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     const code = event.keyCode;
     if (hidden && (REVEAL_KEYS.has(event.key) || code === 13)) {
       reveal();
+      // A TV's centre button first reveals its transport. Give the next press a useful, native-player-shaped
+      // target instead of leaving focus on the now-blurred picture/body where Select cannot do anything.
+      if (event.key === 'Enter' || event.key === 'Select' || code === 13)
+        root?.querySelector<HTMLElement>('.tv-play-pause')?.focus({ preventScroll: true });
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -140,19 +144,34 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
         (target instanceof HTMLSelectElement && target !== editing)
       ))
         return false;
-      const group = target.closest<HTMLElement>('.tv-transport, .controls, header');
-      if (!group) return false;
-      const controls = [
-        ...group.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), a[href], select:not([disabled])',
-        ),
-      ].sort(
-        (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left,
+      const group = target.closest<HTMLElement>(
+        '[data-tv-horizontal-group], .tv-transport, .controls, header',
       );
+      if (!group) return false;
+      const controlsIn = (container: HTMLElement) =>
+        [
+          ...container.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), a[href], select:not([disabled])',
+          ),
+        ].sort(
+          (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left,
+        );
+      const controls = controlsIn(group);
       const index = controls.indexOf(target);
       const next = controls[index + direction];
-      if (!next) return false;
-      next.focus({ preventScroll: true });
+      if (next) {
+        next.focus({ preventScroll: true });
+        return true;
+      }
+      // Transport and custom actions are two visual rows but one horizontal remote sequence. Explicit groups
+      // make that relationship stable when optional Audio, Subtitles, Streams or Next controls disappear.
+      if (!group.hasAttribute('data-tv-horizontal-group')) return false;
+      const groups = [...root!.querySelectorAll<HTMLElement>('[data-tv-horizontal-group]')];
+      const adjacent = groups[groups.indexOf(group) + direction];
+      const across = adjacent && controlsIn(adjacent);
+      const boundary = across?.[direction > 0 ? 0 : across.length - 1];
+      if (!boundary) return false;
+      boundary.focus({ preventScroll: true });
       return true;
     };
     const moveSpatial = (direction: 'up' | 'down') => {

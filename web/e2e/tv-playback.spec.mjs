@@ -324,10 +324,12 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
   await expect(video).toHaveCount(1);
+  const playPause = page.locator('.tv-play-pause');
+  await expect(playPause).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
 
   // Freeze the idle clock while checking deterministic focus traversal.
-  expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
-  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
   await transport.first().focus();
   await expect(transport.first()).toBeFocused();
   await expect(transport.first()).toHaveCSS('outline-style', 'none');
@@ -345,7 +347,17 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(transport.nth(1)).toBeFocused();
 
+  // The transport and AVKit-style actions are one horizontal remote sequence, even though they are laid out as
+  // separate visual rows. Optional actions may disappear, so the boundary follows the first one actually shown.
+  await transport.last().focus();
+  expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
+  const firstPlayerAction = page.getByRole('button', { name: /^Audio track:/ });
+  await expect(firstPlayerAction).toBeFocused();
+  expect(await remoteKey(page, 'ArrowLeft', 37)).toBe(true);
+  await expect(transport.last()).toBeFocused();
+
   // Down enters the metadata controls; horizontal presses can then reach every source/track picker.
+  await transport.nth(1).focus();
   expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.closest('footer') !== null))
