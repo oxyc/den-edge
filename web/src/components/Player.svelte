@@ -485,13 +485,21 @@
   /**
    * The playing release is already a valid stream choice before (or even when) the background listing answers.
    * TV always exposes the stream control, like the native Apple TV player; ordinary web keeps hiding a picker
-   * that would contain only one choice. De-duplicate because the completed listing normally includes this release.
+   * that would contain only one choice. Filename is also the identity sent back when switching: providers can return
+   * the same file independently, so one filename must render as one choice (and therefore one stable menu key).
    */
   function releaseChoices(): Release[] {
     if (!session) return releases;
-    return releases.some((release) => release.filename === session?.release.filename)
-      ? releases
-      : [{ ...session.release, plays: session.video?.transcoded ? 'convert' : 'yes' }, ...releases];
+    const seen = new Set<string>();
+    const playing: Release = {
+      ...session.release,
+      plays: session.video?.transcoded ? 'convert' : 'yes',
+    };
+    return [playing, ...releases].filter((release) => {
+      if (seen.has(release.filename)) return false;
+      seen.add(release.filename);
+      return true;
+    });
   }
 
   /** Start the independent release listing as soon as this browser's claims are known, alongside session startup. */

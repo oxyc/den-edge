@@ -28,6 +28,14 @@ const releases = [
     size: 14 * 1024 ** 3,
     plays: 'no',
   },
+  // Two providers can independently return the same file. Playback selection itself accepts only the filename, so
+  // these are one actionable choice—not two DOM rows with an invalid duplicate identity.
+  {
+    label: '4K • WEB-DL • Dolby Vision • 14 GB · duplicate provider',
+    filename: 'The.Movie.2001.2160p.WEB-DL.DV.P5.H.265-NOGROUP.mkv',
+    size: 14 * 1024 ** 3,
+    plays: 'no',
+  },
 ];
 
 async function mockPlayer(page, { releaseGate } = {}) {
