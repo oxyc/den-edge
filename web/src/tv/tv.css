@@ -55,10 +55,12 @@
 /* TV action pickers are read from metres away and navigated one row at a time. ActionMenu stays compact on the
    browser face; only the TV bundle promotes its stream/audio/subtitle dialogs to ten-foot geometry. */
 .den-tv dialog[role='menu'] {
+  inset: 0;
   width: var(--tv-menu-width);
   min-width: var(--tv-menu-width);
   max-width: var(--tv-menu-width);
   max-height: min(76vh, 820px);
+  margin: auto;
   padding: var(--tv-menu-padding);
   border-color: rgb(255 255 255 / 0.16);
   border-radius: 26px;

@@ -150,16 +150,21 @@
       await tick();
     }
     if (!menu) return;
-    // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
-    // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
-    position();
     if (__DEN_TV__) {
       const dialog = menu as HTMLDialogElement;
+      // The TV variant is a centred modal, not a web popover anchored beside a trigger. In particular, never
+      // leave inline trigger coordinates on a wider ten-foot dialog: controls near the viewport edge would put
+      // most of it off-screen.
+      dialog.style.removeProperty('left');
+      dialog.style.removeProperty('top');
       if (!dialog.open) {
         dialog.showModal();
         opened();
       }
     } else if (!menu.matches(':popover-open')) {
+      // Position while it is still hidden. Waiting until `beforetoggle` and then a frame lets the browser paint
+      // the newly top-layer popover once at its unanchored fallback before the requested coordinates arrive.
+      position();
       menu.showPopover();
       // Measured now that it is laid out, and placed again before it is painted.
       position();
