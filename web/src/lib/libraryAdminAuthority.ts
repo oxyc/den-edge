@@ -8,13 +8,14 @@ import {
 import type { ClockStore } from './clockStore';
 import { buildHistoryExport } from './historyExport';
 import { householdScoped, profileScoped } from './householdScope';
+import { linkKeys } from './inbox';
 import { unaccounted } from './localLibraryMove';
 import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
 import { LibraryLog, projectV3Documents, successorTag } from './log';
 import type { Vault } from './localVault';
-import { linkKeys, sealHandover } from './pair';
+import { sealHandover } from './pairHandover';
 import { completeDurableTaskOperation } from './libraryOperationAuthority';
 import {
   abandon,

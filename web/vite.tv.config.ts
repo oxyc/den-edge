@@ -15,6 +15,7 @@ const legacyCompat = fileURLToPath(new URL('./src/tv/compat-legacy.ts', import.m
 const tizen3WorkerCompat = fileURLToPath(
   new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
 );
+const tizen3PairCurve = fileURLToPath(new URL('./src/lib/pairCurve-tizen3.ts', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
@@ -318,6 +319,7 @@ export default mergeConfig(
     // to wrappers with byte-identical APIs beside the compatible generated modules.
     resolve: {
       alias: [
+        ...(tizen3 ? [{ find: './pairCurve', replacement: tizen3PairCurve }] : []),
         {
           find: /^(?:.*\/)?vendor\/den-core\/(index|assistant|recovery)\.js$/,
           replacement: `${tvCore}/$1.js`,

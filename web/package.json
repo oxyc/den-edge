@@ -72,6 +72,7 @@
     "core-js": "^3.50.0",
     "hls.js": "^1.7.3",
     "intersection-observer": "^0.12.2",
-    "qrcode-generator": "2.0.4"
+    "qrcode-generator": "2.0.4",
+    "ristretto255": "^0.1.3"
   }
 }

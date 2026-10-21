@@ -2,25 +2,30 @@
 // den-edge's /pair routes, which never see the secret half of the code. pair.test.ts runs den-spec's vectors —
 // the CPace draft's own among them — which the TV runs too.
 
-import { ristretto255, ristretto255_hasher } from '@noble/curves/ed25519.js';
 import { hkdf } from './crypto';
 import { cleanLabel, deviceLabel } from './edge';
 import { linkKeys, sendToLink } from './inbox';
+import { multiplyEncodedPoint, multiplyPoint, pointFromUniformBytes } from './pairCurve';
+import type { PairingPoint as Point } from './pairCurveTypes';
 import { ALPHABET, parseCode } from './pairCode';
+import {
+  isGrantTicket,
+  isStampDeviceId,
+  openHandover,
+  sealHandover,
+  type Handover,
+} from './pairHandover';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
-type Point = InstanceType<typeof ristretto255.Point>;
 type Role = 'joiner' | 'host';
 
 const utf8 = new TextEncoder();
 const DSI = utf8.encode('CPaceRistretto255');
 const CI = utf8.encode('den/pair/v1');
-const HANDOVER = utf8.encode('den/pair/v1/handover');
-export const isStampDeviceId = (value: unknown): value is string =>
-  typeof value === 'string' && /^[0-9a-f]{16}$/.test(value);
 
 export { parseCode };
+export { isStampDeviceId, openHandover, sealHandover, type Handover };
 
 /**
  * A code as it is typed: alphabet characters only, at most twelve, in the TV's groups of four. `caret` is where the
@@ -100,8 +105,8 @@ function generatorString(prs: Uint8Array, ci: Uint8Array, sid: Uint8Array): Byte
 }
 
 export async function generator(prs: Uint8Array, ci: Uint8Array, sid: Uint8Array): Promise<Point> {
-  const g = ristretto255_hasher.deriveToCurve?.(await sha512(generatorString(prs, ci, sid)));
-  if (!g) throw new Error('@noble/curves has no ristretto255 element derivation');
+  const g = pointFromUniformBytes(await sha512(generatorString(prs, ci, sid)));
+  if (!g) throw new Error('Ristretto255 has no element derivation');
   return g;
 }
 
@@ -112,21 +117,11 @@ export function sampleScalar(): Bytes {
   return y;
 }
 
-const scalar = (littleEndian: Uint8Array): bigint =>
-  littleEndian.reduceRight((n, byte) => (n << 8n) | BigInt(byte), 0n);
-
-export const scalarMult = (y: Uint8Array, g: Point): Bytes =>
-  new Uint8Array(g.multiply(scalar(y)).toBytes());
+export const scalarMult = (y: Uint8Array, g: Point): Bytes => multiplyPoint(y, g);
 
 /** `y` times the encoded point, or the identity (32 zero bytes) when it doesn't decode. */
 export function scalarMultVfy(y: Uint8Array, encoded: Uint8Array): Bytes {
-  let point: Point;
-  try {
-    point = ristretto255.Point.fromBytes(encoded);
-  } catch {
-    return new Uint8Array(32);
-  }
-  return point.is0() ? new Uint8Array(32) : new Uint8Array(point.multiply(scalar(y)).toBytes());
+  return multiplyEncodedPoint(y, encoded) ?? new Uint8Array(32);
 }
 
 export function intermediateKey(
@@ -252,71 +247,6 @@ export async function hostRespond(
 /** The host checks the joiner's tag `c`, before asking its user to allow the joiner. */
 export async function hostConfirm(state: HostState, c: Uint8Array): Promise<boolean> {
   return equal(c, await hmac512(state.macKey, lvCat(state.Ya, state.ADa)));
-}
-
-export interface Handover {
-  host: string;
-  /** Stable library stamp id of the host. Missing on handovers from older clients. */
-  hostDeviceId?: string;
-  linkKey: Bytes;
-  libraryKey: Bytes;
-  /** A one-use guest-device ticket, carried only inside the encrypted handover. */
-  grantTicket?: string;
-}
-
-const isGrantTicket = (value: unknown): value is string =>
-  typeof value === 'string' && /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/.test(value);
-
-async function aes(key: Bytes, use: KeyUsage): Promise<CryptoKey> {
-  return crypto.subtle.importKey('raw', key, 'AES-GCM', false, [use]);
-}
-
-export async function sealHandover(
-  key: Bytes,
-  handover: Handover,
-  nonce = crypto.getRandomValues(new Uint8Array(12)),
-) {
-  const plaintext = JSON.stringify({
-    v: 1,
-    host: handover.host,
-    ...(handover.hostDeviceId ? { hostDeviceId: handover.hostDeviceId } : {}),
-    ...(handover.grantTicket ? { grantTicket: handover.grantTicket } : {}),
-    linkKey: toBase64url(handover.linkKey),
-    libraryKey: toBase64url(handover.libraryKey),
-  });
-  const params = { name: 'AES-GCM', iv: nonce, additionalData: HANDOVER };
-  return concat(
-    nonce,
-    new Uint8Array(
-      await crypto.subtle.encrypt(params, await aes(key, 'encrypt'), utf8.encode(plaintext)),
-    ),
-  );
-}
-
-/** The host's handover, or null when it doesn't open or lacks a key. */
-export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover | null> {
-  if (d.length < 12 + 16) return null;
-  try {
-    const params = { name: 'AES-GCM', iv: d.slice(0, 12), additionalData: HANDOVER };
-    const plain = await crypto.subtle.decrypt(params, await aes(key, 'decrypt'), d.slice(12));
-    const body = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
-    const linkKey = typeof body.linkKey === 'string' ? fromBase64url(body.linkKey) : null;
-    const libraryKey = typeof body.libraryKey === 'string' ? fromBase64url(body.libraryKey) : null;
-    if (body.hostDeviceId !== undefined && !isStampDeviceId(body.hostDeviceId)) return null;
-    if (body.grantTicket !== undefined && !isGrantTicket(body.grantTicket)) return null;
-    const hostDeviceId = isStampDeviceId(body.hostDeviceId) ? body.hostDeviceId : undefined;
-    if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32)
-      return null;
-    return {
-      host: body.host,
-      ...(hostDeviceId ? { hostDeviceId } : {}),
-      ...(isGrantTicket(body.grantTicket) ? { grantTicket: body.grantTicket } : {}),
-      linkKey,
-      libraryKey,
-    };
-  } catch {
-    return null;
-  }
 }
 
 /** Where joining gets its link keys; kept on this module for the tests that pin den-spec's vectors here. */

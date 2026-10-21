@@ -37,6 +37,13 @@ if (tizen3) {
   const metadata = JSON.parse(await readFile(resolve(directory, 'den-tv-package.json'), 'utf8'));
   if (metadata.tizenVersion !== '3.0' || metadata.legacyNonModule !== true)
     throw new Error('Tizen 3 package metadata is not marked as legacy non-module output');
+  const pairFiles = assets.filter((file) => /^pair-legacy-.*\.js$/.test(file));
+  if (pairFiles.length !== 1) throw new Error('Expected one Tizen 3 pairing chunk');
+  const pair = await readFile(resolve(directory, 'assets', pairFiles[0]), 'utf8');
+  if (/\bBigInt\s*\(|\b\d+n\b/.test(pair))
+    throw new Error('Native BigInt remains in the Tizen 3 pairing path');
+  if (!pair.includes('ristretto255'))
+    throw new Error('Tizen 3 pairing did not select the typed-array Ristretto adapter');
 }
 for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
