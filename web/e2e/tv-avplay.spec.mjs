@@ -190,6 +190,10 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   );
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  // Freeze the fixture's accelerated playback clock before injecting exact caption timestamps below. Otherwise its
+  // 25x timer can overwrite 250ms between the callback and assertion, making this timing test nondeterministic.
+  expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
+  await expect.poll(() => callsNamed(page, 'pause')).toHaveLength(1);
   await chooseSubtitle(page, 'English');
   await page.evaluate(() => {
     window.__avplayFixture.latest().oncurrentplaytime(1_000);
