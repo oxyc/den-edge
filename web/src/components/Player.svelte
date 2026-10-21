@@ -2127,7 +2127,9 @@
       return;
     }
     if (message.id !== current.playlist) return;
-    if (message.type === 'den-progress') {
+    if (message.type === 'den-activity') {
+      revealWebControls();
+    } else if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
       // A length is known only once the playlist came through the media listener.
@@ -4423,7 +4425,7 @@
           {#if onnext && nextHref}<a
               class="player-tv-action next-action"
               href={nextHref}
-              aria-label={next ? `Next episode: ${next}` : 'Next episode'}
+              aria-label={next ? `Next: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
           {#if desktopTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
@@ -4732,7 +4734,9 @@
   /* The cast page's own "Choose your Chromecast" button, under the offer's notice: only a press in that page can
      open Chrome's device list. */
   iframe.cast-choose {
-    z-index: 2;
+    /* Above the owned player's header gradient and buttons: this is the one cross-origin press that may open
+       Chrome's receiver chooser, so looking visible while the header intercepted it made Cast appear inert. */
+    z-index: 8;
     top: calc(12px + 76px + 8px);
     left: 50%;
     width: min(18rem, calc(100% - 24px));

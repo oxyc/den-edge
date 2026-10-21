@@ -257,6 +257,14 @@ async function playingPast(page, seconds) {
     .toBeGreaterThan(seconds);
 }
 
+/** Move over the picture as a viewer does before pressing chrome that has auto-hidden while they watched. */
+async function revealPlayerControls(page) {
+  const box = await page.locator('.player').boundingBox();
+  if (!box) throw new Error('player has no box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(50);
+}
+
 /** The progress the library holds for `episode` of season 1 (`value` its fraction); null where it holds none. */
 const progressOf = (page, episode) =>
   page.evaluate(
@@ -363,6 +371,7 @@ test('closing the player and playing another title opens a fresh player', async 
     await playFirstEpisode(page);
     await playingPast(page, 1);
     await page.evaluate(() => (window.__seriesVideo = document.querySelector('.player video')));
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Close' }).click();
     await expect(player(page)).toHaveCount(0);
     // Leaving the player takes its video with it.
@@ -410,6 +419,7 @@ test.describe('Den Cast', () => {
     try {
       await playFirstEpisode(page);
       await playingPast(page, 1);
+      await revealPlayerControls(page);
       await page.getByRole('button', { name: 'Cast to a TV' }).click();
       const choose = page
         .frameLocator(`iframe[src^="${CAST}"]`)

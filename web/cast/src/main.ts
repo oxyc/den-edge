@@ -228,6 +228,21 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
 }
 
+// Pointer events stop at an iframe boundary. Without forwarding activity, the player's chrome could hide while the
+// Cast page was under the pointer and then never return: the invisible parent controls could not receive the move
+// that should reveal them. Keep this deliberately coarse; it is a presence signal, not pointer telemetry.
+let lastPointerActivity = 0;
+window.addEventListener(
+  'pointermove',
+  () => {
+    const now = performance.now();
+    if (now - lastPointerActivity < 250) return;
+    lastPointerActivity = now;
+    tell('den-activity');
+  },
+  { passive: true },
+);
+
 /** Tell den-remux why the session couldn't play — its log sees nothing of it otherwise — and then the player. */
 function fail(message: string, code = 0, owner: PlayingMedia | undefined = playing): void {
   const lifecycle = denLifecycleMedia(owner);

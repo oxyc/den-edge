@@ -249,8 +249,17 @@ async function playingPast(page, seconds) {
   return page.evaluate(() => document.querySelector('.player video').currentTime);
 }
 
+/** Move over the picture as a viewer does before pressing chrome that has auto-hidden while they watched. */
+async function revealPlayerControls(page) {
+  const box = await page.locator('.player').boundingBox();
+  if (!box) throw new Error('player has no box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(50);
+}
+
 /** Press Cast, wait for the cast page's own "Choose your Chromecast", and press it there. */
 async function chooseReceiver(page, asked) {
+  await revealPlayerControls(page);
   await page.getByRole('button', { name: 'Cast to a TV' }).click();
   const choose = castFrame(page).getByRole('button', { name: 'Choose your Chromecast' });
   await expect(choose).toBeVisible({ timeout: 15_000 });
@@ -359,6 +368,7 @@ test('a receiver that never starts is reported as a Cast session failure, not an
     await expect.poll(() => castLoads(page)).toHaveLength(1);
     // Past the (shortened) wait for the receiver to start, then closed: the visit's cast report goes.
     await page.waitForTimeout(2_500);
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Close' }).click();
     await expect.poll(() => asked.castReports).toHaveLength(1);
     expect(asked.castReports[0]).toMatchObject({
