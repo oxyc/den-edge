@@ -212,14 +212,14 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
     .toBe(true);
   await page.getByRole('button', { name: /^Subtitles:/ }).click();
   await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
-  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toContainText('+0.0s');
+  await expect(page.getByRole('group', { name: 'Subtitle timing' })).toContainText('+0.0s');
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
-  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toContainText('+0.5s');
+  await expect(page.getByRole('group', { name: 'Subtitle timing' })).toContainText('+0.5s');
   // Use AVPlay's clock callback rather than the hidden HTML video's clock: Samsung owns playback timing.
   await page.evaluate(() => window.__avplayFixture.latest().oncurrentplaytime(250));
   await expect(captions).toBeHidden();
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
-  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Subtitle timing' })).toHaveCount(0);
   await chooseSubtitle(page, 'Off');
   await expect(captions).toBeHidden();
 });

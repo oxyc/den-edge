@@ -19,7 +19,7 @@ const expectUpdateRequired = async (page) => {
 test('a cold linked library renders HTTP 426 as a stable update-required screen', async ({
   page,
 }) => {
-  const edge = { upgradeRequired: 5 };
+  const edge = { upgradeRequired: 6 };
   await routeLibraryEdge(page, edge);
 
   await page.goto(`${FIXTURE}?online&lifecycle`);
@@ -37,7 +37,7 @@ test('a cached linked library replaces its contents when refresh receives HTTP 4
   await routeLibraryEdge(page, edge);
   await page.goto(`${FIXTURE}?seed`);
   await page.getByRole('status').filter({ hasText: 'Worker library seeded' }).waitFor();
-  edge.upgradeRequired = 5;
+  edge.upgradeRequired = 6;
   edge.wires.length = 0;
 
   await page.goto(`${FIXTURE}?online&lifecycle`);

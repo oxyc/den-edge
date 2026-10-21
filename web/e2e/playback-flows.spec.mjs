@@ -262,8 +262,15 @@ const segmentHosts = () =>
 const stamped = (page, source) => expect(page.getByTestId('playback-source')).toHaveText(source);
 
 const castFrame = (page) => page.locator('iframe[title="Den Cast player"]');
+/** Move over the picture as a viewer does before pressing chrome that has auto-hidden while they watched. */
+async function revealPlayerControls(page) {
+  const box = await page.locator('.player').boundingBox();
+  if (!box) throw new Error('player has no box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+}
 /** The stamp's menu, opened, and its switch to `to` chosen. */
 async function switchFromStamp(page, from, to) {
+  await revealPlayerControls(page);
   await page.getByRole('button', { name: `Playing from ${from}` }).click();
   await page.getByRole('menuitem', { name: `Switch to ${to}` }).click();
 }
@@ -399,6 +406,7 @@ test('a viewer whose Hearth has only Remux gets the switch disabled, and the rea
   try {
     await playingPast(pageVideo(page), 3);
     await stamped(page, 'Den Remux');
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Playing from Den Remux' }).click();
     const menu = page.getByRole('menu', { name: 'Playing from Den Remux' });
     await expect(menu).toContainText('This Hearth has no TorBox to play from');
