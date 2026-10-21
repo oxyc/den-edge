@@ -20,7 +20,7 @@ if (platform === 'tizen' && process.env.DEN_TIZEN_VERSION === '5.5') {
       throw new Error(`Module Worker option remains in the Tizen 5.5 build: ${file}`);
   }
 }
-for (const name of ['den_core', 'den_core_assistant']) {
+for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
   if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);
   const bytes = await readFile(resolve(directory, 'assets', matches[0]));

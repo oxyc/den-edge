@@ -23,7 +23,13 @@
     "generated/den_core_assistant_bg.wasm.d.ts": "5c93af8a8cfab7569c92cf075ad88233e2c3743a0887bb4af3dfcdc7a4588b9e",
     "generated/den_core_bg.wasm": "86d8ded709b146a8c37df7c8149e69641105d04fbd82a79df3c015dcad7ab580",
     "generated/den_core_bg.wasm.d.ts": "bcabe71bb18ceff11cb0df53098492abfa89e3f5f45d311f42cab3cccd7a3eb2",
+    "generated/den_core_recovery.d.ts": "5f922d44f44d5b1d5ea346febd85c77edd2744d312c2a7eeaa3383650d771a6d",
+    "generated/den_core_recovery.js": "e13cc97a4d9fa5d63035c60bee2b5bc38ca8464c605e89426af363aad9555193",
+    "generated/den_core_recovery_bg.wasm": "085ec494a0f3aec144289499087d5ebcc53e6a64ab6c0aa50bd206ac4ed11ac8",
+    "generated/den_core_recovery_bg.wasm.d.ts": "863828fd10d2c7f7d45eabef19c59b9530521dcb2e1cef7a705e5725c5b4b799",
     "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
-    "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87"
+    "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87",
+    "recovery.d.ts": "1cfaaf8df197be50cfefd71e0d281b2776cd453b3afec3f015206fcb7ce124c1",
+    "recovery.js": "ea077272a96f3ee7b112ff496dfd7138187eea700a1ebb1f40352fb2e4b48fe2"
   }
 }

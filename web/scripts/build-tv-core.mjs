@@ -92,10 +92,40 @@ execFileSync(
     },
   },
 );
+// Cargo unifies features across packages in one invocation. The recovery crate enables den-sync/recovery-kdf;
+// compiling it with the ordinary core would silently put Argon2 back into that core. A distinct invocation and
+// target directory are therefore part of the capability boundary, not merely a build optimization.
+const recoveryTarget = join(scratch, 'target-recovery');
+execFileSync(
+  'cargo',
+  [
+    'build',
+    '-Z',
+    'build-std=std,panic_abort',
+    '--locked',
+    '--release',
+    '-p',
+    'den-core-web-recovery',
+    '--target',
+    'wasm32-unknown-unknown',
+  ],
+  {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      RUSTC_BOOTSTRAP: '1',
+      RUSTFLAGS: rustflags,
+      CARGO_ENCODED_RUSTFLAGS: encodedFlags,
+      CARGO_TARGET_DIR: recoveryTarget,
+    },
+  },
+);
 const generated = join(scratch, 'generated');
-for (const [crate, name] of [
+for (const [crate, name, target = join(scratch, 'target')] of [
   ['den_core_web', 'den_core'],
   ['den_core_web_assistant', 'den_core_assistant'],
+  ['den_core_web_recovery', 'den_core_recovery', recoveryTarget],
 ]) {
   execFileSync(
     bindgen,
@@ -107,13 +137,21 @@ for (const [crate, name] of [
       generated,
       '--out-name',
       name,
-      join(scratch, 'target/wasm32-unknown-unknown/release', `${crate}.wasm`),
+      join(target, 'wasm32-unknown-unknown/release', `${crate}.wasm`),
     ],
     { stdio: 'inherit' },
   );
 }
 mkdirSync(tvCore, { recursive: true });
-for (const name of ['index.js', 'index.d.ts', 'assistant.js', 'assistant.d.ts', 'LICENSE'])
+for (const name of [
+  'index.js',
+  'index.d.ts',
+  'assistant.js',
+  'assistant.d.ts',
+  'recovery.js',
+  'recovery.d.ts',
+  'LICENSE',
+])
   cpSync(join(browserCore, name), join(tvCore, name));
 cpSync(generated, join(tvCore, 'generated'), { recursive: true });
 const names = [
@@ -122,6 +160,8 @@ const names = [
   'index.d.ts',
   'assistant.js',
   'assistant.d.ts',
+  'recovery.js',
+  'recovery.d.ts',
   ...readdirSync(generated).map((name) => `generated/${name}`),
 ].sort();
 writeFileSync(
