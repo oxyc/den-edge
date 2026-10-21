@@ -104,6 +104,7 @@ function testTier(tizenVersion, wasmCspSource) {
 
 testTier('8.0', "'wasm-unsafe-eval'");
 testTier('6.5', "'unsafe-eval'");
+testTier('5.5', "'unsafe-eval'");
 
 const rejected = spawnSync(
   process.execPath,
@@ -122,5 +123,5 @@ const rejected = spawnSync(
 if (rejected.status === 0 || !rejected.stderr.includes('exact HTTPS origin'))
   throw new Error('Packager accepted an API URL with a path');
 console.log(
-  'Tizen 8.0 and 6.5 unsigned WGTs passed metadata, CSP, root-layout, asset-path, icon, and optional XML validation.',
+  'Tizen 8.0, 6.5, and 5.5 unsigned WGTs passed metadata, CSP, root-layout, asset-path, icon, and optional XML validation.',
 );
