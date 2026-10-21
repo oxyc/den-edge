@@ -3030,7 +3030,9 @@ export class LibraryLog {
         log.forgetPartial();
         return log.restoreJournal();
       }
-      log.keepPartial();
+      // Do not ask for the next page until this one is durable. A TV may kill the Worker at any point; once the
+      // following request starts, a restart must be able to resume at this page rather than decrypt it again.
+      if (!(await log.keepPartial())) return null;
       since = page.entries.at(-1)?.seq ?? page.head;
     }
   }
@@ -3568,10 +3570,18 @@ export class LibraryLog {
   }
 
   /** The pages a first read has read so far (`PARTIAL`); a failure only costs the next visit those pages. */
-  private keepPartial(): void {
-    if (!this.local) return;
+  private async keepPartial(): Promise<boolean> {
+    if (!this.local) return true;
     const snapshot = this.snapshot();
-    this.saving = this.saving.then(() => this.keep(PARTIAL, snapshot)).catch(() => undefined);
+    let kept = true;
+    this.saving = this.saving
+      .then(() => this.keep(PARTIAL, snapshot))
+      .catch((error: unknown) => {
+        kept = false;
+        console.warn('den: the partial library import could not be kept', error);
+      });
+    await this.saving;
+    return kept;
   }
 
   private forgetPartial(): void {

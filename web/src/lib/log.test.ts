@@ -1478,6 +1478,56 @@ describe('LibraryLog', () => {
     });
   });
 
+  it('commits each cold-import page before requesting the next one', async () => {
+    const stored = memoryVault();
+    const server = await edge([row(1), row(2), row(3)]);
+    let release!: () => void;
+    const checkpointMayFinish = new Promise<void>((resolve) => (release = resolve));
+    let checkpointStarted = false;
+    const vault: Vault = {
+      ...stored.vault,
+      put: async (key, value) => {
+        if (key.endsWith(':log-partial.v1')) {
+          checkpointStarted = true;
+          await checkpointMayFinish;
+        }
+        await stored.vault.put(key, value);
+      },
+    };
+    let pages = 0;
+    const connection: typeof fetch = (input, init) => {
+      if (!init?.method) pages++;
+      return server.fetchImpl(input, init);
+    };
+
+    const opening = LibraryLog.open(LIBRARY_KEY, connection, undefined, vault);
+    await vi.waitFor(() => expect(checkpointStarted).toBe(true));
+    expect(pages, 'the next page waits for the checkpoint transaction').toBe(1);
+    release();
+    await expect(opening).resolves.not.toBeNull();
+    expect(pages).toBe(2);
+  });
+
+  it('stops a cold import when its page checkpoint cannot be committed', async () => {
+    const stored = memoryVault();
+    const server = await edge([row(1), row(2), row(3)]);
+    const vault: Vault = {
+      ...stored.vault,
+      put: async (key, value) => {
+        if (key.endsWith(':log-partial.v1')) throw new Error('storage full');
+        await stored.vault.put(key, value);
+      },
+    };
+    let pages = 0;
+    const connection: typeof fetch = (input, init) => {
+      if (!init?.method) pages++;
+      return server.fetchImpl(input, init);
+    };
+
+    await expect(LibraryLog.open(LIBRARY_KEY, connection, undefined, vault)).resolves.toBeNull();
+    expect(pages, 'an uncommitted page must not be followed by another page').toBe(1);
+  });
+
   it('shows the kept copy without waiting on den-edge, and sends kept work on the refresh after', async () => {
     const { vault } = memoryVault();
     const data = new Map<string, string>();
