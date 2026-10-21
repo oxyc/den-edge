@@ -302,6 +302,11 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await transport.last().focus();
   await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
 
+  // The LG Magic Remote reveals controls by aiming, without requiring a click on an invisible target.
+  await page.mouse.move(320, 240);
+  await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
+
   // The first Select only reveals controls; it must not activate the Close button focused before idle hiding.
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
   await expect(page.locator('.tv-transport')).not.toHaveAttribute('inert', '');
