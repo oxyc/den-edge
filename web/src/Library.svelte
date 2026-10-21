@@ -1266,7 +1266,7 @@
    * Which services have a "new" or a "coming" chart is atlas's to say and changes with its releases, so the rows
    * are only ever as broad as the manifest — and where it lists none, there are no rows rather than empty ones.
    */
-  let serviceCatalogs = $state<AtlasCatalog[]>([]);
+  let serviceCatalogs = $state.raw<AtlasCatalog[]>([]);
   $effect(() => {
     const here = atlas;
     if (!here) return;
@@ -1366,7 +1366,7 @@
   let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
-  let directories = $state<Record<string, Service[]>>({});
+  let directories = $state.raw<Record<string, Service[]>>({});
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
@@ -1413,7 +1413,7 @@
    * what is new or still to come, and what has just landed on this household's own services, away from anything the
    * library already holds.
    */
-  let featured = $state<RecommendedTitle[]>([]);
+  let featured = $state.raw<RecommendedTitle[]>([]);
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );

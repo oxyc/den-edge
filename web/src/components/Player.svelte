@@ -386,7 +386,7 @@
    * Where den-remux is asked, which starts as the page's own route and moves to the relay when the viewer asks to
    * cast from a direct (tailnet or home-network) one: those play in a plain video element that has no Cast button.
    */
-  let route = $state(untrack(() => remux));
+  let route = $state.raw(untrack(() => remux));
   let routeBeforeCast = untrack(() => remux);
   /** Where a press of Cast stands (`castLook`): playback moves to the relay only once a receiver was seen. */
   let castOffer = $state<CastOffer>('idle');
@@ -438,7 +438,7 @@
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
   /** On `none`: the containers of the releases that were ready but that the browser player can't open (`.ts`, …). */
-  let skippedFormats = $state<string[]>([]);
+  let skippedFormats = $state.raw<string[]>([]);
   /**
    * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
    * which is waited out rather than acted on. One per hls.js instance.
@@ -477,7 +477,7 @@
   /** What this browser decodes, found once: den-remux converts only what won't play here. */
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
-  let releases = $state<Release[]>([]);
+  let releases = $state.raw<Release[]>([]);
   /**
    * Discovery is separate from session creation. The session itself is a valid first choice, but presenting that
    * one row as a finished list while Scout is still collecting releases makes a slow answer look like "one stream".
@@ -3203,7 +3203,7 @@
   }
 
   /** SkipDB's segments for what is playing, and the one under the playhead right now. */
-  let segments = $state<SkipSegment[]>([]);
+  let segments = $state.raw<SkipSegment[]>([]);
   let active = $state<SkipSegment | null>(null);
   /**
    * Kinds already skipped in this session, so a viewer who scrubs back into the credits is not yanked out of

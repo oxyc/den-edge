@@ -271,9 +271,9 @@ export function writePendingReset(
  * when it loaded, so a TV paired in one tab was dropped by the next change another tab made, and gone on reload.
  */
 export class Links {
-  list = $state<Link[]>(readLinks());
+  list = $state.raw<Link[]>(readLinks());
   /** The devices this browser gave its library to. */
-  shared = $state<Shared[]>(readShared());
+  shared = $state.raw<Shared[]>(readShared());
   /**
    * Set once the visitor dismisses the invitation to pair, and remembered: the invitation belongs to a first
    * visit, not to every load. Pairing stays reachable from Settings afterwards, so dismissing costs nothing.
@@ -435,11 +435,13 @@ export class Links {
     this.reread();
     const kept = this.shared.find((s) => sameShared(s, entry));
     if (!kept) return;
-    for (const record of kept === entry ? [kept] : [kept, entry]) {
-      record.name = name;
-      if (deviceId) record.deviceId = deviceId;
-    }
-    this.shared = [...this.shared];
+    const identified = (record: Shared): Shared => ({
+      ...record,
+      name,
+      ...(deviceId ? { deviceId } : {}),
+    });
+    this.shared = this.shared.map((record) => (record === kept ? identified(record) : record));
+    if (entry !== kept) Object.assign(entry, identified(entry));
     this.saveShared();
   }
 
@@ -448,11 +450,13 @@ export class Links {
     this.reread();
     const kept = this.list.find((l) => l.inboxKey === entry.inboxKey);
     if (!kept) return;
-    for (const record of kept === entry ? [kept] : [kept, entry]) {
-      record.sentIdentityName = name;
-      record.sentIdentityDeviceId = deviceId;
-    }
-    this.list = [...this.list];
+    const delivered = (record: Link): Link => ({
+      ...record,
+      sentIdentityName: name,
+      sentIdentityDeviceId: deviceId,
+    });
+    this.list = this.list.map((record) => (record === kept ? delivered(record) : record));
+    if (entry !== kept) Object.assign(entry, delivered(entry));
     this.saveLinks();
   }
 

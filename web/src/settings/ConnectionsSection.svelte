@@ -166,8 +166,8 @@
   // Keys: checked with their service before they're kept, and the saved ones checked once as the page opens, as
   // the TV checks its keys at launch.
   const checks = new SvelteMap<string, KeyCheck | 'checking'>();
-  let drafts = $state<Record<string, string>>({ tmdb: '', omdb: '', doesthedogdie: '' });
-  let notes = $state<Record<string, { text: string; bad: boolean }>>({});
+  let drafts = $state.raw<Record<string, string>>({ tmdb: '', omdb: '', doesthedogdie: '' });
+  let notes = $state.raw<Record<string, { text: string; bad: boolean }>>({});
   const serviceName = { tmdb: 'TMDB', omdb: 'OMDb', doesthedogdie: 'doesthedogdie' };
   const savedNote = {
     tmdb: 'Saved — discovery is loading.',
@@ -190,35 +190,43 @@
     if (!key) return;
     const before = checks.get(service.name);
     checks.set(service.name, 'checking');
-    notes[service.name] = { text: `Checking with ${serviceName[service.name]}…`, bad: false };
+    notes = {
+      ...notes,
+      [service.name]: { text: `Checking with ${serviceName[service.name]}…`, bad: false },
+    };
     const result = await checkKey(service, key);
     if (result !== 'accepted') {
       if (before) checks.set(service.name, before);
       else checks.delete(service.name);
-      notes[service.name] = {
-        text:
-          result === 'refused'
-            ? `${serviceName[service.name]} didn’t accept this key.`
-            : `Couldn’t reach ${serviceName[service.name]}. Try again in a moment.`,
-        bad: true,
+      notes = {
+        ...notes,
+        [service.name]: {
+          text:
+            result === 'refused'
+              ? `${serviceName[service.name]} didn’t accept this key.`
+              : `Couldn’t reach ${serviceName[service.name]}. Try again in a moment.`,
+          bad: true,
+        },
       };
       return;
     }
     if (!(await setApiKey(apiService(service.name), key))) {
       if (before) checks.set(service.name, before);
       else checks.delete(service.name);
-      delete notes[service.name];
+      const { [service.name]: _removed, ...remaining } = notes;
+      notes = remaining;
       return;
     }
-    drafts[service.name] = '';
+    drafts = { ...drafts, [service.name]: '' };
     checks.set(service.name, 'accepted');
-    notes[service.name] = { text: savedNote[service.name], bad: false };
+    notes = { ...notes, [service.name]: { text: savedNote[service.name], bad: false } };
   }
 
   async function removeKey(service: KeyService) {
     if (!(await setApiKey(apiService(service.name), null))) return;
     checks.delete(service.name);
-    delete notes[service.name];
+    const { [service.name]: _removed, ...remaining } = notes;
+    notes = remaining;
     // TMDB's terms: cached content goes when the key it was fetched with does.
     if (service.name === 'tmdb')
       await content.query({ kind: 'provider-cache.clear', service: 'tmdb' });
@@ -249,8 +257,8 @@
   let configuringOwner = $state(false);
   let resettingGuest = $state<string | null>(null);
   let configureGuestProblem = $state<string | null>(null);
-  let pluginMenus = $state<Record<string, ActionMenu | undefined>>({});
-  let guestMenus = $state<Record<string, ActionMenu | undefined>>({});
+  let pluginMenus = $state.raw<Record<string, ActionMenu | undefined>>({});
+  let guestMenus = $state.raw<Record<string, ActionMenu | undefined>>({});
   let pluginConfirm = $state<{ kind: 'remove' | 'unverify'; url: string } | null>(null);
   let pluginConfirmNext: { kind: 'remove' | 'unverify'; url: string } | null = null;
 
@@ -1021,7 +1029,12 @@
           spellcheck="false"
           placeholder={saved ? 'Saved — type to replace' : service.placeholder}
           aria-label="{service.label} API key"
-          bind:value={drafts[service.name]}
+          value={drafts[service.name]}
+          oninput={(event) =>
+            (drafts = {
+              ...drafts,
+              [service.name]: (event.currentTarget as HTMLInputElement).value,
+            })}
         />
         <Button
           type="submit"
@@ -1074,7 +1087,9 @@
             >
             <span class="addon-menu">
               <ActionMenu
-                bind:this={pluginMenus[url]}
+                bind:this={
+                  () => pluginMenus[url], (menu) => (pluginMenus = { ...pluginMenus, [url]: menu })
+                }
                 items={() => pluginItems(url, configureURL, pinned)}
                 label="More actions for {den?.label ?? hostOf(url)}"
                 heading={den?.label ?? hostOf(url)}
@@ -1166,7 +1181,10 @@
             >
             <span class="addon-menu">
               <ActionMenu
-                bind:this={guestMenus[grant.gid]}
+                bind:this={
+                  () => guestMenus[grant.gid],
+                  (menu) => (guestMenus = { ...guestMenus, [grant.gid]: menu })
+                }
                 items={() => guestItems(grant.gid, grant.secret, Boolean(hasOverride))}
                 label="More actions for Den Hearth"
                 heading="Den Hearth"

@@ -139,7 +139,7 @@ function writeSecrets(secrets: Record<string, PendingSecret>): void {
 }
 
 export class GuestGrants {
-  list = $state<GuestGrant[]>([]);
+  list = $state.raw<GuestGrant[]>([]);
   /** An invite code that arrived in the address (`#invite=…`), waiting for the viewer to redeem it. */
   invite = $state<string | null>(null);
   /**

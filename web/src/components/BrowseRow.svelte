@@ -43,7 +43,7 @@
   // False from a retained page's reactivation until the first observer delivery after it. See `.row-window`.
   let placed = $state(true);
   let observed = false;
-  let materialized = $state<number[]>([]);
+  let materialized = $state.raw<number[]>([]);
   /** The cards on screen (`cardsOnScreen`), which `PosterCard` would otherwise each observe for themselves. */
   let onscreen = $state.raw({ start: 0, end: 0 });
   let focusedIndex = $state<number | null>(null);

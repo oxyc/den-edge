@@ -12,7 +12,7 @@
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
   /** Kept with the module, not the section: matching a long history goes on while the viewer is elsewhere. */
-  let state = $state<State>({ step: 'idle' });
+  let state = $state.raw<State>({ step: 'idle' });
   /** The films and series (`importKey`) the viewer unticked in the preview. */
   const excluded = new SvelteSet<string>();
 </script>
