@@ -44,11 +44,14 @@ export function noteLibraryFold(documents: number, elapsedMs: number): void {
   held.viewSource = 'authoritative';
 }
 
-export function noteFinishedViewCache(source: 'read' | 'write', bytes: number, hit = false): void {
+export function noteLibraryCacheIO(source: 'read' | 'write', bytes: number): void {
   const held = metrics();
   if (source === 'read') held.cacheBytesRead += bytes;
   else held.cacheBytesWritten += bytes;
-  if (hit) held.viewSource = 'cache';
+}
+
+export function noteFinishedViewCacheHit(): void {
+  metrics().viewSource = 'cache';
 }
 
 export function noteFinishedViewPromotion(reason: string): void {

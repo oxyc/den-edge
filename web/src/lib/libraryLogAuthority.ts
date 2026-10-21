@@ -40,10 +40,12 @@ import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
+  removeFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewPieces,
   type FinishedLibraryViews,
 } from './finishedLibraryViews';
+import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   applyLog,
   ContinueProjector,
@@ -573,8 +575,10 @@ export class LibraryLogAuthority {
         return this.#title(selection.title);
       case 'presence':
         return this.#presence(selection.titles);
-      case 'settings':
-        return this.#rememberFinished('settings', await this.#settings());
+      case 'settings': {
+        const revision = this.#finishedAuthorityRevision();
+        return this.#rememberFinished('settings', await this.#settings(), revision);
+      }
       case 'connections':
         return this.#connections();
       case 'simkl':
@@ -1885,14 +1889,15 @@ export class LibraryLogAuthority {
   #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime'>(
     kind: T,
     value: Extract<LibrarySelectionValue, { kind: T }>,
+    computedRevision?: string,
   ): Extract<LibrarySelectionValue, { kind: T }> {
     if (!this.#options.libraryKey || !this.#options.vault) return value;
     const summary = this.#log.currentSummary();
-    const revision = JSON.stringify([this.#log.logHead, this.#log.rowsVersion, summary.stamp]);
-    if (this.#finishedRevision !== revision) {
-      this.#finishedRevision = revision;
-      this.#finishedPieces = {};
-    }
+    const revision = this.#finishedAuthorityRevision(summary);
+    this.#changeFinishedRevision(revision);
+    // Settings awaits assistant policy. A command may change the log while it is suspended; never stamp the old
+    // answer with the new revision merely because it completed afterward.
+    if (computedRevision !== undefined && computedRevision !== revision) return value;
     if (kind === 'overview') {
       const overview = value as Extract<LibrarySelectionValue, { kind: 'overview' }>;
       this.#finishedPieces.watchlist = { titles: overview.watchlist };
@@ -1933,7 +1938,7 @@ export class LibraryLogAuthority {
           head: this.#log.logHead,
           authorityRevision: revision,
           policyVersion: FINISHED_LIBRARY_POLICY,
-          profileVersion: String(this.#log.rowsVersion),
+          rowsVersion: this.#log.rowsVersion,
           layoutVersion: String(this.#shapesVersion),
           recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
           reconsiderAt,
@@ -1949,12 +1954,40 @@ export class LibraryLogAuthority {
     return value;
   }
 
+  #finishedAuthorityRevision(summary = this.#log.currentSummary()): string {
+    return libraryLocalAuthorityRevision(this.#log.logHead, this.#log.rowsVersion, summary.stamp);
+  }
+
+  #changeFinishedRevision(revision?: string): void {
+    if (!this.#options.libraryKey || !this.#options.vault) return;
+    revision ??= this.#finishedAuthorityRevision();
+    if (this.#finishedRevision === revision) return;
+    this.#finishedRevision = revision;
+    this.#finishedPieces = {};
+    this.#finishedPending = undefined;
+    if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
+    this.#finishedTimer = undefined;
+    this.#finishedSaving = this.#finishedSaving
+      .then(async () => {
+        await removeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
+      })
+      .catch((error: unknown) =>
+        console.warn('den: stale finished library views could not be discarded', error),
+      );
+  }
+
   #flushFinished(): void {
     const pending = this.#finishedPending;
     if (!pending || !this.#options.libraryKey || !this.#options.vault) return;
     this.#finishedPending = undefined;
     this.#finishedSaving = this.#finishedSaving
       .then(async () => {
+        await this.#log.keep(LIBRARY_LOCAL_AUTHORITY, {
+          generation: pending.identity.generation,
+          head: pending.identity.head,
+          authorityRevision: pending.identity.authorityRevision,
+          rowsVersion: pending.identity.rowsVersion,
+        });
         await writeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!, pending);
       })
       .catch((error: unknown) =>
@@ -2463,6 +2496,7 @@ export class LibraryLogAuthority {
       );
       if (row && !(await this.#log.write(row))) this.#writeFailed();
     }
+    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),
@@ -2533,6 +2567,7 @@ export class LibraryLogAuthority {
       };
       if (!(await this.#log.write(row))) this.#writeFailed();
     }
+    this.#changeFinishedRevision();
     this.#simklApproval = undefined;
     return {
       outcome: 'applied',
@@ -2785,6 +2820,7 @@ export class LibraryLogAuthority {
     const queued = this.#log.queuedActions;
     const written = await this.#log.writeAction(journal);
     if (!written) this.#writeFailed();
+    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2800,6 +2836,7 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const queued = this.#log.queuedActions;
     if (!(await this.#log.writeActions(journals))) this.#writeFailed();
+    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2814,6 +2851,7 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const queued = this.#log.queuedActions;
     if (!(await this.#log.write(row))) this.#writeFailed();
+    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2827,6 +2865,7 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;
     if (!(await this.#log.writeRows(rows))) this.#writeFailed();
+    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),

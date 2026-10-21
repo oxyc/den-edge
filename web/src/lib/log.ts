@@ -10,6 +10,7 @@ import { resetAssistantRows } from './libraryAssistantAuthority';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
+import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
 import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
@@ -46,6 +47,7 @@ import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } f
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
 import { noteLibraryDecrypt } from './libraryStartupMetrics';
+import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   believe,
   compareStamps,
@@ -3368,15 +3370,7 @@ export class LibraryLog {
    */
   async keep(name: string, value: unknown): Promise<void> {
     if (!this.local) return;
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const sealed = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv, additionalData: utf8.encode(name) },
-      this.local.key,
-      utf8.encode(JSON.stringify(value)),
-    );
-    const bytes = new Uint8Array(iv.length + sealed.byteLength);
-    bytes.set(iv);
-    bytes.set(new Uint8Array(sealed), iv.length);
+    const bytes = await sealLibraryLocalValue(this.local.key, name, value);
     await this.local.vault.put(`${this.keys.id}:${name}`, bytes);
   }
 
@@ -3436,12 +3430,7 @@ export class LibraryLog {
         projectRows ? Date.now() : undefined,
       );
       if (opened !== undefined) return opened;
-      const plain = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode(name) },
-        this.local.key,
-        bytes.slice(12),
-      );
-      return JSON.parse(new TextDecoder().decode(plain)) as T;
+      return (await openLibraryLocalValue(this.local.key, name, bytes)) as T;
     } catch (error) {
       console.warn(`den: the kept ${name} could not be read`, error);
       return undefined;
@@ -3471,9 +3460,27 @@ export class LibraryLog {
       this.wireMin >= WIRE && !this.offline ? [SNAPSHOT_V4, SNAPSHOT] : [SNAPSHOT, SNAPSHOT_V4];
     const save = async (kept: Snapshot) => {
       await this.local?.vault.remove(`${this.keys.id}:${other}`);
-      return kept.entries.length || kept.profileDirectory
+      await (kept.entries.length || kept.profileDirectory
         ? this.keep(name, kept)
-        : this.local?.vault.remove(`${this.keys.id}:${name}`);
+        : this.local?.vault.remove(`${this.keys.id}:${name}`));
+      if (!this.offline && this.generation) {
+        try {
+          const summary = this.currentSummary();
+          await this.keep(LIBRARY_LOCAL_AUTHORITY, {
+            generation: this.generation,
+            head: this.head,
+            authorityRevision: libraryLocalAuthorityRevision(
+              this.head,
+              this.entriesVersion,
+              summary.stamp,
+            ),
+            rowsVersion: this.entriesVersion,
+          });
+        } catch (error) {
+          // The snapshot remains authoritative. A missing/older marker only makes the disposable view cache miss.
+          console.warn('den: the finished-view authority marker could not be kept', error);
+        }
+      }
     };
     this.saving = this.saving
       .then(() =>

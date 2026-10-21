@@ -3,10 +3,11 @@ import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
-  writeEncryptedLibraryValue,
   writeFinishedLibraryViews,
   type FinishedLibraryViews,
 } from './finishedLibraryViews';
+import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
+import { writeEncryptedLibraryValue } from './libraryLocalValue';
 import { openFinishedLibraryViewAuthority } from './finishedLibraryViewAuthority';
 import type { Vault } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
@@ -17,7 +18,9 @@ import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
+  readonly reads: string[] = [];
   async get(key: string) {
+    this.reads.push(key);
     return this.values.get(key)?.slice();
   }
   async entries(prefix: string) {
@@ -56,7 +59,7 @@ async function cached(vault: Vault): Promise<FinishedLibraryViews> {
       head: 12,
       authorityRevision: 'revision-a',
       policyVersion: FINISHED_LIBRARY_POLICY,
-      profileVersion: 'profile-a',
+      rowsVersion: 3,
       layoutVersion: 'layout-a',
       recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
       reconsiderAt: Date.now() + 60_000,
@@ -93,6 +96,12 @@ async function cached(vault: Vault): Promise<FinishedLibraryViews> {
     },
   } as unknown as FinishedLibraryViews;
   await writeFinishedLibraryViews(libraryKey, vault, value);
+  await writeEncryptedLibraryValue(libraryKey, vault, LIBRARY_LOCAL_AUTHORITY, {
+    generation: value.identity.generation,
+    head: value.identity.head,
+    authorityRevision: value.identity.authorityRevision,
+    rowsVersion: value.identity.rowsVersion,
+  });
   return value;
 }
 
@@ -101,6 +110,7 @@ function fullAuthority(): LibraryServiceAuthority {
     generation: 'generation-a',
     async select(selection) {
       if (selection.kind === 'history') return { kind: 'history', items: [] };
+      if (selection.kind === 'continue') return { kind: 'continue', items: [], needsShapes: [] };
       throw new Error(`unexpected ${selection.kind}`);
     },
     async command() {
@@ -122,14 +132,19 @@ function fullAuthority(): LibraryServiceAuthority {
 it('serves capability-selected startup views without opening the document authority', async () => {
   const vault = new MemoryVault();
   const value = await cached(vault);
+  vault.reads.length = 0;
   const openFull = vi.fn(async () => fullAuthority());
   const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
   expect(opened).not.toBeNull();
+  expect(vault.reads).toHaveLength(2);
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toEqual({
     kind: 'overview',
     ...value.pieces.recommendations,
     watchlist: value.pieces.watchlist!.titles,
   });
+  expect(vault.reads.some((key) => key.endsWith(':continue'))).toBe(false);
+  expect(vault.reads.some((key) => key.endsWith(':settings'))).toBe(false);
+  expect(vault.reads.some((key) => key.endsWith(':runtime'))).toBe(false);
   await expect(opened!.authority.select({ kind: 'continue' })).resolves.toEqual(
     value.pieces.continue!.view,
   );
@@ -174,6 +189,27 @@ it('names cached shelves through content without opening library documents', asy
     shapes: [],
   });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('promotes when uncached metadata needs credentials from the document authority', async () => {
+  const vault = new MemoryVault();
+  await cached(vault);
+  const openFull = vi.fn(async () => fullAuthority());
+  const unavailable = { title: vi.fn(async () => ({ kind: 'not-configured' as const })) };
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    unavailable,
+    vi.fn(),
+  );
+  await expect(
+    opened!.authority.query({ kind: 'library.metadata', titles: [{ type: 'movie', id: 7 }] }),
+  ).resolves.toMatchObject({
+    kind: 'library.metadata',
+    retryable: [{ type: 'movie', id: 7 }],
+  });
+  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
 });
 
 it('keeps retained presentation hints without opening library documents', async () => {
@@ -280,6 +316,86 @@ it('keeps the cache on an unchanged head and promotes when reconciliation finds 
   }
 });
 
+it('returns from reconnecting to ready after an unchanged reconciliation succeeds', async () => {
+  vi.useFakeTimers();
+  try {
+    const vault = new MemoryVault();
+    const value = await cached(vault);
+    const openFull = vi.fn(async () => fullAuthority());
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ generation: value.identity.generation, head: 12, entries: [] }),
+          { status: 200 },
+        ),
+      );
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    const events: unknown[] = [];
+    opened!.authority.listen?.((event) => events.push(event));
+    await opened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(events).toEqual([
+      { kind: 'status', status: { kind: 'reconnecting' } },
+      { kind: 'status', status: { kind: 'ready' } },
+    ]);
+    expect(openFull).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('does not promote a changed reconciliation after the cached authority closes', async () => {
+  vi.useFakeTimers();
+  try {
+    const vault = new MemoryVault();
+    const value = await cached(vault);
+    let answer!: (response: Response) => void;
+    const fetchImpl = vi.fn<typeof fetch>(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    );
+    const openFull = vi.fn(async () => fullAuthority());
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    await opened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await opened!.authority.close?.();
+    answer(
+      new Response(
+        JSON.stringify({ generation: value.identity.generation, head: 13, entries: [{}] }),
+        { status: 200 },
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openFull).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('misses before reading views when durable pending work exists', async () => {
   const vault = new MemoryVault();
   const value = await cached(vault);
@@ -289,11 +405,106 @@ it('misses before reading views when durable pending work exists', async () => {
   ).resolves.toBeNull();
 });
 
-it('misses once Continue reaches its reconsideration time', async () => {
+it('keeps unrelated capabilities lazy and promotes Continue after its reconsideration time', async () => {
   const vault = new MemoryVault();
   const value = await cached(vault);
   value.identity.reconsiderAt = Date.now() - 1;
   await writeFinishedLibraryViews(libraryKey, vault, value);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  expect(opened).not.toBeNull();
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toEqual(
+    value.pieces.settings,
+  );
+  expect(openFull).not.toHaveBeenCalled();
+  await expect(opened!.authority.select({ kind: 'continue' })).resolves.toEqual({
+    kind: 'continue',
+    items: [],
+    needsShapes: [],
+  });
+  expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('promotes an open cached Continue authority when its reconsideration deadline arrives', async () => {
+  vi.useFakeTimers();
+  try {
+    const vault = new MemoryVault();
+    const value = await cached(vault);
+    value.identity.reconsiderAt = Date.now() + 1_000;
+    await writeFinishedLibraryViews(libraryKey, vault, value);
+    const openFull = vi.fn(async () => fullAuthority());
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      vi.fn(),
+    );
+    await opened!.authority.select({ kind: 'continue' });
+    expect(openFull).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(openFull).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(openFull).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('misses after a policy or recommendation version changes', async () => {
+  const vault = new MemoryVault();
+  const value = await cached(vault);
+  value.identity.policyVersion++;
+  value.identity.recommendationVersion++;
+  await writeFinishedLibraryViews(libraryKey, vault, value);
+  await expect(
+    openFinishedLibraryViewAuthority(request, vault, async () => fullAuthority(), content, vi.fn()),
+  ).resolves.toBeNull();
+});
+
+it('promotes when the remote generation changes at the same head', async () => {
+  vi.useFakeTimers();
+  try {
+    const vault = new MemoryVault();
+    const value = await cached(vault);
+    const openFull = vi.fn(async () => fullAuthority());
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ generation: 'generation-b', head: value.identity.head, entries: [] }),
+          { status: 200 },
+        ),
+      );
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    await opened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openFull).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('misses when the locally saved authority has advanced beyond the finished views', async () => {
+  const vault = new MemoryVault();
+  const value = await cached(vault);
+  await writeEncryptedLibraryValue(libraryKey, vault, LIBRARY_LOCAL_AUTHORITY, {
+    generation: value.identity.generation,
+    head: value.identity.head + 1,
+    authorityRevision: 'newer-local-authority',
+    rowsVersion: value.identity.rowsVersion,
+  });
   await expect(
     openFinishedLibraryViewAuthority(request, vault, async () => fullAuthority(), content, vi.fn()),
   ).resolves.toBeNull();

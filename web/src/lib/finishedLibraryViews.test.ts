@@ -4,7 +4,6 @@ import {
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
   readFinishedLibraryViews,
-  reusableFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewIdentity,
   type FinishedLibraryViews,
@@ -43,7 +42,7 @@ async function fixture(): Promise<FinishedLibraryViews> {
     head: 42,
     authorityRevision: '42:0',
     policyVersion: FINISHED_LIBRARY_POLICY,
-    profileVersion: 'owner:7',
+    rowsVersion: 7,
     layoutVersion: 'layouts:3',
     recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
     reconsiderAt: Date.now() + 60_000,
@@ -91,6 +90,23 @@ describe('finished library views', () => {
     await expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toBeNull();
   });
 
+  it('treats truncation and eviction as disposable misses', async () => {
+    const vault = new MemoryVault();
+    await writeFinishedLibraryViews(libraryKey, vault, await fixture());
+    const [continued] = [...vault.values].find(([key]) => key.endsWith(':continue'))!;
+    vault.values.set(continued, Uint8Array.of(1, 2, 3));
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toBeNull();
+    vault.values.delete(continued);
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toBeNull();
+  });
+
+  it('cannot open one library cache with another library key', async () => {
+    const vault = new MemoryVault();
+    await writeFinishedLibraryViews(libraryKey, vault, await fixture());
+    const other = btoa(String.fromCharCode(...new Uint8Array(32).fill(99)));
+    await expect(readFinishedLibraryViews(other, vault, ['watchlist'])).resolves.toBeNull();
+  });
+
   it('refuses malformed pieces before publishing them', async () => {
     const vault = new MemoryVault();
     const value = await fixture();
@@ -133,17 +149,8 @@ describe('finished library views', () => {
         pieces: { watchlist: first.pieces.watchlist },
       },
     );
-  });
-
-  it('misses on every identity change and at Continue reconsideration', async () => {
-    const { identity } = await fixture();
-    const { reconsiderAt: _reconsiderAt, ...expected } = identity;
-    expect(reusableFinishedLibraryViews(identity, expected)).toBe(true);
-    expect(reusableFinishedLibraryViews(identity, { ...expected, authorityRevision: '42:1' })).toBe(
-      false,
-    );
-    expect(reusableFinishedLibraryViews({ ...identity, reconsiderAt: 100 }, expected, 100)).toBe(
-      false,
-    );
+    vault.interruptManifest = false;
+    await writeFinishedLibraryViews(libraryKey, vault, replacement);
+    expect(vault.values.size).toBe(1 + Object.keys(replacement.pieces).length);
   });
 });

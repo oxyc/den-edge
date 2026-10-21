@@ -1,5 +1,9 @@
-import { noteFinishedViewCache } from './libraryStartupMetrics';
-import { libraryLocalKey } from './libraryLocalKey';
+import { noteLibraryCacheIO } from './libraryStartupMetrics';
+import {
+  libraryLocalMaterials,
+  openLibraryLocalValue,
+  sealLibraryLocalValue,
+} from './libraryLocalValue';
 import type { Vault } from './localVault';
 import type {
   ContinueView,
@@ -9,14 +13,11 @@ import type {
 } from './libraryServiceProtocol';
 import { LIBRARY_SERVICE_PROTOCOL } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
-import { deriveKeys } from './wire';
 
 export const FINISHED_LIBRARY_VIEWS_SCHEMA = 1;
 export const FINISHED_LIBRARY_POLICY = 1;
 export const FINISHED_LIBRARY_RECOMMENDATIONS = 1;
 const NAME = 'finished-views.v1';
-const utf8 = new TextEncoder();
-const text = new TextDecoder();
 const CAPABILITIES: readonly FinishedLibraryViewCapability[] = [
   'watchlist',
   'continue',
@@ -43,7 +44,7 @@ export interface FinishedLibraryViewIdentity {
   /** Includes local/pending changes not represented by `head`. */
   authorityRevision: string;
   policyVersion: number;
-  profileVersion: string;
+  rowsVersion: number;
   layoutVersion: string;
   recommendationVersion: number;
   reconsiderAt: number | null;
@@ -54,16 +55,6 @@ export interface FinishedLibraryViews {
   identity: FinishedLibraryViewIdentity;
   pieces: Partial<FinishedLibraryViewPieces>;
 }
-
-const rawLibraryKey = (encoded: string): Uint8Array<ArrayBuffer> | null => {
-  try {
-    const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-    if (raw.length !== 32 || btoa(String.fromCharCode(...raw)) !== encoded) return null;
-    return raw;
-  } catch {
-    return null;
-  }
-};
 
 const storedKey = (libraryId: string) => `${libraryId}:${NAME}`;
 const pieceKey = (libraryId: string, revision: string, capability: FinishedLibraryViewCapability) =>
@@ -88,7 +79,8 @@ const validIdentity = (value: unknown): value is FinishedLibraryViewIdentity => 
     held.head! >= 0 &&
     typeof held.authorityRevision === 'string' &&
     typeof held.policyVersion === 'number' &&
-    typeof held.profileVersion === 'string' &&
+    Number.isSafeInteger(held.rowsVersion) &&
+    held.rowsVersion! >= 0 &&
     typeof held.layoutVersion === 'string' &&
     typeof held.recommendationVersion === 'number' &&
     (held.reconsiderAt === null ||
@@ -177,40 +169,6 @@ const validManifest = (value: unknown): value is FinishedLibraryViewManifest => 
   );
 };
 
-async function materials(libraryKey: string) {
-  const raw = rawLibraryKey(libraryKey);
-  if (!raw) return null;
-  try {
-    const keys = await deriveKeys(raw);
-    return { libraryId: keys.id, key: await libraryLocalKey(raw) };
-  } finally {
-    raw.fill(0);
-  }
-}
-
-async function sealValue(key: CryptoKey, aad: string, value: unknown): Promise<Uint8Array> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const sealed = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: utf8.encode(aad) },
-    key,
-    utf8.encode(JSON.stringify(value)),
-  );
-  const bytes = new Uint8Array(iv.length + sealed.byteLength);
-  bytes.set(iv);
-  bytes.set(new Uint8Array(sealed), iv.length);
-  return bytes;
-}
-
-async function openValue(key: CryptoKey, aad: string, bytes: Uint8Array): Promise<unknown> {
-  if (bytes.length < 13) throw new Error('truncated cache value');
-  const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode(aad) },
-    key,
-    bytes.slice(12),
-  );
-  return JSON.parse(text.decode(plain)) as unknown;
-}
-
 const revision = (): string =>
   [...crypto.getRandomValues(new Uint8Array(16))]
     .map((value) => value.toString(16).padStart(2, '0'))
@@ -222,13 +180,13 @@ export async function readFinishedLibraryViews(
   vault: Vault,
   capabilities: readonly FinishedLibraryViewCapability[],
 ): Promise<FinishedLibraryViews | null> {
-  const local = await materials(libraryKey);
+  const local = await libraryLocalMaterials(libraryKey);
   if (!local) return null;
   const manifestBytes = await vault.get(storedKey(local.libraryId));
   if (!manifestBytes) return null;
-  noteFinishedViewCache('read', manifestBytes.byteLength);
+  noteLibraryCacheIO('read', manifestBytes.byteLength);
   try {
-    const manifest = await openValue(local.key, NAME, manifestBytes);
+    const manifest = await openLibraryLocalValue(local.key, NAME, manifestBytes);
     if (!validManifest(manifest) || manifest.identity.libraryId !== local.libraryId) return null;
     if (capabilities.some((capability) => !manifest.capabilities.includes(capability))) return null;
     const pieces: Partial<FinishedLibraryViewPieces> = {};
@@ -236,8 +194,8 @@ export async function readFinishedLibraryViews(
       const aad = `${NAME}:${manifest.revision}:${capability}`;
       const bytes = await vault.get(pieceKey(local.libraryId, manifest.revision, capability));
       if (!bytes) return null;
-      noteFinishedViewCache('read', bytes.byteLength);
-      const piece = await openValue(local.key, aad, bytes);
+      noteLibraryCacheIO('read', bytes.byteLength);
+      const piece = await openLibraryLocalValue(local.key, aad, bytes);
       if (!validPiece(capability, piece)) return null;
       Object.assign(pieces, { [capability]: piece });
     }
@@ -251,36 +209,19 @@ export async function readFinishedLibraryViews(
   }
 }
 
-/** Open one of LibraryLog's small encrypted retained values without opening its document snapshot. */
-export async function readEncryptedLibraryValue<T>(
+/**
+ * Make every finished view unusable before a new authority revision is assembled. Removing the shared prefix also
+ * collects immutable pieces left by an interrupted replacement.
+ */
+export async function removeFinishedLibraryViews(
   libraryKey: string,
   vault: Vault,
-  name: string,
-): Promise<T | undefined> {
-  const local = await materials(libraryKey);
-  if (!local) return undefined;
-  const bytes = await vault.get(`${local.libraryId}:${name}`);
-  if (!bytes) return undefined;
-  noteFinishedViewCache('read', bytes.byteLength);
-  try {
-    return (await openValue(local.key, name, bytes)) as T;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Replace one of LibraryLog's small encrypted retained values without opening its document snapshot. */
-export async function writeEncryptedLibraryValue(
-  libraryKey: string,
-  vault: Vault,
-  name: string,
-  value: unknown,
 ): Promise<boolean> {
-  const local = await materials(libraryKey);
+  const local = await libraryLocalMaterials(libraryKey);
   if (!local) return false;
-  const bytes = await sealValue(local.key, name, value);
-  await vault.put(`${local.libraryId}:${name}`, bytes);
-  noteFinishedViewCache('write', bytes.byteLength);
+  const manifest = storedKey(local.libraryId);
+  await vault.delete(manifest);
+  await vault.remove(`${manifest}:`);
   return true;
 }
 
@@ -290,24 +231,15 @@ export async function writeFinishedLibraryViews(
   vault: Vault,
   value: FinishedLibraryViews,
 ): Promise<boolean> {
-  const local = await materials(libraryKey);
+  const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
-  let previous: FinishedLibraryViewManifest | undefined;
-  const previousBytes = await vault.get(storedKey(local.libraryId));
-  if (previousBytes)
-    try {
-      const opened = await openValue(local.key, NAME, previousBytes);
-      if (validManifest(opened) && opened.identity.libraryId === local.libraryId) previous = opened;
-    } catch {
-      // A corrupt prior generation is replaced by the new, complete generation below.
-    }
   const nextRevision = revision();
   const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
   for (const capability of capabilities) {
     const aad = `${NAME}:${nextRevision}:${capability}`;
-    const bytes = await sealValue(local.key, aad, value.pieces[capability]);
+    const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
     await vault.put(pieceKey(local.libraryId, nextRevision, capability), bytes);
-    noteFinishedViewCache('write', bytes.byteLength);
+    noteLibraryCacheIO('write', bytes.byteLength);
   }
   const manifest: FinishedLibraryViewManifest = {
     schema: value.schema,
@@ -315,33 +247,15 @@ export async function writeFinishedLibraryViews(
     revision: nextRevision,
     capabilities,
   };
-  const bytes = await sealValue(local.key, NAME, manifest);
+  const bytes = await sealLibraryLocalValue(local.key, NAME, manifest);
   await vault.put(storedKey(local.libraryId), bytes);
-  noteFinishedViewCache('write', bytes.byteLength);
-  if (previous && previous.revision !== nextRevision)
-    await Promise.allSettled(
-      previous.capabilities.map((capability) =>
-        vault.delete(pieceKey(local.libraryId, previous.revision, capability)),
-      ),
-    );
-  return true;
-}
-
-/** Every uncertain input is a miss; time-dependent Continue is reusable only before its next reconsideration. */
-export function reusableFinishedLibraryViews(
-  cached: FinishedLibraryViewIdentity,
-  expected: Omit<FinishedLibraryViewIdentity, 'reconsiderAt'>,
-  now = Date.now(),
-): boolean {
-  return (
-    cached.libraryId === expected.libraryId &&
-    cached.generation === expected.generation &&
-    cached.head === expected.head &&
-    cached.authorityRevision === expected.authorityRevision &&
-    cached.policyVersion === expected.policyVersion &&
-    cached.profileVersion === expected.profileVersion &&
-    cached.layoutVersion === expected.layoutVersion &&
-    cached.recommendationVersion === expected.recommendationVersion &&
-    (cached.reconsiderAt === null || cached.reconsiderAt > now)
+  noteLibraryCacheIO('write', bytes.byteLength);
+  const active = new Set(
+    capabilities.map((capability) => pieceKey(local.libraryId, nextRevision, capability)),
   );
+  const storedPieces = await vault.entries(`${storedKey(local.libraryId)}:`);
+  await Promise.allSettled(
+    storedPieces.flatMap(([key]) => (active.has(key) ? [] : [vault.delete(key)])),
+  );
+  return true;
 }

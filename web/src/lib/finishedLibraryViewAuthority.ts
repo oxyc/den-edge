@@ -1,11 +1,14 @@
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
-  readEncryptedLibraryValue,
   readFinishedLibraryViews,
-  writeEncryptedLibraryValue,
   type FinishedLibraryViews,
 } from './finishedLibraryViews';
+import {
+  LIBRARY_LOCAL_AUTHORITY,
+  validLibraryLocalAuthorityIdentity,
+} from './libraryLocalAuthority';
+import { readEncryptedLibraryValue, writeEncryptedLibraryValue } from './libraryLocalValue';
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import type {
@@ -21,7 +24,7 @@ import {
   type LibraryServiceAuthority,
 } from './libraryServiceCore';
 import { deriveKeys } from './wire';
-import { noteFinishedViewCache, noteFinishedViewPromotion } from './libraryStartupMetrics';
+import { noteFinishedViewCacheHit, noteFinishedViewPromotion } from './libraryStartupMetrics';
 import { isRetainedServices } from './libraryServiceProtocolCodec';
 import {
   RETAINED_HOME_SHELVES,
@@ -39,6 +42,21 @@ import {
 
 const VISIBLE_REFRESH_MS = 30_000;
 const PLAYBACK_REFRESH_MS = 5_000;
+const MAX_TIMER_MS = 2_147_483_647;
+
+const sameIdentity = (
+  left: FinishedLibraryViews['identity'],
+  right: FinishedLibraryViews['identity'],
+): boolean =>
+  left.libraryId === right.libraryId &&
+  left.generation === right.generation &&
+  left.head === right.head &&
+  left.authorityRevision === right.authorityRevision &&
+  left.policyVersion === right.policyVersion &&
+  left.rowsVersion === right.rowsVersion &&
+  left.layoutVersion === right.layoutVersion &&
+  left.recommendationVersion === right.recommendationVersion &&
+  left.reconsiderAt === right.reconsiderAt;
 
 const rawLibraryKey = (encoded: string): Uint8Array<ArrayBuffer> | null => {
   try {
@@ -61,8 +79,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #closed = false;
   #checking?: Promise<void>;
   #timer?: ReturnType<typeof setTimeout>;
+  #reconsiderTimer?: ReturnType<typeof setTimeout>;
   #lifecycle?: Extract<LibraryObservation, { kind: 'lifecycle' }>;
   #foregroundReady = false;
+  #reconnecting = false;
+  readonly #pieceFlights = new Map<string, Promise<boolean>>();
 
   constructor(
     private readonly request: LibraryServiceHello,
@@ -83,6 +104,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (this.#full) return this.#full.select(selection);
     const pieces = this.cached.pieces;
     if (selection.kind === 'overview') {
+      if (!(await this.#loadCapabilities(['watchlist', 'recommendations'])))
+        return (await this.#promote('cache:overview')).select(selection);
       const recommendations = pieces.recommendations!;
       return {
         kind: 'overview',
@@ -90,9 +113,21 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         watchlist: structuredClone(pieces.watchlist!.titles),
       };
     }
-    if (selection.kind === 'continue') return structuredClone(pieces.continue!.view);
-    if (selection.kind === 'settings') return structuredClone(pieces.settings!);
-    if (selection.kind === 'runtime') return structuredClone(pieces.runtime!);
+    if (selection.kind === 'continue') {
+      if (!(await this.#loadContinue()))
+        return (await this.#promote('cache:continue')).select(selection);
+      return structuredClone(pieces.continue!.view);
+    }
+    if (selection.kind === 'settings') {
+      if (!(await this.#loadCapabilities(['settings'])))
+        return (await this.#promote('cache:settings')).select(selection);
+      return structuredClone(pieces.settings!);
+    }
+    if (selection.kind === 'runtime') {
+      if (!(await this.#loadCapabilities(['runtime'])))
+        return (await this.#promote('cache:runtime')).select(selection);
+      return structuredClone(pieces.runtime!);
+    }
     return (await this.#promote(`selection:${selection.kind}`)).select(selection);
   }
 
@@ -203,6 +238,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (this.#closed) return;
     this.#closed = true;
     this.#cancelTimer();
+    this.#cancelReconsider();
     this.#stopFull?.();
     this.#listeners.clear();
     await this.#opening?.catch(() => undefined);
@@ -225,6 +261,35 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #cancelTimer(): void {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+  }
+
+  #cancelReconsider(): void {
+    if (this.#reconsiderTimer !== undefined) clearTimeout(this.#reconsiderTimer);
+    this.#reconsiderTimer = undefined;
+  }
+
+  #continueFresh(): boolean {
+    const reconsiderAt = this.cached.identity.reconsiderAt;
+    if (reconsiderAt === null) return true;
+    const remaining = reconsiderAt - Date.now();
+    if (remaining <= 0) return false;
+    if (this.#reconsiderTimer === undefined) {
+      this.#reconsiderTimer = setTimeout(
+        () => {
+          this.#reconsiderTimer = undefined;
+          if (this.#closed || this.#full) return;
+          if (this.#continueFresh()) return;
+          void this.#promote('continue:reconsider').catch(() => undefined);
+        },
+        Math.min(remaining, MAX_TIMER_MS),
+      );
+    }
+    return true;
+  }
+
+  async #loadContinue(): Promise<boolean> {
+    if (!this.#continueFresh() || !(await this.#loadCapabilities(['continue']))) return false;
+    return this.#continueFresh();
   }
 
   #reconcile(): Promise<void> {
@@ -257,8 +322,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           Array.isArray(page.entries) &&
           page.entries.length === 0;
         if (!unchanged) await this.#promote('reconcile:changed');
+        else if (this.#reconnecting && !this.#closed) {
+          this.#reconnecting = false;
+          this.#emit({ kind: 'status', status: { kind: 'ready' } });
+        }
       } catch {
-        if (!this.#closed) this.#emit({ kind: 'status', status: { kind: 'reconnecting' } });
+        if (!this.#closed && !this.#reconnecting) {
+          this.#reconnecting = true;
+          this.#emit({ kind: 'status', status: { kind: 'reconnecting' } });
+        }
       } finally {
         if (!this.#closed && !this.#full) {
           const interval = this.#lifecycle?.playbackActive
@@ -281,18 +353,27 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       { kind: 'library.metadata' }
     >['titles'],
   ): Promise<Extract<LibraryQueryResult, { kind: 'library.metadata' }>> {
+    if (!(await this.#loadContinue()))
+      return (await (
+        await this.#promote('cache:continue-layouts')
+      ).query({
+        kind: 'library.metadata',
+        titles,
+      })) as Extract<LibraryQueryResult, { kind: 'library.metadata' }>;
     const found: Array<{
       title: NonNullable<ReturnType<typeof libraryMetadataTitle>>;
       shape?: NonNullable<ReturnType<typeof libraryMetadataShape>>;
     }> = [];
     const retryable: typeof titles = [];
     let retryAfterMs = 0;
+    let contentNotConfigured = false;
     let next = 0;
     const lookup = async () => {
       for (let ref = titles[next++]; ref; ref = titles[next++]) {
         const result = await this.content.title(ref);
         if (result.kind === 'unavailable' || result.kind === 'not-configured') {
           retryable.push(ref);
+          if (result.kind === 'not-configured') contentNotConfigured = true;
           if (result.kind === 'unavailable')
             retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs ?? 0);
           continue;
@@ -309,6 +390,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       titles.findIndex((ref) => ref.type === title.type && ref.id === title.id);
     found.sort((left, right) => order(left.title) - order(right.title));
     retryable.sort((left, right) => order(left) - order(right));
+    // Cached metadata normally comes from ContentAuthority's own local values. If it needs a provider credential,
+    // promote once so the ordinary authority can bind the encrypted keys held in the library log.
+    if (contentNotConfigured) void this.#promote('content:not-configured').catch(() => undefined);
 
     const cached = this.cached.pieces.continue!;
     const needs = new Set(cached.view.needsShapes.map((ref) => `${ref.type}:${ref.id}`));
@@ -330,11 +414,43 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     };
   }
 
+  #loadCapabilities(capabilities: Array<keyof FinishedLibraryViews['pieces']>): Promise<boolean> {
+    const missing = capabilities.filter(
+      (capability) => this.cached.pieces[capability] === undefined,
+    );
+    if (!missing.length) return Promise.resolve(true);
+    const flightKey = [...missing].sort().join(',');
+    const held = this.#pieceFlights.get(flightKey);
+    if (held) return held;
+    const flight = readFinishedLibraryViews(this.request.libraryKey, this.vault, missing).then(
+      (opened) => {
+        if (!opened || !sameIdentity(opened.identity, this.cached.identity)) return false;
+        Object.assign(this.cached.pieces, opened.pieces);
+        return true;
+      },
+      () => false,
+    );
+    this.#pieceFlights.set(flightKey, flight);
+    void flight.finally(() => {
+      if (this.#pieceFlights.get(flightKey) === flight) this.#pieceFlights.delete(flightKey);
+    });
+    return flight;
+  }
+
   #promote(reason: string): Promise<LibraryServiceAuthority> {
     if (this.#full) return Promise.resolve(this.#full);
     if (this.#opening) return this.#opening;
+    if (this.#closed)
+      return Promise.reject(
+        new LibraryServiceAuthorityError({
+          code: 'not-ready',
+          message: 'library service is closed',
+          retryable: true,
+        }),
+      );
     noteFinishedViewPromotion(reason);
     this.#cancelTimer();
+    this.#cancelReconsider();
     const opening = this.openFull().then(async (authority) => {
       if (!authority)
         throw new LibraryServiceAuthorityError({
@@ -386,21 +502,24 @@ export async function openFinishedLibraryViewAuthority(
   try {
     const keys = await deriveKeys(raw);
     if ((await vault.entries(`${keys.id}:runtime:pending:`)).length) return null;
-    const cached = await readFinishedLibraryViews(request.libraryKey, vault, [
-      'watchlist',
-      'continue',
-      'recommendations',
-      'settings',
-      'runtime',
-    ]);
+    const localIdentity = await readEncryptedLibraryValue<unknown>(
+      request.libraryKey,
+      vault,
+      LIBRARY_LOCAL_AUTHORITY,
+    );
+    const cached = await readFinishedLibraryViews(request.libraryKey, vault, []);
     if (
       !cached ||
+      !validLibraryLocalAuthorityIdentity(localIdentity) ||
+      localIdentity.generation !== cached.identity.generation ||
+      localIdentity.head !== cached.identity.head ||
+      localIdentity.authorityRevision !== cached.identity.authorityRevision ||
+      localIdentity.rowsVersion !== cached.identity.rowsVersion ||
       cached.identity.policyVersion !== FINISHED_LIBRARY_POLICY ||
-      cached.identity.recommendationVersion !== FINISHED_LIBRARY_RECOMMENDATIONS ||
-      (cached.identity.reconsiderAt !== null && cached.identity.reconsiderAt <= Date.now())
+      cached.identity.recommendationVersion !== FINISHED_LIBRARY_RECOMMENDATIONS
     )
       return null;
-    noteFinishedViewCache('read', 0, true);
+    noteFinishedViewCacheHit();
     const membership = { libraryId: keys.id, memberToken: keys.member };
     return {
       authority: new FinishedLibraryViewAuthority(

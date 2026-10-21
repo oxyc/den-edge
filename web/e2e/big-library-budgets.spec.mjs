@@ -630,6 +630,14 @@ for (const [label, type, device, options] of ENGINES) {
             )
             .toBeLessThan(WEBKIT_MB);
       }
+      expect
+        .soft(
+          measured.some(({ libraryStartup }) =>
+            libraryStartup?.some(({ viewSource }) => viewSource === 'cache'),
+          ),
+          'at least one unchanged returning surface must exercise the finished-view cache',
+        )
+        .toBe(true);
       console.log(`${label}\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
     } finally {
       await browser.close();
