@@ -216,6 +216,9 @@ test('capability discovery never exposes or enables the legacy Owner UI', async 
   answerCapability();
   await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
   await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await expect(page.locator('.owner-gate')).toHaveCSS('position', 'relative');
+  await expect(page.locator('.owner-gate')).toHaveCSS('z-index', '1');
+  await expect(page.locator('.owner-gate')).toHaveCSS('background-color', 'rgb(22, 22, 28)');
   await expect(page.locator('[data-mode]')).toHaveCount(0);
 });
 

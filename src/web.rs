@@ -147,6 +147,24 @@ async fn serve_file(
         _ => (state.web_dir.as_deref(), &state.web_files),
     };
     let Some(dir) = dir else { return ("404", not_found()) };
+    // Safari rejects a repeated HEAD of the page itself as an access-control failure in some retained-page
+    // states. Give the release watcher an ordinary, tiny same-origin GET instead. It must name the exact shell
+    // digest (not the semantic version) so an old tab can tell whether its hashed chunks still belong to the
+    // deployed build, and it must never be held by the shared edge cache.
+    if path == "/__den/release" {
+        let file = dir.join("index.html");
+        let Some(mut opened) = open(&file).await else { return ("404", not_found()) };
+        let Ok((_, etag)) = files.shell(&file, &mut opened).await else {
+            return ("404", not_found());
+        };
+        let release = release(&etag);
+        let mut resp = Response::new(Body::from(release.as_bytes().to_vec()));
+        let headers = resp.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+        headers.insert(RELEASE, release);
+        return ("release", resp);
+    }
     let mut kept: Vec<String>;
     let media: &[String] = match face {
         crate::handler::Face::Web | crate::handler::Face::Tv => {
@@ -1074,6 +1092,19 @@ mod tests {
         let next = "<!doctype html><title>Den</title><script src=new>";
         std::fs::write(h.dir.join("web/index.html"), next).unwrap();
         assert_ne!(release(&h.send("GET", "/", None, &[]).await), first);
+    }
+
+    #[tokio::test]
+    async fn the_release_probe_is_a_tiny_uncached_get_of_the_exact_shell() {
+        let h = with_app();
+        let root = h.send("GET", "/", None, &[]).await;
+        let expected = root.headers()["x-den-release"].to_str().unwrap().to_owned();
+        let response = h.send("GET", "/__den/release", None, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+        assert_eq!(response.headers()["x-den-release"], expected);
+        assert_eq!(body_text(response).await, expected);
     }
 
     #[tokio::test]

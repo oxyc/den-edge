@@ -54,7 +54,6 @@ interface ReleaseWatcher {
 export function watchRelease(
   loaded: Promise<string | undefined>,
   fetchImpl: typeof fetch = fetch,
-  path: () => string = () => (typeof location === 'undefined' ? '/' : location.pathname),
 ): ReleaseWatcher {
   let checking: Promise<boolean> | undefined;
   let found = false;
@@ -67,9 +66,9 @@ export function watchRelease(
         try {
           const original = await loaded;
           if (!original) return false;
-          // Revalidate rather than bypassing the cache altogether: the shell itself is revalidated, and a HEAD
-          // carries no body. This is a quiet release probe, not work the page waits for.
-          const response = await fetchImpl(path(), { method: 'HEAD', cache: 'no-cache' });
+          // An ordinary same-origin GET works in Safari's retained-page states where a HEAD of the document can
+          // be rejected as an access-control failure. The endpoint is the exact shell digest and is never cached.
+          const response = await fetchImpl('/__den/release', { cache: 'no-store' });
           const current = response.headers.get('x-den-release');
           if (!current || current === original) return false;
           found = true;

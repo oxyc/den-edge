@@ -121,15 +121,12 @@ describe('loadRelease / currentRelease', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('reads x-den-release from a HEAD of this page’s own path', async () => {
+  it('reads x-den-release from the uncached release endpoint', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'deadbeef' } }));
     await loadRelease(fetchImpl, '/movie/550-fight-club');
-    expect(fetchImpl).toHaveBeenCalledWith('/movie/550-fight-club', {
-      method: 'HEAD',
-      cache: 'no-store',
-    });
+    expect(fetchImpl).toHaveBeenCalledWith('/__den/release', { cache: 'no-store' });
     expect(currentRelease()).toBe('deadbeef');
   });
 

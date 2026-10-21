@@ -77,6 +77,11 @@
 
 <style>
   .owner-gate {
+    /* The parser-time billboard is a positioned layer. Keep this access card above it while the app is
+       establishing a profile; otherwise WebKit paints the card beneath the retained artwork and leaves only
+       its native form controls visible. */
+    position: relative;
+    z-index: 1;
     display: grid;
     gap: 16px;
     max-width: 420px;
