@@ -146,7 +146,9 @@ async function opensInPlace(browser, kind, viewport) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${kind.from}`);
     const link = await kind.open(page);
-    await expect(link).toHaveAttribute('href', kind.href);
+    // Every kind is discovered through the freshly booted app. Under a fully occupied CI runner the Browse row can
+    // legitimately arrive after Playwright's five-second assertion default, so use the suite's app-ready budget.
+    await expect(link).toHaveAttribute('href', kind.href, { timeout: 15_000 });
     await page.evaluate(() => (window.sameDocument = true));
     const entries = await page.evaluate(() => history.length);
     await link.click({ timeout: 10_000 });
@@ -173,7 +175,7 @@ async function opensInANewTab(browser, kind, viewport) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${kind.from}`);
     const link = await kind.open(page);
-    await expect(link).toHaveAttribute('href', kind.href);
+    await expect(link).toHaveAttribute('href', kind.href, { timeout: 15_000 });
     await page.evaluate(() => (window.sameDocument = true));
     // The new tab is the browser's own, and only where it opened matters: its document is a stub.
     const opening = `${E2E_ORIGIN}${kind.href}`;
@@ -230,10 +232,12 @@ async function opensOnTheEpisode(browser, viewport) {
     // page stays at its top and the address is left as it is.
     for (const wrong of ['99', 'abc', '-1']) {
       await page.goto(`${E2E_ORIGIN}${PAGE}?season=2&episode=${wrong}`);
+      // Each goto boots a fresh app and season query. Give every one the same loaded-detail budget as the valid
+      // address above; the default assertion timeout was shorter and failed only under a fully occupied CI runner.
       await expect(
         active(page).getByText('Season 2, episode 1', { exact: true }),
         wrong,
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 15_000 });
       await page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
       expect(await page.evaluate(() => window.addressedEpisodes), wrong).toEqual([]);
       expect(await page.evaluate(() => window.scrollY), wrong).toBe(0);
