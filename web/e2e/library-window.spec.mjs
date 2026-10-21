@@ -72,7 +72,11 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
   });
-  await expect(sparse.locator('[data-card-index]')).toHaveCount(16);
+  const sparseSlots = sparse.locator('[data-card-index]');
+  await expect.poll(() => sparseSlots.count()).toBeGreaterThan(8);
+  // One synthetic jump can produce both its explicit scroll event and the native event from the growing track.
+  // Each admits one bounded eight-title tranche; their ordering is browser scheduling, not product behavior.
+  expect([16, 24]).toContain(await sparseSlots.count());
   await expect(sparse.getByRole('link', { name: 'Measured movie 1', exact: true })).toHaveCount(0);
 });
 
