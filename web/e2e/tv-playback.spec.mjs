@@ -139,10 +139,14 @@ async function repeatedMediaPlaylist(minutes = 10) {
   return body.join('\n');
 }
 
-async function routePlayback(page, { onSession, onMedia, releases = [] } = {}) {
+async function routePlayback(page, { onSession, onMedia, releases = [], skipSegments } = {}) {
   const ended = [];
   await page.route('**/tmdb/3/**', (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
-  await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route(`${ORIGIN}/skipdb/**`, (route) =>
+    skipSegments
+      ? route.fulfill({ json: { segments: skipSegments } })
+      : route.fulfill({ status: 404, json: {} }),
+  );
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
   await page.route(
@@ -346,13 +350,12 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.closest('footer') !== null))
     .toBe(true);
-  const audioPicker = page.getByRole('combobox', { name: 'Audio track' });
+  const audioPicker = page.getByRole('button', { name: /^Audio track:/ });
   const subtitlePicker = page.getByRole('button', { name: /^Subtitles:/ });
-  // Stream and subtitle choices need the release/track context carried by menus; audio remains a native select.
-  // Down lands on the stream chooser, and two horizontal moves still reach the subtitles picker.
+  // Down lands on Audio, matching AVKit's custom-action order; one horizontal move reaches Subtitles.
   await expect(audioPicker).toBeVisible();
   await expect(subtitlePicker).toBeVisible();
-  for (let n = 0; n < 2; n += 1) expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
+  expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
   await expect(subtitlePicker).toBeFocused();
   await expect(subtitlePicker).toHaveCSS('outline-style', 'none');
   await expect(subtitlePicker).toHaveCSS('background-color', 'rgb(255, 255, 255)');
@@ -378,6 +381,19 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await page.keyboard.press('Enter');
   await expect(subtitlePicker).toHaveAccessibleName('Subtitles: English');
 
+  // Down past AVKit-style custom actions opens playback details; Back dismisses that panel before the player.
+  expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
+  await expect(page.getByRole('region', { name: 'Playback details' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Movie details' })).toBeFocused();
+  expect(await remoteKey(page, 'ArrowUp', 38)).toBe(true);
+  await expect(page.getByRole('region', { name: 'Playback details' })).toHaveCount(0);
+  await expect(subtitlePicker).toBeFocused();
+  expect(await remoteKey(page, 'ArrowDown', 40)).toBe(true);
+  await expect(page.getByRole('link', { name: 'Movie details' })).toBeFocused();
+  expect(await remoteKey(page, 'Back', 461)).toBe(true);
+  await expect(page.getByRole('region', { name: 'Playback details' })).toHaveCount(0);
+  await expect(video).toHaveCount(1);
+
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
   await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
@@ -393,6 +409,26 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
       timeout: 30_000,
     })
     .toBeGreaterThan(1);
+});
+
+test('TV Skip Intro remains actionable after the ordinary transport hides', async ({ page }) => {
+  await routePlayback(page, {
+    skipSegments: {
+      intro: { start_ms: 0, end_ms: 55_000, confidence: 0.9 },
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?resume=12`);
+
+  const video = page.locator('.player video');
+  const skip = page.getByRole('button', { name: 'Skip Intro' });
+  await expect(skip).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.tv-transport')).toHaveAttribute('inert', '', { timeout: 10_000 });
+  await expect(skip).toBeVisible();
+  await skip.click();
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime))
+    .toBeGreaterThanOrEqual(54.5);
+  await expect(skip).toHaveCount(0);
 });
 
 test('TV Back closes cleanly while a playback session is still loading', async ({ page }) => {

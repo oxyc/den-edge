@@ -30,7 +30,7 @@ function session(sequence, audioTrack = 0) {
   };
 }
 
-async function routePlayback(page, externalSubtitles = undefined) {
+async function routePlayback(page, externalSubtitles = undefined, subtitleTracks = undefined) {
   let sequence = 0;
   const ended = [];
   const reports = [];
@@ -48,7 +48,11 @@ async function routePlayback(page, externalSubtitles = undefined) {
     sequence += 1;
     await route.fulfill({
       status: 201,
-      json: { ...session(sequence, request.audioTrack ?? 0), externalSubtitles },
+      json: {
+        ...session(sequence, request.audioTrack ?? 0),
+        ...(subtitleTracks ? { subtitles: subtitleTracks } : {}),
+        externalSubtitles,
+      },
     });
   });
   await page.route(`${ORIGIN}/direct/s/**`, (route) => {
@@ -120,13 +124,23 @@ test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visi
   expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
 
-  const audio = page.getByLabel('Audio track');
-  await audio.selectOption('1');
+  const audio = page.getByRole('button', { name: /^Audio track:/ });
+  await audio.click();
+  await page.getByRole('menuitemradio', { name: /^Spanish/ }).click();
   await expect.poll(() => routed.sessionRequests).toHaveLength(2);
   await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(2);
   await expect
     .poll(() => callsNamed(page, 'setSelectTrack'))
     .toContainEqual(['setSelectTrack', 'AUDIO', 12, 'PLAYING']);
+
+  await audio.click();
+  await page.getByRole('menuitem', { name: 'Re-sync audio & video' }).click();
+  await expect.poll(() => routed.sessionRequests).toHaveLength(3);
+  expect(routed.sessionRequests.at(-1)).toMatchObject({
+    audioTrack: 1,
+    filename: release.filename,
+  });
+  await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(3);
 
   // Samsung can deliver queued callbacks after stop/close. Neither callback from the replaced mount may affect the
   // new session, even though the fixture deliberately retains every listener object.
@@ -153,8 +167,8 @@ test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visi
   });
   await expect(video).toHaveCount(0);
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
-  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(2);
-  await expect.poll(() => routed.ended.length).toBe(2);
+  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(3);
+  await expect.poll(() => routed.ended.length).toBe(3);
   await expect
     .poll(async () => {
       const value = await page.getByTestId('player-progress').textContent();
@@ -177,9 +191,57 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
   await chooseSubtitle(page, 'English');
-  await expect(page.locator('.den-avplay-captions')).toHaveText('External caption');
+  await page.evaluate(() => {
+    window.__avplayFixture.latest().oncurrentplaytime(1_000);
+  });
+  const captions = page.locator('.den-avplay-captions');
+  await expect(captions).toHaveText('External caption');
+  await expect
+    .poll(async () => {
+      const [captionBox, timelineBox] = await Promise.all([
+        captions.boundingBox(),
+        page.getByRole('slider', { name: 'Playback position' }).boundingBox(),
+      ]);
+      return !!captionBox && !!timelineBox && captionBox.y + captionBox.height <= timelineBox.y;
+    })
+    .toBe(true);
+  await page.getByRole('button', { name: /^Subtitles:/ }).click();
+  await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
+  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toContainText('+0.0s');
+  expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
+  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toContainText('+0.5s');
+  // Use AVPlay's clock callback rather than the hidden HTML video's clock: Samsung owns playback timing.
+  await page.evaluate(() => window.__avplayFixture.latest().oncurrentplaytime(250));
+  await expect(captions).toBeHidden();
+  expect(await remoteKey(page, 'Enter', 13)).toBe(true);
+  await expect(page.getByRole('status', { name: 'Subtitle timing' })).toHaveCount(0);
   await chooseSubtitle(page, 'Off');
-  await expect(page.locator('.den-avplay-captions')).toBeHidden();
+  await expect(captions).toBeHidden();
+});
+
+test('Samsung subtitle menu honors hidden languages and the OpenSubtitles per-language limit', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page);
+  await routePlayback(page, undefined, [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      value: `opensubtitles:en:${index}`,
+      language: 'en',
+      name: `English candidate ${index + 1}`,
+      source: 'opensubtitles',
+    })),
+    {
+      value: 'opensubtitles:es:0',
+      language: 'es',
+      name: 'Spanish candidate',
+      source: 'opensubtitles',
+    },
+  ]);
+  await page.goto(`${ORIGIN}/test/player.html?shownSubtitles=en&subtitlesPerLanguage=1`);
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  await page.getByRole('button', { name: /^Subtitles:/ }).click();
+  await expect(page.getByRole('menuitemradio', { name: /^English candidate/ })).toHaveCount(1);
+  await expect(page.getByRole('menuitemradio', { name: 'Spanish candidate' })).toHaveCount(0);
 });
 
 test('Samsung serializes rapid seeks and coalesces them to the latest remote target', async ({

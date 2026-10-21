@@ -64,7 +64,7 @@
 .full-tv-player > footer {
   position: absolute;
   right: 5vw;
-  bottom: clamp(22px, 3vh, 38px);
+  bottom: clamp(104px, 11.5vh, 132px);
   left: 5vw;
   z-index: 4;
   padding: 0;
@@ -183,11 +183,6 @@
   color: #fff;
 }
 
-.full-tv-transport .tv-next {
-  width: 68px;
-  min-width: 68px;
-}
-
 .skip-icon {
   width: 43px;
   height: 43px;
@@ -218,8 +213,8 @@
 /* AVKit renders Den's stream, audio and subtitle actions as circled symbols. Keep their existing accessible names
    and menu implementations, but present the hosted-TV triggers as that same compact action family. */
 .full-tv-player footer .controls > .pick,
-.full-tv-player footer .controls > .pick-menu,
-.full-tv-player footer .pick-menu .trigger.pick {
+.full-tv-player footer .pick-menu .trigger.pick,
+.full-tv-player footer .player-tv-action {
   flex: 0 0 68px;
   width: 68px;
   min-width: 68px;
@@ -230,6 +225,137 @@
   border-color: rgb(255 255 255 / 0.08);
   background: rgb(255 255 255 / 0.16);
   box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+}
+
+.full-tv-player footer .controls > .pick-menu {
+  flex: 0 0 68px;
+  width: 68px;
+  min-width: 68px;
+  max-width: 68px;
+}
+
+.full-tv-player footer .player-tv-action {
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  font: inherit;
+  text-decoration: none;
+}
+
+/* Match AVKit's custom-action order, independent of which optional groups this release has. */
+.full-tv-player footer .audio-pick {
+  order: 1;
+}
+
+.full-tv-player footer .subtitle-pick {
+  order: 2;
+}
+
+.full-tv-player footer .stream-pick {
+  order: 3;
+}
+
+.full-tv-player footer .beginning-action {
+  order: 4;
+}
+
+.full-tv-player footer .next-action {
+  order: 5;
+}
+
+/* Skip Intro/Credits belongs to the picture, not the persistent transport. It remains available when the ordinary
+   controls auto-hide, as Den's native tvOS SkipOverlay does. */
+.full-tv-player .tv-skip-overlay {
+  position: absolute;
+  right: 5vw;
+  bottom: clamp(210px, 23vh, 270px);
+  z-index: 6;
+  min-width: 190px;
+  min-height: 64px;
+  border-radius: 999px;
+  font-size: 21px;
+}
+
+.full-tv-player .tv-subtitle-timing {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: auto minmax(150px, auto) auto;
+  gap: 28px;
+  align-items: center;
+  padding: 28px 38px 24px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 28px;
+  background: rgb(30 30 30 / 0.9);
+  box-shadow: 0 18px 70px rgb(0 0 0 / 0.55);
+  color: rgb(255 255 255 / 0.76);
+  font-size: 22px;
+  font-weight: 650;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(22px);
+}
+
+.full-tv-player .tv-subtitle-timing strong {
+  color: #fff;
+  font-size: 50px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.full-tv-player .tv-subtitle-timing small {
+  grid-column: 1 / -1;
+  color: rgb(255 255 255 / 0.58);
+  font-size: 17px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.full-tv-player .tv-details {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 7;
+  display: grid;
+  gap: 12px;
+  min-height: 32vh;
+  padding: 52px 7vw 70px;
+  align-content: end;
+  background: linear-gradient(to top, rgb(0 0 0 / 0.97), rgb(0 0 0 / 0.8) 65%, transparent);
+}
+
+.full-tv-player .tv-details h2,
+.full-tv-player .tv-details p {
+  max-width: 60ch;
+  margin: 0;
+}
+
+.full-tv-player .tv-details h2 {
+  font-size: 38px;
+}
+
+.full-tv-player .tv-details p {
+  color: rgb(255 255 255 / 0.72);
+  font-size: 21px;
+}
+
+.full-tv-player .tv-details a {
+  width: fit-content;
+  margin-top: 8px;
+  padding: 14px 22px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.16);
+  color: #fff;
+  font-size: 21px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.den-tv.tv-remote-active .full-tv-player .tv-details a:focus {
+  outline: 0;
+  background: #fff;
+  color: #000;
 }
 
 .full-tv-player footer .pick .icon,
@@ -277,7 +403,8 @@
 }
 
 .den-tv.tv-remote-active .full-tv-player footer .pick:focus-within,
-.den-tv.tv-remote-active .full-tv-player footer .pick-menu .trigger.pick:focus {
+.den-tv.tv-remote-active .full-tv-player footer .pick-menu .trigger.pick:focus,
+.den-tv.tv-remote-active .full-tv-player footer .player-tv-action:focus {
   border-color: transparent;
   outline: 0;
   background: #fff;

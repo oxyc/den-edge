@@ -31,4 +31,11 @@ video.den-avplay-placeholder {
     0 2px 3px black,
     0 0 5px black;
   pointer-events: none;
+  transition: bottom 180ms ease;
+}
+
+/* AVKit lifts captions above its revealed transport. AVPlay draws neither captions nor controls for us, so keep
+   Den's caption plane out of the shared timeline/action row while that row is visible. */
+.full-tv-player:not(.tv-controls-hidden) .den-avplay-captions {
+  bottom: 26%;
 }
