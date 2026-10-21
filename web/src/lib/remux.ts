@@ -166,6 +166,8 @@ export interface Want {
   maxBitrate?: number;
   /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
   player?: 'native' | 'hls.js' | 'cast';
+  /** TV packaging target, kept separate from the playback engine so Hearth can apply platform workarounds narrowly. */
+  platform?: 'webos' | 'tizen';
   /**
    * This browser's IPv4 address (`ipv4.ts`), for den-edge alone: added by `startSession` only when den-edge sees the
    * page over IPv6 and asks for it (`ipv4_hint_wanted`).

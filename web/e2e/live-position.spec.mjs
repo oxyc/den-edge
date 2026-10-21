@@ -57,6 +57,21 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   const pushing = pushEveryMs ? setInterval(push, pushEveryMs) : undefined;
   const route = async (page, name) => {
     await routeLibraryEdge(page);
+    // This fixture needs a reachable player route as well as the paired TV: the regression below checks that the
+    // hero's own Resume action follows the live episode, not Continue Watching's independently projected target.
+    await page.route('**/routes', (route) =>
+      route.fulfill({
+        json: {
+          addons: {
+            scout: [{ url: `${E2E_ORIGIN}/scout` }],
+            remux: [{ url: `${E2E_ORIGIN}/remux` }],
+          },
+        },
+      }),
+    );
+    await page.route(`${E2E_ORIGIN}/remux/health`, (route) =>
+      route.fulfill({ json: { status: 'ok' } }),
+    );
     // `routeLibraryEdge` names movies only; the seeded series (tv:1003) is named here.
     await routeTmdb(page, (route) => {
       const id = new URL(route.request().url()).pathname.match(/\/tv\/(\d+)$/)?.[1];
@@ -294,6 +309,7 @@ test('a series’ page says which device plays which episode, and moves nothing 
     await page.locator('.card', { hasText: 'Series 1003' }).click();
     await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
     const block = page.locator('.hero .continue');
+    const resume = page.locator('header.hero').getByRole('link', { name: 'Resume', exact: true });
     const label = block.locator('strong');
     const clock = block.locator('.live-clock');
     const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
@@ -306,6 +322,8 @@ test('a series’ page says which device plays which episode, and moves nothing 
     // The seeded resume point was written as the page opened, so its own clock may still be running out.
     await expect(clock).toBeHidden({ timeout: 60_000 });
     await expect(label).toHaveText('Continue Watching');
+    const projectedResume = await resume.getAttribute('href');
+    expect(projectedResume).not.toMatch(/season=1&episode=3&play=1$/);
     const without = await boxes();
 
     const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
@@ -313,6 +331,7 @@ test('a series’ page says which device plays which episode, and moves nothing 
     await expect(label).toHaveText('Playing on Apple TV');
     await expect(block.locator('small')).toHaveText('S1 · E3');
     await expect(block).toHaveAttribute('href', /season=1&episode=3&play=1$/);
+    await expect(resume).toHaveAttribute('href', /season=1&episode=3&play=1$/);
     expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
     const samples = await watch(clock, 15_000);
     expect(samples.filter((text) => text === null)).toEqual([]);

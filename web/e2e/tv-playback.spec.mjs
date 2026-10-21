@@ -265,7 +265,14 @@ test('webOS native playback does not wait on its advertised but silent frame cal
 test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Back', async ({
   page,
 }) => {
-  const ended = await routePlayback(page, { releases: [session.release, alternate] });
+  let opening;
+  const ended = await routePlayback(page, {
+    releases: [session.release, alternate],
+    onSession: (route) => {
+      opening = route.request().postDataJSON();
+      return route.fulfill({ status: 201, json: session });
+    },
+  });
   await page.goto(`${ORIGIN}/test/player.html?resume=12&next=1`);
 
   const video = page.locator('.player video');
@@ -274,6 +281,8 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(12);
+  // Desktop preview uses hls.js, while an LG uses its native engine. The platform remains explicit in either case.
+  expect(opening).toMatchObject({ player: 'hls.js', platform: 'webos' });
 
   expect(await remoteKey(page, 'MediaTrackNext', 176)).toBe(true);
   await expect(page.getByTestId('player-next-count')).toHaveText('1');
