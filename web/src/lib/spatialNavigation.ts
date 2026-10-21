@@ -154,16 +154,6 @@ function semanticDestination(
     }
   }
 
-  if (direction === 'up') {
-    const panel = current.closest<HTMLElement>('[role="tabpanel"][id]');
-    const selected = panel
-      ? root.querySelector<HTMLElement>(
-          `[role="tab"][aria-selected="true"][aria-controls="${CSS.escape(panel.id)}"]`,
-        )
-      : null;
-    if (selected && candidates.includes(selected)) return selected;
-  }
-
   // An expanded controller and its region form one vertical unit. Down enters the first usable control; Up from
   // that first control returns to the controller. Sources, disclosure rows and menus all get the same behavior.
   if (direction === 'down' && current.getAttribute('aria-expanded') === 'true') {
@@ -203,6 +193,19 @@ function semanticDestination(
         if (next) return next;
       }
     }
+  }
+
+  // A tab owns its panel only at the panel's leading edge. Semantic rows inside that panel get the first chance
+  // above, so Up walks episode 3 -> 2 -> 1 before episode 1 exits to the selected season. This applies equally to
+  // any later tab panel containing a declared vertical list; it is not an episode-number exception.
+  if (direction === 'up') {
+    const panel = current.closest<HTMLElement>('[role="tabpanel"][id]');
+    const selected = panel
+      ? root.querySelector<HTMLElement>(
+          `[role="tab"][aria-selected="true"][aria-controls="${CSS.escape(panel.id)}"]`,
+        )
+      : null;
+    if (selected && candidates.includes(selected)) return selected;
   }
 
   // An action painted over a primary surface is spatially above it even when both occupy the same rectangle.

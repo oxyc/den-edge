@@ -328,7 +328,10 @@
   .row-window {
     width: 100vw;
     margin-inline: calc(50% - 50vw);
-    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+    contain-intrinsic-block-size: auto
+      calc(
+        var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)
+      );
   }
 
   .row-window.placed:not(.near) {
@@ -350,30 +353,32 @@
     width: var(--card-w);
 
     /* Match PosterCard art, gap, and two metadata lines before any title is known. */
-    height: calc(var(--card-w) * 1.5 + 8px + 39.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     border-radius: 12px;
-    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
+    background: linear-gradient(var(--card), var(--card)) top / 100%
+      calc(100% - var(--poster-meta-block-size)) no-repeat;
   }
 
   .slot {
     display: block;
     width: var(--card-w);
-    min-height: calc(var(--card-w) * 1.5 + 47.2px);
+    min-height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     scroll-snap-align: start;
   }
 
   /* Empty virtual slots have fixed geometry and no popover/focus artwork to escape their bounds. */
   .slot.vacant {
     contain: strict;
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     border-radius: 12px;
-    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
+    background: linear-gradient(var(--card), var(--card)) top / 100%
+      calc(100% - var(--poster-meta-block-size)) no-repeat;
   }
 
   .proxy {
     display: block;
     width: 100%;
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     opacity: 0;
   }
 
@@ -386,7 +391,7 @@
     width: var(--card-w);
 
     /* Match a normal poster and its two-line metadata reserve so a failure cannot resize the shelf. */
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     padding: 12px;
     border: 0;
     border-radius: 12px;

@@ -2,15 +2,43 @@
 :root.den-tv {
   --gutter: clamp(54px, 5vw, 96px);
   --bar-space: 124px;
-  --card-w: clamp(190px, 13vw, 260px);
+
+  /* PosterRow owns the local `--card-w` used by cards and virtual slots. Override its shared source token instead
+     of setting `--card-w` here: a value on the row itself otherwise wins inheritance and silently leaves TV at
+     the browser's 190px maximum (about 8.5 posters across a 1920px screen). */
+  --poster-card-w: clamp(190px, 13vw, 260px);
+  --poster-meta-block-size: 75.2px;
+  --poster-row-chrome-block-size: 249.6px;
   --ring-width: 4px;
+  --button-large-min-height: 58px;
+  --detail-content-max: clamp(1200px, 66.6667vw, 1320px);
   --page-max: 1920px;
-  --tv-type-caption: 16px;
-  --tv-type-small: 20px;
-  --tv-type-body: 24px;
-  --tv-type-input: 28px;
-  --tv-type-heading: 32px;
+  --tv-type-caption: 20px;
+  --tv-type-small: 24px;
+  --tv-type-body: 28px;
+  --tv-type-input: 32px;
+  --tv-type-heading: 36px;
   --tv-type-nav: 28px;
+  --episode-art-w: clamp(320px, 18vw, 360px);
+  --episode-menu-target: 58px;
+  --detail-reaction-font-size: var(--tv-type-small);
+  --section-heading-size: var(--tv-type-heading);
+  --billboard-title-size: clamp(56px, 3.4vw, 68px);
+  --billboard-fact-size: var(--tv-type-small);
+  --service-name-size: var(--tv-type-small);
+  --service-country-size: var(--tv-type-caption);
+  --person-card-size: var(--tv-type-small);
+  --person-card-supporting-size: var(--tv-type-caption);
+  --person-title-size: clamp(48px, 3.2vw, 64px);
+  --settings-columns: 280px minmax(0, 1100px);
+  --settings-column-gap: 64px;
+  --settings-font-size: var(--tv-type-small);
+  --settings-title-size: 44px;
+  --settings-section-title-size: var(--tv-type-heading);
+  --settings-caption-size: var(--tv-type-caption);
+  --settings-row-min-height: 68px;
+  --settings-row-padding: 12px 20px;
+  --settings-field-min-height: 58px;
 
   font-size: var(--tv-type-body);
   overscroll-behavior: none;
@@ -280,7 +308,7 @@
 }
 
 .den-tv .episode .still {
-  height: clamp(106.875px, 13.5vw, 157.5px);
+  height: calc(var(--episode-art-w) * 0.5625);
 }
 
 .den-tv header.hero .poster {
@@ -297,6 +325,12 @@
 
 .den-tv header.hero h1 {
   font-size: clamp(44px, 3.4vw, 64px);
+}
+
+.den-tv .episode .facts,
+.den-tv .episode .overview,
+.den-tv .episode .air-date {
+  font-size: var(--tv-type-small);
 }
 
 .den-tv header.hero .ratings,
@@ -322,13 +356,50 @@
   font-size: var(--tv-type-body);
 }
 
-:root.den-tv .season-download-trigger,
-.den-tv header.hero .hero-actions .den-button-large {
-  min-height: 58px;
-}
-
 .den-tv .card .meta {
   padding-top: 10px;
+  font-size: var(--tv-type-small);
+}
+
+/* Detail content uses one ten-foot measure. The browser keeps its 1100px reading column; on a 1920px TV this
+   reaches the action row's opinion controls instead of leaving the episode menu stranded near the centre. */
+.den-tv .seasons,
+.den-tv .source-accordion,
+.den-tv .source-panel {
+  max-width: var(--detail-content-max);
+}
+
+.den-tv .episode-play {
+  gap: 44px;
+}
+
+.den-tv .episode {
+  grid-template-columns: minmax(0, 1fr) var(--episode-menu-target);
+  gap: 12px;
+  padding: 16px;
+}
+
+.den-tv .episode strong {
+  font-size: var(--tv-type-body);
+}
+
+.den-tv .episode .download-state,
+.den-tv .episode .number,
+.den-tv .totals,
+.den-tv .watched-count,
+.den-tv .source-accordion .source-count,
+.den-tv .source-panel .readiness {
+  font-size: var(--tv-type-caption);
+}
+
+.den-tv .episode-trigger {
+  width: var(--episode-menu-target);
+  height: var(--episode-menu-target);
+}
+
+.den-tv .season-bar [role='tab'] {
+  min-height: 58px;
+  padding-inline: 24px;
   font-size: var(--tv-type-small);
 }
 
@@ -455,6 +526,20 @@
   min-height: 54px;
   padding-inline: 26px;
   font-size: var(--tv-type-body);
+}
+
+/* Supporting poster badges use the same TV type scale as the shelves they belong to. Their component defaults
+   remain compact on phones and laptops. */
+.den-tv .card .badge,
+.den-tv .card .art-caption,
+.den-tv .card .rating,
+.den-tv .card .release,
+.den-tv .card .standing.live {
+  font-size: var(--tv-type-caption);
+}
+
+.den-tv .card .placeholder {
+  font-size: var(--tv-type-small);
 }
 
 :root.den-tv .tv-bar nav a,

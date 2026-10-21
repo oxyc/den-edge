@@ -13,6 +13,10 @@
   --focus-ring: #fff;
   --ring-width: 3px;
   --ring-offset: 3px;
+  --button-large-min-height: 48px;
+  --detail-content-max: 1100px;
+  --poster-meta-block-size: 47.2px;
+  --poster-row-chrome-block-size: 127.2px;
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
@@ -99,7 +103,7 @@ input {
 }
 
 .den-button-large {
-  min-height: 48px;
+  min-height: var(--button-large-min-height);
   padding-inline: 22px;
 }
 

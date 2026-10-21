@@ -47,6 +47,24 @@ test('remote shelf focus keeps the entire white poster ring inside clipping boun
   const track = page.locator('[data-route-page][data-active="true"] .row .track').first();
   const first = track.locator('a.card').first();
   await expect(first).toBeVisible();
+  const shelfGeometry = await track.evaluate((node) => {
+    const card = node.querySelector('.card');
+    if (!card) return null;
+    const trackBox = node.getBoundingClientRect();
+    const cardBox = card.getBoundingClientRect();
+    const gap = Number.parseFloat(getComputedStyle(node).columnGap);
+    return {
+      cardWidth: cardBox.width,
+      cardsAcross: (trackBox.right - cardBox.left + gap) / (cardBox.width + gap),
+    };
+  });
+  expect(shelfGeometry).not.toBeNull();
+  // At 1920px the ten-foot token is 13vw: roughly six and a half posters remain visible, rather than the web
+  // shelf's 190px maximum fitting about eight and a half. This exercises the rendered inheritance boundary that
+  // a token/class assertion would miss.
+  expect(shelfGeometry.cardWidth).toBeCloseTo(249.6, 0);
+  expect(shelfGeometry.cardsAcross).toBeGreaterThan(6.5);
+  expect(shelfGeometry.cardsAcross).toBeLessThan(7);
   for (let i = 0; i < 30 && !(await track.locator('a.card:focus').count()); i++) {
     await page.keyboard.press('ArrowDown');
     await page.waitForTimeout(80);

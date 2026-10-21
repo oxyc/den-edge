@@ -349,9 +349,9 @@
 
 <style>
   .row-reserve {
-    --card-w: clamp(140px, 38vw, 190px);
+    --card-w: var(--poster-card-w, clamp(140px, 38vw, 190px));
 
     /* PosterRow heading + gap + BrowseRow's initial card skeleton + track padding + row margin. */
-    height: calc(var(--card-w) * 1.5 + 127.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-row-chrome-block-size));
   }
 </style>

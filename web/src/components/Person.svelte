@@ -228,7 +228,7 @@
 
   h1 {
     margin: 0;
-    font-size: clamp(28px, 3.4vw, 44px);
+    font-size: var(--person-title-size, clamp(28px, 3.4vw, 44px));
     line-height: 1.12;
   }
 

@@ -99,6 +99,7 @@
     padding: 8px 12px;
     border-radius: 10px;
     color: var(--muted);
+    font-size: var(--settings-font-size, inherit);
     font-weight: 600;
     text-decoration: none;
   }
@@ -107,7 +108,7 @@
     padding: 6px 14px;
     border-radius: 999px;
     color: var(--muted);
-    font-size: 15px;
+    font-size: var(--settings-font-size, 15px);
     font-weight: 600;
     text-decoration: none;
     white-space: nowrap;

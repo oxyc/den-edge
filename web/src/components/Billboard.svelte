@@ -1431,7 +1431,7 @@
 
   h2 {
     margin: 0;
-    font-size: clamp(26px, 6vw, 48px);
+    font-size: var(--billboard-title-size, clamp(26px, 6vw, 48px));
     line-height: 1.05;
 
     /* A ceiling, not a reservation: the text sits at the bottom of the hero, so a one-line title simply leaves
@@ -1456,7 +1456,7 @@
   .reason {
     margin: 0;
     color: rgb(255 255 255 / 0.92);
-    font-size: 14px;
+    font-size: var(--billboard-fact-size, 14px);
     font-weight: 600;
     line-height: 1.4;
   }
@@ -1467,7 +1467,7 @@
   .facts {
     margin: 0;
     color: rgb(255 255 255 / 0.92);
-    font-size: 14px;
+    font-size: var(--billboard-fact-size, 14px);
     line-height: 1.4;
     max-block-size: 2.8em;
     display: -webkit-box;

@@ -51,7 +51,9 @@ export function cardsOnScreen(
   return { start: Math.min(start, end), end };
 }
 
-/** PosterRow's responsive card width, in CSS pixels. */
-export function posterCardWidth(viewportWidth: number): number {
-  return Math.min(190, Math.max(140, viewportWidth * 0.38));
+/** PosterRow's responsive card width, in CSS pixels. Keep these clamps paired with its CSS source token. */
+export function posterCardWidth(viewportWidth: number, tv = __DEN_TV__): number {
+  return tv
+    ? Math.min(260, Math.max(190, viewportWidth * 0.13))
+    : Math.min(190, Math.max(140, viewportWidth * 0.38));
 }

@@ -45,4 +45,5 @@ it('uses the same clamp as PosterRow CSS', () => {
   expect(posterCardWidth(320)).toBe(140);
   expect(posterCardWidth(390)).toBeCloseTo(148.2);
   expect(posterCardWidth(1280)).toBe(190);
+  expect(posterCardWidth(1920, true)).toBeCloseTo(249.6);
 });

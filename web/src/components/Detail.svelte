@@ -1149,6 +1149,7 @@
             <ol
               bind:this={episodeList}
               class="episodes"
+              data-spatial-list="vertical"
               class:loading={seasonLoading}
               inert={seasonLoading}
               aria-hidden={seasonLoading}
@@ -1482,7 +1483,7 @@
   }
 
   .seasons {
-    max-width: 1100px;
+    max-width: var(--detail-content-max);
     margin-bottom: 48px;
   }
 

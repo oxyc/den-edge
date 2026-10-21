@@ -65,7 +65,7 @@
     display: grid;
     width: var(--card-w);
     color: inherit;
-    font-size: 14px;
+    font-size: var(--person-card-size, 14px);
     text-align: center;
     text-decoration: none;
   }
@@ -112,7 +112,7 @@
     display: -webkit-box;
     overflow: hidden;
     color: var(--muted);
-    font-size: 13px;
+    font-size: var(--person-card-supporting-size, 13px);
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;

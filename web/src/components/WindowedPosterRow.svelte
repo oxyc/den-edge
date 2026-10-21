@@ -340,11 +340,18 @@
   .windowed {
     width: 100vw;
     margin-inline: calc(50% - 50vw);
-    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+    contain-intrinsic-block-size: auto
+      calc(
+        var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)
+      );
   }
 
   .windowed.landscape {
-    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.45 * 9 / 16 + 127.2px);
+    contain-intrinsic-block-size: auto
+      calc(
+        var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.45 * 9 / 16 +
+          var(--poster-row-chrome-block-size)
+      );
   }
 
   /* Until placed the wrapper keeps the containment `auto` gives a row that is not skipped, so its height (the row's
@@ -358,34 +365,35 @@
   .slot {
     display: block;
     width: var(--card-w);
-    min-height: calc(var(--card-w) * 1.5 + 47.2px);
+    min-height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     scroll-snap-align: start;
   }
 
   .slot.vacant {
     contain: strict;
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     border-radius: 12px;
-    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
+    background: linear-gradient(var(--card), var(--card)) top / 100%
+      calc(100% - var(--poster-meta-block-size)) no-repeat;
   }
 
   .slot.landscape {
     width: calc(var(--card-w) * 1.45);
-    min-height: calc(var(--card-w) * 1.45 * 9 / 16 + 47.2px);
+    min-height: calc(var(--card-w) * 1.45 * 9 / 16 + var(--poster-meta-block-size));
   }
 
   .slot.vacant.landscape {
-    height: calc(var(--card-w) * 1.45 * 9 / 16 + 47.2px);
+    height: calc(var(--card-w) * 1.45 * 9 / 16 + var(--poster-meta-block-size));
   }
 
   .proxy {
     display: block;
     width: 100%;
-    height: calc(var(--card-w) * 1.5 + 47.2px);
+    height: calc(var(--card-w) * 1.5 + var(--poster-meta-block-size));
     opacity: 0;
   }
 
   .landscape .proxy {
-    height: calc(var(--card-w) * 1.45 * 9 / 16 + 47.2px);
+    height: calc(var(--card-w) * 1.45 * 9 / 16 + var(--poster-meta-block-size));
   }
 </style>

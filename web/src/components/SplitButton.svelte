@@ -180,7 +180,7 @@
   .split-surface {
     display: flex;
     width: 100%;
-    min-height: 48px;
+    min-height: var(--button-large-min-height);
     overflow: hidden;
     border: 1px solid var(--fg);
     border-radius: 12px;
@@ -216,7 +216,7 @@
     --button-border: transparent;
     --button-fg: var(--bg);
 
-    min-height: 46px;
+    min-height: calc(var(--button-large-min-height) - 2px);
     border: 0;
     border-radius: 0;
     background: transparent;

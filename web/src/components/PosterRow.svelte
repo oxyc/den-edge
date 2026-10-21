@@ -92,7 +92,9 @@
 <style>
   .row {
     /* ~2.3 posters on a phone, so the cut-off one says "scroll"; 6–8 on a desktop. */
-    --card-w: clamp(140px, 38vw, 190px);
+
+    /* A TV-only stylesheet can enlarge the shared shelf without adding TV selectors or code to the web build. */
+    --card-w: var(--poster-card-w, clamp(140px, 38vw, 190px));
     --page-inset: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
 
     width: 100vw;
