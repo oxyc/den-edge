@@ -12,6 +12,9 @@ const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
 const standardCompat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
 const legacyCompat = fileURLToPath(new URL('./src/tv/compat-legacy.ts', import.meta.url));
+const tizen3WorkerCompat = fileURLToPath(
+  new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
+);
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
@@ -19,7 +22,7 @@ const packaged = process.env.DEN_TV_PACKAGED === '1';
 const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
 const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
 const legacyTizen = platform === 'tizen' && (tizen3 || tizenVersion === '5.5');
-const compat = legacyTizen ? legacyCompat : standardCompat;
+const workerCompat = tizen3 ? tizen3WorkerCompat : legacyTizen ? legacyCompat : standardCompat;
 const tvCspValue = tvCsp(tizenVersion);
 const apiOriginText = process.env.DEN_TV_API_ORIGIN;
 if (packaged && !apiOriginText)
@@ -89,7 +92,8 @@ function workerCompatibility(): Plugin {
         const ordinary = "import './compat';";
         if (!code.includes(ordinary))
           throw new Error('Tizen 5.5 compatibility entry no longer matches TV main');
-        return { code: code.replace(ordinary, "import './compat-legacy';"), map: null };
+        const replacement = tizen3 ? "import './compat-tizen3';" : "import './compat-legacy';";
+        return { code: code.replace(ordinary, replacement), map: null };
       }
       if (/\/src\/lib\/syncPolicyModule\.ts$/.test(id)) {
         const original = '../vendor/den-core/generated/den_core_bg.wasm';
@@ -108,7 +112,7 @@ function workerCompatibility(): Plugin {
       }
       if (/\/src\/lib\/(?:libraryServiceWorker|libraryWorker|recoveryWorker)\.ts$/.test(id))
         return {
-          code: `import ${JSON.stringify(compat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
+          code: `import ${JSON.stringify(workerCompat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
           map: null,
         };
     },
