@@ -1,5 +1,5 @@
 import { initialize } from '../vendor/den-core/index.js';
-import { SYNC_POLICY_REQUEST } from './syncPolicyModule';
+import { SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
 let ready = false;
 let pending: Promise<void> | undefined;

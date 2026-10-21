@@ -18,7 +18,7 @@ import {
   decodeContentServiceServerMessage,
 } from './contentServiceProtocolCodec';
 import { acceptSyncPolicy } from './syncLoader';
-import { SYNC_POLICY_OFFER } from './syncPolicyModule';
+import { SYNC_POLICY_OFFER } from './syncPolicyProtocol';
 
 interface LibraryServiceDispatcher {
   dispatch(input: unknown): Promise<LibraryServiceServerMessage[]>;

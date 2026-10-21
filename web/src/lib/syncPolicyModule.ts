@@ -2,9 +2,7 @@
 // opens two libraries, one Worker each; each used to fetch the same 1.66 MB wasm and compile it again (WebKit
 // downloads both, Chromium shares the transfer but still compiles twice).
 
-/** The first message a library Worker receives: the port its compiled den-core arrives on (`acceptSyncPolicy`). */
-export const SYNC_POLICY_OFFER = 'den-core-module';
-export const SYNC_POLICY_REQUEST = 'den-core-module-request';
+import { SYNC_POLICY_OFFER, SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
 const WASM = new URL('../vendor/den-core/generated/den_core_bg.wasm', import.meta.url);
 
