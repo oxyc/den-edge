@@ -829,6 +829,9 @@
         : samsungAvplay || webOsNative || nativeHls(document.createElement('video'))
           ? 'native'
           : 'hls.js',
+      ...(__DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen'
+        ? { platform: __DEN_TV_PLATFORM__ }
+        : {}),
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
       // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
