@@ -246,6 +246,10 @@
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
   const tv = __DEN_TV__;
+  // The hosted webOS and Samsung shells share one ten-foot transport. Their decoders differ underneath (HTMLMedia
+  // on LG, AVPlay on Samsung), but exposing that implementation detail in the controls made Samsung needlessly
+  // second-class. Android retains its launcher-era strip until its native playback surface adopts this contract.
+  const fullTvTransport = __DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen';
   // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
@@ -2913,6 +2917,15 @@
     active = null;
   }
 
+  /** The native Den Apple TV exposes this beside its track/stream actions. TV browsers can seek the active decoder
+   * directly: the Samsung facade turns this assignment into a serialized AVPlay seek. */
+  function playFromBeginning() {
+    if (!video) return;
+    video.currentTime = 0;
+    tvPosition = 0;
+    void video.play();
+  }
+
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
   function seekCastFrame(time: number): boolean {
     const current = session;
@@ -3344,7 +3357,7 @@
 
 <div
   class="player"
-  class:webos-player={__DEN_TV_PLATFORM__ === 'webos'}
+  class:full-tv-player={fullTvTransport}
   role="dialog"
   aria-modal="true"
   aria-label={heading}
@@ -3596,8 +3609,8 @@
           {/each}
         </video>
         {#if tv}
-          {#if __DEN_TV_PLATFORM__ === 'webos'}
-            <nav class="tv-transport webos-transport" aria-label="Playback controls">
+          {#if fullTvTransport}
+            <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
               <div class="tv-timeline">
                 <span aria-hidden="true">{clockTime(tvPosition)}</span>
                 <input
@@ -3620,6 +3633,9 @@
                 <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
               </div>
               <div class="tv-transport-actions">
+                <button type="button" aria-label="Play from beginning" onclick={playFromBeginning}>
+                  {@render beginningIcon()}
+                </button>
                 <button
                   class="tv-skip"
                   type="button"
@@ -3655,8 +3671,11 @@
                 >
                   {@render skipIcon('forward')}
                 </button>
-                {#if onnext && nextHref}<a class="tv-next" href={nextHref} onclick={advanceLink}
-                    >Next <span aria-hidden="true">›</span></a
+                {#if onnext && nextHref}<a
+                    class="tv-next"
+                    href={nextHref}
+                    aria-label={next ? `Next episode: ${next}` : 'Next episode'}
+                    onclick={advanceLink}>{@render nextIcon()}</a
                   >{/if}
               </div>
             </nav>
@@ -3763,23 +3782,27 @@
             >
               {#snippet glyph()}
                 {@render plates()}
-                <span class="value" aria-hidden="true">{short}</span>
-                {@render chevron()}
+                {#if !fullTvTransport}
+                  <span class="value" aria-hidden="true">{short}</span>
+                  {@render chevron()}
+                {/if}
               {/snippet}
             </ActionMenu>
           </div>
         {/if}
         {#if session.audioTracks.length > 1 && playingTrack}
           <div class="pick">
-            {@render globe()}
+            {#if fullTvTransport}{@render audioIcon()}{:else}{@render globe()}{/if}
             <!-- A track this browser gets with fewer channels says what it gets beside its name, quietly: a known
                  limit of the conversion, not a fault. -->
-            <span class="value" aria-hidden="true"
-              >{trackLabel(playingTrack, session.audioTrack)}{#if downmix}<span class="downmix"
-                  >{downmix}</span
-                >{/if}</span
-            >
-            {@render chevron()}
+            {#if !fullTvTransport}
+              <span class="value" aria-hidden="true"
+                >{trackLabel(playingTrack, session.audioTrack)}{#if downmix}<span class="downmix"
+                    >{downmix}</span
+                  >{/if}</span
+              >
+              {@render chevron()}
+            {/if}
             <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
               {#each session.audioTracks as track, n (n)}
                 <option value={n}
@@ -3820,9 +3843,13 @@
               ]}
             >
               {#snippet glyph()}
-                {@render globe()}
-                <span class="value" aria-hidden="true">{chosenSubtitleLabel}</span>
-                {@render chevron()}
+                {#if fullTvTransport}
+                  {@render subtitlesIcon()}
+                {:else}
+                  {@render globe()}
+                  <span class="value" aria-hidden="true">{chosenSubtitleLabel}</span>
+                  {@render chevron()}
+                {/if}
               {/snippet}
             </ActionMenu>
           </div>
@@ -3834,7 +3861,7 @@
         {#if active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
-        {#if onnext && next}
+        {#if !fullTvTransport && onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <Button
@@ -3865,6 +3892,20 @@
   </svg>
 {/snippet}
 
+{#snippet beginningIcon()}
+  <svg class="transport-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+    <path d="M17 14H9V6M10 14a17 17 0 1 1-2 17" />
+    <path class="filled" d="m20 17 13 8-13 8Z" />
+  </svg>
+{/snippet}
+
+{#snippet nextIcon()}
+  <svg class="transport-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+    <path class="filled" d="m12 12 20 13-20 13Z" />
+    <path d="M36 12v26" />
+  </svg>
+{/snippet}
+
 <!-- The Apple TV's own menus mark these with rectangle.stack and globe; the same two, drawn as lines. -->
 {#snippet plates()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -3881,6 +3922,20 @@
     <path
       d="M12 3.5c2.4 2.4 3.7 5.3 3.7 8.5s-1.3 6.1-3.7 8.5c-2.4-2.4-3.7-5.3-3.7-8.5s1.3-6.1 3.7-8.5Z"
     />
+  </svg>
+{/snippet}
+
+{#snippet audioIcon()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
+    <path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" />
+  </svg>
+{/snippet}
+
+{#snippet subtitlesIcon()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="3" y="5" width="18" height="14" rx="3" />
+    <path d="M6.5 10h4M13.5 10h4M6.5 14h6M15.5 14h2" />
   </svg>
 {/snippet}
 
