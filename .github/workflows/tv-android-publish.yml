@@ -83,10 +83,13 @@ jobs:
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs den-tv-android.apk > android-signing.txt
           expected=$(tr -d ':[:space:]' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')
-          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' android-signing.txt \
-            | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
-          test "$actual" = "$expected" || {
-            echo "::error::Android signer is $actual, expected $expected"
+          # Build Tools can identify a v3.1 signer by its SDK range instead of "Signer #1". Accept the pinned
+          # certificate in any signer slot so key-rotation metadata remains verifiable across tool versions.
+          mapfile -t actuals < <(sed -nE \
+            's/^Signer .* certificate SHA-256 digest:[[:space:]]*//p' android-signing.txt \
+            | sed 's/://g; s/[[:space:]]//g' | tr '[:upper:]' '[:lower:]')
+          printf '%s\n' "${actuals[@]}" | grep -Fxq "$expected" || {
+            echo "::error::Android signer(s) ${actuals[*]:-<none>} do not include expected $expected"
             exit 1
           }
 
