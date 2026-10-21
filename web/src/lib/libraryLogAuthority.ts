@@ -576,7 +576,10 @@ export class LibraryLogAuthority {
       case 'presence':
         return this.#presence(selection.titles);
       case 'settings': {
-        const revision = this.#finishedAuthorityRevision();
+        const revision =
+          this.#options.libraryKey && this.#options.vault
+            ? this.#finishedAuthorityRevision()
+            : undefined;
         return this.#rememberFinished('settings', await this.#settings(), revision);
       }
       case 'connections':

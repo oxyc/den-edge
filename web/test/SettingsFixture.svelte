@@ -67,9 +67,11 @@
       'bbbb000000000002.seen': { int: 9000 },
     }),
   ];
+  let rowsVersion = 0;
 
   const put = (next: Row) => {
     stored = [...stored.filter((held) => rowName(held) !== rowName(next)), next];
+    rowsVersion++;
   };
   // What the library holds now, for a spec to read back what a press wrote.
   (globalThis as { fixtureRows?: () => Row[] }).fixtureRows = () => stored;
@@ -80,6 +82,10 @@
       return new URLSearchParams(location.search).has('profiles');
     },
     currentGeneration: undefined,
+    logHead: 0,
+    get rowsVersion() {
+      return rowsVersion;
+    },
     pendingActions: 0,
     libraryId: fixtureLibraryId,
     memberProof: fixtureMemberToken,
@@ -114,6 +120,7 @@
       },
     ],
     newestStamp: () => at,
+    currentSummary: () => ({ stamp: at, reconsiderAt: Infinity, at: Date.now() }),
     kept: async () => undefined,
     keep: async () => {},
     relayMembership: async () => ({
