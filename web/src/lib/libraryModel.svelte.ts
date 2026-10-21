@@ -984,13 +984,14 @@ export class LibraryModel {
     return result;
   }
 
-  sealPairingHandover(handoverKey: string, host: string, linkKey?: string) {
+  sealPairingHandover(handoverKey: string, host: string, linkKey?: string, grantTicket?: string) {
     this.#assertOpen();
     return this.service.query({
       kind: 'pairing.handover',
       handoverKey,
       host,
       ...(linkKey ? { linkKey } : {}),
+      ...(grantTicket ? { grantTicket } : {}),
     });
   }
 

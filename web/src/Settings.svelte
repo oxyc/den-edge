@@ -309,8 +309,13 @@
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
 
-  async function sealHandover(handoverKey: string, host: string, linkKey: string) {
-    const { result } = await model.sealPairingHandover(handoverKey, host, linkKey);
+  async function sealHandover(
+    handoverKey: string,
+    host: string,
+    linkKey: string,
+    grantTicket?: string,
+  ) {
+    const { result } = await model.sealPairingHandover(handoverKey, host, linkKey, grantTicket);
     if (result.kind !== 'pairing.handover') throw new Error('wrong pairing response');
     return result;
   }

@@ -127,6 +127,7 @@ export class LibraryAdminAuthority {
     handoverKey: string,
     host: string,
     suppliedLinkKey?: string,
+    grantTicket?: string,
   ): Promise<Extract<LibraryQueryResult, { kind: 'pairing.handover' }>> {
     const transport = fromBase64url(handoverKey);
     const linkKey = suppliedLinkKey
@@ -137,6 +138,7 @@ export class LibraryAdminAuthority {
       const sealed = await sealHandover(transport, {
         host,
         hostDeviceId: this.clock.device,
+        ...(grantTicket ? { grantTicket } : {}),
         linkKey,
         libraryKey,
       });

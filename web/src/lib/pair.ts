@@ -260,7 +260,12 @@ export interface Handover {
   hostDeviceId?: string;
   linkKey: Bytes;
   libraryKey: Bytes;
+  /** A one-use guest-device ticket, carried only inside the encrypted handover. */
+  grantTicket?: string;
 }
+
+const isGrantTicket = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/.test(value);
 
 async function aes(key: Bytes, use: KeyUsage): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', key, 'AES-GCM', false, [use]);
@@ -275,6 +280,7 @@ export async function sealHandover(
     v: 1,
     host: handover.host,
     ...(handover.hostDeviceId ? { hostDeviceId: handover.hostDeviceId } : {}),
+    ...(handover.grantTicket ? { grantTicket: handover.grantTicket } : {}),
     linkKey: toBase64url(handover.linkKey),
     libraryKey: toBase64url(handover.libraryKey),
   });
@@ -297,10 +303,17 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
     const linkKey = typeof body.linkKey === 'string' ? fromBase64url(body.linkKey) : null;
     const libraryKey = typeof body.libraryKey === 'string' ? fromBase64url(body.libraryKey) : null;
     if (body.hostDeviceId !== undefined && !isStampDeviceId(body.hostDeviceId)) return null;
+    if (body.grantTicket !== undefined && !isGrantTicket(body.grantTicket)) return null;
     const hostDeviceId = isStampDeviceId(body.hostDeviceId) ? body.hostDeviceId : undefined;
     if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32)
       return null;
-    return { host: body.host, ...(hostDeviceId ? { hostDeviceId } : {}), linkKey, libraryKey };
+    return {
+      host: body.host,
+      ...(hostDeviceId ? { hostDeviceId } : {}),
+      ...(isGrantTicket(body.grantTicket) ? { grantTicket: body.grantTicket } : {}),
+      linkKey,
+      libraryKey,
+    };
   } catch {
     return null;
   }
@@ -325,6 +338,14 @@ interface JoinOptions {
   signal?: AbortSignal;
   /** A fixed scalar, for tests. */
   y?: Bytes;
+}
+
+export interface ReceiveOptions extends JoinOptions {
+  /** The ordinary pairing code to put in the TV's HTTPS QR and show as a typing fallback. */
+  onCode: (code: string) => void;
+  /** Fixed for tests. */
+  sid?: string;
+  secret?: string;
 }
 
 /**
@@ -438,6 +459,55 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   return { handover, inboxKey };
 }
 
+/**
+ * Receive a library on a TV that initiated the pairing. The TV creates the rendezvous and acts as CPace's joiner;
+ * the phone that scans its code opens the rendezvous and gives its library as the host. The server sees the same
+ * four opaque messages as an ordinary pairing and never sees the secret half of the code.
+ */
+export async function receive(options: ReceiveOptions): Promise<JoinResult> {
+  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } =
+    options;
+  if (options.deviceId !== undefined && !isStampDeviceId(options.deviceId))
+    return { error: 'failed' };
+  if (!secureContext()) return { error: 'insecure' };
+  const sid = options.sid ?? randomSid();
+  const secret = options.secret ?? randomSecret();
+  const { send, put, read, end } = relay(sid, fetchImpl, wait, options.signal);
+  const made = await send('/pair/new', 'POST', { sid });
+  if (!made) return { error: 'unreachable' };
+  if (made.status !== 200)
+    return { error: made.status === 429 || made.status === 503 ? 'throttled' : 'unreachable' };
+  const nameplate = ((await made.json().catch(() => null)) as { nameplate?: unknown } | null)
+    ?.nameplate;
+  if (typeof nameplate !== 'string' || !parseCode(nameplate + secret)) {
+    await end();
+    return { error: 'unreachable' };
+  }
+  options.onCode(nameplate + secret);
+  const fail = async (): Promise<JoinResult> => {
+    await end();
+    return { error: 'failed' };
+  };
+  const label = cleanLabel(options.label ?? deviceLabel()) || 'TV';
+  const { state, a } = await joinerStart(secret, fromHex(sid), label, options.y);
+  if (!(await put('a', a))) return fail();
+  const b = await read('b');
+  const finished = b && (await joinerFinish(state, b));
+  if (!finished || !(await put('c', finished.c))) return fail();
+  const d = await read('d');
+  const handover = d && (await openHandover(finished.handoverKey, d));
+  if (!handover) return fail();
+  const inboxKey = (await linkKeys(handover.linkKey)).inbox;
+  if (options.deviceId) {
+    await sendToLink(
+      handover.linkKey,
+      { type: 'device', name: label, deviceId: options.deviceId },
+      fetchImpl,
+    );
+  }
+  return { handover, inboxKey };
+}
+
 // --- Hosting a pairing, as the TV does ---
 
 export type HostError = 'unreachable' | 'busy' | 'failed' | 'insecure';
@@ -450,6 +520,7 @@ export interface HostOptions {
     handoverKey: string,
     host: string,
     linkKey: string,
+    grantTicket?: string,
   ) => Promise<{ sealed: string; linkKey: string; inboxKey: string }>;
   /** What the joined device will call this one; this browser by default. */
   label?: string;
@@ -468,6 +539,8 @@ export interface HostOptions {
   sid?: string;
   secret?: string;
   linkKey?: Bytes;
+  /** A guest-device ticket to seal with the library for the receiving TV. */
+  grantTicket?: string;
   y?: Bytes;
 }
 
@@ -492,7 +565,7 @@ export async function host(options: HostOptions): Promise<HostResult> {
     return { error: 'failed' };
   const sid = options.sid ?? randomSid();
   const secret = options.secret ?? randomSecret();
-  const { send, put, read, end } = relay(sid, fetchImpl, wait, options.signal);
+  const { send } = relay(sid, fetchImpl, wait, options.signal);
 
   const made = await send('/pair/new', 'POST', { sid });
   if (!made) return { error: 'unreachable' };
@@ -503,6 +576,48 @@ export async function host(options: HostOptions): Promise<HostResult> {
   if (typeof nameplate !== 'string' || !parseCode(nameplate + secret))
     return { error: 'unreachable' };
   options.onCode(nameplate + secret);
+
+  return hostSession(sid, secret, options, fetchImpl, wait);
+}
+
+export type GiveOptions = Omit<HostOptions, 'onCode' | 'sid' | 'secret'>;
+
+/** Give this browser's library to the TV showing `code`. */
+export async function give(code: string, options: GiveOptions): Promise<HostResult> {
+  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } =
+    options;
+  const parsed = parseCode(code);
+  if (!parsed) return { error: 'failed' };
+  if (!secureContext()) return { error: 'insecure' };
+  if (options.deviceId !== undefined && !isStampDeviceId(options.deviceId))
+    return { error: 'failed' };
+  if (options.grantTicket !== undefined && !isGrantTicket(options.grantTicket))
+    return { error: 'failed' };
+  const { send } = requests(fetchImpl);
+  const opened = await send('/pair/open', 'POST', { nameplate: parsed.nameplate });
+  if (!opened) return { error: 'unreachable' };
+  if (opened.status !== 200)
+    return {
+      error:
+        opened.status === 429 || opened.status === 503
+          ? 'busy'
+          : opened.status === 409 || opened.status === 410
+            ? 'failed'
+            : 'unreachable',
+    };
+  const sid = ((await opened.json().catch(() => null)) as { sid?: unknown } | null)?.sid;
+  if (typeof sid !== 'string' || !/^[0-9a-f]{32}$/.test(sid)) return { error: 'unreachable' };
+  return hostSession(sid, parsed.secret, options, fetchImpl, wait);
+}
+
+async function hostSession(
+  sid: string,
+  secret: string,
+  options: Omit<HostOptions, 'onCode' | 'sid' | 'secret'>,
+  fetchImpl: typeof fetch,
+  wait: (ms: number) => Promise<void>,
+): Promise<HostResult> {
+  const { put, read, end } = relay(sid, fetchImpl, wait, options.signal);
 
   const fail = async (): Promise<HostResult> => {
     await end();
@@ -517,7 +632,12 @@ export async function host(options: HostOptions): Promise<HostResult> {
   if (!(await options.allow(responded.state.joiner))) return fail();
   const requestedLinkKey = options.linkKey ?? crypto.getRandomValues(new Uint8Array(32));
   const handover = await options
-    .seal(toBase64url(responded.state.handoverKey), label, toBase64url(requestedLinkKey))
+    .seal(
+      toBase64url(responded.state.handoverKey),
+      label,
+      toBase64url(requestedLinkKey),
+      options.grantTicket,
+    )
     .catch(() => null);
   if (!handover) return fail();
   const sealed = fromBase64url(handover.sealed);

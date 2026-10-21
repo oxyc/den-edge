@@ -184,8 +184,11 @@ for (const width of [320, 390, 820, 1280]) {
       const linkedDeviceHeadings = await devices
         .getByRole('heading', { level: 3 })
         .allTextContents();
-      expect(linkedDeviceHeadings.indexOf('Link another device')).toBe(
+      expect(linkedDeviceHeadings.indexOf('Link a TV')).toBe(
         linkedDeviceHeadings.indexOf('Devices') + 1,
+      );
+      expect(linkedDeviceHeadings.indexOf('Link another device')).toBe(
+        linkedDeviceHeadings.indexOf('Link a TV') + 1,
       );
       // A Library v4 library is cut off from here: the reset asks first, and says what it costs.
       await devices.getByRole('button', { name: 'Reset library key…' }).click();

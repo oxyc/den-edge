@@ -121,6 +121,7 @@ describe('openLibraryServiceAuthority', () => {
       kind: 'pairing.handover',
       handoverKey: toBase64url(handoverKey),
       host: 'This browser',
+      grantTicket: '1234abcd.ABCDEFGHJKLMNPQRSTUVWX',
     });
     expect(handover.kind).toBe('pairing.handover');
     const opened = await openHandover(
@@ -130,6 +131,7 @@ describe('openLibraryServiceAuthority', () => {
     expect(opened).toMatchObject({
       host: 'This browser',
       hostDeviceId: '0123456789abcdef',
+      grantTicket: '1234abcd.ABCDEFGHJKLMNPQRSTUVWX',
       libraryKey: new Uint8Array(32).fill(31),
     });
 
