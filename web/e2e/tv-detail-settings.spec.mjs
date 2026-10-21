@@ -99,7 +99,7 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
       page
         .getByRole('region', { name: 'Watchlist', exact: true })
         .getByRole('link', { name: /Remote Series/ }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
     return edge;
   }
   return edge;

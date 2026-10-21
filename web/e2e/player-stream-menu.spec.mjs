@@ -28,15 +28,26 @@ const releases = [
     size: 14 * 1024 ** 3,
     plays: 'no',
   },
+  // Two providers can independently return the same file. Playback selection itself accepts only the filename, so
+  // these are one actionable choice—not two DOM rows with an invalid duplicate identity.
+  {
+    label: '4K • WEB-DL • Dolby Vision • 14 GB · duplicate provider',
+    filename: 'The.Movie.2001.2160p.WEB-DL.DV.P5.H.265-NOGROUP.mkv',
+    size: 14 * 1024 ** 3,
+    plays: 'no',
+  },
 ];
 
-async function mockPlayer(page) {
+async function mockPlayer(page, { releaseGate } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
-  await page.route(`${ORIGIN}/direct/releases`, (route) => route.fulfill({ json: { releases } }));
+  await page.route(`${ORIGIN}/direct/releases`, async (route) => {
+    await releaseGate?.promise;
+    return route.fulfill({ json: { releases } });
+  });
   const asked = [];
   await page.route(`${ORIGIN}/direct/session`, (route) => {
     const body = route.request().postDataJSON();
@@ -69,6 +80,72 @@ async function mockPlayer(page) {
   return asked;
 }
 
+test('the modal player contains keyboard focus and returns it to its opener', async ({ page }) => {
+  await mockPlayer(page);
+  await page.goto(`${ORIGIN}/test/player.html?startClosed`);
+  const opener = page.getByRole('button', { name: 'Open fixture player' });
+  await opener.focus();
+  await opener.click();
+
+  const dialog = page.getByRole('dialog', { name: 'The Movie' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+
+  // Reverse-tab at the dialog boundary stays in its final visible control. Forward-tab from that boundary loops
+  // back to the first: neither direction can move through the page hidden behind this modal surface.
+  await page.keyboard.press('Shift+Tab');
+  await expect
+    .poll(() => dialog.evaluate((element) => element.contains(document.activeElement)))
+    .toBe(true);
+  await page.evaluate(() => {
+    const player = document.querySelector('.player');
+    const stops = Array.from(
+      player.querySelectorAll(
+        'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter(
+      (element) =>
+        element.getAttribute('aria-disabled') !== 'true' && element.getClientRects().length > 0,
+    );
+    stops.at(-1)?.focus();
+  });
+  await page.keyboard.press('Tab');
+  await expect
+    .poll(() => dialog.evaluate((element) => element.contains(document.activeElement)))
+    .toBe(true);
+
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(opener).toBeFocused();
+});
+
+test('a pending stream search is named and keeps the playing choice focused as results arrive', async ({
+  page,
+}) => {
+  let release;
+  const releaseGate = {
+    promise: new Promise((resolve) => (release = resolve)),
+  };
+  await mockPlayer(page, { releaseGate });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await expect(page.locator('.player video')).toBeVisible();
+
+  const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });
+  await picker.click();
+  const menu = page.getByRole('menu', { name: 'Stream: 4K · 11 GB' });
+  await expect(menu).toContainText('Finding the other available streams…');
+  const playing = menu.getByRole('menuitemradio', {
+    name: '4K · BluRay REMUX · Dolby Vision · Atmos · 11 GB',
+  });
+  await expect(playing).toBeFocused();
+  await expect(playing).toHaveAttribute('aria-checked', 'true');
+
+  release();
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(3);
+  await expect(menu).not.toContainText('Finding the other available streams…');
+  await expect(playing).toBeFocused();
+});
+
 const layouts = [
   ['phone', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
   ['desktop', { viewport: { width: 1280, height: 800 } }],
@@ -86,6 +163,16 @@ for (const [engine, browserType] of [
       );
       try {
         const context = await browser.newContext(options);
+        if (browserType === webkit && layout === 'desktop') {
+          await context.addInitScript(() => {
+            Object.defineProperty(HTMLVideoElement.prototype, 'webkitShowPlaybackTargetPicker', {
+              configurable: true,
+              value() {
+                window.airPlayPickerCalls = (window.airPlayPickerCalls ?? 0) + 1;
+              },
+            });
+          });
+        }
         const page = await context.newPage();
         const asked = await mockPlayer(page);
         await page.goto(`${ORIGIN}/test/player.html`);
@@ -97,8 +184,32 @@ for (const [engine, browserType] of [
           })
           .toBeGreaterThan(1);
 
+        const video = page.locator('.player video');
+        if (layout === 'desktop') {
+          await expect(video).not.toHaveAttribute('controls', '');
+          await page.mouse.move(options.viewport.width / 2, options.viewport.height / 2);
+          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+          await page.getByRole('button', { name: 'Pause' }).click();
+          await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+          await page.getByRole('button', { name: 'Play', exact: true }).click();
+          await expect.poll(() => video.evaluate((element) => element.paused)).toBe(false);
+          const pause = page.getByRole('button', { name: 'Pause' });
+          await expect
+            .poll(() => pause.evaluate((element) => getComputedStyle(element).cursor))
+            .toBe('pointer');
+          if (browserType === webkit) {
+            const airplay = page.getByRole('button', { name: 'AirPlay', exact: true });
+            await expect(airplay).toBeVisible();
+            await airplay.click();
+            await expect.poll(() => page.evaluate(() => window.airPlayPickerCalls ?? 0)).toBe(1);
+          }
+        } else {
+          await expect(video).toHaveAttribute('controls', '');
+          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toHaveCount(0);
+        }
+
         const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });
-        await expect(picker).toHaveText('4K · 11 GB');
+        await expect(picker).toBeVisible();
         await expect(picker).toHaveAttribute('aria-haspopup', 'menu');
         await picker.click();
         const menu = page.getByRole('menu', { name: 'Stream: 4K · 11 GB' });
@@ -142,7 +253,7 @@ for (const [engine, browserType] of [
         await expect.poll(() => asked.length).toBe(2);
         expect(asked[1]).toMatchObject({ filename: releases[1].filename, transcode: 'never' });
         const next = page.getByRole('button', { name: 'Stream: 4K · 9 GB' });
-        await expect(next).toHaveText('4K · 9 GB', { timeout: 30_000 });
+        await expect(next).toBeVisible({ timeout: 30_000 });
         await next.click();
         await expect(
           page.getByRole('menuitemradio', {

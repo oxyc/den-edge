@@ -66,16 +66,27 @@
   }: ButtonProps = $props();
 
   function activate(event: MouseEvent) {
-    if (
-      busy ||
-      disabled ||
-      attributes['aria-disabled'] === true ||
-      attributes['aria-disabled'] === 'true'
-    ) {
+    if (unavailable()) {
       event.preventDefault();
       return;
     }
     onclick?.(event);
+  }
+
+  /**
+   * A Button rendered as a link cannot use the native `disabled` attribute. Keep one source of truth for its
+   * interaction and accessibility state: previously `disabled` stopped activation but was missing from
+   * `aria-disabled`, so assistive technology still announced an enabled link. Removing its destination also stops
+   * a disabled link being opened through the context menu while `tabindex=0` preserves the deliberate focus-stable
+   * behaviour used while a save is in flight.
+   */
+  function unavailable() {
+    return (
+      busy ||
+      disabled ||
+      attributes['aria-disabled'] === true ||
+      attributes['aria-disabled'] === 'true'
+    );
   }
 </script>
 
@@ -87,16 +98,16 @@
 
 {#if href !== undefined}
   <a
-    {href}
-    role={attributes.role}
-    tabindex={attributes.tabindex}
+    href={unavailable() ? undefined : href}
+    role={attributes.role ?? 'link'}
+    tabindex={attributes.tabindex ?? (unavailable() ? 0 : undefined)}
     id={attributes.id}
     title={attributes.title}
     class="den-button den-button-{variant} den-button-{size} {className}"
     aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
     aria-describedby={attributes['aria-describedby']}
     aria-busy={busy || attributes['aria-busy'] || undefined}
-    aria-disabled={busy || attributes['aria-disabled'] || undefined}
+    aria-disabled={unavailable() || undefined}
     onclick={activate}>{@render contents()}</a
   >
 {:else}

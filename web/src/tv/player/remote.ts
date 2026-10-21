@@ -278,7 +278,12 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       target instanceof HTMLSelectElement
     )
       editing = editing === target ? undefined : target;
-    else if (
+    else if ((event.key === 'Enter' || event.key === 'Select' || code === 13) && !interactive) {
+      // The centre button over the picture is the native-TV play/pause gesture. Hidden controls still use the first
+      // press to reveal and focus Play/Pause above; once visible, a press with no focused control acts immediately.
+      if (actions.paused()) void actions.play();
+      else actions.pause();
+    } else if (
       event.key === 'Escape' ||
       event.key === 'Back' ||
       event.key === 'BrowserBack' ||

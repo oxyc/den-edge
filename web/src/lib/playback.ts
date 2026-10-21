@@ -155,6 +155,20 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   if (!answer || !playlist || !release) return null;
   const nested = record(answer.session);
   if (!nested) {
+    const audioTracks = Array.isArray(answer.audioTracks)
+      ? answer.audioTracks.flatMap((value): Session['audioTracks'] => {
+          const track = record(value);
+          if (!track) return [];
+          return [
+            {
+              language: text(track.language),
+              name: text(track.name),
+              channels: number(track.channels) ?? 0,
+              commentary: track.commentary === true,
+            },
+          ];
+        })
+      : [];
     const subtitles = Array.isArray(answer.subtitles)
       ? answer.subtitles.flatMap((value): NonNullable<Session['subtitles']> => {
           const track = record(value);
@@ -198,8 +212,8 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
       playlist,
       duration: 0,
       release,
-      audioTrack: 0,
-      audioTracks: [],
+      audioTrack: Math.max(0, number(answer.audioTrack) ?? 0),
+      audioTracks,
       subtitles,
       torboxSubtitle: number(answer.torboxSubtitle) ?? null,
       startupTiming: timing ?? undefined,

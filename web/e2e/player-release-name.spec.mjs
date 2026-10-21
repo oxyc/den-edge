@@ -81,7 +81,11 @@ for (const [engine, browserType] of [
 
         // The selection played or paused nothing, and the player and its controls are as they were.
         expect(await video.evaluate((v) => v.paused)).toBe(false);
-        await expect(video).toHaveAttribute('controls', '');
+        if (layout === 'phone') await expect(video).toHaveAttribute('controls', '');
+        else {
+          await expect(video).not.toHaveAttribute('controls', '');
+          await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
+        }
         await expect(page.locator('.player footer')).toBeVisible();
         // The rest of the player still selects nothing under a finger.
         await page.evaluate(() => getSelection()?.removeAllRanges());

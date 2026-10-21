@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import type { Plugin, ViteDevServer } from 'vite';
+import type { Plugin, ProxyOptions, ViteDevServer } from 'vite';
 import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 import { upstream } from './scripts/upstream.ts';
@@ -8,6 +8,24 @@ import { upstream } from './scripts/upstream.ts';
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another. Under e2e (`DEN_E2E=1`) it is never a real one.
 const edge = upstream('DEN_EDGE', 'http://192.168.86.193:8094');
+// The raw homelab listener serves several faces and deliberately gates web-only capabilities by Host. A local page
+// is the d.oxy.fi web face, even though its transport goes straight to the LAN address. Preserve that production
+// identity; an explicit DEN_EDGE may provide DEN_EDGE_HOST when it also targets a shared raw listener.
+const edgeHost =
+  process.env.DEN_EDGE_HOST ??
+  (!process.env.DEN_EDGE && process.env.DEN_E2E !== '1' ? 'd.oxy.fi' : undefined);
+const edgeProxy: ProxyOptions = {
+  target: edge,
+  changeOrigin: true,
+  ...(edgeHost
+    ? {
+        // node-http-proxy applies changeOrigin after static headers. Set Host on the final outbound request.
+        configure(proxy) {
+          proxy.on('proxyReq', (request) => request.setHeader('host', edgeHost));
+        },
+      }
+    : {}),
+};
 // `/tmdb` is den-edge lending its TMDB key to a browser that has none, so it has to be proxied too — without
 // it this server answers the app's own index.html to a request for a title and nothing is ever named here.
 // `/metadata` names the titles atlas lists without a poster; without it every atlas row is empty here.
@@ -29,6 +47,11 @@ const api = [
   '/grant',
   '/oauth',
   '/playback',
+  // Reel's carried-source control plane belongs to Edge. Keep these more-specific entries before the raw `/reel`
+  // media proxy below; otherwise local development strips the prefix and asks Reel itself for POST `/transport`,
+  // which correctly answers 405 and forces every carried source onto its relay fallback.
+  '/reel/transport',
+  '/reel/activate',
   '/den',
   '/ratings',
   '/warnings',
@@ -183,7 +206,7 @@ export default defineConfig({
     // puts this server behind the tailnet's own certificate, and the dev server has to answer to that name.
     allowedHosts: ['.ts.net', 'localhost'],
     proxy: {
-      ...Object.fromEntries(api.map((path) => [path, { target: edge, changeOrigin: true }])),
+      ...Object.fromEntries(api.map((path) => [path, edgeProxy])),
       '/atlas': {
         target: atlas,
         changeOrigin: true,

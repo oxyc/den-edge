@@ -22,7 +22,9 @@ async function measure(directory) {
     totalGzip += size;
     if (initial.has(`assets/${name}`)) initialGzip += size;
     if (
-      /den:tv-back|den-tv-diagnostics|tv-remote-active|tv-transport|den-avplay|Samsung AVPlay/.test(
+      // The owned player transport is deliberately shared with desktop browsers. Remote navigation, diagnostics
+      // and decoder bridges remain package-only and must never enter the ordinary browser graph.
+      /den:tv-back|den-tv-diagnostics|tv-remote-active|den-avplay|Samsung AVPlay/.test(
         bytes.toString(),
       )
     )
@@ -43,9 +45,9 @@ if (process.argv.includes('--capture')) {
   const initialDelta = current.initialGzip - baseline.initialGzip;
   const totalDelta = current.totalGzip - baseline.totalGzip;
   console.log(JSON.stringify({ baseline, current, initialDelta, totalDelta }, null, 2));
-  // Shared keyboard/spatial-navigation improvements get a small allowance. Keep the initial graph proportional
-  // and the complete lazy graph under a fixed 7 KiB ceiling; TV-only implementation is rejected above.
+  // Shared navigation and the owned browser/TV player get a small allowance. Keep the initial graph proportional
+  // and the complete lazy graph under a fixed 9 KiB ceiling; TV-only implementation is rejected above.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.0125)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 7168) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 9216) throw new Error('Browser total JS/CSS budget exceeded');
 }

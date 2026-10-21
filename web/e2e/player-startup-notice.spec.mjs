@@ -33,6 +33,16 @@ test('the startup notice counts the wait, names a large release once open, and c
       viewport: { width: 1280, height: 800 },
     });
     const page = await context.newPage();
+    await page.addInitScript(() => {
+      window.__firstStartupStatusAt = undefined;
+      new MutationObserver(() => {
+        if (
+          window.__firstStartupStatusAt === undefined &&
+          document.querySelector('.startup[role="status"]')
+        )
+          window.__firstStartupStatusAt = performance.now();
+      }).observe(document, { childList: true, subtree: true });
+    });
     await guardNetwork(page);
     await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
     await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
@@ -63,6 +73,8 @@ test('the startup notice counts the wait, names a large release once open, and c
     await page.goto(`${ORIGIN}/test/player.html`);
 
     await expect(page.getByText('Finding a release this browser can play…')).toBeVisible();
+    await expect(page.locator('.startup .status-spinner')).toBeVisible();
+    expect(await page.evaluate(() => window.__firstStartupStatusAt)).toBeGreaterThanOrEqual(450);
     // Four real seconds, held open: NOTICE_DELAY_MS (startupNotice.ts) is exactly this.
     await new Promise((resolve) => setTimeout(resolve, 4_200));
     await expect(page.getByText('Opening the release…', { exact: false })).toBeVisible();

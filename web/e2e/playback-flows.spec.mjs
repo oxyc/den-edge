@@ -177,6 +177,7 @@ async function open({
   grant,
   userAgent,
   linkLimit,
+  releases = [{ label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 }],
 }) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -214,9 +215,7 @@ async function open({
   });
   await page.route(`${ORIGIN}/remux/releases`, (r) => {
     asked.releases.push(r.request().postDataJSON());
-    return r.fulfill({
-      json: { releases: [{ label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 }] },
-    });
+    return r.fulfill({ json: { releases } });
   });
   await page.route(`${ORIGIN}/den/**/subtitles/**`, (r) =>
     r.fulfill({ status: 404, json: { error: 'not_found' } }),
@@ -263,8 +262,15 @@ const segmentHosts = () =>
 const stamped = (page, source) => expect(page.getByTestId('playback-source')).toHaveText(source);
 
 const castFrame = (page) => page.locator('iframe[title="Den Cast player"]');
+/** Move over the picture as a viewer does before pressing chrome that has auto-hidden while they watched. */
+async function revealPlayerControls(page) {
+  const box = await page.locator('.player').boundingBox();
+  if (!box) throw new Error('player has no box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+}
 /** The stamp's menu, opened, and its switch to `to` chosen. */
 async function switchFromStamp(page, from, to) {
+  await revealPlayerControls(page);
   await page.getByRole('button', { name: `Playing from ${from}` }).click();
   await page.getByRole('menuitem', { name: `Switch to ${to}` }).click();
 }
@@ -400,6 +406,7 @@ test('a viewer whose Hearth has only Remux gets the switch disabled, and the rea
   try {
     await playingPast(pageVideo(page), 3);
     await stamped(page, 'Den Remux');
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Playing from Den Remux' }).click();
     const menu = page.getByRole('menu', { name: 'Playing from Den Remux' });
     await expect(menu).toContainText('This Hearth has no TorBox to play from');
@@ -456,12 +463,26 @@ test('owner away plays from the public listener', async () => {
 });
 
 test('a guest on the host’s Hearth plays, and lists releases under its own name for the host’s install', async () => {
+  const sharedReleases = [
+    { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 },
+    {
+      label: 'Fixture 4K · 12 GB',
+      filename: 'fixture-owner-first-choice.mkv',
+      size: 12_000_000_000,
+    },
+    {
+      label: 'Fixture 720p · 2 GB',
+      filename: 'fixture-owner-third-choice.mkv',
+      size: 2_000_000_000,
+    },
+  ];
   const { browser, page, asked } = await open({
     answer: remuxAnswer,
     home: false,
     playback: `/den/~${GUEST}/playback`,
     scout: `${ORIGIN}/den/~${GUEST}`,
     grant: `${GUEST}:${GUEST_SECRET}`,
+    releases: sharedReleases,
   });
   try {
     await playingPast(castVideo(page), 3);
@@ -470,6 +491,15 @@ test('a guest on the host’s Hearth plays, and lists releases under its own nam
     expect(segmentHosts()).toEqual(new Set(['media.test']));
     await expect.poll(() => asked.releases.length).toBeGreaterThan(0);
     expect(asked.releases[0].scout).toBe(`${ORIGIN}/den/~${GUEST}`);
+    const streamPicker = page.getByRole('button', { name: /^Stream:/ });
+    await streamPicker.focus();
+    await streamPicker.press('Enter');
+    const choices = page.getByRole('menu', { name: /^Stream:/ }).getByRole('menuitemradio');
+    await expect(choices).toHaveCount(sharedReleases.length);
+    for (const [index, { label, filename }] of sharedReleases.entries()) {
+      await expect(choices.nth(index)).toContainText(label);
+      await expect(choices.nth(index)).toContainText(filename);
+    }
     await stamped(page, 'Den Remux');
   } finally {
     await browser.close();

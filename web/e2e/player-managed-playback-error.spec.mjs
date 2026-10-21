@@ -21,6 +21,9 @@ async function playerPage(answer) {
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
+  await page.route(`${ORIGIN}/direct/releases`, (route) =>
+    route.fulfill({ json: { releases: [] } }),
+  );
   await page.route(`${ORIGIN}/den/config/playback`, answer);
   return { browser, page };
 }
@@ -106,7 +109,7 @@ test('a rejected TorBox key tells the guest exactly what to update', async () =>
   );
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('alert')).toHaveText(
+    await expect(page.getByRole('alert').locator('p')).toHaveText(
       'Your TorBox API key was rejected. Update the key in Den Hearth settings, then try again.',
     );
     await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
@@ -128,7 +131,7 @@ test('a no-release fallback still shows the specific managed-provider failure', 
   );
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('alert')).toHaveText(
+    await expect(page.getByRole('alert').locator('p')).toHaveText(
       'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
     );
     await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
@@ -148,7 +151,7 @@ test('a title with only TS and AVI releases says those are what the browser can�
   );
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('alert')).toHaveText(
+    await expect(page.getByRole('alert').locator('p')).toHaveText(
       'The releases of this that are ready are TS and AVI files, which Den can’t play in a browser yet. Try again once another release is out, or play it on your TV.',
     );
   } finally {
@@ -169,7 +172,7 @@ test('a TorBox plan without streaming support explains the required configuratio
   );
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('alert')).toHaveText(
+    await expect(page.getByRole('alert').locator('p')).toHaveText(
       'Your TorBox plan doesn’t support streaming links. Update the TorBox plan or remove TorBox from this Den Hearth install.',
     );
     await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);

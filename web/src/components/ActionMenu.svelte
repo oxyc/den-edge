@@ -546,7 +546,9 @@
     {/if}
     <!-- Only a wrapper, so the menu still owns its items; on the sheet, what scrolls under the head. -->
     <div class="items" role="presentation" bind:this={list} onpointerdown={sheetPointerDown}>
-      {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}
+      <!-- A live menu may grow around its focused item. Callers with stable identities can preserve that exact DOM
+           control; ordinary static menus retain the positional fallback that disambiguates equal labels. -->
+      {#each shownItems as item, i (item.key ?? `${item.kind}:${item.label}:${i}`)}
         <Button
           variant="menu"
           size="regular"
@@ -664,6 +666,12 @@
 
   .menu :global(.item[aria-checked='true']) {
     font-weight: 600;
+    background: rgb(91 141 239 / 0.16);
+  }
+
+  .menu :global(.item[aria-checked='true']:hover),
+  .menu :global(.item[aria-checked='true']:focus-visible) {
+    background: rgb(91 141 239 / 0.24);
   }
 
   .menu :global(.item[aria-disabled='true']) {

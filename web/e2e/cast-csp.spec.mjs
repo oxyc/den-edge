@@ -73,7 +73,9 @@ test.beforeAll(() => {
   built = mkdtempSync(join(tmpdir(), 'den-cast-csp-'));
   execFileSync('npx', ['vite', 'build', '--config', 'vite.cast.config.ts', '--outDir', built], {
     cwd: web,
-    env: { ...process.env, VITE_DEN_PARENT_ORIGINS: ORIGIN },
+    // Production uses CSP's space-separated source-list syntax for the same build value. The sender must parse
+    // both entries rather than treating the whole value as one impossible postMessage origin.
+    env: { ...process.env, VITE_DEN_PARENT_ORIGINS: `${ORIGIN} https://another-parent.test` },
     stdio: 'ignore',
   });
 });

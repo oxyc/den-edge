@@ -214,6 +214,14 @@ async function playingPast(page, seconds) {
     .toBeGreaterThan(seconds);
 }
 
+/** Move over the Cast picture so its activity signal reveals the parent player's auto-hidden chrome. */
+async function revealPlayerControls(page) {
+  const box = await page.locator('.player').boundingBox();
+  if (!box) throw new Error('player has no box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(50);
+}
+
 test('a session the cast page plays reports its stats and is ended when the player closes', async () => {
   const { browser, page } = await open();
   try {
@@ -222,6 +230,7 @@ test('a session the cast page plays reports its stats and is ended when the play
     // the routes go before the frame does. Closing asks this page's own server for nothing.
     await page.unrouteAll();
     await page.context().unrouteAll();
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Close' }).click();
     await expect(page.locator('iframe[title="Den Cast player"]')).toHaveCount(0);
     await expect.poll(() => heard.ended, { timeout: 10_000 }).toEqual([PATH]);
@@ -260,6 +269,7 @@ test('a Hearth session on the public address plays in the real cast page on its 
     // not `native`, as it did for every session in that frame.
     const outcome = page.waitForRequest((r) => r.url() === `${ORIGIN}/playback/outcome`);
     await page.route(`${ORIGIN}/playback/outcome`, (r) => r.fulfill({ status: 204 }));
+    await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Close' }).click();
     expect((await outcome).postDataJSON()).toMatchObject({
       engine: 'cast_page',

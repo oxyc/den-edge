@@ -75,12 +75,10 @@ interface ActiveClient {
 export interface LibraryServiceSupervisorOptions {
   /** Consecutive replacement workers allowed before an explicit retry. */
   maxAutomaticRestarts?: number;
-  /** Host-scoped, fail-closed authorization for the one legacy-wire-4 to household-wire-5 bootstrap. */
-  profileHouseholdEnabled?: () => Promise<boolean>;
-  /** A household this browser saw bootstrapped before: it opens on wire 5, kept only once the host enables profiles. */
+  /** A household this browser saw require wire 5 before: its one-way upgrade can be used on the first open. */
   knownProfileHousehold?: (libraryKey: string) => boolean;
-  /** Called once a household refused on wire 4 has opened on wire 5. */
-  onProfileHouseholdBootstrapped?: (libraryKey: string) => void;
+  /** Called once an existing household has itself proved that it is a wire-5 profile household. */
+  onProfileHouseholdConfirmed?: (libraryKey: string) => void;
 }
 
 /**
@@ -92,14 +90,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   readonly #observations = new Map<string, LibraryObservation>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   readonly #maxAutomaticRestarts: number;
-  readonly #profileHouseholdEnabled: () => Promise<boolean>;
   readonly #knownProfileHousehold: (libraryKey: string) => boolean;
-  readonly #onProfileHouseholdBootstrapped: (libraryKey: string) => void;
+  readonly #onProfileHouseholdConfirmed: (libraryKey: string) => void;
   #automaticRestartsLeft: number;
-  #bootstrapped = false;
-  /** A known household opened on wire 5 ahead of the host's answer, and the wire-4 options it falls back to. */
-  #knownGate?: { approved: Promise<boolean>; legacy: LibraryServiceOpenOptions };
-  #reopenLegacy = false;
+  #confirmProfileHousehold = false;
   #nextSubscription = 0;
   #nextToken = 0;
   #openOptions?: LibraryServiceOpenOptions;
@@ -119,9 +113,8 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       throw new RangeError('maxAutomaticRestarts must be a non-negative integer');
     this.#maxAutomaticRestarts = maxAutomaticRestarts;
     this.#automaticRestartsLeft = maxAutomaticRestarts;
-    this.#profileHouseholdEnabled = options.profileHouseholdEnabled ?? (async () => false);
     this.#knownProfileHousehold = options.knownProfileHousehold ?? (() => false);
-    this.#onProfileHouseholdBootstrapped = options.onProfileHouseholdBootstrapped ?? (() => {});
+    this.#onProfileHouseholdConfirmed = options.onProfileHouseholdConfirmed ?? (() => {});
   }
 
   static forTransport(
@@ -322,19 +315,15 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     while (true) {
       try {
         const version = await this.#connectOnce();
-        if (this.#bootstrapped) {
-          this.#bootstrapped = false;
-          this.#onProfileHouseholdBootstrapped(this.#openOptions!.libraryKey);
+        if (this.#confirmProfileHousehold) {
+          this.#confirmProfileHousehold = false;
+          this.#onProfileHouseholdConfirmed(this.#openOptions!.libraryKey);
         }
         return version;
       } catch (error) {
         const failure = failureFrom(error);
         this.#disposeActive();
         if (this.#phase === 'closed') throw new LibraryServiceError(failure);
-        if (this.#reopenLegacy) {
-          this.#reopenLegacy = false;
-          continue;
-        }
         if (await this.#bootstrapProfileHousehold(failure)) continue;
         if (!failure.retryable || this.#automaticRestartsLeft === 0) {
           this.#setFailed(failure);
@@ -375,22 +364,6 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           retryable: false,
         },
       );
-    const gate = this.#knownGate;
-    if (gate) {
-      // Nothing is published until the host agrees, so a host that says no never shows the wire-5 household.
-      this.#knownGate = undefined;
-      if (!(await gate.approved)) {
-        startupMark('supervisor household bootstrap', 'profiles not enabled; reopening on wire 4');
-        this.#openOptions = gate.legacy;
-        this.#reopenLegacy = true;
-        throw new LibraryServiceError({
-          code: 'cancelled',
-          message: 'a known household reopens on wire 4',
-          retryable: false,
-        });
-      }
-    }
-
     for (const observation of this.#observations.values()) {
       version = await client.observe(observation);
       active.version = newerVersion(active.version, version);
@@ -543,9 +516,8 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   }
 
   /**
-   * A household this browser has seen bootstrapped skips the wire-4 refusal: the Owner split is one-way, so it still
-   * needs wire 5. The host's capability stays the authority, as for the bootstrap itself: it is asked alongside the
-   * open, and the connection is kept only once it answers enabled (`#connectOnce`); otherwise it reopens on wire 4.
+   * A household this browser has seen confirmed skips the wire-4 refusal. The upgrade is one-way, so the remembered
+   * requirement cannot become stale; a successful authenticated wire-5 open confirms it again for this session.
    */
   #openKnownProfileHousehold(): void {
     const options = this.#openOptions;
@@ -557,30 +529,22 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     )
       return;
     startupMark('supervisor household bootstrap', 'opening a known household on wire 5');
-    this.#knownGate = {
-      // Fail closed: a discovery that throws reopens on wire 4, where den-edge's answer decides.
-      approved: this.#profileHouseholdEnabled().catch(() => false),
-      legacy: options,
-    };
     this.#openOptions = { ...options, wire: 5, bootstrapProfileHousehold: false };
+    this.#confirmProfileHousehold = true;
   }
 
   async #bootstrapProfileHousehold(failure: LibraryServiceFailure): Promise<boolean> {
     if (!this.#canBootstrapProfileHousehold(failure)) return false;
-    let enabled = false;
-    try {
-      enabled = await this.#profileHouseholdEnabled();
-    } catch {
-      // Host capability discovery is fail-closed. The original authenticated 426 remains authoritative.
-    }
-    if (!enabled || !this.#openOptions) return false;
+    if (!this.#openOptions) return false;
     startupMark('supervisor household bootstrap', 'reopening on wire 5');
     this.#openOptions = {
       ...this.#openOptions,
       wire: 5,
       bootstrapProfileHousehold: false,
     };
-    this.#bootstrapped = true;
+    // The authenticated 426 is the household's durable statement that its one-way upgrade happened. Publish that
+    // before the retry so the page remains behind profile discovery rather than briefly taking the legacy path.
+    this.#onProfileHouseholdConfirmed(this.#openOptions.libraryKey);
     this.#automaticRestartsLeft = this.#maxAutomaticRestarts;
     return true;
   }

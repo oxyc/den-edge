@@ -128,7 +128,11 @@ test('wire-5 bootstrap state stays scoped to the household that earned it', asyn
   const edge = { upgradeRequired: 5 };
   await routeLibraryEdge(page, edge);
   await page.route('**/capabilities/profiles', (route) =>
-    route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } }),
+    route.fulfill({
+      status: 404,
+      headers: { 'cache-control': 'no-store' },
+      json: { error: 'not_found' },
+    }),
   );
   const changes = () => edge.libraryRequests.filter(({ path }) => path.endsWith('/changes'));
   const reset = () => {

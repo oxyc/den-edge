@@ -6,6 +6,7 @@
 <script lang="ts">
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
@@ -254,6 +255,12 @@
   // on LG, AVPlay on Samsung), but exposing that implementation detail in the controls made Samsung needlessly
   // second-class. Android retains its launcher-era strip until its native playback surface adopts this contract.
   const fullTvTransport = __DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen';
+  // A desktop browser has enough room and a precise pointer for Den's complete transport. Phones and tablets keep
+  // their native controls: on iOS those are also the only route to the system fullscreen player, AirPlay and PiP.
+  // The query is intentionally capability-based, so a desktop Safari gets the same surface as desktop Chrome while
+  // a browser merely resized to phone width does not lose useful controls.
+  const desktopTransport = !tv && matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const customTransport = fullTvTransport || desktopTransport;
   // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
@@ -343,12 +350,22 @@
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
   };
 
+  let playerRoot = $state<HTMLDivElement>();
   let video = $state<HTMLVideoElement>();
   let tvPaused = $state(true);
   let tvPosition = $state(0);
   let tvDuration = $state(0);
+  let playerVolume = $state(1);
+  let playerMuted = $state(false);
+  let playerFullscreen = $state(false);
+  let airPlayCapable = $state(false);
+  let airPlayActive = $state(false);
+  let airPlayAvailability = $state<'unknown' | 'available' | 'unavailable'>('unknown');
+  let webControlsVisible = $state(true);
+  let webControlsTimer: ReturnType<typeof setTimeout> | undefined;
   let tvDetailsOpen = $state(false);
   let tvSubtitleTimingOpen = $state(false);
+  let subtitleTimingPanel = $state<HTMLElement>();
   let tvEpisode = $state.raw<EpisodeDetail | null>();
   let castFrame = $state<HTMLIFrameElement>();
   let remoteTime = 0;
@@ -462,15 +479,45 @@
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
   /**
+   * Discovery is separate from session creation. The session itself is a valid first choice, but presenting that
+   * one row as a finished list while Scout is still collecting releases makes a slow answer look like "one stream".
+   */
+  let releaseListing = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  /**
    * The playing release is already a valid stream choice before (or even when) the background listing answers.
-   * TV always exposes the stream control, like the native Apple TV player; ordinary web keeps hiding a picker
-   * that would contain only one choice. De-duplicate because the completed listing normally includes this release.
+   * The player always exposes the stream control. That makes a slow or failed guest listing visible instead of
+   * silently looking like the host withheld the picker, and still gives a one-stream session an honest explanation.
+   * Filename is also the identity sent back when switching: providers can return the same file independently, so
+   * one filename must render as one choice (and therefore one stable menu key).
    */
   function releaseChoices(): Release[] {
     if (!session) return releases;
-    return releases.some((release) => release.filename === session?.release.filename)
-      ? releases
-      : [{ ...session.release, plays: session.video?.transcoded ? 'convert' : 'yes' }, ...releases];
+    const seen = new SvelteSet<string>();
+    const playing: Release = {
+      ...session.release,
+      plays: session.video?.transcoded ? 'convert' : 'yes',
+    };
+    return [playing, ...releases].filter((release) => {
+      if (seen.has(release.filename)) return false;
+      seen.add(release.filename);
+      return true;
+    });
+  }
+
+  /** Start the independent release listing as soon as this browser's claims are known, alongside session startup. */
+  function discoverReleases(can: Playable) {
+    if (!imdb || releaseListing === 'loading' || releaseListing === 'ready') return;
+    releaseListing = 'loading';
+    const listing = memoryKey;
+    void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
+      videoCodecs: videoCodecsOf(can),
+      playable: can,
+    }).then((list) => {
+      // An episode advanced from meanwhile lists its own.
+      if (memoryKey !== listing) return;
+      releases = list ?? [];
+      releaseListing = list === null ? 'failed' : 'ready';
+    });
   }
   /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
   let swapped = $state<string | null>(null);
@@ -685,6 +732,23 @@
   const bufferLine = $derived(
     stalling && !autoSwitch ? bufferingWhilePlaying(stallProgress, deliveryGaveUp) : null,
   );
+  /** A normal session often crosses these states between two painted frames. Do not flash UI for work that finished
+   * before a viewer could read it; once a wait is perceptible, keep its truthful live detail and activity indicator. */
+  const STATUS_REVEAL_MS = 500;
+  const visibleStartupNotice = $derived(elapsedMs >= STATUS_REVEAL_MS ? notice : null);
+  let stallNoticeVisible = $state(false);
+  $effect(() => {
+    const waiting = stalling && !autoSwitch;
+    if (!waiting) {
+      stallNoticeVisible = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (stalling && !autoSwitch) stallNoticeVisible = true;
+    }, STATUS_REVEAL_MS);
+    return () => clearTimeout(timer);
+  });
+  const visibleBufferLine = $derived(stallNoticeVisible ? bufferLine : null);
 
   /** How long a notice that asks nothing of the viewer stays up. */
   const NOTICE_MS = 6_000;
@@ -932,14 +996,15 @@
         : {}),
       ...(delivery === 'direct' ? { directOnly: true } : {}),
     };
+    // This used to wait until the playback session had completely opened, so the stream menu could show one
+    // apparently-final choice for several seconds. Source discovery does not depend on that answer and belongs in
+    // parallel with it.
+    discoverReleases(can);
     // Whether Hearth tries TorBox first for this request: one that rules it out goes straight to Remux (den-hearth
-    // `managed_request`), and its Remux answer says nothing of whether TorBox is there.
+    // `managed_request`), and its Remux answer says nothing of whether TorBox is there. A selected audio track no
+    // longer rules it out: Scout asks TorBox to create that exact track's stream.
     const torboxTried =
-      !!playback &&
-      !asked.directFailed &&
-      asked.audioTrack === undefined &&
-      asked.replaces === undefined &&
-      !asked.exclude?.length;
+      !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
@@ -1209,18 +1274,6 @@
         result,
         (name) => releases.find((r) => r.filename === name)?.label ?? name,
       );
-    // The release list remains useful for managed HLS: it contains names, never media URLs, and every filename the
-    // viewer picks still comes back through this configured Hearth playback operation.
-    if (!releases.length) {
-      const listing = memoryKey;
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
-        videoCodecs: request.videoCodecs,
-        playable: can,
-      }).then((list) => {
-        // An episode advanced from meanwhile lists its own.
-        if (memoryKey === listing) releases = list ?? [];
-      });
-    }
     return true;
   }
 
@@ -2074,7 +2127,9 @@
       return;
     }
     if (message.id !== current.playlist) return;
-    if (message.type === 'den-progress') {
+    if (message.type === 'den-activity') {
+      revealWebControls();
+    } else if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
       // A length is known only once the playlist came through the media listener.
@@ -2176,9 +2231,44 @@
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
   const castable = canOfferCast();
 
-  /** WebKit's non-standard opt-in keeps native HLS available to the system AirPlay picker. */
+  type AirPlayVideo = HTMLVideoElement & {
+    webkitCurrentPlaybackTargetIsWireless?: boolean;
+    webkitShowPlaybackTargetPicker?: () => void;
+  };
+  type AirPlayAvailabilityEvent = Event & { availability?: string };
+
+  /**
+   * WebKit's non-standard opt-in keeps native HLS available to AirPlay. Desktop Safari loses the native media
+   * control when Den draws its own transport, so capability and availability are retained for Den's equivalent
+   * output button. The picker itself still has to be opened synchronously from that button's user gesture.
+   */
   function allowAirPlay(element: HTMLVideoElement) {
     element.setAttribute('x-webkit-airplay', 'allow');
+    const airplay = element as AirPlayVideo;
+    airPlayCapable = typeof airplay.webkitShowPlaybackTargetPicker === 'function';
+    airPlayActive = !!airplay.webkitCurrentPlaybackTargetIsWireless;
+    const availability = (event: Event) => {
+      const answer = (event as AirPlayAvailabilityEvent).availability;
+      airPlayAvailability = answer === 'available' ? 'available' : 'unavailable';
+    };
+    const targetChanged = () => {
+      airPlayActive = !!airplay.webkitCurrentPlaybackTargetIsWireless;
+    };
+    element.addEventListener('webkitplaybacktargetavailabilitychanged', availability);
+    element.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', targetChanged);
+    return {
+      destroy() {
+        element.removeEventListener('webkitplaybacktargetavailabilitychanged', availability);
+        element.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', targetChanged);
+        airPlayCapable = false;
+        airPlayActive = false;
+        airPlayAvailability = 'unknown';
+      },
+    };
+  }
+
+  function offerAirPlay() {
+    (video as AirPlayVideo | undefined)?.webkitShowPlaybackTargetPicker?.();
   }
 
   const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
@@ -2211,7 +2301,7 @@
   // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
   // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.castOrigin && (route !== RELAY || playsHome(session)))
+    if (castable && session && !session.castOrigin && canOfferCurrentCast(session))
       reachCast('offered');
   });
 
@@ -2302,6 +2392,15 @@
   /** A session this page plays from the home-network address, though it came for the cast page (`begin`). */
   const playsHome = (current: Session) =>
     current.lanPlaylist !== undefined && current.playlist === current.lanPlaylist;
+
+  /**
+   * A relay-owned Remux session without a Cast page cannot be moved to a receiver. Managed direct media is different:
+   * its signed CDN capability is deliberately handed to the Cast page only after a receiver is chosen, even though
+   * the browser reached Hearth through the ordinary `/remux` facade.
+   */
+  function canOfferCurrentCast(current: Session): boolean {
+    return current.external === true || route !== RELAY || playsHome(current);
+  }
 
   // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
   $effect(() => {
@@ -2536,8 +2635,9 @@
   }
 
   function playing() {
-    if (tv) tvPaused = false;
+    if (customTransport) tvPaused = false;
     if (tv) setTvPlaybackActive(true);
+    scheduleWebControls();
     progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
@@ -2546,8 +2646,9 @@
   }
 
   function paused() {
-    if (tv) tvPaused = true;
+    if (customTransport) tvPaused = true;
     if (tv) setTvPlaybackActive(false);
+    revealWebControls(false);
     clearInterval(timer);
     report();
     if (session) {
@@ -2727,6 +2828,27 @@
     subtitleOffset = Math.max(-30, Math.min(30, Math.round((subtitleOffset + change) * 2) / 2));
     avplay?.setSubtitleOffset(subtitleOffset);
     retimeSubtitles();
+  }
+
+  async function openSubtitleTiming() {
+    tvSubtitleTimingOpen = true;
+    if (!desktopTransport) return;
+    await renderTick();
+    // ActionMenu restores its trigger as its native popover closes. Move into the newly opened editor after that
+    // lifecycle, so keyboard users do not have to reverse-tab past every player action to find it.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() =>
+        subtitleTimingPanel?.querySelector<HTMLElement>('button')?.focus(),
+      ),
+    );
+  }
+
+  async function closeSubtitleTiming(focusTrigger = desktopTransport) {
+    tvSubtitleTimingOpen = false;
+    scheduleWebControls();
+    if (!focusTrigger) return;
+    await renderTick();
+    playerRoot?.querySelector<HTMLElement>('button[aria-label^="Subtitles:"]')?.focus();
   }
 
   function displayedSubtitleTracks(tracks: NonNullable<Session['subtitles']>) {
@@ -2976,7 +3098,7 @@
    */
   function tick() {
     const at = video?.currentTime ?? remoteTime;
-    if (tv) {
+    if (customTransport) {
       tvPosition = at;
       tvDuration = length();
     }
@@ -3032,6 +3154,86 @@
     video.currentTime = 0;
     tvPosition = 0;
     void video.play();
+  }
+
+  function seekBy(seconds: number) {
+    if (!video) return;
+    const total = length();
+    video.currentTime = Math.max(
+      0,
+      total ? Math.min(video.currentTime + seconds, total) : video.currentTime + seconds,
+    );
+    tvPosition = video.currentTime;
+  }
+
+  function togglePlaying() {
+    if (!video) return;
+    if (video.paused) void video.play();
+    else video.pause();
+  }
+
+  function setVolume(event: Event) {
+    if (!video) return;
+    const volume = Number((event.currentTarget as HTMLInputElement).value);
+    video.volume = volume;
+    video.muted = volume === 0;
+    playerVolume = volume;
+    playerMuted = video.muted;
+  }
+
+  function toggleMuted() {
+    if (!video) return;
+    video.muted = !video.muted;
+    playerMuted = video.muted;
+  }
+
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await playerRoot?.requestFullscreen();
+  }
+
+  type PictureInPictureVideo = HTMLVideoElement & {
+    webkitPresentationMode?: string;
+    webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
+  };
+
+  function canPictureInPicture(): boolean {
+    const element = video as PictureInPictureVideo | undefined;
+    return !!(
+      element &&
+      (('pictureInPictureEnabled' in document && document.pictureInPictureEnabled) ||
+        element.webkitSetPresentationMode)
+    );
+  }
+
+  async function togglePictureInPicture() {
+    const element = video as PictureInPictureVideo | undefined;
+    if (!element) return;
+    if ('pictureInPictureElement' in document && document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else if (element.requestPictureInPicture) {
+      await element.requestPictureInPicture();
+    } else if (element.webkitSetPresentationMode) {
+      element.webkitSetPresentationMode(
+        element.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture',
+      );
+    }
+  }
+
+  function scheduleWebControls() {
+    if (!desktopTransport) return;
+    clearTimeout(webControlsTimer);
+    if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen)
+      webControlsTimer = setTimeout(() => {
+        if (!playerMenuOpen() && !tvSubtitleTimingOpen) webControlsVisible = false;
+      }, 3_500);
+  }
+
+  function revealWebControls(schedule = true) {
+    if (!desktopTransport) return;
+    webControlsVisible = true;
+    clearTimeout(webControlsTimer);
+    if (schedule) scheduleWebControls();
   }
 
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
@@ -3292,6 +3494,7 @@
     chosenRelease = filename ?? remembered.chosen;
     excluded = remembered.left;
     releases = [];
+    releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
     switchCount = 0;
     lastSwitchReason = undefined;
@@ -3359,6 +3562,76 @@
       : document.querySelector('.player [popover]:popover-open') !== null;
   }
 
+  /** Tabbable controls in the modal player, in DOM order. Hidden and unavailable controls do not hold the loop. */
+  function playerTabStops(): HTMLElement[] {
+    if (!playerRoot) return [];
+    return Array.from(
+      playerRoot.querySelectorAll<HTMLElement>(
+        'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter(
+      (element) =>
+        element.getAttribute('aria-disabled') !== 'true' &&
+        element.getAttribute('aria-hidden') !== 'true' &&
+        element.getClientRects().length > 0,
+    );
+  }
+
+  function playerKey(event: KeyboardEvent) {
+    if (event.key === 'Escape' && tvSubtitleTimingOpen) {
+      event.preventDefault();
+      void closeSubtitleTiming();
+      return;
+    }
+    if (
+      event.key === 'Escape' &&
+      !event.defaultPrevented &&
+      !document.fullscreenElement &&
+      !playerMenuOpen()
+    ) {
+      close();
+      return;
+    }
+    // This is a modal surface rather than an overlay people can tab through. ActionMenu owns Tab while it is open;
+    // otherwise loop at the two boundaries and leave every intermediate browser-native movement alone.
+    if (event.key === 'Tab' && !tv && !playerMenuOpen()) {
+      const stops = playerTabStops();
+      const first = stops[0];
+      const last = stops.at(-1);
+      if (
+        first &&
+        last &&
+        ((event.shiftKey &&
+          (document.activeElement === first || document.activeElement === playerRoot)) ||
+          (!event.shiftKey && document.activeElement === last))
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+      return;
+    }
+    if (
+      !desktopTransport ||
+      event.defaultPrevented ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    )
+      return;
+    const target = event.target as HTMLElement | null;
+    if (target?.matches('button, a, input, select, textarea, [role="menuitem"], [contenteditable]'))
+      return;
+    const key = event.key.toLowerCase();
+    if (key === ' ' || key === 'k') togglePlaying();
+    else if (event.key === 'ArrowLeft') seekBy(-SKIP_SECS);
+    else if (event.key === 'ArrowRight') seekBy(SKIP_SECS);
+    else if (key === 'm') toggleMuted();
+    else if (key === 'f') void toggleFullscreen();
+    else return;
+    revealWebControls();
+    event.preventDefault();
+  }
+
   // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
   // the size the poster cards already loaded, and the detail page's — and the video's own transport.
   $effect(() => {
@@ -3412,6 +3685,13 @@
 
   $effect(() => {
     untrack(() => void begin());
+    const focusBeforePlayer = document.activeElement as HTMLElement | null;
+    const root = untrack(() => playerRoot);
+    let initialFocusFrame: number | undefined;
+    if (!tv)
+      initialFocusFrame = requestAnimationFrame(() => {
+        if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+      });
     // The page behind stays put: it would otherwise scroll under a player that covers it.
     const scrolls = [document.documentElement, document.body].map(
       (el) => [el, el.style.overflow] as const,
@@ -3420,10 +3700,13 @@
     addEventListener('pagehide', finish);
     addEventListener('message', castMessage);
     return () => {
+      if (initialFocusFrame !== undefined) cancelAnimationFrame(initialFocusFrame);
+      clearTimeout(webControlsTimer);
       for (const [el, overflow] of scrolls) el.style.overflow = overflow;
       removeEventListener('pagehide', finish);
       removeEventListener('message', castMessage);
       finish();
+      if (focusBeforePlayer?.isConnected) focusBeforePlayer.focus({ preventScroll: true });
     };
   });
 
@@ -3476,16 +3759,10 @@
 
 <!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
      (`defaultPrevented`), or — focus still on its trigger — it is open as the key arrives. -->
-<svelte:window
-  onkeydown={(event) =>
-    event.key === 'Escape' &&
-    !event.defaultPrevented &&
-    !document.fullscreenElement &&
-    !playerMenuOpen() &&
-    close()}
-/>
+<svelte:window onkeydown={playerKey} />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
 <svelte:document
+  onfullscreenchange={() => (playerFullscreen = !!document.fullscreenElement)}
   onvisibilitychange={() => {
     if (document.visibilityState !== 'hidden') return;
     if (tv) close();
@@ -3494,11 +3771,19 @@
 />
 
 <div
+  bind:this={playerRoot}
   class="player"
   class:full-tv-player={fullTvTransport}
+  class:web-custom-player={desktopTransport}
+  class:web-controls-hidden={desktopTransport && !webControlsVisible}
   role="dialog"
+  tabindex="-1"
   aria-modal="true"
   aria-label={heading}
+  onpointermove={() => revealWebControls()}
+  onpointerleave={scheduleWebControls}
+  onfocusin={() => revealWebControls(false)}
+  onfocusout={scheduleWebControls}
 >
   <header>
     <b>{heading}</b>
@@ -3521,6 +3806,7 @@
               ? `Playing through Den Remux. ${ruledOut}.`
               : 'Playing through Den Remux'}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
+          onclose={scheduleWebControls}
           items={() => [
             {
               kind: 'item',
@@ -3548,7 +3834,7 @@
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
     {/if}
-    {#if castable && session && !session.castOrigin && (route !== RELAY || playsHome(session))}
+    {#if !customTransport && castable && session && !session.castOrigin && canOfferCurrentCast(session)}
       <Button
         variant="player"
         size="icon"
@@ -3575,28 +3861,33 @@
   <div class="notices">
     {#if session}
       {#if swapped}
-        {@render banner(swapped, () => (swapped = null))}
+        {@render banner(swapped, { dismiss: () => (swapped = null) })}
       {/if}
       {#if autoSwitch}
-        {@render banner(autoSwitch, () => (autoSwitch = null))}
-      {:else if bufferLine}
-        {@render banner(bufferLine, undefined, undefined, true)}
+        {@render banner(autoSwitch, {
+          dismiss: () => (autoSwitch = null),
+          busy: switching,
+        })}
+      {:else if visibleBufferLine}
+        {@render banner(visibleBufferLine, { quiet: true, busy: true })}
       {/if}
       {#if slowPick}
         {@render banner(
           `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
-          () => (slowPick = null),
-          { label: 'Try another release', run: tryAnother },
+          {
+            dismiss: () => (slowPick = null),
+            action: { label: 'Try another release', run: tryAnother },
+          },
         )}
       {/if}
       {#if struggling}
         {@render banner(
           `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
-          () => (struggling = null),
+          { dismiss: () => (struggling = null) },
         )}
       {/if}
       {#if unchanged}
-        {@render banner(unchanged, () => (unchanged = null))}
+        {@render banner(unchanged, { dismiss: () => (unchanged = null) })}
       {/if}
     {/if}
   </div>
@@ -3606,22 +3897,21 @@
            picture means neither its arrival nor its longer empty-state copy moves or resizes what is playing. -->
       <div class="cast-status">
         {#if castOffer === 'looking'}
-          {@render banner('Looking for a Chromecast…')}
+          {@render banner('Looking for a Chromecast…', { busy: true, quiet: true })}
         {:else if castOffer === 'choose'}
-          {@render banner(
-            'A Chromecast is on your network. Choose it below to cast this to it.',
-            () => look({ kind: 'dismissed' }),
-          )}
+          {@render banner('A Chromecast is on your network. Choose it below to cast this to it.', {
+            dismiss: () => look({ kind: 'dismissed' }),
+          })}
         {:else}
           {@render banner(
             'No Chromecast found. Check that it is awake and on the same network as this device.',
-            () => (castOffer = 'idle'),
+            { dismiss: () => (castOffer = 'idle') },
           )}
         {/if}
       </div>
     {/if}
     {#if failure === 'login'}
-      <form onsubmit={letIn}>
+      <form class="terminal-message" onsubmit={letIn}>
         <p>
           Your library’s scout install can only check what’s available, so playing it here needs a
           browser key from the homelab (<code>remux-browser-key.txt</code>) — once; the browser
@@ -3644,70 +3934,89 @@
           </p>{/if}
       </form>
     {:else if failure === 'sourceUnavailable' && managedCause === 'torbox_rate_limited'}
-      <p class="note" role="status">{managedCauseMessages[managedCause]}</p>
+      {@render banner(managedCauseMessages[managedCause], { busy: true, startup: true })}
     {:else if failure === 'sourceUnavailable' && managedCause}
-      <p class="error" role="alert">{managedCauseMessages[managedCause]}</p>
-      {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
-        <Button variant="primary" label="Try again" onclick={() => void begin()} />
-      {/if}
+      <div class="terminal-message error" role="alert">
+        <p>{managedCauseMessages[managedCause]}</p>
+        {#if managedCause !== 'torbox_managed_streaming_unavailable_for_plan'}
+          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+        {/if}
+      </div>
     {:else if failure === 'none' && skippedFormats.length}
-      <p class="error" role="alert">
-        The releases of this that are ready are {skippedFormats
-          .map((ext) => ext.slice(1).toUpperCase())
-          .join(' and ')} files, which Den can’t play in a browser yet. Try again once another release
-        is out, or play it on your TV.
-      </p>
+      <div class="terminal-message error" role="alert">
+        <p>
+          The releases of this that are ready are {skippedFormats
+            .map((ext) => ext.slice(1).toUpperCase())
+            .join(' and ')} files, which Den can’t play in a browser yet. Try again once another release
+          is out, or play it on your TV.
+        </p>
+      </div>
     {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode' || failure === 'timedOut' || failure === 'temporarilyUnavailable'}
-      <p class="note" role="status">{waits[failure]}</p>
+      {@render banner(waits[failure], { busy: true, startup: true })}
     {:else if failure === 'lost'}
-      <div class="lost" role="alert">
+      <div class="terminal-message" role="alert">
         <p>The connection was gone too long for this to carry on.</p>
         <Button variant="primary" label={`Resume from ${clockTime(lostAt)}`} onclick={resumeLost} />
       </div>
     {:else if failure === 'ended'}
-      <p class="error" role="alert">
-        {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with you.
-      </p>
-    {:else if failure}
-      <p class="error" role="alert">{messages[failure]}</p>
-      {#if failure === 'playback' && session}
-        <Button
-          variant="primary"
-          label="Try another release"
-          disabled={switching}
-          onclick={tryAfterRefusal}
-        />
-      {/if}
-      {#if failure === 'engine'}
-        <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
-             with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
-        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
-      {/if}
-      {#if failure === 'request' || failure === 'protocol'}
-        <Button variant="primary" label="Reload" onclick={() => location.reload()} />
-      {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
-        <Button variant="primary" label="Try again" onclick={() => void begin()} />
-      {/if}
-    {:else if !session && !holding}
-      {#if notice}
-        <p class="note startup" role="status">
-          {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
-              >&nbsp;· {notice.clock}</span
-            >{/if}
+      <div class="terminal-message error" role="alert">
+        <p>
+          {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with
+          you.
         </p>
+      </div>
+    {:else if failure}
+      <div class="terminal-message error" role="alert">
+        <p>{messages[failure]}</p>
+        {#if failure === 'playback' && session}
+          <Button
+            variant="primary"
+            label="Try another release"
+            disabled={switching}
+            onclick={tryAfterRefusal}
+          />
+        {/if}
+        {#if failure === 'engine'}
+          <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
+               with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
+          <Button variant="primary" label="Reload" onclick={() => location.reload()} />
+        {/if}
+        {#if failure === 'request' || failure === 'protocol'}
+          <Button variant="primary" label="Reload" onclick={() => location.reload()} />
+        {:else if failure === 'unreachable' || failure === 'sourceUnavailable'}
+          <Button variant="primary" label="Try again" onclick={() => void begin()} />
+        {/if}
+      </div>
+    {:else if !session && !holding}
+      {#if visibleStartupNotice}
+        {@render banner(visibleStartupNotice.text, {
+          busy: true,
+          quiet: true,
+          startup: true,
+          clock: visibleStartupNotice.clock,
+        })}
       {/if}
     {:else}
       {#if !session?.castOrigin}
         <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
         <video
           bind:this={video}
-          controls={!tv}
+          controls={!customTransport}
           autoplay
           playsinline
           use:allowAirPlay
+          onclick={() => {
+            if (!desktopTransport) return;
+            if (!webControlsVisible) revealWebControls();
+            else togglePlaying();
+          }}
+          onvolumechange={() => {
+            playerVolume = video?.volume ?? playerVolume;
+            playerMuted = video?.muted ?? playerMuted;
+          }}
           onloadedmetadata={() => {
             seekToStart();
-            if (tv) {
+            if (customTransport) {
               tvPosition = video?.currentTime ?? 0;
               tvDuration = length();
             }
@@ -3746,96 +4055,120 @@
             <track kind="subtitles" src={track.url} srclang={track.language} label={track.value} />
           {/each}
         </video>
-        {#if tv}
-          {#if fullTvTransport}
-            <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
-              <div class="tv-timeline">
-                <span aria-hidden="true">{clockTime(tvPosition)}</span>
-                <input
-                  type="range"
-                  aria-label="Playback position"
-                  aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
-                  min="0"
-                  max={Math.max(tvDuration, 1)}
-                  step="10"
-                  value={Math.min(tvPosition, Math.max(tvDuration, 1))}
-                  disabled={!tvDuration}
-                  style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
-                  oninput={(event) => {
-                    if (!video) return;
-                    const to = Number(event.currentTarget.value);
-                    video.currentTime = to;
-                    tvPosition = to;
-                  }}
-                />
-                <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
-              </div>
-              <div class="tv-transport-actions" data-tv-horizontal-group="transport">
-                <button
-                  class="tv-skip"
-                  type="button"
-                  aria-label="Rewind 10 seconds"
-                  onclick={() => {
-                    if (!video) return;
-                    video.currentTime = Math.max(0, video.currentTime - SKIP_SECS);
-                    tvPosition = video.currentTime;
-                  }}
-                >
-                  {@render skipIcon('back')}
-                </button>
-                <button
-                  class="tv-play-pause"
-                  type="button"
-                  aria-label={tvPaused ? 'Play' : 'Pause'}
-                  onclick={() => (video?.paused ? void video.play() : video?.pause())}
-                >
-                  <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled={tvPaused} />
-                </button>
-                <button
-                  class="tv-skip"
-                  type="button"
-                  aria-label="Forward 10 seconds"
-                  onclick={() => {
-                    if (!video) return;
-                    video.currentTime = Math.min(
-                      length() || Infinity,
-                      video.currentTime + SKIP_SECS,
-                    );
-                    tvPosition = video.currentTime;
-                  }}
-                >
-                  {@render skipIcon('forward')}
-                </button>
-              </div>
-            </nav>
-          {:else}
-            <nav class="tv-transport legacy-transport" aria-label="Playback controls">
+        {#if customTransport}
+          <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
+            <div class="tv-timeline">
+              <span aria-hidden="true">{clockTime(tvPosition)}</span>
+              <input
+                type="range"
+                aria-label="Playback position"
+                aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
+                min="0"
+                max={Math.max(tvDuration, 1)}
+                step="10"
+                value={Math.min(tvPosition, Math.max(tvDuration, 1))}
+                disabled={!tvDuration}
+                style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+                oninput={(event) => {
+                  if (!video) return;
+                  const to = Number(event.currentTarget.value);
+                  video.currentTime = to;
+                  tvPosition = to;
+                }}
+              />
+              <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
+            </div>
+            <div class="tv-transport-actions" data-tv-horizontal-group="transport">
               <button
+                class="tv-skip"
                 type="button"
-                onclick={() =>
-                  video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
-                >−10s</button
+                aria-label="Rewind 10 seconds"
+                onclick={() => seekBy(-SKIP_SECS)}
               >
+                {@render skipIcon('back')}
+              </button>
               <button
+                class="tv-play-pause"
                 type="button"
-                onclick={() => (video?.paused ? void video.play() : video?.pause())}
-                >{tvPaused ? 'Play' : 'Pause'}</button
+                aria-label={tvPaused ? 'Play' : 'Pause'}
+                onclick={togglePlaying}
               >
+                <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled={tvPaused} />
+              </button>
               <button
+                class="tv-skip"
                 type="button"
-                onclick={() =>
-                  video &&
-                  (video.currentTime = Math.min(
-                    length() || Infinity,
-                    video.currentTime + SKIP_SECS,
-                  ))}>+10s</button
+                aria-label="Forward 10 seconds"
+                onclick={() => seekBy(SKIP_SECS)}
               >
-              {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
-              <button type="button" onclick={close}>Close</button>
-            </nav>
-          {/if}
+                {@render skipIcon('forward')}
+              </button>
+              {#if desktopTransport}
+                <div class="web-transport-extras">
+                  <button
+                    class="web-volume-button"
+                    type="button"
+                    aria-label={playerMuted ? 'Unmute' : 'Mute'}
+                    onclick={toggleMuted}
+                  >
+                    <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
+                  </button>
+                  <input
+                    class="web-volume"
+                    type="range"
+                    aria-label="Volume"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={playerMuted ? 0 : playerVolume}
+                    oninput={setVolume}
+                  />
+                  {#if canPictureInPicture()}
+                    <button
+                      class="web-pip"
+                      type="button"
+                      aria-label="Picture in picture"
+                      title="Picture in picture"
+                      onclick={() => void togglePictureInPicture()}>PiP</button
+                    >
+                  {/if}
+                  <button
+                    type="button"
+                    aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                    title="Fullscreen"
+                    onclick={() => void toggleFullscreen()}
+                  >
+                    <ButtonIcon name="fullscreen" />
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </nav>
+        {:else if tv}
+          <nav class="tv-transport legacy-transport" aria-label="Playback controls">
+            <button
+              type="button"
+              onclick={() =>
+                video && (video.currentTime = Math.max(0, video.currentTime - SKIP_SECS))}
+              >−10s</button
+            >
+            <button
+              type="button"
+              onclick={() => (video?.paused ? void video.play() : video?.pause())}
+              >{tvPaused ? 'Play' : 'Pause'}</button
+            >
+            <button
+              type="button"
+              onclick={() =>
+                video &&
+                (video.currentTime = Math.min(length() || Infinity, video.currentTime + SKIP_SECS))}
+              >+10s</button
+            >
+            {#if onnext && nextHref}<a href={nextHref} onclick={advanceLink}>Next</a>{/if}
+            <button type="button" onclick={close}>Close</button>
+          </nav>
         {/if}
-        {#if fullTvTransport && active}
+        {#if customTransport && active}
           <Button
             variant="primary"
             class="tv-skip-overlay"
@@ -3843,24 +4176,47 @@
             onclick={skipActive}
           />
         {/if}
-        {#if fullTvTransport && tvSubtitleTimingOpen}
-          <section class="tv-subtitle-timing" aria-label="Subtitle timing" role="status">
-            <span>‹ Earlier</span>
-            <strong>{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong>
-            <span>Later ›</span>
-            <small>Left or right to adjust · Select to finish</small>
+        {#if customTransport && tvSubtitleTimingOpen}
+          <section
+            bind:this={subtitleTimingPanel}
+            class="tv-subtitle-timing"
+            aria-label="Subtitle timing"
+            role="group"
+          >
+            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
+                >Earlier</button
+              >{:else}<span>‹ Earlier</span>{/if}
+            <strong aria-live="polite"
+              >{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong
+            >
+            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
+                >Later</button
+              >{:else}<span>Later ›</span>{/if}
+            {#if desktopTransport}
+              <div class="web-timing-actions">
+                <button
+                  type="button"
+                  disabled={subtitleOffset === 0}
+                  onclick={() => adjustSubtitleOffset(-subtitleOffset)}>Reset</button
+                >
+                <button type="button" onclick={() => void closeSubtitleTiming()}>Done</button>
+              </div>
+            {:else}
+              <small>Left or right to adjust · Select to finish</small>
+            {/if}
           </section>
         {/if}
         {#if reconnecting}
-          <p class="countdown" role="status">Reconnecting…</p>
+          {@render banner('Reconnecting…', { busy: true, quiet: true, countdown: true })}
         {:else if startsIn}
-          <p class="countdown" role="status">{startsIn}</p>
-        {:else if notice}
-          <p class="note startup" role="status">
-            {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
-                >&nbsp;· {notice.clock}</span
-              >{/if}
-          </p>
+          {@render banner(startsIn, { busy: true, quiet: true, countdown: true })}
+        {:else if visibleStartupNotice}
+          {@render banner(visibleStartupNotice.text, {
+            busy: true,
+            quiet: true,
+            startup: true,
+            clock: visibleStartupNotice.clock,
+          })}
         {/if}
       {/if}
     {/if}
@@ -3898,6 +4254,8 @@
   {/if}
   {#if session}
     {@const parts = releaseParts(session)}
+    {@const playingFile = session.release.filename}
+    {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
@@ -3912,44 +4270,50 @@
         {/if}
       </p>
       <div class="controls" data-tv-horizontal-group={fullTvTransport ? 'actions' : undefined}>
-        {#if fullTvTransport || releases.length > 1}
-          <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
-               quality and size over the release's file name — and ticks the one playing. -->
-          {@const playingFile = session.release.filename}
-          {@const short = pickLabel(session.release)}
-          <div class="pick-menu stream-pick">
-            <ActionMenu
-              label={`Stream: ${short}`}
-              heading="Streams"
-              triggerClass="pick"
-              items={() =>
-                releaseChoices().map((release) => ({
-                  kind: 'radio',
-                  group: 'release',
-                  label: optionLabel(release),
-                  description: release.filename,
-                  checked: release.filename === playingFile,
-                  disabled: release.plays === 'no',
-                  onselect: () => switchRelease(release.filename),
-                }))}
-            >
-              {#snippet glyph()}
-                {@render plates()}
-                {#if !fullTvTransport}
-                  <span class="value" aria-hidden="true">{short}</span>
-                  {@render chevron()}
-                {/if}
-              {/snippet}
-            </ActionMenu>
-          </div>
-        {/if}
-        {#if (fullTvTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
-          {#if fullTvTransport}
+        <!-- The pill names the stream playing in short; its menu lists each with what tells them apart —
+             quality and size over the release's file name — and ticks the one playing. -->
+        <div class="pick-menu stream-pick">
+          <ActionMenu
+            label={`Stream: ${short}`}
+            heading="Streams"
+            note={releaseListing === 'loading'
+              ? 'Finding the other available streams…'
+              : releaseListing === 'failed'
+                ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
+                : releaseListing === 'ready' && releaseChoices().length === 1
+                  ? 'One stream is available.'
+                  : undefined}
+            triggerClass="pick"
+            onclose={scheduleWebControls}
+            items={() =>
+              releaseChoices().map((release) => ({
+                kind: 'radio',
+                key: release.filename,
+                group: 'release',
+                label: optionLabel(release),
+                description: release.filename,
+                checked: release.filename === playingFile,
+                disabled: release.plays === 'no',
+                onselect: () => switchRelease(release.filename),
+              }))}
+          >
+            {#snippet glyph()}
+              {@render plates()}
+              {#if !customTransport}
+                <span class="value" aria-hidden="true">{short}</span>
+                {@render chevron()}
+              {/if}
+            {/snippet}
+          </ActionMenu>
+        </div>
+        {#if (customTransport ? session.audioTracks.length > 0 : session.audioTracks.length > 1) && playingTrack}
+          {#if customTransport}
             <div class="pick-menu audio-pick">
               <ActionMenu
                 label={`Audio track: ${trackLabel(playingTrack, session.audioTrack)}`}
                 heading="Audio Track"
                 triggerClass="pick"
+                onclose={scheduleWebControls}
                 items={() => [
                   ...session!.audioTracks.map((track, n) => ({
                     kind: 'radio' as const,
@@ -4001,6 +4365,7 @@
               label={`Subtitles: ${chosenSubtitleLabel}`}
               heading="Subtitles"
               triggerClass="pick"
+              onclose={scheduleWebControls}
               items={() => [
                 {
                   kind: 'radio',
@@ -4017,12 +4382,12 @@
                   checked: subtitleValue(track) === subtitleChoice,
                   onselect: () => void chooseSubtitle(subtitleValue(track)),
                 })),
-                ...(fullTvTransport && subtitleChoice !== null
+                ...(customTransport && subtitleChoice !== null
                   ? [
                       {
                         kind: 'item' as const,
                         label: `Adjust subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
-                        onselect: () => (tvSubtitleTimingOpen = true),
+                        onselect: openSubtitleTiming,
                       },
                       {
                         kind: 'item' as const,
@@ -4039,7 +4404,7 @@
               ]}
             >
               {#snippet glyph()}
-                {#if fullTvTransport}
+                {#if customTransport}
                   {@render subtitlesIcon()}
                 {:else}
                   {@render globe()}
@@ -4050,7 +4415,7 @@
             </ActionMenu>
           </div>
         {/if}
-        {#if fullTvTransport}
+        {#if customTransport}
           <button
             class="player-tv-action beginning-action"
             type="button"
@@ -4060,18 +4425,49 @@
           {#if onnext && nextHref}<a
               class="player-tv-action next-action"
               href={nextHref}
-              aria-label={next ? `Next episode: ${next}` : 'Next episode'}
+              aria-label={next ? `Next: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
+          {#if desktopTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
+            <Button
+              variant="player"
+              size="icon"
+              class="player-tv-action output-action"
+              icon="cast"
+              ariaLabel="Cast to a TV"
+              title="Chromecast"
+              disabled={castOffer === 'looking' || castOffer === 'choose'}
+              onclick={offerCast}
+            />
+          {/if}
+          {#if desktopTransport && airPlayCapable}
+            <Button
+              variant="player"
+              size="icon"
+              class="player-tv-action output-action"
+              icon="airplay"
+              ariaLabel={airPlayAvailability === 'unavailable'
+                ? 'AirPlay, no devices available'
+                : airPlayActive
+                  ? 'Change AirPlay device'
+                  : 'AirPlay'}
+              title={airPlayAvailability === 'unavailable'
+                ? 'No AirPlay devices available'
+                : 'AirPlay'}
+              pressed={airPlayActive}
+              disabled={airPlayAvailability === 'unavailable'}
+              onclick={offerAirPlay}
+            />
+          {/if}
         {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
-        {#if !fullTvTransport && active}
+        {#if !customTransport && active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
-        {#if !fullTvTransport && onnext && next}
+        {#if !customTransport && onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <Button
@@ -4143,27 +4539,44 @@
 
 {#snippet banner(
   text: string,
-  dismiss?: () => void,
-  action?: { label: string; run: () => void },
-  quiet = false,
+  options: {
+    dismiss?: () => void;
+    action?: { label: string; run: () => void };
+    quiet?: boolean;
+    busy?: boolean;
+    startup?: boolean;
+    countdown?: boolean;
+    clock?: string;
+  } = {},
 )}
-  <p class="notice" class:quiet role="status">
-    <span>{text}</span>
-    {#if action}<Button
+  <p
+    class="notice"
+    class:quiet={options.quiet}
+    class:busy={options.busy}
+    class:startup={options.startup}
+    class:countdown={options.countdown}
+    role="status"
+  >
+    {#if options.busy}<span class="status-spinner" aria-hidden="true"></span>{/if}
+    <span class="notice-copy"
+      >{text}{#if options.clock}<span class="clock" aria-hidden="true">&nbsp;· {options.clock}</span
+        >{/if}</span
+    >
+    {#if options.action}<Button
         variant="tertiary"
         size="compact"
         class="notice-action"
-        label={action.label}
-        onclick={action.run}
+        label={options.action.label}
+        onclick={options.action.run}
       />{/if}
-    {#if dismiss}
+    {#if options.dismiss}
       <Button
         variant="tertiary"
         size="icon"
         class="notice-dismiss"
         icon="close"
         ariaLabel="Dismiss"
-        onclick={dismiss}
+        onclick={options.dismiss}
       />
     {/if}
   </p>
@@ -4285,7 +4698,9 @@
     position: absolute;
     top: 12px;
     left: 50%;
-    z-index: 2;
+
+    /* Above the custom player's header gradient: its Dismiss action must remain pressable while controls show. */
+    z-index: 7;
     width: min(36rem, calc(100% - 24px));
     pointer-events: none;
     transform: translateX(-50%);
@@ -4319,7 +4734,9 @@
   /* The cast page's own "Choose your Chromecast" button, under the offer's notice: only a press in that page can
      open Chrome's device list. */
   iframe.cast-choose {
-    z-index: 2;
+    /* Above the owned player's header gradient and buttons: this is the one cross-origin press that may open
+       Chrome's receiver chooser, so looking visible while the header intercepted it made Cast appear inert. */
+    z-index: 8;
     top: calc(12px + 76px + 8px);
     left: 50%;
     width: min(18rem, calc(100% - 24px));
@@ -4360,29 +4777,17 @@
     justify-content: flex-end;
   }
 
-  .note {
-    max-width: 50ch;
-    color: rgb(255 255 255 / 0.6);
-    text-align: center;
-  }
-
-  /* Over the held picture, clear of the video's own controls along the bottom. */
+  /* Over the held picture, clear of the video's own controls along the bottom. The same surface and activity glyph
+     serve startup, prebuffer, reconnecting, Cast discovery and a mid-play stall; only the copy changes. */
   .countdown {
-    position: relative;
-    padding: 8px 16px;
-    border-radius: 999px;
-    background: rgb(0 0 0 / 0.6);
+    width: auto;
     font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 
-  /* The startup notice (den-edge#234): a line rather than `.countdown`'s pill, since it says more than a number. */
+  /* The startup status stays centred over an empty/held stage and never intercepts the player. */
   .startup {
-    position: relative;
-    padding: 10px 20px;
-    border-radius: 16px;
-    background: rgb(0 0 0 / 0.6);
-    color: rgb(255 255 255 / 0.85);
+    width: min(calc(100% - 24px), 42rem);
     pointer-events: none;
   }
 
@@ -4419,22 +4824,28 @@
     justify-items: center;
   }
 
-  /* Glass, as every control over media is (`app.css`), with LibraryStatus's accent edge: a passing note. */
+  /* One quiet media toast for every non-terminal player message. A shadow separates it from the picture without
+     adding the bordered alert-box look that made buffering and Cast messages feel unrelated to the player. */
   .notice {
     display: flex;
     gap: 4px 12px;
     align-items: center;
     width: min(100%, 36rem);
     margin: 0;
-    padding: 6px 6px 6px 14px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--glass-edge));
-    border-radius: 12px;
-    background: var(--glass-bg);
+    padding: 8px 8px 8px 14px;
+    border: 0;
+    border-radius: 14px;
+    background: rgb(18 18 20 / 0.88);
     color: rgb(255 255 255 / 0.9);
     font-size: 14px;
     line-height: 1.35;
+    box-shadow: 0 10px 32px rgb(0 0 0 / 0.34);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  .notice.quiet {
+    color: rgb(255 255 255 / 0.78);
   }
 
   .notice:last-of-type {
@@ -4453,10 +4864,26 @@
   }
 
   /* A notice with nothing to dismiss still sits the same height as one with. */
-  .notice > span {
+  .notice-copy {
     flex: 1 1 auto;
     min-width: 0;
     padding: 6px 0;
+  }
+
+  .status-spinner {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgb(255 255 255 / 0.22);
+    border-top-color: rgb(255 255 255 / 0.88);
+    border-radius: 50%;
+    animation: status-spin 800ms linear infinite;
+  }
+
+  @keyframes status-spin {
+    to {
+      transform: rotate(1turn);
+    }
   }
 
   /* The offer a notice makes: the accent's text, as LibraryStatus's Undo. */
@@ -4587,17 +5014,421 @@
     outline-offset: 2px;
   }
 
-  .error {
-    max-width: 50ch;
-    color: var(--danger);
+  /* Desktop gets the same owned transport as the TV shells, scaled down through variables instead of maintaining a
+     second player. Touch browsers keep the ordinary grid and their system controls above. */
+  .web-custom-player {
+    --player-control-size: 44px;
+    --player-primary-size: 56px;
+    --player-control-gap: 12px;
+    --player-side: clamp(20px, 3vw, 48px);
+
+    grid-template-rows: minmax(0, 1fr);
+    padding: 0;
+  }
+
+  .web-custom-player > header {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 5;
+    padding: 22px var(--player-side) 72px;
+    background: linear-gradient(to bottom, rgb(0 0 0 / 0.8), transparent);
+  }
+
+  .web-custom-player > .notices {
+    position: absolute;
+    top: 72px;
+    right: var(--player-side);
+    left: auto;
+    z-index: 6;
+    width: min(36rem, calc(100% - 2 * var(--player-side)));
+    justify-items: end;
+  }
+
+  .web-custom-player > .stage {
+    position: absolute;
+    inset: 0;
+  }
+
+  .web-custom-player video {
+    cursor: pointer;
+  }
+
+  .web-custom-player > footer {
+    position: absolute;
+    right: var(--player-side);
+    bottom: 24px;
+    left: var(--player-side);
+    z-index: 5;
+    display: block;
+    padding: 0;
+    pointer-events: none;
+  }
+
+  .web-custom-player > footer .release {
+    position: absolute;
+    bottom: 92px;
+    left: 0;
+    width: min(55vw, 64ch);
+    color: rgb(255 255 255 / 0.86);
+    font-size: 13px;
+    text-shadow: 0 1px 5px #000;
+    pointer-events: auto;
+  }
+
+  .web-custom-player > footer .controls {
+    justify-content: flex-start;
+    width: fit-content;
+    max-width: calc(50% - 100px);
+    pointer-events: auto;
+  }
+
+  .web-custom-player .full-tv-transport {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
+    display: grid;
+    gap: 12px;
+    padding: 105px var(--player-side) 18px;
+    background: linear-gradient(to top, rgb(0 0 0 / 0.92), rgb(0 0 0 / 0.52) 52%, transparent);
+  }
+
+  .web-custom-player .tv-timeline {
+    display: grid;
+    grid-template-columns: 6ch minmax(0, 1fr) 6ch;
+    gap: 14px;
+    align-items: center;
+    color: rgb(255 255 255 / 0.9);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .web-custom-player .tv-timeline span:last-child {
+    text-align: right;
+  }
+
+  .web-custom-player .tv-timeline input[type='range'] {
+    width: 100%;
+    height: 24px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(
+      to right,
+      #fff 0 var(--tv-progress),
+      rgb(255 255 255 / 0.32) var(--tv-progress) 100%
+    );
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: 0;
+    border-radius: 50%;
+    appearance: none;
+    background: #fff;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.5);
+    transform: scale(0.72);
+    transition: transform 120ms ease;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.32);
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-progress {
+    height: 4px;
+    border-radius: 999px;
+    background: #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible {
+    outline: 0;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible::-webkit-slider-thumb {
+    transform: scale(1.15);
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-custom-player .tv-timeline input[type='range']:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .web-custom-player .tv-transport-actions {
+    position: relative;
+    display: flex;
+    gap: var(--player-control-gap);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .web-custom-player .full-tv-transport button,
+  .web-custom-player footer .player-tv-action,
+  .web-custom-player footer .pick-menu :global(.trigger.pick) {
+    display: grid;
+    place-items: center;
+    width: var(--player-control-size);
+    min-width: var(--player-control-size);
+    max-width: var(--player-control-size);
+    height: var(--player-control-size);
+    min-height: var(--player-control-size);
+    padding: 0;
+    border: 1px solid rgb(255 255 255 / 0.12);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.14);
+    color: #fff;
+    font: inherit;
+    text-decoration: none;
+    box-shadow: 0 5px 18px rgb(0 0 0 / 0.28);
+    transition:
+      background 120ms ease,
+      transform 120ms ease;
+  }
+
+  .web-custom-player .tv-subtitle-timing button {
+    min-height: 40px;
+    padding: 0 14px;
+    border: 1px solid rgb(255 255 255 / 0.18);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.12);
+    color: #fff;
+    font: inherit;
+  }
+
+  .web-custom-player .full-tv-transport button:hover,
+  .web-custom-player footer .player-tv-action:hover,
+  .web-custom-player footer .pick-menu :global(.trigger.pick:hover) {
+    background: rgb(255 255 255 / 0.26);
+  }
+
+  .web-custom-player .full-tv-transport button:focus-visible,
+  .web-custom-player footer .player-tv-action:focus-visible,
+  .web-custom-player footer .pick-menu :global(.trigger.pick:focus-visible) {
+    border-color: transparent;
+    outline: var(--ring-width) solid #fff;
+    outline-offset: 3px;
+    transform: scale(1.06);
+  }
+
+  .web-custom-player .full-tv-transport .tv-play-pause {
+    --button-icon-size: 27px;
+
+    width: var(--player-primary-size);
+    min-width: var(--player-primary-size);
+    height: var(--player-primary-size);
+    background: rgb(255 255 255 / 0.92);
+    color: #111;
+  }
+
+  .web-custom-player .skip-icon,
+  .web-custom-player .transport-icon {
+    width: 28px;
+    height: 28px;
+    overflow: visible;
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.5;
+  }
+
+  .web-custom-player .skip-icon text {
+    fill: currentcolor;
+    stroke: none;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 750;
+    text-anchor: middle;
+  }
+
+  .web-custom-player .transport-icon .filled {
+    fill: currentcolor;
+    stroke: none;
+  }
+
+  .web-custom-player .web-transport-extras {
+    position: absolute;
+    right: 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .web-custom-player .web-volume {
+    width: 84px;
+    accent-color: #fff;
+  }
+
+  .web-custom-player .web-pip {
+    font-size: 11px;
+    font-weight: 750;
+  }
+
+  .web-custom-player footer .pick-menu {
+    flex: 0 0 var(--player-control-size);
+    width: var(--player-control-size);
+    min-width: var(--player-control-size);
+    max-width: var(--player-control-size);
+  }
+
+  .web-custom-player footer .pick-menu .icon {
+    width: 22px;
+    height: 22px;
+    opacity: 1;
+  }
+
+  .web-custom-player :global(.tv-skip-overlay) {
+    position: absolute;
+    right: var(--player-side);
+    bottom: 160px;
+    z-index: 7;
+    border-radius: 999px;
+  }
+
+  .web-custom-player .tv-subtitle-timing {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 8;
+    display: grid;
+    grid-template-columns: auto minmax(90px, auto) auto;
+    gap: 18px;
+    align-items: center;
+    padding: 22px;
+    border: 1px solid rgb(255 255 255 / 0.15);
+    border-radius: 20px;
+    background: rgb(25 25 25 / 0.9);
+    box-shadow: 0 18px 70px rgb(0 0 0 / 0.55);
+    transform: translate(-50%, -50%);
+    backdrop-filter: blur(20px);
+  }
+
+  .web-custom-player .tv-subtitle-timing strong {
+    font-size: 30px;
+    font-variant-numeric: tabular-nums;
     text-align: center;
   }
 
-  .lost {
+  .web-custom-player .web-timing-actions {
+    display: flex;
+    grid-column: 1 / -1;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  .web-custom-player > header,
+  .web-custom-player > footer,
+  .web-custom-player .full-tv-transport {
+    transition: opacity 180ms ease;
+  }
+
+  .web-custom-player.web-controls-hidden > header,
+  .web-custom-player.web-controls-hidden > footer,
+  .web-custom-player.web-controls-hidden .full-tv-transport {
+    opacity: 0;
+  }
+
+  /* Invisible controls cannot intercept a pointer meant for a notice or the picture. Footer children normally opt
+     back into pointer events, so name them here too. Keyboard focus still reveals the controls before it acts. */
+  .web-custom-player.web-controls-hidden > header,
+  .web-custom-player.web-controls-hidden > footer,
+  .web-custom-player.web-controls-hidden > footer .controls,
+  .web-custom-player.web-controls-hidden > footer .release,
+  .web-custom-player.web-controls-hidden .full-tv-transport {
+    pointer-events: none;
+  }
+
+  @media (height <= 600px) {
+    .web-custom-player > footer .release {
+      display: none;
+    }
+
+    .web-custom-player .full-tv-transport {
+      padding-top: 72px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .status-spinner {
+      animation: none;
+    }
+
+    .web-custom-player > header,
+    .web-custom-player > footer,
+    .web-custom-player .full-tv-transport,
+    .web-custom-player .full-tv-transport button,
+    .web-custom-player footer .player-tv-action,
+    .web-custom-player footer .pick-menu :global(.trigger.pick),
+    .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
+      transition: none;
+    }
+  }
+
+  /* A wait remains a toast over the media; a state that cannot continue becomes one calm, centred decision card.
+     Keeping its action inside the same surface avoids the former mix of loose text and apparently unrelated buttons. */
+  .terminal-message {
     display: grid;
-    gap: 12px;
+    gap: 16px;
     justify-items: center;
-    max-width: 50ch;
+    width: min(calc(100% - 24px), 32rem);
+    max-width: none;
+    margin: 0;
+    padding: 24px;
+    border-radius: 18px;
+    background: rgb(18 18 20 / 0.9);
+    color: rgb(255 255 255 / 0.86);
     text-align: center;
+    box-shadow: 0 16px 48px rgb(0 0 0 / 0.4);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  .terminal-message p {
+    margin: 0;
+  }
+
+  /* A terminal decision needs calm hierarchy, not a danger-red sentence competing with a solid white action. The
+     role still announces the failure; red remains for a concrete field error such as a rejected browser key. */
+  .terminal-message :global(.den-button-primary) {
+    --button-bg: rgb(255 255 255 / 0.12);
+    --button-border: rgb(255 255 255 / 0.18);
+    --button-fg: rgb(255 255 255 / 0.92);
+  }
+
+  .terminal-message .error {
+    color: var(--danger);
   }
 </style>

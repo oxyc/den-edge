@@ -564,6 +564,28 @@ describe('findRemux', () => {
       return new Response('{"status":"ok"}', { status: 200 });
     };
 
+  it('uses the same-origin Remux proxy first on a Tailscale HTTPS development face', async () => {
+    vi.stubGlobal('location', {
+      href: 'https://oskars-macbook-pro.tailce93d3.ts.net:8443/',
+      origin: 'https://oskars-macbook-pro.tailce93d3.ts.net:8443',
+      hostname: 'oskars-macbook-pro.tailce93d3.ts.net',
+      protocol: 'https:',
+    });
+    const asked: string[] = [];
+    try {
+      const found = await findRemux(entries, async (input) => {
+        asked.push(String(input));
+        if (String(input) === '/remux/health')
+          return new Response('{"status":"ok"}', { status: 200 });
+        throw new TypeError('the cross-origin route must not be probed first');
+      });
+      expect(found).toBe('/remux');
+      expect(asked).toEqual(['/remux/health']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('takes the first entry this page can use whose health answers', async () => {
     let lanInit: RequestInit | undefined;
     const localFetch: typeof fetch = async (input, init) => {
