@@ -1,6 +1,7 @@
 # One image: den-edge, the browser app, the separately compiled webOS TV app, and the Cast page. All three builds
 # share one npm install, while their output graphs and runtime host names remain isolated.
 ARG PREVIOUS_IMAGE=scratch
+ARG DEN_PARENT_ORIGINS="https://d.oxy.fi https://oskars-macbook-pro.tailce93d3.ts.net:8443"
 FROM ${PREVIOUS_IMAGE} AS previous
 
 FROM node:26-alpine AS web-source
@@ -19,7 +20,7 @@ RUN node scripts/keep-previous-assets.mjs
 FROM web-source AS cast-web
 # The production browser and Cindy's stable Tailscale HTTPS development face may frame the isolated sender. CSP uses
 # a space-separated source list; the sender accepts the same list (and commas for test/build compatibility).
-ARG DEN_PARENT_ORIGINS="https://d.oxy.fi https://oskars-macbook-pro.tailce93d3.ts.net:8443"
+ARG DEN_PARENT_ORIGINS
 ENV VITE_DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
 RUN npm run build:cast
 
@@ -31,6 +32,8 @@ ENV DEN_TV_SERVICE_ORIGIN=$DEN_TV_SERVICE_ORIGIN
 RUN npm run build:tv:webos
 
 FROM rust:1-alpine AS rust-build
+ARG DEN_PARENT_ORIGINS
+ENV DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
 RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
