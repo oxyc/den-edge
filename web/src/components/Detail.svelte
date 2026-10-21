@@ -575,6 +575,10 @@
   const series = $derived(detail ? seriesPresentation(detail, episodes, row) : null);
   const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);
+  // A fresh position from another device is more specific than Continue Watching's projected target. The latter
+  // may already name the next episode while the device is still writing the episode on screen; every Resume and
+  // Sources action must agree with the live status row until that session stops.
+  const playbackTarget = $derived(live?.episode ?? target);
   const sourceCoord = $derived(sourceTarget ?? target);
   /**
    * The episodes of the season Sources is for, to switch between there: named where that season is the one on screen,
@@ -984,20 +988,20 @@
             seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
             onplay={!__DEN_TV__ && onplay
-              ? () => onplay(d.title, target?.season, target?.episode)
+              ? () => onplay(d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
             onplayhere={onplayhere
-              ? () => onplayhere(d.title, target?.season, target?.episode)
+              ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
             playHref={titleHref({
               ...d.title,
-              season: target?.season,
-              episode: target?.episode,
+              season: playbackTarget?.season,
+              episode: playbackTarget?.episode,
               play: true,
             })}
             onsources={!guestScout && !restricted
               ? () => {
-                  sourceTarget = target;
+                  sourceTarget = playbackTarget;
                   void sourcesPanel?.show();
                 }
               : undefined}
