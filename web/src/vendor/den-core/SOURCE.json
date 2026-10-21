@@ -5,7 +5,7 @@
   "rust": "1.95.0",
   "uniffi": "0.32.2",
   "wasmBindgen": "0.2.129",
-  "sourceDigest": "f42cabcc8709671690d7a9be1f11ec028f9d4b441057ee0e3d92f8f2cac87ec0",
+  "sourceDigest": "c88f66591f8ac87201c88c5c95e6426546a9cbe348dc2adf7f3981b9bbf05b70",
   "sources": {
     "Cargo.lock": "83efdcc661b67a0a5e5ee7f6902511b4da0aa1c74cf8980e0c9ffc83bb60f319",
     "Cargo.toml": "5d509ee1e98005bd4dc39bac575f87e348013b2a1dfe00af6e288dc9b3eb4907",
@@ -52,7 +52,7 @@
     "crates/den-sync/src/library_v4/write.rs": "96b4faffcc9b73f722bd8c5dd3b89d24cb77092270beb255d19d66621d32001f",
     "crates/den-sync/src/profiles.rs": "c8e655e354f22f69dc22d2f16f31e8886a35fe51b25762f8d02d7b3792f75b83",
     "crates/den-sync/src/projection.rs": "51b1c00fda8104c2f3465440d104fed5f9585319509fbfe9e3e9ef076d0a11d6",
-    "crates/den-sync/src/recovery.rs": "76b9c7f6b923cdbd0d8e9352ceb9ebaa3d3be76228658cbeee80a55d7ce44994",
+    "crates/den-sync/src/recovery.rs": "0e25e5093651bc26092e82cb3a1da92298a2fbc62f7880774ac382cb58699cc8",
     "crates/den-sync/src/series.rs": "b2ffe596cda0ee39814ca802252a39caf6101b180eb390ba2d37e61a3f1a9d22",
     "crates/den-sync/src/tilt.rs": "23a073cc9585412644e7b70cf2c8e74f7cfb6d841b8d7d0a38889f3ef486baeb",
     "crates/den-sync/src/wire.rs": "67735d4b92dae49c8aee24cc92ebb11b60c4d5ca5067a3505ae04464fa183d96",

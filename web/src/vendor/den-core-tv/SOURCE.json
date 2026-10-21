@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "sourceManifest": "../den-core/SOURCE.json",
-  "sourceDigest": "bbfe357e3c75963ad86e7ea84aa79601311fb65ff2374388c0a6edc3b6d35165",
+  "sourceDigest": "c88f66591f8ac87201c88c5c95e6426546a9cbe348dc2adf7f3981b9bbf05b70",
   "rust": "1.95.0",
   "wasmBindgen": "0.2.129",
   "rustflags": "-C target-feature=-reference-types",
@@ -19,9 +19,9 @@
     "generated/den_core.js": "ebb9e5dfecb323fa7e582b15d1bff1824c963d3cade15752340d6a9f7336521a",
     "generated/den_core_assistant.d.ts": "89c31904721ebed36bd5e11f4bab7c2493ca5230ba3ece46d145107efcec3754",
     "generated/den_core_assistant.js": "508b89f32ea37631c172346943ac02917af982589617239d6bdd9cf453559c56",
-    "generated/den_core_assistant_bg.wasm": "178de97b8c3e47ad56be71373c2b9321e8e29a39cbc6944b74b6689e6f6edb3e",
+    "generated/den_core_assistant_bg.wasm": "ccf2f1d877a158979b62bb1c0bedecae2355d581ec5c25372503245c2716facc",
     "generated/den_core_assistant_bg.wasm.d.ts": "5c93af8a8cfab7569c92cf075ad88233e2c3743a0887bb4af3dfcdc7a4588b9e",
-    "generated/den_core_bg.wasm": "55058d9be021e36e778ffec35416399d67bbc27faa40530eaa891c7a55608fb7",
+    "generated/den_core_bg.wasm": "86d8ded709b146a8c37df7c8149e69641105d04fbd82a79df3c015dcad7ab580",
     "generated/den_core_bg.wasm.d.ts": "bcabe71bb18ceff11cb0df53098492abfa89e3f5f45d311f42cab3cccd7a3eb2",
     "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
     "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87"
