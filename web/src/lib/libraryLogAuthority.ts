@@ -734,7 +734,12 @@ export class LibraryLogAuthority {
       case 'recovery.seal':
         return this.#administration().sealRecovery(query.locator, query.wrapKey, query.createdAt);
       case 'pairing.handover':
-        return this.#administration().pairingHandover(query.handoverKey, query.host, query.linkKey);
+        return this.#administration().pairingHandover(
+          query.handoverKey,
+          query.host,
+          query.linkKey,
+          query.grantTicket,
+        );
       case 'history.export':
         return this.#administration().historyExport();
       case 'library.metadata':

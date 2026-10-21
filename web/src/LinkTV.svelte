@@ -1,9 +1,20 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Button from './components/Button.svelte';
   import { thisDevice } from './lib/device.svelte';
   import { browserClock } from './lib/clock';
   import { links } from './lib/links.svelte';
-  import { formatCode, join, parseCode, type JoinError } from './lib/pair';
+  import {
+    formatCode,
+    join,
+    parseCode,
+    receive,
+    type JoinError,
+    type JoinResult,
+  } from './lib/pair';
+  import { guestGrants } from './lib/grants.svelte';
+  import { qrCode } from './lib/qr';
+  import { tvLink } from './lib/tvLink';
   import RecoveryRedeem from './components/RecoveryRedeem.svelte';
   import { currentAppPath } from './lib/runtimeUrl';
 
@@ -46,6 +57,14 @@
   let busy = $state(false);
   let failure = $state<JoinError | null>(null);
   const deviceId = browserClock().device;
+  let receiveCode = $state<string | null>(null);
+  let receiveFailure = $state<string | null>(null);
+  let receiving = $state(false);
+  let receiveController = new AbortController();
+  const receiveAddress = $derived(
+    receiveCode ? tvLink(__DEN_TV_API_ORIGIN__ || location.origin, receiveCode) : null,
+  );
+  const receiveQR = $derived(receiveAddress ? qrCode(receiveAddress) : null);
 
   const messages: Record<JoinError, string> = {
     expired: 'That code has expired or doesn’t exist. Get a new one on the TV.',
@@ -62,6 +81,62 @@
   /** The twelve characters the TV shows. */
   const whole = $derived(parseCode(code) !== null);
 
+  async function keep(result: Extract<JoinResult, { handover: unknown }>): Promise<boolean> {
+    const ticket = result.handover.grantTicket;
+    if (ticket) {
+      const redeemed = await guestGrants.redeemTicket(ticket);
+      if ('failure' in redeemed) {
+        receiveFailure =
+          redeemed.failure === 'full'
+            ? `${redeemed.host} needs to allow another device before this TV can use the shared Den.`
+            : redeemed.failure === 'invalid'
+              ? 'The shared-access ticket expired. Show a new QR and scan it again.'
+              : 'Couldn’t add shared access to this TV. Check its connection and try again.';
+        return false;
+      }
+    }
+    const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+    const { host, hostDeviceId, libraryKey, linkKey } = result.handover;
+    links.add(result.inboxKey, {
+      name: host,
+      libraryKey: base64(libraryKey),
+      linkKey: base64(linkKey),
+      ...(hostDeviceId ? { deviceId: hostDeviceId } : {}),
+    });
+    return true;
+  }
+
+  async function showTVLink() {
+    receiveController.abort();
+    receiveController = new AbortController();
+    receiveCode = null;
+    receiveFailure = null;
+    receiving = true;
+    const result = await receive({
+      label: thisDevice.name,
+      deviceId,
+      signal: receiveController.signal,
+      onCode: (next) => (receiveCode = next),
+    });
+    receiving = false;
+    if ('error' in result) {
+      if (!receiveController.signal.aborted)
+        receiveFailure =
+          result.error === 'insecure'
+            ? 'Linking needs a secure HTTPS connection.'
+            : result.error === 'throttled'
+              ? 'Too many links were started. Wait a minute and try again.'
+              : 'That link didn’t finish. Show a new QR and try again.';
+      return;
+    }
+    await keep(result);
+  }
+
+  onMount(() => {
+    if (__DEN_TV__) void showTVLink();
+    return () => receiveController.abort();
+  });
+
   async function link() {
     busy = true;
     failure = null;
@@ -71,14 +146,7 @@
       failure = result.error;
       return;
     }
-    const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-    const { host, hostDeviceId, libraryKey, linkKey } = result.handover;
-    links.add(result.inboxKey, {
-      name: host,
-      libraryKey: base64(libraryKey),
-      linkKey: base64(linkKey),
-      deviceId: hostDeviceId,
-    });
+    await keep(result);
   }
 
   // A scanned code starts at once: the next step is on the TV.
@@ -95,11 +163,36 @@
   {#if !embedded}
     <p class="sub">
       {#if __DEN_TV__}
-        On a device with your library, open <b>Settings › Linked devices</b> and enter its code here.
+        Scan this code with your phone’s camera, then confirm which Den this TV should open.
       {:else}
         On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
       {/if}
     </p>
+  {/if}
+  {#if __DEN_TV__}
+    <div class="tv-link" aria-live="polite">
+      {#if receiveQR && receiveCode}
+        <svg
+          class="qr"
+          viewBox="-2 -2 {receiveQR.size + 4} {receiveQR.size + 4}"
+          role="img"
+          aria-label="QR code to link this TV"
+          shape-rendering="crispEdges"
+        >
+          <rect x="-2" y="-2" width={receiveQR.size + 4} height={receiveQR.size + 4} fill="#fff" />
+          <path d={receiveQR.path} fill="#000" />
+        </svg>
+        <b class="shown-code">{formatCode(receiveCode).text}</b>
+        <p class="sub">Any camera app can open it. The code works once, for ten minutes.</p>
+      {:else if receiving}
+        <p class="sub">Making a secure link…</p>
+      {/if}
+      {#if receiveFailure}
+        <p class="error" role="alert">{receiveFailure}</p>
+        <Button variant="primary" label="Show a new QR" onclick={() => void showTVLink()} />
+      {/if}
+    </div>
+    <p class="alternative">Or enter a code from a device that already has your library:</p>
   {/if}
   <form
     onsubmit={(event) => {
@@ -122,7 +215,11 @@
       />
     </div>
     <label class="name">
-      <span>The TV will ask to allow this device as</span>
+      <span
+        >{__DEN_TV__
+          ? 'Your other device will see this TV as'
+          : 'The TV will ask to allow this device as'}</span
+      >
       <input
         value={thisDevice.chosen}
         placeholder={thisDevice.guess}
@@ -182,6 +279,45 @@
   .sub {
     margin: 0 0 24px;
     color: var(--muted);
+  }
+
+  .error {
+    color: var(--danger);
+  }
+
+  .tv-link {
+    display: grid;
+    justify-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .tv-link .sub,
+  .tv-link .error {
+    margin: 0;
+  }
+
+  .qr {
+    width: min(240px, 56vw);
+    padding: 10px;
+    border-radius: 12px;
+    background: #fff;
+  }
+
+  .shown-code {
+    font:
+      700 20px/1.2 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Consolas,
+      monospace;
+    letter-spacing: 0.12em;
+  }
+
+  .alternative {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 14px;
   }
 
   form {
@@ -260,10 +396,6 @@
 
   .name input:focus-visible {
     border-color: var(--accent);
-  }
-
-  .error {
-    color: var(--danger);
   }
 
   .recovery {

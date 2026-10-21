@@ -874,6 +874,7 @@ export type LibraryQuery =
       handoverKey: string;
       host: string;
       linkKey?: string;
+      grantTicket?: string;
     }
   | { kind: 'history.export' }
   | { kind: 'relay.membership' }

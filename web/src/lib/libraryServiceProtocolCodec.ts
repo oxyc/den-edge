@@ -794,10 +794,15 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'pairing.handover')
     return (
-      exact(value, ['kind', 'handoverKey', 'host', 'linkKey']) &&
+      exact(value, ['kind', 'handoverKey', 'host', 'linkKey', 'grantTicket']) &&
       base64url32(value.handoverKey) &&
       boundedText(value.host, 256) &&
-      optional(value.linkKey, base64url32)
+      optional(value.linkKey, base64url32) &&
+      optional(
+        value.grantTicket,
+        (ticket): ticket is string =>
+          text(ticket) && /^[0-9a-f]{8}\.[A-Za-z0-9_-]{22}$/.test(ticket),
+      )
     );
   if (value.kind === 'download.refresh')
     return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);

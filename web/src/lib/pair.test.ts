@@ -317,6 +317,58 @@ describe('hosting a pairing', () => {
   });
 });
 
+describe('TV-initiated pairing', () => {
+  it('lets a scanned phone give its library and guest ticket to the waiting TV', async () => {
+    const fetchImpl = fakeEdge();
+    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
+    const libraryKey = new Uint8Array(32).fill(9);
+    const ticket = '1234abcd.ABCDEFGHJKLMNPQRSTUVWX';
+    let show: (code: string) => void = () => undefined;
+    const shown = new Promise<string>((resolve) => (show = resolve));
+    const receiving = pair.receive({
+      sid: p.sid,
+      secret: p.secret,
+      label: 'Living room TV',
+      deviceId: joinerDeviceId,
+      onCode: show,
+      fetchImpl,
+      wait,
+    });
+    const giving = pair.give(await shown, {
+      label: 'Joni’s phone',
+      deviceId: hostDeviceId,
+      grantTicket: ticket,
+      allow: async (joiner) => joiner === 'Living room TV',
+      seal: async (handoverKey, host, linkKey, grantTicket) => {
+        const rawLinkKey = fromBase64url(linkKey)!;
+        return {
+          sealed: toBase64url(
+            await pair.sealHandover(fromBase64url(handoverKey)!, {
+              host,
+              hostDeviceId,
+              linkKey: rawLinkKey,
+              libraryKey,
+              ...(grantTicket ? { grantTicket } : {}),
+            }),
+          ),
+          linkKey,
+          inboxKey: (await pair.linkKeys(rawLinkKey)).inbox,
+        };
+      },
+      linkKey: fromHex(p.link.linkKey),
+      fetchImpl,
+      wait,
+    });
+    const [received, given] = await Promise.all([receiving, giving]);
+    expect(given).toMatchObject({ joiner: 'Living room TV', inboxKey: p.link.inbox });
+    expect(received).toHaveProperty('handover.host', 'Joni’s phone');
+    expect(received).toHaveProperty('handover.grantTicket', ticket);
+    expect([...(received as { handover: pair.Handover }).handover.libraryKey]).toEqual([
+      ...libraryKey,
+    ]);
+  });
+});
+
 describe('joining through den-edge', () => {
   const options = (fetchImpl: typeof fetch) => ({
     label: p.joinerLabel,

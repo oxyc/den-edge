@@ -21,7 +21,7 @@
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { parsePublicKey } from './preferences';
   import { thisDevice } from '../lib/device.svelte';
-  import type { GrantAddon } from '../lib/grants';
+  import { deviceTicket, type GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
   import {
     hasSharedMediaSettings,
@@ -30,7 +30,15 @@
   } from '../lib/guestConfigure';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
-  import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
+  import {
+    formatCode,
+    give,
+    host,
+    join,
+    parseCode,
+    type HostError,
+    type JoinError,
+  } from '../lib/pair';
   import { acceptsAddonURL } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
   import { routePath } from '../lib/route';
@@ -47,6 +55,7 @@
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { JoinLibrary, JoinLink } from '../lib/browserHousehold';
   import PinInput from '../components/PinInput.svelte';
+  import { parseTVLink } from '../lib/tvLink';
 
   let {
     link,
@@ -105,6 +114,7 @@
       handoverKey: string,
       host: string,
       linkKey: string,
+      grantTicket?: string,
     ) => Promise<{ sealed: string; linkKey: string; inboxKey: string }>;
     /** False when the device's entry wasn't removed. */
     removeDevice: (id: string) => Promise<boolean>;
@@ -457,6 +467,7 @@
   onMount(() => () => {
     leaving.abort();
     answer?.(false);
+    tvAnswer?.(false);
   });
   /**
    * Put `text` on the clipboard. Safari only allows a write that starts inside the tap, so a code that
@@ -544,6 +555,92 @@
     pairNotice =
       'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
     void focusPair('[data-pair-start]');
+  }
+
+  // A TV with no library can show an HTTPS QR that opens this Settings page. Its ordinary pairing code remains in
+  // the fragment, never sent with the page request; read it once and remove it from the address before anything can
+  // copy or bookmark it. A person may type the same twelve characters here when their camera cannot scan the QR.
+  const scannedTV = parseTVLink(location.href);
+  if (scannedTV) history.replaceState(history.state, '', location.pathname + location.search);
+  let tvCode = $state(formatCode(scannedTV ?? '').text);
+  let tvGiving = $state(false);
+  let tvProblem = $state<string | null>(null);
+  let tvNotice = $state<string | null>(null);
+  let tvAsking = $state<string | null>(null);
+  let tvAnswer = $state<((allowed: boolean) => void) | null>(null);
+  let tvGrant = $state('');
+  const liveGuestGrants = $derived(
+    guestGrants.list.filter((grant) => !grant.ended && grant.secret),
+  );
+  $effect(() => {
+    if (!link?.guest) tvGrant = '';
+    else if (!tvGrant && liveGuestGrants.length === 1) tvGrant = liveGuestGrants[0]!.gid;
+  });
+
+  function typedTVCode(event: Event & { currentTarget: HTMLInputElement }) {
+    tvCode = formatCode(event.currentTarget.value).text;
+    event.currentTarget.value = tvCode;
+  }
+
+  async function giveToTV() {
+    if (!link) {
+      tvProblem = 'This library is not synced yet, so another device cannot open it.';
+      return;
+    }
+    if (!parseCode(tvCode)) {
+      tvProblem = 'That isn’t a whole TV code.';
+      return;
+    }
+    const grant = link.guest
+      ? liveGuestGrants.find((candidate) => candidate.gid === tvGrant)
+      : undefined;
+    if (link.guest && !grant) {
+      tvProblem = 'Choose which shared access this TV should use.';
+      return;
+    }
+    tvGiving = true;
+    tvProblem = null;
+    tvNotice = null;
+    let ticket: string | undefined;
+    if (grant) {
+      const made = await deviceTicket(grant.gid, grant.secret);
+      if (!made.ok) {
+        tvGiving = false;
+        tvProblem =
+          made.status === 404 || made.status === 410
+            ? `${grant.name}’s shared access has ended. Refresh or choose another one.`
+            : 'Couldn’t prepare shared access for the TV. Check your connection and try again.';
+        return;
+      }
+      ticket = made.value.ticket;
+    }
+    const result = await give(tvCode, {
+      seal: sealHandover,
+      label: thisDevice.name,
+      deviceId: selfId,
+      grantTicket: ticket,
+      signal: leaving.signal,
+      allow: (joiner) =>
+        new Promise<boolean>((resolve) => {
+          tvAsking = joiner;
+          tvAnswer = (allowed) => {
+            tvAsking = null;
+            tvAnswer = null;
+            resolve(allowed);
+          };
+        }),
+    });
+    tvGiving = false;
+    if ('error' in result) {
+      tvProblem = pairFailures[result.error];
+      return;
+    }
+    links.share(result.joiner, link.libraryKey, {
+      inboxKey: result.inboxKey,
+      linkKey: btoa(String.fromCharCode(...result.linkKey)),
+    });
+    tvCode = '';
+    tvNotice = `${result.joiner} now has ${grant ? `${grant.name}’s shared Den` : 'this Den library'}.`;
   }
 
   // Joining another TV's library: a browser has no library of its own to merge, so it links to that TV as it linked
@@ -1168,6 +1265,57 @@
       <p class="status">None yet: a device shows up here when it next opens your library.</p>
     {/if}
 
+    {#if !__DEN_TV__}
+      <h3>Link a TV</h3>
+      <div class="pair" class:scanned={!!scannedTV}>
+        <p>
+          {scannedTV
+            ? 'This TV is waiting. Confirm what it should receive.'
+            : 'Scan the QR shown by an unlinked TV, or type its code here.'}
+        </p>
+        <input
+          class="field tv-code"
+          value={tvCode}
+          oninput={typedTVCode}
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          maxlength="14"
+          placeholder="ABCD-EFGH-JKLM"
+          aria-label="Code shown on TV"
+          disabled={tvGiving}
+        />
+        {#if link?.guest}
+          <label class="tv-grant">
+            <span>Shared access for this TV</span>
+            <select bind:value={tvGrant} disabled={tvGiving}>
+              <option value="">Choose shared Den…</option>
+              {#each liveGuestGrants as grant (grant.gid)}
+                <option value={grant.gid}>{grant.name} · {grant.gid.slice(-4)}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        <Button
+          variant="primary"
+          label={tvGiving ? 'Linking TV…' : 'Link this TV'}
+          disabled={tvGiving || !parseCode(tvCode) || !link || (!!link.guest && !tvGrant)}
+          onclick={() => void giveToTV()}
+        />
+        {#if tvAsking}
+          <div class="tv-confirm" role="alertdialog" aria-label="Allow this TV?">
+            <p><b>Link “{tvAsking}”?</b> It will receive this library and its watchlist.</p>
+            <span class="actions">
+              <Button variant="primary" label="Allow TV" onclick={() => tvAnswer?.(true)} />
+              <Button variant="secondary" label="Don’t allow" onclick={() => tvAnswer?.(false)} />
+            </span>
+          </div>
+        {/if}
+        {#if tvNotice}<p class="status" role="status">{tvNotice}</p>{/if}
+        {#if tvProblem}<p class="status bad" role="alert">{tvProblem}</p>{/if}
+      </div>
+    {/if}
+
     <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
     {#if link}
       <h3>Link another device</h3>
@@ -1418,6 +1566,48 @@
 
   .pair p b {
     color: var(--fg);
+  }
+
+  .pair.scanned {
+    outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+
+  .tv-code {
+    flex: 1 1 210px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .tv-grant {
+    display: grid;
+    flex: 1 1 220px;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .tv-grant select {
+    min-height: 44px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    color: var(--fg);
+  }
+
+  .tv-confirm {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .tv-confirm .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .code {

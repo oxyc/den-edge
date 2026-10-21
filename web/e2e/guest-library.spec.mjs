@@ -97,6 +97,21 @@ test('accepting an invite starts the guest’s library with the watchlist alread
   });
 });
 
+test('a TV camera link opens the exact shared-grant confirmation without keeping its code in the URL', async () => {
+  const edge = newEdge({ devices: 2 });
+  await browserOf(edge, async (_browser, open) => {
+    const phone = await laptopAcceptingAnInvite(open, edge);
+    await phone.goto(`${E2E_ORIGIN}/settings#tv=ABCD-EFGH-JKLM`);
+    await phone.getByRole('button', { name: /Linked devices/ }).click();
+    const devices = phone.getByRole('region', { name: 'Linked devices' });
+    await expect(devices.getByText('This TV is waiting.')).toBeVisible();
+    await expect(devices.getByLabel('Code shown on TV')).toHaveValue('ABCD-EFGH-JKLM');
+    await expect(devices.getByLabel('Shared access for this TV')).toHaveValue(GID);
+    await expect(devices.getByRole('button', { name: 'Link this TV' })).toBeEnabled();
+    await expect(phone).toHaveURL(`${E2E_ORIGIN}/settings`);
+  });
+});
+
 test('on a profile host an invite starts the guest’s own profile household', async () => {
   const edge = newEdge({ profiles: true });
   await browserOf(edge, async (_browser, open) => {
