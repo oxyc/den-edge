@@ -23,7 +23,8 @@ test('built TV page and Worker keep a real library when later runtime APIs are a
   const workers = [];
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('worker', (worker) => workers.push(worker.url()));
-  await routeGuestEdge(page, newEdge());
+  const edge = newEdge();
+  await routeGuestEdge(page, edge);
   await page.addInitScript(olderAPIs);
   await page.route('**/assets/*Worker-*.js', async (route) => {
     const response = await route.fetch();
@@ -39,9 +40,13 @@ test('built TV page and Worker keep a real library when later runtime APIs are a
   await save.click();
   await expect(save).toHaveAttribute('aria-pressed', 'true');
   // Saving probes whether a local library can become a household. Finish that
-  // real request before destroying its document; WebKit reports unload-time
-  // fetches as access-control page errors even when the response is same-origin.
+  // real request and the onboarding QR's aborted pairing cleanup before destroying
+  // this document. WebKit reports unfinished unload-time fetches as access-control
+  // page errors even when the response is same-origin.
   await saveCapability;
+  await expect
+    .poll(() => edge.pairs.size > 0 && [...edge.pairs.values()].every((pair) => pair.ended))
+    .toBe(true);
   await page.reload();
   await expect(save).toHaveAttribute('aria-pressed', 'true', { timeout: 30_000 });
   await page.getByRole('link', { name: 'Watchlist', exact: true }).click();
