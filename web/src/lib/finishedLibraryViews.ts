@@ -1,4 +1,4 @@
-import { noteLibraryCacheIO } from './libraryStartupMetrics';
+import { noteFinishedViewsRewrite, noteLibraryCacheIO } from './libraryStartupMetrics';
 import {
   libraryLocalMaterials,
   openLibraryLocalValue,
@@ -68,6 +68,8 @@ interface FinishedLibraryViewManifest {
   identity: FinishedLibraryViewIdentity;
   revision: string;
   capabilities: FinishedLibraryViewCapability[];
+  /** SHA-256 of the identity and pieces it names: a write of the same views again is skipped. Absent before it. */
+  digest?: string;
 }
 
 const validIdentity = (value: unknown): value is FinishedLibraryViewIdentity => {
@@ -168,9 +170,45 @@ const validManifest = (value: unknown): value is FinishedLibraryViewManifest => 
     /^[0-9a-f]{32}$/.test(held.revision) &&
     Array.isArray(held.capabilities) &&
     held.capabilities.every((capability) => CAPABILITIES.includes(capability)) &&
-    new Set(held.capabilities).size === held.capabilities.length
+    new Set(held.capabilities).size === held.capabilities.length &&
+    (held.digest === undefined || /^[0-9a-f]{64}$/.test(held.digest))
   );
 };
+
+/**
+ * What the views say, and of which library state. Not `layoutVersion`: a counter of the layouts a page learnt, which
+ * every visit moves again from zero, while the layouts the views were drawn with are in `continue.layouts` already.
+ */
+const viewsDigest = async (value: FinishedLibraryViews): Promise<string> => {
+  const { layoutVersion: _layoutVersion, ...identity } = value.identity;
+  return [
+    ...new Uint8Array(
+      await crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(JSON.stringify([identity, value.pieces])),
+      ),
+    ),
+  ]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+};
+
+/** The kept manifest, when it opens and is this library's; null otherwise. */
+async function keptManifest(
+  local: NonNullable<Awaited<ReturnType<typeof libraryLocalMaterials>>>,
+  vault: Vault,
+): Promise<FinishedLibraryViewManifest | null> {
+  const bytes = await vault.get(storedKey(local.libraryId));
+  if (!bytes) return null;
+  try {
+    const manifest = await openLibraryLocalValue(local.key, NAME, bytes);
+    return validManifest(manifest) && manifest.identity.libraryId === local.libraryId
+      ? manifest
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 const revision = (): string =>
   [...crypto.getRandomValues(new Uint8Array(16))]
@@ -236,8 +274,27 @@ export async function writeFinishedLibraryViews(
 ): Promise<boolean> {
   const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
-  const nextRevision = revision();
   const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
+  // A returning visit that opened the whole log recomputes the views it already keeps: nothing to write then.
+  const digest = await viewsDigest(value);
+  const kept = await keptManifest(local, vault);
+  if (
+    kept?.digest === digest &&
+    kept.capabilities.length === capabilities.length &&
+    capabilities.every((capability) => kept.capabilities.includes(capability))
+  )
+    return true;
+  if (!kept) noteFinishedViewsRewrite('write:none kept');
+  else {
+    const changed = (
+      Object.keys(value.identity) as Array<keyof FinishedLibraryViewIdentity>
+    ).filter(
+      (field) => JSON.stringify(kept.identity[field]) !== JSON.stringify(value.identity[field]),
+    );
+    const pieces = capabilities.length !== kept.capabilities.length ? ['capabilities'] : [];
+    noteFinishedViewsRewrite(`write:${[...changed, ...pieces].join(',') || 'pieces'}`);
+  }
+  const nextRevision = revision();
   for (const capability of capabilities) {
     const aad = `${NAME}:${nextRevision}:${capability}`;
     const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
@@ -249,6 +306,7 @@ export async function writeFinishedLibraryViews(
     identity: value.identity,
     revision: nextRevision,
     capabilities,
+    digest,
   };
   const bytes = await sealLibraryLocalValue(local.key, NAME, manifest);
   await vault.put(storedKey(local.libraryId), bytes);
