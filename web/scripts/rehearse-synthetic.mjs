@@ -6,8 +6,11 @@ const DEVICE = 'aaaaaaaaaaaaaaaa';
 const OTHER = 'bbbbbbbbbbbbbbbb';
 const DAY = 86_400_000;
 
-/** `rows(now)`: library rows (wire.ts `Row`s) with every stamp a few days to a few months before `now`. */
-export function syntheticRows(now = Date.now(), { legacy = false, large = false } = {}) {
+/**
+ * `rows(now)`: library rows (wire.ts `Row`s) with every stamp a few days to a few months before `now`. `scale`
+ * multiplies the long history `large` adds.
+ */
+export function syntheticRows(now = Date.now(), { legacy = false, large = false, scale = 1 } = {}) {
   const at = (daysAgo, device = DEVICE) => [now - daysAgo * DAY, 0, device];
   const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
   const text = (value, when) => ({ value: { string: value }, at: when });
@@ -55,7 +58,7 @@ export function syntheticRows(now = Date.now(), { legacy = false, large = false 
     }
   });
 
-  if (large) rows.push(...longHistory(now, at, films, series));
+  if (large) rows.push(...longHistory(now, at, films, series, scale));
 
   // A tracker account's receipts for one film, as a delivery document.
   rows.push({
@@ -156,13 +159,13 @@ export function syntheticRows(now = Date.now(), { legacy = false, large = false 
 
 /**
  * Years of use on top of the rows above, at the size a long-lived household reaches: about 1,900 titles, 1,170
- * seasons and 3,050 tracker receipts (two accounts), some 6,100 rows in all. Ids start above the common ones the
- * small household uses, so nothing collides.
+ * seasons and 3,050 tracker receipts (two accounts), some 6,100 rows in all; `scale` times as many. Ids start above
+ * the common ones the small household uses, so nothing collides.
  */
-function longHistory(now, at, films, series) {
+function longHistory(now, at, films, series, scale) {
   const rows = [];
-  const filmIds = Array.from({ length: 1_500 }, (_, i) => 100_000 + i);
-  const seriesIds = Array.from({ length: 375 }, (_, i) => 200_000 + i);
+  const filmIds = Array.from({ length: 1_500 * scale }, (_, i) => 100_000 + i);
+  const seriesIds = Array.from({ length: 375 * scale }, (_, i) => 200_000 + i);
   filmIds.forEach((id, i) => {
     const watchlist = i % 9 === 0;
     rows.push({
@@ -227,6 +230,8 @@ function longHistory(now, at, films, series) {
     if (!(title.type === 'movie' && title.id === 603))
       rows.push(receipt('42', title, 8 + (i % 400)));
   });
-  titles.slice(0, 1_163).forEach((title, i) => rows.push(receipt('7', title, 5 + (i % 300))));
+  titles
+    .slice(0, 1_163 * scale)
+    .forEach((title, i) => rows.push(receipt('7', title, 5 + (i % 300))));
   return rows;
 }

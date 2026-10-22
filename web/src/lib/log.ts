@@ -83,6 +83,7 @@ import {
   type WatchRow,
 } from './wire';
 import { trackerEvent } from './trackerEvents';
+import { episodeRow, titleRow } from './titleView';
 import { ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
@@ -3804,10 +3805,7 @@ export class LibraryLog {
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
-    const document = this.document(`title:${ref.type}:${ref.id}`);
-    if (document) return projectDocument(document)[0] as TitleRow;
-    const row = this.entries.get(`rec:${ref.type}:${ref.id}`)?.row;
-    return row?.kind === 'rec' ? row : undefined;
+    return titleRow((name) => this.entries.get(name)?.row, ref);
   }
 
   episode(
@@ -3815,37 +3813,7 @@ export class LibraryLog {
     season: number,
     episode: number,
   ): EpisodeRow | undefined {
-    const document = ref.type === 'tv' && this.document(`season:tv:${ref.id}:${season}`);
-    if (document)
-      return projectEpisode(this.document(`title:tv:${ref.id}`), document, ref, season, episode);
-    const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
-    if (row?.kind === 'ep') return row;
-    if (ref.type !== 'tv') return undefined;
-    const block = Math.floor(episode / 32);
-    const watch = this.entries.get(`wat:tv:${ref.id}:${season}:${block}`)?.row;
-    if (watch?.kind !== 'wat') return undefined;
-    const register = watch.entries[String(episode)];
-    if (!register) return undefined;
-    const title = this.title(ref);
-    const resets = [watch.seasonReset, title?.episodesReset].filter(
-      (value): value is Stamp => value !== null && value !== undefined,
-    );
-    const state = syncPolicy<{
-      watched: boolean;
-      resume: EpisodeRow['progress'] | null;
-      viewing: number;
-      watched_at: number | null;
-    }>({ op: 'episode_state', register, resets, now: Date.now() });
-    const at: Stamp =
-      state.resume?.at ?? (state.watched_at ? [state.watched_at, 0, ''] : ZERO_STAMP);
-    return {
-      kind: 'ep',
-      schema: 2,
-      title: { type: 'tv', id: ref.id },
-      season,
-      episode,
-      progress: state.resume ?? { value: state.watched ? 1 : 0, viewing: state.viewing, at },
-    };
+    return episodeRow((name) => this.entries.get(name)?.row, ref, season, episode);
   }
 
   private v3EpisodeWrite(row: EpisodeRow): WatchRow | null {

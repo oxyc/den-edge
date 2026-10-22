@@ -34,11 +34,17 @@ export const WATCHED_SERIES = 200_000;
 /** Its last season, downloading: two episodes have a release, the rest are still searched for. */
 const SEASON_DOWNLOAD = { season: 4, episodes: 10, released: 2 };
 
+/**
+ * How many times the long history the household holds: `BIG_LIBRARY_SCALE=3` makes one of about 9,200 documents, to
+ * check that what a screen or a tap does stays the same as the library grows.
+ */
+export const BIG_LIBRARY_SCALE = Number(process.env.BIG_LIBRARY_SCALE ?? 1);
+
 /** What the fixture holds, for assertions and for budgets that scale with it. */
 export const BIG_LIBRARY = {
-  films: 1_510,
-  series: 380,
-  watching: 30,
+  films: 1_500 * BIG_LIBRARY_SCALE + 10,
+  series: 375 * BIG_LIBRARY_SCALE + 5,
+  watching: 25 * BIG_LIBRARY_SCALE + 5,
   downloads: 6 + SEASON_DOWNLOAD.episodes,
 };
 
@@ -46,7 +52,7 @@ const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
 const text = (value, at) => ({ value: { string: value }, at });
 
 export function bigLibraryRows(now = fixtureNow()) {
-  const rows = syntheticRows(now, { large: true });
+  const rows = syntheticRows(now, { large: true, scale: BIG_LIBRARY_SCALE });
   const at = [now - DAY, 0, 'aaaaaaaaaaaaaaaa'];
   // Five more downloads beside the synthetic household's one: films queued over the last days.
   for (let i = 1; i <= 5; i += 1) {
@@ -607,16 +613,16 @@ export async function bigHousehold(context, edge, options = {}) {
     });
     step('accepted');
     // The move is done once den-edge holds a library with the whole history in it: as Library v4 documents, one per
-    // title and one per season, about 3,070 of them.
+    // title and one per season, about 3,070 of them at scale 1.
     await expect
       .poll(
         () => Math.max(0, ...[...edge.libraries.values()].map((library) => library.rows.size)),
         {
-          timeout: 180_000,
+          timeout: 180_000 * BIG_LIBRARY_SCALE,
           message: 'the Owner library holds the seeded rows',
         },
       )
-      .toBeGreaterThan(3_000);
+      .toBeGreaterThan(3_000 * BIG_LIBRARY_SCALE);
     step('moved');
     // A first visit to Home and to the Watchlist (which names the whole history) fills this browser's TMDB cache, so
     // every later load is a returning visit's.

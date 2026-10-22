@@ -19,16 +19,20 @@ import { readEncryptedLibraryValue, writeEncryptedLibraryValue } from './library
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import type {
+  AssistantConnection,
   LibraryCommand,
   LibraryObservation,
   LibraryQueryResult,
   LibrarySelection,
   LibrarySelectionValue,
   LibraryServiceHello,
+  TitleRef,
+  TitleView,
 } from './libraryServiceProtocol';
 import {
   LibraryServiceAuthorityError,
   type LibraryAuthorityEvent,
+  type LibrarySelectionScope,
   type LibraryServiceAuthority,
 } from './libraryServiceCore';
 import {
@@ -39,6 +43,14 @@ import {
 } from './libraryStartupMetrics';
 import { isRetainedServices } from './libraryServiceProtocolCodec';
 import { ensureSyncPolicy } from './syncLoader';
+import {
+  ASSISTANT_RECORDS,
+  DROPBOX_ROW,
+  dropboxKey,
+  publicationDueAt,
+  type AssistantRecords,
+} from './libraryAssistantAuthority';
+import { ensureAssistantPolicy } from './assistantCore';
 import { syncPolicy } from './syncCore';
 import { startupMark } from './startupTiming';
 import {
@@ -54,13 +66,15 @@ import {
   libraryMetadataShapeDigest,
   libraryMetadataTitle,
 } from './libraryMetadata';
-import { ContinueProjector, type Shape } from './library';
+import { ContinueProjector, titleKey, type Shape } from './library';
 import type { HomeLibraryView } from './homeLibraryView';
+import { episodeRow, episodeRowNames, titleCoordinates, titleRow, titleView } from './titleView';
 import {
   believe,
   deriveKeys,
   openEntry,
   rowKey,
+  wellFormed,
   type LibraryKeys,
   type Row,
   type SettingsRow,
@@ -168,6 +182,17 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   readonly #factProjector = new ContinueProjector();
   readonly #factShapes = new Map<string, Shape>();
   #factHome?: HomeLibraryView;
+  /** Series shapes the page observed, by title: a title's view needs its episodes, and a promotion is told them. */
+  readonly #titleShapes = new Map<
+    string,
+    {
+      shape: Shape;
+      digest: string;
+      observation: Extract<LibraryObservation, { kind: 'title-shape' }>;
+    }
+  >();
+  /** Titles whose view was read from the fact store: told of a change another device made. */
+  readonly #titlesServed = new Map<string, TitleRef>();
   #preferFacts: boolean;
   /** The import is still reading the history behind a first page (`importNewestFirst`). */
   #filling = false;
@@ -185,6 +210,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     private readonly factStore: LibraryFactStore | null = null,
     preferFacts = false,
     filling?: ImportedFacts['filling'],
+    /**
+     * The fact store whenever it holds this generation whole, at the views' head or past it: a title's view reads only
+     * its own documents (`#titleFromFacts`), so a store that moved on since the views were saved is only more current.
+     */
+    private readonly documents: LibraryFactStore | null = factStore,
   ) {
     this.#preferFacts = preferFacts;
     if (filling) {
@@ -241,7 +271,56 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         return (await this.#promote('cache:devices')).select(selection);
       return structuredClone(pieces.devices!);
     }
+    if (selection.kind === 'title') {
+      const view = await this.#titleFromFacts(selection.title);
+      if (view) return view;
+    }
     return (await this.#promote(`selection:${selection.kind}`)).select(selection);
+  }
+
+  /**
+   * A title's view from its own rows in the fact store, as the full log builds it (`titleView`, `titleRow`,
+   * `episodeRow`): the rows those may read for the title and each episode of the shape the page observed, read by key —
+   * a few dozen, not the whole library. Null when the store is not this library's whole copy, or holds one of them
+   * only as den-edge's sealed value, which the full log opens.
+   */
+  async #titleFromFacts(ref: TitleRef): Promise<TitleView | null> {
+    const documents = this.documents;
+    if (!documents) return null;
+    try {
+      const generation = this.cached.identity.generation;
+      const manifest = await documents.manifest();
+      if (!manifest?.complete || manifest.generation !== generation) return null;
+      const shape = this.#titleShapes.get(titleKey(ref))?.shape;
+      const names = new Set([
+        `title:${ref.type}:${ref.id}`,
+        `rec:${ref.type}:${ref.id}`,
+        ...titleCoordinates(ref, shape).flatMap(({ season, episode }) =>
+          episodeRowNames(ref, season, episode),
+        ),
+      ]);
+      const rows = new Map<string, Row>();
+      for (const name of names) {
+        const stored = await documents.document(generation, await rowKey(this.keys, name));
+        if (!stored) continue;
+        if (!stored.row || !wellFormed(stored.row)) return null;
+        rows.set(name, stored.row);
+      }
+      // Projecting a document, and an episode's watch register, is den-core's.
+      if (rows.size) await ensureSyncPolicy();
+      const get = (name: string) => rows.get(name);
+      const view = titleView(
+        ref,
+        titleRow(get, ref),
+        (season, episode) => episodeRow(get, ref, season, episode),
+        shape,
+      );
+      this.#titlesServed.set(titleKey(ref), { type: ref.type, id: ref.id });
+      return view;
+    } catch (error) {
+      console.warn('den: a title could not be read from library facts', error);
+      return null;
+    }
   }
 
   command: LibraryServiceAuthority['command'] = async (command, operationId) => {
@@ -334,8 +413,66 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (!this.#full && query.kind === 'library.metadata') return this.#metadata(query.titles);
     return (await this.#promote(`query:${query.kind}`)).query(query);
   };
-  task: LibraryServiceAuthority['task'] = async (task, operationId) =>
-    (await this.#promote(`task:${task.kind}`)).task(task, operationId);
+  task: LibraryServiceAuthority['task'] = async (task, operationId) => {
+    // Deciding what to publish reads the whole library; until this device's publication is due, nothing is.
+    if (task.kind === 'assistant.publish' && !this.#full && (await this.#publicationCurrent()))
+      return { result: { kind: 'assistant.publish', published: 0 }, affected: [] };
+    // A drain that found nothing has nothing to apply: the drop-box key is all it needs, from its one row.
+    if (task.kind === 'assistant.apply' && !task.messages.length && !this.#full) {
+      const row = await this.#dropboxRow(task.connection ?? null);
+      if (row !== undefined) {
+        await ensureAssistantPolicy();
+        return {
+          result: { kind: 'assistant.apply', results: [], ack: null, dropbox: dropboxKey(row) },
+          affected: [],
+        };
+      }
+    }
+    return (await this.#promote(`task:${task.kind}`)).task(task, operationId);
+  };
+
+  /**
+   * The assistant's drop-box row (`DROPBOX_ROW`) as the library log reads it: a split household's from its connection,
+   * else this library's, by key from the fact store. Undefined when the store cannot say.
+   */
+  async #dropboxRow(lent: AssistantConnection | null): Promise<SettingsRow | null | undefined> {
+    if (lent)
+      return (lent.rows.find((row) => row.name === DROPBOX_ROW) as SettingsRow | undefined) ?? null;
+    const documents = this.documents;
+    if (!documents) return undefined;
+    try {
+      const generation = this.cached.identity.generation;
+      const manifest = await documents.manifest();
+      if (!manifest?.complete || manifest.generation !== generation) return undefined;
+      const stored = await documents.document(
+        generation,
+        await rowKey(this.keys, `set:${DROPBOX_ROW}`),
+      );
+      if (!stored) return null;
+      return stored.row?.kind === 'set' ? stored.row : undefined;
+    } catch (error) {
+      console.warn('den: the assistant drop-box row could not be read from library facts', error);
+      return undefined;
+    }
+  }
+
+  /** Whether this device's last assistant publication still stands (`publicationDueAt`). */
+  async #publicationCurrent(): Promise<boolean> {
+    const dueAt = publicationDueAt(
+      await readEncryptedLibraryValue<AssistantRecords>(
+        this.request.libraryKey,
+        this.vault,
+        ASSISTANT_RECORDS,
+      ),
+    );
+    if (dueAt === null || Date.now() >= dueAt) return false;
+    // Said once a page, as the library log says it (`LibraryAssistantAuthority.publish`).
+    if (!this.#saidCurrent) console.info('den: assistant projection up to date');
+    this.#saidCurrent = true;
+    return true;
+  }
+
+  #saidCurrent = false;
 
   async observe(observation: LibraryObservation) {
     if (this.#full) return this.#full.observe(observation);
@@ -348,6 +485,27 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (observation.kind === 'foreground-ready') {
       this.#foregroundReady = true;
       return { outcome: 'unchanged' as const, affected: [] };
+    }
+    if (observation.kind === 'title-shape' && this.documents) {
+      const counts = new Map<number, number>();
+      for (const { season, episodes } of observation.seasons) {
+        if (season < 0 || episodes < 0 || counts.has(season))
+          return (await this.#promote(`observation:${observation.kind}`)).observe(observation);
+        counts.set(season, episodes);
+      }
+      const digest = libraryMetadataShapeDigest(observation);
+      const key = titleKey(observation.title);
+      if (this.#titleShapes.get(key)?.digest === digest)
+        return { outcome: 'unchanged' as const, affected: [] };
+      this.#titleShapes.set(key, {
+        shape: { counts, ...(observation.lastAired ? { lastAired: observation.lastAired } : {}) },
+        digest,
+        observation: structuredClone(observation),
+      });
+      return {
+        outcome: 'applied' as const,
+        affected: [{ kind: 'title' as const, title: observation.title }],
+      };
     }
     return (await this.#promote(`observation:${observation.kind}`)).observe(observation);
   }
@@ -651,13 +809,18 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (loaded.length && !(await this.#loadFactCapabilities([...loaded]))) return false;
     this.#emit({
       kind: 'changed',
-      affected: loaded.map((capability) =>
-        capability === 'continue'
-          ? { kind: 'continue' as const }
-          : capability === 'settings' || capability === 'runtime' || capability === 'devices'
-            ? { kind: capability }
-            : { kind: 'overview' as const },
-      ),
+      affected: [
+        ...loaded.map((capability) =>
+          capability === 'continue'
+            ? { kind: 'continue' as const }
+            : capability === 'settings' || capability === 'runtime' || capability === 'devices'
+              ? { kind: capability }
+              : { kind: 'overview' as const },
+        ),
+        ...(changed
+          ? [...this.#titlesServed.values()].map((title) => ({ kind: 'title' as const, title }))
+          : []),
+      ],
     });
     return true;
   }
@@ -708,6 +871,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     // Cached metadata normally comes from ContentAuthority's own local values. If it needs a provider credential,
     // promote once so the ordinary authority can bind the encrypted keys held in the library log.
     if (contentNotConfigured) void this.#promote('content:not-configured').catch(() => undefined);
+    // The shape of a series whose page this authority serves (`#titleFromFacts`) is observed, as the full log observes
+    // it, so the page counts its episodes. Only those: every title Home names would otherwise reach the log with it.
+    if (this.documents) {
+      const affected: LibrarySelectionScope[] = [];
+      for (const { shape } of found)
+        if (shape && this.#titlesServed.has(titleKey(shape.title)))
+          affected.push(...(await this.observe({ kind: 'title-shape', ...shape })).affected);
+      if (affected.length) this.#emit({ kind: 'changed', affected });
+    }
 
     const cached = this.cached.pieces.continue!;
     const needs = new Set(cached.view.needsShapes.map((ref) => `${ref.type}:${ref.id}`));
@@ -894,6 +1066,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#stopFull = authority.listen?.((event) => this.#emit(event));
       if (this.#lifecycle) await authority.observe(this.#lifecycle);
       if (this.#foregroundReady) await authority.observe({ kind: 'foreground-ready' });
+      for (const { observation } of this.#titleShapes.values())
+        await authority.observe(observation);
       this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
       return authority;
     });
@@ -1339,6 +1513,7 @@ export async function openFinishedLibraryViewAuthority(
           : null,
         !classic,
         filling,
+        factsReady && factManifest!.generation === selected.identity.generation ? factStore! : null,
       ),
       membership,
     };

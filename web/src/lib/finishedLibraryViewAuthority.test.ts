@@ -13,7 +13,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
+import { deriveKeys, seal, type Row, type SettingsRow, type Stamp, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -579,6 +579,247 @@ it('applies one changed document to capability facts without opening unrelated d
   } finally {
     vi.useRealTimers();
   }
+});
+
+/** A series in the fact store as Library v4 documents: its title, and season 1 with episodes 1–2 watched, 3 half. */
+async function seriesFacts(vault: FactVault) {
+  const keys = await deriveKeys(raw);
+  const at: [number, number, string] = [Date.now() - 86_400_000, 0, 'device'];
+  const episode = (value: number) => ({
+    progress: { value, at, viewing: 0 },
+    imported: false,
+    plays: { 0: at[0] },
+    cleared: null,
+  });
+  const rows = [
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id: 55 },
+      status: { value: 'inProgress', at },
+      addedAt: at[0],
+    },
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 55 },
+      season: 1,
+      seasonReset: null,
+      episodes: { 1: episode(1), 2: episode(1), 3: episode(0.5) },
+    },
+  ] as unknown as Parameters<typeof seal>[1][];
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+}
+
+const seriesShape = {
+  kind: 'title-shape' as const,
+  title: { type: 'tv' as const, id: 55 },
+  seasons: [{ season: 1, episodes: 3 }],
+};
+
+it('reads a title’s view from its own documents, as the full log builds it, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(opened!.authority.observe(seriesShape)).resolves.toEqual({
+    outcome: 'applied',
+    affected: [{ kind: 'title', title: { type: 'tv', id: 55 } }],
+  });
+  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
+  expect(view).toMatchObject({
+    kind: 'title',
+    listed: true,
+    watched: false,
+    standing: 'in-progress',
+    episodes: [
+      { season: 1, episode: 1, watched: true, fraction: 1 },
+      { season: 1, episode: 2, watched: true, fraction: 1 },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts a served series’ episodes once naming finds its shape, and keeps other shapes from the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const shaped = (id: number) => ({
+    kind: 'found' as const,
+    value: {
+      title: { type: 'tv' as const, id, title: `Series ${id}` },
+      shape: { counts: new Map([[1, 3]]) },
+    },
+  });
+  const named = { title: vi.fn(async (ref: { id: number }) => shaped(ref.id)) };
+  const full = fullAuthority();
+  const observe = vi.spyOn(full, 'observe');
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, named, vi.fn());
+  const changed: unknown[] = [];
+  opened!.authority.listen!((event) => changed.push(event));
+  const series = { type: 'tv' as const, id: 55 };
+
+  // The page is open before its shape is known: no episodes yet.
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [],
+  });
+  // Naming finds the shape of the series on screen, and of another only named.
+  await opened!.authority.query({
+    kind: 'library.metadata',
+    titles: [series, { type: 'tv', id: 56 }],
+  });
+  expect(changed).toContainEqual({ kind: 'changed', affected: [{ kind: 'title', title: series }] });
+  expect(JSON.stringify(changed)).not.toContain('"id":56');
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  // A write opens the log: it is told the served series' shape, not the one only named.
+  await opened!.authority.command(
+    { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+    'operation',
+  );
+  expect(observe.mock.calls.map(([observation]) => observation)).toEqual([
+    expect.objectContaining({ kind: 'title-shape', title: series }),
+  ]);
+  expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('tells the log the shapes it was given when a write opens it', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const full = fullAuthority();
+  const observe = vi.spyOn(full, 'observe');
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await opened!.authority.observe(seriesShape);
+  await opened!.authority.command(
+    { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+    'operation',
+  );
+  expect(openFull).toHaveBeenCalledOnce();
+  expect(observe).toHaveBeenCalledWith(seriesShape);
+});
+
+it.each([
+  ['not yet due, publishes nothing without opening the log', 60_000, 0],
+  ['due, opens the log to decide', -1, 1],
+])('an assistant publication %s', async (_, dueIn, opens) => {
+  const vault = new MemoryVault();
+  await cached(vault);
+  await writeEncryptedLibraryValue(libraryKey, vault, 'assistant.records.v1', {
+    revoked: [],
+    applied: {},
+    renewedAt: 0,
+    dropped: [],
+    publication: { key: 'built-from', dueAt: Date.now() + dueIn, sent: {}, layouts: {} },
+  });
+  const full = fullAuthority();
+  vi.spyOn(full, 'task').mockResolvedValue({
+    result: { kind: 'assistant.publish', published: 0 },
+    affected: [],
+  });
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task({ kind: 'assistant.publish' }, 'publish'),
+  ).resolves.toMatchObject({ result: { kind: 'assistant.publish', published: 0 } });
+  expect(openFull).toHaveBeenCalledTimes(opens);
+});
+
+it('answers a drain that found nothing from the drop-box row, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task({ kind: 'assistant.apply', messages: [] }, 'drain'),
+  ).resolves.toEqual({
+    result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
+    affected: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+/** Rows of an earlier format, held in the fact store as den-edge gave them. */
+async function earlierFacts(vault: Vault, rows: readonly Row[]): Promise<void> {
+  const keys = await deriveKeys(raw);
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row as Parameters<typeof seal>[1]);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+}
+
+it('reads a title held in an earlier format as the full log does, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await earlierFacts(vault, [factTitle('watched', 10)]);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.select({ kind: 'title', title: { type: 'movie', id: 77 } }),
+  ).resolves.toMatchObject({ kind: 'title', listed: true, watched: true, standing: 'watched' });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts episodes a series holds only in an earlier watch block as watched', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const register = (value: number) => ({
+    imported: false,
+    progress: { value, at: [2000, 0, 'device'] as Stamp, viewing: 0 },
+    plays: value >= 1 ? { 0: 2000 } : {},
+    cleared: null,
+  });
+  // Season 1 watched before v4: a `wat:` block of watch marks and no season document.
+  await earlierFacts(vault, [
+    {
+      kind: 'wat',
+      schema: 3,
+      title: { type: 'tv', id: 55 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: { 1: register(1), 2: register(1), 3: register(0.5) },
+    } as Row,
+  ]);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await opened!.authority.observe(seriesShape);
+  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
+  expect(view).toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  expect(openFull).not.toHaveBeenCalled();
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {
