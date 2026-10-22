@@ -10,7 +10,12 @@
 import { test, expect, chromium, devices } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
-import { bigHousehold, routeBigHousehold, settleProjection } from './big-library.mjs';
+import {
+  WATCHED_SERIES,
+  bigHousehold,
+  routeBigHousehold,
+  settleProjection,
+} from './big-library.mjs';
 
 /** KB of the library kept here that an edit, or the visit after one, may write. About 1.6 KB for one add. */
 const LIBRARY_KB = 64;
@@ -94,6 +99,33 @@ async function edit({ page, row, written }, action, done) {
   return { action, shownMs, ...(await written()) };
 }
 
+/**
+ * Season 3 episode 1 of the watched series (seasons 1–2 are watched) marked watched from its card's menu: the ms until
+ * the season list counts it, and the KB of the library it wrote.
+ */
+async function markEpisode({ page, written }) {
+  await page.goto(`${E2E_ORIGIN}/tv/${WATCHED_SERIES}`);
+  const episodes = page.getByRole('region', { name: 'Episodes' });
+  await expect(episodes.getByText('20 of 40 watched')).toBeVisible({ timeout: 30_000 });
+  await episodes.getByRole('combobox', { name: 'Season' }).selectOption({ index: 2 });
+  const season = episodes.getByRole('tabpanel', { name: 'Season 3' });
+  await expect(season).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(3_000);
+  await written();
+  await season.getByRole('link', { name: /^Play episode 1:/ }).hover({ timeout: 10_000 });
+  await season
+    .getByRole('button', { name: 'Options for episode 1', exact: true })
+    .click({ timeout: 10_000 });
+  const item = page.getByRole('menuitem', { name: 'Mark watched' });
+  await expect(item).toBeVisible();
+  const started = Date.now();
+  await item.click();
+  await expect(episodes.getByText('21 of 40 watched')).toBeVisible({ timeout: 30_000 });
+  const shownMs = Date.now() - started;
+  await page.waitForTimeout(3_000);
+  return { action: 'Mark episode watched', shownMs, ...(await written()) };
+}
+
 test('an edit to a big household writes only what it changed', async () => {
   test.setTimeout(600_000);
   const browser = await chromium.launch({
@@ -110,6 +142,8 @@ test('an edit to a big household writes only what it changed', async () => {
     const edits = [
       await edit(visit, 'Add to watchlist', 'to your watchlist'),
       await edit(visit, 'Remove from watchlist', 'from your watchlist'),
+      await edit(visit, 'Mark as seen', 'as seen'),
+      await markEpisode(visit),
     ];
     await visit.page.close();
     const after = await home(context, edge);
