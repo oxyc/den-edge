@@ -66,7 +66,7 @@
 
   let connectionsLease = $state.raw(untrack(() => model.connections()));
   const simklLease = untrack(() => model.simkl());
-  const recoveryLease = untrack(() => model.recovery());
+  const recoveryLease = untrack(() => (__DEN_TV_LEGACY_JS_CORE__ ? undefined : model.recovery()));
   onDestroy(() => {
     connectionsLease?.release();
     simklLease?.release();
@@ -437,11 +437,13 @@
         {sealHandover}
         {selfId}
       />
-      <AssistantsSection
-        connectionFetch={assistantConnectionFetch}
-        revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
-        listGrants={link && !local ? () => model.assistantGrants() : undefined}
-      />
+      {#if !__DEN_TV_LEGACY_JS_CORE__}
+        <AssistantsSection
+          connectionFetch={assistantConnectionFetch}
+          revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
+          listGrants={link && !local ? () => model.assistantGrants() : undefined}
+        />
+      {/if}
       <ImportSection
         {ready}
         {content}
