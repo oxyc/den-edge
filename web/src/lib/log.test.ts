@@ -1393,6 +1393,17 @@ describe('LibraryLog', () => {
     expect(read.rows()).toHaveLength(2);
   });
 
+  it('leaves a library kept only here (no generation) as it is when its key is opened on den-edge', async () => {
+    const { data, vault } = await keptWhole((log) => ({
+      head: 0,
+      entries: log.rows().map((held) => [rowName(held), 0, held]),
+    }));
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+
+    await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault);
+    expect([...data.keys()].filter((key) => key.endsWith(':log.v1'))).toHaveLength(1);
+  });
+
   it('keeps its own write for the next visit once den-edge has echoed it', async () => {
     const { vault } = memoryVault();
     const server = await edge([row(1)]);

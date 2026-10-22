@@ -3662,13 +3662,14 @@ export class LibraryLog {
     const local = this.local;
     if (!local) return;
     const saved = (await this.kept<Snapshot>(SNAPSHOT_V4)) ?? (await this.kept<Snapshot>(SNAPSHOT));
-    if (!saved) return;
+    // A copy with no generation is no copy of den-edge's: it is a library kept only here (`openLocal`), never removed.
+    if (!saved?.generation) return;
     const store = this.factStore;
     try {
       const generation = saved.generation;
       if (!store) return;
       await store.clear();
-      if (!generation || saved.profileDirectory || saved.kidTitleApprovals?.length) return;
+      if (saved.profileDirectory || saved.kidTitleApprovals?.length) return;
       const rows = saved.entries.filter(([, , row]) => wellFormed(row));
       const batchSize = 64;
       for (let offset = 0; offset === 0 || offset < rows.length; offset += batchSize) {
