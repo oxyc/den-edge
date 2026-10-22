@@ -572,6 +572,12 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   });
 
   metadata.requests.length = 0;
+  // Each Worker generation's library supervisor says when it is up. A Worker that dies before then is a crash in
+  // startup, which the supervisor deliberately restarts only once; the generations here die after coming up.
+  let supervisorsReady = 0;
+  page.on('console', (message) => {
+    if (message.text().includes('supervisor ready')) supervisorsReady += 1;
+  });
   await page.goto(`${FIXTURE}?routed&online&roundtrip-detail`);
   let active = page.locator('[data-route-page][data-active="true"]');
   await expect(active.getByRole('heading', { name: 'Movie 1001' })).toBeVisible({
@@ -593,6 +599,9 @@ test('a large paired Home reopens its direct detail from Continue Watching while
   for (let generation = 0; generation < 4; generation += 1) {
     await expect
       .poll(() => wideDetail, { message: `wide detail reached generation ${generation + 1}` })
+      .toBe(generation + 1);
+    await expect
+      .poll(() => supervisorsReady, { message: `generation ${generation + 1} came up` })
       .toBe(generation + 1);
     await page.evaluate(() => window.fixtureFailCurrentWorker());
     wideDetails[generation].finish();
