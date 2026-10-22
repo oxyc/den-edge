@@ -578,12 +578,11 @@
   let transitionNoticeId = 0;
   let transitionNotice = $state<string | null>(null);
   /**
-   * A replacement reuses the same `<video>`. Its `autoplay` attribute started the element when it was first mounted,
-   * but browsers need not run autoplay again after hls.js swaps the MediaSource. Remember that the outgoing stream
-   * was actually playing and explicitly resume only that replacement; a viewer who switched while paused stays
-   * paused.
+   * Later sessions reuse the same `<video>`. Its one-shot `autoplay` starts the first, but browsers need not run it
+   * again after hls.js swaps the MediaSource. Explicitly start a next episode; for an in-place replacement, remember
+   * whether the outgoing stream was actually playing so a viewer who switched while paused stays paused.
    */
-  let resumeReplacement: Session | null = null;
+  let playWhenMounted: Session | null = null;
 
   function showTransition(label: string): number {
     transitionNotice = label;
@@ -1183,6 +1182,10 @@
     )
       result = { ...result, castOrigin: directCastOrigin };
     const replacingWasPlaying = replacing ? !!video && !video.paused : false;
+    // After the first play `playing()` retires the one-shot autoplay flag. A new episode can reuse this component
+    // and element without being a `replacing` session, so it too needs an explicit start. A true replacement follows
+    // the outgoing element's actual state, preserving a deliberate pause.
+    const shouldPlayWhenMounted = replacing ? replacingWasPlaying : video?.autoplay === false;
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
       watcher?.stop();
@@ -1220,7 +1223,7 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     session = result;
-    resumeReplacement = replacingWasPlaying ? session : null;
+    playWhenMounted = shouldPlayWhenMounted ? session : null;
     directAttempt = result.external
       ? delivery === 'ordinary' || delivery === 'direct'
         ? 'initial'
@@ -1557,8 +1560,8 @@
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
     const resumeIfReplaced = () => {
-      if (resumeReplacement !== current) return;
-      resumeReplacement = null;
+      if (playWhenMounted !== current) return;
+      playWhenMounted = null;
       // A held start has its own readiness boundary and resumes there.
       if (hold || !element.paused) return;
       void element
@@ -2765,6 +2768,13 @@
   }
 
   function playing() {
+    // Autoplay is only the initial-start request. Some TV engines reconsider a persistent autoplay flag after a
+    // later readiness/buffering transition and can undo a deliberate pause. Once playback has begun, every future
+    // start is either a viewer action or an explicitly state-preserving source replacement.
+    if (video?.autoplay) {
+      video.autoplay = false;
+      video.removeAttribute('autoplay');
+    }
     if (customTransport) tvPaused = false;
     if (tv) setTvPlaybackActive(true);
     scheduleWebControls();
