@@ -32,6 +32,7 @@ import type {
 import {
   LibraryServiceAuthorityError,
   type LibraryAuthorityEvent,
+  type LibrarySelectionScope,
   type LibraryServiceAuthority,
 } from './libraryServiceCore';
 import {
@@ -67,19 +68,16 @@ import {
 } from './libraryMetadata';
 import { ContinueProjector, titleKey, type Shape } from './library';
 import type { HomeLibraryView } from './homeLibraryView';
-import { projectDocument, projectEpisode } from './libraryV4';
-import { titleCoordinates, titleView } from './titleView';
+import { episodeRow, episodeRowNames, titleCoordinates, titleRow, titleView } from './titleView';
 import {
   believe,
   deriveKeys,
-  isDocument,
   openEntry,
   rowKey,
-  type DocumentRow,
+  wellFormed,
   type LibraryKeys,
   type Row,
   type SettingsRow,
-  type TitleRow,
 } from './wire';
 import {
   selectedDevicesView,
@@ -281,9 +279,10 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   }
 
   /**
-   * A title's view from its own documents in the fact store (`title:…`, and a series' `season:…` documents for the
-   * shape the page observed), as the full log builds it (`titleView`): a few documents, not the whole library. Null
-   * when the store is not this library's whole copy, or holds a row only the full log reads (an earlier format).
+   * A title's view from its own rows in the fact store, as the full log builds it (`titleView`, `titleRow`,
+   * `episodeRow`): the rows those may read for the title and each episode of the shape the page observed, read by key —
+   * a few dozen, not the whole library. Null when the store is not this library's whole copy, or holds one of them
+   * only as den-edge's sealed value, which the full log opens.
    */
   async #titleFromFacts(ref: TitleRef): Promise<TitleView | null> {
     const documents = this.documents;
@@ -292,34 +291,28 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       const generation = this.cached.identity.generation;
       const manifest = await documents.manifest();
       if (!manifest?.complete || manifest.generation !== generation) return null;
-      const read = async (name: string): Promise<DocumentRow | null | undefined> => {
-        const stored = await documents.document(generation, await rowKey(this.keys, name));
-        if (!stored) return undefined;
-        return stored.row && isDocument(stored.row) ? stored.row : null;
-      };
-      const title = await read(`title:${ref.type}:${ref.id}`);
-      if (title === null) return null;
-      if (
-        !title &&
-        (await documents.document(generation, await rowKey(this.keys, `rec:${ref.type}:${ref.id}`)))
-      )
-        return null;
       const shape = this.#titleShapes.get(titleKey(ref))?.shape;
-      const seasons = new Map<number, DocumentRow>();
-      for (const season of new Set(titleCoordinates(ref, shape).map(({ season }) => season))) {
-        const held = await read(`season:tv:${ref.id}:${season}`);
-        if (held === null) return null;
-        if (held) seasons.set(season, held);
+      const names = new Set([
+        `title:${ref.type}:${ref.id}`,
+        `rec:${ref.type}:${ref.id}`,
+        ...titleCoordinates(ref, shape).flatMap(({ season, episode }) =>
+          episodeRowNames(ref, season, episode),
+        ),
+      ]);
+      const rows = new Map<string, Row>();
+      for (const name of names) {
+        const stored = await documents.document(generation, await rowKey(this.keys, name));
+        if (!stored) continue;
+        if (!stored.row || !wellFormed(stored.row)) return null;
+        rows.set(name, stored.row);
       }
-      // Projecting a document is den-core's (`projectDocument`, `projectEpisode`).
-      if (title || seasons.size) await ensureSyncPolicy();
+      // Projecting a document, and an episode's watch register, is den-core's.
+      if (rows.size) await ensureSyncPolicy();
+      const get = (name: string) => rows.get(name);
       const view = titleView(
         ref,
-        title ? (projectDocument(title)[0] as TitleRow) : undefined,
-        (season, episode) => {
-          const held = seasons.get(season);
-          return held ? projectEpisode(title, held, ref, season, episode) : undefined;
-        },
+        titleRow(get, ref),
+        (season, episode) => episodeRow(get, ref, season, episode),
         shape,
       );
       this.#titlesServed.set(titleKey(ref), { type: ref.type, id: ref.id });
@@ -878,6 +871,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     // Cached metadata normally comes from ContentAuthority's own local values. If it needs a provider credential,
     // promote once so the ordinary authority can bind the encrypted keys held in the library log.
     if (contentNotConfigured) void this.#promote('content:not-configured').catch(() => undefined);
+    // The shape of a series whose page this authority serves (`#titleFromFacts`) is observed, as the full log observes
+    // it, so the page counts its episodes. Only those: every title Home names would otherwise reach the log with it.
+    if (this.documents) {
+      const affected: LibrarySelectionScope[] = [];
+      for (const { shape } of found)
+        if (shape && this.#titlesServed.has(titleKey(shape.title)))
+          affected.push(...(await this.observe({ kind: 'title-shape', ...shape })).affected);
+      if (affected.length) this.#emit({ kind: 'changed', affected });
+    }
 
     const cached = this.cached.pieces.continue!;
     const needs = new Set(cached.view.needsShapes.map((ref) => `${ref.type}:${ref.id}`));

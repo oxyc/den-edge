@@ -13,7 +13,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
+import { deriveKeys, seal, type Row, type SettingsRow, type Stamp, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -650,6 +650,55 @@ it('reads a title’s view from its own documents, as the full log builds it, wi
   expect(openFull).not.toHaveBeenCalled();
 });
 
+it('counts a served series’ episodes once naming finds its shape, and keeps other shapes from the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const shaped = (id: number) => ({
+    kind: 'found' as const,
+    value: {
+      title: { type: 'tv' as const, id, title: `Series ${id}` },
+      shape: { counts: new Map([[1, 3]]) },
+    },
+  });
+  const named = { title: vi.fn(async (ref: { id: number }) => shaped(ref.id)) };
+  const full = fullAuthority();
+  const observe = vi.spyOn(full, 'observe');
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, named, vi.fn());
+  const changed: unknown[] = [];
+  opened!.authority.listen!((event) => changed.push(event));
+  const series = { type: 'tv' as const, id: 55 };
+
+  // The page is open before its shape is known: no episodes yet.
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [],
+  });
+  // Naming finds the shape of the series on screen, and of another only named.
+  await opened!.authority.query({
+    kind: 'library.metadata',
+    titles: [series, { type: 'tv', id: 56 }],
+  });
+  expect(changed).toContainEqual({ kind: 'changed', affected: [{ kind: 'title', title: series }] });
+  expect(JSON.stringify(changed)).not.toContain('"id":56');
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  // A write opens the log: it is told the served series' shape, not the one only named.
+  await opened!.authority.command(
+    { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+    'operation',
+  );
+  expect(observe.mock.calls.map(([observation]) => observation)).toEqual([
+    expect.objectContaining({ kind: 'title-shape', title: series }),
+  ]);
+  expect(openFull).toHaveBeenCalledOnce();
+});
+
 it('tells the log the shapes it was given when a write opens it', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
@@ -711,35 +760,66 @@ it('answers a drain that found nothing from the drop-box row, without opening th
   expect(openFull).not.toHaveBeenCalled();
 });
 
-it('opens the log for a title held in an earlier format', async () => {
+/** Rows of an earlier format, held in the fact store as den-edge gave them. */
+async function earlierFacts(vault: Vault, rows: readonly Row[]): Promise<void> {
+  const keys = await deriveKeys(raw);
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row as Parameters<typeof seal>[1]);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+}
+
+it('reads a title held in an earlier format as the full log does, without opening the log', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
-  const keys = await deriveKeys(raw);
-  const row = factTitle('watched', 10);
-  const sealed = await seal(keys, row);
-  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
-  await facts.commitBatch(
-    'generation-a',
-    12,
-    [{ k: sealed.k, seq: 12, value: sealed.v, row }],
-    true,
-  );
-  const full = fullAuthority();
-  vi.spyOn(full, 'select').mockResolvedValue({
-    kind: 'title',
-    title: { type: 'movie', id: 77 },
-    listed: true,
-    watched: true,
-    reaction: null,
-    standing: 'watched',
-    progress: null,
-    episodes: [],
-  });
-  const openFull = vi.fn(async () => full);
+  await earlierFacts(vault, [factTitle('watched', 10)]);
+  const openFull = vi.fn(async () => fullAuthority());
   const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
 
-  await opened!.authority.select({ kind: 'title', title: { type: 'movie', id: 77 } });
-  expect(openFull).toHaveBeenCalledOnce();
+  await expect(
+    opened!.authority.select({ kind: 'title', title: { type: 'movie', id: 77 } }),
+  ).resolves.toMatchObject({ kind: 'title', listed: true, watched: true, standing: 'watched' });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts episodes a series holds only in an earlier watch block as watched', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const register = (value: number) => ({
+    imported: false,
+    progress: { value, at: [2000, 0, 'device'] as Stamp, viewing: 0 },
+    plays: value >= 1 ? { 0: 2000 } : {},
+    cleared: null,
+  });
+  // Season 1 watched before v4: a `wat:` block of watch marks and no season document.
+  await earlierFacts(vault, [
+    {
+      kind: 'wat',
+      schema: 3,
+      title: { type: 'tv', id: 55 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: { 1: register(1), 2: register(1), 3: register(0.5) },
+    } as Row,
+  ]);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await opened!.authority.observe(seriesShape);
+  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
+  expect(view).toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  expect(openFull).not.toHaveBeenCalled();
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {

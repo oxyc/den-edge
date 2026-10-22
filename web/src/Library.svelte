@@ -320,10 +320,17 @@
     };
   });
   // Watched history is the whole library's, which the library Worker reads in full: it is asked for once the Watchlist's
-  // own view has arrived, so the screen never waits on it (an old TV spends seconds on that read), and kept asked for.
+  // billboard has painted its first details (`watchlistLead`, below), which come from the same Worker, or there is no
+  // billboard, so the screen never waits on it (an old TV spends seconds on that read). Then kept asked for.
   let historyAsked = $state(false);
   $effect(() => {
-    if (route.page === 'watchlist' && overview) historyAsked = true;
+    if (route.page !== 'watchlist' || !overview || historyAsked) return;
+    if (!watchlistLead && !(watchlistNamed && !untrack(() => savedTitles.length))) return;
+    // The frame that draws them, then the next: asked for only once they are on screen.
+    let frame = requestAnimationFrame(
+      () => (frame = requestAnimationFrame(() => (historyAsked = true))),
+    );
+    return () => cancelAnimationFrame(frame);
   });
   $effect(() => {
     if (!model || route.page !== 'watchlist' || !historyAsked) return;
