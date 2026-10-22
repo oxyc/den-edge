@@ -68,9 +68,10 @@ function testTier(tizenVersion, wasmCspSource) {
     if (!config.includes(required)) throw new Error(`Tizen config validation failed: ${required}`);
   if (/script-src[^;]*'unsafe-inline'/.test(config))
     throw new Error('Inline JavaScript CSP source present in Tizen config');
-  if (tizenVersion === '3.0' && !/style-src[^;]*'unsafe-inline'/.test(config))
+  // The `style-src` directive itself: every tier's `style-src-attr` already permits inline attributes.
+  if (tizenVersion === '3.0' && !/style-src\s[^;]*'unsafe-inline'/.test(config))
     throw new Error('Tizen 3 config must permit Svelte legacy component styles');
-  if (tizenVersion !== '3.0' && /style-src[^;]*'unsafe-inline'/.test(config))
+  if (tizenVersion !== '3.0' && /style-src\s[^;]*'unsafe-inline'/.test(config))
     throw new Error('Supported Tizen tiers unnecessarily permit inline element styles');
   if (tizenVersion === '8.0' && /script-src[^;]*'unsafe-eval'/.test(config))
     throw new Error('Modern Tizen config unnecessarily permits JavaScript eval');

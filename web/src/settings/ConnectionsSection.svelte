@@ -4,7 +4,7 @@
      server on its own network — says where to do it. -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
   import DetailIcon from '../components/DetailIcon.svelte';
@@ -257,6 +257,8 @@
   let configuringOwner = $state(false);
   let resettingGuest = $state<string | null>(null);
   let configureGuestProblem = $state<string | null>(null);
+  /** Device rows whose Remove is asking: its question then takes the row's full width (`.device-action.confirm`). */
+  const askingRemove = new SvelteSet<string>();
   let pluginMenus = $state.raw<Record<string, ActionMenu | undefined>>({});
   let guestMenus = $state.raw<Record<string, ActionMenu | undefined>>({});
   let pluginConfirm = $state<{ kind: 'remove' | 'unverify'; url: string } | null>(null);
@@ -1264,12 +1266,16 @@
             <div
               class="device-action"
               class:self={row.device?.id === selfId}
-              class:confirm={row.device?.id !== selfId}
+              class:confirm={askingRemove.has(row.id)}
             >
               {#if row.device?.id === selfId}
                 <span class="device-self">This device</span>
               {:else}
                 <Confirm
+                  bind:asking={
+                    () => askingRemove.has(row.id),
+                    (asking) => (asking ? askingRemove.add(row.id) : askingRemove.delete(row.id))
+                  }
                   label="Remove"
                   ariaLabel="Remove {row.name}"
                   question="Remove {row.name} from this list?"
