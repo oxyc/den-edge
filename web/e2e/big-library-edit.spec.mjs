@@ -94,6 +94,40 @@ async function home(context, edge) {
   return { page, row, written };
 }
 
+/**
+ * Time, inside the page, from the next click to `done` entering the page: the app's own latency. Timed from here,
+ * an edit counted this test's polling too, which scans the whole page at 4× CPU and made a slow runner read 1.2 s for
+ * an edit the page showed in 0.3 s.
+ */
+async function armTiming(page, done, where = '[role="status"]') {
+  await page.evaluate(
+    ([done, where]) => {
+      const timing = (globalThis.__editTiming = { clicked: null, shown: null });
+      addEventListener('pointerup', () => (timing.clicked ??= performance.now()), {
+        capture: true,
+        once: true,
+      });
+      // Only the element that says it is read, so the timing adds no work of its own.
+      const observer = new MutationObserver(() => {
+        if (timing.clicked === null) return;
+        if (![...document.querySelectorAll(where)].some((at) => at.textContent.includes(done)))
+          return;
+        timing.shown = performance.now();
+        observer.disconnect();
+      });
+      observer.observe(document, { subtree: true, childList: true, characterData: true });
+    },
+    [done, where],
+  );
+}
+
+/** The ms `armTiming` measured, once the page has said it. */
+async function timed(page) {
+  const { clicked, shown } = await page.evaluate(() => globalThis.__editTiming);
+  expect(shown, 'the page said the edit was done after the click').not.toBeNull();
+  return Math.round(shown - clicked);
+}
+
 /** `action` from Film 300000's menu: the ms until the page says `done`, and the KB of the library it wrote. */
 async function edit({ page, row, written }, action, done) {
   await written();
@@ -103,10 +137,11 @@ async function edit({ page, row, written }, action, done) {
     .getByRole('menu', { name: 'Actions for Film 300000' })
     .getByRole('menuitemcheckbox', { name: action });
   await expect(item).toBeVisible();
-  const started = Date.now();
+  await armTiming(page, done);
   await item.click();
-  await expect(page.getByText(done, { exact: false }).first()).toBeVisible({ timeout: 30_000 });
-  const shownMs = Date.now() - started;
+  // The confirmation itself: the menu's own label ("Mark as seen") says `done` too.
+  await expect(page.getByRole('status').filter({ hasText: done })).toBeVisible({ timeout: 30_000 });
+  const shownMs = await timed(page);
   await page.waitForTimeout(3_000);
   return { action, shownMs, ...(await written()) };
 }
@@ -130,10 +165,10 @@ async function markEpisode({ page, written }) {
     .click({ timeout: 10_000 });
   const item = page.getByRole('menuitem', { name: 'Mark watched' });
   await expect(item).toBeVisible();
-  const started = Date.now();
+  await armTiming(page, '21 of 40 watched', 'section[aria-label="Episodes"]');
   await item.click();
   await expect(episodes.getByText('21 of 40 watched')).toBeVisible({ timeout: 30_000 });
-  const shownMs = Date.now() - started;
+  const shownMs = await timed(page);
   await page.waitForTimeout(3_000);
   return { action: 'Mark episode watched', shownMs, ...(await written()) };
 }
