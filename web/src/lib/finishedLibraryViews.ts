@@ -63,13 +63,17 @@ const storedKey = (libraryId: string) => `${libraryId}:${NAME}`;
 const pieceKey = (libraryId: string, revision: string, capability: FinishedLibraryViewCapability) =>
   `${storedKey(libraryId)}:${revision}:${capability}`;
 
+/** Where each piece is kept (`revision`) and the SHA-256 of what it says: a piece that says the same is kept as is. */
+type KeptPieces = Partial<
+  Record<FinishedLibraryViewCapability, { revision: string; digest: string }>
+>;
+
 interface FinishedLibraryViewManifest {
   schema: typeof FINISHED_LIBRARY_VIEWS_SCHEMA;
   identity: FinishedLibraryViewIdentity;
-  revision: string;
-  capabilities: FinishedLibraryViewCapability[];
-  /** SHA-256 of the identity and pieces it names: a write of the same views again is skipped. Absent before it. */
-  digest?: string;
+  pieces: KeptPieces;
+  /** Of a revision the library has moved past (`staleFinishedLibraryViews`): never opened, its pieces kept. */
+  stale?: true;
 }
 
 const validIdentity = (value: unknown): value is FinishedLibraryViewIdentity => {
@@ -166,32 +170,38 @@ const validManifest = (value: unknown): value is FinishedLibraryViewManifest => 
   return (
     held.schema === FINISHED_LIBRARY_VIEWS_SCHEMA &&
     validIdentity(held.identity) &&
-    typeof held.revision === 'string' &&
-    /^[0-9a-f]{32}$/.test(held.revision) &&
-    Array.isArray(held.capabilities) &&
-    held.capabilities.every((capability) => CAPABILITIES.includes(capability)) &&
-    new Set(held.capabilities).size === held.capabilities.length &&
-    (held.digest === undefined || /^[0-9a-f]{64}$/.test(held.digest))
+    (held.stale === undefined || held.stale === true) &&
+    !!held.pieces &&
+    typeof held.pieces === 'object' &&
+    !Array.isArray(held.pieces) &&
+    Object.entries(held.pieces).every(
+      ([capability, piece]) =>
+        CAPABILITIES.includes(capability as FinishedLibraryViewCapability) &&
+        typeof piece?.revision === 'string' &&
+        /^[0-9a-f]{32}$/.test(piece.revision) &&
+        typeof piece.digest === 'string' &&
+        /^[0-9a-f]{64}$/.test(piece.digest),
+    )
   );
 };
 
-/**
- * What the views say, and of which library state. Not `layoutVersion`: a counter of the layouts a page learnt, which
- * every visit moves again from zero, while the layouts the views were drawn with are in `continue.layouts` already.
- */
-const viewsDigest = async (value: FinishedLibraryViews): Promise<string> => {
-  const { layoutVersion: _layoutVersion, ...identity } = value.identity;
-  return [
+const pieceDigest = async (piece: unknown): Promise<string> =>
+  [
     ...new Uint8Array(
-      await crypto.subtle.digest(
-        'SHA-256',
-        new TextEncoder().encode(JSON.stringify([identity, value.pieces])),
-      ),
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(piece))),
     ),
   ]
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
-};
+
+/**
+ * The same library state. Not `layoutVersion`: a counter of the layouts a page learnt, which every visit moves again
+ * from zero, while the layouts the views were drawn with are in `continue.layouts` already.
+ */
+const sameState = (left: FinishedLibraryViewIdentity, right: FinishedLibraryViewIdentity) =>
+  (Object.keys(left) as Array<keyof FinishedLibraryViewIdentity>).every(
+    (field) => field === 'layoutVersion' || left[field] === right[field],
+  );
 
 /** The kept manifest, when it opens and is this library's; null otherwise. */
 async function keptManifest(
@@ -228,12 +238,18 @@ export async function readFinishedLibraryViews(
   noteLibraryCacheIO('read', manifestBytes.byteLength);
   try {
     const manifest = await openLibraryLocalValue(local.key, NAME, manifestBytes);
-    if (!validManifest(manifest) || manifest.identity.libraryId !== local.libraryId) return null;
-    if (capabilities.some((capability) => !manifest.capabilities.includes(capability))) return null;
+    if (
+      !validManifest(manifest) ||
+      manifest.stale ||
+      manifest.identity.libraryId !== local.libraryId
+    )
+      return null;
+    if (capabilities.some((capability) => !manifest.pieces[capability])) return null;
     const pieces: Partial<FinishedLibraryViewPieces> = {};
     for (const capability of capabilities) {
-      const aad = `${NAME}:${manifest.revision}:${capability}`;
-      const bytes = await vault.get(pieceKey(local.libraryId, manifest.revision, capability));
+      const { revision } = manifest.pieces[capability]!;
+      const aad = `${NAME}:${revision}:${capability}`;
+      const bytes = await vault.get(pieceKey(local.libraryId, revision, capability));
       if (!bytes) return null;
       noteLibraryCacheIO('read', bytes.byteLength);
       const piece = await openLibraryLocalValue(local.key, aad, bytes);
@@ -251,22 +267,24 @@ export async function readFinishedLibraryViews(
 }
 
 /**
- * Make every finished view unusable before a new authority revision is assembled. Removing the shared prefix also
- * collects immutable pieces left by an interrupted replacement.
+ * Make the kept views unusable before a new revision is assembled, without removing their pieces: the next write
+ * names each one that still says the same again instead of writing it.
  */
-export async function removeFinishedLibraryViews(
-  libraryKey: string,
-  vault: Vault,
-): Promise<boolean> {
+export async function staleFinishedLibraryViews(libraryKey: string, vault: Vault): Promise<void> {
   const local = await libraryLocalMaterials(libraryKey);
-  if (!local) return false;
-  const manifest = storedKey(local.libraryId);
-  await vault.delete(manifest);
-  await vault.remove(`${manifest}:`);
-  return true;
+  if (!local) return;
+  const kept = await keptManifest(local, vault);
+  if (!kept || kept.stale) return;
+  noteFinishedViewsRewrite('stale');
+  const bytes = await sealLibraryLocalValue(local.key, NAME, { ...kept, stale: true });
+  await vault.put(storedKey(local.libraryId), bytes);
+  noteLibraryCacheIO('write', bytes.byteLength);
 }
 
-/** Write immutable pieces first and publish their manifest last, so interruption preserves the previous complete set. */
+/**
+ * Write the pieces that say something the kept ones do not, each under a new revision, and publish their manifest
+ * last, so interruption preserves the previous complete set. A piece that says the same is named again where it is.
+ */
 export async function writeFinishedLibraryViews(
   libraryKey: string,
   vault: Vault,
@@ -275,27 +293,33 @@ export async function writeFinishedLibraryViews(
   const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
   const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
-  // A returning visit that opened the whole log recomputes the views it already keeps: nothing to write then.
-  const digest = await viewsDigest(value);
   const kept = await keptManifest(local, vault);
+  const nextRevision = revision();
+  const pieces: KeptPieces = {};
+  const changed: FinishedLibraryViewCapability[] = [];
+  for (const capability of capabilities) {
+    const digest = await pieceDigest(value.pieces[capability]);
+    const held = kept?.pieces[capability];
+    if (held?.digest === digest) pieces[capability] = held;
+    else {
+      pieces[capability] = { revision: nextRevision, digest };
+      changed.push(capability);
+    }
+  }
+  const dropped = Object.keys(kept?.pieces ?? {}).filter(
+    (capability) => !capabilities.includes(capability as FinishedLibraryViewCapability),
+  );
+  // A returning visit that opened the whole log recomputes the views it already keeps: nothing to write then.
   if (
-    kept?.digest === digest &&
-    kept.capabilities.length === capabilities.length &&
-    capabilities.every((capability) => kept.capabilities.includes(capability))
+    kept &&
+    !kept.stale &&
+    !changed.length &&
+    !dropped.length &&
+    sameState(kept.identity, value.identity)
   )
     return true;
-  if (!kept) noteFinishedViewsRewrite('write:none kept');
-  else {
-    const changed = (
-      Object.keys(value.identity) as Array<keyof FinishedLibraryViewIdentity>
-    ).filter(
-      (field) => JSON.stringify(kept.identity[field]) !== JSON.stringify(value.identity[field]),
-    );
-    const pieces = capabilities.length !== kept.capabilities.length ? ['capabilities'] : [];
-    noteFinishedViewsRewrite(`write:${[...changed, ...pieces].join(',') || 'pieces'}`);
-  }
-  const nextRevision = revision();
-  for (const capability of capabilities) {
+  noteFinishedViewsRewrite(kept ? `write:${changed.join(',') || 'identity'}` : 'write:none kept');
+  for (const capability of changed) {
     const aad = `${NAME}:${nextRevision}:${capability}`;
     const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
     await vault.put(pieceKey(local.libraryId, nextRevision, capability), bytes);
@@ -304,15 +328,17 @@ export async function writeFinishedLibraryViews(
   const manifest: FinishedLibraryViewManifest = {
     schema: value.schema,
     identity: value.identity,
-    revision: nextRevision,
-    capabilities,
-    digest,
+    pieces,
   };
   const bytes = await sealLibraryLocalValue(local.key, NAME, manifest);
   await vault.put(storedKey(local.libraryId), bytes);
   noteLibraryCacheIO('write', bytes.byteLength);
+  if (!changed.length && !dropped.length) return true;
+  // What the manifest no longer names: the pieces replaced, and any an interrupted write left behind.
   const active = new Set(
-    capabilities.map((capability) => pieceKey(local.libraryId, nextRevision, capability)),
+    Object.entries(pieces).map(([capability, { revision }]) =>
+      pieceKey(local.libraryId, revision, capability as FinishedLibraryViewCapability),
+    ),
   );
   const storedPieces = await vault.entries(`${storedKey(local.libraryId)}:`);
   await Promise.allSettled(
