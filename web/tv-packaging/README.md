@@ -82,20 +82,12 @@ and includes TV-only standard-library fallbacks. CI verifies all package variant
 remains unqualified until it is tested on a real TV. The same per-version policy is embedded in packaged HTML so
 production package E2E exercises it rather than testing a more permissive page.
 
-An additional **experimental, unpublished** Tizen 3 build tier prepares the application as SystemJS rather than
-native modules and targets Chromium 47 without changing the browser bundle or the supported Samsung widgets. CI
-builds and validates its manifest, CSP, post-minify legacy Worker syntax, classic Workers, Samsung bridge, relative
-assets, and absence of module scripts. It is deliberately not added to `tv-samsung-publish` until all of these
-release gates are closed:
-
-- replace the library and assistant Wasm cores (tracked separately) and retain both lazy core assets;
-- remove or transform native `BigInt` from pairing/crypto and provide a Proxy-free Svelte state path;
-- provide Chromium 47 browser primitives, notably `AbortController`, `URLSearchParams`, `IntersectionObserver`, and
-  `ResizeObserver`, in both the page and Workers;
-- produce a Tizen 3 CSS tier without unsupported custom properties or Grid, with fallbacks for flex gaps,
-  `min()`/`max()`/`clamp()`, and newer selectors used by the TV UI; and
-- qualify pairing, persistence, remote navigation, AVPlay, codecs, suspend/resume, memory, and startup performance on
-  a 2017 TV or its matching emulator.
+An additional **experimental** Tizen 3 build tier prepares the application as SystemJS rather than native modules
+and targets Chromium 47 without changing the browser bundle or the supported Samsung widgets. CI builds and validates
+its manifest, CSP, post-minify legacy Worker syntax, classic Workers, Samsung bridge, relative assets, and absence of
+module scripts. `tv-samsung-publish` attaches it to each release as `den-tv-tizen3-experimental.wgt`, never as the
+default `den-tv-tizen.wgt`, so it can be qualified on real hardware (#728): pairing, persistence, remote navigation,
+AVPlay, codecs, suspend/resume, memory, and startup performance on a 2017 TV.
 
 To inspect the unsigned shell locally:
 
