@@ -252,6 +252,9 @@ pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
     pub head: u64,
     pub more: bool,
+    /// The library's live rows, where the read reports them (newest first): what a client's progress through the
+    /// history is counted against, as sequence numbers are not once older rows have been replaced.
+    pub rows: Option<u64>,
 }
 
 /// One transaction's complete current-row authority. Profile migration uses this instead of paging `/changes`:
@@ -1006,7 +1009,7 @@ impl LibraryStore for RedbLibrary {
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        Ok(RangePage { entries, head, more })
+        Ok(RangePage { entries, head, more, rows: None })
     }
 
     fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError> {
@@ -1019,6 +1022,11 @@ impl LibraryStore for RedbLibrary {
                 .map_err(StoreError::redb)?
                 .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
             value.value()
+        };
+        // Kept in the table's header, as the write path's live-row count is: no scan.
+        let live_rows = {
+            let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
+            keys.len().map_err(StoreError::redb)?
         };
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let mut rows = sequence.range(..before).map_err(StoreError::redb)?.rev();
@@ -1039,7 +1047,7 @@ impl LibraryStore for RedbLibrary {
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        Ok(RangePage { entries, head, more })
+        Ok(RangePage { entries, head, more, rows: Some(live_rows) })
     }
 
     fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
@@ -1069,7 +1077,7 @@ impl LibraryStore for RedbLibrary {
             entries.push(self.row(sequence_number, fragment.value()));
         }
         entries.sort_by_key(|row| row.sequence);
-        Ok(RangePage { entries, head, more: false })
+        Ok(RangePage { entries, head, more: false, rows: None })
     }
 
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {

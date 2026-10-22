@@ -2073,8 +2073,13 @@ async fn changes(
         Err(reason) => return internal("library read task", io::Error::other(reason)),
     };
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
+    // A newest-first read also says how many rows the library holds, so a client counts its progress in rows.
+    let extra = match page.rows {
+        Some(rows) => format!(r#"{marker},"rows":{rows}"#),
+        None => marker.to_owned(),
+    };
 
-    let mut body = changes_body(&entries, page.head, page.more, &generation, marker);
+    let mut body = changes_body(&entries, page.head, page.more, &generation, &extra);
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
             let job = state.metrics.compression_started();
@@ -3522,6 +3527,22 @@ mod tests {
         assert_eq!((page["entries"].as_array().unwrap().len(), page["more"].clone()), (2, json!(true)));
         let (_, rest) = changes(&h, TOKEN, "?since=2&limit=10").await;
         assert_eq!((rest["entries"].as_array().unwrap().len(), rest["more"].clone()), (3, json!(false)));
+    }
+
+    #[tokio::test]
+    async fn changes_newest_first_count_live_rows_not_sequence_numbers() {
+        let h = Harness::new();
+        let writes: Vec<Value> =
+            (0..5).map(|i| json!({ "k": format!("{i:016x}"), "base": 0, "v": "v" })).collect();
+        batch(&h, TOKEN, json!(writes)).await;
+        // Two rows replaced: the history's head moves on, the library still holds five.
+        let rewrites: Vec<Value> =
+            (0..2).map(|i| json!({ "k": format!("{i:016x}"), "base": i + 1, "v": "w" })).collect();
+        batch(&h, TOKEN, json!(rewrites)).await;
+        let (_, page) = changes(&h, TOKEN, &format!("?before={}&limit=2", u64::MAX)).await;
+        assert_eq!((page["head"].clone(), page["rows"].clone()), (json!(7), json!(5)));
+        let (_, plain) = changes(&h, TOKEN, "?since=0&limit=1").await;
+        assert!(plain.get("rows").is_none(), "only a newest-first read counts the rows");
     }
 
     #[tokio::test]

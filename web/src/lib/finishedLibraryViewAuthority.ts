@@ -1110,6 +1110,8 @@ interface ChangesPage {
   entries: Array<{ k: string; seq: number; v: string }>;
   order?: unknown;
   selected?: unknown;
+  /** The library's live rows, which a newer den-edge reports with a newest-first page. */
+  rows?: unknown;
 }
 
 type FactEntry = Parameters<LibraryFactStore['commitBatch']>[2][number];
@@ -1313,7 +1315,13 @@ async function importNewestFirst(
   // Every row at or below `top` is read by this import; anything written since is what later reads catch up with.
   const top = manifest?.head ?? first.head;
   let profileTopology = manifest?.profileTopology ?? false;
-  const reached = () => progress?.(Math.min(1, Math.max(0, 1 - (floor - 1) / Math.max(1, top))));
+  // Progress is rows kept of the library's rows, where den-edge says how many it holds and this import read them all.
+  // Otherwise (an older den-edge, or a resumed import whose earlier rows were not counted) it is how far below `top`
+  // the reading has come, which runs ahead over the newest rows: older ones are sparse once rows have been replaced.
+  const rows = fresh && typeof first.rows === 'number' && first.rows > 0 ? first.rows : null;
+  let kept = 0;
+  const reached = () =>
+    progress?.(Math.min(1, Math.max(0, rows ? kept / rows : 1 - (floor - 1) / Math.max(1, top))));
 
   /** Keep one page of the history, and lower `floor` to its oldest row. */
   const keep = async (page: ChangesPage, extra: FactEntry[] = []) => {
@@ -1328,10 +1336,9 @@ async function importNewestFirst(
       complete,
       (batch) => {
         // A batch's floor is the oldest history row it keeps; the settings rows ahead of the first are not history.
-        floor = Math.min(
-          floor,
-          ...batch.filter((fact) => !extra.includes(fact)).map((fact) => fact.seq),
-        );
+        const history = batch.filter((fact) => !extra.includes(fact));
+        kept += history.length;
+        floor = Math.min(floor, ...history.map((fact) => fact.seq));
         return { head: top, floor };
       },
       { profileTopology },
@@ -1339,6 +1346,7 @@ async function importNewestFirst(
     );
     if (complete) {
       floor = 1;
+      kept = rows ?? kept;
       reached();
       reading.finished();
     }
@@ -1352,6 +1360,9 @@ async function importNewestFirst(
     profileTopology ||= opened.profileTopology;
     settingsFacts = opened.facts;
   }
+  // The page below the first, asked for as it arrives: on its way while the first is decrypted and kept, rather than
+  // after (a round trip and more on a phone, while the line stood still). Unread if this import stops early.
+  const second = first.more && first.entries.length ? below(first.entries.at(-1)!.seq) : null;
   if (!(await keep(first, settingsFacts))) return null;
   const opened = await store.manifest();
   if (!opened || opened.generation !== generation) return null;
@@ -1360,7 +1371,7 @@ async function importNewestFirst(
   const page = { committed: () => {} };
   const done = (async () => {
     // The page below the one being decrypted and committed, already on its way.
-    let next = below(floor);
+    let next = second ?? below(floor);
     for (;;) {
       const current = await next;
       if (!current || current.order !== 'desc' || current.generation !== generation) return false;
