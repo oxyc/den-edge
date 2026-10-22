@@ -129,6 +129,7 @@
       dialog?.close();
       return;
     }
+    if (profiles.waitsForPin(choice.role)) return;
     if (profiles.setsPin(choice.role)) {
       flushSync(() => {
         pending = choice;
@@ -289,7 +290,7 @@
             class="profile-choice"
             class:current={choiceKey(choice) === choiceKey(active)}
             type="button"
-            disabled={switching}
+            disabled={switching || profiles.waitsForPin(choice.role)}
             aria-label={`Use ${choice.name}`}
             onclick={() => void choose(choice)}
           >

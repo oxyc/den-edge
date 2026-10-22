@@ -200,10 +200,20 @@ test('a title’s hero never resizes or rescales as it opens and its backdrop ar
 });
 
 // A poster tapped while the page is still scrolling under the finger's last fling: the title opens at its top and
-// stays there, rather than carrying on the glide that was moving the page it came from.
-test('a poster tapped mid-scroll opens its title at the top, and Back returns to where the page was', async ({
-  browser,
-}) => {
+// stays there, rather than carrying on the glide that was moving the page it came from. On a slow device each frame
+// of that glide can take longer than 100 ms; `frameMs` makes every glide frame that long.
+for (const [speed, frameMs] of [
+  ['', 0],
+  [' on a slow device', 150],
+]) {
+  test(`a poster tapped mid-scroll${speed} opens its title at the top, and Back returns to where the page was`, async ({
+    browser,
+  }) => {
+    await tappedMidGlide(browser, frameMs);
+  });
+}
+
+async function tappedMidGlide(browser, frameMs) {
   const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
   const { card, release } = await setup(page);
   release();
@@ -215,13 +225,25 @@ test('a poster tapped mid-scroll opens its title at the top, and Back returns to
   // The glide a fling leaves running: the page keeps moving, frame after frame, with no new touch, while the
   // poster is tapped. It went on moving the document once the title had replaced the page, which opened partway
   // down. It runs until ten frames after the title is the page in front.
-  await page.evaluate(() => {
+  await page.evaluate((frameMs) => {
     // Where the page was as it was left: where Back must bring it.
     addEventListener('click', () => (window.leftAt = scrollY), { capture: true, once: true });
+    // The glide is under way once the page has seen it move, a few scroll events in.
+    let scrolls = 0;
+    window.moving = new Promise((under) => {
+      const seen = () => {
+        if (++scrolls < 3) return;
+        removeEventListener('scroll', seen);
+        under();
+      };
+      addEventListener('scroll', seen, { passive: true });
+    });
     let after = 0;
     window.glided = new Promise((done) => {
       const glide = () => {
         scrollBy({ top: 8, behavior: 'instant' });
+        const until = performance.now() + frameMs;
+        while (performance.now() < until);
         const title = document.querySelector('[data-route-page][data-active="true"] h1');
         if (title?.textContent === 'Another Movie') after++;
         if (after < 10) requestAnimationFrame(glide);
@@ -229,9 +251,10 @@ test('a poster tapped mid-scroll opens its title at the top, and Back returns to
       };
       requestAnimationFrame(glide);
     });
-  });
+  }, frameMs);
   // This is deliberately a tap during continuous motion. Locator.tap waits for two motionless frames that this
   // test intentionally never provides; a real touchscreen delivers at the finger's coordinates immediately.
+  await page.evaluate(() => window.moving);
   const point = await card.evaluate((element) => {
     const box = element.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
@@ -253,7 +276,7 @@ test('a poster tapped mid-scroll opens its title at the top, and Back returns to
     await page.evaluate(() => window.leftAt),
   );
   await page.close();
-});
+}
 
 /** The rings a poster card draws: the link's own, the artwork's, and whether the row cuts the artwork's off. */
 const rings = (card) =>
