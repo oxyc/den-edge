@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { verifyTvCore, sha256 } from './tv-core-artifacts.mjs';
+import { verifyTvCore, verifyTizen3Core, sha256 } from './tv-core-artifacts.mjs';
 
 const tvCore = verifyTvCore();
 
@@ -29,13 +29,18 @@ if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
   }
 }
 if (tizen3) {
+  verifyTizen3Core();
   const html = await readFile(resolve(directory, 'index.html'), 'utf8');
   if (/type=["']module["']|rel=["']modulepreload["']/.test(html))
     throw new Error('Native module loading remains in the Tizen 3 build');
   if (!html.includes('id="vite-legacy-polyfill"') || !html.includes('id="vite-legacy-entry"'))
     throw new Error('Tizen 3 build is missing the SystemJS legacy loader');
   const metadata = JSON.parse(await readFile(resolve(directory, 'den-tv-package.json'), 'utf8'));
-  if (metadata.tizenVersion !== '3.0' || metadata.legacyNonModule !== true)
+  if (
+    metadata.tizenVersion !== '3.0' ||
+    metadata.legacyNonModule !== true ||
+    metadata.policyCore !== 'javascript'
+  )
     throw new Error('Tizen 3 package metadata is not marked as legacy non-module output');
   const pairFiles = assets.filter((file) => /^pair-legacy-.*\.js$/.test(file));
   if (pairFiles.length !== 1) throw new Error('Expected one Tizen 3 pairing chunk');
@@ -45,11 +50,11 @@ if (tizen3) {
   if (!pair.includes('ristretto255'))
     throw new Error('Tizen 3 pairing did not select the typed-array Ristretto adapter');
 }
+if (tizen3 && assets.some((file) => file.endsWith('.wasm')))
+  throw new Error('A Wasm asset leaked into the Tizen 3 JavaScript-core package');
 for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
-  // Tizen 3's non-Wasm core is being built independently. Keep this packaging tier testable while
-  // that replacement may omit either generated Wasm asset; supported tiers must retain both.
-  if (tizen3 && matches.length === 0) continue;
+  if (tizen3) continue;
   if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);
   const bytes = await readFile(resolve(directory, 'assets', matches[0]));
   if (sha256(bytes) !== tvCore.artifacts[`generated/${name}_bg.wasm`])

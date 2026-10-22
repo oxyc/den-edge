@@ -26,6 +26,17 @@ const tizen3WorkerCompat = fileURLToPath(
   new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
 );
 const tizen3PairCurve = fileURLToPath(new URL('./src/lib/pairCurve-tizen3.ts', import.meta.url));
+const tizen3Core = fileURLToPath(new URL('./src/vendor/den-core-tizen3/index.js', import.meta.url));
+const tizen3SyncLoader = fileURLToPath(new URL('./src/lib/syncLoader-tizen3.ts', import.meta.url));
+const tizen3SyncPolicyModule = fileURLToPath(
+  new URL('./src/lib/syncPolicyModule-tizen3.ts', import.meta.url),
+);
+const tizen3AssistantCore = fileURLToPath(
+  new URL('./src/lib/assistantCore-tizen3.ts', import.meta.url),
+);
+const tizen3RecoveryCore = fileURLToPath(
+  new URL('./src/lib/recoveryCore-tizen3.ts', import.meta.url),
+);
 const appCss = fileURLToPath(new URL('./src/app.css', import.meta.url));
 const tvCss = fileURLToPath(new URL('./src/tv/tv.css', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
@@ -266,6 +277,7 @@ const packagedMetadata: Plugin = {
             serviceOrigin,
             tizenVersion,
             legacyNonModule: tizen3,
+            policyCore: tizen3 ? 'javascript' : 'wasm',
             e2e,
           },
           null,
@@ -343,6 +355,7 @@ export default mergeConfig(
       __DEN_TV__: 'true',
       __DEN_TV_PLATFORM__: JSON.stringify(platform),
       __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
+      __DEN_TV_LEGACY_JS_CORE__: tizen3 ? 'true' : 'false',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
       __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(serviceOrigin),
     },
@@ -351,7 +364,19 @@ export default mergeConfig(
     // to wrappers with byte-identical APIs beside the compatible generated modules.
     resolve: {
       alias: [
-        ...(tizen3 ? [{ find: './pairCurve', replacement: tizen3PairCurve }] : []),
+        ...(tizen3
+          ? [
+              { find: './pairCurve', replacement: tizen3PairCurve },
+              { find: './syncLoader', replacement: tizen3SyncLoader },
+              { find: './syncPolicyModule', replacement: tizen3SyncPolicyModule },
+              { find: './assistantCore', replacement: tizen3AssistantCore },
+              { find: './recoveryCore', replacement: tizen3RecoveryCore },
+              {
+                find: /^(?:.*\/)?vendor\/den-core\/index\.js$/,
+                replacement: tizen3Core,
+              },
+            ]
+          : []),
         {
           find: /^(?:.*\/)?vendor\/den-core\/(index|assistant|recovery)\.js$/,
           replacement: `${tvCore}/$1.js`,

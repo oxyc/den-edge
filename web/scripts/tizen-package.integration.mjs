@@ -9,6 +9,8 @@ const webRoot = resolve(import.meta.dirname, '..');
 const shell = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'shell');
 const widget = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'packages', 'den-tv-tizen.wgt');
 
+run(process.execPath, ['scripts/tizen3-core.integration.mjs'], process.env);
+
 function run(command, args, env) {
   const result = spawnSync(command, args, {
     cwd: webRoot,

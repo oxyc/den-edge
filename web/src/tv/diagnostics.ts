@@ -89,6 +89,7 @@ export function installDiagnostics(): void {
       worker: typeof Worker !== 'undefined',
       indexedDB: typeof indexedDB !== 'undefined',
       wasm: typeof WebAssembly !== 'undefined',
+      policyCore: __DEN_TV_LEGACY_JS_CORE__ ? 'JavaScript fallback' : 'WebAssembly',
       cssCustomProperties: CSS.supports('--den-probe', '1px'),
       cssGrid: CSS.supports('display', 'grid'),
       cssFlexGap: supportsFlexGap(),
@@ -115,7 +116,7 @@ export function installDiagnostics(): void {
     const checks: [string, () => Promise<unknown>][] = [
       ['Web Crypto', () => crypto.subtle.digest('SHA-256', new Uint8Array([1, 2, 3]))],
       ['IndexedDB write/read', storageProbe],
-      ['Worker + Crypto + WASM', workerProbe],
+      [`Worker + Crypto${__DEN_TV_LEGACY_JS_CORE__ ? '' : ' + WASM'}`, workerProbe],
     ];
     const lines = await Promise.all(
       checks.map(async ([label, probe]) => {
