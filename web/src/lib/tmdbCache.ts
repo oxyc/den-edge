@@ -78,6 +78,11 @@ const PRUNE_IDLE_TIMEOUT_MS = 5_000;
 export const PRUNE_EVERY = 200;
 /** How long answers fetched one after another are gathered into one IndexedDB write. */
 const PUT_GATHER_MS = 250;
+/**
+ * How long reads asked one after another are gathered into one IndexedDB read: a list's titles are looked up a few
+ * lanes at a time, each asking again as its last read answers, so with no wait each read was a transaction of its own.
+ */
+const GET_GATHER_MS = 4;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
 export const STALE_FOR = 7 * DAY;
 
@@ -635,11 +640,13 @@ function indexedKept<T extends { fetchedAt: number }>(
     return puts.map(() => undefined);
   }, PUT_GATHER_MS);
   return {
-    get: coalesced<string, T | undefined>((keys) =>
-      run('readonly', (answers) => {
-        const asked = keys.map((key) => answers.get(key) as IDBRequest<T | undefined>);
-        return () => asked.map((request) => request.result);
-      }).then((found) => found ?? keys.map(() => undefined)),
+    get: coalesced<string, T | undefined>(
+      (keys) =>
+        run('readonly', (answers) => {
+          const asked = keys.map((key) => answers.get(key) as IDBRequest<T | undefined>);
+          return () => asked.map((request) => request.result);
+        }).then((found) => found ?? keys.map(() => undefined)),
+      GET_GATHER_MS,
     ),
     put: (key, entry) => put([key, entry]),
     prune: async (cutoff, most, batch) => {

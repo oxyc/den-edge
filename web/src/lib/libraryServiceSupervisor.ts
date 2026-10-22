@@ -134,7 +134,12 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           retryable: false,
         }),
       );
-    this.#openOptions = structuredClone({ ...options, wire: options.wire ?? 4 });
+    // A function can't be cloned: the progress listener is kept beside the cloned data.
+    const { progress, ...data } = options;
+    this.#openOptions = {
+      ...structuredClone({ ...data, wire: data.wire ?? 4 }),
+      ...(progress ? { progress } : {}),
+    };
     if (this.#phase === 'ready') return Promise.resolve(this.#version!);
     if (this.#connecting) return this.#connecting;
     if (this.#phase === 'failed') return Promise.reject(new LibraryServiceError(this.#failure!));
@@ -380,6 +385,9 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     // A retained route can acquire another selection while the initial Worker replies are still arriving. Drain
     // every subscription added during that wait before publishing ready; once a pass finds none, JavaScript cannot
     // interleave another subscriber before the synchronous phase change below.
+    // When each selection's first answer arrived, for the ready mark: the Worker answers them in turn.
+    const bindingStarted = performance.now();
+    const answered: string[] = [];
     for (;;) {
       const unbound = [...this.#subscriptions].filter(
         ([, subscription]) => subscription.attemptedToken !== active.token,
@@ -389,6 +397,9 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         unbound.map(async ([id, subscription]) => {
           try {
             await this.#bindSubscription(id, subscription, active);
+            answered.push(
+              `${subscription.selection.kind} ${Math.round(performance.now() - bindingStarted)}ms`,
+            );
           } catch (error) {
             if (subscription.required) throw error;
             if (this.#active !== active || this.#subscriptions.get(id) !== subscription) return;
@@ -419,7 +430,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       subscription.staged = undefined;
       this.#notifySubscription(subscription);
     }
-    startupMark('supervisor ready', `${this.#subscriptions.size} subscriptions bound`);
+    startupMark(
+      'supervisor ready',
+      `${this.#subscriptions.size} subscriptions bound: ${answered.join(', ')}`,
+    );
     this.#emitStatus({ kind: 'ready', version: readyVersion });
     return readyVersion;
   }

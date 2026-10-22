@@ -252,6 +252,9 @@ pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
     pub head: u64,
     pub more: bool,
+    /// The library's live rows, where the read reports them (newest first): what a client's progress through the
+    /// history is counted against, as sequence numbers are not once older rows have been replaced.
+    pub rows: Option<u64>,
 }
 
 /// One transaction's complete current-row authority. Profile migration uses this instead of paging `/changes`:
@@ -319,6 +322,10 @@ pub(super) trait LibraryStore: Send + Sync {
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError>;
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
+    /// The rows below `before`, newest first: a first read that wants a library's recent rows before its oldest.
+    fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError>;
+    /// The current rows of `keys` that exist, in sequence order, with the head they were read at.
+    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError>;
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage>;
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError>;
     #[cfg(test)]
@@ -1002,7 +1009,75 @@ impl LibraryStore for RedbLibrary {
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        Ok(RangePage { entries, head, more })
+        Ok(RangePage { entries, head, more, rows: None })
+    }
+
+    fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let head = {
+            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let value = metadata
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
+            value.value()
+        };
+        // Kept in the table's header, as the write path's live-row count is: no scan.
+        let live_rows = {
+            let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
+            keys.len().map_err(StoreError::redb)?
+        };
+        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+        let mut rows = sequence.range(..before).map_err(StoreError::redb)?.rev();
+        let mut entries = Vec::new();
+        let mut page_bytes = 128usize;
+        let mut more = false;
+        while entries.len() < limit.min(MAX_LIMIT) {
+            let Some(item) = rows.next() else { break };
+            let (stored_sequence, fragment) = item.map_err(StoreError::redb)?;
+            let cost = fragment.value().len() + usize::from(!entries.is_empty());
+            if !entries.is_empty() && page_bytes + cost > PAGE_BYTES {
+                more = true;
+                break;
+            }
+            page_bytes += cost;
+            entries.push(self.row(stored_sequence.value(), fragment.value()));
+        }
+        if !more {
+            more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
+        }
+        Ok(RangePage { entries, head, more, rows: Some(live_rows) })
+    }
+
+    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
+        let head = {
+            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let value = metadata
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
+            value.value()
+        };
+        let index = transaction.open_table(KEYS).map_err(StoreError::redb)?;
+        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+        let mut entries = Vec::new();
+        for key in keys {
+            let Some(sequence_number) =
+                index.get(key.as_str()).map_err(StoreError::redb)?.map(|value| value.value())
+            else {
+                continue;
+            };
+            let fragment = sequence
+                .get(sequence_number)
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 key points to no fragment".into()))?;
+            entries.push(self.row(sequence_number, fragment.value()));
+        }
+        entries.sort_by_key(|row| row.sequence);
+        Ok(RangePage { entries, head, more: false, rows: None })
     }
 
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
@@ -1899,6 +1974,14 @@ impl LibraryStore for StoreLease {
 
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
         self.store.range(since, limit)
+    }
+
+    fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError> {
+        self.store.range_before(before, limit)
+    }
+
+    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
+        self.store.rows(keys)
     }
 
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {

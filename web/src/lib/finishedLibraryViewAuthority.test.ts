@@ -13,7 +13,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type TitleRow } from './wire';
+import { deriveKeys, seal, type Row, type SettingsRow, type Stamp, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -225,7 +225,58 @@ it('opens completed capability facts without a monolithic snapshot or finished-v
   expect(openFull).toHaveBeenCalledOnce();
 });
 
-it('cold-imports bounded pages and serves the main startup capabilities without full hydration', async () => {
+/**
+ * den-edge's `/changes` over `entries`: oldest first after `since`, and — unless `older`, a den-edge that predates them
+ * and reads every request as one from `since=0` — newest first below `before` and the named `keys`. `limit` defaults
+ * as den-edge's does; `fail` throws for the requests it names; `counted` reports the library's rows with a
+ * newest-first page, as a newer den-edge does.
+ */
+function changesEdge(
+  entries: ReadonlyArray<{ k: string; seq: number; v: string }>,
+  generation: string,
+  {
+    older = false,
+    fail,
+    counted = false,
+  }: { older?: boolean; fail?: (url: URL) => boolean; counted?: boolean } = {},
+) {
+  const requests: URL[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    requests.push(url);
+    if (fail?.(url)) throw new Error('device stopped');
+    const limit = Number(url.searchParams.get('limit') ?? 500);
+    const head = Math.max(0, ...entries.map((entry) => entry.seq));
+    const keys = url.searchParams.get('keys');
+    const before = url.searchParams.get('before');
+    let body: Record<string, unknown>;
+    if (!older && keys !== null) {
+      const named = new Set(keys.split(','));
+      body = {
+        entries: entries.filter((entry) => named.has(entry.k)),
+        more: false,
+        selected: true,
+      };
+    } else if (!older && before !== null) {
+      const below = entries.filter((entry) => entry.seq < Number(before)).reverse();
+      body = {
+        entries: below.slice(0, limit),
+        more: below.length > limit,
+        order: 'desc',
+        ...(counted ? { rows: entries.length } : {}),
+      };
+    } else {
+      const since = Number(url.searchParams.get('since') ?? 0);
+      const after = entries.filter((entry) => entry.seq > since);
+      body = { entries: after.slice(0, limit), more: after.length > limit };
+    }
+    return new Response(JSON.stringify({ generation, head, ...body }), { status: 200 });
+  });
+  return { fetchImpl, requests };
+}
+
+it('cold-imports bounded pages from an older den-edge and serves the main startup capabilities without full hydration', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
   const keys = await deriveKeys(raw);
@@ -241,9 +292,10 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
   const fetchImpl = vi.fn<typeof fetch>(async (input) => {
     const url = new URL(String(input), 'https://den.test');
     if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
-    const since = Number(url.searchParams.get('since'));
-    const limit = Number(url.searchParams.get('limit'));
-    pageSizes.push(limit);
+    // An older den-edge reads a newest-first or by-key request as one from `since=0`, unmarked.
+    const since = Number(url.searchParams.get('since') ?? 0);
+    const limit = Number(url.searchParams.get('limit') ?? 500);
+    if (url.searchParams.has('since')) pageSizes.push(limit);
     const page = entries.filter((entry) => entry.seq > since).slice(0, limit);
     return new Response(
       JSON.stringify({
@@ -256,15 +308,23 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
     );
   });
   const openFull = vi.fn(async () => fullAuthority());
+  const commitBatch = vi.spyOn(LibraryFactStore.prototype, 'commitBatch');
+  const progress = vi.fn();
   const opened = await openFinishedLibraryViewAuthority(
     request,
     vault,
     openFull,
     content,
     fetchImpl,
+    progress,
   );
 
-  expect(pageSizes).toEqual([64, 64, 64]);
+  // Asked newest first, it answered unmarked: one oldest-first read of the whole history follows, each committed
+  // checkpoint bounded and saying how far it is, after a 0 before the first request.
+  expect(pageSizes).toEqual([1000]);
+  expect(commitBatch.mock.calls.map(([, , batch]) => batch.length)).toEqual([64, 64, 2]);
+  commitBatch.mockRestore();
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 64 / 130, 128 / 130, 1]);
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 2 }]),
   });
@@ -285,7 +345,7 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
   });
 });
 
-it('resumes a cold import from the last atomically committed page', async () => {
+it('resumes a cold import from an older den-edge from the last atomically committed page', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
   const keys = await deriveKeys(raw);
@@ -296,11 +356,11 @@ it('resumes a cold import from the last atomically committed page', async () => 
       return { ...(await seal(keys, value)), seq: index + 1 };
     }),
   );
-  let changes = 0;
   const interrupted = vi.fn<typeof fetch>(async (input) => {
     const url = new URL(String(input), 'https://den.test');
     if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
-    if (++changes > 1) throw new Error('device stopped');
+    // The device stops once the first page is read; an older den-edge answers every other request as `since=0`.
+    if (Number(url.searchParams.get('since') ?? 0) > 0) throw new Error('device stopped');
     return new Response(
       JSON.stringify({
         generation: 'generation-resume',
@@ -345,6 +405,189 @@ it('resumes a cold import from the last atomically committed page', async () => 
   });
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 90 }]),
+  });
+});
+
+/** A library whose oldest row is its preferences (anime hidden), then `titles` watchlisted titles, newest last. */
+async function settledLongAgo(titles: number) {
+  const keys = await deriveKeys(raw);
+  const prefs: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'prefs',
+    values: { 'den.hideAnime': { value: { bool: true }, at: [1, 0, 'device'] } },
+  };
+  const entries = [{ ...(await seal(keys, prefs)), seq: 1 }];
+  for (let id = 1; id <= titles; id += 1) {
+    const row = { ...factTitle('watchlist', id + 1), title: { type: 'movie' as const, id } };
+    entries.push({ ...(await seal(keys, row)), seq: id + 1 });
+  }
+  return entries;
+}
+
+it('draws a first open from its newest page and its settings by key, then reads the rest behind it', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  const edge = changesEdge(entries, 'generation-newest');
+  // The rest of the history waits until the first page has been looked at.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    const before = new URL(String(input), 'https://den.test').searchParams.get('before');
+    if (before !== null && Number(before) < Number.MAX_SAFE_INTEGER) await released;
+    return edge.fetchImpl(input, init);
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const progress = vi.fn();
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    fetchImpl,
+    progress,
+  );
+
+  // Answered after one newest-first page, with the settings read by key beside it.
+  expect(edge.requests.map((url) => [...url.searchParams.keys()].sort().join('&'))).toEqual([
+    'before&limit',
+    'keys',
+  ]);
+  const first = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
+  expect(first.watchlist).toContainEqual({ type: 'movie', id: 1_100 });
+  expect(first.watchlist).not.toContainEqual({ type: 'movie', id: 1 });
+  // The oldest row of all, yet already applied.
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    preferences: { hideAnime: true },
+  });
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    head: 1_101,
+    complete: false,
+    floor: 102,
+  });
+  expect(progress.mock.calls.at(-1)![0]).toBeLessThan(1);
+
+  const changed = vi.fn();
+  opened!.authority.listen?.(changed);
+  release();
+  await vi.waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      head: 1_101,
+      complete: true,
+    }),
+  );
+  await vi.waitFor(() =>
+    expect(changed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'changed',
+        affected: expect.arrayContaining([{ kind: 'overview' }]),
+      }),
+    ),
+  );
+  const filled = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
+  expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
+  expect(progress.mock.calls.at(-1)![0]).toBe(1);
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts a first open’s progress in rows, and asks for the second page as the first arrives', async () => {
+  await ensureSyncPolicy();
+  // Older rows replaced over the years: below the newest 1,000, the history's sequence numbers are ten apart.
+  const settled = [...(await settledLongAgo(1_100))].sort((a, b) => a.seq - b.seq);
+  const older = settled.length - 1_000;
+  const entries = settled.map((entry, at) => ({
+    ...entry,
+    seq: at < older ? 1 + at * 10 : 1 + older * 10 + (at - older),
+  }));
+  const top = entries.at(-1)!.seq;
+  const firstPageFloor = entries.at(-1_000)!.seq;
+  const progressAfterFirstPage = async (counted: boolean) => {
+    const vault = new FactVault();
+    const edge = changesEdge(entries, 'generation-rows', { counted });
+    const pagesAsked = () => edge.requests.filter((url) => url.searchParams.has('before')).length;
+    // How many history pages had been asked for when the first batch was kept.
+    let askedAtFirstSave = 0;
+    const progress = vi.fn((value: number) => {
+      if (value > 0 && !askedAtFirstSave) askedAtFirstSave = pagesAsked();
+    });
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      vi.fn(async () => fullAuthority()),
+      content,
+      edge.fetchImpl,
+      progress,
+    );
+    expect(opened).not.toBeNull();
+    const firstPage = progress.mock.calls.map(([value]) => value).filter((value) => value < 1);
+    return { last: firstPage.at(-1)!, askedAtFirstSave };
+  };
+
+  const counted = await progressAfterFirstPage(true);
+  // 1,000 of 1,100 rows kept: what the line says, not how far below the head the page reached.
+  expect(counted.last).toBeCloseTo(1_000 / entries.length, 2);
+  expect(counted.askedAtFirstSave).toBe(2);
+  // An older den-edge says no count: the share of sequence numbers read, as before.
+  const uncounted = await progressAfterFirstPage(false);
+  expect(uncounted.last).toBeCloseTo(1 - (firstPageFloor - 1) / top, 2);
+  expect(uncounted.last).toBeLessThan(counted.last);
+});
+
+it('ends a first open’s progress when its read gives up, so the line never outlives it', async () => {
+  await ensureSyncPolicy();
+  const edge = changesEdge(await settledLongAgo(10), 'generation-gives-up', {
+    fail: (url) => url.searchParams.has('before'),
+  });
+  const progress = vi.fn();
+  await openFinishedLibraryViewAuthority(
+    request,
+    new FactVault(),
+    vi.fn(async () => fullAuthority()),
+    content,
+    edge.fetchImpl,
+    progress,
+  );
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 1]);
+});
+
+it('resumes a newest-first import below the last committed page, and opens the log when the rest stops', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  // The device stops once the first page is kept.
+  const interrupted = changesEdge(entries, 'generation-newest', {
+    fail: (url) => Number(url.searchParams.get('before') ?? Infinity) < Number.MAX_SAFE_INTEGER,
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    interrupted.fetchImpl,
+  );
+  expect(opened).not.toBeNull();
+  // The stopped read leaves Home to the full log rather than to half a history.
+  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+  await opened!.authority.close?.();
+
+  const resumed = changesEdge(entries, 'generation-newest');
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    resumed.fetchImpl,
+  );
+  // Below the floor the first open kept, without reading the settings again.
+  expect(resumed.requests.map((url) => url.searchParams.get('before'))).toEqual(['102']);
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    head: 1_101,
+    complete: true,
+  });
+  await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 1 }]),
   });
 });
 
@@ -406,6 +649,247 @@ it('applies one changed document to capability facts without opening unrelated d
   } finally {
     vi.useRealTimers();
   }
+});
+
+/** A series in the fact store as Library v4 documents: its title, and season 1 with episodes 1–2 watched, 3 half. */
+async function seriesFacts(vault: FactVault) {
+  const keys = await deriveKeys(raw);
+  const at: [number, number, string] = [Date.now() - 86_400_000, 0, 'device'];
+  const episode = (value: number) => ({
+    progress: { value, at, viewing: 0 },
+    imported: false,
+    plays: { 0: at[0] },
+    cleared: null,
+  });
+  const rows = [
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id: 55 },
+      status: { value: 'inProgress', at },
+      addedAt: at[0],
+    },
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 55 },
+      season: 1,
+      seasonReset: null,
+      episodes: { 1: episode(1), 2: episode(1), 3: episode(0.5) },
+    },
+  ] as unknown as Parameters<typeof seal>[1][];
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+}
+
+const seriesShape = {
+  kind: 'title-shape' as const,
+  title: { type: 'tv' as const, id: 55 },
+  seasons: [{ season: 1, episodes: 3 }],
+};
+
+it('reads a title’s view from its own documents, as the full log builds it, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(opened!.authority.observe(seriesShape)).resolves.toEqual({
+    outcome: 'applied',
+    affected: [{ kind: 'title', title: { type: 'tv', id: 55 } }],
+  });
+  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
+  expect(view).toMatchObject({
+    kind: 'title',
+    listed: true,
+    watched: false,
+    standing: 'in-progress',
+    episodes: [
+      { season: 1, episode: 1, watched: true, fraction: 1 },
+      { season: 1, episode: 2, watched: true, fraction: 1 },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts a served series’ episodes once naming finds its shape, and keeps other shapes from the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const shaped = (id: number) => ({
+    kind: 'found' as const,
+    value: {
+      title: { type: 'tv' as const, id, title: `Series ${id}` },
+      shape: { counts: new Map([[1, 3]]) },
+    },
+  });
+  const named = { title: vi.fn(async (ref: { id: number }) => shaped(ref.id)) };
+  const full = fullAuthority();
+  const observe = vi.spyOn(full, 'observe');
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, named, vi.fn());
+  const changed: unknown[] = [];
+  opened!.authority.listen!((event) => changed.push(event));
+  const series = { type: 'tv' as const, id: 55 };
+
+  // The page is open before its shape is known: no episodes yet.
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [],
+  });
+  // Naming finds the shape of the series on screen, and of another only named.
+  await opened!.authority.query({
+    kind: 'library.metadata',
+    titles: [series, { type: 'tv', id: 56 }],
+  });
+  expect(changed).toContainEqual({ kind: 'changed', affected: [{ kind: 'title', title: series }] });
+  expect(JSON.stringify(changed)).not.toContain('"id":56');
+  await expect(opened!.authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  // A write opens the log: it is told the served series' shape, not the one only named.
+  await opened!.authority.command(
+    { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+    'operation',
+  );
+  expect(observe.mock.calls.map(([observation]) => observation)).toEqual([
+    expect.objectContaining({ kind: 'title-shape', title: series }),
+  ]);
+  expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('tells the log the shapes it was given when a write opens it', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const full = fullAuthority();
+  const observe = vi.spyOn(full, 'observe');
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await opened!.authority.observe(seriesShape);
+  await opened!.authority.command(
+    { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+    'operation',
+  );
+  expect(openFull).toHaveBeenCalledOnce();
+  expect(observe).toHaveBeenCalledWith(seriesShape);
+});
+
+it.each([
+  ['not yet due, publishes nothing without opening the log', 60_000, 0],
+  ['due, opens the log to decide', -1, 1],
+])('an assistant publication %s', async (_, dueIn, opens) => {
+  const vault = new MemoryVault();
+  await cached(vault);
+  await writeEncryptedLibraryValue(libraryKey, vault, 'assistant.records.v1', {
+    revoked: [],
+    applied: {},
+    renewedAt: 0,
+    dropped: [],
+    publication: { key: 'built-from', dueAt: Date.now() + dueIn, sent: {}, layouts: {} },
+  });
+  const full = fullAuthority();
+  vi.spyOn(full, 'task').mockResolvedValue({
+    result: { kind: 'assistant.publish', published: 0 },
+    affected: [],
+  });
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task({ kind: 'assistant.publish' }, 'publish'),
+  ).resolves.toMatchObject({ result: { kind: 'assistant.publish', published: 0 } });
+  expect(openFull).toHaveBeenCalledTimes(opens);
+});
+
+it('answers a drain that found nothing from the drop-box row, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task({ kind: 'assistant.apply', messages: [] }, 'drain'),
+  ).resolves.toEqual({
+    result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
+    affected: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+/** Rows of an earlier format, held in the fact store as den-edge gave them. */
+async function earlierFacts(vault: Vault, rows: readonly Row[]): Promise<void> {
+  const keys = await deriveKeys(raw);
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row as Parameters<typeof seal>[1]);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+}
+
+it('reads a title held in an earlier format as the full log does, without opening the log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await earlierFacts(vault, [factTitle('watched', 10)]);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.select({ kind: 'title', title: { type: 'movie', id: 77 } }),
+  ).resolves.toMatchObject({ kind: 'title', listed: true, watched: true, standing: 'watched' });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts episodes a series holds only in an earlier watch block as watched', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const register = (value: number) => ({
+    imported: false,
+    progress: { value, at: [2000, 0, 'device'] as Stamp, viewing: 0 },
+    plays: value >= 1 ? { 0: 2000 } : {},
+    cleared: null,
+  });
+  // Season 1 watched before v4: a `wat:` block of watch marks and no season document.
+  await earlierFacts(vault, [
+    {
+      kind: 'wat',
+      schema: 3,
+      title: { type: 'tv', id: 55 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: { 1: register(1), 2: register(1), 3: register(0.5) },
+    } as Row,
+  ]);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await opened!.authority.observe(seriesShape);
+  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
+  expect(view).toMatchObject({
+    episodes: [
+      { season: 1, episode: 1, watched: true },
+      { season: 1, episode: 2, watched: true },
+      { season: 1, episode: 3, watched: false, fraction: 0.5 },
+    ],
+  });
+  expect(openFull).not.toHaveBeenCalled();
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {
@@ -482,6 +966,30 @@ it('keeps retained presentation hints without opening library documents', async 
     opened!.authority.command({ kind: 'preferences.seed', household: {} }, 'preference-seed'),
   ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('decides a first open’s preference seed from its settings facts, opening the log only to write one', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const edge = changesEdge(await settledLongAgo(10), 'generation-seed');
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    edge.fetchImpl,
+  );
+  // The profile has decided the one preference the household holds: nothing to write, and nothing kept said so.
+  const decided = { 'den.hideAnime': { value: { bool: false }, at: [1, 0, 'household'] } };
+  await expect(
+    opened!.authority.command({ kind: 'preferences.seed', household: decided }, 'seed-1'),
+  ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
+  expect(openFull).not.toHaveBeenCalled();
+  // One it has not decided is written, by the log.
+  const undecided = { 'den.hideWatched': { value: { bool: true }, at: [1, 0, 'household'] } };
+  await opened!.authority.command({ kind: 'preferences.seed', household: undecided }, 'seed-2');
+  expect(openFull).toHaveBeenCalledOnce();
 });
 
 it('keeps matching TV layouts lazy and promotes a changed layout', async () => {

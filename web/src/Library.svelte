@@ -306,7 +306,6 @@
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
-  let connectionsLease = $state.raw<ReturnType<NonNullable<typeof model>['connections']>>();
   let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
 
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
@@ -320,22 +319,26 @@
       if (titleLease === lease) titleLease = undefined;
     };
   });
+  // Watched history is the whole library's, which the library Worker reads in full: it is asked for once the Watchlist's
+  // billboard has painted its first details (`watchlistLead`, below), which come from the same Worker, or there is no
+  // billboard, so the screen never waits on it (an old TV spends seconds on that read). Then kept asked for.
+  let historyAsked = $state(false);
   $effect(() => {
-    if (!model || route.page !== 'watchlist') return;
+    if (route.page !== 'watchlist' || !overview || historyAsked) return;
+    if (!watchlistLead && !(watchlistNamed && !untrack(() => savedTitles.length))) return;
+    // The frame that draws them, then the next: asked for only once they are on screen.
+    let frame = requestAnimationFrame(
+      () => (frame = requestAnimationFrame(() => (historyAsked = true))),
+    );
+    return () => cancelAnimationFrame(frame);
+  });
+  $effect(() => {
+    if (!model || route.page !== 'watchlist' || !historyAsked) return;
     const lease = model.history();
     historyLease = lease;
     return () => {
       lease.release();
       if (historyLease === lease) historyLease = undefined;
-    };
-  });
-  $effect(() => {
-    if (!model || route.page !== 'title') return;
-    const lease = model.connections();
-    connectionsLease = lease;
-    return () => {
-      lease.release();
-      if (connectionsLease === lease) connectionsLease = undefined;
     };
   });
   // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
@@ -1860,7 +1863,9 @@
     </p>
   </section>
 {:else if link && model && !overview && !serviceFailed}
-  <Loading label="Loading your library" page />
+  <!-- No spinner: a first read from den-edge draws its progress on the navigation bar, and any other open is too
+       short to show one. The marker still holds the Router's scroll restore until the library is drawn. -->
+  <div data-route-loading></div>
 {:else if serviceFailed}
   <section class="library-failure" role="alert">
     <h1>Couldn’t open your library</h1>

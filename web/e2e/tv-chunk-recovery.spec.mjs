@@ -7,7 +7,10 @@ for (const persistent of [false, true]) {
     page,
   }) => {
     await routeGuestEdge(page, newEdge());
-    let failures = 0;
+    // 404s served for the old release's Settings chunk and for the replacement's. A page may ask for the chunk more
+    // than once (a second load after the first has failed fetches it again), so these count outcomes, not requests.
+    let old = 0;
+    let fresh = 0;
     // A replacement release has a new hashed module graph. Serve the same production bytes in a fresh asset
     // namespace after recovery; do not pretend a deleted immutable chunk reappears at its original URL.
     await page.route('**/settings?den-retry=*', async (route) => {
@@ -29,9 +32,13 @@ for (const persistent of [false, true]) {
         });
       return route.fulfill({ response });
     });
+    // The old release's chunk is gone for good: every request for it fails. The replacement's fails only when the
+    // outage is persistent.
     await page.route('**/*assets/Settings-*.js', (route) => {
-      if (persistent || failures === 0) {
-        failures += 1;
+      const replacement = route.request().url().includes('/updated-assets/');
+      if (!replacement || persistent) {
+        if (replacement) fresh += 1;
+        else old += 1;
         return route.fulfill({
           status: 404,
           // Match den-edge's missing-asset response.
@@ -63,11 +70,11 @@ for (const persistent of [false, true]) {
       ).toBeVisible();
       await expect(page.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
       await page.waitForTimeout(500);
-      expect(failures).toBe(2);
+      expect(fresh, 'the fresh document tried the replacement release').toBeGreaterThan(0);
     } else {
       await expect(page.getByRole('button', { name: /Linked devices/ })).toBeVisible();
-      expect(failures).toBe(1);
     }
+    expect(old, 'the old release’s chunk was asked for and missing').toBeGreaterThan(0);
     expect(documents).toHaveLength(1);
   });
 }

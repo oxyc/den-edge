@@ -242,7 +242,7 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     );
     expect(asked.relay).toEqual([]);
 
-    await castButton.click();
+    await clickCast(page);
     await expect.poll(() => asked.managed.length).toBeGreaterThanOrEqual(2);
     expect(asked.managed[1].player).toBe('cast');
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
@@ -280,7 +280,7 @@ test('a signed LAN HTTP session stays on Hearth and is handed directly to Chrome
   const { browser, page, asked } = await open('playing', { lanHttp: true });
   try {
     await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect.poll(() => asked.direct.length).toBe(2);
     expect(asked.direct[1]).toMatchObject({ player: 'cast' });
     expect(asked.relay, 'LAN HTTP media does not need Edge public-media ingress').toEqual([]);
@@ -305,7 +305,7 @@ test('a selected subtitle never disqualifies TorBox before Cast', async () => {
   });
   try {
     await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect.poll(() => asked.managed.length).toBe(2);
     expect(asked.managed[1]).toMatchObject({ player: 'cast' });
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
@@ -337,6 +337,17 @@ async function playingPast(page, seconds) {
   });
 }
 
+/**
+ * Press Cast the way a viewer does. The output action lives in the auto-hiding transport, which hides 3.5 s into
+ * playback; a viewer reveals it by moving toward the controls, while Playwright otherwise teleports its synthetic
+ * click to a control that correctly no longer receives pointer input underneath the video.
+ */
+async function clickCast(page) {
+  await page.mouse.move(20, 20);
+  await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+  await page.getByRole('button', { name: 'Cast to a TV' }).click();
+}
+
 async function playerGeometry(page) {
   return page.locator('.player').evaluate((player) => {
     const box = (selector) => {
@@ -360,7 +371,7 @@ for (const viewport of [
       await playingPast(page, 1);
       const idle = await playerGeometry(page);
 
-      await page.getByRole('button', { name: 'Cast to a TV' }).click();
+      await clickCast(page);
       await expect(page.getByText('Looking for a Chromecast…')).toBeVisible();
       expect(await playerGeometry(page)).toEqual(idle);
       const searchingStatus = await page.locator('.cast-status .notice').boundingBox();
@@ -378,7 +389,7 @@ test('Cast with no Chromecast on the network leaves the video playing', async ()
   const { browser, page, asked } = await open('none');
   try {
     const before = await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect(page.getByText('No Chromecast found.')).toBeVisible({ timeout: 15_000 });
     // The same element, never replaced, and still going: nothing was restarted or moved.
     const video = page.locator('.player video[data-before="cast"]');
@@ -433,13 +444,7 @@ for (const [mode, what] of [
     const { browser, page, asked } = await open(mode);
     try {
       const before = await playingPast(page, 7);
-      // The integrated output action lives in the auto-hiding transport. A viewer reveals it by moving toward the
-      // controls; Playwright otherwise teleports its synthetic click to a control that correctly no longer receives
-      // pointer input underneath the video.
-      await page.mouse.move(20, 20);
-      const castButton = page.getByRole('button', { name: 'Cast to a TV' });
-      await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
-      await castButton.click();
+      await clickCast(page);
       // A receiver was seen, so playback moved to the relay, starting where the video was.
       await expect.poll(() => asked.relay.length).toBe(1);
       expect(asked.relay[0].startAt).toBeGreaterThanOrEqual(Math.floor(before));

@@ -35,7 +35,7 @@ test('Settings retires a legacy Reel install whose config Reel refuses, once Hea
     return route.fulfill({ status: 404, json: { error: 'not_found' } });
   });
 
-  await page.goto(`${FIXTURE}?seed&legacy-reel`);
+  await page.goto(`${FIXTURE}?seed&online&legacy-reel`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });

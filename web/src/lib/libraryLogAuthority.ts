@@ -33,6 +33,7 @@ import {
   type DownloadRelease,
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
+import { titleCoordinates, titleView } from './titleView';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
@@ -40,7 +41,8 @@ import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
-  removeFinishedLibraryViews,
+  readFinishedLibraryViews,
+  staleFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewPieces,
   type FinishedLibraryViews,
@@ -229,17 +231,6 @@ const refFromKey = (key: string): TitleRef => {
   if (!Number.isSafeInteger(parsed) || parsed <= 0)
     throw authorityError('internal', 'library projection produced an invalid title reference');
   return { type, id: parsed };
-};
-
-const effectiveStanding = (
-  row: TitleRow | undefined,
-  episodes: readonly TitleView['episodes'][number][],
-): Standing | null => {
-  if (!row || row.deleted.value || row.status.value === 'none')
-    return episodes.some(({ fraction }) => fraction > 0) ? 'in-progress' : null;
-  if (row.status.value === 'watchlist' && episodes.some(({ fraction }) => fraction > 0))
-    return 'in-progress';
-  return row.status.value === 'inProgress' ? 'in-progress' : row.status.value;
 };
 
 const publicRelease = (
@@ -1468,40 +1459,12 @@ export class LibraryLogAuthority {
   }
 
   #title(ref: TitleRef): TitleView {
-    const row = this.#log.title(ref);
-    const coordinates = this.#coordinates(ref);
-    const episodes = coordinates.map(({ season, episode }) => {
-      const held = this.#log.episode(ref, season, episode);
-      const fraction = episodeProgress(held, row);
-      return {
-        season,
-        episode,
-        watched: fraction >= WATCHED,
-        fraction,
-        ...(held?.progress.seconds !== undefined ? { seconds: held.progress.seconds } : {}),
-        ...(held?.progress.at[0] ? { updatedAt: held.progress.at[0] } : {}),
-      };
-    });
-    const visible = !!row && !row.deleted.value;
-    const shapedWatched = coordinates.length > 0 && episodes.every(({ watched }) => watched);
-    return {
-      kind: 'title',
-      title: ref,
-      listed:
-        (visible && row.status.value !== 'none') || episodes.some(({ fraction }) => fraction > 0),
-      watched: coordinates.length ? shapedWatched : visible && row.status.value === 'watched',
-      reaction: visible ? row.reaction.value : null,
-      standing: effectiveStanding(row, episodes),
-      progress:
-        visible && row.resume.value > 0
-          ? {
-              fraction: Math.max(0, Math.min(1, row.resume.value)),
-              ...(row.resume.seconds !== undefined ? { seconds: row.resume.seconds } : {}),
-              ...(row.resume.at[0] ? { updatedAt: row.resume.at[0] } : {}),
-            }
-          : null,
-      episodes,
-    };
+    return titleView(
+      ref,
+      this.#log.title(ref),
+      (season, episode) => this.#log.episode(ref, season, episode),
+      this.#shapes.get(titleKey(ref))?.shape,
+    );
   }
 
   #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
@@ -1866,12 +1829,22 @@ export class LibraryLogAuthority {
       this.#finishedPieces.recommendations = recommendations;
     } else if (kind === 'continue') {
       const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
+      // Continue is finished once every series in it has its layout: kept before then, it holds whichever layouts this
+      // page had learnt so far, which differ from one visit to the next, so the next visit opens the log to learn them
+      // again and keeps another partial Continue in its place.
+      if (view.needsShapes.length) {
+        delete this.#finishedPieces.continue;
+        this.#finishedPending = undefined;
+        return value;
+      }
       const required = new Set(this.#projected().home.requiredShapeRefs);
       this.#finishedPieces.continue = {
         view,
+        // In key order, not the order this page learnt them in: the same layouts keep the same views.
         layouts: Object.fromEntries(
           [...this.#shapes]
             .filter(([key]) => required.has(key))
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
             .map(([key, stored]) => [key, stored.digest]),
         ),
       };
@@ -1922,10 +1895,16 @@ export class LibraryLogAuthority {
     return libraryLocalAuthorityRevision(this.#log.logHead, this.#log.rowsVersion, summary.stamp);
   }
 
+  /**
+   * A new revision is assembled from pieces selected at it. The views kept of the last one are marked stale meanwhile,
+   * so no visit opens them; their pieces stay, and each that says the same at the new revision is named again rather
+   * than written again (`writeFinishedLibraryViews`).
+   */
   #changeFinishedRevision(revision?: string): void {
     if (!this.#options.libraryKey || !this.#options.vault) return;
     revision ??= this.#finishedAuthorityRevision();
     if (this.#finishedRevision === revision) return;
+    const first = this.#finishedRevision === undefined;
     this.#finishedRevision = revision;
     this.#finishedPieces = {};
     this.#finishedPending = undefined;
@@ -1933,10 +1912,19 @@ export class LibraryLogAuthority {
     this.#finishedTimer = undefined;
     this.#finishedSaving = this.#finishedSaving
       .then(async () => {
-        await removeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
+        // This authority's first revision: views kept by an earlier visit at the same revision still describe it.
+        if (first) {
+          const kept = await readFinishedLibraryViews(
+            this.#options.libraryKey!,
+            this.#options.vault!,
+            [],
+          );
+          if (kept?.identity.authorityRevision === revision) return;
+        }
+        await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })
       .catch((error: unknown) =>
-        console.warn('den: stale finished library views could not be discarded', error),
+        console.warn('den: stale finished library views could not be marked', error),
       );
   }
 
@@ -1960,16 +1948,7 @@ export class LibraryLogAuthority {
   }
 
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {
-    if (ref.type !== 'tv') return [];
-    const shape = this.#shapes.get(titleKey(ref))?.shape;
-    if (!shape) return [];
-    return [...shape.counts]
-      .filter(([season]) => season > 0)
-      .sort(([a], [b]) => a - b)
-      .flatMap(([season, count]) =>
-        Array.from({ length: count }, (_, index) => ({ season, episode: index + 1 })),
-      )
-      .filter((episode) => isAired(episode, shape.lastAired));
+    return titleCoordinates(ref, this.#shapes.get(titleKey(ref))?.shape);
   }
 
   async #titleAction(

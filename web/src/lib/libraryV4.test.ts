@@ -297,7 +297,9 @@ describe('Library v4 documents', () => {
     const server = await edge([filmDocument(1)]);
     const { vault, data } = memoryVault();
     const first = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    await vi.waitFor(() => expect(data.has(`${first.libraryId}:log.v4`)).toBe(true));
+    await vi.waitFor(() =>
+      expect(data.has(`${first.libraryId}:library-facts.v1:manifest`)).toBe(true),
+    );
     // The minimum was remembered only in page storage, which the Worker that opens the log cannot read.
     first.close();
     data.delete(`${first.libraryId}:runtime:meta:wireMin`);
@@ -775,7 +777,9 @@ describe('SIMKL delivery on Library v4', () => {
 
     // A visit while the library was v3: it is kept here, and an edit den-edge refused for now is kept with it.
     const visit = (await LibraryLog.open(LIBRARY_KEY, connection, storage, vault.vault))!;
-    await vi.waitFor(() => expect(vault.data.has(`${visit.libraryId}:log.v1`)).toBe(true));
+    await vi.waitFor(() =>
+      expect(vault.data.has(`${visit.libraryId}:library-facts.v1:manifest`)).toBe(true),
+    );
     server.log.refuseNext = 'rewrite_in_progress';
     const film = visit.title({ type: 'movie', id: 550 })!;
     expect(await visit.write({ ...film, dismissed: { value: true, at: at(9000) } })).not.toBeNull();
@@ -1466,6 +1470,66 @@ describe('a settings row riding with an edit (assistant v1 §6)', () => {
   });
 });
 
+describe('an edit made on a log of its own documents (LibraryLog.openNarrow)', () => {
+  const ref = { type: 'movie' as const, id: 550 };
+  const names = ['title:movie:550', 'rec:movie:550'];
+  const sent = (log: LibraryLog) => vi.waitFor(() => expect(log.pendingActions).toBe(0));
+
+  /** A library this browser has opened whole, so its fact store is complete and its membership kept. */
+  async function openedHere(fetchWrap?: (inner: typeof fetch) => typeof fetch) {
+    const server = await edge([filmDocument(1), filmDocument(2), filmDocument(550)]);
+    const fetchImpl = fetchWrap ? fetchWrap(server.fetchImpl) : server.fetchImpl;
+    const { vault } = memoryVault();
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    expect(full.title(ref)?.status.value).toBe('watchlist');
+    full.close();
+    return { server, fetchImpl, vault };
+  }
+
+  it('reads only the documents it names, and its edit reaches den-edge whole', async () => {
+    const { server, fetchImpl, vault } = await openedHere();
+    const narrow = await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault);
+    expect(narrow, 'opened narrow').not.toBeNull();
+    expect(narrow!.title(ref)?.status.value).toBe('watchlist');
+    expect(
+      narrow!.title({ type: 'movie', id: 1 }),
+      'the other titles are not read',
+    ).toBeUndefined();
+
+    await narrow!.write(react(narrow!.title(ref)!, 'love', at(4000)));
+    await sent(narrow!);
+    narrow!.close();
+
+    const stored = document(await server.opened(), 'title:movie:550');
+    expect(stored?.reaction).toEqual({ value: 'love', at: at(4000) });
+    expect(stored?.status, 'the rest of the document kept').toEqual({
+      value: 'watchlist',
+      at: at(1000),
+    });
+  });
+
+  it('declines a browser with no fact store', async () => {
+    const { fetchImpl } = await openedHere();
+    expect(
+      await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, memoryVault().vault),
+    ).toBeNull();
+  });
+
+  it('declines while work is kept on this device', async () => {
+    let unreachable = false;
+    const { fetchImpl, vault } = await openedHere((inner) => async (input, init) => {
+      if (unreachable && init?.method === 'POST') throw new TypeError('network down');
+      return inner(input, init);
+    });
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    unreachable = true;
+    await full.write(react(full.title(ref)!, 'like', at(4000)));
+    await vi.waitFor(() => expect(full.queuedActions, 'kept, not sent').toBe(1));
+    full.close();
+    expect(await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault)).toBeNull();
+  });
+});
+
 function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {
@@ -1475,6 +1539,17 @@ function memoryVault() {
     delete: async (key) => void data.delete(key),
     remove: async (prefix) => {
       for (const k of [...data.keys()]) if (k.startsWith(prefix)) data.delete(k);
+    },
+    page: async (prefix, after, limit) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit),
+    commit: async (changes) => {
+      for (const change of changes) {
+        if (change.kind === 'put') data.set(change.key, change.value.slice());
+        else data.delete(change.key);
+      }
     },
   };
   return { data, vault };

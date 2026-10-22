@@ -80,6 +80,52 @@ it('installs the relay membership before open resolves and releases it on close'
   expect(stop).toHaveBeenCalledOnce();
 });
 
+it('reports a first read’s progress and keeps a reading open alive past its startup timeout', async () => {
+  vi.useFakeTimers();
+  try {
+    const transport = new FakeTransport();
+    const client = new LibraryServiceClient(transport, 'client-1', 1_000);
+    const progress = vi.fn();
+    const opening = client.open({ libraryKey: 'library-key', mode: 'online', progress });
+    const hello = transport.sent[0]!;
+    for (const value of [0.25, 0.5, 0.75]) {
+      vi.advanceTimersByTime(900);
+      transport.emit({
+        type: 'opening',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: hello.requestId,
+        progress: value,
+      });
+    }
+    vi.advanceTimersByTime(900);
+    transport.emit({
+      type: 'ready',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: hello.requestId,
+      relayMembership: null,
+      version: version(0),
+    });
+
+    await expect(opening).resolves.toEqual(version(0));
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([0.25, 0.5, 0.75]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('still times out an open that says nothing', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = new LibraryServiceClient(new FakeTransport(), 'client-1', 1_000);
+    const opening = client.open({ libraryKey: 'library-key', mode: 'online' });
+    const settled = expect(opening).rejects.toMatchObject({ failure: { code: 'unavailable' } });
+    vi.advanceTimersByTime(1_000);
+    await settled;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('installs only newer replacements from the opened service instance', async () => {
   const { client, transport } = await opened();
   const values = vi.fn();

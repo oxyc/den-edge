@@ -209,6 +209,18 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
   };
 }
 
+/** The drop-box key `row` (`DROPBOX_ROW`) holds, once the assistant module is loaded (`ensureAssistantPolicy`). */
+export const dropboxKey = (row: SettingsRow | null): DropboxKey | null =>
+  assistantPolicy<DropboxKey | null>({ op: 'assistant_dropbox', assistant: row });
+
+/**
+ * When this device's last publication must next be built, its inputs unchanged (`Publication.dueAt`); null when it
+ * has none. Before then, a page that has written nothing has nothing to publish: another device publishes its own
+ * changes, and this device's go through the library log, which publishes them.
+ */
+export const publicationDueAt = (records: AssistantRecords | null | undefined): number | null =>
+  readRecords(records).publication?.dueAt ?? null;
+
 function readPublication(value: unknown): value is Publication {
   if (!value || typeof value !== 'object') return false;
   const { key, dueAt, sent, layouts } = value as Partial<Publication>;
@@ -371,10 +383,7 @@ export class LibraryAssistantAuthority {
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
   dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
-    return assistantPolicy<DropboxKey | null>({
-      op: 'assistant_dropbox',
-      assistant: this.#row(DROPBOX_ROW, lent),
-    });
+    return dropboxKey(this.#row(DROPBOX_ROW, lent));
   }
 
   #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {

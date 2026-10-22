@@ -81,13 +81,52 @@ describe('library fact store', () => {
       head: 7,
       complete: false,
       profileTopology: false,
-      fullAuthority: true,
+      newest: { stamp: [70, 0, 'device'], reconsiderAt: null },
     });
     const names = [...vault.values.keys()];
     expect(names.some((name) => name.includes(':document:'))).toBe(true);
     expect(names.some((name) => name.includes(':fact:watchlist:'))).toBe(true);
     expect(names.some((name) => name.includes(':fact:recommendations:'))).toBe(true);
     expect(names.some((name) => name.includes(':history:'))).toBe(false);
+  });
+
+  it('keeps the newest stamp of every row it has kept, across reads, own writes and generations', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const newest = async () => (await store.manifest())!.newest!.stamp;
+    await store.commitBatch(
+      'generation-a',
+      2,
+      [
+        { k: 'a'.repeat(64), seq: 1, value: 'one', row: title(1, 'watchlist', 90) },
+        { k: 'b'.repeat(64), seq: 2, value: 'two', row: title(3, 'watchlist', 40) },
+      ],
+      false,
+    );
+    expect(await newest()).toEqual([90, 0, 'device']);
+    // A later page of older rows leaves it; a fresh store reading the same library carries it on.
+    const again = (await LibraryFactStore.open(libraryKey, vault))!;
+    await again.commitBatch(
+      'generation-a',
+      3,
+      [{ k: 'c'.repeat(64), seq: 3, value: 'three', row: title(5, 'watchlist', 10) }],
+      true,
+    );
+    expect(await newest()).toEqual([90, 0, 'device']);
+    // A row this browser wrote, kept beside the cursor without moving it, raises it.
+    await again.keepRows('generation-a', [
+      { k: 'a'.repeat(64), seq: 4, value: '', row: title(1, 'watched', 120) },
+    ]);
+    expect((await store.manifest())!).toMatchObject({ head: 3, complete: true });
+    expect(await newest()).toEqual([120, 0, 'device']);
+    // A new generation starts from its own rows.
+    await again.commitBatch(
+      'generation-b',
+      1,
+      [{ k: 'd'.repeat(64), seq: 1, value: 'four', row: title(7, 'watchlist', 30) }],
+      true,
+    );
+    expect(await newest()).toEqual([30, 0, 'device']);
   });
 
   it('reduces Watchlist and Continue independently without a watched-history fact', async () => {

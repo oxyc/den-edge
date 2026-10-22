@@ -29,6 +29,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
+  BIG_LIBRARY_SCALE,
   bigHousehold,
   forgetPublication,
   holdProjectionBuilds,
@@ -68,6 +69,14 @@ const ALLOCATED_MB = 100;
 const ROWS_READ = 100;
 
 /**
+ * Documents a returning visit to one screen may fold, whatever the library's size: what it shows, not the whole
+ * library. A screen that opens the full log folds every document (3,079 here, three times as many at
+ * `BIG_LIBRARY_SCALE=3`), which an old TV or phone pays for in seconds and tens of MB. A count, not a time: Chromium
+ * slows a page's CPU but not its Workers', where the folding happens.
+ */
+const FOLDED_DOCUMENTS = 500;
+
+/**
  * MB WebKit's WebContent process may hold once a returning visit has settled (`pageFootprint`). What iOS ends a tab's
  * process by is its footprint, which macOS reads alike: 96-179 MB here across the surfaces, 0.271.68's 264-650 (its
  * library Worker kept the projection build's 61 MB of wasm, and more besides). CI's WebKit is Linux's WPE port, whose
@@ -82,12 +91,20 @@ const DURING_REBUILD_MS = 1_000;
 
 /**
  * `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. `shelves`: the surface
- * names its library rows, and has its `shelves ready` milestone budgeted too.
+ * names its library rows, and has its `shelves ready` milestone budgeted too. `background`: library promotions the
+ * surface makes only once it has drawn, left out of `FOLDED_DOCUMENTS`.
  */
 const SURFACES = [
   { name: 'Home', path: '/', content: ['billboardText', 'continuePoster'], shelves: true },
   { name: 'Series', path: '/series', content: ['rowPoster'], shelves: true },
-  { name: 'Watchlist', path: '/watchlist', content: ['billboardText'], shelves: true },
+  // Its watched history is the whole library's: asked for once the screen has drawn (`historyAsked`, Library.svelte).
+  {
+    name: 'Watchlist',
+    path: '/watchlist',
+    content: ['billboardText'],
+    shelves: true,
+    background: ['selection:history'],
+  },
   { name: 'Series detail', path: `/tv/${WATCHED_SERIES}`, content: ['episodes'] },
   { name: 'Settings', path: '/settings', content: ['settings'] },
   // After the switch below: the household's Kid, whose billboard is age-checked title by title.
@@ -406,12 +423,22 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
   );
   page.on('console', (message) => {
     if (isBuild(message)) built.page++;
-    const match =
-      /^den: startup \+(\d+)ms (app module requested|worker ready|handover|shelves ready|billboard detail|first poster|episodes shown)/.exec(
-        message.text(),
-      );
+    // Every page milestone, named without its detail; a Worker's own lines (`[worker] …`) are left to its metrics.
+    const match = /^den: startup \+(\d+)ms ([^[(][^(]*?)(?: \((.*)\))?$/.exec(message.text());
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
+    // Which selections the supervisor waited on before ready, and when each first answered.
+    if (match?.[2] === 'supervisor ready' && marks.bound === undefined) marks.bound = match[3];
   });
+  // When each library promotion was heard, in ms from just before navigation: a `background` one must come after the
+  // surface's content (which is timed from navigation start, so never later than this clock for the same moment).
+  const started = Date.now();
+  const promoted = {};
+  const hearPromotion = (message) => {
+    const reason = /library promoted \((.+)\)$/.exec(message.text())?.[1];
+    if (reason && promoted[reason] === undefined) promoted[reason] = Date.now() - started;
+  };
+  page.on('console', hearPromotion);
+  page.on('worker', (worker) => worker.on?.('console', hearPromotion));
   const projectionsBefore = edge.assistant?.projections.length ?? 0;
   // Rows den-edge sent the library Workers, from every changes page.
   const reads = [];
@@ -458,6 +485,7 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
     ...processes,
     drawnAt,
     marks,
+    promoted,
   };
   await page.close();
   return result;
@@ -534,7 +562,7 @@ for (const [label, type, device, options] of ENGINES) {
       type === webkit && !process.env.CI && !existsSync(webkit.executablePath()),
       'needs WebKit: npx playwright install webkit',
     );
-    test.setTimeout(300_000);
+    test.setTimeout(300_000 * BIG_LIBRARY_SCALE);
     const footprint = type === webkit ? pageFootprint : undefined;
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
@@ -591,6 +619,17 @@ for (const [label, type, device, options] of ENGINES) {
         // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
         // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
         expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
+        const folded = (result.libraryStartup ?? [])
+          .filter(({ promotion }) => !surface.background?.includes(promotion))
+          .reduce((sum, startup) => sum + startup.documentsFolded, 0);
+        expect
+          .soft(folded, `${surface.name}: library documents folded`)
+          .toBeLessThan(FOLDED_DOCUMENTS);
+        for (const reason of surface.background ?? [])
+          if (result.promoted[reason] !== undefined)
+            expect
+              .soft(result.promoted[reason], `${surface.name}: ms to ${reason}, after its content`)
+              .toBeGreaterThanOrEqual(result.contentMs);
         for (const startup of result.libraryStartup ?? []) {
           if (startup.viewSource !== 'cache') continue;
           expect

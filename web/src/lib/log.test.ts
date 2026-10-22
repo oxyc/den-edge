@@ -20,6 +20,8 @@ import { fetchDetailsResult } from './workerTmdbProvider';
 import {
   deriveKeys,
   open,
+  rowKey,
+  rowName,
   seal,
   sealPlaintext,
   type EpisodeRow,
@@ -163,28 +165,27 @@ function memoryVault() {
     remove: async (prefix) => {
       for (const key of [...data.keys()]) if (key.startsWith(prefix)) data.delete(key);
     },
+    page: async (prefix, after, limit) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit),
+    commit: async (changes) => {
+      const next = new Map(data);
+      for (const change of changes) {
+        if (change.kind === 'put') next.set(change.key, change.value.slice());
+        else next.delete(change.key);
+      }
+      data.clear();
+      for (const [key, value] of next) data.set(key, value);
+    },
   };
   return { data, vault };
 }
 
-function factMemoryVault() {
-  const held = memoryVault();
-  held.vault.page = async (prefix, after, limit) =>
-    [...held.data]
-      .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
-      .sort(([left], [right]) => left.localeCompare(right))
-      .slice(0, limit);
-  held.vault.commit = async (changes) => {
-    const next = new Map(held.data);
-    for (const change of changes) {
-      if (change.kind === 'put') next.set(change.key, change.value.slice());
-      else next.delete(change.key);
-    }
-    held.data.clear();
-    for (const [key, value] of next) held.data.set(key, value);
-  };
-  return held;
-}
+/** The fact store holds a library: its manifest is kept. */
+const keptFacts = (data: Map<string, Uint8Array>) =>
+  [...data.keys()].some((key) => key.endsWith(':library-facts.v1:manifest'));
 
 function memoryStorage() {
   const data = new Map<string, string>();
@@ -203,7 +204,7 @@ function memoryStorage() {
 
 describe('LibraryLog', () => {
   it('promotes explicit full work from individual authority without downloading the library again', async () => {
-    const { vault } = factMemoryVault();
+    const { vault } = memoryVault();
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     const value = row(91);
     const encrypted = await seal(keys, value);
@@ -225,7 +226,8 @@ describe('LibraryLog', () => {
 
     const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
     expect(log.rows()).toContainEqual(value);
-    expect(requests).toEqual([`PUT /lib/${keys.id}/member`]);
+    // The membership this browser never registered is registered beside the open, not before it.
+    await vi.waitFor(() => expect(requests).toEqual([`PUT /lib/${keys.id}/member`]));
   });
 
   it('seals migration credentials under the worker-only household key and reopens them after restart', async () => {
@@ -322,7 +324,7 @@ describe('LibraryLog', () => {
   });
 
   it('reads the validated profile directory beside, never as, profile activity', async () => {
-    const server = await edge([], [await sealedProfileDirectory()]);
+    const server = await edge([], [await sealedProfileDirectory()], 'generation-1');
     const { vault } = memoryVault();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
 
@@ -385,7 +387,7 @@ describe('LibraryLog', () => {
   });
 
   it('deactivates a valid and cached directory when a newer profiles row is invalid', async () => {
-    const server = await edge([], [await sealedProfileDirectory()]);
+    const server = await edge([], [await sealedProfileDirectory()], 'generation-1');
     const { vault } = memoryVault();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
     expect(log.profileDirectory()?.profiles[OWNER_ID]?.display.value.name).toBe('Cindy');
@@ -951,7 +953,7 @@ describe('LibraryLog', () => {
   });
 
   it('keeps an acknowledged write before it returns so an immediate reload cannot restore stale data', async () => {
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     const { storage } = memoryStorage();
     const { vault } = memoryVault();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
@@ -1256,16 +1258,16 @@ describe('LibraryLog', () => {
 
   it('starts a return visit from the kept copy and asks only for what changed since', async () => {
     const { data, vault } = memoryVault();
-    const server = await edge([row(1), row(2), row(3)]);
+    const server = await edge([row(1), row(2), row(3)], [], 'generation-1');
     const asked: string[] = [];
     const counting: typeof fetch = (input, init) => {
       asked.push(String(input));
       return server.fetchImpl(input, init);
     };
     await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault);
-    await vi.waitFor(() => expect(data.size).toBe(1));
-    const kept = new TextDecoder().decode([...data.values()][0]);
-    expect(kept).not.toContain('watchlist');
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
+    for (const value of data.values())
+      expect(new TextDecoder().decode(value)).not.toContain('watchlist');
 
     // Meanwhile the TV adds a title and changes another.
     const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
@@ -1292,7 +1294,7 @@ describe('LibraryLog', () => {
 
   it('resolves profile discovery after an unchanged return-visit refresh', async () => {
     const { data, vault } = memoryVault();
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     const household: typeof fetch = async (input, init) => {
       const response = await server.fetchImpl(input, init);
       const headers = new Headers(response.headers);
@@ -1301,7 +1303,7 @@ describe('LibraryLog', () => {
     };
     const first = (await LibraryLog.open(LIBRARY_KEY, household, undefined, vault, 5))!;
     expect(first.profileDirectoryPending).toBe(false);
-    await vi.waitFor(() => expect(data.size).toBe(1));
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
 
     const returned = (await LibraryLog.open(LIBRARY_KEY, household, undefined, vault, 5))!;
     expect(returned.fromCache).toBe(true);
@@ -1309,6 +1311,103 @@ describe('LibraryLog', () => {
 
     expect(await returned.refresh()).toBe(true);
     expect(returned.profileDirectoryPending).toBe(false);
+  });
+
+  it('keeps an edit as the one document it changed, never the whole library again', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1), row(3), row(4)], [], 'generation-1');
+    const written: string[] = [];
+    const recording: Vault = {
+      ...vault,
+      put: async (key, value) => (written.push(key), vault.put(key, value)),
+      commit: async (changes) => {
+        written.push(...changes.map((change) => change.key));
+        await vault.commit!(changes);
+      },
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, recording))!;
+    written.length = 0;
+    await log.write(row(2));
+
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const changed = await rowKey(keys, 'rec:movie:2');
+    const library = written.filter((key) => !key.includes(':runtime:'));
+    expect(library.filter((key) => key.includes(':library-facts.v1:'))).not.toEqual([]);
+    // The changed document, the finished-view marker, and the store's manifest, which takes its newest stamp in.
+    for (const key of library)
+      expect(
+        key.endsWith(':local-authority.v1') ||
+          key.endsWith(':library-facts.v1:manifest') ||
+          key.endsWith(changed),
+        key,
+      ).toBe(true);
+    expect([...data.keys()].filter((key) => /:log\.v[14]$/.test(key))).toEqual([]);
+    log.close();
+
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault))!;
+    expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
+    expect(reopened.rows()).toHaveLength(4);
+  });
+
+  /** A library an earlier build kept whole, under the name `persist` wrote it to before the fact store kept it. */
+  async function keptWhole(snapshot: (log: LibraryLog) => unknown, generation = 'generation-1') {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1), row(2)], [], generation);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    await log.keep('log.v1', snapshot(log));
+    for (const key of [...data.keys()]) if (key.includes(':library-facts.v1:')) data.delete(key);
+    log.close();
+    return { data, vault, server };
+  }
+
+  it('moves a library an earlier build kept whole into the fact store once, then opens from that', async () => {
+    const { data, vault } = await keptWhole((log) => ({
+      generation: 'generation-1',
+      head: 2,
+      entries: log.rows().map((held) => [rowName(held), 1, held]),
+    }));
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+
+    const moved = (await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault))!;
+    expect(moved.fromCache).toBe(true);
+    expect(moved.rows()).toHaveLength(2);
+    expect(
+      [...data.keys()].filter((key) => key.endsWith(':log.v1')),
+      'the whole copy',
+    ).toEqual([]);
+    expect(keptFacts(data)).toBe(true);
+
+    const again = (await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault))!;
+    expect(again.fromCache).toBe(true);
+    expect(again.rows()).toHaveLength(2);
+  });
+
+  it('reads den-edge again for a library kept whole with its profile directory, which the store cannot take', async () => {
+    const { data, vault, server } = await keptWhole((log) => ({
+      generation: 'generation-1',
+      head: 2,
+      entries: log.rows().map((held) => [rowName(held), 1, held]),
+      profileDirectory: [3, profileDirectory()],
+    }));
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+
+    expect(await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault)).toBeNull();
+    expect([...data.keys()].filter((key) => key.endsWith(':log.v1'))).toEqual([]);
+    const read = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(read.fromCache).toBe(false);
+    expect(read.rows()).toHaveLength(2);
+  });
+
+  it('leaves a library kept only here (no generation) as it is when its key is opened on den-edge', async () => {
+    const { data, vault } = await keptWhole((log) => ({
+      head: 0,
+      entries: log.rows().map((held) => [rowName(held), 0, held]),
+    }));
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+
+    await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault);
+    expect([...data.keys()].filter((key) => key.endsWith(':log.v1'))).toHaveLength(1);
   });
 
   it('keeps its own write for the next visit once den-edge has echoed it', async () => {
@@ -1330,7 +1429,7 @@ describe('LibraryLog', () => {
    */
   it('keeps the head it read its own writes back to, so the next visit does not read them again', async () => {
     const { vault } = memoryVault();
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
     await log.write(row(2));
     await log.write(row(3));
@@ -1498,7 +1597,7 @@ describe('LibraryLog', () => {
   /** A first read cut off part way started again from the first page on every visit, and on a slow link never ended. */
   it('goes on with a first read from the last page it kept', async () => {
     const { data, vault } = memoryVault();
-    const server = await edge([row(1), row(2), row(3), row(4), row(5)]);
+    const server = await edge([row(1), row(2), row(3), row(4), row(5)], [], 'generation-1');
     const asked: string[] = [];
     let failAt = 2;
     const connection: typeof fetch = async (url, init) => {
@@ -1508,8 +1607,9 @@ describe('LibraryLog', () => {
       }
       return server.fetchImpl(url, init);
     };
+    const partial = () => [...data.keys()].some((key) => key.endsWith(':log-partial.v1'));
     expect(await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault)).toBeNull();
-    await vi.waitFor(() => expect(data.size).toBe(1));
+    await vi.waitFor(() => expect(partial()).toBe(true));
     asked.length = 0;
     failAt = 0;
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
@@ -1517,7 +1617,7 @@ describe('LibraryLog', () => {
     expect(asked[0]).toContain('since=2');
     expect(log.rows()).toHaveLength(5);
     await vi.waitFor(async () => {
-      expect(data.size, 'only the whole copy is kept').toBe(1);
+      expect(partial(), 'the pages read so far are forgotten').toBe(false);
       const next = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
       expect(next.fromCache).toBe(true);
       expect(next.rows()).toHaveLength(5);
@@ -1587,7 +1687,7 @@ describe('LibraryLog', () => {
       removeItem: (k: string) => void data.delete(k),
       clear: () => data.clear(),
     } as Storage;
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
     const blank = blankTitle({ type: 'movie', id: 10 }, 0);
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
@@ -1612,9 +1712,9 @@ describe('LibraryLog', () => {
   it('draws kept work on a return visit while den-edge is out of reach', async () => {
     const { data: kept, vault } = memoryVault();
     const { data, storage } = memoryStorage();
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
-    await vi.waitFor(() => expect(kept.size).toBe(1));
+    await vi.waitFor(() => expect(keptFacts(kept)).toBe(true));
     const blank = blankTitle({ type: 'movie', id: 10 }, 0);
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'kept')!;
@@ -1656,7 +1756,7 @@ describe('LibraryLog', () => {
   /** A return visit whose membership den-edge never took claimed none until the first refresh read /changes. */
   it('registers a membership not yet registered as soon as a return visit opens', async () => {
     const { data, vault } = memoryVault();
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     let members = 0;
     let refuseMember = true;
     const connection: typeof fetch = async (url, init) => {
@@ -1669,7 +1769,7 @@ describe('LibraryLog', () => {
     };
     forgetLibraryCredential();
     await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault);
-    await vi.waitFor(() => expect(data.size).toBe(1));
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
     forgetLibraryCredential();
     refuseMember = false;
     members = 0;
@@ -1684,10 +1784,10 @@ describe('LibraryLog', () => {
 
   it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
     const { data, vault } = memoryVault();
-    const server = await edge([row(1)]);
+    const server = await edge([row(1)], [], 'generation-1');
     await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault);
-    await vi.waitFor(() => expect(data.size).toBe(1));
-    const [key, value] = [...data][0]!;
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
+    const [key, value] = [...data].find(([name]) => name.endsWith(':library-facts.v1:manifest'))!;
     const tampered = value.slice();
     tampered[20] = tampered[20]! ^ 1;
     data.set(key, tampered);

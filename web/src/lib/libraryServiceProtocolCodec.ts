@@ -2546,6 +2546,15 @@ export function decodeLibraryServiceServerMessage(
       if (!exact(input, ['type', 'protocol', 'status']) || !sessionStatus(input.status))
         return invalid('session status is invalid');
       break;
+    case 'opening':
+      if (
+        !exact(input, ['type', 'protocol', 'requestId', 'progress']) ||
+        !text(input.requestId) ||
+        typeof input.progress !== 'number' ||
+        !(input.progress >= 0 && input.progress <= 1)
+      )
+        return invalid('opening progress is invalid');
+      break;
     case 'update':
       if (
         !exact(input, ['type', 'protocol', 'subscriptionId', 'version', 'value']) ||

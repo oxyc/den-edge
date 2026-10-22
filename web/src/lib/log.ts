@@ -47,7 +47,7 @@ import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profil
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
-import { noteLibraryDecrypt, noteLibraryHydrate } from './libraryStartupMetrics';
+import { noteLibraryHydrate } from './libraryStartupMetrics';
 import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   believe,
@@ -83,6 +83,7 @@ import {
   type WatchRow,
 } from './wire';
 import { trackerEvent } from './trackerEvents';
+import { episodeRow, titleRow } from './titleView';
 import { ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
@@ -320,7 +321,10 @@ interface Batch {
   conflicts: { k: string; seq: number; v: string | null; omitted?: boolean }[];
 }
 
-/** What a return visit starts from: the rows as den-edge last gave them, and where in its log that was. */
+/**
+ * A library kept whole, as rows and where in its log they were read to: one kept only here (`openLocal`), a first
+ * read's pages so far (`PARTIAL`), or a copy an earlier build kept of one on den-edge (`convertSnapshot`).
+ */
 interface Snapshot {
   generation?: string;
   head: number;
@@ -328,7 +332,6 @@ interface Snapshot {
   /** A null document records a newer, correctly named directory that failed validation (fail closed offline too). */
   profileDirectory?: [seq: number, document: ProfileDirectoryDocument | null];
   kidTitleApprovals?: [kid: string, seq: number, document: KidTitleApprovalsDocument][];
-  memberRegistered?: boolean;
   /**
    * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
    * on den-edge remembers den-edge's answer in the browser runtime vault instead.
@@ -362,16 +365,21 @@ interface KeptWork {
   generation?: string;
 }
 
-/** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
+/**
+ * Under what `LibraryLog.keep` holds a library kept only here; a new format takes a new name, so an old copy is never
+ * misread. Earlier builds kept a library on den-edge whole under it too, before v4.
+ */
 const SNAPSHOT = 'log.v1';
-/** The same for a library at v4, whose documents a build from before it would misread as rows. */
+/** Where earlier builds kept a library on den-edge at v4 whole; `convertSnapshot` moves it into the fact store. */
 const SNAPSHOT_V4 = 'log.v4';
+/** The generation this browser's membership was registered under (`putMember`). */
+const MEMBER = 'log-member.v1';
 /** Unsealed existence marker for a browser-local library. It contains no key or library data. */
 const LOCAL_LIBRARY = 'runtime:meta:local-library';
 
 /**
  * Under what a first read of the log keeps the pages it has read so far, so a read cut off on a slow link goes on
- * from there on the next visit instead of from the start. Never opened as the library: only `SNAPSHOT` is whole.
+ * from there on the next visit instead of from the start. Never opened as the library: it is not whole.
  */
 const PARTIAL = 'log-partial.v1';
 
@@ -424,6 +432,11 @@ export class LibraryLog {
    * edits: what the next visit starts from.
    */
   private readonly acknowledged = new Map<string, Entry>();
+  /**
+   * Names `acknowledged` took from this browser's own writes, with the generation they were written in, that the fact
+   * store has yet to keep (`keepAcknowledged`). A read of the log keeps its rows itself (`keepFacts`).
+   */
+  private readonly unkept = new Map<string, string | undefined>();
   /** How many times `project` changed a row: `replay` says it changed what this browser holds by it. */
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
@@ -513,6 +526,11 @@ export class LibraryLog {
   private readonly rejected = new Map<string, number>();
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
+  /**
+   * A narrow log's (`openNarrow`): the newest stamp of the whole library it did not read. Its other rows are not here,
+   * so it never keeps the finished-view marker, which is built from them.
+   */
+  private narrowNewest: Stamp | null = null;
   /** How many generation changes (library v2 §2) `refresh` has read and written back: a recovery reconcile follows each. */
   generationChanges = 0;
   /**
@@ -2740,6 +2758,7 @@ export class LibraryLog {
           )
             return false;
           this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+          this.unkept.set(write.name, this.generation);
         }
       }
     }
@@ -2888,52 +2907,24 @@ export class LibraryLog {
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
-    const decryptAt = performance.now();
-    const savedV4 = await log.kept<Snapshot>(SNAPSHOT_V4, true);
-    const saved = savedV4 ?? (await log.kept<Snapshot>(SNAPSHOT, true));
-    if (saved) noteLibraryDecrypt(saved.entries.length, performance.now() - decryptAt);
-    if (saved) {
-      await policy;
-      log.memberRegistered = saved.memberRegistered ?? false;
-      log.generation = saved.generation;
-      log.head = saved.head;
-      let documents = false;
-      await inPolicySlices(saved.entries, ([name, seq, row]) => {
-        if (!wellFormed(row)) return;
-        log.noteFormat(row);
-        documents ||= isDocument(row);
-        log.acknowledged.set(name, { seq, row });
-        log.entries.set(name, { seq, row });
-      });
-      // A library kept as v4 is at minimum 4 even when this browser kept no minimum for it (one remembered only in
-      // page storage before the log moved into the Worker). Without this, an edit made before den-edge first answers
-      // goes out in the v2/v3 form: `set:tracker-event:*` and `ep`/`rec` rows a v4 library must never hold (§8).
-      if ((savedV4 || documents) && log.wireMin < WIRE) log.wireMin = WIRE;
-      log.restoreProfileDirectory(saved);
-      log.restoreKidTitleApprovals(saved);
-      // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
-      // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
-      // follows at once, sends the work kept here.
-      if (log.memberRegistered) useLibraryCredential(keys);
-      else
-        void log.registerMember().then(() => {
-          if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
-        });
-      log.fromCache = true;
-      log.projectJournal();
-      // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
-      await log.projectKept();
-      await log.seedFacts(saved);
-      return log;
-    }
+    await log.convertSnapshot();
     const factManifest = await log.factStore?.manifest();
-    if (factManifest?.complete && factManifest.fullAuthority) {
+    if (factManifest?.complete) {
       await policy;
       if (await log.restoreFacts(factManifest.generation, factManifest.head)) {
+        // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
+        // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
+        // follows at once, sends the work kept here.
+        if (log.memberRegistered) useLibraryCredential(keys);
+        else
+          void log.registerMember().then(() => {
+            if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
+          });
         log.fromCache = true;
         log.projectJournal();
+        // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
         await log.projectKept();
-        return log.restoreJournal();
+        return log;
       }
     }
     // Registered once the first page names the generation (below): sent before it, the registration carries generation
@@ -3370,7 +3361,8 @@ export class LibraryLog {
             }
             const previous = this.entries.get(rowName(row));
             const merged = previous ? merge(previous.row, row) : row;
-            factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: merged });
+            // As den-edge holds it, like `acknowledged`: the next visit draws the work kept here over it again.
+            factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row });
             if (!previous || entry.seq > previous.seq) {
               this.entries.set(rowName(row), {
                 seq: entry.seq,
@@ -3392,8 +3384,8 @@ export class LibraryLog {
             !page.more || page.entries.length === 0,
             factProfileTopology,
           );
-          // Kept with the rows: a pass that reads back only this browser's own writes changes no row, and without this
-          // the kept head stayed behind them, so every later visit read and opened them all again.
+          // The finished views' marker names the head: a pass that reads back only this browser's own writes changes no
+          // row, and without this the marker stayed behind them.
           if (head !== this.head) this.dirty = true;
           this.head = head;
           if (!page.more || page.entries.length === 0) return 'head';
@@ -3478,7 +3470,7 @@ export class LibraryLog {
         this.local.key,
         name,
         bytes,
-        name === SNAPSHOT || name === SNAPSHOT_V4,
+        name === SNAPSHOT,
         projectRows ? Date.now() : undefined,
       );
       if (opened !== undefined) return opened;
@@ -3499,54 +3491,80 @@ export class LibraryLog {
   }
 
   /**
-   * Keep den-edge's rows for the next visit, in the order they changed; a failure only costs that visit a full read.
-   * A library kept only here is saved whole by each tab that has it open, so what another tab saved is merged in
-   * first (`takeKept`), under one lock per library where the browser has `navigator.locks`.
+   * Keep what changed for the next visit; a failure only costs that visit a read of what changed since. Of a library on
+   * den-edge, the rows its writes acknowledged go into the fact store (`keepAcknowledged`): a read of the log keeps
+   * what it read itself, with its cursor (`keepFacts`). A library kept only here is saved whole by each tab that has
+   * it open, so what another tab saved is merged in first (`takeKept`), under one lock per library where the browser
+   * has `navigator.locks`.
    */
   private persist(): void {
     if (!this.dirty || !this.local) return;
     this.dirty = false;
-    const snapshot = this.offline ? undefined : this.snapshot();
-    // A library at v4 is kept under its own name, and the older copy goes, so neither is read for the other.
-    const [name, other] =
-      this.wireMin >= WIRE && !this.offline ? [SNAPSHOT_V4, SNAPSHOT] : [SNAPSHOT, SNAPSHOT_V4];
-    const save = async (kept: Snapshot) => {
-      await this.local?.vault.remove(`${this.keys.id}:${other}`);
-      await (kept.entries.length || kept.profileDirectory
-        ? this.keep(name, kept)
-        : this.local?.vault.remove(`${this.keys.id}:${name}`));
-      if (!this.offline && this.generation) {
-        try {
-          const summary = this.currentSummary();
-          await this.keep(LIBRARY_LOCAL_AUTHORITY, {
-            generation: this.generation,
-            head: this.head,
-            authorityRevision: libraryLocalAuthorityRevision(
-              this.head,
-              this.entriesVersion,
-              summary.stamp,
-            ),
-            rowsVersion: this.entriesVersion,
-          });
-        } catch (error) {
-          // The snapshot remains authoritative. A missing/older marker only makes the disposable view cache miss.
-          console.warn('den: the finished-view authority marker could not be kept', error);
-        }
-      }
-    };
     this.saving = this.saving
       .then(() =>
-        snapshot
-          ? save(snapshot)
-          : exclusive(`den.library.${this.keys.id}`, async () => {
+        this.offline
+          ? exclusive(`den.library.${this.keys.id}`, async () => {
               await this.takeKept();
-              await save(this.snapshot());
-            }),
+              const kept = this.snapshot();
+              await (kept.entries.length || kept.profileDirectory
+                ? this.keep(SNAPSHOT, kept)
+                : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`));
+            })
+          : this.keepAcknowledged(),
       )
       .catch((error: unknown) => {
         this.dirty = true;
         console.warn('den: the library could not be kept for the next visit', error);
       });
+  }
+
+  /**
+   * The rows acknowledged since the last keep (`unkept`), each as den-edge now holds it, read at their turn in
+   * `saving`: a page `keepFacts` kept meanwhile is never overwritten by an older copy. Then the marker the finished
+   * views are checked against.
+   */
+  private async keepAcknowledged(): Promise<void> {
+    const generation = this.generation;
+    if (!generation) return;
+    const names = [...this.unkept].flatMap(([name, at]) => (at === generation ? [name] : []));
+    this.unkept.clear();
+    try {
+      if (this.factStore && names.length)
+        await this.factStore.keepRows(
+          generation,
+          await Promise.all(
+            names.map(async (name) => {
+              const held = this.acknowledged.get(name);
+              return {
+                k: await rowKey(this.keys, name),
+                seq: held?.seq ?? 0,
+                value: '',
+                row: held?.row ?? null,
+              };
+            }),
+          ),
+        );
+    } catch (error) {
+      for (const name of names) this.unkept.set(name, generation);
+      throw error;
+    }
+    if (this.narrowNewest) return;
+    try {
+      const summary = this.currentSummary();
+      await this.keep(LIBRARY_LOCAL_AUTHORITY, {
+        generation,
+        head: this.head,
+        authorityRevision: libraryLocalAuthorityRevision(
+          this.head,
+          this.entriesVersion,
+          summary.stamp,
+        ),
+        rowsVersion: this.entriesVersion,
+      });
+    } catch (error) {
+      // A missing/older marker only makes the finished-view cache miss.
+      console.warn('den: the finished-view authority marker could not be kept', error);
+    }
   }
 
   /** Every row another tab kept of this library kept only here, merged with this tab's the way a write is merged. */
@@ -3565,7 +3583,6 @@ export class LibraryLog {
     return {
       generation: this.generation,
       head: this.head,
-      memberRegistered: this.memberRegistered,
       entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
       ...(this.profileDirectorySeq > 0
         ? {
@@ -3588,12 +3605,13 @@ export class LibraryLog {
     };
   }
 
-  /** Hydrate explicit full-history/editing work from the one-time individual import without downloading it again. */
+  /** Open the library from the fact store, this browser's one copy of it, without asking den-edge. */
   private async restoreFacts(generation: string, head: number): Promise<boolean> {
     if (!this.factStore) return false;
     try {
       this.generation = generation;
       this.head = head;
+      this.memberRegistered = (await this.kept<string>(MEMBER)) === generation;
       let documents = false;
       for await (const { key, document } of this.factStore.documents(generation)) {
         noteLibraryHydrate();
@@ -3626,8 +3644,6 @@ export class LibraryLog {
         this.acknowledged.set(name, { seq: document.seq, row: value });
       }
       if (documents && this.wireMin < WIRE) this.wireMin = WIRE;
-      await this.registerMember();
-      if (this.memberRegistered) useLibraryCredential(this.keys);
       return true;
     } catch (error) {
       console.warn('den: individual library authority could not be opened', error);
@@ -3637,30 +3653,98 @@ export class LibraryLog {
       this.kidApprovalEntries.clear();
       this.head = 0;
       this.generation = undefined;
+      this.memberRegistered = false;
       return false;
     }
   }
 
-  /** Seed the individual authority once from an older complete snapshot. Later starts can stay on compact facts. */
-  private async seedFacts(snapshot: Snapshot): Promise<void> {
-    if (!this.factStore || !snapshot.generation) return;
-    try {
-      const manifest = await this.factStore.manifest();
+  /**
+   * A log of `names` alone, read from the fact store, for one edit of those documents rather than an open of the whole
+   * library: each row it writes is read here first, and it stamps after every row the store holds (its manifest's
+   * `newest`). Null wherever that is not enough, and the whole log is opened instead: no complete store, a profile
+   * directory, kept work, a library not known to be v4 or not yet registered here, a stamp still ahead of this clock,
+   * or a row of an earlier or newer format. It never reads the rest of the library or keeps the finished-view marker.
+   */
+  static async openNarrow(
+    libraryKey: string,
+    names: readonly string[],
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    vault: Vault | null = libraryVault,
+    wire: LibraryWire = WIRE,
+  ): Promise<LibraryLog | null> {
+    if (!vault) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const log = new LibraryLog(
+      keys,
+      fetchImpl,
+      typeof localStorage === 'undefined' ? undefined : localStorage,
+      { vault, key: await libraryLocalKey(raw) },
+      false,
+      vault,
+      wire,
+    );
+    await log.initializeRuntime();
+    if (log.wireMin < WIRE || log.pending.size || log.readOnly) return null;
+    const store = await LibraryFactStore.open(libraryKey, vault);
+    const manifest = await store?.manifest();
+    if (!store || !manifest?.complete || manifest.profileTopology || !manifest.newest) return null;
+    const { stamp, reconsiderAt } = manifest.newest;
+    if (reconsiderAt !== null && Date.now() >= reconsiderAt) return null;
+    if ((await log.kept<string>(MEMBER)) !== manifest.generation) return null;
+    await ensureSyncPolicy();
+    for (const name of names) {
+      const k = await rowKey(keys, name);
+      const stored = await store.document(manifest.generation, k);
+      if (!stored) continue;
+      const value =
+        stored.row ?? (stored.value ? await log.readEntry({ k, v: stored.value }) : null);
       if (
-        manifest?.complete &&
-        manifest.generation === snapshot.generation &&
-        manifest.head === snapshot.head
+        !value ||
+        log.isProfileDirectory(value) ||
+        log.isKidTitleApprovals(value) ||
+        log.isInvalidProfileDirectory(value)
       )
-        return;
+        return null;
+      const row = value;
+      if (!wellFormed(row) || !isDocument(row) || row.format > 4) return null;
+      log.entries.set(name, { seq: stored.seq, row });
+      log.acknowledged.set(name, { seq: stored.seq, row });
+    }
+    log.factStore = store;
+    log.generation = manifest.generation;
+    log.head = manifest.head;
+    log.memberRegistered = true;
+    log.fromCache = true;
+    log.narrowNewest = stamp;
+    useLibraryCredential(keys);
+    return log;
+  }
+
+  /**
+   * A library an earlier build kept whole (`SNAPSHOT_V4`, or `SNAPSHOT` before v4) moves into the fact store, once:
+   * the store starts over as that copy, one complete generation at its head, and the copy goes once the store's cursor
+   * says so. A copy holding the profile directory or a Kid's approvals cannot move: it kept them opened, where the
+   * store keeps den-edge's sealed rows. Then, and if the move fails, the store is emptied too, and this open reads
+   * den-edge from the start.
+   */
+  private async convertSnapshot(): Promise<void> {
+    const local = this.local;
+    if (!local) return;
+    const saved = (await this.kept<Snapshot>(SNAPSHOT_V4)) ?? (await this.kept<Snapshot>(SNAPSHOT));
+    // A copy with no generation is no copy of den-edge's: it is a library kept only here (`openLocal`), never removed.
+    if (!saved?.generation) return;
+    const store = this.factStore;
+    try {
+      const generation = saved.generation;
+      if (!store) return;
+      await store.clear();
+      if (saved.profileDirectory || saved.kidTitleApprovals?.length) return;
+      const rows = saved.entries.filter(([, , row]) => wellFormed(row));
       const batchSize = 64;
-      if (!snapshot.entries.length) {
-        await this.factStore.commitBatch(snapshot.generation, snapshot.head, [], true, {
-          profileTopology: !!snapshot.profileDirectory,
-        });
-        return;
-      }
-      for (let offset = 0; offset < snapshot.entries.length; offset += batchSize) {
-        const slice = snapshot.entries.slice(offset, offset + batchSize);
+      for (let offset = 0; offset === 0 || offset < rows.length; offset += batchSize) {
+        const slice = rows.slice(offset, offset + batchSize);
+        const last = offset + batchSize >= rows.length;
         const entries = await Promise.all(
           slice.map(async ([name, seq, row]) => ({
             k: await rowKey(this.keys, name),
@@ -3669,28 +3753,47 @@ export class LibraryLog {
             row,
           })),
         );
-        await this.factStore.commitBatch(
-          snapshot.generation,
-          offset + slice.length === snapshot.entries.length ? snapshot.head : entries.at(-1)!.seq,
-          entries,
-          offset + slice.length === snapshot.entries.length,
-          { profileTopology: !!snapshot.profileDirectory },
-        );
+        // Until the last batch the cursor stays at 0: a move cut off resumes as a first read, never above a row.
+        await store.commitBatch(generation, last ? saved.head : 0, entries, last);
       }
+      const manifest = await store.manifest();
+      if (!manifest?.complete || manifest.generation !== generation || manifest.head !== saved.head)
+        throw new Error('the moved copy does not read back at its head');
     } catch (error) {
-      // Facts are disposable. The complete snapshot remains authoritative and a later open can seed them again.
-      console.warn('den: incremental library facts could not be seeded', error);
-      this.factStore = null;
+      console.warn('den: the library kept whole could not be moved into the fact store', error);
+      await store?.clear().catch(() => undefined);
+    } finally {
+      await Promise.all(
+        [SNAPSHOT, SNAPSHOT_V4].map((name) => local.vault.delete(`${this.keys.id}:${name}`)),
+      ).catch((error: unknown) =>
+        console.warn('den: the library kept whole could not be removed', error),
+      );
     }
   }
 
-  /** Keep one fetched page in bounded atomic batches; failure only disables the optional fact path. */
-  private async keepFacts(
+  /**
+   * Keep one fetched page in bounded atomic batches, in turn with `persist`'s; failure only costs the next visit a
+   * read of what changed since the store's cursor.
+   */
+  private keepFacts(
     generation: string | undefined,
     head: number,
     entries: readonly LibraryFactEntry[],
     complete: boolean,
     profileTopology = false,
+  ): Promise<void> {
+    this.saving = this.saving.then(() =>
+      this.commitFacts(generation, head, entries, complete, profileTopology),
+    );
+    return this.saving;
+  }
+
+  private async commitFacts(
+    generation: string | undefined,
+    head: number,
+    entries: readonly LibraryFactEntry[],
+    complete: boolean,
+    profileTopology: boolean,
   ): Promise<void> {
     if (!this.factStore || !generation) return;
     try {
@@ -3771,10 +3874,7 @@ export class LibraryLog {
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
-    const document = this.document(`title:${ref.type}:${ref.id}`);
-    if (document) return projectDocument(document)[0] as TitleRow;
-    const row = this.entries.get(`rec:${ref.type}:${ref.id}`)?.row;
-    return row?.kind === 'rec' ? row : undefined;
+    return titleRow((name) => this.entries.get(name)?.row, ref);
   }
 
   episode(
@@ -3782,37 +3882,7 @@ export class LibraryLog {
     season: number,
     episode: number,
   ): EpisodeRow | undefined {
-    const document = ref.type === 'tv' && this.document(`season:tv:${ref.id}:${season}`);
-    if (document)
-      return projectEpisode(this.document(`title:tv:${ref.id}`), document, ref, season, episode);
-    const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
-    if (row?.kind === 'ep') return row;
-    if (ref.type !== 'tv') return undefined;
-    const block = Math.floor(episode / 32);
-    const watch = this.entries.get(`wat:tv:${ref.id}:${season}:${block}`)?.row;
-    if (watch?.kind !== 'wat') return undefined;
-    const register = watch.entries[String(episode)];
-    if (!register) return undefined;
-    const title = this.title(ref);
-    const resets = [watch.seasonReset, title?.episodesReset].filter(
-      (value): value is Stamp => value !== null && value !== undefined,
-    );
-    const state = syncPolicy<{
-      watched: boolean;
-      resume: EpisodeRow['progress'] | null;
-      viewing: number;
-      watched_at: number | null;
-    }>({ op: 'episode_state', register, resets, now: Date.now() });
-    const at: Stamp =
-      state.resume?.at ?? (state.watched_at ? [state.watched_at, 0, ''] : ZERO_STAMP);
-    return {
-      kind: 'ep',
-      schema: 2,
-      title: { type: 'tv', id: ref.id },
-      season,
-      episode,
-      progress: state.resume ?? { value: state.watched ? 1 : 0, viewing: state.viewing, at },
-    };
+    return episodeRow((name) => this.entries.get(name)?.row, ref, season, episode);
   }
 
   private v3EpisodeWrite(row: EpisodeRow): WatchRow | null {
@@ -3883,7 +3953,7 @@ export class LibraryLog {
       now < cached.reconsiderAt
     )
       return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
-    let latest = ZERO_STAMP;
+    let latest = this.narrowNewest ?? ZERO_STAMP;
     let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
       const summary = newestSummary(row, now);
@@ -3927,7 +3997,7 @@ export class LibraryLog {
       return null;
     }
     if (saved) {
-      // A return visit opens the acknowledged snapshot before it reaches den-edge. Keep the applied row there before
+      // A return visit opens the acknowledged copy before it reaches den-edge. Keep the applied row there before
       // dropping its recovery copy, or an immediate reload briefly restores the older row and an offline reload loses
       // the edit altogether.
       this.persist();
@@ -4200,6 +4270,7 @@ export class LibraryLog {
         if (conflict.v === null) {
           this.entries.delete(write.name);
           this.acknowledged.delete(write.name);
+          this.unkept.set(write.name, this.generation);
           continue;
         }
         const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
@@ -4212,6 +4283,7 @@ export class LibraryLog {
           return false;
         this.entries.set(write.name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+        this.unkept.set(write.name, this.generation);
         this.dirty = true;
       }
     }
@@ -4288,6 +4360,7 @@ export class LibraryLog {
       ) {
         this.entries.set(name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(name, { seq: conflict.seq, row: theirs });
+        this.unkept.set(name, this.generation);
         this.dirty = true;
       }
       return false;
@@ -4372,6 +4445,7 @@ export class LibraryLog {
         // What this browser remembered belongs to a log that was reset.
         this.entries.delete(name);
         this.acknowledged.delete(name);
+        this.unkept.set(name, this.generation);
         continue;
       }
       const theirs = believe(await open(this.keys, k, conflict.v));
@@ -4524,6 +4598,7 @@ export class LibraryLog {
         },
       });
     try {
+      let registered = this.writeGeneration ?? this.generation;
       let res = await put();
       // Registered under a generation this browser has not read yet (a cached open, or a change since): once more
       // under the one den-edge names. Only the registration takes it; reads and writes still find the change.
@@ -4532,13 +4607,18 @@ export class LibraryLog {
         res.status === 409 &&
         (await errorCode(res)) === 'generation_changed' &&
         current &&
-        current !== (this.writeGeneration ?? this.generation)
-      )
+        current !== registered
+      ) {
+        registered = current;
         res = await put(current);
+      }
       if (res.ok) {
         this.memberRegistered = true;
-        this.dirty = true;
-        this.persist();
+        // Remembered for the next visit, which opens without registering again; a failure only costs it that.
+        if (registered)
+          await this.keep(MEMBER, registered).catch((error: unknown) =>
+            console.warn("den: this browser's membership could not be remembered", error),
+          );
       } else
         console.warn(
           `den: den-edge did not register this browser's membership (${res.status} ${(await errorCode(res)) ?? ''})`,
@@ -4646,11 +4726,12 @@ export class LibraryLog {
     if (local)
       this.saving = this.saving
         .then(() =>
-          Promise.all(
-            [SNAPSHOT, SNAPSHOT_V4, PARTIAL].map((name) =>
+          Promise.all([
+            ...[SNAPSHOT, SNAPSHOT_V4, PARTIAL].map((name) =>
               local.vault.delete(`${this.keys.id}:${name}`),
             ),
-          ),
+            this.factStore?.clear(),
+          ]),
         )
         .then(() => undefined)
         .catch((error: unknown) =>
@@ -4735,6 +4816,7 @@ export class LibraryLog {
     this.throttledUntil = 0;
     this.entries.set(name, { seq, row });
     this.acknowledged.set(name, { seq, row });
+    this.unkept.set(name, this.generation);
     this.dirty = true;
   }
 

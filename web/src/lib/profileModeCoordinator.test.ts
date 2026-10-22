@@ -1294,6 +1294,29 @@ describe('profilesCapability', () => {
   });
 });
 
+describe('choosing Kid before the Owner PIN’s state is known (den#295)', () => {
+  it('waits, then sets the PIN first once none is known to exist', () => {
+    const { coordinator, householdModel } = owner(memoryStorage(), false);
+    expect(coordinator.establishUnprotectedOwner()).toBe(true);
+    expect(coordinator.mode).toBe('owner');
+    // A page that opens as the Owner it last was, while its connections view is still on its way.
+    const lease = vi.mocked(householdModel.connections).mock.results[0]!.value as {
+      snapshot: { value: { parentalPinConfigured?: boolean } };
+    };
+    lease.snapshot.value.parentalPinConfigured = undefined;
+    expect(coordinator.parentalPinConfigured).toBeUndefined();
+    // Not known yet: choosing Kid would switch without the PIN that brings the Owner back.
+    expect(coordinator.setsPin('kid')).toBe(false);
+    expect(coordinator.waitsForPin('kid')).toBe(true);
+    expect(coordinator.waitsForPin('visitor')).toBe(false);
+
+    lease.snapshot.value.parentalPinConfigured = false;
+    expect(coordinator.waitsForPin('kid')).toBe(false);
+    expect(coordinator.setsPin('kid')).toBe(true);
+    coordinator.dispose();
+  });
+});
+
 describe('a browser whose household is not made yet (den#295)', () => {
   it('offers the Kid it will have, and choosing it hands the new Owner PIN to the household it makes', async () => {
     const storage = memoryStorage();

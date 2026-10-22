@@ -174,7 +174,7 @@ async function openWithDevice(browser, page, options) {
   await edge.route(page, 'page');
   // Keep wall time for the Worker's real pull cadence, but let expiry advance without sleeping for LIVE_MS.
   await page.clock.install();
-  await page.goto(`${SEED_FIXTURE}?seed&stale-live`);
+  await page.goto(`${SEED_FIXTURE}?seed&online&stale-live`);
   await page
     .getByRole('status')
     .filter({ hasText: 'Worker library seeded' })
