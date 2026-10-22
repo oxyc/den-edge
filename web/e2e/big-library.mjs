@@ -508,13 +508,17 @@ export async function routeBigHousehold(
  * says (`LibraryAssistantAuthority.publish`): `built` (and recorded) or `current`.
  */
 export async function firstPublish(page, path, options = {}) {
-  const outcome = new Promise((resolve) =>
-    page.on('console', (message) => {
+  const outcome = new Promise((resolve) => {
+    const hear = (message) => {
       const text = message.text();
       if (text.startsWith('den: assistant projection built')) resolve('built');
       else if (text === 'den: assistant projection up to date') resolve('current');
-    }),
-  );
+    };
+    // Chromium forwards a Worker's console through its page; WebKit can expose it only on the Worker. Observe both
+    // rather than timing out a settled projection because the engine chose the other console surface this run.
+    page.on('console', hear);
+    page.on('worker', (worker) => worker.on?.('console', hear));
+  });
   await page.goto(`${E2E_ORIGIN}${path}`);
   return Promise.race([
     outcome,
