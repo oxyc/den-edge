@@ -310,6 +310,8 @@ export interface ServiceRef {
 
 export type LibrarySelection =
   | { kind: 'overview' }
+  | { kind: 'watchlist' }
+  | { kind: 'recommendations' }
   | { kind: 'continue' }
   | { kind: 'history' }
   | { kind: 'title'; title: TitleRef }
@@ -351,6 +353,22 @@ export interface LibraryOverviewView {
   owned: TitleRef[];
   watched: TitleRef[];
   watchlist: TitleRef[];
+  standings: Array<{ title: TitleRef; standing: Standing }>;
+  weighted: Array<{ title: TitleRef; weight: number; updatedAt: number }>;
+  seeds: { watched: TitleRef[]; watchlisted: TitleRef[] };
+}
+
+/** Small independent shelf selection for clients that do not need watched recommendation inputs. */
+export interface WatchlistView {
+  kind: 'watchlist';
+  titles: TitleRef[];
+}
+
+/** Recommendation inputs without the Watchlist shelf payload. */
+export interface RecommendationInputsView {
+  kind: 'recommendations';
+  owned: TitleRef[];
+  watched: TitleRef[];
   standings: Array<{ title: TitleRef; standing: Standing }>;
   weighted: Array<{ title: TitleRef; weight: number; updatedAt: number }>;
   seeds: { watched: TitleRef[]; watchlisted: TitleRef[] };
@@ -576,6 +594,8 @@ export interface RecoveryView {
 
 export type LibrarySelectionValue =
   | LibraryOverviewView
+  | WatchlistView
+  | RecommendationInputsView
   | ContinueView
   | HistoryView
   | TitleView

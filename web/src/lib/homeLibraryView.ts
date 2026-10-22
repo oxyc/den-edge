@@ -150,8 +150,11 @@ export function compactContinueLibrary(library: Library): Library {
 const unique = (keys: string[]) => [...new Set(keys)];
 
 /** Select the fixed, render-facing Home inputs available at the Worker's initial fold. */
-export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
-  const titles = activeTitleRows(rows);
+export function selectHomeLibraryViewFromFold(
+  library: Library,
+  titles: TitleRow[],
+  downloads: Download[] = [],
+): HomeLibraryView {
   const reactions = new Map<string, TitleRow['reaction']['value']>();
   for (const row of titles) reactions.set(titleKey(row.title), row.reaction.value);
   const seeds = selectedSeeds(titles);
@@ -199,8 +202,12 @@ export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibrar
     shelfRefs,
     requiredShapeRefs: shelfRefs.filter((key) => key.startsWith('tv:') && shaped.has(key)),
     continueLibrary: compactContinueLibrary(library),
-    downloads: readDownloads(rows),
+    downloads,
   };
+}
+
+export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
+  return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */

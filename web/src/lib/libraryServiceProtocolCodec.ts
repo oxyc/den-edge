@@ -35,6 +35,7 @@ import {
   type RetainedServices,
   type ServiceRef,
   type SimklView,
+  type Standing,
   type TitleRef,
 } from './libraryServiceProtocol';
 
@@ -744,6 +745,8 @@ function selection(value: unknown): value is LibrarySelection {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
     case 'overview':
+    case 'watchlist':
+    case 'recommendations':
     case 'continue':
     case 'history':
     case 'settings':
@@ -1577,38 +1580,49 @@ function episodeProgress(value: unknown): value is {
   );
 }
 
+function recommendationFields(value: Record<string, unknown>): boolean {
+  return (
+    list(value.owned, titleRef) &&
+    list(value.watched, titleRef) &&
+    list(
+      value.standings,
+      (candidate): candidate is { title: TitleRef; standing: Standing } =>
+        record(candidate) &&
+        exact(candidate, ['title', 'standing']) &&
+        titleRef(candidate.title) &&
+        standing(candidate.standing),
+    ) &&
+    list(
+      value.weighted,
+      (candidate): candidate is { title: TitleRef; weight: number; updatedAt: number } =>
+        record(candidate) &&
+        exact(candidate, ['title', 'weight', 'updatedAt']) &&
+        titleRef(candidate.title) &&
+        finite(candidate.weight) &&
+        integer(candidate.updatedAt),
+    ) &&
+    record(value.seeds) &&
+    exact(value.seeds, ['watched', 'watchlisted']) &&
+    list(value.seeds.watched, titleRef) &&
+    list(value.seeds.watchlisted, titleRef)
+  );
+}
+
 function selectionValue(value: unknown): value is LibrarySelectionValue {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
+    case 'watchlist':
+      return exact(value, ['kind', 'titles']) && list(value.titles, titleRef);
+    case 'recommendations':
+      return (
+        exact(value, ['kind', 'owned', 'watched', 'standings', 'weighted', 'seeds']) &&
+        recommendationFields(value)
+      );
     case 'overview':
       return (
         exact(value, ['kind', 'owned', 'watched', 'watchlist', 'standings', 'weighted', 'seeds']) &&
-        list(value.owned, titleRef) &&
-        list(value.watched, titleRef) &&
         list(value.watchlist, titleRef) &&
-        list(
-          value.standings,
-          (
-            candidate,
-          ): candidate is { title: TitleRef; standing: 'watchlist' | 'in-progress' | 'watched' } =>
-            record(candidate) &&
-            exact(candidate, ['title', 'standing']) &&
-            titleRef(candidate.title) &&
-            standing(candidate.standing),
-        ) &&
-        list(
-          value.weighted,
-          (candidate): candidate is { title: TitleRef; weight: number; updatedAt: number } =>
-            record(candidate) &&
-            exact(candidate, ['title', 'weight', 'updatedAt']) &&
-            titleRef(candidate.title) &&
-            finite(candidate.weight) &&
-            integer(candidate.updatedAt),
-        ) &&
-        record(value.seeds) &&
-        exact(value.seeds, ['watched', 'watchlisted']) &&
-        list(value.seeds.watched, titleRef) &&
-        list(value.seeds.watchlisted, titleRef)
+        recommendationFields(value)
       );
     case 'continue':
       return (

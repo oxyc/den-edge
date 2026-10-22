@@ -589,8 +589,13 @@ function isAssistantPublish(input: unknown): boolean {
 
 function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {
   if (scope.kind === 'all') return true;
+  if (scope.kind === 'overview')
+    return (
+      selection.kind === 'overview' ||
+      selection.kind === 'watchlist' ||
+      selection.kind === 'recommendations'
+    );
   if (
-    scope.kind === 'overview' ||
     scope.kind === 'continue' ||
     scope.kind === 'history' ||
     scope.kind === 'settings' ||

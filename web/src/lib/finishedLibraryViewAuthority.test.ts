@@ -9,12 +9,14 @@ import {
 import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
 import { writeEncryptedLibraryValue } from './libraryLocalValue';
 import { openFinishedLibraryViewAuthority } from './finishedLibraryViewAuthority';
-import type { Vault } from './localVault';
+import { LibraryFactStore } from './libraryFactStore';
+import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys } from './wire';
+import { deriveKeys, seal, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
+import { ensureSyncPolicy } from './syncLoader';
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
@@ -37,6 +39,24 @@ class MemoryVault implements Vault {
   }
 }
 
+class FactVault extends MemoryVault {
+  async page(prefix: string, after: string | undefined, limit: number) {
+    return [...this.values]
+      .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, limit);
+  }
+  async commit(changes: readonly VaultChange[]) {
+    const next = new Map(this.values);
+    for (const change of changes) {
+      if (change.kind === 'put') next.set(change.key, change.value.slice());
+      else next.delete(change.key);
+    }
+    this.values.clear();
+    for (const [key, value] of next) this.values.set(key, value);
+  }
+}
+
 const raw = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
 const libraryKey = btoa(String.fromCharCode(...raw));
 const request: LibraryServiceHello = {
@@ -49,6 +69,20 @@ const request: LibraryServiceHello = {
   mode: 'online',
 };
 const content = { title: vi.fn(async () => ({ kind: 'missing' as const })) };
+
+const factTitle = (status: TitleRow['status']['value'], at: number): TitleRow => ({
+  kind: 'rec',
+  schema: 2,
+  title: { type: 'movie', id: 77 },
+  status: { value: status, at: [at, 0, 'device'] },
+  resume: { value: 0, at: [at, 0, 'device'], viewing: 0 },
+  reaction: { value: null, at: [at, 0, 'device'] },
+  deleted: { value: false, at: [at, 0, 'device'] },
+  dismissed: { value: false, at: [0, 0, ''] },
+  episodesReset: null,
+  addedAt: at,
+  watchedAt: status === 'watched' ? at : null,
+});
 
 async function cached(vault: Vault): Promise<FinishedLibraryViews> {
   const value: FinishedLibraryViews = {
@@ -164,6 +198,214 @@ it('serves capability-selected startup views without opening the document author
     capability: { libraryId: value.identity.libraryId },
   });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('opens completed capability facts without a monolithic snapshot or finished-view cache', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const row = factTitle('watchlist', 10);
+  const encrypted = await seal(keys, row);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    [{ k: encrypted.k, seq: 12, value: encrypted.v, row }],
+    true,
+  );
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    kind: 'overview',
+    watchlist: [{ type: 'movie', id: 77 }],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await opened!.authority.select({ kind: 'history' });
+  expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('cold-imports bounded pages and serves the main startup capabilities without full hydration', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const entries = await Promise.all(
+    Array.from({ length: 130 }, async (_, index) => {
+      const row = { ...factTitle(index % 2 ? 'watchlist' : 'watched', index + 1) };
+      row.title = { type: 'movie', id: index + 1 };
+      const encrypted = await seal(keys, row);
+      return { ...encrypted, seq: index + 1 };
+    }),
+  );
+  const pageSizes: number[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    const since = Number(url.searchParams.get('since'));
+    const limit = Number(url.searchParams.get('limit'));
+    pageSizes.push(limit);
+    const page = entries.filter((entry) => entry.seq > since).slice(0, limit);
+    return new Response(
+      JSON.stringify({
+        generation: 'generation-cold',
+        head: entries.length,
+        more: page.at(-1)?.seq !== entries.length,
+        entries: page,
+      }),
+      { status: 200 },
+    );
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    fetchImpl,
+  );
+
+  expect(pageSizes).toEqual([64, 64, 64]);
+  await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 2 }]),
+  });
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    kind: 'settings',
+    assistant: { read: false, write: false },
+  });
+  await expect(opened!.authority.select({ kind: 'devices' })).resolves.toEqual({
+    kind: 'devices',
+    devices: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  expect([...vault.values.keys()].some((key) => /:log\.v[14]$/.test(key))).toBe(false);
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    generation: 'generation-cold',
+    head: 130,
+    complete: true,
+  });
+});
+
+it('resumes a cold import from the last atomically committed page', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const entries = await Promise.all(
+    Array.from({ length: 90 }, async (_, index) => {
+      const value = { ...factTitle('watchlist', index + 1) };
+      value.title = { type: 'movie', id: index + 1 };
+      return { ...(await seal(keys, value)), seq: index + 1 };
+    }),
+  );
+  let changes = 0;
+  const interrupted = vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    if (++changes > 1) throw new Error('device stopped');
+    return new Response(
+      JSON.stringify({
+        generation: 'generation-resume',
+        head: entries.length,
+        more: true,
+        entries: entries.slice(0, 64),
+      }),
+      { status: 200 },
+    );
+  });
+  await expect(
+    openFinishedLibraryViewAuthority(request, vault, vi.fn(), content, interrupted),
+  ).resolves.toBeNull();
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    generation: 'generation-resume',
+    head: 64,
+    complete: false,
+  });
+
+  const resumedSince: number[] = [];
+  const resumed = vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    const since = Number(url.searchParams.get('since'));
+    resumedSince.push(since);
+    const page = entries.filter((entry) => entry.seq > since).slice(0, 64);
+    return new Response(
+      JSON.stringify({
+        generation: 'generation-resume',
+        head: entries.length,
+        more: page.at(-1)?.seq !== entries.length,
+        entries: page,
+      }),
+      { status: 200 },
+    );
+  });
+  const opened = await openFinishedLibraryViewAuthority(request, vault, vi.fn(), content, resumed);
+  expect(resumedSince).toEqual([64]);
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    head: 90,
+    complete: true,
+  });
+  await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 90 }]),
+  });
+});
+
+it('applies one changed document to capability facts without opening unrelated documents', async () => {
+  vi.useFakeTimers();
+  try {
+    await ensureSyncPolicy();
+    const vault = new FactVault();
+    const keys = await deriveKeys(raw);
+    const old = factTitle('watchlist', 10);
+    const replacement = factTitle('watched', 20);
+    const before = await seal(keys, old);
+    const after = await seal(keys, replacement);
+    expect(after.k).toBe(before.k);
+    const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+    await facts.commitBatch(
+      'generation-a',
+      12,
+      [{ k: before.k, seq: 12, value: before.v, row: old }],
+      true,
+    );
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          generation: 'generation-a',
+          head: 13,
+          more: false,
+          entries: [{ k: after.k, seq: 13, v: after.v }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const openFull = vi.fn(async () => fullAuthority());
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [{ type: 'movie', id: 77 }],
+    });
+    await opened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(facts.manifest()).resolves.toMatchObject({ head: 13 }));
+    await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [],
+      watched: [{ type: 'movie', id: 77 }],
+    });
+    expect(openFull).not.toHaveBeenCalled();
+    expect(await facts.manifest()).toMatchObject({ head: 13, complete: true });
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {

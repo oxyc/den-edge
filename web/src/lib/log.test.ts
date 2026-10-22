@@ -11,6 +11,7 @@ import {
   type Library,
 } from './library';
 import { LibraryLog, LibraryUpdateRequiredError } from './log';
+import { LibraryFactStore } from './libraryFactStore';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
@@ -166,6 +167,25 @@ function memoryVault() {
   return { data, vault };
 }
 
+function factMemoryVault() {
+  const held = memoryVault();
+  held.vault.page = async (prefix, after, limit) =>
+    [...held.data]
+      .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, limit);
+  held.vault.commit = async (changes) => {
+    const next = new Map(held.data);
+    for (const change of changes) {
+      if (change.kind === 'put') next.set(change.key, change.value.slice());
+      else next.delete(change.key);
+    }
+    held.data.clear();
+    for (const [key, value] of next) held.data.set(key, value);
+  };
+  return held;
+}
+
 function memoryStorage() {
   const data = new Map<string, string>();
   const storage = {
@@ -182,6 +202,32 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('promotes explicit full work from individual authority without downloading the library again', async () => {
+    const { vault } = factMemoryVault();
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const value = row(91);
+    const encrypted = await seal(keys, value);
+    const facts = (await LibraryFactStore.open(LIBRARY_KEY, vault))!;
+    await facts.commitBatch(
+      'generation-facts',
+      4,
+      [{ k: encrypted.k, seq: 4, value: encrypted.v, row: value }],
+      true,
+    );
+    const requests: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      requests.push(
+        `${init?.method ?? 'GET'} ${new URL(String(input), 'https://den.test').pathname}`,
+      );
+      if (init?.method === 'PUT') return new Response(null, { status: 204 });
+      throw new Error('the library must not be downloaded');
+    };
+
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    expect(log.rows()).toContainEqual(value);
+    expect(requests).toEqual([`PUT /lib/${keys.id}/member`]);
+  });
+
   it('seals migration credentials under the worker-only household key and reopens them after restart', async () => {
     const server = await edge();
     const { data, vault } = memoryVault();

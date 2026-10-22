@@ -106,7 +106,7 @@ export function titleCaption(
 
 type Status = 'none' | 'watchlist' | 'inProgress' | 'watched';
 
-interface LibraryRecord {
+export interface LibraryRecord {
   title: Title;
   status: Status;
   progress: number;
@@ -119,7 +119,7 @@ interface LibraryRecord {
   deleted: boolean;
 }
 
-interface Mark {
+export interface Mark {
   type: string;
   id: number;
   season: number;

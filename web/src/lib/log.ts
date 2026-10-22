@@ -11,6 +11,7 @@ import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } f
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
+import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
@@ -46,7 +47,7 @@ import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profil
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
-import { noteLibraryDecrypt } from './libraryStartupMetrics';
+import { noteLibraryDecrypt, noteLibraryHydrate } from './libraryStartupMetrics';
 import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   believe,
@@ -66,6 +67,7 @@ import {
   openMigrationRow,
   openPlaintext,
   rowName,
+  rowKey,
   seal,
   sealPlaintext,
   toBase64url,
@@ -469,6 +471,8 @@ export class LibraryLog {
   /** Vault-backed runtime work, mirrored so synchronous UI facts stay synchronous after async startup. */
   private readonly pending = new Map<string, string>();
   private runtimeVault: Vault | null;
+  /** Individually retained authority and small selected facts; absent on storage adapters without atomic batches. */
+  private factStore: LibraryFactStore | null = null;
   private runtimeFallback = false;
   private runtimeChannel?: BroadcastChannel;
   private recoveryRows?: Row[];
@@ -898,6 +902,7 @@ export class LibraryLog {
       wire,
     );
     await log.initializeRuntime();
+    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     await ensureSyncPolicy();
     const saved = await log.kept<Snapshot>(SNAPSHOT);
     log.takeForm(saved);
@@ -2878,6 +2883,7 @@ export class LibraryLog {
       wire,
     );
     await log.initializeRuntime();
+    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
     // never skip valid rows.
     const policy = ensureSyncPolicy();
@@ -2917,7 +2923,18 @@ export class LibraryLog {
       log.projectJournal();
       // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
       await log.projectKept();
+      await log.seedFacts(saved);
       return log;
+    }
+    const factManifest = await log.factStore?.manifest();
+    if (factManifest?.complete && factManifest.fullAuthority) {
+      await policy;
+      if (await log.restoreFacts(factManifest.generation, factManifest.head)) {
+        log.fromCache = true;
+        log.projectJournal();
+        await log.projectKept();
+        return log.restoreJournal();
+      }
     }
     // Registered once the first page names the generation (below): sent before it, the registration carries generation
     // 0 and den-edge refuses it for any library that exists.
@@ -3000,22 +3017,33 @@ export class LibraryLog {
         await log.registerMember();
         useLibraryCredential(keys);
       }
+      const factEntries: LibraryFactEntry[] = [];
+      let factProfileTopology = false;
       for (const entry of page.entries) {
         // Tampered with, sealed under another library's key, or newer than this build: not read as a row.
         const row = await log.readEntry(entry);
-        if (!row) continue;
+        if (!row) {
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
+          continue;
+        }
         if (log.isInvalidProfileDirectory(row)) {
+          factProfileTopology = true;
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.invalidateProfileDirectory(entry);
           continue;
         }
         if (log.isProfileDirectory(row)) {
+          factProfileTopology = true;
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.acceptProfileDirectory(entry, row);
           continue;
         }
         if (log.isKidTitleApprovals(row)) {
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.acceptKidTitleApprovals(entry, row);
           continue;
         }
+        factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row });
         const previous = log.entries.get(rowName(row));
         log.entries.set(rowName(row), {
           seq: entry.seq,
@@ -3023,8 +3051,11 @@ export class LibraryLog {
         });
         log.acknowledged.set(rowName(row), { seq: entry.seq, row });
       }
-      log.head = page.entries.at(-1)?.seq ?? page.head;
-      if (!page.more || page.entries.length === 0) {
+      const pageHead = page.entries.at(-1)?.seq ?? page.head;
+      const complete = !page.more || page.entries.length === 0;
+      await log.keepFacts(page.generation, pageHead, factEntries, complete, factProfileTopology);
+      log.head = pageHead;
+      if (complete) {
         log.dirty = true;
         log.persist();
         log.forgetPartial();
@@ -3311,27 +3342,39 @@ export class LibraryLog {
           if (this.profileDirectoryPending) this.unreported = true;
           this.readCurrentGeneration = true;
           this.writeGeneration = undefined;
+          const factEntries: LibraryFactEntry[] = [];
+          let factProfileTopology = false;
           for (const entry of page.entries) {
             // Unreadable rows are skipped individually, as on initial open.
             const row = await this.readEntry(entry);
-            if (!row) continue;
+            if (!row) {
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
+              continue;
+            }
             if (this.isInvalidProfileDirectory(row)) {
+              factProfileTopology = true;
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.invalidateProfileDirectory(entry)) this.unreported = true;
               continue;
             }
             if (this.isProfileDirectory(row)) {
+              factProfileTopology = true;
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.acceptProfileDirectory(entry, row)) this.unreported = true;
               continue;
             }
             if (this.isKidTitleApprovals(row)) {
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.acceptKidTitleApprovals(entry, row)) this.unreported = true;
               continue;
             }
             const previous = this.entries.get(rowName(row));
+            const merged = previous ? merge(previous.row, row) : row;
+            factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: merged });
             if (!previous || entry.seq > previous.seq) {
               this.entries.set(rowName(row), {
                 seq: entry.seq,
-                row: previous ? merge(previous.row, row) : row,
+                row: merged,
               });
               this.unreported = true;
             }
@@ -3342,6 +3385,13 @@ export class LibraryLog {
             }
           }
           const head = page.entries.at(-1)?.seq ?? page.head;
+          await this.keepFacts(
+            page.generation,
+            head,
+            factEntries,
+            !page.more || page.entries.length === 0,
+            factProfileTopology,
+          );
           // Kept with the rows: a pass that reads back only this browser's own writes changes no row, and without this
           // the kept head stayed behind them, so every later visit read and opened them all again.
           if (head !== this.head) this.dirty = true;
@@ -3536,6 +3586,134 @@ export class LibraryLog {
         : {}),
       ...(this.offline && this.wireMin > 2 ? { wireMin: this.wireMin } : {}),
     };
+  }
+
+  /** Hydrate explicit full-history/editing work from the one-time individual import without downloading it again. */
+  private async restoreFacts(generation: string, head: number): Promise<boolean> {
+    if (!this.factStore) return false;
+    try {
+      this.generation = generation;
+      this.head = head;
+      let documents = false;
+      for await (const { key, document } of this.factStore.documents(generation)) {
+        noteLibraryHydrate();
+        let value:
+          | Row
+          | ProfileDirectoryDocument
+          | KidTitleApprovalsDocument
+          | InvalidProfileDirectory
+          | null = document.row;
+        if (!value && document.value) value = await this.readEntry({ k: key, v: document.value });
+        if (!value) continue;
+        const entry = { seq: document.seq };
+        if (this.isInvalidProfileDirectory(value)) {
+          this.invalidateProfileDirectory(entry);
+          continue;
+        }
+        if (this.isProfileDirectory(value)) {
+          this.acceptProfileDirectory(entry, value);
+          continue;
+        }
+        if (this.isKidTitleApprovals(value)) {
+          this.acceptKidTitleApprovals(entry, value);
+          continue;
+        }
+        if (!wellFormed(value)) return false;
+        this.noteFormat(value);
+        documents ||= isDocument(value);
+        const name = rowName(value);
+        this.entries.set(name, { seq: document.seq, row: value });
+        this.acknowledged.set(name, { seq: document.seq, row: value });
+      }
+      if (documents && this.wireMin < WIRE) this.wireMin = WIRE;
+      await this.registerMember();
+      if (this.memberRegistered) useLibraryCredential(this.keys);
+      return true;
+    } catch (error) {
+      console.warn('den: individual library authority could not be opened', error);
+      this.entries.clear();
+      this.acknowledged.clear();
+      this.resetProfileDirectory();
+      this.kidApprovalEntries.clear();
+      this.head = 0;
+      this.generation = undefined;
+      return false;
+    }
+  }
+
+  /** Seed the individual authority once from an older complete snapshot. Later starts can stay on compact facts. */
+  private async seedFacts(snapshot: Snapshot): Promise<void> {
+    if (!this.factStore || !snapshot.generation) return;
+    try {
+      const manifest = await this.factStore.manifest();
+      if (
+        manifest?.complete &&
+        manifest.generation === snapshot.generation &&
+        manifest.head === snapshot.head
+      )
+        return;
+      const batchSize = 64;
+      if (!snapshot.entries.length) {
+        await this.factStore.commitBatch(snapshot.generation, snapshot.head, [], true, {
+          profileTopology: !!snapshot.profileDirectory,
+        });
+        return;
+      }
+      for (let offset = 0; offset < snapshot.entries.length; offset += batchSize) {
+        const slice = snapshot.entries.slice(offset, offset + batchSize);
+        const entries = await Promise.all(
+          slice.map(async ([name, seq, row]) => ({
+            k: await rowKey(this.keys, name),
+            seq,
+            value: '',
+            row,
+          })),
+        );
+        await this.factStore.commitBatch(
+          snapshot.generation,
+          offset + slice.length === snapshot.entries.length ? snapshot.head : entries.at(-1)!.seq,
+          entries,
+          offset + slice.length === snapshot.entries.length,
+          { profileTopology: !!snapshot.profileDirectory },
+        );
+      }
+    } catch (error) {
+      // Facts are disposable. The complete snapshot remains authoritative and a later open can seed them again.
+      console.warn('den: incremental library facts could not be seeded', error);
+      this.factStore = null;
+    }
+  }
+
+  /** Keep one fetched page in bounded atomic batches; failure only disables the optional fact path. */
+  private async keepFacts(
+    generation: string | undefined,
+    head: number,
+    entries: readonly LibraryFactEntry[],
+    complete: boolean,
+    profileTopology = false,
+  ): Promise<void> {
+    if (!this.factStore || !generation) return;
+    try {
+      const batchSize = 64;
+      if (!entries.length) {
+        await this.factStore.commitBatch(generation, head, [], complete, { profileTopology });
+        return;
+      }
+      for (let offset = 0; offset < entries.length; offset += batchSize) {
+        const batch = entries.slice(offset, offset + batchSize);
+        const last = offset + batch.length === entries.length;
+        await this.factStore.commitBatch(
+          generation,
+          last ? head : batch.at(-1)!.seq,
+          batch,
+          complete && last,
+          { profileTopology },
+        );
+      }
+    } catch (error) {
+      console.warn('den: incremental library facts could not be kept', error);
+      this.factStore = null;
+    }
   }
 
   private restoreProfileDirectory(snapshot: Snapshot | undefined): void {

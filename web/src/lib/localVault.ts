@@ -8,6 +8,12 @@ export interface Vault {
   get(key: string): Promise<Uint8Array | undefined>;
   /** Every key/value pair whose key starts with `prefix`, in IndexedDB key order. */
   entries(prefix: string): Promise<Array<[key: string, value: Uint8Array]>>;
+  /** One bounded page whose keys start with `prefix`, strictly after `after` when supplied. */
+  page?(
+    prefix: string,
+    after: string | undefined,
+    limit: number,
+  ): Promise<Array<[key: string, value: Uint8Array]>>;
   put(key: string, value: Uint8Array): Promise<void>;
   /** Atomically replace one value from its current value. `updater` runs synchronously inside a write transaction. */
   update?(
@@ -18,7 +24,13 @@ export interface Vault {
   delete(key: string): Promise<void>;
   /** Drop every value whose key starts with `prefix`. */
   remove(prefix: string): Promise<void>;
+  /** Apply prepared writes and exact deletions in one object-store transaction. */
+  commit?(changes: readonly VaultChange[]): Promise<void>;
 }
+
+export type VaultChange =
+  | { readonly kind: 'put'; readonly key: string; readonly value: Uint8Array }
+  | { readonly kind: 'delete'; readonly key: string };
 
 /** A transaction on one object store, with the request `work` makes in it: its result once the transaction is done. */
 export type Transact = <T>(
@@ -204,6 +216,25 @@ export function indexedVault(factory: IDBFactory): Vault {
       });
       return found ?? [];
     },
+    page: async (prefix, after, limit) => {
+      if (!Number.isSafeInteger(limit) || limit <= 0)
+        throw new Error('Vault page limit must be positive');
+      const found = await run('readonly', (kept) => {
+        const upper = prefix + String.fromCharCode(0xffff);
+        const range = after
+          ? IDBKeyRange.bound(after, upper, true, false)
+          : IDBKeyRange.bound(prefix, upper);
+        const keys = kept.getAllKeys(range, limit);
+        const values = kept.getAll(range, limit) as IDBRequest<Uint8Array[]>;
+        return () =>
+          keys.result.flatMap((key, index) =>
+            typeof key === 'string' && key.startsWith(prefix) && values.result[index]
+              ? [[key, values.result[index]!] as [string, Uint8Array]]
+              : [],
+          );
+      });
+      return found ?? [];
+    },
     put: async (key, value) => {
       await run('readwrite', (kept) => kept.put(value, key));
     },
@@ -225,6 +256,14 @@ export function indexedVault(factory: IDBFactory): Vault {
     },
     remove: async (prefix) => {
       await run('readwrite', (kept) => kept.delete(prefixRange(prefix)));
+    },
+    commit: async (changes) => {
+      await run('readwrite', (kept) => {
+        for (const change of changes) {
+          if (change.kind === 'put') kept.put(change.value, change.key);
+          else kept.delete(change.key);
+        }
+      });
     },
   };
 }

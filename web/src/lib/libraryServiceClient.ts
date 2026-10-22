@@ -373,6 +373,8 @@ function newer(candidate: LibraryVersion, current: LibraryVersion | undefined): 
 
 function selectionMatches(selection: LibrarySelection, value: LibrarySelectionValue): boolean {
   if (selection.kind === 'overview') return value.kind === 'overview';
+  if (selection.kind === 'watchlist') return value.kind === 'watchlist';
+  if (selection.kind === 'recommendations') return value.kind === 'recommendations';
   if (selection.kind === 'continue') return value.kind === 'continue';
   if (selection.kind === 'history') return value.kind === 'history';
   if (selection.kind === 'settings') return value.kind === 'settings';
