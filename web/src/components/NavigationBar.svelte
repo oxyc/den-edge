@@ -259,9 +259,32 @@
   /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
   let shown = $state<number | null>(null);
   let finished = $state(false);
+  /**
+   * Movement before the read has reported any: it eases toward `CREEP_CAP` from the moment the read begins, so a slow
+   * first response still shows the library is on its way. The read's own progress takes over as soon as it is
+   * further, and the line never moves back.
+   */
+  const CREEP_CAP = 0.1;
+  let creep = $state(0);
+  const reading = $derived(opening !== null);
+  $effect(() => {
+    if (!reading) {
+      creep = 0;
+      return;
+    }
+    if (untrack(() => creep) >= CREEP_CAP * 0.95) return;
+    const began = performance.now();
+    const from = untrack(() => creep);
+    const tick = setInterval(() => {
+      const eased = CREEP_CAP * (1 - Math.exp(-(performance.now() - began) / 1500));
+      creep = Math.max(from, eased);
+      if (eased >= CREEP_CAP * 0.95) clearInterval(tick);
+    }, 300);
+    return () => clearInterval(tick);
+  });
   $effect(() => {
     if (opening !== null) {
-      shown = opening;
+      shown = Math.max(opening, creep, untrack(() => shown) ?? 0);
       finished = false;
       return;
     }
@@ -286,25 +309,30 @@
       aria-label="Loading your library"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={Math.round(shown * 100)}
+      aria-valuenow={finished ? 100 : Math.round((opening ?? 0) * 100)}
       bind:clientWidth={barWidth}
       bind:clientHeight={barHeight}
     >
       {#if barWidth && barHeight}
+        <!-- From the lower left: right along the bottom, up around the right end, back along the top, down the left. -->
+        {@const r = (barHeight - 2) / 2}
         <svg width={barWidth} height={barHeight} aria-hidden="true">
-          <rect
-            x="1"
-            y="1"
-            width={barWidth - 2}
-            height={barHeight - 2}
-            rx={(barHeight - 2) / 2}
+          <path
+            d="M {1 + r} {barHeight - 1} H {barWidth - 1 - r} A {r} {r} 0 0 0 {barWidth -
+              1 -
+              r} 1 H {1 + r} A {r} {r} 0 0 0 {1 + r} {barHeight - 1}"
             stroke-dasharray="{shown * outline} {outline}"
           />
         </svg>
       {/if}
     </div>
     <p class="opening-label" class:finished aria-hidden="true">
-      {finished ? 'Library ready' : `Loading your library · ${Math.round(shown * 100)}%`}
+      <!-- Only the read's own figure: none until it has kept something, never the creep before it. -->
+      {finished
+        ? 'Library ready'
+        : opening
+          ? `Loading your library · ${Math.round(opening * 100)}%`
+          : 'Loading your library'}
     </p>
   {/if}
 {/snippet}
@@ -520,7 +548,7 @@
     overflow: visible;
   }
 
-  .opening rect {
+  .opening path {
     fill: none;
     stroke: var(--accent);
     stroke-linecap: round;
@@ -555,7 +583,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .opening rect {
+    .opening path {
       transition: none;
     }
   }

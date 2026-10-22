@@ -310,11 +310,11 @@ it('cold-imports bounded pages from an older den-edge and serves the main startu
   );
 
   // Asked newest first, it answered unmarked: one oldest-first read of the whole history follows, each committed
-  // checkpoint bounded and saying how far it is.
+  // checkpoint bounded and saying how far it is, after a 0 before the first request.
   expect(pageSizes).toEqual([1000]);
   expect(commitBatch.mock.calls.map(([, , batch]) => batch.length)).toEqual([64, 64, 2]);
   commitBatch.mockRestore();
-  expect(progress.mock.calls.map(([value]) => value)).toEqual([64 / 130, 128 / 130, 1]);
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 64 / 130, 128 / 130, 1]);
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 2 }]),
   });
