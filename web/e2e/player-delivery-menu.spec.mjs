@@ -100,6 +100,12 @@ test('delivery changes explain the wait immediately and until the replacement pa
     await expect(remux).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('Switching to Den Remux…')).toHaveCount(0);
 
+    // A source replacement cannot rely on the element's one-shot autoplay attribute. This models the browser state
+    // seen when it has already consumed that initial autoplay: the replacement must explicitly preserve playback.
+    await video.evaluate((element) => {
+      element.autoplay = false;
+      element.removeAttribute('autoplay');
+    });
     await remux.click();
     await page.getByRole('menuitem', { name: 'Switch to TorBox' }).click();
     await expect.poll(() => playback.length).toBe(3);
@@ -107,6 +113,10 @@ test('delivery changes explain the wait immediately and until the replacement pa
     releases.shift()();
     await expect(torbox).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('Switching to TorBox…')).toHaveCount(0);
+    const resumedAt = await video.evaluate((element) => element.currentTime);
+    await expect
+      .poll(() => video.evaluate((element) => (element.paused ? -1 : element.currentTime)))
+      .toBeGreaterThan(resumedAt);
   } finally {
     await browser.close();
   }

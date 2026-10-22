@@ -577,6 +577,13 @@
    */
   let transitionNoticeId = 0;
   let transitionNotice = $state<string | null>(null);
+  /**
+   * A replacement reuses the same `<video>`. Its `autoplay` attribute started the element when it was first mounted,
+   * but browsers need not run autoplay again after hls.js swaps the MediaSource. Remember that the outgoing stream
+   * was actually playing and explicitly resume only that replacement; a viewer who switched while paused stays
+   * paused.
+   */
+  let resumeReplacement: Session | null = null;
 
   function showTransition(label: string): number {
     transitionNotice = label;
@@ -1175,6 +1182,7 @@
       (result.external || privateLanRemuxPlaylist(result.playlist) || result.castOrigin)
     )
       result = { ...result, castOrigin: directCastOrigin };
+    const replacingWasPlaying = replacing ? !!video && !video.paused : false;
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
       watcher?.stop();
@@ -1212,6 +1220,7 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     session = result;
+    resumeReplacement = replacingWasPlaying ? session : null;
     directAttempt = result.external
       ? delivery === 'ordinary' || delivery === 'direct'
         ? 'initial'
@@ -1547,6 +1556,20 @@
   $effect(() => {
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
+    const resumeIfReplaced = () => {
+      if (resumeReplacement !== current) return;
+      resumeReplacement = null;
+      // A held start has its own readiness boundary and resumes there.
+      if (hold || !element.paused) return;
+      void element
+        .play()
+        .catch((error: unknown) =>
+          console.warn(
+            'The replacement stream could not resume on its own; its controls can.',
+            error,
+          ),
+        );
+    };
     // LG's webOS media pipeline accepts HLS even when its WebKit canPlayType answer is incomplete.
     // Keeping it on this element path preserves Den's existing progress, recovery and session ownership.
     const playsNatively = samsungAvplay || webOsNative || nativeHls(element);
@@ -1929,6 +1952,7 @@
     }
     if (playsNatively) {
       element.src = current.playlist;
+      resumeIfReplaced();
       const mounted = element.src;
       watcher = watchPlayback({ video: element, reportUrl });
       return () => {
@@ -2033,6 +2057,7 @@
       });
       // hls.js has its subtitle tracks once the master is parsed, and would otherwise show the DEFAULT one.
       hls.on(Hls.Events.MANIFEST_PARSED, applySubtitles);
+      hls.on(Hls.Events.MEDIA_ATTACHED, resumeIfReplaced);
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
     });
