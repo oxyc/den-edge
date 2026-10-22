@@ -297,7 +297,9 @@ describe('Library v4 documents', () => {
     const server = await edge([filmDocument(1)]);
     const { vault, data } = memoryVault();
     const first = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    await vi.waitFor(() => expect(data.has(`${first.libraryId}:log.v4`)).toBe(true));
+    await vi.waitFor(() =>
+      expect(data.has(`${first.libraryId}:library-facts.v1:manifest`)).toBe(true),
+    );
     // The minimum was remembered only in page storage, which the Worker that opens the log cannot read.
     first.close();
     data.delete(`${first.libraryId}:runtime:meta:wireMin`);
@@ -775,7 +777,9 @@ describe('SIMKL delivery on Library v4', () => {
 
     // A visit while the library was v3: it is kept here, and an edit den-edge refused for now is kept with it.
     const visit = (await LibraryLog.open(LIBRARY_KEY, connection, storage, vault.vault))!;
-    await vi.waitFor(() => expect(vault.data.has(`${visit.libraryId}:log.v1`)).toBe(true));
+    await vi.waitFor(() =>
+      expect(vault.data.has(`${visit.libraryId}:library-facts.v1:manifest`)).toBe(true),
+    );
     server.log.refuseNext = 'rewrite_in_progress';
     const film = visit.title({ type: 'movie', id: 550 })!;
     expect(await visit.write({ ...film, dismissed: { value: true, at: at(9000) } })).not.toBeNull();
@@ -1475,6 +1479,17 @@ function memoryVault() {
     delete: async (key) => void data.delete(key),
     remove: async (prefix) => {
       for (const k of [...data.keys()]) if (k.startsWith(prefix)) data.delete(k);
+    },
+    page: async (prefix, after, limit) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit),
+    commit: async (changes) => {
+      for (const change of changes) {
+        if (change.kind === 'put') data.set(change.key, change.value.slice());
+        else data.delete(change.key);
+      }
     },
   };
   return { data, vault };

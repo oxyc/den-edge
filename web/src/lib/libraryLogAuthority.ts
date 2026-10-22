@@ -34,14 +34,14 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
-import { noteFinishedViewsRewrite, noteLibraryFold } from './libraryStartupMetrics';
+import { noteLibraryFold } from './libraryStartupMetrics';
 import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
   readFinishedLibraryViews,
-  removeFinishedLibraryViews,
+  staleFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewPieces,
   type FinishedLibraryViews,
@@ -1933,6 +1933,11 @@ export class LibraryLogAuthority {
     return libraryLocalAuthorityRevision(this.#log.logHead, this.#log.rowsVersion, summary.stamp);
   }
 
+  /**
+   * A new revision is assembled from pieces selected at it. The views kept of the last one are marked stale meanwhile,
+   * so no visit opens them; their pieces stay, and each that says the same at the new revision is named again rather
+   * than written again (`writeFinishedLibraryViews`).
+   */
   #changeFinishedRevision(revision?: string): void {
     if (!this.#options.libraryKey || !this.#options.vault) return;
     revision ??= this.#finishedAuthorityRevision();
@@ -1945,8 +1950,7 @@ export class LibraryLogAuthority {
     this.#finishedTimer = undefined;
     this.#finishedSaving = this.#finishedSaving
       .then(async () => {
-        // This authority's first revision: views kept by an earlier visit at the same revision still describe it, and
-        // removing them only had the views written again, whole, a moment later.
+        // This authority's first revision: views kept by an earlier visit at the same revision still describe it.
         if (first) {
           const kept = await readFinishedLibraryViews(
             this.#options.libraryKey!,
@@ -1954,14 +1958,11 @@ export class LibraryLogAuthority {
             [],
           );
           if (kept?.identity.authorityRevision === revision) return;
-          noteFinishedViewsRewrite(
-            kept ? 'discard:first revision differs' : 'discard:first none kept',
-          );
-        } else noteFinishedViewsRewrite('discard:revision changed');
-        await removeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
+        }
+        await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })
       .catch((error: unknown) =>
-        console.warn('den: stale finished library views could not be discarded', error),
+        console.warn('den: stale finished library views could not be marked', error),
       );
   }
 

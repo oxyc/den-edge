@@ -4,6 +4,7 @@ import {
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
   readFinishedLibraryViews,
+  staleFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewIdentity,
   type FinishedLibraryViews,
@@ -32,6 +33,7 @@ class MemoryVault implements Vault {
   }
 }
 
+const NAME_SUFFIX = ':finished-views.v1';
 const raw = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const libraryKey = btoa(String.fromCharCode(...raw));
 
@@ -115,18 +117,45 @@ describe('finished library views', () => {
     expect(vault.values.size).toBe(0);
   });
 
-  it('removes superseded immutable pieces after publishing their replacement', async () => {
+  it('writes only the pieces that changed, and removes the ones they replace', async () => {
     const vault = new MemoryVault();
     const value = await fixture();
     await writeFinishedLibraryViews(libraryKey, vault, value);
-    const previousPieces = [...vault.values.keys()].filter(
-      (key) => !key.endsWith(':finished-views.v1'),
+    const pieceKeys = () => [...vault.values.keys()].filter((key) => !key.endsWith(NAME_SUFFIX));
+    const before = pieceKeys();
+    const put = vi.spyOn(vault, 'put');
+
+    const next = structuredClone(value);
+    next.identity.head += 1;
+    next.pieces.watchlist = { titles: [{ type: 'movie', id: 8 }] };
+    await writeFinishedLibraryViews(libraryKey, vault, next);
+    expect(put.mock.calls.map(([key]) => key.split(':').at(-1))).toEqual([
+      'watchlist',
+      'finished-views.v1',
+    ]);
+    const after = pieceKeys();
+    expect(after.filter((key) => !before.includes(key))).toHaveLength(1);
+    expect(before.filter((key) => !after.includes(key))).toEqual(
+      before.filter((key) => key.endsWith(':watchlist')),
     );
-    await writeFinishedLibraryViews(libraryKey, vault, {
-      ...value,
-      identity: { ...value.identity, head: value.identity.head + 1 },
-    });
-    expect(previousPieces.every((key) => !vault.values.has(key))).toBe(true);
+    await expect(
+      readFinishedLibraryViews(libraryKey, vault, ['watchlist', 'continue', 'recommendations']),
+    ).resolves.toMatchObject({ identity: next.identity, pieces: next.pieces });
+
+    // Marked stale for a new revision, they are not opened; the revision's pieces all say the same, so only the
+    // manifest is written again.
+    await staleFinishedLibraryViews(libraryKey, vault);
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toBeNull();
+    put.mockClear();
+    const third = { ...next, identity: { ...next.identity, head: next.identity.head + 1 } };
+    await writeFinishedLibraryViews(libraryKey, vault, third);
+    expect(put.mock.calls.map(([key]) => key.split(':').at(-1))).toEqual(['finished-views.v1']);
+    expect(pieceKeys()).toEqual(after);
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject(
+      {
+        identity: third.identity,
+      },
+    );
   });
 
   it('writes nothing when the same views are kept already', async () => {
