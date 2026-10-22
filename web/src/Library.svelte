@@ -306,7 +306,6 @@
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
-  let connectionsLease = $state.raw<ReturnType<NonNullable<typeof model>['connections']>>();
   let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
 
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
@@ -327,15 +326,6 @@
     return () => {
       lease.release();
       if (historyLease === lease) historyLease = undefined;
-    };
-  });
-  $effect(() => {
-    if (!model || route.page !== 'title') return;
-    const lease = model.connections();
-    connectionsLease = lease;
-    return () => {
-      lease.release();
-      if (connectionsLease === lease) connectionsLease = undefined;
     };
   });
   // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
