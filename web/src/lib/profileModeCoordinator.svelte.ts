@@ -459,6 +459,20 @@ export class ProfileModeCoordinator {
   }
 
   /**
+   * Whether choosing `target` must wait until the Owner PIN's state is known: that state decides whether the choice
+   * first sets the PIN (`setsPin`), and choosing Kid before it is known would switch with none to bring the Owner back.
+   */
+  waitsForPin(target: ActiveProfileMode): boolean {
+    return (
+      !this.#startsKid &&
+      target === 'kid' &&
+      !this.#preview &&
+      this.mode === 'owner' &&
+      this.parentalPinConfigured === undefined
+    );
+  }
+
+  /**
    * The Owner sets the household's Owner PIN; true once den-edge holds it. With no household yet it is kept for the
    * household the Kid choice makes (`startsKid`).
    */
