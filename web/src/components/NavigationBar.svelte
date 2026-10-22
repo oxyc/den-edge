@@ -260,33 +260,22 @@
   let shown = $state<number | null>(null);
   let finished = $state(false);
   /**
-   * Movement before the read has reported any: it eases toward `CREEP_CAP` from the moment the read begins, so a slow
-   * first response still shows the library is on its way. The read's own progress takes over as soon as it is
-   * further, and the line never moves back.
+   * A line that stands still reads as stuck. Between the read's reports it keeps easing from where it is toward
+   * `AHEAD` of what is left, slowing the longer nothing comes but never reaching the end; each report starts it again
+   * from there. The caption keeps the read's own figure, and the line never moves back.
    */
-  const CREEP_CAP = 0.1;
-  let creep = $state(0);
-  const reading = $derived(opening !== null);
-  $effect(() => {
-    if (!reading) {
-      creep = 0;
-      return;
-    }
-    if (untrack(() => creep) >= CREEP_CAP * 0.95) return;
-    const began = performance.now();
-    const from = untrack(() => creep);
-    const tick = setInterval(() => {
-      const eased = CREEP_CAP * (1 - Math.exp(-(performance.now() - began) / 1500));
-      creep = Math.max(from, eased);
-      if (eased >= CREEP_CAP * 0.95) clearInterval(tick);
-    }, 300);
-    return () => clearInterval(tick);
-  });
+  const AHEAD = 0.25;
   $effect(() => {
     if (opening !== null) {
-      shown = Math.max(opening, creep, untrack(() => shown) ?? 0);
+      const from = Math.max(opening, untrack(() => shown) ?? 0);
+      shown = from;
       finished = false;
-      return;
+      const began = performance.now();
+      const tick = setInterval(() => {
+        const eased = (1 - from) * AHEAD * (1 - Math.exp(-(performance.now() - began) / 4000));
+        shown = Math.max(from + eased, untrack(() => shown) ?? 0);
+      }, 300);
+      return () => clearInterval(tick);
     }
     if (untrack(() => shown) === null) return;
     shown = 1;
@@ -316,14 +305,19 @@
       {#if barWidth && barHeight}
         <!-- From the lower left: right along the bottom, up around the right end, back along the top, down the left. -->
         {@const r = (barHeight - 2) / 2}
+        {@const d = `M ${1 + r} ${barHeight - 1} H ${barWidth - 1 - r} A ${r} ${r} 0 0 0 ${barWidth - 1 - r} 1 H ${1 + r} A ${r} ${r} 0 0 0 ${1 + r} ${barHeight - 1}`}
         <svg width={barWidth} height={barHeight} aria-hidden="true">
-          <path
-            d="M {1 + r} {barHeight - 1} H {barWidth - 1 - r} A {r} {r} 0 0 0 {barWidth -
-              1 -
-              r} 1 H {1 + r} A {r} {r} 0 0 0 {1 + r} {barHeight - 1}"
-            stroke-dasharray="{shown * outline} {outline}"
-          />
+          <path {d} stroke-dasharray="{shown * outline} {outline}" />
         </svg>
+        <!-- The line's head, breathing while the read runs: rides the same outline, in step with the line. -->
+        {#if !finished}
+          <span
+            class="opening-head"
+            aria-hidden="true"
+            style:offset-path="path('{d}')"
+            style:offset-distance="{shown * 100}%"
+          ></span>
+        {/if}
       {/if}
     </div>
     <p class="opening-label" class:finished aria-hidden="true">
@@ -534,7 +528,7 @@
     border-radius: 999px;
   }
 
-  /* The whole pill: the read traces its outline, clockwise from the top left, round to where it began. */
+  /* The whole pill: the read traces its outline from the lower left, round to where it began. */
   .opening {
     position: absolute;
     inset: 0;
@@ -554,6 +548,35 @@
     stroke-linecap: round;
     stroke-width: 2px;
     transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* The line's head: a dot on the outline that breathes, so a slow read never looks stopped. */
+  .opening-head {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px 2px var(--accent);
+    offset-rotate: 0deg;
+    transition: offset-distance 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: opening-pulse 1.2s ease-in-out infinite;
+  }
+
+  /* Without motion paths (older TV browsers) the dot has nowhere to ride; the line alone shows the read. */
+  @supports not (offset-path: path('M 0 0')) {
+    .opening-head {
+      display: none;
+    }
+  }
+
+  @keyframes opening-pulse {
+    50% {
+      opacity: 0.45;
+      transform: scale(0.6);
+    }
   }
 
   /* Read: the closed outline glows, then fades with its caption. */
@@ -583,8 +606,10 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .opening path {
+    .opening path,
+    .opening-head {
       transition: none;
+      animation: none;
     }
   }
 

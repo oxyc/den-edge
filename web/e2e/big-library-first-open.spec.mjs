@@ -127,6 +127,8 @@ test('a first open shows its progress before den-edge has answered', async () =>
     const drawn = () => page.locator('.opening path').getAttribute('stroke-dasharray');
     const before = await drawn();
     await expect.poll(drawn, { timeout: 5_000 }).not.toBe(before);
+    // Its head is drawn on the outline while the read runs.
+    await expect(page.locator('.opening-head')).toBeVisible();
 
     release();
     await expect(page.locator('main section[aria-label="Continue Watching"]')).toBeVisible({
