@@ -19,6 +19,7 @@ import { readEncryptedLibraryValue, writeEncryptedLibraryValue } from './library
 import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import type {
+  LibraryCommand,
   LibraryObservation,
   LibraryQueryResult,
   LibrarySelection,
@@ -38,6 +39,8 @@ import {
 } from './libraryStartupMetrics';
 import { isRetainedServices } from './libraryServiceProtocolCodec';
 import { ensureSyncPolicy } from './syncLoader';
+import { syncPolicy } from './syncCore';
+import { startupMark } from './startupTiming';
 import {
   RETAINED_HOME_SHELVES,
   RETAINED_PREFERENCE_SEED,
@@ -53,7 +56,15 @@ import {
 } from './libraryMetadata';
 import { ContinueProjector, type Shape } from './library';
 import type { HomeLibraryView } from './homeLibraryView';
-import { believe, deriveKeys, openEntry, type LibraryKeys, type Row } from './wire';
+import {
+  believe,
+  deriveKeys,
+  openEntry,
+  rowKey,
+  type LibraryKeys,
+  type Row,
+  type SettingsRow,
+} from './wire';
 import {
   selectedDevicesView,
   selectedRuntimeView,
@@ -158,6 +169,10 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   readonly #factShapes = new Map<string, Shape>();
   #factHome?: HomeLibraryView;
   #preferFacts: boolean;
+  /** The import is still reading the history behind a first page (`importNewestFirst`). */
+  #filling = false;
+  #refilling?: Promise<void>;
+  #refillAgain = false;
 
   constructor(
     private readonly request: LibraryServiceHello,
@@ -169,8 +184,14 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     private readonly fetchImpl: typeof fetch,
     private readonly factStore: LibraryFactStore | null = null,
     preferFacts = false,
+    filling?: ImportedFacts['filling'],
   ) {
     this.#preferFacts = preferFacts;
+    if (filling) {
+      this.#filling = true;
+      filling.page.committed = () => this.#refill();
+      void filling.done.then((complete) => this.#filled(complete));
+    }
   }
 
   get generation(): string | null {
@@ -252,6 +273,17 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         );
         if (JSON.stringify(seeded) === JSON.stringify(command.household))
           return { outcome: 'unchanged', delivery: 'synced', affected: [] };
+        // Nothing kept says so on a first open, but the profile's own preferences are in its settings facts: when it
+        // has decided every one the household holds, there is nothing to write, and no log to open for it.
+        if (await this.#seedDecided(command.household)) {
+          await writeEncryptedLibraryValue(
+            this.request.libraryKey,
+            this.vault,
+            RETAINED_PREFERENCE_SEED,
+            command.household,
+          );
+          return { outcome: 'unchanged', delivery: 'synced', affected: [] };
+        }
       }
     }
     return (await this.#promote(`command:${command.kind}`)).command(command, operationId);
@@ -341,9 +373,114 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     for (const listener of this.#listeners) listener(event);
   }
 
+  /** Whether seeding `household`'s preferences would write nothing (`LibraryLogAuthority`'s `#seedPreferences`). */
+  async #seedDecided(
+    household: Extract<LibraryCommand, { kind: 'preferences.seed' }>['household'],
+  ): Promise<boolean> {
+    if (!this.factStore || !this.#preferFacts) return false;
+    try {
+      const manifest = await this.factStore.manifest();
+      if (
+        !manifest ||
+        (!manifest.complete && !this.#filling) ||
+        manifest.generation !== this.cached.identity.generation
+      )
+        return false;
+      const rows = await this.factStore.settings(this.cached.identity.generation, 'settings');
+      await ensureSyncPolicy();
+      const { values } = syncPolicy<{ values: SettingsRow['values'] }>({
+        op: 'profiles_seed_preferences',
+        input: { household, profile: rows.find((row) => row.name === 'prefs')?.values ?? {} },
+      });
+      return !Object.keys(values).length;
+    } catch (error) {
+      console.warn('den: the preference seed could not be decided from facts', error);
+      return false;
+    }
+  }
+
+  /**
+   * Another page of the history is kept: Continue Watching and the Watchlist are read again with it. The
+   * recommendations stay as the first page made them until the history is complete (`#filled`), so Home's billboard
+   * and shelves change once rather than with every page.
+   */
+  #refill(): void {
+    if (this.#closed || this.#full) return;
+    if (this.#refilling) {
+      this.#refillAgain = true;
+      return;
+    }
+    const refilling = (async () => {
+      do {
+        this.#refillAgain = false;
+        const loaded = (['watchlist', 'continue'] as const).filter(
+          (capability) => this.cached.pieces[capability] !== undefined,
+        );
+        if (!loaded.length) continue;
+        for (const capability of loaded) delete this.cached.pieces[capability];
+        this.#factHome = undefined;
+        if (!(await this.#loadFactCapabilities([...loaded]))) return;
+        if (this.#closed || this.#full) return;
+        this.#emit({
+          kind: 'changed',
+          affected: loaded.map((capability) =>
+            capability === 'continue'
+              ? { kind: 'continue' as const }
+              : { kind: 'overview' as const },
+          ),
+        });
+      } while (this.#refillAgain);
+    })().catch((error: unknown) => console.warn('den: library facts could not be refilled', error));
+    this.#refilling = refilling;
+    void refilling.finally(() => {
+      if (this.#refilling === refilling) this.#refilling = undefined;
+    });
+  }
+
+  /** The import has read the whole history, or stopped: every loaded view is read again, or the log takes over. */
+  async #filled(complete: boolean): Promise<void> {
+    this.#filling = false;
+    if (this.#closed || this.#full) return;
+    if (!complete) {
+      void this.#promote('import:stopped').catch(() => undefined);
+      return;
+    }
+    await this.#refilling;
+    const loaded = (
+      ['watchlist', 'continue', 'recommendations', 'settings', 'runtime', 'devices'] as const
+    ).filter((capability) => this.cached.pieces[capability] !== undefined);
+    for (const capability of loaded) delete this.cached.pieces[capability];
+    this.#factHome = undefined;
+    this.#cancelReconsider();
+    if (loaded.length && !(await this.#loadFactCapabilities([...loaded]))) {
+      void this.#promote('import:complete').catch(() => undefined);
+      return;
+    }
+    if (this.#closed || this.#full) return;
+    this.#emit({
+      kind: 'changed',
+      affected: loaded.map((capability) =>
+        capability === 'continue'
+          ? { kind: 'continue' as const }
+          : capability === 'settings' || capability === 'runtime' || capability === 'devices'
+            ? { kind: capability }
+            : { kind: 'overview' as const },
+      ),
+    });
+    // What was written while the history was read sits above the head it was read to.
+    this.#schedule(0);
+  }
+
   #schedule(delay: number): void {
     this.#cancelTimer();
-    if (this.#closed || this.#full || !this.#lifecycle?.visible || !this.#lifecycle.online) return;
+    if (
+      this.#closed ||
+      this.#full ||
+      this.#filling ||
+      !this.#lifecycle?.visible ||
+      !this.#lifecycle.online
+    )
+      return;
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       void this.#reconcile();
@@ -694,7 +831,12 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         };
       }
       const factManifest = await this.factStore.manifest();
-      if (!factManifest?.complete || factManifest.generation !== this.cached.identity.generation)
+      // While the history is still read (`#filling`), its settings are kept already: they were read first, by key.
+      if (
+        !factManifest ||
+        (!factManifest.complete && !this.#filling) ||
+        factManifest.generation !== this.cached.identity.generation
+      )
         return false;
       if (capabilities.includes('settings')) {
         const rows = await this.factStore.settings(this.cached.identity.generation, 'settings');
@@ -729,6 +871,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         }),
       );
     noteFinishedViewPromotion(reason);
+    // A promotion reads the whole log again: worth seeing in a startup's milestones when it happens.
+    startupMark('library promoted', reason);
     this.#cancelTimer();
     this.#cancelReconsider();
     const opening = this.openFull().then(async (authority) => {
@@ -770,6 +914,169 @@ export interface FinishedLibraryViewAuthorityOpen {
 
 const FACT_BATCH = 64;
 
+/**
+ * The rows a Settings, runtime or devices view is read from (`librarySelectedSettings.ts`), and the profile directory
+ * that says whether the library belongs to a profile household: read by key before anything else, so a first open
+ * that draws Home after one page draws it with this library's own settings.
+ */
+const SETTINGS_ROWS = [
+  'set:prefs',
+  'set:assistant-grants',
+  'set:assistant-read',
+  'set:plugins',
+  'set:addresses',
+  'set:devices',
+  'profiles',
+];
+
+interface ChangesPage {
+  generation: string;
+  head: number;
+  more: boolean;
+  entries: Array<{ k: string; seq: number; v: string }>;
+  order?: unknown;
+  selected?: unknown;
+}
+
+type FactEntry = Parameters<LibraryFactStore['commitBatch']>[2][number];
+
+/** One import's reads and writes; every request and check both orders of import share. */
+class FactImport {
+  #registered = false;
+  #decrypted = 0;
+  readonly #started = performance.now();
+
+  constructor(
+    readonly request: LibraryServiceHello,
+    readonly keys: LibraryKeys,
+    readonly store: LibraryFactStore,
+    readonly fetchImpl: typeof fetch,
+  ) {}
+
+  /** A changes page whose every entry `accept`s its sequence, or null for any answer that is not one. */
+  async page(query: string, generation: string | undefined, accept: (seq: number) => boolean) {
+    let body: Partial<Record<keyof ChangesPage, unknown>> | null;
+    try {
+      const response = await this.fetchImpl(`/lib/${this.keys.id}/changes?${query}`, {
+        headers: {
+          'x-den-library-token': this.keys.token,
+          'x-den-wire': String(this.request.wire),
+          'x-den-generation': generation ?? '0',
+        },
+      });
+      if (!response.ok) return null;
+      body = await response.json().catch(() => null);
+    } catch {
+      return null;
+    }
+    if (
+      !body ||
+      typeof body.generation !== 'string' ||
+      !body.generation.length ||
+      !Number.isSafeInteger(body.head) ||
+      typeof body.more !== 'boolean' ||
+      !Array.isArray(body.entries)
+    )
+      return null;
+    const entries: ChangesPage['entries'] = [];
+    for (const candidate of body.entries as unknown[]) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+      const { k, seq, v } = candidate as { k?: unknown; seq?: unknown; v?: unknown };
+      if (
+        typeof k !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(k) ||
+        !Number.isSafeInteger(seq) ||
+        !accept(seq as number) ||
+        typeof v !== 'string'
+      )
+        return null;
+      entries.push({ k, seq: seq as number, v });
+    }
+    return { ...(body as ChangesPage), entries };
+  }
+
+  /** Registered once a page names the generation: before it, den-edge refuses it for any library that exists. */
+  register(generation: string): void {
+    if (this.#registered) return;
+    this.#registered = true;
+    void this.fetchImpl(`/lib/${this.keys.id}/member`, {
+      method: 'PUT',
+      headers: {
+        'x-den-library-token': this.keys.token,
+        'x-den-library-member': `${this.keys.id}:${this.keys.member}`,
+        'x-den-wire': String(this.request.wire),
+        'x-den-generation': generation,
+      },
+    }).catch(() => undefined);
+  }
+
+  /**
+   * The page's rows as facts, merged with any kept copy unless `fresh` (nothing of this generation is kept yet), and
+   * whether one of them is the profile directory. Null for a row framed by a newer build.
+   */
+  async facts(
+    entries: ChangesPage['entries'],
+    generation: string,
+    fresh: boolean,
+  ): Promise<{ facts: FactEntry[]; profileTopology: boolean } | null> {
+    if (entries.length) await ensureSyncPolicy();
+    // WebCrypto works off the thread: a page's rows are decrypted at once, as many at a time as the browser runs.
+    const opened = await Promise.all(entries.map(({ k, v }) => openEntry(this.keys, k, v)));
+    const facts: FactEntry[] = [];
+    let profileTopology = false;
+    for (const [index, { k, seq, v }] of entries.entries()) {
+      const entry = opened[index]!;
+      let row: Row | null = null;
+      if ('row' in entry) {
+        const previous = fresh ? null : await this.store.document(generation, k);
+        row = mergeFactRows(previous?.row ?? null, believe(entry.row));
+      } else if ('profileDirectory' in entry || 'invalidProfileDirectory' in entry)
+        profileTopology = true;
+      else if ('newerFraming' in entry) return null;
+      facts.push({ k, seq, value: v, row });
+      this.#decrypted++;
+    }
+    return { facts, profileTopology };
+  }
+
+  /** `facts` kept in bounded atomic batches, each a resumable checkpoint; `cursor` names each batch's manifest. */
+  async commit(
+    generation: string,
+    facts: readonly FactEntry[],
+    complete: boolean,
+    cursor: (batch: readonly FactEntry[], last: boolean) => { head: number; floor?: number },
+    options: { profileTopology: boolean },
+    committed?: (batch: readonly FactEntry[]) => void,
+  ): Promise<void> {
+    for (let offset = 0; offset === 0 || offset < facts.length; offset += FACT_BATCH) {
+      const batch = facts.slice(offset, offset + FACT_BATCH);
+      const last = offset + FACT_BATCH >= facts.length;
+      const { head, floor } = cursor(batch, last);
+      await this.store.commitBatch(generation, head, batch, complete && last, {
+        ...options,
+        ...(floor !== undefined ? { floor } : {}),
+      });
+      committed?.(batch);
+    }
+  }
+
+  finished(): void {
+    const elapsed = performance.now() - this.#started;
+    noteLibraryDecrypt(this.#decrypted, elapsed);
+    noteLibraryFold(this.#decrypted, elapsed);
+  }
+}
+
+type ImportedFacts = {
+  store: LibraryFactStore;
+  manifest: Awaited<ReturnType<LibraryFactStore['manifest']>>;
+  /**
+   * A newest-first import answered after its first page: the rest of the history, read on behind it. Settles true
+   * once every row is kept, false if the read stopped; `page` is called after each page it keeps meanwhile.
+   */
+  filling?: { done: Promise<boolean>; page: { committed: () => void } };
+};
+
 /** A first selected open: scan encrypted authority in bounded pages and retain no full-history plaintext graph. */
 async function importLibraryFacts(
   request: LibraryServiceHello,
@@ -777,55 +1084,142 @@ async function importLibraryFacts(
   vault: Vault,
   fetchImpl: typeof fetch,
   progress?: (progress: number) => void,
-): Promise<{
-  store: LibraryFactStore;
-  manifest: Awaited<ReturnType<LibraryFactStore['manifest']>>;
-} | null> {
+): Promise<ImportedFacts | null> {
   const store = await LibraryFactStore.open(request.libraryKey, vault);
   if (!store) return null;
-  let manifest = await store.manifest();
+  const manifest = await store.manifest();
   if (manifest?.complete) return { store, manifest };
+  const reading = new FactImport(request, keys, store, fetchImpl);
+  // An oldest-first import under way resumes as one; anything else reads the newest rows first, where den-edge can.
+  if (!manifest || manifest.floor !== undefined) {
+    const newest = await importNewestFirst(reading, manifest, progress);
+    if (newest !== 'unsupported') return newest;
+  }
+  return importOldestFirst(reading, manifest?.floor === undefined ? manifest : null, progress);
+}
+
+/**
+ * The newest rows first, and this library's settings by key beside them: Continue Watching and the Watchlist are
+ * mostly what changed last, so after one page Home can draw them, with the settings it filters the rest by. The rest
+ * of the history follows in `filling`. `'unsupported'`: den-edge did not read as asked (an older one), so nothing was
+ * kept and the caller reads oldest first.
+ */
+async function importNewestFirst(
+  reading: FactImport,
+  manifest: Awaited<ReturnType<LibraryFactStore['manifest']>>,
+  progress?: (progress: number) => void,
+): Promise<ImportedFacts | 'unsupported' | null> {
+  const { store, keys } = reading;
+  let generation = manifest?.generation;
+  let floor = manifest?.floor ?? Number.MAX_SAFE_INTEGER;
+  // On a resumed import the settings are kept already, read in its first page.
+  const settingsKeys = manifest
+    ? null
+    : await Promise.all(SETTINGS_ROWS.map((name) => rowKey(keys, name)));
+  const below = (before: number) =>
+    reading.page(`before=${before}&limit=1000`, generation, (seq) => seq > 0 && seq < before);
+  const [first, settings] = await Promise.all([
+    below(floor),
+    settingsKeys && reading.page(`keys=${settingsKeys.join(',')}`, generation, (seq) => seq > 0),
+  ]);
+  if (!first) return null;
+  if (first.order !== 'desc') return 'unsupported';
+  if (settingsKeys && !settings) return null;
+  if (settings && (settings.selected !== true || settings.generation !== first.generation))
+    return null;
+  if (generation && first.generation !== generation) {
+    // The store started over since the import began: begin again, as a first open of the new generation.
+    if (manifest) return importNewestFirst(reading, null, progress);
+  }
+  generation = first.generation;
+  reading.register(generation);
+  const fresh = !manifest;
+  // Every row at or below `top` is read by this import; anything written since is what later reads catch up with.
+  const top = manifest?.head ?? first.head;
+  let profileTopology = manifest?.profileTopology ?? false;
+  const reached = () => progress?.(Math.min(1, Math.max(0, 1 - (floor - 1) / Math.max(1, top))));
+
+  /** Keep one page of the history, and lower `floor` to its oldest row. */
+  const keep = async (page: ChangesPage, extra: FactEntry[] = []) => {
+    const opened = await reading.facts(page.entries, generation!, fresh);
+    if (!opened) return false;
+    profileTopology ||= opened.profileTopology;
+    const facts = [...extra, ...opened.facts];
+    const complete = !page.more || page.entries.length === 0;
+    await reading.commit(
+      generation!,
+      facts,
+      complete,
+      (batch) => {
+        // A batch's floor is the oldest history row it keeps; the settings rows ahead of the first are not history.
+        floor = Math.min(
+          floor,
+          ...batch.filter((fact) => !extra.includes(fact)).map((fact) => fact.seq),
+        );
+        return { head: top, floor };
+      },
+      { profileTopology },
+      reached,
+    );
+    if (complete) {
+      floor = 1;
+      reached();
+      reading.finished();
+    }
+    return true;
+  };
+
+  let settingsFacts: FactEntry[] = [];
+  if (settings) {
+    const opened = await reading.facts(settings.entries, generation, fresh);
+    if (!opened) return null;
+    profileTopology ||= opened.profileTopology;
+    settingsFacts = opened.facts;
+  }
+  if (!(await keep(first, settingsFacts))) return null;
+  const opened = await store.manifest();
+  if (!opened || opened.generation !== generation) return null;
+  if (opened.complete) return { store, manifest: opened };
+
+  const page = { committed: () => {} };
+  const done = (async () => {
+    // The page below the one being decrypted and committed, already on its way.
+    let next = below(floor);
+    for (;;) {
+      const current = await next;
+      if (!current || current.order !== 'desc' || current.generation !== generation) return false;
+      if (current.more && current.entries.length) next = below(current.entries.at(-1)!.seq);
+      if (!(await keep(current))) return false;
+      page.committed();
+      if (!current.more || !current.entries.length) return true;
+    }
+  })().catch((error: unknown) => {
+    console.warn('den: the rest of the library could not be read', error);
+    return false;
+  });
+  return { store, manifest: opened, filling: { done, page } };
+}
+
+/** Every row after the import's `head`, oldest first: the whole history before Home is drawn. */
+async function importOldestFirst(
+  reading: FactImport,
+  resumed: Awaited<ReturnType<LibraryFactStore['manifest']>>,
+  progress?: (progress: number) => void,
+): Promise<ImportedFacts | null> {
+  const { store } = reading;
+  let manifest = resumed;
   let generation = manifest?.generation;
   let since = manifest?.head ?? 0;
   // Nothing of this generation is kept yet, so no row has a previous local copy to merge with.
   let fresh = !manifest;
-  let registered = false;
-  let decrypted = 0;
-  const started = performance.now();
-  const ask = async (after: number, of: string | undefined) => {
-    try {
-      const response = await fetchImpl(`/lib/${keys.id}/changes?since=${after}&limit=1000`, {
-        headers: {
-          'x-den-library-token': keys.token,
-          'x-den-wire': String(request.wire),
-          'x-den-generation': of ?? '0',
-        },
-      });
-      if (!response.ok) return null;
-      return (await response.json().catch(() => null)) as {
-        generation?: unknown;
-        head?: unknown;
-        more?: unknown;
-        entries?: unknown;
-      } | null;
-    } catch {
-      return null;
-    }
-  };
+  const after = (from: number) =>
+    reading.page(`since=${from}&limit=1000`, generation, (seq) => seq > from);
   // The page after the one being decrypted and committed, already on its way.
-  let next: ReturnType<typeof ask> | undefined;
+  let next: ReturnType<typeof after> | undefined;
   for (;;) {
-    const page = await (next ?? ask(since, generation));
+    const page = await (next ?? after(since));
     next = undefined;
-    if (
-      !page ||
-      typeof page.generation !== 'string' ||
-      !page.generation.length ||
-      !Number.isSafeInteger(page.head) ||
-      typeof page.more !== 'boolean' ||
-      !Array.isArray(page.entries)
-    )
-      return null;
+    if (!page) return null;
     if (generation && page.generation !== generation) {
       generation = page.generation;
       since = 0;
@@ -834,71 +1228,30 @@ async function importLibraryFacts(
       continue;
     }
     generation = page.generation;
-    const lastSeq = (page.entries.at(-1) as { seq?: unknown } | undefined)?.seq;
-    if (page.more && Number.isSafeInteger(lastSeq)) next = ask(lastSeq as number, generation);
-    if (!registered) {
-      registered = true;
-      void fetchImpl(`/lib/${keys.id}/member`, {
-        method: 'PUT',
-        headers: {
-          'x-den-library-token': keys.token,
-          'x-den-library-member': `${keys.id}:${keys.member}`,
-          'x-den-wire': String(request.wire),
-          'x-den-generation': generation,
-        },
-      }).catch(() => undefined);
-    }
-    const facts = [];
-    if (page.entries.length) await ensureSyncPolicy();
-    let profileTopology = manifest?.profileTopology ?? false;
-    const entries: Array<{ k: string; seq: number; v: string }> = [];
-    for (const candidate of page.entries) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
-      const { k, seq, v } = candidate as { k?: unknown; seq?: unknown; v?: unknown };
-      if (
-        typeof k !== 'string' ||
-        !/^[0-9a-f]{64}$/.test(k) ||
-        !Number.isSafeInteger(seq) ||
-        (seq as number) <= since ||
-        typeof v !== 'string'
-      )
-        return null;
-      entries.push({ k, seq: seq as number, v });
-    }
-    // WebCrypto works off the thread: a page's rows are decrypted at once, as many at a time as the browser runs.
-    const openedEntries = await Promise.all(entries.map(({ k, v }) => openEntry(keys, k, v)));
-    for (const [index, { k, seq, v }] of entries.entries()) {
-      const opened = openedEntries[index]!;
-      let row: Row | null = null;
-      if ('row' in opened) {
-        const previous = fresh ? null : await store.document(generation, k);
-        row = mergeFactRows(previous?.row ?? null, believe(opened.row));
-      } else if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened)
-        profileTopology = true;
-      else if ('newerFraming' in opened) return null;
-      facts.push({ k, seq, value: v, row });
-      decrypted++;
-    }
-    const head = facts.at(-1)?.seq ?? (page.head as number);
-    const complete = !page.more || facts.length === 0;
-    const reached = (seq: number) =>
-      progress?.(Math.min(1, seq / Math.max(1, page.head as number)));
-    // One request per thousand rows (each is a round trip), committed in bounded batches as resumable checkpoints.
-    for (let offset = 0; offset + FACT_BATCH < facts.length; offset += FACT_BATCH) {
-      const batch = facts.slice(offset, offset + FACT_BATCH);
-      await store.commitBatch(generation, batch.at(-1)!.seq, batch, false, { profileTopology });
-      reached(batch.at(-1)!.seq);
-    }
-    const last = facts.slice(Math.max(0, Math.ceil(facts.length / FACT_BATCH) - 1) * FACT_BATCH);
-    await store.commitBatch(generation, head, last, complete, { profileTopology });
+    if (page.more && page.entries.length) next = after(page.entries.at(-1)!.seq);
+    reading.register(generation);
+    const opened = await reading.facts(page.entries, generation, fresh);
+    if (!opened) return null;
+    const profileTopology = (manifest?.profileTopology ?? false) || opened.profileTopology;
+    const head = page.entries.at(-1)?.seq ?? page.head;
+    const complete = !page.more || page.entries.length === 0;
+    await reading.commit(
+      generation,
+      opened.facts,
+      complete,
+      (batch, last) => ({ head: last ? head : batch.at(-1)!.seq }),
+      { profileTopology },
+      (batch) => {
+        // The last batch of the history says 1, below, once.
+        if (batch.length && !(complete && batch.at(-1)!.seq === head))
+          progress?.(Math.min(1, batch.at(-1)!.seq / Math.max(1, page.head)));
+      },
+    );
     if (complete) progress?.(1);
-    else reached(head);
     since = head;
     manifest = await store.manifest();
     if (complete) {
-      const elapsed = performance.now() - started;
-      noteLibraryDecrypt(decrypted, elapsed);
-      noteLibraryFold(decrypted, elapsed);
+      reading.finished();
       return manifest?.complete ? { store, manifest } : null;
     }
   }
@@ -941,11 +1294,14 @@ export async function openFinishedLibraryViewAuthority(
       factManifest.complete &&
       factManifest.schema === LIBRARY_FACT_SCHEMA &&
       factManifest.generation.length > 0;
+    let filling: ImportedFacts['filling'];
     if (!classic && !factsReady) {
       const imported = await importLibraryFacts(request, keys, vault, fetchImpl, progress);
       factStore = imported?.store ?? factStore;
       factManifest = imported?.manifest ?? null;
-      factsReady = !!factManifest?.complete;
+      filling = imported?.filling;
+      // A newest-first import answers with its first page, the rest of the history read on behind it.
+      factsReady = !!factManifest?.complete || !!filling;
     }
     if (!classic && !factsReady) return null;
     const selected: FinishedLibraryViews = classic
@@ -982,6 +1338,7 @@ export async function openFinishedLibraryViewAuthority(
           ? factStore!
           : null,
         !classic,
+        filling,
       ),
       membership,
     };
