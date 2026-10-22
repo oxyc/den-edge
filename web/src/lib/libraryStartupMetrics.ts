@@ -11,6 +11,8 @@ export interface LibraryStartupMetrics {
   cacheBytesWritten: number;
   viewSource: 'none' | 'cache' | 'authoritative';
   promotion?: string;
+  /** Why the kept finished views were discarded or written again, each reason once. */
+  viewsRewritten?: string[];
 }
 
 declare global {
@@ -68,6 +70,11 @@ export function noteLibraryCacheIO(source: 'read' | 'write', bytes: number): voi
 
 export function noteFinishedViewCacheHit(): void {
   metrics().viewSource = 'cache';
+}
+
+export function noteFinishedViewsRewrite(reason: string): void {
+  const held = (metrics().viewsRewritten ??= []);
+  if (!held.includes(reason) && held.length < 8) held.push(reason.slice(0, 120));
 }
 
 export function noteFinishedViewPromotion(reason: string): void {
