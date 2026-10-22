@@ -91,12 +91,20 @@ const DURING_REBUILD_MS = 1_000;
 
 /**
  * `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. `shelves`: the surface
- * names its library rows, and has its `shelves ready` milestone budgeted too.
+ * names its library rows, and has its `shelves ready` milestone budgeted too. `background`: library promotions the
+ * surface makes only once it has drawn, left out of `FOLDED_DOCUMENTS`.
  */
 const SURFACES = [
   { name: 'Home', path: '/', content: ['billboardText', 'continuePoster'], shelves: true },
   { name: 'Series', path: '/series', content: ['rowPoster'], shelves: true },
-  { name: 'Watchlist', path: '/watchlist', content: ['billboardText'], shelves: true },
+  // Its watched history is the whole library's: asked for once the screen has drawn (`historyAsked`, Library.svelte).
+  {
+    name: 'Watchlist',
+    path: '/watchlist',
+    content: ['billboardText'],
+    shelves: true,
+    background: ['selection:history'],
+  },
   { name: 'Series detail', path: `/tv/${WATCHED_SERIES}`, content: ['episodes'] },
   { name: 'Settings', path: '/settings', content: ['settings'] },
   // After the switch below: the household's Kid, whose billboard is age-checked title by title.
@@ -421,6 +429,16 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
       );
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
   });
+  // When each library promotion was heard, in ms from just before navigation: a `background` one must come after the
+  // surface's content (which is timed from navigation start, so never later than this clock for the same moment).
+  const started = Date.now();
+  const promoted = {};
+  const hearPromotion = (message) => {
+    const reason = /library promoted \((.+)\)$/.exec(message.text())?.[1];
+    if (reason && promoted[reason] === undefined) promoted[reason] = Date.now() - started;
+  };
+  page.on('console', hearPromotion);
+  page.on('worker', (worker) => worker.on?.('console', hearPromotion));
   const projectionsBefore = edge.assistant?.projections.length ?? 0;
   // Rows den-edge sent the library Workers, from every changes page.
   const reads = [];
@@ -467,6 +485,7 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
     ...processes,
     drawnAt,
     marks,
+    promoted,
   };
   await page.close();
   return result;
@@ -600,13 +619,17 @@ for (const [label, type, device, options] of ENGINES) {
         // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
         // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
         expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
-        const folded = (result.libraryStartup ?? []).reduce(
-          (sum, startup) => sum + startup.documentsFolded,
-          0,
-        );
+        const folded = (result.libraryStartup ?? [])
+          .filter(({ promotion }) => !surface.background?.includes(promotion))
+          .reduce((sum, startup) => sum + startup.documentsFolded, 0);
         expect
           .soft(folded, `${surface.name}: library documents folded`)
           .toBeLessThan(FOLDED_DOCUMENTS);
+        for (const reason of surface.background ?? [])
+          if (result.promoted[reason] !== undefined)
+            expect
+              .soft(result.promoted[reason], `${surface.name}: ms to ${reason}, after its content`)
+              .toBeGreaterThanOrEqual(result.contentMs);
         for (const startup of result.libraryStartup ?? []) {
           if (startup.viewSource !== 'cache') continue;
           expect

@@ -319,8 +319,14 @@
       if (titleLease === lease) titleLease = undefined;
     };
   });
+  // Watched history is the whole library's, which the library Worker reads in full: it is asked for once the Watchlist's
+  // own view has arrived, so the screen never waits on it (an old TV spends seconds on that read), and kept asked for.
+  let historyAsked = $state(false);
   $effect(() => {
-    if (!model || route.page !== 'watchlist') return;
+    if (route.page === 'watchlist' && overview) historyAsked = true;
+  });
+  $effect(() => {
+    if (!model || route.page !== 'watchlist' || !historyAsked) return;
     const lease = model.history();
     historyLease = lease;
     return () => {
