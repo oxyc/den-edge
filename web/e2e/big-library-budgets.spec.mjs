@@ -423,11 +423,11 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
   );
   page.on('console', (message) => {
     if (isBuild(message)) built.page++;
-    const match =
-      /^den: startup \+(\d+)ms (app module requested|worker ready|handover|shelves ready|billboard detail|first poster|episodes shown)/.exec(
-        message.text(),
-      );
+    // Every page milestone, named without its detail; a Worker's own lines (`[worker] …`) are left to its metrics.
+    const match = /^den: startup \+(\d+)ms ([^[(][^(]*?)(?: \((.*)\))?$/.exec(message.text());
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
+    // Which selections the supervisor waited on before ready, and when each first answered.
+    if (match?.[2] === 'supervisor ready' && marks.bound === undefined) marks.bound = match[3];
   });
   // When each library promotion was heard, in ms from just before navigation: a `background` one must come after the
   // surface's content (which is timed from navigation start, so never later than this clock for the same moment).
