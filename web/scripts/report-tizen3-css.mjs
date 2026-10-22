@@ -19,6 +19,8 @@ if (!(await stat(directory).catch(() => undefined))?.isDirectory()) {
 
 const styles = [];
 for (const file of (await filesBelow(directory)).filter((file) => file.endsWith('.js'))) {
+  // Diagnostics writes a JSON capability report through textContent; it is data, not an injected stylesheet.
+  if (basename(file).startsWith('diagnostics-')) continue;
   const code = await readFile(file, 'utf8');
   for (const match of code.matchAll(/\.textContent\s*=\s*`([\s\S]*?)`/g)) {
     styles.push({ chunk: basename(file), css: match[1] });
@@ -37,6 +39,7 @@ const checks = {
   focusWithin: /:focus-within\b/g,
   has: /:has\(/g,
   is: /:is\(/g,
+  webkitAny: /:-webkit-any\(/g,
   colorMix: /color-mix\(/g,
   logicalProperties: /\b(?:margin|padding|border|inset)-(?:inline|block)(?:-(?:start|end))?\s*:/g,
 };
@@ -64,6 +67,10 @@ console.log(
 for (const [name, expression] of Object.entries(checks)) {
   console.log(`${name}: ${count(css, expression)}`);
 }
+console.log(
+  `unsupportedIs: ${Math.max(0, count(css, checks.is) - count(css, checks.webkitAny))} (` +
+    `${count(css, checks.is)} :is rules, ${count(css, checks.webkitAny)} paired Chromium 47 fallbacks)`,
+);
 console.log(
   `Remaining variables: ${[...variables.entries()]
     .sort((a, b) => b[1] - a[1])

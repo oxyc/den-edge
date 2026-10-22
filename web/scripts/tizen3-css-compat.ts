@@ -9,6 +9,7 @@ const UNSUPPORTED_RESULT = /\b(?:clamp|min|max)\(|var\(|env\(/;
 const FIXED_UNIT = /(-?(?:\d+\.?\d*|\.\d+))(dvw|svw|lvw|vw|dvh|svh|lvh|vh|vmin|vmax|rem)\b/gi;
 const SAFE_AREA = /env\(safe-area-inset-(?:top|right|bottom|left)(?:\s*,[^)]*)?\)/gi;
 const SCROLL_LOGICAL = /^scroll-(padding|margin)-(inline|block)$/;
+const FOCUS_HAS = /:has\([^)]*:focus(?:-visible)?[^)]*\)/g;
 
 function pixels(value: number, unit: string): number {
   switch (unit.toLowerCase()) {
@@ -91,6 +92,23 @@ export function tizen3ScrollLogical(): Plugin {
       declaration.cloneBefore({ prop: `scroll-${match[1]}-${edges[0]}`, value: start });
       declaration.cloneBefore({ prop: `scroll-${match[1]}-${edges[1]}`, value: end });
       declaration.remove();
+    },
+  };
+}
+
+/**
+ * A TV remote is a keyboard-like input, so its focus must always remain visible. Chromium 47 predates both modern
+ * focus selectors. The shared capability listener already marks focus ancestors; lower the selectors only in the
+ * exact Tizen 3 artifact instead of adding listeners to individual components.
+ */
+export function tizen3FocusSelectors(): Plugin {
+  return {
+    postcssPlugin: 'den:tizen3-focus-selectors',
+    Rule(rule) {
+      rule.selector = rule.selector
+        .replace(FOCUS_HAS, '.tv-focus-within')
+        .replace(/:focus-within\b/g, '.tv-focus-within')
+        .replace(/:focus-visible\b/g, ':focus');
     },
   };
 }

@@ -212,6 +212,7 @@
   }
 
   .split-surface.open {
+    border-color: #bfbfc3;
     border-color: var(--split-expanded-edge);
     border-radius: 12px 12px 0 0;
     box-shadow: none;
@@ -246,6 +247,7 @@
   .split-button:not(.pointer-open) .split-surface :global(.den-button.split-region:focus-visible) {
     outline: 0;
     outline-offset: 0;
+    background: #eeeef0;
     background: var(--split-focus-bg);
   }
 
@@ -270,6 +272,7 @@
     flex: 0 0 1px;
     align-self: stretch;
     margin-block: 10px;
+    background: rgb(11 11 15 / 0.16);
     background: var(--split-divider-bg);
     pointer-events: none;
   }
@@ -291,6 +294,7 @@
   }
 
   .split-surface :global(.den-button.split-region:active:not([aria-disabled='true'])) {
+    background: #c8c8cb;
     background: var(--split-active-bg);
     transform: none;
   }
@@ -312,9 +316,11 @@
     position: absolute;
     inset: 100% 0 auto;
     padding: 0;
+    border: 1px solid #bfbfc3;
     border: 1px solid var(--split-expanded-edge);
     border-top: 0;
     border-radius: 0 0 12px 12px;
+    background: #dedee1;
     background: var(--split-menu-bg);
     animation: reveal-destination 120ms ease-out;
   }
@@ -333,6 +339,7 @@
   }
 
   .split-menu :global(.den-button.split-alternate:active) {
+    background: #bfbfc3;
     background: var(--split-menu-active-bg);
     transform: none;
   }

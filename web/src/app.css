@@ -135,9 +135,12 @@ button[aria-disabled='true'] {
   justify-content: center;
   gap: 8px;
   padding: 0 16px;
+  border: 1px solid #26262f;
   border: 1px solid var(--button-border);
   border-radius: 12px;
+  background: transparent;
   background: var(--button-bg);
+  color: #e7e7ea;
   color: var(--button-fg);
   font: inherit;
   font-weight: 600;
@@ -177,35 +180,73 @@ button[aria-disabled='true'] {
   --button-bg: var(--fg);
   --button-border: var(--fg);
   --button-fg: var(--bg);
+
+  border-color: #e7e7ea;
+  border-color: var(--button-border);
+  background: #e7e7ea;
+  background: var(--button-bg);
+  color: #0b0b0f;
+  color: var(--button-fg);
 }
 
 .den-button-secondary,
 .den-button-stateful {
   --button-bg: rgb(255 255 255 / 0.08);
   --button-border: rgb(255 255 255 / 0.14);
+
+  border-color: rgb(255 255 255 / 0.14);
+  border-color: var(--button-border);
+  background: rgb(255 255 255 / 0.08);
+  background: var(--button-bg);
 }
 
 .den-button-tertiary {
   --button-border: transparent;
   --button-fg: var(--muted);
+
+  border-color: transparent;
+  border-color: var(--button-border);
+  color: #9a9aa6;
+  color: var(--button-fg);
 }
 
 .den-button-device {
   --button-bg: rgb(255 255 255 / 0.08);
   --button-border: rgb(255 255 255 / 0.14);
   --button-fg: var(--device-fg);
+
+  border-color: rgb(255 255 255 / 0.14);
+  border-color: var(--button-border);
+  background: rgb(255 255 255 / 0.08);
+  background: var(--button-bg);
+  color: #d1d8ed;
+  color: var(--button-fg);
 }
 
 .den-button-destructive {
   --button-bg: var(--danger-wash-12);
   --button-border: var(--danger-line-48);
   --button-fg: #ff9a9a;
+
+  border-color: #8e474c;
+  border-color: var(--button-border);
+  background: rgb(255 107 107 / 0.12);
+  background: var(--button-bg);
+  color: #ff9a9a;
+  color: var(--button-fg);
 }
 
 .den-button-stateful[aria-pressed='true'] {
   --button-bg: var(--fg);
   --button-border: var(--fg);
   --button-fg: var(--bg);
+
+  border-color: #e7e7ea;
+  border-color: var(--button-border);
+  background: #e7e7ea;
+  background: var(--button-bg);
+  color: #0b0b0f;
+  color: var(--button-fg);
 }
 
 .den-button-menu {
@@ -221,6 +262,12 @@ button[aria-disabled='true'] {
   --button-border: var(--glass-edge);
   --button-fg: #fff;
 
+  border-color: rgb(255 255 255 / 0.12);
+  border-color: var(--button-border);
+  background: rgb(28 28 34 / 0.55);
+  background: var(--button-bg);
+  color: #fff;
+  color: var(--button-fg);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
     0 8px 24px rgb(0 0 0 / 0.3);

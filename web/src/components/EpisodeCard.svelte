@@ -176,10 +176,10 @@
         <span class="number">{episode.number}</span>
         {#if seen}<span class="watched"><DetailIcon name="check" /></span>{/if}
         {#if !upcoming}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
-        {#if progress > RESUME_FLOOR}<span
-            class="progress"
-            style:--progress={`${seen ? 100 : progress * 100}%`}
-          ></span>{/if}
+        {#if progress > RESUME_FLOOR}<span class="progress"
+            ><span class="progress-fill" style:width={`${seen ? 100 : progress * 100}%`}
+            ></span></span
+          >{/if}
       </span>
       {@render about(true)}
     </a>
@@ -309,10 +309,8 @@
     background: #fff4;
   }
 
-  .progress::after {
-    content: '';
+  .progress-fill {
     display: block;
-    width: var(--progress);
     height: 100%;
     border-radius: inherit;
     background: white;

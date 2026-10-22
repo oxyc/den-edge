@@ -693,6 +693,85 @@
 
 /* These deliberately come after the modern declarations: capability classes must win the cascade. */
 /* stylelint-disable no-descending-specificity -- Capability overrides must follow modern declarations. */
+.den-tv.tv-no-custom-properties .row:not(.services-row) .head {
+  padding-right: 96px;
+  padding-left: 96px;
+}
+
+.den-tv.tv-no-custom-properties .row:not(.services-row) .track {
+  padding-left: 96px;
+  scroll-padding-left: 96px;
+}
+
+.den-tv.tv-no-custom-properties .card,
+.den-tv.tv-no-custom-properties .holder,
+.den-tv.tv-no-custom-properties .row .slot,
+.den-tv.tv-no-custom-properties .row .skeleton,
+.den-tv.tv-no-custom-properties .row .retry {
+  width: 249.6px;
+}
+
+.den-tv.tv-no-custom-properties .card.landscape,
+.den-tv.tv-no-custom-properties .holder.landscape,
+.den-tv.tv-no-custom-properties .row .slot.landscape {
+  width: 361.92px;
+}
+
+.den-tv.tv-no-custom-properties .card .art {
+  height: 374.4px;
+}
+
+.den-tv.tv-no-custom-properties .card .art.landscape {
+  height: 203.58px;
+}
+
+.den-tv.tv-no-custom-properties .row .slot,
+.den-tv.tv-no-custom-properties .row .skeleton,
+.den-tv.tv-no-custom-properties .row .retry,
+.den-tv.tv-no-custom-properties .row .proxy {
+  min-height: 449.6px;
+  height: 449.6px;
+}
+
+.den-tv.tv-no-custom-properties .row .slot.landscape,
+.den-tv.tv-no-custom-properties .row .slot.landscape .proxy {
+  min-height: 278.78px;
+  height: 278.78px;
+}
+
+.den-tv.tv-no-custom-properties .services-row .tile,
+.den-tv.tv-no-custom-properties .services-row .hold {
+  width: 120px;
+}
+
+.den-tv.tv-no-custom-properties .services-row .art,
+.den-tv.tv-no-custom-properties .services-row .plate {
+  width: 120px;
+  height: 120px;
+}
+
+.den-tv.tv-no-custom-properties .episode .still {
+  height: 202.5px;
+}
+
+:root.den-tv.tv-no-custom-properties .tv-bar .brand {
+  width: 54px;
+}
+
+:root.den-tv.tv-no-custom-properties .tv-bar .brand img {
+  width: 118.8px;
+  margin-left: -32.4px;
+}
+
+.den-tv.tv-no-custom-properties header.hero {
+  min-height: 1015.2px;
+  margin-bottom: 24px;
+}
+
+.den-tv.tv-no-custom-properties header.hero .hero-content {
+  margin-bottom: 0;
+}
+
 .den-tv.tv-no-grid .billboard .expand,
 .den-tv.tv-no-grid .billboard .dot,
 .den-tv.tv-no-grid .close,
@@ -718,6 +797,20 @@
 .den-tv.tv-no-grid .episode {
   display: flex;
   align-items: center;
+}
+
+.den-tv.tv-no-grid .billboard .slide,
+.den-tv.tv-no-grid header.hero {
+  display: flex;
+  align-items: flex-end;
+}
+
+.den-tv.tv-no-grid .player .stage,
+.den-tv.tv-no-grid .player .terminal-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .den-tv.tv-no-grid .episode-play {

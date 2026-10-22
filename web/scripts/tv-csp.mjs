@@ -19,10 +19,14 @@ export function tvCsp(tizenVersion = DEFAULT_TIZEN_VERSION) {
   // experimental Tizen 3 package; newer widgets retain their smaller CSP and native module loader.
   const legacySources =
     version === '3.0' ? legacyLoaderHashes.map((hash) => `'sha256-${hash}'`).join(' ') : '';
+  // Svelte's legacy code-split chunks install their component CSS through local <style> elements. Chromium 47
+  // cannot use the constructable-sheet path used by newer engines. This permits styles only; executable sources
+  // remain self-only plus the two pinned legacy-loader hashes, and every newer Samsung package stays stricter.
+  const legacyStyles = version === '3.0' ? " 'unsafe-inline'" : '';
   return [
     "default-src 'self'",
     `script-src 'self' ${wasmSource}${legacySources ? ` ${legacySources}` : ''}`,
-    "style-src 'self'",
+    `style-src 'self'${legacyStyles}`,
     "style-src-attr 'unsafe-inline'",
     "worker-src 'self' blob:",
     // Samsung AVPlay creates a platform-owned <object> without a data URL; keep it

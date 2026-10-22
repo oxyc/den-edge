@@ -13,6 +13,7 @@ import browser from './vite.config.ts';
 import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
 import {
   tizen3FixedViewportMath,
+  tizen3FocusSelectors,
   tizen3ScrollLogical,
   tizen3UnsupportedEnhancements,
 } from './scripts/tizen3-css-compat.ts';
@@ -304,6 +305,7 @@ const tizen3CssPlugins = tizen3
         tizen3UnsupportedEnhancements(),
         postcssCustomProperties({ preserve: false }),
         tizen3FixedViewportMath(),
+        tizen3FocusSelectors(),
         tizen3ScrollLogical(),
         postcssLogical({ blockDirection: 'top-to-bottom', inlineDirection: 'left-to-right' }),
         globalData[1],

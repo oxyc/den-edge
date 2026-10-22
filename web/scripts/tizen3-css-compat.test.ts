@@ -3,6 +3,7 @@ import postcssLogical from 'postcss-logical';
 import { describe, expect, it } from 'vitest';
 import {
   tizen3FixedViewportMath,
+  tizen3FocusSelectors,
   tizen3ScrollLogical,
   tizen3UnsupportedEnhancements,
 } from './tizen3-css-compat';
@@ -12,6 +13,7 @@ async function transform(css: string): Promise<string> {
     await postcss([
       tizen3UnsupportedEnhancements(),
       tizen3FixedViewportMath(),
+      tizen3FocusSelectors(),
       tizen3ScrollLogical(),
       postcssLogical({ blockDirection: 'top-to-bottom', inlineDirection: 'left-to-right' }),
     ]).process(css, { from: undefined })
@@ -78,5 +80,18 @@ describe('Tizen 3 CSS compatibility', () => {
     expect(css).toContain('color: #c8d3ef;');
     expect(css).not.toContain('color-mix');
     expect(css).not.toContain('@supports');
+  });
+
+  it('uses remote-visible focus and the one shared focus-ancestor marker', async () => {
+    const css = await transform(`
+      .button:focus-visible { outline: 4px solid white; }
+      .field:focus-within { border-color: white; }
+      .pick:has(select:focus-visible) { outline: 4px solid white; }
+    `);
+
+    expect(css).toContain('.button:focus');
+    expect(css).toContain('.field.tv-focus-within');
+    expect(css).toContain('.pick.tv-focus-within');
+    expect(css).not.toMatch(/:focus-visible|:focus-within|:has\(/);
   });
 });

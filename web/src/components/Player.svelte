@@ -4262,7 +4262,7 @@
                 step="10"
                 value={Math.min(tvPosition, Math.max(tvDuration, 1))}
                 disabled={!tvDuration}
-                style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+                style:background-image={`linear-gradient(to right, #fff 0%, #fff ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%, rgba(255, 255, 255, 0.32) ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%, rgba(255, 255, 255, 0.32) 100%)`}
                 oninput={(event) => {
                   if (!video) return;
                   const to = Number(event.currentTarget.value);
@@ -5314,18 +5314,17 @@
     padding: 0;
     border: 0;
     appearance: none;
-    background: transparent;
+    background-color: transparent;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 100% 4px;
     cursor: pointer;
   }
 
   .web-custom-player .tv-timeline input[type='range']::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: 999px;
-    background: linear-gradient(
-      to right,
-      #fff 0 var(--tv-progress),
-      rgb(255 255 255 / 0.32) var(--tv-progress) 100%
-    );
+    background: transparent;
   }
 
   .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
@@ -5363,6 +5362,7 @@
 
   .web-custom-player .tv-timeline input[type='range']:focus-visible {
     outline: 0;
+    background-size: 100% 6px;
   }
 
   .web-custom-player .tv-timeline input[type='range']:focus-visible::-webkit-slider-thumb {

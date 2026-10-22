@@ -29,9 +29,11 @@ export function installTvCssCapabilities(): () => void {
   const grid = CSS.supports('display', 'grid');
   const flexGap = supportsFlexGap();
   const focusWithin = supportsSelector(':focus-within');
+  const customProperties = CSS.supports('--den-css-vars', '1');
   root.classList.toggle('tv-no-grid', !grid);
   root.classList.toggle('tv-no-flex-gap', !flexGap);
   root.classList.toggle('tv-no-focus-within', !focusWithin);
+  root.classList.toggle('tv-no-custom-properties', !customProperties);
 
   if (focusWithin) return () => {};
 
