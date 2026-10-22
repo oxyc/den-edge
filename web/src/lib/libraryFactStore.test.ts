@@ -81,7 +81,6 @@ describe('library fact store', () => {
       head: 7,
       complete: false,
       profileTopology: false,
-      fullAuthority: true,
     });
     const names = [...vault.values.keys()];
     expect(names.some((name) => name.includes(':document:'))).toBe(true);

@@ -566,7 +566,7 @@ test('a large paired Home reopens its direct detail from Continue Watching while
     },
   };
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed`);
+  await page.goto(`${FIXTURE}?seed&online`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -673,7 +673,7 @@ async function reopenRetainedContinueCard(browser) {
     holdId: null,
   };
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed&verano`);
+  await page.goto(`${FIXTURE}?seed&online&verano`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -729,7 +729,7 @@ test('Home Continue Watching puts a film watched after a series ahead of it', as
     holdId: null,
   };
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed&film-after-series`);
+  await page.goto(`${FIXTURE}?seed&online&film-after-series`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -788,7 +788,7 @@ async function backToWindowedHome(browser) {
     holdId: null,
   };
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed`);
+  await page.goto(`${FIXTURE}?seed&online`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -928,7 +928,7 @@ test('a personal billboard keep cannot kill the Worker before reopening Verano a
     }),
   );
 
-  await page.goto(`${FIXTURE}?seed&verano`);
+  await page.goto(`${FIXTURE}?seed&online&verano`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -1013,7 +1013,7 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
     };
   });
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed`);
+  await page.goto(`${FIXTURE}?seed&online`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -1110,7 +1110,7 @@ test('a cold paired Worker authenticates a direct-IMDb episode source request', 
   };
 
   await routes(page, metadata);
-  await page.goto(`${FIXTURE}?seed`);
+  await page.goto(`${FIXTURE}?seed&online`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });
@@ -1214,7 +1214,7 @@ test('paired billboard holds the early generic fallback until retained lookup se
     });
   });
 
-  await page.goto(`${FIXTURE}?seed`);
+  await page.goto(`${FIXTURE}?seed&online`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });

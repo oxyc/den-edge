@@ -117,7 +117,8 @@ async function backThroughSeasons(browser) {
   try {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}/`);
-    await expect(page.locator('main')).toBeVisible();
+    // The first wait on the app booting: on a busy runner the unbundled dev server took 5.3 s to bring the page up.
+    await expect(page.locator('main')).toBeVisible({ timeout: 30_000 });
     await page.evaluate(
       (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
       PAGE,

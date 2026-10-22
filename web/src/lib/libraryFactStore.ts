@@ -23,7 +23,8 @@ import {
 
 export const LIBRARY_FACT_SCHEMA = 1;
 const ROOT = 'library-facts.v1';
-const DOCUMENT_PAGE = 64;
+/** Documents a read takes a transaction: an open of the whole library reads every one of them. */
+const DOCUMENT_PAGE = 512;
 const FACT_PAGE = 256;
 
 export type LibraryFactCapability =
@@ -59,7 +60,6 @@ export interface LibraryFactManifest {
   head: number;
   complete: boolean;
   profileTopology: boolean;
-  fullAuthority: boolean;
   /**
    * A newest-first import under way: every row from `floor` up to `head` is kept, and it resumes below `floor`.
    * Absent for an oldest-first import, which resumes after `head`.
@@ -165,7 +165,6 @@ const validManifest = (value: unknown): value is LibraryFactManifest => {
     held.head! >= 0 &&
     typeof held.complete === 'boolean' &&
     typeof held.profileTopology === 'boolean' &&
-    typeof held.fullAuthority === 'boolean' &&
     (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0))
   );
 };
@@ -189,12 +188,12 @@ export function mergeFactRows(previous: Row | null, replacement: Row | null): Ro
 }
 
 /**
- * Individually encrypted authority and disposable capability facts. Every batch publishes its rows and cursor in
- * one IndexedDB transaction; a Vault without that contract cannot opt into this path.
+ * This browser's one copy of a library on den-edge: each document individually encrypted, beside the capability facts
+ * selected from it. Every batch publishes its rows and cursor in one IndexedDB transaction; a Vault without that
+ * contract keeps no copy, and every visit reads den-edge.
  */
 export class LibraryFactStore {
   private profileTopology = false;
-  private fullAuthority = true;
   private generation?: string;
   private readonly staleGenerations = new Set<string>();
   private constructor(
@@ -216,7 +215,6 @@ export class LibraryFactStore {
       const opened = await openLibraryLocalValue(this.key, manifestName, bytes);
       if (!validManifest(opened)) return null;
       this.profileTopology = opened.profileTopology;
-      this.fullAuthority = opened.fullAuthority;
       this.generation = opened.generation;
       return opened;
     } catch {
@@ -248,21 +246,24 @@ export class LibraryFactStore {
     for (;;) {
       const page = await this.vault.page(prefix, after, DOCUMENT_PAGE);
       if (!page.length) return;
-      for (const [storedKey, bytes] of page) {
-        const name = storedKey.slice(this.libraryId.length + 1);
-        try {
-          const opened = (await openLibraryLocalValue(
-            this.key,
-            name,
-            bytes,
-          )) as StoredLibraryDocument;
-          if (opened?.schema !== LIBRARY_FACT_SCHEMA || !Number.isSafeInteger(opened.seq))
-            throw new Error('invalid document');
-          yield { key: name.slice(namePrefix.length), document: opened };
-        } catch {
-          throw new Error('Individual library authority is corrupt');
-        }
-      }
+      // A page's documents are opened at once: WebCrypto runs them off the thread, as many at a time as it can.
+      yield* await Promise.all(
+        page.map(async ([storedKey, bytes]) => {
+          const name = storedKey.slice(this.libraryId.length + 1);
+          try {
+            const opened = (await openLibraryLocalValue(
+              this.key,
+              name,
+              bytes,
+            )) as StoredLibraryDocument;
+            if (opened?.schema !== LIBRARY_FACT_SCHEMA || !Number.isSafeInteger(opened.seq))
+              throw new Error('invalid document');
+            return { key: name.slice(namePrefix.length), document: opened };
+          } catch {
+            throw new Error('Individual library authority is corrupt');
+          }
+        }),
+      );
       if (page.length < DOCUMENT_PAGE) return;
       after = page.at(-1)![0];
     }
@@ -280,8 +281,59 @@ export class LibraryFactStore {
       if (this.generation) this.staleGenerations.add(this.generation);
       this.generation = generation;
       this.profileTopology = false;
-      this.fullAuthority = true;
     }
+    const changes = await this.changes(generation, entries);
+    this.profileTopology ||= options.profileTopology === true;
+    const manifest: LibraryFactManifest = {
+      schema: LIBRARY_FACT_SCHEMA,
+      generation,
+      head,
+      complete,
+      profileTopology: this.profileTopology,
+      ...(options.floor !== undefined && !complete ? { floor: options.floor } : {}),
+    };
+    changes.push({
+      kind: 'put',
+      key: `${this.libraryId}:${manifestName}`,
+      value: await sealLibraryLocalValue(this.key, manifestName, manifest),
+    });
+    await this.vault.commit(changes);
+    noteLibraryFactCommit(entries.length);
+    if (complete)
+      for (const stale of [...this.staleGenerations]) {
+        try {
+          await this.vault.remove(`${this.libraryId}:${namespace(stale)}:`);
+          this.staleGenerations.delete(stale);
+        } catch {
+          // The active manifest already names the complete replacement. Old generations are harmless sealed garbage.
+        }
+      }
+  }
+
+  /**
+   * Rows den-edge acknowledged outside a read of its log (this browser's own writes), kept without moving the cursor:
+   * the read that reaches them keeps them again with it. Nothing is kept for a generation this store does not hold.
+   */
+  async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
+    if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
+    if (this.generation !== generation || !entries.length) return;
+    await this.vault.commit(await this.changes(generation, entries));
+    noteLibraryFactCommit(entries.length);
+  }
+
+  /** Forget every generation and the cursor: the next open reads den-edge from the start. */
+  async clear(): Promise<void> {
+    await this.vault.remove(`${this.libraryId}:${ROOT}:`);
+    this.generation = undefined;
+    this.profileTopology = false;
+    this.staleGenerations.clear();
+  }
+
+  /** Each entry's document and facts, sealed. */
+  private async changes(
+    generation: string,
+    entries: readonly LibraryFactEntry[],
+  ): Promise<VaultChange[]> {
     // Every value of the batch is sealed at once: WebCrypto runs them off the thread, as many at a time as it can.
     const pending: Array<Promise<VaultChange>> = [];
     for (const entry of entries) {
@@ -317,34 +369,7 @@ export class LibraryFactStore {
         );
       }
     }
-    const changes = await Promise.all(pending);
-    this.profileTopology ||= options.profileTopology === true;
-    this.fullAuthority &&= entries.every((entry) => entry.value.length > 0);
-    const manifest: LibraryFactManifest = {
-      schema: LIBRARY_FACT_SCHEMA,
-      generation,
-      head,
-      complete,
-      profileTopology: this.profileTopology,
-      fullAuthority: this.fullAuthority,
-      ...(options.floor !== undefined && !complete ? { floor: options.floor } : {}),
-    };
-    changes.push({
-      kind: 'put',
-      key: `${this.libraryId}:${manifestName}`,
-      value: await sealLibraryLocalValue(this.key, manifestName, manifest),
-    });
-    await this.vault.commit(changes);
-    noteLibraryFactCommit(entries.length);
-    if (complete)
-      for (const stale of [...this.staleGenerations]) {
-        try {
-          await this.vault.remove(`${this.libraryId}:${namespace(stale)}:`);
-          this.staleGenerations.delete(stale);
-        } catch {
-          // The active manifest already names the complete replacement. Old generations are harmless sealed garbage.
-        }
-      }
+    return Promise.all(pending);
   }
 
   async *read<T extends TitleFact | ContinueFact | SettingsFact>(

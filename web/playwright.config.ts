@@ -28,6 +28,7 @@ export default defineConfig({
     'keyboard-enhancement.spec.mjs',
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
+    'big-library-edit.spec.mjs',
   ],
   timeout: 120_000,
   // Files are isolated by Playwright contexts and do not share mutable server state.
