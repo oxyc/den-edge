@@ -1265,15 +1265,33 @@ async function importLibraryFacts(
   if (!store) return null;
   const manifest = await store.manifest();
   if (manifest?.complete) return { store, manifest };
-  // A read of the history begins: said before its first request, so the page shows it is under way at once.
-  progress?.(0);
+  // A read of the history begins: said before its first request, so the page shows it is under way at once. It always
+  // ends with 1 too, kept, given up (the document log takes over) or failed, so its line never outlives it.
+  let reported: number | undefined;
+  const report = (value: number) => {
+    reported = value;
+    progress?.(value);
+  };
+  const ended = () => reported !== 1 && report(1);
+  report(0);
   const reading = new FactImport(request, keys, store, fetchImpl);
-  // An oldest-first import under way resumes as one; anything else reads the newest rows first, where den-edge can.
-  if (!manifest || manifest.floor !== undefined) {
-    const newest = await importNewestFirst(reading, manifest, progress);
-    if (newest !== 'unsupported') return newest;
+  const read = async () => {
+    // An oldest-first import under way resumes as one; anything else reads the newest rows first, where den-edge can.
+    if (!manifest || manifest.floor !== undefined) {
+      const newest = await importNewestFirst(reading, manifest, report);
+      if (newest !== 'unsupported') return newest;
+    }
+    return importOldestFirst(reading, manifest?.floor === undefined ? manifest : null, report);
+  };
+  try {
+    const imported = await read();
+    if (imported?.filling) void imported.filling.done.finally(ended);
+    else ended();
+    return imported;
+  } catch (error) {
+    ended();
+    throw error;
   }
-  return importOldestFirst(reading, manifest?.floor === undefined ? manifest : null, progress);
 }
 
 /**

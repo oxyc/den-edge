@@ -534,6 +534,23 @@ it('counts a first open’s progress in rows, and asks for the second page as th
   expect(uncounted.last).toBeLessThan(counted.last);
 });
 
+it('ends a first open’s progress when its read gives up, so the line never outlives it', async () => {
+  await ensureSyncPolicy();
+  const edge = changesEdge(await settledLongAgo(10), 'generation-gives-up', {
+    fail: (url) => url.searchParams.has('before'),
+  });
+  const progress = vi.fn();
+  await openFinishedLibraryViewAuthority(
+    request,
+    new FactVault(),
+    vi.fn(async () => fullAuthority()),
+    content,
+    edge.fetchImpl,
+    progress,
+  );
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 1]);
+});
+
 it('resumes a newest-first import below the last committed page, and opens the log when the rest stops', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
