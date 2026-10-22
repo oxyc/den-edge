@@ -57,9 +57,19 @@
      * made after a page has settled, by the page itself or anything else, are left alone.
      */
     let releaseScroll = () => {};
-    /** When the document last moved: a page left mid-glide moved within the last frame or two. */
-    let scrolledAt = -Infinity;
-    const scrolled = () => (scrolledAt = performance.now());
+    /**
+     * Whether the document moved within the last frame or two, as a page left mid-glide did. Counted in frames,
+     * not milliseconds: a slow device's frames can each outlast any fixed time, and its glide would read as settled.
+     */
+    let moving = false;
+    let settle = 0;
+    const scrolled = () => {
+      moving = true;
+      cancelAnimationFrame(settle);
+      settle = requestAnimationFrame(
+        () => (settle = requestAnimationFrame(() => (moving = false))),
+      );
+    };
     window.addEventListener('scroll', scrolled, { passive: true });
     const holdScroll = (x: number, y: number, gliding: boolean) => {
       releaseScroll();
@@ -303,7 +313,7 @@
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
-      const gliding = performance.now() - scrolledAt < 100;
+      const gliding = moving;
       const ticket = ++revision;
       // No animation of Den's own where the browser has just animated the page itself: its swipe back on iOS
       // (`hasUAVisualTransition`), or Den's own swipe, whose preview already moved it.
