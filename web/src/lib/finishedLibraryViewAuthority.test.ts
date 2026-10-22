@@ -228,12 +228,17 @@ it('opens completed capability facts without a monolithic snapshot or finished-v
 /**
  * den-edge's `/changes` over `entries`: oldest first after `since`, and — unless `older`, a den-edge that predates them
  * and reads every request as one from `since=0` — newest first below `before` and the named `keys`. `limit` defaults
- * as den-edge's does; `fail` throws for the requests it names.
+ * as den-edge's does; `fail` throws for the requests it names; `counted` reports the library's rows with a
+ * newest-first page, as a newer den-edge does.
  */
 function changesEdge(
   entries: ReadonlyArray<{ k: string; seq: number; v: string }>,
   generation: string,
-  { older = false, fail }: { older?: boolean; fail?: (url: URL) => boolean } = {},
+  {
+    older = false,
+    fail,
+    counted = false,
+  }: { older?: boolean; fail?: (url: URL) => boolean; counted?: boolean } = {},
 ) {
   const requests: URL[] = [];
   const fetchImpl = vi.fn<typeof fetch>(async (input) => {
@@ -255,7 +260,12 @@ function changesEdge(
       };
     } else if (!older && before !== null) {
       const below = entries.filter((entry) => entry.seq < Number(before)).reverse();
-      body = { entries: below.slice(0, limit), more: below.length > limit, order: 'desc' };
+      body = {
+        entries: below.slice(0, limit),
+        more: below.length > limit,
+        order: 'desc',
+        ...(counted ? { rows: entries.length } : {}),
+      };
     } else {
       const since = Number(url.searchParams.get('since') ?? 0);
       const after = entries.filter((entry) => entry.seq > since);
@@ -310,11 +320,11 @@ it('cold-imports bounded pages from an older den-edge and serves the main startu
   );
 
   // Asked newest first, it answered unmarked: one oldest-first read of the whole history follows, each committed
-  // checkpoint bounded and saying how far it is.
+  // checkpoint bounded and saying how far it is, after a 0 before the first request.
   expect(pageSizes).toEqual([1000]);
   expect(commitBatch.mock.calls.map(([, , batch]) => batch.length)).toEqual([64, 64, 2]);
   commitBatch.mockRestore();
-  expect(progress.mock.calls.map(([value]) => value)).toEqual([64 / 130, 128 / 130, 1]);
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 64 / 130, 128 / 130, 1]);
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 2 }]),
   });
@@ -479,6 +489,66 @@ it('draws a first open from its newest page and its settings by key, then reads 
   expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
   expect(progress.mock.calls.at(-1)![0]).toBe(1);
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('counts a first open’s progress in rows, and asks for the second page as the first arrives', async () => {
+  await ensureSyncPolicy();
+  // Older rows replaced over the years: below the newest 1,000, the history's sequence numbers are ten apart.
+  const settled = [...(await settledLongAgo(1_100))].sort((a, b) => a.seq - b.seq);
+  const older = settled.length - 1_000;
+  const entries = settled.map((entry, at) => ({
+    ...entry,
+    seq: at < older ? 1 + at * 10 : 1 + older * 10 + (at - older),
+  }));
+  const top = entries.at(-1)!.seq;
+  const firstPageFloor = entries.at(-1_000)!.seq;
+  const progressAfterFirstPage = async (counted: boolean) => {
+    const vault = new FactVault();
+    const edge = changesEdge(entries, 'generation-rows', { counted });
+    const pagesAsked = () => edge.requests.filter((url) => url.searchParams.has('before')).length;
+    // How many history pages had been asked for when the first batch was kept.
+    let askedAtFirstSave = 0;
+    const progress = vi.fn((value: number) => {
+      if (value > 0 && !askedAtFirstSave) askedAtFirstSave = pagesAsked();
+    });
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      vi.fn(async () => fullAuthority()),
+      content,
+      edge.fetchImpl,
+      progress,
+    );
+    expect(opened).not.toBeNull();
+    const firstPage = progress.mock.calls.map(([value]) => value).filter((value) => value < 1);
+    return { last: firstPage.at(-1)!, askedAtFirstSave };
+  };
+
+  const counted = await progressAfterFirstPage(true);
+  // 1,000 of 1,100 rows kept: what the line says, not how far below the head the page reached.
+  expect(counted.last).toBeCloseTo(1_000 / entries.length, 2);
+  expect(counted.askedAtFirstSave).toBe(2);
+  // An older den-edge says no count: the share of sequence numbers read, as before.
+  const uncounted = await progressAfterFirstPage(false);
+  expect(uncounted.last).toBeCloseTo(1 - (firstPageFloor - 1) / top, 2);
+  expect(uncounted.last).toBeLessThan(counted.last);
+});
+
+it('ends a first open’s progress when its read gives up, so the line never outlives it', async () => {
+  await ensureSyncPolicy();
+  const edge = changesEdge(await settledLongAgo(10), 'generation-gives-up', {
+    fail: (url) => url.searchParams.has('before'),
+  });
+  const progress = vi.fn();
+  await openFinishedLibraryViewAuthority(
+    request,
+    new FactVault(),
+    vi.fn(async () => fullAuthority()),
+    content,
+    edge.fetchImpl,
+    progress,
+  );
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 1]);
 });
 
 it('resumes a newest-first import below the last committed page, and opens the log when the rest stops', async () => {

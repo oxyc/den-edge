@@ -20,6 +20,25 @@ const FIRST_OPEN_MS = 4_000;
 /** Changes requests the library Workers may make to read the whole history: about 3,100 rows, 1,000 a request. */
 const CHANGES_REQUESTS = 10;
 
+/** Forget every library this browser keeps, but not its keys: the next open reads the history from den-edge. */
+async function forgetLibraries(context, edge) {
+  const wipe = await context.newPage();
+  await routeBigHousehold(wipe, edge);
+  await wipe.goto(`${E2E_ORIGIN}/test/seed-library.html`);
+  expect(
+    await wipe.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const request = indexedDB.deleteDatabase('den-library');
+          request.onsuccess = () => resolve('deleted');
+          request.onerror = () => resolve(`error ${request.error}`);
+          request.onblocked = () => resolve('blocked');
+        }),
+    ),
+  ).toBe('deleted');
+  await wipe.close();
+}
+
 test('a big household opens for the first time within its budget', async () => {
   test.setTimeout(300_000);
   const browser = await chromium.launch({
@@ -30,23 +49,7 @@ test('a big household opens for the first time within its budget', async () => {
     const context = await browser.newContext();
     const edge = newEdge({ profiles: true });
     await bigHousehold(context, edge);
-
-    // Forget every library this browser keeps, but not its keys: the next open reads the history from den-edge.
-    const wipe = await context.newPage();
-    await routeBigHousehold(wipe, edge);
-    await wipe.goto(`${E2E_ORIGIN}/test/seed-library.html`);
-    expect(
-      await wipe.evaluate(
-        () =>
-          new Promise((resolve) => {
-            const request = indexedDB.deleteDatabase('den-library');
-            request.onsuccess = () => resolve('deleted');
-            request.onerror = () => resolve(`error ${request.error}`);
-            request.onblocked = () => resolve('blocked');
-          }),
-      ),
-    ).toBe('deleted');
-    await wipe.close();
+    await forgetLibraries(context, edge);
 
     edge.changesLatencyMs = ROUND_TRIP_MS;
     const page = await context.newPage();
@@ -84,6 +87,54 @@ test('a big household opens for the first time within its budget', async () => {
     expect
       .soft(changes, 'changes requests to read the history')
       .toBeLessThanOrEqual(CHANGES_REQUESTS);
+  } finally {
+    await browser.close();
+  }
+});
+
+// On a slow link or device the first page can take seconds. The line must be moving before it arrives, and say no
+// percentage it has not read.
+test('a first open shows its progress before den-edge has answered', async () => {
+  test.setTimeout(300_000);
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const context = await browser.newContext();
+    const edge = newEdge({ profiles: true });
+    await bigHousehold(context, edge);
+    await forgetLibraries(context, edge);
+
+    const page = await context.newPage();
+    await routeBigHousehold(page, edge);
+    // Every history read waits until the line has been seen moving.
+    let release;
+    const answered = new Promise((resolve) => (release = resolve));
+    let held = 0;
+    await page.route(/\/lib\/[^/]+\/changes\?/, async (route) => {
+      held++;
+      await answered;
+      await route.fallback();
+    });
+
+    await page.goto(`${E2E_ORIGIN}/`);
+    const line = page.getByRole('progressbar', { name: 'Loading your library' });
+    await expect(line).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => held).toBeGreaterThan(0);
+    await expect(page.getByText('Loading your library', { exact: true })).toBeVisible();
+    await expect(line).toHaveAttribute('aria-valuenow', '0');
+    // It creeps, without a read to show for it.
+    const drawn = () => page.locator('.opening path').getAttribute('stroke-dasharray');
+    const before = await drawn();
+    await expect.poll(drawn, { timeout: 5_000 }).not.toBe(before);
+    // Its head is drawn on the outline while the read runs.
+    await expect(page.locator('.opening-head')).toBeVisible();
+
+    release();
+    await expect(page.locator('main section[aria-label="Continue Watching"]')).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(line).toHaveCount(0, { timeout: 10_000 });
   } finally {
     await browser.close();
   }

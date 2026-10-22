@@ -259,11 +259,23 @@
   /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
   let shown = $state<number | null>(null);
   let finished = $state(false);
+  /**
+   * A line that stands still reads as stuck. Between the read's reports it keeps easing from where it is toward
+   * `AHEAD` of what is left, slowing the longer nothing comes but never reaching the end; each report starts it again
+   * from there. The caption keeps the read's own figure, and the line never moves back.
+   */
+  const AHEAD = 0.25;
   $effect(() => {
     if (opening !== null) {
-      shown = opening;
+      const from = Math.max(opening, untrack(() => shown) ?? 0);
+      shown = from;
       finished = false;
-      return;
+      const began = performance.now();
+      const tick = setInterval(() => {
+        const eased = (1 - from) * AHEAD * (1 - Math.exp(-(performance.now() - began) / 4000));
+        shown = Math.max(from + eased, untrack(() => shown) ?? 0);
+      }, 300);
+      return () => clearInterval(tick);
     }
     if (untrack(() => shown) === null) return;
     shown = 1;
@@ -286,25 +298,35 @@
       aria-label="Loading your library"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={Math.round(shown * 100)}
+      aria-valuenow={finished ? 100 : Math.round((opening ?? 0) * 100)}
       bind:clientWidth={barWidth}
       bind:clientHeight={barHeight}
     >
       {#if barWidth && barHeight}
+        <!-- From the lower left: right along the bottom, up around the right end, back along the top, down the left. -->
+        {@const r = (barHeight - 2) / 2}
+        {@const d = `M ${1 + r} ${barHeight - 1} H ${barWidth - 1 - r} A ${r} ${r} 0 0 0 ${barWidth - 1 - r} 1 H ${1 + r} A ${r} ${r} 0 0 0 ${1 + r} ${barHeight - 1}`}
         <svg width={barWidth} height={barHeight} aria-hidden="true">
-          <rect
-            x="1"
-            y="1"
-            width={barWidth - 2}
-            height={barHeight - 2}
-            rx={(barHeight - 2) / 2}
-            stroke-dasharray="{shown * outline} {outline}"
-          />
+          <path {d} stroke-dasharray="{shown * outline} {outline}" />
         </svg>
+        <!-- The line's head, breathing while the read runs: rides the same outline, in step with the line. -->
+        {#if !finished}
+          <span
+            class="opening-head"
+            aria-hidden="true"
+            style:offset-path="path('{d}')"
+            style:offset-distance="{shown * 100}%"
+          ></span>
+        {/if}
       {/if}
     </div>
     <p class="opening-label" class:finished aria-hidden="true">
-      {finished ? 'Library ready' : `Loading your library · ${Math.round(shown * 100)}%`}
+      <!-- Only the read's own figure: none until it has kept something, never the creep before it. -->
+      {finished
+        ? 'Library ready'
+        : opening
+          ? `Loading your library · ${Math.round(opening * 100)}%`
+          : 'Loading your library'}
     </p>
   {/if}
 {/snippet}
@@ -506,7 +528,7 @@
     border-radius: 999px;
   }
 
-  /* The whole pill: the read traces its outline, clockwise from the top left, round to where it began. */
+  /* The whole pill: the read traces its outline from the lower left, round to where it began. */
   .opening {
     position: absolute;
     inset: 0;
@@ -520,12 +542,41 @@
     overflow: visible;
   }
 
-  .opening rect {
+  .opening path {
     fill: none;
     stroke: var(--accent);
     stroke-linecap: round;
     stroke-width: 2px;
     transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* The line's head: a dot on the outline that breathes, so a slow read never looks stopped. */
+  .opening-head {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px 2px var(--accent);
+    offset-rotate: 0deg;
+    transition: offset-distance 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: opening-pulse 1.2s ease-in-out infinite;
+  }
+
+  /* Without motion paths (older TV browsers) the dot has nowhere to ride; the line alone shows the read. */
+  @supports not (offset-path: path('M 0 0')) {
+    .opening-head {
+      display: none;
+    }
+  }
+
+  @keyframes opening-pulse {
+    50% {
+      opacity: 0.45;
+      transform: scale(0.6);
+    }
   }
 
   /* Read: the closed outline glows, then fades with its caption. */
@@ -555,8 +606,10 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .opening rect {
+    .opening path,
+    .opening-head {
       transition: none;
+      animation: none;
     }
   }
 
