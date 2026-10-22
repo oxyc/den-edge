@@ -358,7 +358,12 @@ test('pairing keeps remote focus as its code becomes an approval', async ({ brow
     };
   });
   const edge = await setupSeries(page, { linked: true });
-  await page.goto(`${E2E_ORIGIN}/settings`);
+  // Accepting the invite has just started the household Worker. Enter Settings as the TV does instead of tearing
+  // that Worker down with an immediate hard navigation while WebKit is still completing its IndexedDB transaction.
+  const settings = page.getByRole('link', { name: 'Settings', exact: true });
+  await settings.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings`);
 
   const linkedDevices = page.getByRole('button', { name: /Linked devices/ });
   await linkedDevices.focus();
@@ -406,7 +411,10 @@ test('a promised-Blob clipboard refusal cannot strand a failed pairing', async (
   });
   await setupSeries(page, { linked: true });
   await page.route('**/pair/new', (route) => route.fulfill({ status: 503, json: {} }));
-  await page.goto(`${E2E_ORIGIN}/settings`);
+  const settings = page.getByRole('link', { name: 'Settings', exact: true });
+  await settings.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings`);
   await page.getByRole('button', { name: /Linked devices/ }).click();
   const region = page.getByRole('region', { name: 'Linked devices' });
   await region.getByRole('button', { name: 'Get a code' }).click();
